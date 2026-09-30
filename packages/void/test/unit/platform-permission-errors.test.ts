@@ -66,6 +66,9 @@ describe('PlatformClient permission errors', () => {
     ['email usage', (c) => c.getEmailUsage(project), reader],
     ['email destination add', (c) => c.addEmailDestination(project, 'target@example.test'), admin],
     ['email domain removal', (c) => c.removeEmailDomain(project, 'example.test'), admin],
+    ['Zero Trust status', (c) => c.getProjectZeroTrust(project), reader],
+    ['Zero Trust update', (c) => c.setProjectZeroTrust(project, true), admin],
+    ['Zero Trust reconcile', (c) => c.reconcileProjectZeroTrust(project), admin],
   ];
   it.each(cases)(
     'explains required access for %s on older APIs',

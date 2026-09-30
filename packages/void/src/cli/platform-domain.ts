@@ -211,7 +211,7 @@ export async function applyPlatformDomain(
   return { manifest, waitingForDns: false, waitingForProtection: false, nameServers: [] };
 }
 
-async function activatePlatformDomain(
+export async function activatePlatformDomain(
   application: PlatformApplication,
   manifest: PlatformInstallationManifest,
 ): Promise<boolean> {
@@ -227,12 +227,18 @@ async function activatePlatformDomain(
     },
     body: JSON.stringify({ application }),
   });
-  const body = (await response.json()) as {
+  // An older runtime has no activation handoff and answers with a non-JSON 404.
+  const body = (await response.json().catch(() => null)) as {
     ok?: boolean;
     installationId?: string;
     ready?: boolean;
     error?: string;
-  };
+  } | null;
+  if (!body || typeof body !== 'object' || response.status === 404) {
+    throw new Error(
+      `platform: The running platform cannot activate this domain (HTTP ${response.status}). Update the platform runtime with \`void platform upgrade ${manifest.id}\` (or repair it with \`void platform repair ${manifest.id}\`), then rerun this command.`,
+    );
+  }
   if (
     !response.ok ||
     body.ok !== true ||

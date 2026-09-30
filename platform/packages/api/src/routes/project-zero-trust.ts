@@ -1,17 +1,51 @@
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import type { ApiEnv } from '../env.ts';
+import {
+  ProjectAccessDeniedError,
+  ProjectNotFoundError,
+  projectAccessErrorBody,
+} from '../project-access.ts';
 import {
   ZeroTrustConfigurationError,
   readZeroTrustConfigurationStrict,
 } from '../zero-trust/configuration.ts';
 import {
   getProjectZeroTrustState,
+  projectZeroTrustAvailable,
   publicProjectZeroTrustState,
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
   ZeroTrustUnavailableError,
 } from '../zero-trust/service.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
+
+const RECONCILIATION_FAILED_MESSAGE =
+  'Cloudflare Access could not be updated. Protection remains fail closed. Run `void project zero-trust reconcile` to retry, or ask a platform administrator to check the Access token.';
+
+function zeroTrustErrorResponse(
+  context: Context<ApiEnv>,
+  error: unknown,
+  failure: string,
+  projectId: string,
+): Response {
+  if (error instanceof ProjectNotFoundError || error instanceof ProjectAccessDeniedError) {
+    return context.json(projectAccessErrorBody(error), error.status);
+  }
+  if (error instanceof ZeroTrustUnavailableError) {
+    return context.json(
+      {
+        error: error.message,
+        message: `${error.message} Run \`void project zero-trust status\` for details.`,
+      },
+      error.status,
+    );
+  }
+  console.error(`[zero-trust] ${failure}`, { projectId, error });
+  return context.json(
+    { error: 'Zero Trust reconciliation failed.', message: RECONCILIATION_FAILED_MESSAGE },
+    502,
+  );
+}
 
 const app = new Hono<ApiEnv>()
   .get('/:id/zero-trust', async (context) => {
@@ -38,7 +72,9 @@ const app = new Hono<ApiEnv>()
     }
     const state = await getProjectZeroTrustState(context.get('db'), projectId);
     return context.json({
-      available: !!configuration?.enabled,
+      // Whether a project admin can change protection now, not merely whether
+      // the installation has Zero Trust enabled.
+      available: projectZeroTrustAvailable(configuration),
       platformStatus: configuration?.status ?? 'not_configured',
       protectNewProjects: configuration?.protectNewProjects ?? false,
       project: publicProjectZeroTrustState(state),
@@ -54,14 +90,23 @@ const app = new Hono<ApiEnv>()
     try {
       body = await context.req.json();
     } catch {
-      return context.json({ error: 'a JSON body is required' }, 400);
+      return context.json(
+        {
+          error: 'a JSON body is required',
+          message: 'Send a JSON body such as {"protected":true}.',
+        },
+        400,
+      );
     }
     const protectedProject =
       body && typeof body === 'object' && !Array.isArray(body)
         ? (body as Record<string, unknown>).protected
         : undefined;
     if (typeof protectedProject !== 'boolean') {
-      return context.json({ error: 'protected must be a boolean' }, 400);
+      return context.json(
+        { error: 'protected must be a boolean', message: 'Set "protected" to true or false.' },
+        400,
+      );
     }
     try {
       const project = await setProjectZeroTrustProtection(
@@ -69,19 +114,11 @@ const app = new Hono<ApiEnv>()
         context.get('db'),
         projectId,
         protectedProject,
+        { actorUserId: context.get('user').id },
       );
       return context.json({ ok: true, project: publicProjectZeroTrustState(project) });
     } catch (error) {
-      if (error instanceof ZeroTrustUnavailableError) {
-        return context.json({ error: error.message }, error.status);
-      }
-      console.error('[zero-trust] project update failed', { projectId, error });
-      return context.json(
-        {
-          error: 'Zero Trust reconciliation failed. Protection remains fail closed; retry later.',
-        },
-        502,
-      );
+      return zeroTrustErrorResponse(context, error, 'project update failed', projectId);
     }
   })
   .post('/:id/zero-trust/reconcile', async (context) => {
@@ -94,15 +131,13 @@ const app = new Hono<ApiEnv>()
       return context.json({
         ok: true,
         project: publicProjectZeroTrustState(
-          await reconcileProjectZeroTrust(context.env, context.get('db'), projectId),
+          await reconcileProjectZeroTrust(context.env, context.get('db'), projectId, {
+            actorUserId: context.get('user').id,
+          }),
         ),
       });
     } catch (error) {
-      if (error instanceof ZeroTrustUnavailableError) {
-        return context.json({ error: error.message }, error.status);
-      }
-      console.error('[zero-trust] project reconcile failed', { projectId, error });
-      return context.json({ error: 'Zero Trust reconciliation failed.' }, 502);
+      return zeroTrustErrorResponse(context, error, 'project reconcile failed', projectId);
     }
   });
 

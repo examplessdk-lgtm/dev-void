@@ -10,9 +10,13 @@ import {
   resolvePlatformApplicationEnvironment,
   type PlatformInstallationManifest,
 } from '@void/platform';
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { PlatformCloudflareClient } from '../../src/cli/platform-cloudflare.ts';
-import { applyPlatformDomain, platformDomainTarget } from '../../src/cli/platform-domain.ts';
+import {
+  activatePlatformDomain,
+  applyPlatformDomain,
+  platformDomainTarget,
+} from '../../src/cli/platform-domain.ts';
 import type { PlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 
 function fixture() {
@@ -304,5 +308,27 @@ describe('platform domain activation', () => {
         false,
       ),
     ).toThrow('pending setup');
+  });
+});
+
+describe('platform domain activation handoff', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    [
+      'an older runtime without the handoff',
+      new Response('<html>Not Found</html>', { status: 404 }),
+    ],
+    ['a non-JSON response', new Response('upstream unavailable', { status: 502 })],
+  ])('asks for a runtime update after %s', async (_name, response) => {
+    const f = fixture();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response),
+    );
+
+    await expect(activatePlatformDomain(f.target, f.manifest)).rejects.toThrow(
+      `void platform upgrade ${f.manifest.id}`,
+    );
   });
 });

@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { verifyPrerenderToken } from '../../src/auth/deploy-token.ts';
 import app from '../../src/index.ts';
+import * as projectAccess from '../../src/project-access.ts';
 import {
   deployments,
   domains,
@@ -67,6 +68,45 @@ async function projectState() {
     env.db.select().from(domains),
     env.db.select().from(resources),
   ]);
+}
+
+async function seedZeroTrustConfiguration(
+  status: 'configuring' | 'error' | 'disabling' | 'ready',
+  operationKind: 'reconcile' | 'disable' | null,
+): Promise<void> {
+  await env.db.insert(platformSettings).values({
+    key: 'zeroTrust.configuration',
+    value: {
+      version: 1,
+      revision: 1,
+      status,
+      enabled: true,
+      protectNewProjects: false,
+      accountId: env.CF_ACCOUNT_ID,
+      teamDomain: 'https://company.cloudflareaccess.com',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+      wildcardApplication: {
+        id: 'access-wildcard',
+        name: 'void-test-projects',
+        audience: 'access-audience',
+        destinations: ['*.void.app'],
+      },
+      operation: operationKind
+        ? {
+            kind: operationKind,
+            phase: 'projects',
+            owner: null,
+            leaseExpiresAt: null,
+            startedAt: new Date().toISOString(),
+            existingProjects: null,
+          }
+        : null,
+      lastError: status === 'error' ? 'Access token was revoked' : null,
+      updatedAt: new Date().toISOString(),
+    },
+  });
 }
 
 describe('project route membership capabilities', () => {
@@ -331,8 +371,95 @@ describe('project route membership capabilities', () => {
     expect(adminUpdate.status).toBe(409);
     expect(await adminUpdate.json()).toEqual({
       error: 'Project Zero Trust is not ready on this platform.',
+      message: expect.stringContaining('void project zero-trust status'),
     });
   });
+
+  it.each([
+    ['configuring', 'reconcile', false],
+    ['error', 'reconcile', false],
+    ['disabling', 'disable', false],
+    ['ready', null, true],
+  ] as const)(
+    'reports Zero Trust as available only when admins can change it (%s)',
+    async (status, operationKind, available) => {
+      const owner = await createTestUser(env.db, `zero-trust-available-${status}`);
+      const project = await createTestProject(env.db, owner.id, `zero-trust-available-${status}`);
+      await seedZeroTrustConfiguration(status, operationKind);
+
+      const response = await app.fetch(
+        authed(`/projects/${project.id}/zero-trust`, owner.jwt),
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ available, platformStatus: status });
+    },
+  );
+
+  it.each([
+    ['PUT', '/zero-trust', { protected: true }],
+    ['POST', '/zero-trust/reconcile', undefined],
+  ] as const)(
+    'rechecks settings capability under the project lock for %s %s',
+    async (method, suffix, body) => {
+      const owner = await createTestUser(env.db, `zero-trust-race-owner-${method}`);
+      const admin = await createTestUser(env.db, `zero-trust-race-admin-${method}`);
+      const project = await createTestProject(env.db, owner.id, `zero-trust-race-${method}`);
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: admin.id,
+        role: 'admin',
+        added_by_user_id: owner.id,
+      });
+      await seedZeroTrustConfiguration('ready', null);
+      await env.db.insert(projectZeroTrust).values({
+        project_id: project.id,
+        desired_protected: false,
+        effective_protected: false,
+        state: 'public',
+        bypass_application_id: 'access-bypass',
+        bypass_application_name: 'void-test-public',
+      });
+      const route = JSON.stringify({ projectId: project.id, userId: owner.id });
+      await env.ROUTING.put(project.slug, route);
+      const before = await env.db.select().from(projectZeroTrust);
+      const fetch = vi.fn(async () => Response.json({ success: false }, { status: 500 }));
+      vi.stubGlobal('fetch', fetch);
+
+      // Return the route's access snapshot, then commit the demotion. The
+      // service must re-resolve the admin under the project lock.
+      const requireCapability = projectAccess.requireProjectCapability;
+      let demoted = false;
+      vi.spyOn(projectAccess, 'requireProjectCapability').mockImplementation(async (...args) => {
+        const result = await requireCapability(...args);
+        if (!demoted && args[3] === 'settings') {
+          demoted = true;
+          await env.db
+            .update(projectMembers)
+            .set({ role: 'reader' })
+            .where(eq(projectMembers.user_id, admin.id));
+        }
+        return result;
+      });
+
+      const response = await app.fetch(
+        authed(`/projects/${project.id}${suffix}`, admin.jwt, method, body),
+        env,
+      );
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: 'forbidden',
+        message: expect.stringContaining(
+          'Changing project settings requires the admin or owner role',
+        ),
+      });
+      expect(demoted).toBe(true);
+      expect(await env.db.select().from(projectZeroTrust)).toEqual(before);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await env.ROUTING.get(project.slug)).toBe(route);
+    },
+  );
 
   it('reports malformed saved Zero Trust configuration without exposing a server error', async () => {
     const owner = await createTestUser(env.db, 'zero-trust-invalid-owner');

@@ -570,7 +570,8 @@ async function scheduled(
 
   // Fast tier: a resumable Zero Trust batch owns the rest of this invocation so
   // it stays within the per-invocation subrequest budget. A failed batch does
-  // not, so the pending-domain and email work below still runs.
+  // not, so the pending-domain and email work below still runs. An operation
+  // already in error waits for the hourly tier or an explicit reconcile.
   if (controller.cron === FAST_CRON) {
     const zeroTrustProgressed = await resumePlatformZeroTrustOperation(env, db).catch((error) => {
       console.error('[scheduled] Zero Trust operation resume failed:', error);

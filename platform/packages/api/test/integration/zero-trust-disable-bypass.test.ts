@@ -16,6 +16,7 @@ import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
   getProjectZeroTrustState,
+  reconcilePendingProjectZeroTrust,
   reconcilePlatformZeroTrust,
   resolveProjectZeroTrustRouting,
   setProjectZeroTrustProtection,
@@ -267,7 +268,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     expect(cloudflare.applications.size).toBe(0);
   });
 
-  it('preserves public access and unvisited project protection when a later project fails', async () => {
+  it('finishes disable around a failing project and keeps it denied until scheduled cleanup', async () => {
     const owner = await createTestUser(env.db, 'mixed-disable-owner');
     const [publicProject, failingProject, unvisitedProject] = [
       { id: 'mixed-public', slug: 'mixed-public', created_at: '2020-01-01 00:00:00' },
@@ -310,31 +311,45 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       }
       return originalPut(...args);
     });
+    const failingRoute = await env.ROUTING.get(failingProject.slug);
     try {
-      await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow(
-        'Later protected project routing failed',
-      );
+      // One project's failure does not hold the installation disable.
+      await expect(disablePlatformZeroTrust(platform, env.db)).resolves.toMatchObject({
+        enabled: false,
+        status: 'ready',
+        operation: null,
+      });
     } finally {
       putSpy.mockRestore();
     }
 
-    expectPublicBypass(cloudflare, bypass.bypass_application_id!, publicProject.slug);
-    expect(cloudflare.applications.has(wildcard.id)).toBe(true);
-    expect(cloudflare.deletedIds).toEqual([]);
-    await expect(resolveProjectZeroTrustRouting(env.db, publicProject.id)).resolves.toBeNull();
-    expect(await getProjectZeroTrustState(env.db, unvisitedProject.id)).toMatchObject({
-      desired_protected: true,
-      effective_protected: true,
-      state: 'protected',
-    });
-    expect(await env.ROUTING.get(unvisitedProject.slug)).toBe(originalUnvisitedRoute);
-    expect(await resolveProjectZeroTrustRouting(env.db, unvisitedProject.id)).toMatchObject({
-      audiences: [{ audience: wildcard.audience, hostname: '*.apps.example.com' }],
-    });
-
-    await reconcilePlatformZeroTrust(platform, env.db);
     expect(cloudflare.deletedIds).toEqual([wildcard.id, bypass.bypass_application_id]);
     expect(cloudflare.applications.size).toBe(0);
+    await expect(resolveProjectZeroTrustRouting(env.db, publicProject.id)).resolves.toBeNull();
+    expect(await getProjectZeroTrustState(env.db, unvisitedProject.id)).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+    });
+    expect(JSON.parse((await env.ROUTING.get(unvisitedProject.slug))!).zeroTrust).toBeUndefined();
+    // The skipped project keeps its protected route: without an Access
+    // assertion dispatch denies it rather than serving it publicly.
+    expect(await getProjectZeroTrustState(env.db, failingProject.id)).toMatchObject({
+      desired_protected: false,
+      state: 'error',
+      last_error: 'Later protected project routing failed',
+    });
+    expect(await env.ROUTING.get(failingProject.slug)).toBe(failingRoute);
+    expect(JSON.parse(failingRoute!).zeroTrust).toBeDefined();
+
+    await reconcilePendingProjectZeroTrust(platform, env.db);
+    expect(await getProjectZeroTrustState(env.db, failingProject.id)).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'public',
+      last_error: null,
+    });
+    expect(JSON.parse((await env.ROUTING.get(failingProject.slug))!).zeroTrust).toBeUndefined();
   });
 
   it.each(['reconcile', 'replacement credential'] as const)(
@@ -443,32 +458,26 @@ describe('Zero Trust disable public bypass lifecycle', () => {
         }, options),
       );
     try {
-      await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow(
-        'Bypass checkpoint transaction failed',
-      );
+      // The project is skipped; the installation disable still completes.
+      await expect(disablePlatformZeroTrust(platform, env.db)).resolves.toMatchObject({
+        enabled: false,
+        status: 'ready',
+        wildcardApplication: null,
+        operation: null,
+      });
     } finally {
       transactionSpy.mockRestore();
     }
 
-    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      enabled: false,
-      status: 'error',
-      wildcardApplication: null,
-      operation: { kind: 'disable', phase: 'bypass-delete', owner: null },
-    });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       bypass_application_id: null,
       bypass_application_name: bypass.bypass_application_name,
+      state: 'error',
     });
     expect(cloudflare.applications.size).toBe(0);
 
-    await reconcilePlatformZeroTrust(platform, env.db);
+    await reconcilePendingProjectZeroTrust(platform, env.db);
 
-    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      enabled: false,
-      status: 'ready',
-      operation: null,
-    });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       bypass_application_id: null,
       bypass_application_name: null,

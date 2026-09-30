@@ -803,11 +803,13 @@ export async function reconcileProjectCleanupJobs(db: Db, env: ApiEnv['Bindings'
  *      DOs of those builds — BEFORE any CF cleanup runs, so a still-running build
  *      can't keep acting on its now-revoked token during the cleanup window.
  *   2. Run critical CF cleanup (container apps, per-deploy container orphan
- *      recovery, and Zero Trust applications). Throws on non-404 failure; the
- *      caller should surface a 5xx and the DB row remains, allowing retry.
+ *      recovery). Throws on non-404 failure; the caller should surface a 5xx
+ *      and the DB row remains, allowing retry.
  *   3. Delete CF resources (D1, KV, R2, queues, Hyperdrive, custom hostnames,
  *      routing entries, deployment Workers). Persist failed operations for
  *      scheduled retry; keep reusable names reserved if their deletion fails.
+ *      Then delete the project's Zero Trust Access applications, whose
+ *      handles exist only on the project row.
  *   4. Cascade-delete the project from the DB (terminalize any build that raced
  *      in after step 1 → domains → resources → secrets → builds → deployments →
  *      project), then best-effort stop the container DOs of any such late build
@@ -857,9 +859,6 @@ export async function teardownProject(
   }
 
   await cleanupCriticalResources(context, projectId, project);
-  // Access application IDs live only on the project row. Deletion must succeed
-  // before the cascade or a retry would no longer be able to address them.
-  await cleanupProjectZeroTrust(context.env, context.get('db'), projectId);
   // Customer-side cleanup is durable and may continue after project deletion.
   await cleanupProjectEmailAssignments(context, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(
@@ -874,6 +873,11 @@ export async function teardownProject(
   // here rather than in `routes/delete.ts` so the two admin teardown paths
   // (admin project delete, admin user delete) get it too.
   await cleanupProjectEmailDestinations(context, projectId);
+  // Access application IDs live only on the project row, so deletion must
+  // succeed before the cascade. It runs after every retryable step above: a
+  // retried teardown must never leave a routed public project without its
+  // bypass or a protected one without its exact application.
+  await cleanupProjectZeroTrust(context.env, context.get('db'), projectId);
   // deleteProjectCascade re-terminalizes under the project lock to catch a build
   // that raced in after step 1 committed (build creation takes the same lock),
   // and returns both that build and every resource row it deleted.

@@ -113,7 +113,10 @@ protection uses an empty audience set to keep metadata maintenance possible
 while dispatch denies access; unexpected database failures abort publication.
 Public intent with a durable bypass remains public during partial routing
 cleanup, so a metadata rewrite cannot reintroduce denial behind the cleanup
-cursor. Deployment admission still requires completed public reconciliation.
+cursor. Deployment admission still requires completed public reconciliation. It
+is checked before any paid provisioning and again inside the cutover fence.
+Recovery that restores already-committed code uses the fail-closed publication
+resolver instead, so pending protection cannot block it.
 During platform disablement, each project's first cleanup batch saves public
 intent before rewriting any routes. Both deployment and metadata publication
 honor that intent through partial pages and retries after an error, while
@@ -139,7 +142,8 @@ over stale Worker variables and KV reads, including scheduled retries.
 
 Project deletion treats Access application deletion as critical because the
 project row is the durable handle. The database cascade occurs only after those
-deletes succeed. Platform disablement clears route enforcement and protected
+deletes succeed. They run after the retryable resource cleanup, so a retried
+deletion never leaves a routed project without its Access exception. Platform disablement clears route enforcement and protected
 custom-domain applications first, retaining public bypasses until the wildcard
 is deleted. Wildcard deletion checkpoints enforcement as disabled and advances
 to bounded bypass cleanup. The saved disable operation remains pending until
@@ -170,10 +174,20 @@ before this credential was recognized.
 The browser admin UI and `/operator/v1/zero-trust` expose redacted status,
 configuration, reconcile, disable, and per-project operations. The user API
 exposes project status to readers and mutations to the `settings` capability
-(project administrators and owners).
+(project administrators and owners). Its `available` field reports whether a
+project administrator can change protection now: enabled, ready, and with no
+running operation. Mutations recheck the capability under the project row lock
+shared with team and ownership changes. Configuration rejects a wildcard that
+would cover the API, proxy, or email gateway hostname.
 
 Errored or interrupted project reconciliations retain their resource IDs and are
 retried by scheduled maintenance while the platform configuration is ready.
+Inside an installation operation, a project-specific failure is recorded on
+that project, which the operation then skips so the remaining projects finish.
+Credential, rate-limit, and provider outage errors stop the whole operation
+instead. After a disable finishes, the same maintenance clears protection left
+on skipped projects. The two-minute tier resumes only operations that have not
+failed; a failed operation retries hourly or through an explicit reconcile.
 Administrators can explicitly reconcile the installation or one project after
 fixing token permissions, policies, or account quota.
 

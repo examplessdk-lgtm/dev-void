@@ -199,18 +199,21 @@ describe('Zero Trust routing read retries', () => {
       expect(JSON.parse((await env.ROUTING.get(domainKey))!).zeroTrust).toBeDefined();
 
       if (status === 'error') {
-        const get = env.ROUTING.get.bind(env.ROUTING);
-        const miss = vi
-          .spyOn(env.ROUTING, 'get')
-          .mockImplementation((async (key: string | Array<string>, ...args: Array<unknown>) =>
-            key === domainKey
-              ? null
-              : Reflect.apply(get, env.ROUTING, [key, ...args])) as typeof env.ROUTING.get);
-        try {
-          await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow('Live routing');
-        } finally {
-          miss.mockRestore();
-        }
+        // An operation-wide failure, such as a revoked token, stops the
+        // disable between routing pages and records it on the operation.
+        const saved = (await readZeroTrustConfigurationStrict(env.db))!;
+        await env.db
+          .update(platformSettings)
+          .set({
+            value: {
+              ...saved,
+              revision: saved.revision + 1,
+              status: 'error',
+              lastError: 'injected operation failure',
+              operation: { ...saved.operation!, owner: null, leaseExpiresAt: null },
+            },
+          })
+          .where(eq(platformSettings.key, 'zeroTrust.configuration'));
       } else if (status === 'provider deletion error') {
         vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
           if (
@@ -399,18 +402,21 @@ describe('Zero Trust routing read retries', () => {
             operation === 'public'
               ? setProjectZeroTrustProtection(platform, env.db, project.id, false)
               : disablePlatformZeroTrust(platform, env.db);
-          await expect(cleanup).rejects.toThrow('Live routing');
+          if (operation === 'public') {
+            await expect(cleanup).rejects.toThrow('Live routing');
+          } else {
+            // One project's stale read does not hold the installation disable.
+            await expect(cleanup).resolves.toMatchObject({
+              enabled: false,
+              status: 'ready',
+              operation: null,
+            });
+          }
           expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
             state: 'error',
             routing_cursor: null,
+            last_error: expect.stringContaining('Live routing'),
           });
-          if (operation === 'disable') {
-            expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-              enabled: true,
-              status: 'error',
-              operation: { kind: 'disable' },
-            });
-          }
         } finally {
           getSpy.mockRestore();
         }

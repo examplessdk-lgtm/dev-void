@@ -91,6 +91,7 @@ import {
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
+  zeroTrustNotReadyMessage,
 } from '../zero-trust/service.ts';
 import { rollbackCfDestination } from './email.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
@@ -1348,7 +1349,14 @@ const app = new Hono<ApiEnv>()
           const workerName = getProjectDeploymentWorkerName(lockedProject.slug, target.id);
           const existingRouting = await context.env.ROUTING.get(lockedProject.slug);
           const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
-          const zeroTrust = await resolveProjectZeroTrustRouting(txDb, projectId);
+          const zeroTrust = await resolveProjectZeroTrustRouting(txDb, projectId).catch(
+            (error: unknown) => {
+              const message = zeroTrustNotReadyMessage(error);
+              throw message
+                ? new RollbackError(409, 'zero trust not ready', undefined, message)
+                : error;
+            },
+          );
           const targetType =
             manifest?.type ??
             (manifest?.framework

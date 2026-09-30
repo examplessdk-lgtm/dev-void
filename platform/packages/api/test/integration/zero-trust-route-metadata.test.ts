@@ -16,7 +16,7 @@ import { domains, deployments } from '../../src/schema.ts';
 import {
   configurePlatformZeroTrust,
   getProjectZeroTrustState,
-  reconcilePlatformZeroTrust,
+  reconcilePendingProjectZeroTrust,
   setProjectZeroTrustProtection,
 } from '../../src/zero-trust/service.ts';
 import {
@@ -377,17 +377,22 @@ describe('Zero Trust authoritative route metadata', () => {
       const remove = vi.spyOn(env.ROUTING, 'delete');
       const read = staleRouteRead([current.slug], stale);
       try {
+        // The stale read fails only this project; the installation operation finishes.
         await expect(
           configurePlatformZeroTrust(bindings(), env.db, configurationInput(protectedProject)),
-        ).rejects.toThrow('Live routing');
+        ).resolves.toMatchObject({ status: 'ready', operation: null });
       } finally {
         read.mockRestore();
       }
+      expect(await getProjectZeroTrustState(env.db, current.id)).toMatchObject({
+        state: 'error',
+        last_error: expect.stringContaining('Live routing'),
+      });
       expect(put.mock.calls.some(([key]) => key === current.slug)).toBe(false);
       expect(remove.mock.calls.some(([key]) => key === current.slug)).toBe(false);
       expect(await env.ROUTING.get(current.slug)).toBeNull();
       expect((await getProject(env.db, current.id))!.active_deployment_id).toBeNull();
-      await reconcilePlatformZeroTrust(bindings(), env.db);
+      await reconcilePendingProjectZeroTrust(bindings(), env.db);
       expect(await env.ROUTING.get(current.slug)).toBeNull();
       expect(await getProjectZeroTrustState(env.db, current.id)).toMatchObject({
         state: protectedProject ? 'protected' : 'public',

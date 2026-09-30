@@ -73,7 +73,9 @@ zeroTrustOperatorRoutes.post('/zero-trust/configure', async (context) => {
   try {
     return context.json({
       ok: true,
-      configuration: await configurePlatformZeroTrust(context.env, context.get('db'), input),
+      configuration: await configurePlatformZeroTrust(context.env, context.get('db'), input, {
+        requestUrl: context.req.url,
+      }),
     });
   } catch (error) {
     operationError(error);

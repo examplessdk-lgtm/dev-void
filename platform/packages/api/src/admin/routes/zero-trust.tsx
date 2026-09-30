@@ -71,7 +71,9 @@ app.post('/configure', async (context) => {
     operatorAuditIntent('zero-trust/configure', input),
     async () => {
       try {
-        await configurePlatformZeroTrust(context.env, context.get('db'), input);
+        await configurePlatformZeroTrust(context.env, context.get('db'), input, {
+          requestUrl: context.req.url,
+        });
       } catch (error) {
         adminError(error);
       }

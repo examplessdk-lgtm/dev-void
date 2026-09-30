@@ -8,7 +8,7 @@ type CloudflareEnvelope<T> = Readonly<{
   errors?: ReadonlyArray<{ code?: number; message?: string }>;
 }>;
 
-class ZeroTrustCloudflareError extends Error {
+export class ZeroTrustCloudflareError extends Error {
   constructor(
     message: string,
     readonly status: number,

@@ -692,7 +692,7 @@ export class PlatformClient {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to inspect project Zero Trust', res);
+      await throwPlatformApiError('Failed to inspect project Zero Trust', res, 'read');
     }
     return res.json();
   }
@@ -707,7 +707,7 @@ export class PlatformClient {
       body: JSON.stringify({ protected: protectedProject }),
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to update project Zero Trust', res);
+      await throwPlatformApiError('Failed to update project Zero Trust', res, 'settings');
     }
     return res.json();
   }
@@ -718,7 +718,7 @@ export class PlatformClient {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
-      await throwPlatformApiError('Failed to reconcile project Zero Trust', res);
+      await throwPlatformApiError('Failed to reconcile project Zero Trust', res, 'settings');
     }
     return res.json();
   }

@@ -1,0 +1,542 @@
+import { eq, sql } from 'drizzle-orm';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
+import * as db from '../../src/db.ts';
+import type { ApiEnv } from '../../src/env.ts';
+import app, { FAST_CRON, scheduled } from '../../src/index.ts';
+import { domains, platformSettings, projectZeroTrust } from '../../src/schema.ts';
+import * as zeroTrustConfiguration from '../../src/zero-trust/configuration.ts';
+import {
+  type ZeroTrustConfigureInput,
+  readZeroTrustConfigurationStrict,
+} from '../../src/zero-trust/configuration.ts';
+import {
+  configurePlatformZeroTrust,
+  disablePlatformZeroTrust,
+  getProjectZeroTrustState,
+  reconcileProjectZeroTrust,
+  reconcileProjectZeroTrustDomains,
+  reconcilePendingProjectZeroTrust,
+  resolveProjectZeroTrustRouting,
+  resolveProjectZeroTrustRoutingForPublication,
+  setProjectZeroTrustProtection,
+} from '../../src/zero-trust/service.ts';
+import {
+  clearTables,
+  createMockExecutionContext,
+  createTestProject,
+  createTestUser,
+  setupEnv,
+  teardownEnv,
+  type TestEnv,
+} from './helpers.ts';
+
+let env: TestEnv;
+
+beforeAll(async () => {
+  env = await setupEnv();
+});
+
+afterAll(async () => {
+  await teardownEnv();
+});
+
+beforeEach(async () => {
+  await clearTables(env.db);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function bindings(overrides: Record<string, unknown> = {}): ApiEnv['Bindings'] {
+  return {
+    ...env,
+    SITE_DOMAIN: 'apps.example.com',
+    PLATFORM_INSTALLATION_ID: 'installation-test',
+    ...overrides,
+  } as unknown as ApiEnv['Bindings'];
+}
+
+function configurationInput(
+  overrides: Partial<ZeroTrustConfigureInput> = {},
+): ZeroTrustConfigureInput {
+  return {
+    accountId: env.CF_ACCOUNT_ID,
+    apiToken: 'access-token',
+    identityProviderIds: ['idp-1'],
+    policyIds: ['policy-1'],
+    protectNewProjects: false,
+    existingProjects: 'public',
+    ...overrides,
+  };
+}
+
+function providerError(message: string, status: number): Response {
+  return Response.json({ success: false, errors: [{ message }] }, { status });
+}
+
+function accessApi() {
+  const applications = new Map<string, Record<string, unknown>>();
+  let nextApplication = 1;
+  let revoked = false;
+  const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input.toString());
+    if (!url.pathname.includes('/access/')) {
+      return providerError('unexpected Cloudflare request', 500);
+    }
+    if (revoked) {
+      return providerError('Access token was revoked', 401);
+    }
+    const path = url.pathname.split('/access/')[1] ?? '';
+    if (path === 'organizations') {
+      return Response.json({
+        success: true,
+        result: { auth_domain: 'company.cloudflareaccess.com' },
+      });
+    }
+    if (path === 'identity_providers/idp-1') {
+      return Response.json({ success: true, result: { id: 'idp-1' } });
+    }
+    if (path === 'policies/policy-1') {
+      return Response.json({
+        success: true,
+        result: {
+          id: 'policy-1',
+          decision: 'allow',
+          include: [{ email_domain: { domain: 'example.com' } }],
+        },
+      });
+    }
+    if (path === 'apps' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const id = `app-${nextApplication++}`;
+      const application = { ...body, id, aud: `aud-${id}` };
+      applications.set(id, application);
+      return Response.json({ success: true, result: application });
+    }
+    if (path === 'apps') {
+      const page = Number(url.searchParams.get('page') ?? '1');
+      const perPage = Number(url.searchParams.get('per_page') ?? '100');
+      const start = (page - 1) * perPage;
+      return Response.json({
+        success: true,
+        result: [...applications.values()].slice(start, start + perPage),
+      });
+    }
+    const match = path.match(/^apps\/([^/]+)$/);
+    if (match) {
+      const id = match[1]!;
+      const previous = applications.get(id);
+      if (!previous) {
+        return providerError('application not found', 404);
+      }
+      if (init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const application = { ...body, id, aud: previous.aud };
+        applications.set(id, application);
+        return Response.json({ success: true, result: application });
+      }
+      if (init?.method === 'DELETE') {
+        applications.delete(id);
+        return Response.json({ success: true, result: { id } });
+      }
+      return Response.json({ success: true, result: previous });
+    }
+    throw new Error(`unexpected Access request: ${url}`);
+  });
+  const accessCalls = () =>
+    fetcher.mock.calls.filter(([input]) => String(input).includes('/access/')).length;
+  return {
+    applications,
+    fetcher,
+    accessCalls,
+    revoke(value: boolean) {
+      revoked = value;
+    },
+  };
+}
+
+/** Save a running operation owned by another request, as its runner would. */
+async function startForeignOperation(): Promise<void> {
+  const saved = (await readZeroTrustConfigurationStrict(env.db))!;
+  await env.db
+    .update(platformSettings)
+    .set({
+      value: {
+        ...saved,
+        revision: saved.revision + 1,
+        status: 'configuring',
+        operation: {
+          id: 'foreign-operation',
+          kind: 'reconcile',
+          phase: 'projects',
+          owner: 'foreign-runner',
+          leaseExpiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          startedAt: new Date().toISOString(),
+          existingProjects: null,
+        },
+      },
+    })
+    .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+}
+
+/** Advance the saved revision after the next unlocked read, as an operation heartbeat does. */
+function heartbeatAfterFirstRead(): void {
+  const read = zeroTrustConfiguration.readZeroTrustConfigurationStrict;
+  let bumped = false;
+  vi.spyOn(zeroTrustConfiguration, 'readZeroTrustConfigurationStrict').mockImplementation(
+    async (...args) => {
+      const result = await read(...args);
+      if (!bumped && result) {
+        bumped = true;
+        await env.db
+          .update(platformSettings)
+          .set({ value: { ...result, revision: result.revision + 1 } })
+          .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+      }
+      return result;
+    },
+  );
+}
+
+describe('Zero Trust operation failures', () => {
+  it('leaves a failed operation to the hourly tier without starving fast maintenance', async () => {
+    const owner = await createTestUser(env.db, 'fast-tier-owner');
+    await createTestProject(env.db, owner.id, 'fast-tier-project');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configurationInput());
+    const saved = (await readZeroTrustConfigurationStrict(env.db))!;
+    await env.db
+      .update(platformSettings)
+      .set({
+        value: {
+          ...saved,
+          revision: saved.revision + 1,
+          status: 'configuring',
+          operation: {
+            id: 'resumable-operation',
+            kind: 'reconcile',
+            phase: 'seed',
+            owner: null,
+            leaseExpiresAt: null,
+            startedAt: new Date().toISOString(),
+            existingProjects: null,
+          },
+        },
+      })
+      .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+    cloudflare.revoke(true);
+    const pendingDomains = vi.spyOn(db, 'getPendingDomainsNewerThan');
+    const fast = () =>
+      scheduled(
+        { cron: FAST_CRON, scheduledTime: Date.now() } as ScheduledController,
+        platform,
+        createMockExecutionContext(),
+      );
+
+    await fast();
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      status: 'error',
+      lastError: expect.stringContaining('Access token was revoked'),
+      operation: { id: 'resumable-operation', owner: null },
+    });
+    expect(pendingDomains).toHaveBeenCalledTimes(1);
+    const failedCalls = cloudflare.accessCalls();
+    expect(failedCalls).toBeGreaterThan(0);
+
+    await fast();
+    expect(cloudflare.accessCalls()).toBe(failedCalls);
+    expect(pendingDomains).toHaveBeenCalledTimes(2);
+
+    cloudflare.revoke(false);
+    await scheduled(
+      { cron: '0 * * * *', scheduledTime: Date.now() } as ScheduledController,
+      platform,
+      createMockExecutionContext(),
+    );
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      status: 'ready',
+      operation: null,
+    });
+  });
+
+  it('finishes configuration around a project over the protected domain cap', async () => {
+    const owner = await createTestUser(env.db, 'domain-cap-owner');
+    const large = await createTestProject(env.db, owner.id, 'domain-cap-large');
+    const small = await createTestProject(env.db, owner.id, 'domain-cap-small');
+    await env.db.insert(domains).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `domain-cap-${index}`,
+        project_id: large.id,
+        hostname: `cap-${index}.example.net`,
+        cf_hostname_id: `cf-domain-cap-${index}`,
+        status: 'pending' as const,
+      })),
+    );
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+
+    await expect(
+      configurePlatformZeroTrust(
+        platform,
+        env.db,
+        configurationInput({ existingProjects: 'protected', protectNewProjects: true }),
+      ),
+    ).resolves.toMatchObject({ enabled: true, status: 'ready', operation: null });
+
+    expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: true,
+      state: 'protected',
+    });
+    expect(await getProjectZeroTrustState(env.db, large.id)).toMatchObject({
+      desired_protected: true,
+      effective_protected: false,
+      state: 'error',
+      last_error: expect.stringContaining('at most 100 custom domains'),
+    });
+    // The skipped project wants protection, so every route writer denies it.
+    await expect(resolveProjectZeroTrustRouting(env.db, large.id)).rejects.toThrow(
+      'still reconciling',
+    );
+    await expect(resolveProjectZeroTrustRoutingForPublication(env.db, large.id)).resolves.toEqual({
+      teamDomain: '',
+      audiences: [],
+    });
+  });
+
+  it('moves a scheduled retry that fails at the checkpoint behind other pending projects', async () => {
+    const owner = await createTestUser(env.db, 'retry-order-owner');
+    const large = await createTestProject(env.db, owner.id, 'retry-order-large');
+    const small = await createTestProject(env.db, owner.id, 'retry-order-small');
+    await env.db.insert(domains).values(
+      Array.from({ length: 101 }, (_, index) => ({
+        id: `retry-order-${index}`,
+        project_id: large.id,
+        hostname: `retry-order-${index}.example.net`,
+        cf_hostname_id: `cf-retry-order-${index}`,
+        status: 'pending' as const,
+      })),
+    );
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(
+      platform,
+      env.db,
+      configurationInput({ existingProjects: 'protected', protectNewProjects: true }),
+    );
+    await env.db
+      .update(projectZeroTrust)
+      .set({ updated_at: sql`now() - interval '1 hour'` })
+      .where(eq(projectZeroTrust.project_id, large.id));
+    await env.db
+      .update(projectZeroTrust)
+      .set({
+        state: 'error',
+        last_error: 'Earlier failure',
+        updated_at: sql`now() - interval '30 minutes'`,
+      })
+      .where(eq(projectZeroTrust.project_id, small.id));
+
+    await reconcilePendingProjectZeroTrust(platform, env.db, 1);
+    expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({ state: 'error' });
+    expect(await getProjectZeroTrustState(env.db, large.id)).toMatchObject({
+      state: 'error',
+      last_error: expect.stringContaining('at most 100 custom domains'),
+    });
+
+    await reconcilePendingProjectZeroTrust(platform, env.db, 1);
+    expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({
+      state: 'protected',
+      last_error: null,
+    });
+  });
+
+  it('checks the routing budget after the checkpoint and keeps the bypass until routes publish', async () => {
+    const owner = await createTestUser(env.db, 'budget-owner');
+    const project = await createTestProject(env.db, owner.id, 'budget-project');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configurationInput());
+    const publicRow = (await getProjectZeroTrustState(env.db, project.id))!;
+    expect(publicRow).toMatchObject({ state: 'public' });
+    await env.db
+      .update(projectZeroTrust)
+      .set({ desired_protected: true, state: 'reconciling' })
+      .where(eq(projectZeroTrust.project_id, project.id));
+    const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
+
+    const routingBudget = { remaining: 5 };
+    const partial = await reconcileProjectZeroTrust(platform, env.db, project.id, {
+      configuration,
+      routingBudget,
+    });
+    expect(routingBudget).toEqual({ remaining: 5, exhausted: true });
+    expect(partial).toMatchObject({
+      desired_protected: true,
+      effective_protected: false,
+      state: 'reconciling',
+      bypass_application_id: publicRow.bypass_application_id,
+    });
+    expect(cloudflare.applications.has(publicRow.bypass_application_id!)).toBe(true);
+
+    await expect(
+      reconcileProjectZeroTrust(platform, env.db, project.id, {
+        configuration,
+        routingBudget: { remaining: 300 },
+      }),
+    ).resolves.toMatchObject({
+      effective_protected: true,
+      state: 'protected',
+      bypass_application_id: null,
+    });
+    expect(cloudflare.applications.has(publicRow.bypass_application_id!)).toBe(false);
+  });
+
+  it('creates a project during a running operation without a spurious warning', async () => {
+    const owner = await createTestUser(env.db, 'running-create-owner');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configurationInput());
+    await startForeignOperation();
+    heartbeatAfterFirstRead();
+
+    const response = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: 'running-create' }),
+      }),
+      platform,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { id: string; warnings?: Array<string> };
+    expect(body.warnings).toBeUndefined();
+    const row = await getProjectZeroTrustState(env.db, body.id);
+    expect(row).toMatchObject({
+      desired_protected: false,
+      effective_protected: false,
+      state: 'reconciling',
+      bypass_application_id: expect.any(String),
+    });
+    expect(cloudflare.applications.has(row!.bypass_application_id!)).toBe(true);
+  });
+
+  it('reconciles domain protection during a running operation', async () => {
+    const owner = await createTestUser(env.db, 'running-domain-owner');
+    const project = await createTestProject(env.db, owner.id, 'running-domain');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configurationInput());
+    await setProjectZeroTrustProtection(platform, env.db, project.id, true);
+    await env.db.insert(domains).values({
+      id: 'running-domain',
+      project_id: project.id,
+      hostname: 'running.example.net',
+      cf_hostname_id: 'cf-running-domain',
+      status: 'pending',
+    });
+    await startForeignOperation();
+    heartbeatAfterFirstRead();
+
+    const row = await reconcileProjectZeroTrustDomains(platform, env.db, project.id);
+
+    expect(row).toMatchObject({ state: 'protected', protected_application_id: expect.any(String) });
+    expect(cloudflare.applications.get(row!.protected_application_id!)).toMatchObject({
+      domain: 'running.example.net',
+    });
+  });
+
+  it.each([
+    [
+      'a dedicated zone',
+      { SITE_DOMAIN: 'example.com', AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback' },
+      'api.example.com',
+    ],
+    [
+      'the workers.dev ingress',
+      {
+        SITE_DOMAIN: 'test.workers.dev',
+        PLATFORM_APPLICATION: JSON.stringify({
+          baseDomain: 'test.workers.dev',
+          zoneName: '',
+          dedicatedZone: false,
+          workersDev: { installationId: 'team-123456abcdef', subdomain: 'test' },
+        }),
+        PROXY_URL: 'https://void-123456abcdef-proxy.test.workers.dev',
+      },
+      'void-123456abcdef-proxy.test.workers.dev',
+    ],
+  ] as const)(
+    'rejects a wildcard that would cover the control plane on %s',
+    async (_name, overrides, hostname) => {
+      const cloudflare = accessApi();
+      vi.stubGlobal('fetch', cloudflare.fetcher);
+
+      await expect(
+        configurePlatformZeroTrust(bindings(overrides), env.db, configurationInput()),
+      ).rejects.toThrow(`control plane (${hostname})`);
+      expect(await readZeroTrustConfigurationStrict(env.db)).toBeNull();
+      expect(cloudflare.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts a replacement credential for a disable after the control plane moved under the wildcard', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    await configurePlatformZeroTrust(bindings(), env.db, configurationInput());
+    cloudflare.revoke(true);
+    await expect(disablePlatformZeroTrust(bindings(), env.db)).rejects.toThrow(
+      'Access token was revoked',
+    );
+    cloudflare.revoke(false);
+    const moved = bindings({ AUTH_REDIRECT_URI: 'https://api.apps.example.com/auth/callback' });
+
+    await configurePlatformZeroTrust(moved, env.db, {
+      ...configurationInput(),
+      apiToken: 'replacement-token',
+    });
+
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      enabled: false,
+      status: 'ready',
+      operation: null,
+      wildcardApplication: null,
+    });
+    await expect(configurePlatformZeroTrust(moved, env.db, configurationInput())).rejects.toThrow(
+      'control plane (api.apps.example.com)',
+    );
+  });
+
+  it('accepts a control plane outside the project application domain', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+
+    await expect(
+      configurePlatformZeroTrust(
+        bindings({ AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback' }),
+        env.db,
+        configurationInput(),
+        { requestUrl: 'https://api.example.com/operator/v1/zero-trust/configure' },
+      ),
+    ).resolves.toMatchObject({ enabled: true, status: 'ready' });
+  });
+});

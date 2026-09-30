@@ -151,6 +151,7 @@ import {
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
+  zeroTrustNotReadyMessage,
 } from '../zero-trust/service.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
@@ -316,6 +317,7 @@ async function replayDeploymentCutover(
   deployment: Deployment,
   plan: PlanId,
   committedProjectType?: Project['type'],
+  options: Readonly<{ restoreCommitted?: boolean }> = {},
 ): Promise<void> {
   const planLimits = getPlanLimits(plan);
   if (!deployment.manifest) {
@@ -329,7 +331,12 @@ async function replayDeploymentCutover(
   const existingEntry = existingRouting
     ? (JSON.parse(existingRouting) as { suspended?: string })
     : {};
-  const zeroTrust = await resolveProjectZeroTrustRouting(db, project.id);
+  // Restoring committed code must not wait for Zero Trust reconciliation. The
+  // publication resolver fails closed, as deploy compensation does. Promoting
+  // a new deployment keeps the strict readiness gate.
+  const zeroTrust = options.restoreCommitted
+    ? await resolveProjectZeroTrustRoutingForPublication(db, project.id)
+    : await resolveProjectZeroTrustRouting(db, project.id);
   let hasAssets = false;
   if (deployment.asset_hashes) {
     const assetHashes = JSON.parse(deployment.asset_hashes) as Record<string, unknown>;
@@ -603,6 +610,7 @@ export async function settleDeploymentForSandboxDrain(
             committedActive,
             owner.plan,
             project.type,
+            { restoreCommitted: true },
           );
         } else {
           await clearProjectExternalState(env, txDb, project);
@@ -713,6 +721,7 @@ export async function settleDeploymentForSandboxDrain(
           committedActive,
           owner.plan,
           project.type,
+          { restoreCommitted: true },
         );
       } else {
         await clearProjectExternalState(env, txDb, project);
@@ -2266,6 +2275,18 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       501,
     );
   }
+  // Reject before any paid or slow work (Sandbox controllers, uploads,
+  // migrations) when routing could not carry this project's protection yet.
+  // The cutover fence repeats this check with the authoritative lock.
+  try {
+    await resolveProjectZeroTrustRouting(context.get('db'), projectId);
+  } catch (error) {
+    const message = zeroTrustNotReadyMessage(error);
+    if (!message) {
+      throw error;
+    }
+    return context.json({ event: 'error', error: 'zero trust not ready', message }, 409);
+  }
   if (incomingManifest.sandbox) {
     try {
       await assertManagedSandboxEntitlement(context.env.CF_ACCOUNT_ID, context.env.CF_API_TOKEN);
@@ -2666,6 +2687,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                   committedActive,
                   lockedAccess.owner.plan,
                   lockedProject.type,
+                  { restoreCommitted: true },
                 );
               } else {
                 await clearProjectExternalState(context.env, txDb, lockedProject);
@@ -5452,6 +5474,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                     committedActive,
                     owner.plan,
                     lockedProject.type,
+                    { restoreCommitted: true },
                   );
                 } else {
                   await clearProjectExternalState(context.env, txDb, lockedProject);

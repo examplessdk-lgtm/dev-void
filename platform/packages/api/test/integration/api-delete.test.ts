@@ -24,6 +24,7 @@ import {
   projectMembers,
   projectOwnershipPeriods,
 } from '../../src/schema.ts';
+import * as zeroTrustService from '../../src/zero-trust/service.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -603,6 +604,45 @@ describe('DELETE /projects/:id', () => {
       createMockExecutionContext(),
     );
     expect(await env.ROUTING.get(project.slug)).toBe(JSON.stringify({ projectId: replacement.id }));
+  });
+
+  it('deletes Zero Trust applications only after retryable cleanup succeeds', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'zero-trust-teardown');
+    await env.ROUTING.put(project.slug, JSON.stringify({ projectId: project.id }));
+    mockCfApi();
+    const cleanupZeroTrust = vi
+      .spyOn(zeroTrustService, 'cleanupProjectZeroTrust')
+      .mockResolvedValue(undefined);
+    const cascade = vi.spyOn(db, 'deleteProjectCascade');
+    const deleteRoute = env.ROUTING.delete.bind(env.ROUTING);
+    const routeDelete = vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+      if (key === project.slug) {
+        throw new Error('temporary KV failure');
+      }
+      return deleteRoute(key);
+    });
+    const request = () =>
+      app.fetch(
+        new Request(`http://localhost/projects/${project.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${user.jwt}` },
+        }),
+        env,
+      );
+
+    // The retried project keeps routing, so it must keep its Access bypass.
+    expect((await request()).status).toBe(500);
+    expect(cleanupZeroTrust).not.toHaveBeenCalled();
+
+    routeDelete.mockRestore();
+    expect((await request()).status).toBe(200);
+    expect(cleanupZeroTrust).toHaveBeenCalledTimes(1);
+    expect(cleanupZeroTrust).toHaveBeenCalledWith(expect.anything(), expect.anything(), project.id);
+    expect(cascade).toHaveBeenCalledTimes(1);
+    expect(cleanupZeroTrust.mock.invocationCallOrder[0]).toBeLessThan(
+      cascade.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('does not warn when worker 404s (static project)', async () => {

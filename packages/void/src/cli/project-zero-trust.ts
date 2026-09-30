@@ -13,7 +13,7 @@ type ZeroTrustArgs = Extract<ProjectArgs, { subcommand: 'zero-trust' }> & {
 async function resolveTarget(root: string, args: ZeroTrustArgs) {
   const token = getToken(root);
   if (!token) {
-    throw new Error('project: Sign in before managing Zero Trust protection.');
+    throw new Error('project: Not logged in. Run `void account login` first.');
   }
   const client = new PlatformClient(token, { root });
   const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectSlug });

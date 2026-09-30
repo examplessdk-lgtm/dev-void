@@ -575,34 +575,37 @@ describe('POST /projects/:id/deploy', () => {
       const project = await createTestProject(env.db, user.id, slug);
       mockCfApi();
 
+      const configuration = (audience: string, revision: number) => ({
+        version: 1,
+        revision,
+        status: 'ready',
+        enabled: true,
+        protectNewProjects: true,
+        accountId: env.CF_ACCOUNT_ID,
+        teamDomain: 'https://company.cloudflareaccess.com',
+        identityProviderIds: ['idp-1'],
+        policyIds: ['policy-1'],
+        credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+        wildcardApplication: {
+          id: 'access-wildcard',
+          name: 'void-test-projects',
+          audience,
+          destinations: ['*.void.app'],
+        },
+        lastError: null,
+        updatedAt: new Date().toISOString(),
+      });
       await env.db.insert(platformSettings).values({
         key: 'zeroTrust.configuration',
-        value: {
-          version: 1,
-          revision: 1,
-          status: 'ready',
-          enabled: true,
-          protectNewProjects: true,
-          accountId: env.CF_ACCOUNT_ID,
-          teamDomain: 'https://company.cloudflareaccess.com',
-          identityProviderIds: ['idp-1'],
-          policyIds: ['policy-1'],
-          credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
-          wildcardApplication: {
-            id: 'access-wildcard',
-            name: 'void-test-projects',
-            audience: 'access-audience',
-            destinations: ['*.void.app'],
-          },
-          lastError: null,
-          updatedAt: new Date().toISOString(),
-        },
+        value: configuration('stale-audience', 1),
       });
+      // Deploy admission requires settled protection; the audience then
+      // changes while the deploy runs, before its cutover lock.
       await env.db.insert(projectZeroTrust).values({
         project_id: project.id,
         desired_protected: true,
-        effective_protected: false,
-        state: 'reconciling',
+        effective_protected: true,
+        state: 'protected',
       });
 
       let protectionCommitted = false;
@@ -612,9 +615,9 @@ describe('POST /projects/:id/deploy', () => {
           fetch: async (request: Request) => {
             if (new URL(request.url).pathname === '/snapshot' && !protectionCommitted) {
               await env.db
-                .update(projectZeroTrust)
-                .set({ effective_protected: true, state: 'protected' })
-                .where(eq(projectZeroTrust.project_id, project.id));
+                .update(platformSettings)
+                .set({ value: configuration('access-audience', 2) })
+                .where(eq(platformSettings.key, 'zeroTrust.configuration'));
               protectionCommitted = true;
               return Response.json({ state: null });
             }

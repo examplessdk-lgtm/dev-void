@@ -28,6 +28,8 @@ Use `--plan` instead of `--yes` to inspect the change without applying it.
 
 Use an API token scoped to the platform account with **Access: Apps and Policies Write** and **Access: Organizations, Identity Providers, and Groups Read**. Void validates the selected identity providers and reusable policies before publishing protection. It does not add these permissions to the platform runtime token.
 
+Serve the platform API, proxy, and email gateway from hostnames outside the project application domain. Configuration is rejected when the project wildcard would cover one of them.
+
 ## Project Overrides
 
 Owners and project administrators may opt a project out or back in:
@@ -39,13 +41,15 @@ void project zero-trust enable
 void project zero-trust reconcile
 ```
 
+Deploys and rollbacks wait until the project's protection is settled. If one is refused, run `void project zero-trust reconcile` and retry.
+
 ## Limits
 
 Cloudflare's default Access application limit is 500 per account. Void uses one wildcard application, up to one bypass application per public project, and up to one additional application per protected project that has custom domains. Include existing Access applications when checking the account limit before enabling this on a large installation. A protected project can have up to 100 custom domains.
 
 ## Recovery
 
-A project never becomes public by mistake while a change is in progress. Failed projects are retried automatically. Use `void platform zero-trust reconcile` after repairing permissions or account quota. Large operations may remain `configuring` or `disabling` after one request; the same reconcile command or scheduled maintenance resumes the saved operation. Disabling removes Void-managed applications and makes all projects public.
+A project never becomes public by mistake while a change is in progress. A platform operation skips a project that fails and finishes the rest; the project keeps its error and is retried by hourly maintenance. A project that was already protected stays protected until then; a project being newly protected keeps its previous access until the retry succeeds. Use `void platform zero-trust reconcile` after repairing permissions or account quota. Large operations may remain `configuring` or `disabling` after one request; the same reconcile command or scheduled maintenance resumes the saved operation. Disabling removes Void-managed applications and makes all projects public.
 
 If the saved Cloudflare API token expires or is revoked during an operation, repeat `void platform zero-trust configure --token-stdin` with a replacement token and the same account, identity providers, policies, and project selections. Void resumes the saved operation, including an interrupted disable. Finish that operation before changing these settings.
 
