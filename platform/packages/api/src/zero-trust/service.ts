@@ -166,6 +166,16 @@ export function publicProjectZeroTrustState(
   };
 }
 
+/** Project protection can change only on a ready installation with no running operation. */
+export function projectZeroTrustAvailable(configuration: ZeroTrustConfiguration | null): boolean {
+  return (
+    !!configuration?.enabled &&
+    configuration.status === 'ready' &&
+    !configuration.operation &&
+    !!configuration.wildcardApplication
+  );
+}
+
 async function updateProjectState(
   db: DbOrTx,
   projectId: string,

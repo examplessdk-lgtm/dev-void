@@ -12,6 +12,7 @@ import {
   Mail,
   Rocket,
   ShieldCheck,
+  ShieldLock,
   Terminal,
   Users,
 } from 'lucide-react';
@@ -139,6 +140,12 @@ export function Layout({
               icon={Mail}
               href="/admin/email"
               isSelected={path.startsWith('/admin/email')}
+            />
+            <SideNavItem
+              label="Zero Trust"
+              icon={ShieldLock}
+              href="/admin/zero-trust"
+              isSelected={path === '/admin/zero-trust'}
             />
             <SideNavItem
               label="CLI Versions"

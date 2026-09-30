@@ -311,6 +311,74 @@ body {
   width: 0.375rem;
   height: 0.375rem;
 }
+.void-admin-zero-trust {
+  display: grid;
+  gap: var(--spacing-5);
+  max-width: 960px;
+}
+.void-admin-zero-trust h1,
+.void-admin-zero-trust h2,
+.void-admin-zero-trust p {
+  margin: 0;
+}
+.void-admin-zero-trust-intro {
+  display: grid;
+  gap: var(--spacing-2);
+}
+.void-admin-zero-trust-intro p,
+.void-admin-zero-trust .astryx-card p {
+  color: var(--color-text-secondary);
+}
+.void-admin-zero-trust .astryx-card {
+  display: grid;
+  gap: var(--spacing-4);
+}
+.void-admin-zero-trust-section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+.void-admin-zero-trust-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: var(--spacing-4);
+  margin: 0;
+}
+.void-admin-zero-trust-details dt {
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+.void-admin-zero-trust-details dd {
+  margin: var(--spacing-1) 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.void-admin-zero-trust-form {
+  display: grid;
+  justify-items: start;
+  gap: var(--spacing-4);
+}
+.void-admin-zero-trust-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+.void-admin-project-zero-trust {
+  display: grid;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+.void-admin-project-zero-trust > * {
+  margin: 0;
+}
+.void-admin-project-zero-trust-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-4);
+}
 .void-admin-access-page {
   display: grid;
   gap: var(--spacing-5);

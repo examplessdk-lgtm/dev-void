@@ -28,6 +28,7 @@ import {
   signupRequest,
   userDetailRequest,
   usersPageRequest,
+  zeroTrustRequest,
 } from './views.ts';
 
 function createServerClient(context: Context<ApiEnv>) {
@@ -68,7 +69,8 @@ export async function renderFateListPage(
     | 'authSettings'
     | 'authNew'
     | 'authEdit'
-    | 'email',
+    | 'email'
+    | 'zeroTrust',
 ): Promise<Response> {
   const title = {
     users: 'Users',
@@ -81,6 +83,7 @@ export async function renderFateListPage(
     authNew: 'Add login method',
     authEdit: 'Edit login method',
     email: 'Email',
+    zeroTrust: 'Zero Trust',
   }[page];
   const path = new URL(context.req.url).pathname + new URL(context.req.url).search;
   const props = {
@@ -115,6 +118,8 @@ export async function renderFateListPage(
       await client.request(authNewRequest(path));
     } else if (page === 'authEdit') {
       await client.request(authEditRequest(path));
+    } else if (page === 'zeroTrust') {
+      await client.request(zeroTrustRequest(path));
     } else {
       await client.request(emailSettingsRequest(path));
     }

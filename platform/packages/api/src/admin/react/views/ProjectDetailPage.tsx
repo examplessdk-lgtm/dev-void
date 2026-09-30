@@ -18,6 +18,7 @@ import { formatDateTime } from './format.ts';
 import { Layout } from './Layout.tsx';
 import { ProjectOwnerTransferSection } from './ProjectOwnerTransferSection.tsx';
 import { ProjectTeamSection } from './ProjectTeamSection.tsx';
+import { ProjectZeroTrustSection } from './ProjectZeroTrustSection.tsx';
 export function ProjectDetailPage({ path, platformName, username }: AdminPageProps) {
   const { projectDetail: ref } = useRequest(projectDetailRequest(path), {
     mode: 'stale-while-revalidate',
@@ -35,6 +36,7 @@ export function ProjectDetailPage({ path, platformName, username }: AdminPagePro
     pendingTeamInvitations,
     domains,
     builds,
+    zeroTrust,
     cfAccountId,
     deployUrl,
     tz,
@@ -155,6 +157,8 @@ export function ProjectDetailPage({ path, platformName, username }: AdminPagePro
 
       <h2>Builds ({builds.length})</h2>
       <BuildTable builds={builds} tz={tz} />
+
+      <ProjectZeroTrustSection projectId={project.id} zeroTrust={zeroTrust} />
 
       <ProjectTeamSection
         projectId={project.id}

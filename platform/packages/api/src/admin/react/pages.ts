@@ -56,6 +56,7 @@ export const adminComponents = {
   invitations: async () => ({
     default: (await import('./views/InvitationsPage.tsx')).InvitationsPage,
   }),
+  zeroTrust: async () => ({ default: (await import('./views/ZeroTrustPage.tsx')).ZeroTrustPage }),
 };
 
 export type AdminPageId = Exclude<keyof typeof adminComponents, 'adminLayout'>;
@@ -121,6 +122,9 @@ export function matchAdminRoute(url: string): AdminPageId | null {
   }
   if (path === '/admin/invitations') {
     return 'invitations';
+  }
+  if (path === '/admin/zero-trust') {
+    return 'zeroTrust';
   }
   return null;
 }

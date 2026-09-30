@@ -245,7 +245,7 @@ app.post('/:id/zero-trust', async (context) => {
         projectZeroTrustError(error);
       }
       return {
-        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}`),
+        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}#zero-trust`),
         succeeded: true,
       };
     },
@@ -264,7 +264,7 @@ app.post('/:id/zero-trust/reconcile', async (context) => {
         projectZeroTrustError(error);
       }
       return {
-        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}`),
+        response: context.redirect(`/admin/projects/${encodeURIComponent(projectId)}#zero-trust`),
         succeeded: true,
       };
     },

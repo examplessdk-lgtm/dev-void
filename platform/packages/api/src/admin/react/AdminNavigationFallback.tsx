@@ -27,6 +27,7 @@ const TITLES: Partial<Record<AdminPageId, string>> = {
   emailProject: 'Project email',
   emailOperation: 'Email operation',
   invitations: 'Invitations',
+  zeroTrust: 'Zero Trust',
 };
 
 export function AdminNavigationFallback({ initialPageData }: { initialPageData: PageObject }) {

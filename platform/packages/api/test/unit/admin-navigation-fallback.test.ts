@@ -32,3 +32,31 @@ it('renders the destination skeleton outside the Void page context', () => {
   expect(markup).toContain('Loading users');
   expect(markup).toContain('void-admin-loading-lines');
 });
+
+it('renders the Zero Trust skeleton for client navigation', () => {
+  const markup = renderToStaticMarkup(
+    createElement(
+      NavigationContext.Provider,
+      {
+        value: {
+          state: 'loading',
+          location: new URL('https://void.example/admin/zero-trust'),
+          method: 'GET',
+        },
+      },
+      createElement(AdminNavigationFallback, {
+        initialPageData: {
+          component: 'dashboard',
+          props: { platformName: 'e2e Void', username: 'admin' },
+          params: {},
+          shared: {},
+          url: '/admin/',
+          errors: null,
+        },
+      }),
+    ),
+  );
+
+  expect(markup).toContain('Loading zero trust');
+  expect(markup).toContain('href="/admin/zero-trust"');
+});

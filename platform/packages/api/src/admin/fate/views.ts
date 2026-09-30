@@ -18,6 +18,7 @@ import type {
   AdminAuthEdit,
   AdminEmailSettings,
   AdminEmailProject,
+  AdminZeroTrust,
   AdminBuildLogs,
   AdminBuildStatus,
   AdminDeploymentLogs,
@@ -123,6 +124,7 @@ export const ProjectDetailView = view<AdminProjectDetail>()({
   pendingTeamInvitations: true,
   domains: true,
   builds: true,
+  zeroTrust: true as never,
   cfAccountId: true,
   deployUrl: true,
   tz: true,
@@ -266,4 +268,26 @@ export const emailSettingsRequest = (path: string) =>
 export const emailProjectRequest = (path: string) =>
   ({
     emailProject: { view: EmailProjectView, args: { path } },
+  }) as const;
+
+export const ZeroTrustView = view<AdminZeroTrust>()({
+  id: true,
+  configured: true,
+  enabled: true,
+  status: true,
+  accountId: true,
+  defaultAccountId: true,
+  teamDomain: true,
+  identityProviderIds: true,
+  policyIds: true,
+  protectNewProjects: true,
+  operation: true as never,
+  lastError: true,
+  live: true as never,
+  projects: true,
+});
+
+export const zeroTrustRequest = (path: string) =>
+  ({
+    zeroTrust: { view: ZeroTrustView, args: { path } },
   }) as const;
