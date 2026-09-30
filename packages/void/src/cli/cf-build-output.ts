@@ -127,9 +127,24 @@ export async function prepareCfBuildOutput(
   if (!config.worker) {
     throw new Error('cf did not produce a Worker configuration.');
   }
-  const main = raw.main;
-  if (typeof main !== 'string' || basename(main) !== main || !existsSync(join(source, main))) {
-    return null;
+  if (typeof raw.main !== 'string' || !raw.main) {
+    throw new Error('The built Worker configuration is missing its main entry. Rebuild the app.');
+  }
+  const entry = raw.main.replaceAll('\\', '/');
+  const main = relative(source, resolve(source, entry));
+  if (
+    isAbsolute(entry) ||
+    /^[a-z]:/i.test(entry) ||
+    !main ||
+    main === '..' ||
+    main.startsWith('../')
+  ) {
+    throw new Error('The built Worker main entry must be inside its output directory.');
+  }
+  if (!existsSync(join(source, main))) {
+    throw new Error(
+      `The built Worker main entry ${JSON.stringify(main)} is missing. Rebuild the app.`,
+    );
   }
 
   const assets = object(raw.assets);

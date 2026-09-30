@@ -254,6 +254,67 @@ it(
   CF_BUILD_TIMEOUT_MS,
 );
 
+it(
+  'accepts a nested hashed Worker entry with a relative module import',
+  async () => {
+    const output = worker({
+      name: 'void-test',
+      compatibility_date: '2026-09-29',
+      main: './assets/index-hash.js',
+    });
+    mkdirSync(join(output, 'assets'));
+    writeFileSync(
+      join(output, 'assets/index-hash.js'),
+      "import { message } from './message.js'; export default { fetch() { return new Response(message) } };\n",
+    );
+    writeFileSync(join(output, 'assets/message.js'), 'export const message = "nested entry";\n');
+    rmSync(join(output, 'index.js'));
+    const prepared = await prepareCfBuildOutput(output, 'account-id');
+    expect(prepared).not.toBeNull();
+    if (!prepared) {
+      return;
+    }
+    try {
+      const built = await readBuildOutput(prepared.directory);
+      expect(built.workers.default.config.manifest).toMatchObject({
+        mainModule: 'assets/index-hash.js',
+        modules: { 'assets/message.js': { type: 'esm' } },
+      });
+      const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
+      const dryRun = spawnSync(
+        process.execPath,
+        [cf, 'workers', 'versions', 'create', '--prebuilt', '--dry-run'],
+        { cwd: prepared.directory, encoding: 'utf8' },
+      );
+      expect(dryRun.status, `${dryRun.stdout}\n${dryRun.stderr}`).toBe(0);
+    } finally {
+      prepared.dispose();
+    }
+  },
+  CF_BUILD_TIMEOUT_MS,
+);
+
+it.each(['../index.js', '/index.js', 'C:\\index.js'])(
+  'rejects an out-of-bundle entry %s',
+  async (main) => {
+    const output = worker({ name: 'void-test', compatibility_date: '2026-09-29', main });
+    await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+      'inside its output directory',
+    );
+  },
+);
+
+it('reports a missing built entry', async () => {
+  const output = worker({
+    name: 'void-test',
+    compatibility_date: '2026-09-29',
+    main: 'assets/missing.js',
+  });
+  await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+    '"assets/missing.js" is missing',
+  );
+});
+
 it('preserves worker settings that the previous bridge dropped', async () => {
   const output = worker({
     name: 'void-test',
