@@ -5976,6 +5976,12 @@ export async function runCloudflareDeploy(
           output: cfOutput,
           workerName,
           runCf: cfCommand,
+          pinnedUpload: {
+            accountId,
+            apiBaseUrl,
+            getToken: () => runWranglerAuthToken(runWrangler, generatedConfigPath),
+            verifyUploader: cfUploaderIsPinned,
+          },
           verifyResources: createCfResourceVerifier({
             configPath: generatedConfigPath,
             runCf: cfCommand,
@@ -6739,6 +6745,12 @@ async function runCloudflareStaticDeploy(
           output: cfOutput,
           workerName,
           runCf: cfCommand,
+          pinnedUpload: {
+            accountId,
+            apiBaseUrl,
+            getToken: () => runWranglerAuthToken(runWrangler, staticConfigPath),
+            verifyUploader: cfUploaderIsPinned,
+          },
           verifyResources: createCfResourceVerifier({
             configPath: staticConfigPath,
             runCf: cfCommand,

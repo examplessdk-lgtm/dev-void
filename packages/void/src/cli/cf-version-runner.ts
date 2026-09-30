@@ -11,6 +11,7 @@ import type {
 import { dirname, join } from 'pathslash';
 import type { CfBuildOutput } from './cf-build-output.ts';
 import { migrateBuiltWranglerConfig } from './cf-config-migrate.ts';
+import { uploadPinnedCloudflareVersion } from './cf-version-api.ts';
 
 type CfCommand = (
   args: Array<string>,
@@ -71,7 +72,7 @@ export function createActiveSecretPinner(options: {
     });
 }
 
-/** Pin opaque secrets to the live version in the private, disposable Build Output. */
+/** Record the live secret source for the version-aware API uploader. */
 export async function pinActiveWorkerSecrets(options: {
   output: CfBuildOutput;
   activeVersionId: string;
@@ -99,12 +100,7 @@ export async function pinActiveWorkerSecrets(options: {
   if (!record(worker) || (worker.env !== undefined && !record(worker.env))) {
     return false;
   }
-  const env = { ...(worker.env ?? {}) } as Record<string, unknown>;
-  // Candidate plaintext secrets are supplied by the one-off secrets file.
-  // Remove placeholders so they cannot also inherit from the latest upload.
-  for (const name of explicit) {
-    delete env[name];
-  }
+  const env = (worker.env ?? {}) as Record<string, unknown>;
   for (const [name, value] of Object.entries(env)) {
     if (
       record(value) &&
@@ -129,31 +125,11 @@ export async function pinActiveWorkerSecrets(options: {
     ) {
       return false;
     }
-    env[name] = { type: 'unsafe:inherit', version_id: activeVersionId };
   }
-  // `keep_bindings` would add secrets from the newer inactive upload. Explicit
-  // inherited bindings above are the complete live secret set for this upload.
-  const unsafe = record(worker.unsafe) ? { ...worker.unsafe } : {};
-  const metadata = record(unsafe.metadata) ? { ...unsafe.metadata } : {};
-  if (metadata.bindings !== undefined) {
-    return false;
-  }
-  if (
-    metadata.keep_bindings !== undefined &&
-    (!Array.isArray(metadata.keep_bindings) ||
-      !metadata.keep_bindings.every((type) => typeof type === 'string'))
-  ) {
-    return false;
-  }
-  // cf defaults to preserving secrets even without a keep_bindings field. An
-  // explicit array overrides that default in the multipart upload metadata.
-  metadata.keep_bindings = (metadata.keep_bindings ?? []).filter(
-    (type) => type !== 'secret_text' && type !== 'secret_key',
-  );
-  unsafe.metadata = metadata;
-  const next = { ...worker, env, unsafe };
-  writeFileSync(path, JSON.stringify(next), { mode: 0o600 });
-  await readBuildOutput(options.output.directory);
+  // The scripts upload API rejects a UUID inheritance source (10057). The
+  // version-aware API accepts one, so leave cf's Build Output untouched and
+  // carry the source only to that uploader.
+  options.output.activeSecrets = { versionId: activeVersionId, bindings: [...bindings] };
   return true;
 }
 
@@ -355,6 +331,12 @@ export function createCfVersionRunner(options: {
   workerName: string;
   runCf: CfCommand;
   verifyResources: (directory: string) => Promise<CloudflareCommandResult>;
+  pinnedUpload?: {
+    accountId: string;
+    apiBaseUrl: string;
+    getToken: () => Promise<string | null>;
+    verifyUploader: () => boolean;
+  };
 }): CloudflareCommandRunner {
   const { output, workerName, runCf } = options;
   const run = async (args: Array<string>, capture: boolean, cwd = output.directory) =>
@@ -364,6 +346,37 @@ export function createCfVersionRunner(options: {
       return await options.verifyResources(directory);
     } catch {
       return failed('Cloudflare resources could not be verified before upload.');
+    }
+  };
+
+  const uploadPinnedVersion = async (args: Array<string>, atomic: boolean) => {
+    if (!options.pinnedUpload || !options.pinnedUpload.verifyUploader()) {
+      return failed('The version-aware Cloudflare uploader is unavailable.');
+    }
+    const token = await options.pinnedUpload.getToken();
+    if (!token) {
+      return failed('Cloudflare session has no bearer for version-aware upload.');
+    }
+    try {
+      const version = await uploadPinnedCloudflareVersion({
+        output,
+        accountId: options.pinnedUpload.accountId,
+        apiBaseUrl: options.pinnedUpload.apiBaseUrl,
+        workerName,
+        token,
+        ...(flag(args, '--message') ? { message: flag(args, '--message') } : {}),
+        ...(flag(args, '--secrets-file') ? { secretsFilePath: flag(args, '--secrets-file') } : {}),
+        atomic,
+        verifyUploader: options.pinnedUpload.verifyUploader,
+      });
+      const preview = version.urls.find((url) => /^https:\/\//.test(url));
+      return {
+        status: 0,
+        stdout: `Worker Version ID: ${version.id}\n${preview ? `Version Preview URL: ${preview}\n` : ''}`,
+        stderr: '',
+      };
+    } catch (cause) {
+      return failed(cause instanceof Error ? cause.message : 'Cloudflare version upload failed.');
     }
   };
 
@@ -498,6 +511,9 @@ export function createCfVersionRunner(options: {
       if (verified.status !== 0 || verified.signal || verified.error) {
         return verified;
       }
+      if (output.activeSecrets) {
+        return uploadPinnedVersion(args, false);
+      }
       return run(
         [
           'workers',
@@ -573,6 +589,9 @@ export function createCfVersionRunner(options: {
       const verified = await verifyResources(output.directory);
       if (verified.status !== 0 || verified.signal || verified.error) {
         return verified;
+      }
+      if (output.activeSecrets) {
+        return uploadPinnedVersion(args, true);
       }
       return run(
         [

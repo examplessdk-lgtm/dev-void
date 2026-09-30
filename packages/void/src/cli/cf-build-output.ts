@@ -31,6 +31,10 @@ type JsonObject = Record<string, unknown>;
 export interface CfBuildOutput {
   directory: string;
   assetsDirectory?: string;
+  activeSecrets?: {
+    versionId: string;
+    bindings: ReadonlyArray<{ name: string; type: 'secret_text' | 'secret_key' }>;
+  };
   dispose(): void;
 }
 

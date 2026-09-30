@@ -3,9 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createServer } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
-import { fileURLToPath } from 'node:url';
 import { getWorkerConfigPath } from '@cloudflare/build-output-utils';
 import { afterEach, expect, it } from 'vite-plus/test';
 import {
@@ -13,6 +12,7 @@ import {
   deployCloudflareVersionTriggers,
 } from '../../../deploy-cloudflare/src/version.ts';
 import { prepareCfBuildOutput } from '../../src/cli/cf-build-output.ts';
+import { uploadPinnedCloudflareVersion } from '../../src/cli/cf-version-api.ts';
 import {
   createActiveSecretPinner,
   createCfCommand,
@@ -206,6 +206,14 @@ async function output(config: Record<string, unknown> = {}) {
   const worker = join(root, 'dist', 'ssr');
   mkdirSync(worker, { recursive: true });
   writeFileSync(join(worker, 'index.js'), 'export default { fetch: () => new Response("ok") };');
+  const assets = config.assets as { directory?: string } | undefined;
+  if (assets?.directory) {
+    const directory = join(worker, assets.directory);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'index.html'), '<h1>Public</h1>');
+    writeFileSync(join(directory, 'private.txt'), 'Never upload this');
+    writeFileSync(join(directory, '.assetsignore'), 'private.txt\n');
+  }
   writeFileSync(
     join(worker, 'wrangler.json'),
     JSON.stringify({
@@ -221,10 +229,12 @@ async function output(config: Record<string, unknown> = {}) {
   return prepared!;
 }
 
-it('pins live secrets in private Build Output and drops latest-version secret preservation', async () => {
+it('uploads live secrets through the version-aware API when the latest upload is inactive', async () => {
   const prepared = await output({
     secrets: { required: ['AUTH_SECRET'] },
     keep_secrets: true,
+    keep_vars: true,
+    assets: { directory: '../client', binding: 'ASSETS', not_found_handling: 'none' },
   });
   try {
     const activeVersionId = '11111111-1111-4111-8111-111111111111';
@@ -241,9 +251,14 @@ it('pins live secrets in private Build Output and drops latest-version secret pr
       ]),
     ).toBe(true);
     const worker = JSON.parse(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8'));
-    expect(worker.env.AUTH_SECRET).toEqual({ type: 'unsafe:inherit', version_id: activeVersionId });
-    expect(worker.env.KEY).toEqual({ type: 'unsafe:inherit', version_id: activeVersionId });
-    expect(worker.unsafe.metadata.keep_bindings).toEqual([]);
+    expect(worker.env.AUTH_SECRET).toEqual({ type: 'secret' });
+    expect(prepared.activeSecrets).toEqual({
+      versionId: activeVersionId,
+      bindings: [
+        { name: 'AUTH_SECRET', type: 'secret_text' },
+        { name: 'KEY', type: 'secret_key' },
+      ],
+    });
     const requests: Array<{ url: string; body: string }> = [];
     const server = createServer(async (request, response) => {
       const chunks: Array<Buffer> = [];
@@ -252,51 +267,67 @@ it('pins live secrets in private Build Output and drops latest-version secret pr
       }
       requests.push({ url: request.url ?? '', body: Buffer.concat(chunks).toString('utf8') });
       response.writeHead(200, { 'Content-Type': 'application/json' });
+      const path = request.url ?? '';
+      const result = path.endsWith('/assets-upload-session')
+        ? {
+            jwt: 'asset-token',
+            buckets: [
+              [
+                (Object.values(JSON.parse(requests.at(-1)!.body).manifest)[0] as { hash: string })
+                  .hash,
+              ],
+            ],
+          }
+        : path.includes('/assets/upload')
+          ? { jwt: 'completion-token' }
+          : request.method === 'GET'
+            ? {
+                id: activeVersionId,
+                bindings: [
+                  { name: 'AUTH_SECRET', type: 'secret_text' },
+                  { name: 'KEY', type: 'secret_key' },
+                  { name: 'DASHBOARD_VAR', type: 'plain_text' },
+                ],
+              }
+            : { id: '22222222-2222-4222-8222-222222222222', urls: [] };
       response.end(
         JSON.stringify({
           success: true,
           errors: [],
-          result: {
-            id: '22222222-2222-4222-8222-222222222222',
-            number: 3,
-            metadata: { has_preview: false },
-            default_environment: { environment: 'production', script: { tag: 'test-tag' } },
-          },
+          result,
         }),
       );
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
-      const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
-      const dryRun = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
-        execFile(
-          process.execPath,
-          [cf, 'workers', 'versions', 'create', '--prebuilt'],
-          {
-            cwd: prepared.directory,
-            encoding: 'utf8',
-            env: {
-              PATH: process.env.PATH,
-              CLOUDFLARE_API_TOKEN: 'synthetic-token',
-              CLOUDFLARE_ACCOUNT_ID: 'account-id',
-              CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
-            },
-          },
-          (error, _stdout, stderr) => resolve({ status: error ? 1 : 0, stderr }),
-        );
+      const uploaded = await uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: false,
+        verifyUploader: () => true,
       });
-      expect(dryRun.status, `${dryRun.stderr}\n${requests.map(({ url }) => url).join('\n')}`).toBe(
-        0,
-      );
-      const upload = requests.find(({ url }) => url.includes('/versions'));
+      expect(uploaded.id).toBe('22222222-2222-4222-8222-222222222222');
+      const upload = requests.find(({ url }) => url.endsWith('/versions'));
       expect(upload).toBeDefined();
-      expect(upload!.body).toContain(
-        '"name":"AUTH_SECRET","type":"inherit","version_id":"11111111-1111-4111-8111-111111111111"',
+      const body = JSON.parse(upload!.body);
+      expect(body.bindings).toEqual(
+        expect.arrayContaining([
+          { name: 'AUTH_SECRET', type: 'inherit', version_id: activeVersionId },
+          { name: 'KEY', type: 'inherit', version_id: activeVersionId },
+          { name: 'DASHBOARD_VAR', type: 'inherit', version_id: activeVersionId },
+        ]),
       );
-      expect(upload!.body).toContain(
-        '"name":"KEY","type":"inherit","version_id":"11111111-1111-4111-8111-111111111111"',
-      );
-      expect(upload!.body).toContain('"keep_bindings":[]');
+      expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
+      expect(body.assets).toEqual({
+        jwt: 'completion-token',
+        config: { not_found_handling: 'none' },
+      });
+      expect(body.bindings).toContainEqual({ name: 'ASSETS', type: 'assets' });
+      const session = requests.find(({ url }) => url.endsWith('/assets-upload-session'));
+      expect(Object.keys(JSON.parse(session!.body).manifest)).toEqual(['/index.html']);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
