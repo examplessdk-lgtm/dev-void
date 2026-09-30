@@ -838,6 +838,14 @@ async function activateCloudflareVersionWithSecretsFile(
     return { ok: false, reason: 'uploader-changed' };
   }
   const previousVersionId = previous.versionId;
+  // Activation can succeed before trigger synchronization or the local receipt
+  // cleanup fails. Once its last recorded candidate owns all live traffic, the
+  // receipt no longer authorizes any *inactive* successor. The history checks
+  // below still reject a newer upload from another operation.
+  const trustedInheritanceVersionIds =
+    previousVersionId && options.trustedInheritanceVersionIds?.at(-1) === previousVersionId
+      ? []
+      : options.trustedInheritanceVersionIds;
   let inheritanceBaseline: Array<RecentCloudflareVersion> | undefined;
   let trustedCandidateChain = false;
   if (options.expectedPreviousVersionId !== undefined || options.verifyInheritedSecrets === true) {
@@ -848,22 +856,22 @@ async function activateCloudflareVersionWithSecretsFile(
     const latestVersionId = recent.at(-1)?.id ?? null;
     if (
       options.expectedPreviousVersionId !== undefined ||
-      options.trustedInheritanceVersionIds !== undefined
+      trustedInheritanceVersionIds !== undefined
     ) {
       const activeIndex = recent.findIndex((version) => version.id === previous.versionId);
       const inheritedChain = activeIndex < 0 ? [] : recent.slice(activeIndex);
       const inheritedCandidates = inheritedChain.slice(1).map((version) => version.id);
       trustedCandidateChain =
-        options.trustedInheritanceVersionIds !== undefined &&
-        options.trustedInheritanceVersionIds.length > 0 &&
-        arraysEqual(inheritedCandidates, options.trustedInheritanceVersionIds);
+        trustedInheritanceVersionIds !== undefined &&
+        trustedInheritanceVersionIds.length > 0 &&
+        arraysEqual(inheritedCandidates, trustedInheritanceVersionIds);
       const safeInheritanceChain =
         inheritedChain.length > 0 &&
         inheritedChain.every(
           (version, index) =>
             index === 0 || version.number === inheritedChain[index - 1]!.number + 1,
         ) &&
-        (arraysEqual(inheritedCandidates, options.trustedInheritanceVersionIds ?? []) ||
+        (arraysEqual(inheritedCandidates, trustedInheritanceVersionIds ?? []) ||
           options.pinActiveSecrets !== undefined);
       if (!safeInheritanceChain) {
         return {

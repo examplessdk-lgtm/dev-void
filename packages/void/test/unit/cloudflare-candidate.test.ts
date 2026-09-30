@@ -52,4 +52,39 @@ describe('ordinary Cloudflare candidate receipt', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('starts a new chain only when the verified parent is the last saved candidate', () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-candidate-activated-'));
+    try {
+      recordCloudflareCandidateUpload(root, null, 'account', 'worker', 'live', 'draft');
+      recordCloudflareCandidateUpload(
+        root,
+        readCloudflareCandidate(root),
+        'account',
+        'worker',
+        'live',
+        'draft-2',
+      );
+      const receipt = readCloudflareCandidate(root);
+      expect(() =>
+        recordCloudflareCandidateUpload(root, receipt, 'account', 'worker', 'draft', 'next'),
+      ).toThrow('different Worker');
+      expect(() =>
+        recordCloudflareCandidateUpload(root, receipt, 'other', 'worker', 'draft-2', 'next'),
+      ).toThrow('different Worker');
+      expect(() =>
+        recordCloudflareCandidateUpload(root, receipt, 'account', 'other', 'draft-2', 'next'),
+      ).toThrow('different Worker');
+      expect(readCloudflareCandidate(root)).toEqual(receipt);
+      recordCloudflareCandidateUpload(root, receipt, 'account', 'worker', 'draft-2', 'next');
+      expect(readCloudflareCandidate(root)).toEqual({
+        accountId: 'account',
+        workerName: 'worker',
+        parentVersionId: 'draft-2',
+        versionIds: ['next'],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

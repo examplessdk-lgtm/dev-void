@@ -376,6 +376,46 @@ describe('Cloudflare version activation', () => {
     ).resolves.toMatchObject({ ok: true, versionId: NEXT });
   });
 
+  it('recovers a receipt whose last candidate already owns production', async () => {
+    const runWrangler = runner();
+    const recordVerifiedCandidate = vi.fn();
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        workerName: 'my-worker',
+        verifyUploader: () => true,
+        verifyInheritedSecrets: true,
+        trustedInheritanceVersionIds: [CONCURRENT, CURRENT],
+        message: encodeCloudflareVersionMessage([]),
+        fetch: async () => Response.json({ ready: true }),
+        recordVerifiedCandidate,
+      }),
+    ).resolves.toMatchObject({ ok: true, versionId: NEXT, previousVersionId: CURRENT });
+    expect(recordVerifiedCandidate).toHaveBeenCalledWith(NEXT, CURRENT);
+  });
+
+  it('still rejects a foreign upload after the recorded candidate became active', async () => {
+    const runWrangler = runner({
+      versions: ok(
+        JSON.stringify([
+          { id: CURRENT, number: 1 },
+          { id: CONCURRENT, number: 2 },
+        ]),
+      ),
+    });
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        workerName: 'my-worker',
+        verifyUploader: () => true,
+        verifyInheritedSecrets: true,
+        trustedInheritanceVersionIds: [CURRENT],
+        message: encodeCloudflareVersionMessage([]),
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: 'inheritance-source-changed' });
+    expect(runWrangler.mock.calls.some(([args]) => args[1] === 'upload')).toBe(false);
+  });
+
   it('does not inherit any remote secret from a failed candidate newer than production', async () => {
     const failed = '44444444-4444-4444-8444-444444444444';
     const directory = mkdtempSync(join(tmpdir(), 'void-active-secret-inheritance-'));
