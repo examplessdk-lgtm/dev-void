@@ -122,8 +122,11 @@ Configure: `seed`, `public-bypasses` (finishes each public project), `wildcard`,
 
 Per-project failures are recorded on the row with a `skipped:<operation id>`
 marker and skipped. Cloudflare 401/403/429/5xx, network errors, timeouts, and
-a replaced operation fail the whole operation. A skipped protected row keeps
-its protection; a row becoming protected keeps its previous routes.
+a replaced operation fail the whole operation. During configure, a skipped
+protected row keeps its protection and a row becoming protected keeps its
+previous routes. During disable, the row is already public by intent: routes
+cleared before the failure open with every other project at wildcard
+deletion, and uncleared routes stay denied until the post-disable cleanup.
 
 The two-minute tier resumes an operation with a free lease that has not failed
 and then owns that invocation. The hourly tier also retries failed operations,

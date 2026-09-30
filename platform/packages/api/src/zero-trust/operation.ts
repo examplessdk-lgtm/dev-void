@@ -204,9 +204,10 @@ function isOperationWideFailure(error: unknown): boolean {
 /**
  * Record a project failure and let the operation continue. The row keeps a
  * skip marker so later batches pass over it; scheduled per-project maintenance
- * retries it after the operation finishes. Failed protection stays effective
- * or denied: this never marks a project public. Returns false, writing
- * nothing, when a newer operation has replaced this one.
+ * retries it after the operation finishes. The skip never marks a row
+ * effectively public. Routes a disable already cleared stay cleared; they open
+ * with every other project when the wildcard is deleted. Returns false,
+ * writing nothing, when a newer operation has replaced this one.
  */
 async function skipFailedProject(
   db: Db,
