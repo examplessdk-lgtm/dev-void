@@ -15,15 +15,15 @@ import { getDomain, getProject } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
 import { domains, platformSettings, projectZeroTrust } from '../../src/schema.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import { setProjectZeroTrustProtection } from '../../src/zero-trust/project.ts';
 import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  reconcilePendingProjectZeroTrust,
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
-  setProjectZeroTrustProtection,
   withProjectZeroTrustRouting,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/routing.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createTestProject,

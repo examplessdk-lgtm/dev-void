@@ -10,15 +10,13 @@ import {
   readZeroTrustConfigurationStrict,
   zeroTrustConfigurationStatus,
 } from '../zero-trust/configuration.ts';
+import { zeroTrustNotReadyMessage, ZeroTrustUnavailableError } from '../zero-trust/errors.ts';
+import { reconcileProjectZeroTrust, setProjectZeroTrustProtection } from '../zero-trust/project.ts';
 import {
   getProjectZeroTrustState,
   projectZeroTrustAvailable,
   publicProjectZeroTrustState,
-  reconcileProjectZeroTrust,
-  setProjectZeroTrustProtection,
-  zeroTrustNotReadyMessage,
-  ZeroTrustUnavailableError,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/state.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
 const RECONCILIATION_FAILED_MESSAGE =

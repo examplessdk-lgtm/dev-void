@@ -193,6 +193,9 @@ export async function applyPlatformDomain(
     manifest,
   );
   await dependencies.verifyOwnership(manifest);
+  // The API publishes the application to routing storage during activation.
+  // Stop with a repair hint before that call if the installation record says
+  // the storage is not ready.
   const routing = manifest.resources.find(
     (resource) => resource.key === 'routing-kv' && resource.state === 'ready',
   );

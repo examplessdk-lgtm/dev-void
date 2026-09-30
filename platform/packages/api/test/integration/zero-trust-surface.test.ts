@@ -12,12 +12,10 @@ import {
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
 import { domains, platformSettings, projectZeroTrust } from '../../src/schema.ts';
-import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  initializeNewProjectZeroTrust,
-  resolveProjectZeroTrustRoutingForPublication,
-} from '../../src/zero-trust/service.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { initializeNewProjectZeroTrust } from '../../src/zero-trust/project.ts';
+import { resolveProjectZeroTrustRoutingForPublication } from '../../src/zero-trust/routing.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createOperatorToken,

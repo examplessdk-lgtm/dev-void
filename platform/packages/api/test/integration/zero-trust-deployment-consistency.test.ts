@@ -13,12 +13,12 @@ import { beginDeploymentCutover, getDomain, getProject } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
 import { domains } from '../../src/schema.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
 import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/project.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createTestDeployment,

@@ -85,14 +85,14 @@ import {
 import { tokenizeSql } from '../sql/tokenize.ts';
 import { getPlanLimits } from '../tiers.ts';
 import type { Build, DeployManifest, Project, ProjectRole, User } from '../types.ts';
+import { zeroTrustNotReadyMessage } from '../zero-trust/errors.ts';
+import { initializeNewProjectZeroTrust } from '../zero-trust/project.ts';
 import {
-  initializeNewProjectZeroTrust,
-  publicProjectZeroTrustState,
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
-  zeroTrustNotReadyMessage,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/routing.ts';
+import { publicProjectZeroTrustState } from '../zero-trust/state.ts';
 import { rollbackCfDestination } from './email.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';

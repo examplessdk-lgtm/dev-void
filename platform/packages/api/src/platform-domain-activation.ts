@@ -4,7 +4,8 @@ import {
   parseZeroTrustApplicationTarget,
   ZeroTrustConfigurationError,
 } from './zero-trust/configuration.ts';
-import { activatePlatformApplication, ZeroTrustUnavailableError } from './zero-trust/service.ts';
+import { ZeroTrustUnavailableError } from './zero-trust/errors.ts';
+import { activatePlatformApplication } from './zero-trust/installation.ts';
 
 /** Final installer handoff; only the service may publish application routing. */
 export async function platformDomainActivation(context: Context<ApiEnv>): Promise<Response> {

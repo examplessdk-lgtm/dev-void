@@ -19,12 +19,14 @@ import {
 import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
-  getProjectZeroTrustState,
-  reconcilePendingProjectZeroTrust,
+} from '../../src/zero-trust/installation.ts';
+import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import { setProjectZeroTrustProtection } from '../../src/zero-trust/project.ts';
+import {
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
-  setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/routing.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createTestDeployment,

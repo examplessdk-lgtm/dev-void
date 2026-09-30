@@ -45,6 +45,13 @@ function destinationList(application: ObjectValue): ReadonlyArray<string> {
   ].filter((value, index, all) => all.indexOf(value) === index);
 }
 
+/**
+ * A rule that names company identities. The CLI checks the Access policies
+ * that protect the platform installation itself with a separate copy in
+ * packages/void/src/cli/platform-access-provision.ts, because the public CLI
+ * cannot import platform code. This list also accepts azureAD, login_method
+ * and auth_context rules; review both when adding a rule type.
+ */
 function identityRule(rule: ObjectValue): boolean {
   if (rule.email_domain) {
     const domain = object(rule.email_domain, 'email domain').domain;
@@ -387,37 +394,56 @@ export class ZeroTrustCloudflareClient {
     };
   }
 
+  /**
+   * Find the application Void recorded: by id first, then by its Void-owned
+   * name. An id that is gone while another application holds its name is an
+   * error, never a match. `inventory` is set when the name lookup ran.
+   */
+  private async locateOwnedApplication(
+    id: string | null | undefined,
+    name: string | null | undefined,
+  ): Promise<{ application: ObjectValue | null; inventory?: Map<string, ObjectValue> }> {
+    const application = id ? await this.application(id) : null;
+    if (application) {
+      if (name && application.name !== name) {
+        throw new Error('The recorded Access application no longer has its Void-owned name.');
+      }
+      return { application };
+    }
+    if (!name) {
+      return { application: null };
+    }
+    const inventory = await this.applications();
+    const sameName = [...inventory.values()].filter((entry) => entry.name === name);
+    if (id && sameName.length > 0) {
+      throw new Error(
+        `The recorded Access application ${id} is missing and its name is now owned by another application.`,
+      );
+    }
+    if (sameName.length > 1) {
+      throw new Error(`Multiple Cloudflare Access applications are named ${name}.`);
+    }
+    return { application: sameName[0] ?? null, inventory };
+  }
+
   async ensureApplication(
     spec: AccessApplicationSpec,
     current?: Readonly<{ id?: string | null; name?: string | null }>,
   ): Promise<ManagedAccessApplication> {
-    let application = current?.id ? await this.application(current.id) : null;
-    if (application && application.name !== spec.name) {
+    if (current?.name && current.name !== spec.name) {
       throw new Error('The recorded Access application no longer has its Void-owned name.');
     }
+    let application: ObjectValue | null = null;
     let inventory: Map<string, ObjectValue> | undefined;
-    if (!application) {
+    if (current?.id || current?.name) {
+      ({ application, inventory } = await this.locateOwnedApplication(current.id, spec.name));
+    } else {
+      // No recorded creation intent: the name must still be free.
       inventory = await this.applications();
-      const sameName = [...inventory.values()].filter((entry) => entry.name === spec.name);
-      if (current?.id && sameName.length > 0) {
+      if ([...inventory.values()].some((entry) => entry.name === spec.name)) {
         throw new Error(
-          `The recorded Access application ${current.id} is missing and its name is now owned by another application.`,
+          `A Cloudflare Access application named ${spec.name} exists without a recorded Void creation intent.`,
         );
-      }
-      if (current?.name) {
-        if (current.name !== spec.name) {
-          throw new Error('The recorded Access application no longer has its Void-owned name.');
-        }
-        if (sameName.length > 1) {
-          throw new Error(`Multiple Cloudflare Access applications are named ${spec.name}.`);
-        }
-        application = sameName[0] ?? null;
-      } else {
-        if (sameName.length > 0) {
-          throw new Error(
-            `A Cloudflare Access application named ${spec.name} exists without a recorded Void creation intent.`,
-          );
-        }
       }
     }
     const body = this.applicationBody(spec);
@@ -480,33 +506,13 @@ export class ZeroTrustCloudflareClient {
     if (!id && !expectedName) {
       return;
     }
-    let resolvedId = id ?? null;
-    let application = resolvedId ? await this.application(resolvedId) : null;
-    if (!application && expectedName) {
-      const inventory = await this.applications();
-      const sameName = [...inventory.values()].filter((entry) => entry.name === expectedName);
-      if (resolvedId) {
-        if (sameName.length > 0) {
-          throw new Error(
-            `The recorded Access application ${resolvedId} is missing and its name is now owned by another application.`,
-          );
-        }
-      } else {
-        if (sameName.length > 1) {
-          throw new Error(`Multiple Cloudflare Access applications are named ${expectedName}.`);
-        }
-        application = sameName[0] ?? null;
-        resolvedId = application ? text(application.id, 'application id') : null;
-      }
-    }
+    const { application } = await this.locateOwnedApplication(id, expectedName);
     if (!application) {
       return;
     }
-    if (expectedName && application.name !== expectedName) {
-      throw new Error('The recorded Access application no longer has its Void-owned name.');
-    }
+    const resolvedId = text(application.id, 'application id');
     try {
-      await this.request(`apps/${encodeURIComponent(resolvedId!)}`, { method: 'DELETE' });
+      await this.request(`apps/${encodeURIComponent(resolvedId)}`, { method: 'DELETE' });
     } catch (error) {
       if (!(error instanceof ZeroTrustCloudflareError && error.status === 404)) {
         throw error;

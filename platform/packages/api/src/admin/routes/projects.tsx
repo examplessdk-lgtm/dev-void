@@ -24,7 +24,7 @@ import type { ProjectMemberRole } from '../../types.ts';
 import {
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
-} from '../../zero-trust/service.ts';
+} from '../../zero-trust/project.ts';
 import { renderFateDetailPage, renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { renderAdminPage } from '../react/server.ts';

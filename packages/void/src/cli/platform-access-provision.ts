@@ -112,6 +112,11 @@ export class PlatformAccessClient {
   }
 }
 
+/**
+ * Project Zero Trust keeps its own, broader copy of this list in
+ * platform/packages/api/src/zero-trust/cloudflare.ts; review both when adding
+ * a rule type.
+ */
 function identityRule(rule: ObjectValue): boolean {
   if (rule.email_domain) {
     const domain = object(rule.email_domain, 'email domain').domain;

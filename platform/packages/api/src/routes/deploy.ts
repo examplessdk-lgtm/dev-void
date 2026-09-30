@@ -147,12 +147,12 @@ import {
   type SandboxMigrationMeta,
   type WebSocketMigrationMeta,
 } from '../types.ts';
+import { zeroTrustNotReadyMessage } from '../zero-trust/errors.ts';
 import {
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
-  zeroTrustNotReadyMessage,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/routing.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
 export { MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES, MAX_ROUTING_RULES, validateManifestShape };

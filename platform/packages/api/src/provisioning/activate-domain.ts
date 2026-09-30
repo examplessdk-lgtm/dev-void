@@ -9,12 +9,12 @@ import {
 import type { ApiEnv } from '../env.ts';
 import type { DomainVerificationData } from '../schema.ts';
 import type { Domain, Project } from '../types.ts';
+import { ZeroTrustUnavailableError } from '../zero-trust/errors.ts';
+import { reconcileProjectZeroTrustDomains } from '../zero-trust/project.ts';
 import {
-  reconcileProjectZeroTrustDomains,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
-  ZeroTrustUnavailableError,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/routing.ts';
 import {
   type CustomHostnameInfo,
   getCustomHostname,

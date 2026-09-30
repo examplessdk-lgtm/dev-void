@@ -51,7 +51,7 @@ import {
 } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
 import type { Build, DeployManifest, Project, ProjectOwnershipPeriod, Resource } from '../types.ts';
-import { cleanupProjectZeroTrust } from '../zero-trust/service.ts';
+import { cleanupProjectZeroTrust } from '../zero-trust/project.ts';
 import {
   CloudflareApiError,
   deleteCustomHostname,

@@ -18,15 +18,15 @@ import {
   projectZeroTrust,
 } from '../../src/schema.ts';
 import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
 import {
   cleanupProjectZeroTrust,
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
   initializeNewProjectZeroTrust,
-  resolveProjectZeroTrustRouting,
   setProjectZeroTrustProtection,
-  zeroTrustStatus,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/project.ts';
+import { resolveProjectZeroTrustRouting } from '../../src/zero-trust/routing.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
+import { zeroTrustStatus } from '../../src/zero-trust/status.ts';
 import {
   clearTables,
   createTestProject,

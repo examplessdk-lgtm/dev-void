@@ -5,7 +5,7 @@ import type { AssetConfig, DeployManifest } from './types.ts';
 import {
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
-} from './zero-trust/service.ts';
+} from './zero-trust/routing.ts';
 
 /**
  * KV key + payload shape for the per-project routing entry consumed by the

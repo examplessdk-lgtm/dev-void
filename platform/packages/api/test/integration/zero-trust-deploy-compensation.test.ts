@@ -14,11 +14,9 @@ import { getProject } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import app from '../../src/index.ts';
 import { deployments, domains, projects } from '../../src/schema.ts';
-import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { setProjectZeroTrustProtection } from '../../src/zero-trust/project.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createTestDeployment,

@@ -7,7 +7,7 @@ import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
   reconcilePlatformZeroTrust,
-} from '../../zero-trust/service.ts';
+} from '../../zero-trust/installation.ts';
 import { renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
 

@@ -4,7 +4,7 @@ import { operatorEvents } from '../../src/schema.ts';
 import {
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/project.ts';
 import {
   clearTables,
   createTestProject,
@@ -14,8 +14,8 @@ import {
   type TestEnv,
 } from './helpers.ts';
 
-vi.mock('../../src/zero-trust/service.ts', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../src/zero-trust/service.ts')>()),
+vi.mock('../../src/zero-trust/project.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/zero-trust/project.ts')>()),
   setProjectZeroTrustProtection: vi.fn(async () => ({})),
   reconcileProjectZeroTrust: vi.fn(async () => ({})),
 }));

@@ -13,12 +13,10 @@ import { beginDeploymentCutover, deleteProjectCascade, getProject, getUser } fro
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
 import { domains, deployments } from '../../src/schema.ts';
-import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  reconcilePendingProjectZeroTrust,
-  setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import { setProjectZeroTrustProtection } from '../../src/zero-trust/project.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createOperatorToken,

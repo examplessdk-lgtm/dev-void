@@ -25,7 +25,7 @@ import {
   users,
 } from '../../src/schema.ts';
 import type { Domain, Project } from '../../src/types.ts';
-import { configurePlatformZeroTrust } from '../../src/zero-trust/service.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
 import {
   setupEnv,
   teardownEnv,

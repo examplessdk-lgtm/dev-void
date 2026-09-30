@@ -19,12 +19,14 @@ import {
 import {
   activatePlatformApplication,
   configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  initializeNewProjectZeroTrust,
   reconcilePlatformZeroTrust,
+} from '../../src/zero-trust/installation.ts';
+import {
+  initializeNewProjectZeroTrust,
   setProjectZeroTrustProtection,
-  zeroTrustStatus,
-} from '../../src/zero-trust/service.ts';
+} from '../../src/zero-trust/project.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
+import { zeroTrustStatus } from '../../src/zero-trust/status.ts';
 import {
   clearTables,
   createTestProject,

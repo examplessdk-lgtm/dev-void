@@ -38,8 +38,8 @@ vi.mock('../../src/db.ts', () => ({
   getDomainsByProjectIds: vi.fn(async () => new Map()),
 }));
 
-vi.mock('../../src/zero-trust/service.ts', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../src/zero-trust/service.ts')>()),
+vi.mock('../../src/zero-trust/routing.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/zero-trust/routing.ts')>()),
   // These counter tests use public projects and a DB sentinel; the integration
   // routing tests cover authoritative protection reads under the project lock.
   resolveProjectZeroTrustRoutingForPublication: vi.fn(async () => null),

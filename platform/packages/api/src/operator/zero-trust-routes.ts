@@ -8,18 +8,16 @@ import {
   readZeroTrustConfigurationStrict,
   redactedZeroTrustConfiguration,
 } from '../zero-trust/configuration.ts';
+import { ZeroTrustUnavailableError } from '../zero-trust/errors.ts';
 import {
   assertExistingProjectsChoice,
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
-  getProjectZeroTrustState,
-  operatorProjectZeroTrustState,
   reconcilePlatformZeroTrust,
-  reconcileProjectZeroTrust,
-  setProjectZeroTrustProtection,
-  zeroTrustStatus,
-  ZeroTrustUnavailableError,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/installation.ts';
+import { reconcileProjectZeroTrust, setProjectZeroTrustProtection } from '../zero-trust/project.ts';
+import { getProjectZeroTrustState, operatorProjectZeroTrustState } from '../zero-trust/state.ts';
+import { zeroTrustStatus } from '../zero-trust/status.ts';
 import { dryRun, OperatorError, preview, readBody } from './common.ts';
 
 export const zeroTrustOperatorRoutes = new Hono<ApiEnv>();

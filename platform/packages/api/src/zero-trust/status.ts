@@ -1,0 +1,94 @@
+import { readPlatformApplication } from '@void/platform';
+import { sql } from 'drizzle-orm';
+import type { Db } from '../db.ts';
+import type { ApiEnv } from '../env.ts';
+import { projectZeroTrust } from '../schema.ts';
+import { resolveZeroTrustApplicationEnvironment } from './application.ts';
+import { reusablePolicyReferences } from './cloudflare.ts';
+import {
+  type ZeroTrustConfiguration,
+  ZeroTrustConfigurationError,
+  readZeroTrustConfigurationStrict,
+  redactedZeroTrustConfiguration,
+  zeroTrustWildcardDestinations,
+} from './configuration.ts';
+import { clientForConfiguration, projectZeroTrustState } from './state.ts';
+
+/**
+ * Installation status from saved state. `check` also asks Cloudflare whether
+ * the account, selections, and wildcard application still match; it makes
+ * several Access API calls, so reads leave it off unless an operator asks.
+ */
+export async function zeroTrustStatus(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  options: Readonly<{ check?: boolean }> = {},
+) {
+  const groups = await db
+    .select({
+      desiredProtected: projectZeroTrust.desired_protected,
+      effectiveProtected: projectZeroTrust.effective_protected,
+      status: projectZeroTrust.status,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(projectZeroTrust)
+    .groupBy(
+      projectZeroTrust.desired_protected,
+      projectZeroTrust.effective_protected,
+      projectZeroTrust.status,
+    );
+  const projectCounts = groups.map(({ desiredProtected, effectiveProtected, status, count }) => ({
+    desiredProtected,
+    effectiveProtected,
+    state: projectZeroTrustState({ status, desired_protected: desiredProtected }),
+    count,
+  }));
+  let configuration: ZeroTrustConfiguration | null;
+  try {
+    configuration = await readZeroTrustConfigurationStrict(db);
+  } catch (error) {
+    if (!(error instanceof ZeroTrustConfigurationError)) {
+      throw error;
+    }
+    return {
+      configured: true,
+      enabled: false,
+      status: 'invalid_configuration' as const,
+      lastError: error.message,
+      checked: false,
+      live: null,
+      projects: projectCounts,
+    };
+  }
+  const checked =
+    !!options.check && !!configuration?.enabled && !!configuration.wildcardApplication;
+  let live: { present: boolean; drifted: boolean } | null = null;
+  if (checked && configuration?.wildcardApplication) {
+    try {
+      env = await resolveZeroTrustApplicationEnvironment(env, db, configuration);
+      const client = await clientForConfiguration(env, configuration);
+      const selection = await client.validateSelection({
+        identityProviderIds: configuration.identityProviderIds,
+        policyIds: configuration.policyIds,
+      });
+      live = await client.inspectApplication(configuration.wildcardApplication, {
+        name: configuration.wildcardApplicationName,
+        destinations: zeroTrustWildcardDestinations(readPlatformApplication(env)),
+        allowedIdentityProviderIds: configuration.identityProviderIds,
+        policies: reusablePolicyReferences(configuration.policyIds),
+      });
+      if (selection.teamDomain !== configuration.teamDomain) {
+        live = { ...live, drifted: true };
+      }
+    } catch (error) {
+      live = { present: false, drifted: true };
+      console.error('[zero-trust] live status check failed', error);
+    }
+  }
+  return {
+    ...redactedZeroTrustConfiguration(configuration),
+    checked,
+    live,
+    projects: projectCounts,
+  };
+}

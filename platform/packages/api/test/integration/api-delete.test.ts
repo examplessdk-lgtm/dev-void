@@ -24,7 +24,7 @@ import {
   projectMembers,
   projectOwnershipPeriods,
 } from '../../src/schema.ts';
-import * as zeroTrustService from '../../src/zero-trust/service.ts';
+import * as zeroTrustService from '../../src/zero-trust/project.ts';
 import {
   setupEnv,
   teardownEnv,

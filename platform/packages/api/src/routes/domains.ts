@@ -21,11 +21,11 @@ import {
   type CustomHostnameInfo,
 } from '../provisioning/cloudflare-api.ts';
 import type { DomainVerificationData } from '../schema.ts';
+import { reconcileProjectZeroTrustDomains } from '../zero-trust/project.ts';
 import {
   getProjectZeroTrustState,
   MAX_ZERO_TRUST_CUSTOM_DOMAINS_PER_PROJECT,
-  reconcileProjectZeroTrustDomains,
-} from '../zero-trust/service.ts';
+} from '../zero-trust/state.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
 const CNAME_TARGET = `cname.${SITE_DOMAIN}`;

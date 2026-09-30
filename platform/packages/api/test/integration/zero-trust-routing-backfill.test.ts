@@ -15,11 +15,9 @@ import { scheduled } from '../../src/index.ts';
 import { transferOperatorProjectOwner } from '../../src/operator/tenant-service.ts';
 import { setProjectsRoutingSuspension } from '../../src/routing.ts';
 import { domains, projects, projectZeroTrust, users } from '../../src/schema.ts';
-import {
-  configurePlatformZeroTrust,
-  getProjectZeroTrustState,
-  setProjectZeroTrustProtection,
-} from '../../src/zero-trust/service.ts';
+import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { setProjectZeroTrustProtection } from '../../src/zero-trust/project.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
   createTestProject,

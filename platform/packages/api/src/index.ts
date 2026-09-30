@@ -130,13 +130,13 @@ import type { Domain, Project } from './types.ts';
 import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
 import { replayFailedWebhookDeliveries } from './webhook-replay.ts';
+import { resumePlatformZeroTrustOperation } from './zero-trust/installation.ts';
+import { reconcilePendingProjectZeroTrust } from './zero-trust/maintenance.ts';
+import { reconcileProjectZeroTrustDomains } from './zero-trust/project.ts';
 import {
-  reconcilePendingProjectZeroTrust,
-  reconcileProjectZeroTrustDomains,
   resolveProjectZeroTrustRoutingForPublication,
-  resumePlatformZeroTrustOperation,
   withProjectZeroTrustRouting,
-} from './zero-trust/service.ts';
+} from './zero-trust/routing.ts';
 
 function isSandboxDrainMaintenanceRequest(request: Request): boolean {
   const path = new URL(request.url).pathname;

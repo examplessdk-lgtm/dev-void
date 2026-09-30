@@ -161,7 +161,7 @@ async function loadProjectZeroTrust(db: Db, projectId: string) {
     zeroTrustConfigurationStatus,
   } = await import('../../zero-trust/configuration.ts');
   const { getProjectZeroTrustState, projectZeroTrustAvailable, publicProjectZeroTrustState } =
-    await import('../../zero-trust/service.ts');
+    await import('../../zero-trust/state.ts');
   const [row, configuration] = await Promise.all([
     getProjectZeroTrustState(db, projectId),
     readZeroTrustConfigurationStrict(db).catch((error: unknown) => {
@@ -443,7 +443,7 @@ export async function loadEmailProjectPage(context: AdminContext, path: string) 
  */
 export async function loadZeroTrustPage(context: AdminContext, path: string) {
   const url = pageLocation(path, '/admin/zero-trust');
-  const { zeroTrustStatus } = await import('../../zero-trust/service.ts');
+  const { zeroTrustStatus } = await import('../../zero-trust/status.ts');
   const status = await zeroTrustStatus(context.env, context.get('db'), {
     check: url.searchParams.get('check') === '1',
   });
