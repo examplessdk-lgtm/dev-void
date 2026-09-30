@@ -80,6 +80,49 @@ describe('platform PostgreSQL SSL mode', () => {
   });
 
   it.each([
+    ['verify-full', '?sslmode=verify-full&sslrootcert=system'],
+    ['require', '?sslrootcert=system&sslmode=require'],
+    ['no sslmode', '?sslrootcert=system'],
+    ['libpq compatibility', '?sslmode=verify-full&sslrootcert=system&uselibpqcompat=true'],
+    ['a repeated root certificate', '?sslrootcert=%2Ftmp%2Froot.pem&sslrootcert=system'],
+  ])(
+    'uses the system trust store with full verification for sslrootcert=system with %s',
+    (_name, query) => {
+      const original = `postgresql://owner:p%40ss@db.example.com:5432/postgres${query}&application_name=void`;
+      const actual = new URL(platformDatabaseClientUrl(original));
+      expect(actual.searchParams.getAll('sslrootcert')).toEqual([]);
+      expect(actual.searchParams.getAll('sslmode')).toEqual(['verify-full']);
+      const expected = new URL(original);
+      for (const name of ['sslrootcert', 'sslmode']) {
+        actual.searchParams.delete(name);
+        expected.searchParams.delete(name);
+      }
+      expect(actual.toString()).toBe(expected.toString());
+    },
+  );
+
+  it.each([
+    'postgresql://owner:pw@db/platform?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Froot.pem',
+    'postgresql://owner:pw@db/platform?sslmode=verify-full&sslrootcert=system&sslrootcert=%2Froot.pem',
+    'postgresql://owner:pw@db/platform?sslmode=verify-full&sslrootcert=System',
+  ])('leaves other root certificate settings unchanged: %s', (url) => {
+    expect(platformDatabaseClientUrl(url)).toBe(url);
+  });
+
+  it('connects to a provider URL with sslrootcert=system using Node default CAs', async () => {
+    const warning = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const { Client } = await vi.importActual<typeof import('pg')>('pg');
+    // Constructing a real pg client parses SSL options, but does not open a connection.
+    const client = new Client({
+      connectionString: platformDatabaseClientUrl(
+        'postgresql://owner:pw@db.example.com:5432/postgres?sslmode=verify-full&sslrootcert=system',
+      ),
+    });
+    expect(client.ssl).toEqual({}); // Node TLS verification defaults remain enabled.
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ['database claim', claimPlatformDatabase],
     ['lifecycle lock', acquirePlatformDatabaseLifecycleLock],
     ['checkpoint read', readPlatformDatabaseLifecycleManifest],
@@ -99,5 +142,19 @@ describe('platform PostgreSQL SSL mode', () => {
     expect(checkpoint.databaseUrl).toBe(original);
     expect(process.env.DATABASE_URL).toBe(original);
     expect(resolvePlatformInstallDatabaseUrl(checkpoint)).toBe(original);
+  });
+
+  it('keeps sslrootcert=system in the saved URL while the claim client uses Node default CAs', async () => {
+    const original =
+      'postgresql://owner:pw@db.example.com/postgres?sslmode=verify-full&sslrootcert=system';
+    const checkpoint = { databaseUrl: original, databaseClaimState: 'claimed' };
+    await expect(
+      claimPlatformDatabase(checkpoint.databaseUrl, 'installation', 'nonce'),
+    ).rejects.toThrow('Stopped before network access.');
+    expect(mocks.pool).toHaveBeenCalledWith({
+      connectionString: 'postgresql://owner:pw@db.example.com/postgres?sslmode=verify-full',
+      max: 1,
+    });
+    expect(checkpoint.databaseUrl).toBe(original);
   });
 });

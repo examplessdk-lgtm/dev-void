@@ -29,6 +29,7 @@ async function attemptReuse(input: {
   directProofDeploymentDrift?: boolean;
   directReadFailure?: boolean;
   liveTriggers?: boolean;
+  reuseMatchingVersion?: boolean;
   secrets?: Record<string, string> | null;
   triggerFailure?: boolean;
   lateVersionDrift?: boolean;
@@ -181,6 +182,9 @@ async function attemptReuse(input: {
       ...(input.acquireUploadSlot ? { acquireUploadSlot: input.acquireUploadSlot } : {}),
       ...(input.directApi ? { readCloudflare } : {}),
       ...(input.onReadyForActivation ? { onReadyForActivation: input.onReadyForActivation } : {}),
+      ...(input.reuseMatchingVersion === undefined
+        ? {}
+        : { reuseMatchingVersion: input.reuseMatchingVersion }),
       ...(input.waitForPriorWorker ? { waitForPriorWorker: input.waitForPriorWorker } : {}),
       inspectNewWorker: async () => 'owned',
       managedRoutes: [],
@@ -225,6 +229,17 @@ it('reconciles traffic without uploading an identical active Worker version', as
   expect(run.calls).toContain('triggers deploy');
   expect(run.onTrafficPublished).toHaveBeenCalledOnce();
 });
+
+it.each([{ directApi: false }, { directApi: true }])(
+  'uploads a fresh version for identical input when reuse is disabled: %j',
+  async ({ directApi }) => {
+    const run = await attemptReuse({ directApi, reuseMatchingVersion: false });
+    expect(String(run.error)).toContain('upload reached');
+    expect(run.calls).toContain('versions upload');
+    expect(run.calls).not.toContain('triggers deploy');
+    expect(run.onTrafficPublished).not.toHaveBeenCalled();
+  },
+);
 
 it('uses direct Cloudflare reads for a verified matching version', async () => {
   const run = await attemptReuse({ directApi: true });

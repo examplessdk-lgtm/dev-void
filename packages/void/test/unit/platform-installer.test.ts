@@ -31,6 +31,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
+  PlatformCloudflareClient,
 } from '../../src/cli/platform-cloudflare.ts';
 import {
   acquirePlatformDatabaseLifecycleLockConnection,
@@ -70,6 +71,7 @@ import {
   withoutCompletedPlatformWorkerMigrations,
   withoutPlatformWorkerTrafficAttachments,
 } from '../../src/cli/platform-installer.ts';
+import { resolvePlatformInstallDatabaseUrl } from '../../src/cli/platform-lifecycle.ts';
 import {
   createPlatformInstallPlan,
   platformProvisionIntentHash,
@@ -78,6 +80,7 @@ import {
   listInstallationManifests,
   promoteInstallationSecrets,
   readInstallationRecoverySecrets,
+  readPendingInstallationSecrets,
   writeInstallationManifest,
   writePendingInstallationSecrets,
 } from '../../src/cli/platform-registry.ts';
@@ -1213,6 +1216,289 @@ describe('platform installer', () => {
         ),
       ).rejects.toThrow('unexpected mutation PUT');
       await expect(fetch(`${proxyBaseUrl}/accounts/account/workers/subdomain`)).rejects.toThrow();
+    } finally {
+      await close(upstream);
+    }
+  });
+
+  it("forwards this Worker's asset upload session and uploads before the guarded create", async () => {
+    const hash = '0123456789abcdef0123456789abcdef';
+    const requests: Array<{
+      authorization: string | undefined;
+      ifNoneMatch: string | undefined;
+      request: string;
+    }> = [];
+    const upstream = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        requests.push({
+          authorization: request.headers.authorization,
+          ifNoneMatch: request.headers['if-none-match'],
+          request: `${request.method} ${request.url}`,
+        });
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end('{"success":true,"result":{"jwt":"token"}}');
+      });
+    });
+    const upstreamOrigin = await listen(upstream);
+    try {
+      await expect(
+        withConditionalPlatformWorkerCreate(
+          'account',
+          'void-api',
+          async (apiBaseUrl) => {
+            // The order the bundled uploader uses for a new Worker with static assets.
+            const sequence: Array<[string, string, string]> = [
+              ['GET', '/accounts/account/workers/services/void-api', 'secret-token'],
+              ['GET', '/accounts/account/workers/scripts/void-api/deployments', 'secret-token'],
+              [
+                'POST',
+                '/accounts/account/workers/scripts/void-api/assets-upload-session',
+                'secret-token',
+              ],
+              ['POST', '/accounts/account/workers/assets/upload?base64=true', 'session-jwt'],
+              ['POST', `/accounts/account/workers/assets/upload/${hash}`, 'session-jwt'],
+              ['GET', '/accounts/account/workers/scripts/void-api/settings', 'secret-token'],
+              [
+                'PUT',
+                '/accounts/account/workers/scripts/void-api?excludeScript=true&bindings_inherit=strict',
+                'secret-token',
+              ],
+              ['POST', '/accounts/account/workers/scripts/void-api/subdomain', 'secret-token'],
+            ];
+            for (const [method, path, token] of sequence) {
+              const response = await fetch(`${apiBaseUrl}${path}`, {
+                ...(method === 'GET' ? {} : { body: 'payload' }),
+                headers: { Authorization: `Bearer ${token}` },
+                method,
+              });
+              expect(response.status, `${method} ${path}`).toBe(200);
+            }
+            return 'created';
+          },
+          `${upstreamOrigin}/client/v4`,
+        ),
+      ).resolves.toBe('created');
+      expect(requests).toEqual([
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: undefined,
+          request: 'GET /client/v4/accounts/account/workers/services/void-api',
+        },
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: undefined,
+          request: 'GET /client/v4/accounts/account/workers/scripts/void-api/deployments',
+        },
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: undefined,
+          request:
+            'POST /client/v4/accounts/account/workers/scripts/void-api/assets-upload-session',
+        },
+        {
+          authorization: 'Bearer session-jwt',
+          ifNoneMatch: undefined,
+          request: 'POST /client/v4/accounts/account/workers/assets/upload?base64=true',
+        },
+        {
+          authorization: 'Bearer session-jwt',
+          ifNoneMatch: undefined,
+          request: `POST /client/v4/accounts/account/workers/assets/upload/${hash}`,
+        },
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: undefined,
+          request: 'GET /client/v4/accounts/account/workers/scripts/void-api/settings',
+        },
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: '*',
+          request:
+            'PUT /client/v4/accounts/account/workers/scripts/void-api?excludeScript=true&bindings_inherit=strict',
+        },
+        {
+          authorization: 'Bearer secret-token',
+          ifNoneMatch: undefined,
+          request: 'POST /client/v4/accounts/account/workers/scripts/void-api/subdomain',
+        },
+      ]);
+    } finally {
+      await close(upstream);
+    }
+  });
+
+  const assetSession = [
+    'POST',
+    '/accounts/account/workers/scripts/void-api/assets-upload-session',
+  ] as const;
+  it.each<{
+    name: string;
+    before: ReadonlyArray<readonly [string, string]>;
+    blocked: readonly [string, string];
+  }>([
+    {
+      name: 'a session for another Worker',
+      before: [],
+      blocked: ['POST', '/accounts/account/workers/scripts/other-worker/assets-upload-session'],
+    },
+    {
+      name: 'a session with a query',
+      before: [],
+      blocked: ['POST', '/accounts/account/workers/scripts/void-api/assets-upload-session?x=1'],
+    },
+    {
+      name: 'a PUT on the session path',
+      before: [],
+      blocked: ['PUT', '/accounts/account/workers/scripts/void-api/assets-upload-session'],
+    },
+    {
+      name: 'a DELETE on the session path',
+      before: [],
+      blocked: ['DELETE', '/accounts/account/workers/scripts/void-api/assets-upload-session'],
+    },
+    {
+      name: 'a dispatch namespace session',
+      before: [],
+      blocked: [
+        'POST',
+        '/accounts/account/workers/dispatch/namespaces/ns/scripts/void-api/assets-upload-session',
+      ],
+    },
+    {
+      name: 'a session under another account',
+      before: [],
+      blocked: ['POST', '/accounts/other/workers/scripts/void-api/assets-upload-session'],
+    },
+    {
+      name: 'an upload before any session',
+      before: [],
+      blocked: ['POST', '/accounts/account/workers/assets/upload?base64=true'],
+    },
+    {
+      name: 'an upload with base64=false',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/workers/assets/upload?base64=false'],
+    },
+    {
+      name: 'an upload with an extra query parameter',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/workers/assets/upload?base64=true&x=1'],
+    },
+    {
+      name: 'an upload with a short hash',
+      before: [assetSession],
+      blocked: ['POST', `/accounts/account/workers/assets/upload/${'a'.repeat(31)}`],
+    },
+    {
+      name: 'an upload with an uppercase hash',
+      before: [assetSession],
+      blocked: ['POST', `/accounts/account/workers/assets/upload/${'A'.repeat(32)}`],
+    },
+    {
+      name: 'an upload with a nested path',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/workers/assets/upload/a/b'],
+    },
+    {
+      name: 'an upload under another account',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/other/workers/assets/upload?base64=true'],
+    },
+    {
+      name: 'a version upload after a session',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/workers/scripts/void-api/versions'],
+    },
+    {
+      name: 'a subdomain change after a session',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/workers/scripts/void-api/subdomain'],
+    },
+    {
+      name: 'an unrelated account mutation after a session',
+      before: [assetSession],
+      blocked: ['POST', '/accounts/account/storage/kv/namespaces'],
+    },
+    {
+      name: 'another Worker upload after a session',
+      before: [assetSession],
+      blocked: [
+        'PUT',
+        '/accounts/account/workers/scripts/other-worker?excludeScript=true&bindings_inherit=strict',
+      ],
+    },
+    {
+      name: 'an unconditional create after a session',
+      before: [assetSession],
+      blocked: ['PUT', '/accounts/account/workers/scripts/void-api?excludeScript=false'],
+    },
+  ])('blocks $name before the guarded create', async ({ before, blocked }) => {
+    let forwarded = 0;
+    const upstream = createServer((request, response) => {
+      forwarded++;
+      request.resume();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end('{"success":true,"result":{"jwt":"token"}}');
+    });
+    const origin = await listen(upstream);
+    try {
+      const result = withConditionalPlatformWorkerCreate(
+        'account',
+        'void-api',
+        async (base) => {
+          for (const [method, path] of before) {
+            const response = await fetch(`${base}${path}`, { body: 'payload', method });
+            expect(response.status).toBe(200);
+          }
+          const [method, path] = blocked;
+          const response = await fetch(`${base}${path}`, { body: 'payload', method });
+          expect(response.status).toBe(409);
+        },
+        `${origin}/client/v4`,
+      );
+      await expect(result).rejects.toThrow(`unexpected mutation ${blocked[0]}`);
+      expect(forwarded).toBe(before.length);
+    } finally {
+      await close(upstream);
+    }
+  });
+
+  it('reports a concurrent create after assets were uploaded', async () => {
+    const requests: Array<string> = [];
+    const upstream = createServer((request, response) => {
+      request.resume();
+      requests.push(`${request.method} ${request.url}`);
+      response.writeHead(request.method === 'PUT' ? 412 : 200, {
+        'Content-Type': 'application/json',
+      });
+      response.end(
+        request.method === 'PUT'
+          ? '{"success":false,"errors":[{"message":"already exists"}]}'
+          : '{"success":true,"result":{"jwt":"token"}}',
+      );
+    });
+    const origin = await listen(upstream);
+    try {
+      const failure = withConditionalPlatformWorkerCreate(
+        'account',
+        'void-api',
+        async (base) => {
+          for (const path of [
+            '/accounts/account/workers/scripts/void-api/assets-upload-session',
+            '/accounts/account/workers/assets/upload?base64=true',
+          ]) {
+            await fetch(`${base}${path}`, { body: 'payload', method: 'POST' });
+          }
+          await fetch(
+            `${base}/accounts/account/workers/scripts/void-api?excludeScript=true&bindings_inherit=strict`,
+            { body: 'worker bundle', method: 'PUT' },
+          );
+        },
+        `${origin}/client/v4`,
+      );
+      await expect(failure).rejects.toThrow('created concurrently (HTTP 412)');
+      expect(requests.filter((request) => request.startsWith('PUT '))).toHaveLength(1);
     } finally {
       await close(upstream);
     }
@@ -3759,6 +4045,449 @@ describe('platform installer', () => {
 
     expect(disabled).toBe(true);
     expect(listInstallationManifests(directory)[0]).toMatchObject({ status: 'failed' });
+  });
+
+  it('rejects a database URL Hyperdrive cannot use before claiming the database', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-preclaim-url-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const plan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      null,
+    );
+    expect(plan.actions.find((action) => action.key === 'hyperdrive')?.action).toBe('create');
+    let claims = 0;
+    let locks = 0;
+    const unused = async () => ({ id: 'unused', name: 'unused' });
+
+    await expect(
+      installPlatform(
+        plan,
+        createPlatformInstallationSecrets({
+          bootstrapGitHubId: '583231',
+          bootstrapGitHubLogin: 'octocat',
+          cloudflareApiToken: 'cf-token',
+          databaseUrl: 'postgres://user:password@db.example.com/void?sslmode=disable',
+          githubClientId: 'github-id',
+          githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+          r2AccessKeyId: 'r2-id',
+          r2SecretAccessKey: 'r2-secret',
+        }),
+        null,
+        {
+          acquireDatabaseLifecycleLock: async () => {
+            locks++;
+            return acquireDatabaseLifecycleLock();
+          },
+          claimDatabase: async () => {
+            claims++;
+          },
+          client: {
+            createAiGateway: unused,
+            createDispatchNamespace: unused,
+            createDnsRecord: async () => ({
+              content: '100::',
+              id: 'unused',
+              name: 'unused',
+              proxied: true,
+              type: 'AAAA',
+            }),
+            createHyperdrive: unused,
+            createKvNamespace: unused,
+            createQueue: unused,
+            createR2Bucket: unused,
+            createZone: async () => ({
+              id: 'unused',
+              name: 'unused',
+              nameServers: [],
+              status: 'active',
+            }),
+            putKvValue: async () => {},
+            putR2Object: async () => {},
+          },
+          revalidateBeforeWorkerDeploy: async () => {},
+        },
+      ),
+    ).rejects.toThrow('Unsupported sslmode');
+
+    expect(claims).toBe(0);
+    expect(locks).toBe(0);
+    const manifest = listInstallationManifests(directory)[0]!;
+    expect(manifest).toMatchObject({ resources: [], status: 'planned' });
+    const checkpoint = readPendingInstallationSecrets(manifest);
+    expect(checkpoint?.databaseClaimState).toBeUndefined();
+    // The database is still unbound, so the operator can resume with a corrected URL.
+    const corrected = 'postgres://user:password@db.example.com/void?sslmode=require';
+    process.env.VOID_PLATFORM_DATABASE_URL = corrected;
+    try {
+      expect(resolvePlatformInstallDatabaseUrl(checkpoint, manifest)).toBe(corrected);
+    } finally {
+      delete process.env.VOID_PLATFORM_DATABASE_URL;
+    }
+  });
+
+  it.each([
+    'postgres://user:password@db.example.com/void?sslmode=verify-full&sslrootcert=/etc/ssl/private-ca.pem',
+    'postgres://user:password@db.example.com/void?sslmode=verify-full&sslrootcert=system&sslrootcert=/etc/ssl/private-ca.pem',
+  ])(
+    'rejects a private certificate authority for a Void-created Hyperdrive before claiming the database: %s',
+    async (databaseUrl) => {
+      const directory = mkdtempSync(join(tmpdir(), 'void-platform-private-ca-test-'));
+      directories.push(directory);
+      process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+      const input = {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      };
+      const plan = await createPlatformInstallPlan(planningClient(), input, null);
+      expect(plan.actions.find((action) => action.key === 'hyperdrive')?.action).toBe('create');
+      const secrets = (url: string) =>
+        createPlatformInstallationSecrets({
+          bootstrapGitHubId: '583231',
+          bootstrapGitHubLogin: 'octocat',
+          cloudflareApiToken: 'cf-token',
+          databaseUrl: url,
+          githubClientId: 'github-id',
+          githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+          r2AccessKeyId: 'r2-id',
+          r2SecretAccessKey: 'r2-secret',
+        });
+      const hyperdriveRequests: Array<Record<string, unknown>> = [];
+      const cloudflare = new PlatformCloudflareClient('cf-token', {
+        fetcher: async (_input, init) => {
+          hyperdriveRequests.push(JSON.parse(String(init?.body)));
+          return Response.json({
+            success: true,
+            result: { id: 'hyperdrive-id', name: plan.deployment.resources.hyperdrive },
+          });
+        },
+      });
+      const claimedUrls: Array<string> = [];
+      const lockedUrls: Array<string> = [];
+      let index = 0;
+      const create = async (_account: string, name: string) => ({ id: `id-${index++}`, name });
+      const dependencies: TestInstallerDependencies = {
+        acquireDatabaseLifecycleLock: async (url) => {
+          lockedUrls.push(url);
+          return acquireDatabaseLifecycleLock();
+        },
+        claimDatabase: async (url) => {
+          claimedUrls.push(url);
+        },
+        client: {
+          createAiGateway: create,
+          createDispatchNamespace: create,
+          createDnsRecord: async (_zone, name) => ({
+            content: '100::',
+            id: `id-${index++}`,
+            name,
+            proxied: true,
+            type: 'AAAA',
+          }),
+          createHyperdrive: (account, name, connectionString) =>
+            cloudflare.createHyperdrive(account, name, connectionString),
+          createKvNamespace: create,
+          createQueue: create,
+          createR2Bucket: create,
+          createZone: async () => {
+            throw new Error('existing zone must not be created');
+          },
+          putKvValue: async () => {},
+          putR2Object: async () => {},
+        },
+        deployWorker: async () => {
+          throw new Error('stop after resources');
+        },
+        migrateDatabase: async () => {},
+        revalidateBeforeWorkerDeploy: async () => {},
+      };
+
+      const rejected = installPlatform(plan, secrets(databaseUrl), null, dependencies);
+      await expect(rejected).rejects.toThrow(
+        'A Hyperdrive created by Void trusts only public certificate authorities',
+      );
+      await expect(rejected).rejects.toThrow('Use an existing Hyperdrive');
+      await expect(rejected).rejects.toThrow('VOID_PLATFORM_HYPERDRIVE_ID');
+
+      expect(claimedUrls).toEqual([]);
+      expect(lockedUrls).toEqual([]);
+      expect(hyperdriveRequests).toEqual([]);
+      const manifest = listInstallationManifests(directory)[0]!;
+      expect(manifest).toMatchObject({ resources: [], status: 'planned' });
+      const checkpoint = readPendingInstallationSecrets(manifest);
+      expect(checkpoint?.databaseClaimState).toBeUndefined();
+
+      // The database is still unbound, so the same installation resumes with a corrected URL.
+      const corrected =
+        'postgres://user:password@db.example.com/void?sslmode=verify-full&sslrootcert=system';
+      process.env.VOID_PLATFORM_DATABASE_URL = corrected;
+      let resumedUrl: string;
+      try {
+        resumedUrl = resolvePlatformInstallDatabaseUrl(checkpoint, manifest);
+      } finally {
+        delete process.env.VOID_PLATFORM_DATABASE_URL;
+      }
+      expect(resumedUrl).toBe(corrected);
+      const resumedPlan = await createPlatformInstallPlan(planningClient(), input, manifest);
+      expect(resumedPlan.actions.find((action) => action.key === 'hyperdrive')?.action).toBe(
+        'create',
+      );
+      await expect(
+        installPlatform(resumedPlan, secrets(resumedUrl), manifest, dependencies),
+      ).rejects.toThrow('stop after resources');
+
+      expect(claimedUrls).toEqual([corrected]);
+      expect(lockedUrls).toEqual([corrected]);
+      expect(hyperdriveRequests).toHaveLength(1);
+      expect(hyperdriveRequests[0]).toMatchObject({ mtls: { sslmode: 'require' } });
+    },
+  );
+
+  it('accepts a private certificate authority for an externally managed Hyperdrive', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-external-private-ca-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const databaseUrl =
+      'postgres://user:password@db.example.com/void?sslmode=verify-full&sslrootcert=/etc/ssl/private-ca.pem';
+    const plan = await createPlatformInstallPlan(
+      {
+        ...planningClient(),
+        listHyperdriveConfigs: async () => [{ id: 'external-hyperdrive', name: 'managed-db' }],
+      },
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        externalHyperdrive: {
+          id: 'external-hyperdrive',
+          name: 'managed-db',
+          host: 'db.example.com',
+          user: 'user',
+        },
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      null,
+    );
+    expect(plan.actions.find((action) => action.key === 'hyperdrive')?.action).toBe('adopt');
+    const claimedUrls: Array<string> = [];
+    const unused = async () => ({ id: 'unused', name: 'unused' });
+
+    await expect(
+      installPlatform(
+        plan,
+        createPlatformInstallationSecrets({
+          bootstrapGitHubId: '583231',
+          bootstrapGitHubLogin: 'octocat',
+          cloudflareApiToken: 'cf-token',
+          databaseUrl,
+          githubClientId: 'github-id',
+          githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+          r2AccessKeyId: 'r2-id',
+          r2SecretAccessKey: 'r2-secret',
+        }),
+        null,
+        {
+          acquireDatabaseLifecycleLock,
+          claimDatabase: async (url) => {
+            claimedUrls.push(url);
+            throw new Error('stop after claim');
+          },
+          client: {
+            createAiGateway: unused,
+            createDispatchNamespace: unused,
+            createDnsRecord: async () => ({
+              content: '100::',
+              id: 'unused',
+              name: 'unused',
+              proxied: true,
+              type: 'AAAA',
+            }),
+            createHyperdrive: async () => {
+              throw new Error('an externally managed Hyperdrive must not be created');
+            },
+            createKvNamespace: unused,
+            createQueue: unused,
+            createR2Bucket: unused,
+            createZone: async () => ({
+              id: 'unused',
+              name: 'unused',
+              nameServers: [],
+              status: 'active',
+            }),
+            putKvValue: async () => {},
+            putR2Object: async () => {},
+          },
+          revalidateBeforeWorkerDeploy: async () => {},
+        },
+      ),
+    ).rejects.toThrow('stop after claim');
+
+    expect(claimedUrls).toEqual([databaseUrl]);
+  });
+
+  it('resumes a claimed verify-full database URL by creating Hyperdrive with its TLS mode', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-platform-verify-full-resume-test-'));
+    directories.push(directory);
+    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const databaseUrl = 'postgresql://user:password@db.example.com:5432/void?sslmode=verify-full';
+    const deployment = createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      displayName: 'Example',
+      installationSlug: 'example',
+    });
+    let manifest = createPlatformInstallationManifest({
+      account: { id: 'account', name: 'Account' },
+      createdAt: '2026-09-14T00:00:00.000Z',
+      deployment,
+      id: 'example-a1b2c3d4',
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    manifest = transitionInstallation(manifest, 'planned', '2026-09-14T00:00:01.000Z');
+    manifest = transitionInstallation(manifest, 'provisioning', '2026-09-14T00:00:02.000Z');
+    // The earlier attempt claimed the database and recorded its Hyperdrive intent,
+    // but Cloudflare rejected the create, so no Hyperdrive resource exists.
+    manifest = recordInstallationStep(
+      manifest,
+      {
+        completedAt: '2026-09-14T00:00:03.000Z',
+        key: 'provision-intent:hyperdrive',
+        resultHash: platformProvisionIntentHash(
+          manifest,
+          'hyperdrive',
+          'hyperdrive',
+          deployment.resources.hyperdrive,
+        ),
+      },
+      '2026-09-14T00:00:03.000Z',
+    );
+    manifest = transitionInstallation(manifest, 'failed', '2026-09-14T00:00:04.000Z');
+    writeInstallationManifest(manifest);
+    writePendingInstallationSecrets(manifest, { databaseClaimState: 'claimed', databaseUrl });
+    const resumedUrl = resolvePlatformInstallDatabaseUrl(
+      readPendingInstallationSecrets(manifest),
+      manifest,
+    );
+    expect(resumedUrl).toBe(databaseUrl);
+    const plan = await createPlatformInstallPlan(
+      planningClient(),
+      {
+        accountId: 'account',
+        applicationDomain: 'apps.example.com',
+        controlPlaneDomain: '',
+        dedicatedZone: false,
+        displayName: 'Example',
+        installationSlug: 'example',
+        zoneName: 'example.com',
+      },
+      manifest,
+    );
+    expect(plan.actions.find((action) => action.key === 'hyperdrive')?.action).toBe('create');
+    const hyperdriveRequests: Array<Record<string, unknown>> = [];
+    const cloudflare = new PlatformCloudflareClient('cf-token', {
+      fetcher: async (_input, init) => {
+        hyperdriveRequests.push(JSON.parse(String(init?.body)));
+        return Response.json({
+          success: true,
+          result: { id: 'hyperdrive-id', name: deployment.resources.hyperdrive },
+        });
+      },
+    });
+    const claimedUrls: Array<string> = [];
+    const lockedUrls: Array<string> = [];
+    let index = 0;
+    const create = async (_account: string, name: string) => ({ id: `id-${index++}`, name });
+
+    await expect(
+      installPlatform(
+        plan,
+        createPlatformInstallationSecrets({
+          bootstrapGitHubId: '583231',
+          bootstrapGitHubLogin: 'octocat',
+          cloudflareApiToken: 'cf-token',
+          databaseUrl: resumedUrl,
+          githubClientId: 'github-id',
+          githubClientSecret: 'github-secret',
+          jwtSecret: TEST_PLATFORM_JWT_SECRET,
+          projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+          r2AccessKeyId: 'r2-id',
+          r2SecretAccessKey: 'r2-secret',
+        }),
+        manifest,
+        {
+          acquireDatabaseLifecycleLock: async (url) => {
+            lockedUrls.push(url);
+            return acquireDatabaseLifecycleLock();
+          },
+          claimDatabase: async (url) => {
+            claimedUrls.push(url);
+          },
+          client: {
+            createAiGateway: create,
+            createDispatchNamespace: create,
+            createDnsRecord: async (_zone, name) => ({
+              content: '100::',
+              id: `id-${index++}`,
+              name,
+              proxied: true,
+              type: 'AAAA',
+            }),
+            createHyperdrive: (account, name, connectionString) =>
+              cloudflare.createHyperdrive(account, name, connectionString),
+            createKvNamespace: create,
+            createQueue: create,
+            createR2Bucket: create,
+            createZone: async () => {
+              throw new Error('existing zone must not be created');
+            },
+            putKvValue: async () => {},
+            putR2Object: async () => {},
+          },
+          deployWorker: async () => {
+            throw new Error('stop after resources');
+          },
+          migrateDatabase: async () => {},
+          revalidateBeforeWorkerDeploy: async () => {},
+        },
+      ),
+    ).rejects.toThrow('stop after resources');
+
+    expect(claimedUrls).toEqual([databaseUrl]);
+    expect(lockedUrls).toEqual([databaseUrl]);
+    expect(hyperdriveRequests).toHaveLength(1);
+    expect(hyperdriveRequests[0]).toMatchObject({ mtls: { sslmode: 'require' } });
+    expect(hyperdriveRequests[0]!.mtls).not.toHaveProperty('ca_certificate_id');
+    expect(listInstallationManifests(directory)[0]!.resources).toContainEqual(
+      expect.objectContaining({
+        configHash: hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl)),
+        id: 'hyperdrive-id',
+        key: 'hyperdrive',
+        state: 'ready',
+      }),
+    );
   });
 
   it('keeps a cutover unresolved when the current Worker rollback is incomplete', async () => {

@@ -1128,7 +1128,7 @@ function parseDnsRecord(value: Record<string, unknown>): CloudflareDnsRecord {
 export function parsePostgresConnectionString(value: string): {
   database: string;
   host: string;
-  mtls?: Readonly<{ sslmode: 'require' | 'verify-ca' | 'verify-full' }>;
+  mtls?: Readonly<{ sslmode: 'require' }>;
   password: string;
   port: number;
   user: string;
@@ -1151,14 +1151,17 @@ export function parsePostgresConnectionString(value: string): {
     throw new Error('platform: DATABASE_URL has an invalid PostgreSQL port.');
   }
   const sslmode = url.searchParams.get('sslmode');
-  let mtls: Readonly<{ sslmode: 'require' | 'verify-ca' | 'verify-full' }> | undefined;
+  let mtls: Readonly<{ sslmode: 'require' }> | undefined;
   if (sslmode) {
     if (sslmode !== 'require' && sslmode !== 'verify-ca' && sslmode !== 'verify-full') {
       throw new Error(
         'platform: Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
       );
     }
-    mtls = { sslmode };
+    // Hyperdrive accepts its verify modes only with an uploaded CA certificate ID, which a
+    // connection URL cannot carry. `require` is Hyperdrive's TLS mode that validates the server
+    // certificate against public CAs; Void's own database connections still use the URL's mode.
+    mtls = { sslmode: 'require' };
   }
   return {
     database,

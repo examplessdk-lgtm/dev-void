@@ -282,8 +282,14 @@ describe('platform Cloudflare client', () => {
     expect(methods).toEqual(['POST', 'GET']);
   });
 
-  it('preserves supported PostgreSQL TLS modes in Hyperdrive requests', async () => {
-    let payload: unknown;
+  it.each([
+    ['?sslmode=verify-full', { sslmode: 'require' }],
+    ['?sslmode=verify-full&sslrootcert=system', { sslmode: 'require' }],
+    ['?sslmode=verify-ca', { sslmode: 'require' }],
+    ['?sslmode=require', { sslmode: 'require' }],
+    ['', undefined],
+  ])('sends a Hyperdrive TLS mode Cloudflare accepts for %j', async (query, mtls) => {
+    let payload: Record<string, unknown> = {};
     const client = new PlatformCloudflareClient('token', {
       fetcher: async (_input, init) => {
         payload = JSON.parse(String(init?.body));
@@ -294,16 +300,38 @@ describe('platform Cloudflare client', () => {
     await client.createHyperdrive(
       'account',
       'void-db',
-      'postgresql://user:secret@db.example.com/void?sslmode=verify-full',
+      `postgresql://user:secret@db.example.com/void${query}`,
     );
 
-    expect(payload).toMatchObject({
-      mtls: { sslmode: 'verify-full' },
-      caching: { disabled: true },
-    });
-    expect(() =>
-      parsePostgresConnectionString('postgresql://user:secret@db.example.com/void?sslmode=prefer'),
-    ).toThrow('Unsupported sslmode');
+    expect(payload).toMatchObject({ caching: { disabled: true } });
+    expect(payload.mtls).toEqual(mtls);
+    expect('mtls' in payload).toBe(mtls !== undefined);
+  });
+
+  it('keeps unsupported PostgreSQL TLS modes out of Hyperdrive requests', () => {
+    for (const sslmode of ['prefer', 'disable', 'allow']) {
+      expect(() =>
+        parsePostgresConnectionString(
+          `postgresql://user:secret@db.example.com/void?sslmode=${sslmode}`,
+        ),
+      ).toThrow('Unsupported sslmode');
+    }
+  });
+
+  it('fingerprints a Hyperdrive origin independently of the URL TLS mode', () => {
+    const base = 'postgresql://user:secret@db.example.com:5432/void';
+    expect(
+      hyperdriveOriginConfigHash(
+        hyperdriveOriginFromConnectionString(`${base}?sslmode=verify-full`),
+      ),
+    ).toBe(
+      hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(`${base}?sslmode=require`)),
+    );
+    expect(
+      hyperdriveOriginConfigHash(
+        hyperdriveOriginFromConnectionString(`${base}?sslmode=verify-full&sslrootcert=system`),
+      ),
+    ).toBe(hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(base)));
   });
 
   it('reads and fingerprints a Hyperdrive origin without its password', async () => {

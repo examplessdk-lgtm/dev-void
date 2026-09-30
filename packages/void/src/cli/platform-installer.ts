@@ -85,6 +85,7 @@ import {
 import {
   hyperdriveOriginConfigHash,
   hyperdriveOriginFromConnectionString,
+  parsePostgresConnectionString,
   PlatformWorkerCustomDomainsChangedError,
   PlatformWorkerRoutesChangedError,
   type CloudflareNamedResource,
@@ -1405,6 +1406,11 @@ export async function installPlatform(
     writeInstallationManifest(manifest);
   }
   assertRequiredPlatformSecrets(plan, manifest, secrets, !!dependencies.prepareAuthentication);
+  if (hyperdriveAction?.action === 'create') {
+    // Reject a URL Hyperdrive can never accept before the claim binds it to this installation.
+    parsePostgresConnectionString(secrets.databaseUrl);
+    assertVoidCreatedHyperdriveTrustsDatabase(secrets.databaseUrl);
+  }
   const pendingSecrets = secretCheckpoint(secrets, workerSecretUpdateIntent);
   writePendingInstallationSecrets(manifest, {
     ...pendingSecrets,
@@ -2646,6 +2652,9 @@ export async function installPlatform(
                   PLATFORM_DISABLED_VALUE,
                 );
               },
+              // Traffic opens only after every Worker in this generation is
+              // verified against its own staged checkpoint, so none may be reused.
+              reuseMatchingVersion: false,
               runner: runPinnedPlatformWrangler,
               workerExisted: true,
             });
@@ -3482,6 +3491,20 @@ export function assertRequiredPlatformSecrets(
   }
 }
 
+/**
+ * A Hyperdrive that Void creates validates the server against public certificate authorities
+ * only, so it cannot honor a private CA that the local database client would trust.
+ */
+function assertVoidCreatedHyperdriveTrustsDatabase(databaseUrl: string): void {
+  // Same last-value-wins rule as the local client; pg ignores an empty value.
+  const sslrootcert = new URL(databaseUrl).searchParams.getAll('sslrootcert').at(-1);
+  if (sslrootcert && sslrootcert !== 'system') {
+    throw new Error(
+      'platform: A Hyperdrive created by Void trusts only public certificate authorities, so it cannot use the certificate authority in DATABASE_URL sslrootcert. If the database certificate comes from a public certificate authority, use sslrootcert=system. Otherwise create a separately managed Hyperdrive that trusts it, then select it with "Use an existing Hyperdrive" when you start a new installation, or set VOID_PLATFORM_HYPERDRIVE_ID, VOID_PLATFORM_HYPERDRIVE_ORIGIN_HOST, and VOID_PLATFORM_HYPERDRIVE_ORIGIN_USER.',
+    );
+  }
+}
+
 /** Make pg's current strict TLS behavior explicit without rewriting saved connection details. */
 export function platformDatabaseClientUrl(databaseUrl: string): string {
   let url: URL;
@@ -3490,9 +3513,19 @@ export function platformDatabaseClientUrl(databaseUrl: string): string {
   } catch {
     return databaseUrl;
   }
-  // Match pg's last-value-wins query parsing and respect explicit libpq compatibility.
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    return databaseUrl;
+  }
+  // Match pg's last-value-wins query parsing. libpq reads `sslrootcert=system` as the system
+  // trust store and requires verify-full with it, while pg would open it as a file path. Node's
+  // default CAs with hostname verification give pg the same policy.
+  if (url.searchParams.getAll('sslrootcert').at(-1) === 'system') {
+    url.searchParams.delete('sslrootcert');
+    url.searchParams.set('sslmode', 'verify-full');
+    return url.toString();
+  }
+  // Respect explicit libpq compatibility.
   if (
-    (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') ||
     url.searchParams.getAll('sslmode').at(-1) !== 'require' ||
     url.searchParams.getAll('uselibpqcompat').at(-1) === 'true'
   ) {
@@ -4283,6 +4316,8 @@ type PlatformWorkerDeploymentOptions = Readonly<{
   publishRoutes: (workerName: string, patterns: ReadonlyArray<string>) => Promise<void>;
   removeCustomDomains: () => Promise<void>;
   retainNewWorker: () => Promise<void>;
+  /** False uploads a new version even when the active one has identical input. */
+  reuseMatchingVersion?: boolean;
   runner: typeof runPlatformWrangler;
   workerExisted: boolean;
 }>;
@@ -4508,6 +4543,7 @@ export async function deployPlatformWorker(
   const nextTriggers = readTriggerConfigFromObject(nextTraffic.wranglerConfig);
   const contentHash =
     secrets === null ? platformWorkerUploadFingerprint(config, options.managedRoutes) : null;
+  const reuseMatchingVersion = options.reuseMatchingVersion !== false;
   let previousTriggers = readTriggerConfigFromObject(previousTraffic.wranglerConfig);
   try {
     const configPath = join(directory, 'wrangler.json');
@@ -4606,7 +4642,7 @@ export async function deployPlatformWorker(
         );
       }
     };
-    if (options.workerExisted && contentHash && options.readCloudflare) {
+    if (options.workerExisted && contentHash && reuseMatchingVersion && options.readCloudflare) {
       let candidate:
         | {
             deploymentId: string;
@@ -4703,6 +4739,7 @@ export async function deployPlatformWorker(
       previousDeploymentId = previousDeployment.id;
       if (
         contentHash &&
+        reuseMatchingVersion &&
         previous.contentHash === contentHash &&
         platformWorkerUploadFingerprint(config, options.managedRoutes) === contentHash
       ) {
@@ -5225,6 +5262,7 @@ async function runPlatformWranglerAtApiBase(
 }
 
 type ConditionalWorkerCreateState = {
+  assetSessionStarted: boolean;
   attempted: boolean;
   conflictStatus: number | null;
   created: boolean;
@@ -5278,8 +5316,11 @@ async function startConditionalWorkerCreateProxy(
     throw new Error('platform: Cloudflare API base URL must use HTTP or HTTPS.');
   }
   const basePath = upstreamBase.pathname.replace(/\/+$/, '');
-  const expectedPath = `${basePath}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}`;
+  const accountPath = `${basePath}/accounts/${encodeURIComponent(accountId)}`;
+  const expectedPath = `${accountPath}/workers/scripts/${encodeURIComponent(workerName)}`;
+  const assetUploadPath = `${accountPath}/workers/assets/upload`;
   const state: ConditionalWorkerCreateState = {
+    assetSessionStarted: false,
     attempted: false,
     conflictStatus: null,
     created: false,
@@ -5313,9 +5354,27 @@ async function startConditionalWorkerCreateProxy(
         ).test(incomingUrl.pathname);
       const isReadOnly =
         incoming.method === 'GET' || incoming.method === 'HEAD' || incoming.method === 'OPTIONS';
+      // A Worker with static assets must register its asset manifest and upload
+      // the missing files before the script PUT that references them. Neither
+      // step attaches anything to a Worker; only the guarded create does.
+      const isAssetUploadSession =
+        incoming.method === 'POST' &&
+        incomingUrl.pathname === `${expectedPath}/assets-upload-session` &&
+        incomingUrl.search === '';
+      const isAssetUpload =
+        incoming.method === 'POST' &&
+        state.assetSessionStarted &&
+        ((incomingUrl.pathname === assetUploadPath && incomingUrl.search === '?base64=true') ||
+          (incomingUrl.search === '' &&
+            incomingUrl.pathname.startsWith(`${assetUploadPath}/`) &&
+            /^[0-9a-f]{32}$/.test(incomingUrl.pathname.slice(assetUploadPath.length + 1))));
       if (
         (isTopLevelWorkerUpload && !isConditionalCreate) ||
-        (!isReadOnly && !isConditionalCreate && !state.created)
+        (!isReadOnly &&
+          !isConditionalCreate &&
+          !isAssetUploadSession &&
+          !isAssetUpload &&
+          !state.created)
       ) {
         state.rejectedMutation = `${incoming.method ?? 'UNKNOWN'} ${incomingUrl.pathname}${
           incomingUrl.pathname === expectedPath && !supportedCreateQuery
@@ -5334,6 +5393,9 @@ async function startConditionalWorkerCreateProxy(
       if (isConditionalCreate) {
         state.attempted = true;
         headers['if-none-match'] = '*';
+      }
+      if (isAssetUploadSession) {
+        state.assetSessionStarted = true;
       }
       const upstreamUrl = new URL(
         `${incomingUrl.pathname}${incomingUrl.search}`,
