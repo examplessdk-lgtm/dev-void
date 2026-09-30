@@ -134,7 +134,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     values: {
       'identity-providers': 'Comma-separated Access identity provider IDs',
       policies: 'Comma-separated reusable Access policy IDs',
-      'existing-projects': 'When enabling: protect existing projects or keep them public',
+      'existing-projects': 'Required when enabling: protected or public for existing projects',
     },
     booleans: ['token-stdin', 'protect-new-projects'],
     method: 'POST',

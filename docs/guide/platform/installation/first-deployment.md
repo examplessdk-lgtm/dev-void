@@ -83,4 +83,4 @@ Your administrator session lasts for one hour. Use it to inspect users, projects
 
 ### Protect Project Hostnames with Zero Trust
 
-After installation, an administrator can require Cloudflare Access on new project hostnames while allowing each project owner or project administrator to opt out. This is independent of Access login and protection for the platform API itself. It needs a separate Cloudflare API token, which Void stores encrypted apart from the platform runtime token. See [Project Zero Trust](/guide/platform/administration/zero-trust) for the token permissions, setup command, application limits, and recovery.
+After installation, an administrator can require Cloudflare Access on new project hostnames while allowing each project owner or project administrator to opt out. This is independent of Access login and protection for the platform API itself, and it needs its own Cloudflare API token. See [Project Zero Trust](/guide/platform/administration/zero-trust) for the requirements, setup command, and recovery.

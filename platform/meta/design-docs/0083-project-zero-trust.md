@@ -8,240 +8,136 @@ created: 2026-09-22
 
 ## Decision
 
-A self-hosted Void installation can enforce Cloudflare Access on project
-hostnames by default. Installation administrators configure the account,
-identity providers, reusable policies, and default. A project owner or project
-administrator can make an individual project public or protected. Readers may
-inspect the state. Direct Cloudflare deployments are unchanged.
+A self-hosted installation can put Cloudflare Access in front of project
+hostnames. Installation administrators choose identity providers, reusable
+policies, and the default for new projects. Owners and project administrators
+override one project (`protect` / `public`); readers inspect. This is separate
+from the Access applications that protect the platform API or provide an OIDC
+login method.
 
-This feature is independent from the Access applications that protect the Void
-API or provide an OIDC login method.
+Direct Cloudflare deployments get no project protection. They share the cache
+change below: a request with `Cf-Access-Jwt-Assertion` bypasses the direct ISR
+KV and edge caches, and `SHARED_CACHE_POLICY_VERSION` 2 makes direct ISR entries
+written under version 1 unreadable, so they render once after upgrade.
 
-## Managed resources
+## Resources and credentials
 
-Void owns only applications identified by a durable ID or pre-creation name
-checkpoint in its PostgreSQL records:
+Void owns only applications recorded in PostgreSQL by ID or by a name committed
+before the create request (names carry a random nonce, so recovery never adopts
+a pre-existing application):
 
-- one self-hosted wildcard application for the installation's project domain
-  and retained workers.dev project origins;
-- one exact-host bypass application for each public project;
-- one exact self-hosted application per protected project with custom domains.
+- one wildcard application for the project domain and workers.dev project
+  origins (limited to the installation's ingress prefix);
+- one exact-host bypass per public project;
+- one exact application per protected project with custom domains (at most
+  100 domains).
 
-The workers.dev wildcard includes the installation's project ingress prefix;
-it must not match unrelated Workers or the platform's own API. Known resource
-IDs are checked directly against Cloudflare. Recovery by name uses a fresh,
-bounded inventory and never relies on a cached absence.
+Footprint: `1 + public projects + protected projects with custom domains`
+against Cloudflare's default 500 applications per account.
 
-The wildcard and protected applications reference administrator-selected
-reusable policies. A bypass application has an explicit Everyone bypass policy.
-Void validates that selected protection policies include at least one allow
-policy tied to company identity, and rejects bypass, non-identity, Everyone, or
-arbitrary-service-token protection.
+The Access token is separate from the runtime token, always used with the
+installation's `CF_ACCOUNT_ID`, encrypted with the platform credential keyring,
+and redacted from reads, previews, and audit targets. Protection policies need
+an identity-bound Allow policy; Bypass, Service Auth, Everyone, and
+any-service-token rules are rejected.
 
-Cloudflare's default account limit is 500 Access applications. The installation
-therefore consumes `1 + public projects + protected projects with custom domains`,
-in addition to applications managed outside Void.
+## State
 
-## Credentials and configuration
+`zeroTrust.configuration` (platform setting) holds: `revision` (compare-and-swap;
+every write increments it, so equal revision means equal snapshot), `enabled`,
+`protectNewProjects`, selections, account/team, credential, the lifetime
+`wildcardApplicationName`, the wildcard handle, `lastError`, and `operation`
+(`id`, `kind`, `phase`, lease owner/expiry, database `startedAt`,
+`existingProjects`, optional `applicationTarget`). Status is not stored:
+`error` if `lastError`, else `ready` without an operation, else `configuring`
+or `disabling` by kind. A corrupt saved value is server state: reads report
+`invalid_configuration`; operator/admin mutations return 500 naming the
+setting, project mutations return 409.
 
-The Access management credential is separate from the platform runtime token.
-It needs Apps and Policies Write plus Organizations, Identity Providers, and
-Groups Read on the installation account. The token is accepted through the
-operator API or standard input, encrypted with the platform credential keyring,
-stored in PostgreSQL settings, redacted from reads and previews, and excluded
-from audit targets.
+`project_zero_trust` holds desired/effective protection, `status`
+(`ready|reconciling|error`, with `ready` implying desired = effective),
+application handles, routing cursor, `reconciled_operation`, and last error.
+Users see one label: `public`/`protected` when ready, otherwise the status.
 
-The saved configuration includes a compare-and-swap revision, desired default,
-account/team identity, selected resource IDs, encrypted credential, wildcard
-application name checkpoint and identity, last error, and resumable operation
-state. Every write increments the revision, so the revision alone identifies a
-snapshot. The operation state records a stable operation ID, kind, phase,
-owner, lease, and database start time. The installation status is not stored;
-one function derives it: `error` when a last error is saved, `ready` with no
-operation, otherwise `configuring` or `disabling` by operation kind. Each
-project records the operation it completed; unrelated project writes cannot
-count as reconciliation progress.
+`--existing-projects` is required when enabling from disabled, rejected once
+enabled, and must be omitted or equal while an operation is pending (token
+replacement). Projects that existed when an enabling operation started follow
+that choice; later projects follow `protectNewProjects`.
 
-Zero Trust always uses the Cloudflare account that hosts the installation, so
-configuration takes no account input. Reconfiguration changes the default for
-future projects but preserves existing project overrides. The explicit
-existing-project choice is required when enabling from disabled and rejected
-otherwise, including by a replacement token for an operation that does not
-enable. One rule decides initial protection: a project that existed when an
-enabling configure operation started follows that choice; every later project
-follows the default for new projects.
+## Locks
 
-## Project state and ordering
+- `lockZeroTrustConfiguration(db, 'shared' | 'exclusive')`: project work,
+  deploy fences, and route publication hold it shared; installation claims,
+  checkpoints, wildcard mutations, and completion hold it exclusive.
+- `withProjectZeroTrustLock(db, projectId, work)`: `projects FOR UPDATE` plus
+  the shared lock in one transaction. Errors from `work` roll back; errors
+  inside its `recordErrors(step)` mark the row failed, commit, then rethrow.
+  User mutations recheck the `settings` capability under this lock.
 
-`project_zero_trust` records desired/effective protection, a reconciliation
-status (`ready`, `reconciling`, or `error`), managed application IDs and
-names, audience, and error. A `ready` row has matching desired and effective
-protection. Users see one derived label: `public` or `protected` for a ready
-row, otherwise its status. Project-row locks fence
-owner changes, domain changes, deletion, Access mutations, and routing
-publication so that an older reconciliation cannot publish over a newer owner
-choice. Shared configuration locks also fence these mutations against a new
-installation operation. Wildcard provider mutations and their checkpoints run
-under the exclusive configuration lock, so an expired owner cannot overwrite
-or delete a newer wildcard. Project initialization preserves an existing row,
-including checkpoints created by a concurrent installation batch.
-Newly generated application names include an unguessable nonce and are
-committed before a Cloudflare create request; this lets a retry recover the one
-matching application if the request succeeds but its returned ID is not
-persisted, without adopting a pre-existing predictable-name application.
+## Ordering (fail closed)
 
-Public transition:
+Public: bypass, then remove JWT enforcement from live routes, then mark public,
+then delete the protected application. Protected: exact application if needed,
+then publish audiences into live routes, then mark protected, then delete the
+bypass. A project is never public before its bypass exists.
 
-1. Create or update the exact-host bypass.
-2. Remove JWT enforcement from every live project route.
-3. Mark the project effectively public.
-4. Delete its protected custom-domain application.
+Every route rewrite (deploy, rollback, suspension, ownership, domain
+activation, backfill, compensation) takes Zero Trust metadata from PostgreSQL,
+not from KV. The publication resolver never fails open: unsettled or invalid
+protection publishes an empty audience set (dispatch denies) for desired or
+effective protected rows; a public row with a recorded bypass stays public;
+unknown rows make domain activation keep the domain pending and every other
+writer publish deny-all.
 
-Protected transition:
+Dispatch re-verifies `Cf-Access-Jwt-Assertion` against the team JWKS (no
+redirects; RS256, issuer, audience, `iat`, `exp`, `type=app`; exact custom
+domain audience before wildcard). Failures return a non-cacheable 403 before
+the user Worker or assets run, so a deleted or drifted Access application
+cannot silently expose a protected project.
 
-1. Create or update an exact application for custom domains, if any.
-2. Publish the wildcard and exact application audiences into every live route.
-3. Mark the project effectively protected.
-4. Delete its public bypass.
+## Admission and control plane
 
-This ordering is fail closed. During a public-to-protected transition, dispatch
-requires a valid Access assertion before the bypass is removed. During a
-protected-to-public transition, an old custom-domain application may temporarily
-remain restrictive if cleanup fails, but the project is never accidentally
-published before its bypass exists.
+Deploys run the strict check after manifest validation and before paid
+provisioning, and again inside the cutover fence; rollbacks check too.
+Recovery that restores already-committed code uses the publication resolver,
+so pending protection cannot block it. Project creation succeeds with a warning
+when initialization fails.
 
-New public projects create their bypass before they can deploy. New protected
-projects need no per-project API call until they add a custom domain. Custom
-domain activation reconciles Access before publishing routing. Deploy, rollback,
-recovery, suspension-preserving cutover, and routing repair all copy the current
-effective enforcement data. Failed-deploy routing compensation restores the
-previous deployment while retaining the latest suspension and Zero Trust state.
+Configure and first-domain activation reject a wildcard that would cover the
+API (request URL on configure, `AUTH_REDIRECT_URI`), `PROXY_URL`, or `EMAIL_GATEWAY_ORIGIN`
+(`*` matches across labels). A replacement token for a pending disable skips
+this check. First-domain activation is an API handoff: the operation saves its
+target, prepares bypasses, updates the wildcard and protected routes, and only
+then publishes `PLATFORM_APPLICATION_KEY`.
 
-KV reads remain [eventually consistent](https://developers.cloudflare.com/kv/concepts/how-kv-works/#consistency)
-even under a database lock. Every route rewrite derives its Zero Trust metadata
-from PostgreSQL instead of copying that
-field from a KV snapshot. This includes domain activation, ownership changes,
-suspension, legacy backfills, and deployment compensation; routing undo
-ignores the field and each caller sets it again. When protection is not
-settled or the saved configuration is invalid, a desired or effectively
-protected project gets an empty audience set, so metadata maintenance stays
-possible while dispatch denies access. A public project with a durable bypass
-stays public, including during partial routing cleanup, so a metadata rewrite
-cannot reintroduce denial behind the cleanup cursor. Any other project has
-unknown protection: domain activation, which retries while the domain stays
-pending, fails and leaves the domain unpublished; every other writer must
-publish and uses the empty audience set. Unexpected database failures abort
-publication. Deployment admission still requires completed public reconciliation. It
-is checked before any paid provisioning and again inside the cutover fence.
-Recovery that restores already-committed code uses the fail-closed publication
-resolver instead, so pending protection cannot block it.
-During platform disablement, each project's first cleanup batch saves public
-intent before rewriting any routes. Both deployment and metadata publication
-honor that intent through partial pages and retries after an error, while
-unvisited projects retain their protection. Transitioning a previously protected
-row also resets any older cleanup cursor, so no restored protection is stranded
-behind a completed page. Effective state and provider handles remain until
-cleanup finishes.
+## Operations and retries
 
-Protection reconciliation also checks project identity and the current cutover
-target or committed deployment. Missing live routes, a previous project's route
-under a reused slug, and stale deployment snapshots retain retryable state.
-Undeployed projects and unpublished domains can have no route; stale
-pending-domain residue for the same project is removed so activation can publish
-a fresh route. Before rewriting a matching deployment, reconciliation derives
-the current owner, suspension, and Worker limits from PostgreSQL, so a stale KV
-snapshot cannot undo a completed operator change.
+Configure: `seed`, `public-bypasses` (finishes each public project), `wildcard`,
+`projects` (protected projects, after the audience is final). Disable: `seed`,
+`projects` (clear enforcement and protected applications, keep bypasses),
+`wildcard-delete`, `bypass-delete`. One run handles at most 100 projects and
+300 routing keys, then releases its lease.
 
-Adding the first application domain is an authenticated installer handoff to
-the platform API. The operation durably saves its target, prepares public
-exceptions, updates the wildcard and all protected routes, and only then
-publishes canonical application routing. The saved target takes precedence
-over stale Worker variables and KV reads, including scheduled retries.
+Per-project failures are recorded on the row with a `skipped:<operation id>`
+marker and skipped. Cloudflare 401/403/429/5xx, network errors, timeouts, and
+a replaced operation fail the whole operation. A skipped protected row keeps
+its protection; a row becoming protected keeps its previous routes.
 
-Project deletion treats Access application deletion as critical because the
-project row is the durable handle. The database cascade occurs only after those
-deletes succeed. They run after the retryable resource cleanup, so a retried
-deletion never leaves a routed project without its Access exception. Platform disablement clears route enforcement and protected
-custom-domain applications first, retaining public bypasses until the wildcard
-is deleted. Wildcard deletion checkpoints enforcement as disabled and advances
-to bounded bypass cleanup. The saved disable operation remains pending until
-every retained bypass is removed, so failures can resume without interrupting
-previously public applications or repeating completed routing writes.
+The two-minute tier resumes an operation with a free lease that has not failed
+and then owns that invocation. The hourly tier also retries failed operations,
+pending project rows (errored rows move behind others), and, after a finished
+disable, clears protection left on skipped rows.
 
-## Independent dispatch verification
+## Status and removal
 
-Cloudflare Access normally rejects a request before it reaches the dispatch
-Worker. Dispatch also verifies `Cf-Access-Jwt-Assertion` against the configured
-team's non-redirecting JWKS endpoint. It pins issuer, application audience,
-RS256, expiry, issued-at, and `type=app`. Exact custom-domain audiences take
-precedence over the one-label wildcard. Missing, malformed, oversized, expired,
-wrong-audience, or unverifiable assertions return a non-cacheable 403 before the
-user Worker or static assets run.
+Status reads return saved state. The live check (account, selections,
+wildcard) runs in configure and reconcile, and only on request for status
+(`status --check`, admin `?check=1`). The project detail page never calls
+Cloudflare.
 
-This second check prevents a deleted or drifted Access application from silently
-making a protected project public.
+Project deletion removes its Access applications after retryable cleanup and
+before the database cascade. Uninstall does not remove Void-managed Access
+applications; administrators disable first.
 
-Access assertions are credentials for shared-cache eligibility, even when no
-cookie or Authorization header accompanies them. They bypass both reads and
-writes for static-response and ISR caches, keeping authenticated users' origin
-responses separate. The shared privacy-policy marker rejects entries admitted
-before this credential was recognized.
-
-## Administration and recovery
-
-The browser admin UI and `/operator/v1/zero-trust` expose redacted status,
-configuration, reconcile, disable, and per-project operations. Status reads
-return saved state only. The live Cloudflare check (account, selections, and
-wildcard application) costs several Access API calls, so it runs during
-configure and reconcile, and on an explicit request: `status --check` in the
-CLI or the check link in the admin UI. Operator per-project responses return
-the user API project shape plus explicitly listed managed-application
-handles, routing cursor, and completed operation. An invalid saved
-configuration is server state, not a bad request: operator and admin
-requests return 500 with the setting to repair, and project requests return
-409 asking for a platform administrator.
-
-The CLI names project overrides `protect` and `public`
-(`void project zero-trust protect|public`, and `project-protect|project-public`
-for operators), so they do not read like the installation-wide `disable`.
-
-The user API exposes project status to readers and mutations to the `settings`
-capability (project administrators and owners). When a new project's
-protection cannot be initialized, creation still succeeds with a warning that
-hourly maintenance retries it and that an owner or project administrator can
-run `void project zero-trust reconcile`. Its `available` field reports whether a
-project administrator can change protection now: enabled, ready, and with no
-running operation. Mutations recheck the capability under the project row lock
-shared with team and ownership changes. Configuration rejects a wildcard that
-would cover the API, proxy, or email gateway hostname.
-
-Errored or interrupted project reconciliations retain their resource IDs and are
-retried by scheduled maintenance while the platform configuration is ready.
-Inside an installation operation, a project-specific failure is recorded on
-that project, which the operation then skips so the remaining projects finish.
-Credential, rate-limit, and provider outage errors stop the whole operation
-instead. After a disable finishes, the same maintenance clears protection left
-on skipped projects. The two-minute tier resumes only operations that have not
-failed; a failed operation retries hourly or through an explicit reconcile.
-Administrators can explicitly reconcile the installation or one project after
-fixing token permissions, policies, or account quota.
-
-A replacement token can resume the same inactive operation without discarding
-its application handles. Administrators can instead cancel a failed setup by
-disabling and cleaning up. Teardown does not require deleted policy or identity
-provider selections to validate, and a failed teardown remains authoritative
-until cleanup finishes: project and domain updates cannot recreate applications.
-
-Installation-wide configure, reconcile, and disable operations are bounded and
-resumable. A short advisory-lock transaction claims a durable owner/lease, and
-each later configuration update uses the saved revision as a compare-and-swap
-token. One invocation handles at most 100 projects and 300 routing keys. A
-protected project may have at most 100 custom domains. Public projects have no
-Access destination cap; route cleanup persists a domain cursor across calls.
-These limits keep one invocation below the Workers subrequest limit and Cloudflare's
-Access API rate limit; unfinished work releases its lease and continues through
-an explicit or scheduled reconcile. The public-bypass phase finishes each public
-project (bypass, routes, and cleanup) and marks it complete for the operation,
-so the projects phase does not repeat its Access and routing writes. Protected
-projects complete only in the projects phase, after the wildcard audience is
-final.
+Code: `platform/packages/api/src/zero-trust/` (`installation`, `operation`,
+`project`, `routing`, `maintenance`, `status`, `lock`, `state`).

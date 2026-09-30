@@ -298,8 +298,10 @@ Project selection follows `--project`, then `VOID_PROJECT`, then the linked
 project.
 
 Readers can inspect the state. The owner or a project administrator can protect
-the project, make it public, or repair drift. `public` creates a Void-managed
-Access bypass; it does not change the platform default for future projects.
+the project, make it public, or repair drift. `public` does not change the
+platform default for future projects. Deploys and rollbacks wait until a
+protection change is finished; if one is refused, the owner or a project
+administrator can run `void project zero-trust reconcile` before you retry.
 These commands do not apply to direct Cloudflare deployments.
 
 ### `void project token <create|list|renew|revoke>`
@@ -615,7 +617,7 @@ printf '%s' "$ACCESS_API_TOKEN" | void platform zero-trust configure \
   --identity-providers <id[,id...]> \
   --policies <id[,id...]> \
   [--existing-projects <protected|public>] \
-  --protect-new-projects \
+  [--protect-new-projects] \
   --token-stdin \
   --yes
 void platform zero-trust reconcile
@@ -629,20 +631,21 @@ void platform zero-trust project-reconcile <project-id>
 
 Mutations support `--plan`, `--yes`, and `--timeout`; use `--plan` instead of
 `--yes` to inspect this change without applying it. The Access management token
-is accepted only on standard input and is encrypted at rest. Zero Trust uses
-the Cloudflare account that hosts the platform. Omit `--protect-new-projects`
-to make new projects public by default. `--existing-projects` is required when
-Zero Trust is enabled and rejected once it is enabled; later configuration
-changes preserve project opt-outs. `status` reports saved state; `--check`
-also compares it with Cloudflare Access. If status remains `configuring` or
-`disabling`, run `void platform zero-trust reconcile` to resume the saved
-operation. Protected projects support up to 100 custom
-domains.
+is accepted only on standard input. Zero Trust uses the Cloudflare account that
+hosts the platform. Omit `--protect-new-projects` to make new projects public
+by default. `--existing-projects` is required when you enable Zero Trust and
+rejected once it is enabled; later configuration changes keep each project's
+protection. `status` reports saved state; `--check` also compares it with
+Cloudflare Access. If status remains `configuring` or `disabling`, run
+`void platform zero-trust reconcile` to resume the saved operation. Protected
+projects support up to 100 custom domains.
 
 The token needs **Access: Apps and Policies Write** plus **Access:
 Organizations, Identity Providers, and Groups Read**, scoped to the platform's
-Cloudflare account. Void rejects policies that allow Everyone, bypass identity,
-or allow arbitrary service tokens.
+Cloudflare account. Select at least one Allow policy that matches people by
+identity; Void rejects Bypass and Service Auth policies and rules that allow
+Everyone or any service token. See [Project Zero Trust](../guide/platform/administration/zero-trust.md)
+for requirements and recovery.
 
 #### Deployments {#operator-deployments}
 
