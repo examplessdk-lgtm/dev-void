@@ -2,7 +2,12 @@ import type { PlatformApplication } from '@void/platform';
 import { platformProjectHostnames } from '@void/platform';
 import { describe, expect, it } from 'vite-plus/test';
 import { resolveAccessAudience } from '../../../dispatch/src/access.ts';
-import { zeroTrustWildcardDestinations } from '../../src/zero-trust/configuration.ts';
+import {
+  normalizeZeroTrustConfigureInput,
+  type ZeroTrustConfiguration,
+  zeroTrustConfigurationStatus,
+  zeroTrustWildcardDestinations,
+} from '../../src/zero-trust/configuration.ts';
 
 const application: PlatformApplication = {
   baseDomain: 'my-account.workers.dev',
@@ -66,5 +71,56 @@ describe('Zero Trust wildcard destinations', () => {
       'project-aud',
       'project-aud',
     ]);
+  });
+});
+
+describe('Zero Trust configuration status', () => {
+  const saved = {
+    lastError: null,
+    operation: null,
+  } as unknown as ZeroTrustConfiguration;
+  const operation = (kind: 'configure' | 'reconcile' | 'disable') =>
+    ({ id: 'operation', kind }) as unknown as ZeroTrustConfiguration['operation'];
+
+  it('derives the status from the saved operation and its last failure', () => {
+    expect(zeroTrustConfigurationStatus(saved)).toBe('ready');
+    expect(zeroTrustConfigurationStatus({ ...saved, operation: operation('configure') })).toBe(
+      'configuring',
+    );
+    expect(zeroTrustConfigurationStatus({ ...saved, operation: operation('reconcile') })).toBe(
+      'configuring',
+    );
+    expect(zeroTrustConfigurationStatus({ ...saved, operation: operation('disable') })).toBe(
+      'disabling',
+    );
+    expect(
+      zeroTrustConfigurationStatus({
+        ...saved,
+        operation: operation('disable'),
+        lastError: 'Access token was revoked',
+      }),
+    ).toBe('error');
+  });
+});
+
+describe('Zero Trust configure input', () => {
+  const input = {
+    apiToken: 'token',
+    identityProviderIds: ['idp-1'],
+    policyIds: ['policy-1'],
+    protectNewProjects: true,
+  };
+
+  it('leaves the existing-project choice optional and ignores an account id', () => {
+    expect(normalizeZeroTrustConfigureInput({ ...input, accountId: 'other-account' })).toEqual(
+      input,
+    );
+    expect(normalizeZeroTrustConfigureInput({ ...input, existingProjects: 'public' })).toEqual({
+      ...input,
+      existingProjects: 'public',
+    });
+    expect(() =>
+      normalizeZeroTrustConfigureInput({ ...input, existingProjects: 'everything' }),
+    ).toThrow('existingProjects must be protected or public');
   });
 });

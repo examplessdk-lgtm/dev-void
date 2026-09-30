@@ -64,8 +64,6 @@ describe('operator argument and help coverage', () => {
       const configureFlags =
         command.group === 'zero-trust' && command.action === 'configure'
           ? [
-              '--account',
-              'account-1',
               '--identity-providers',
               'idp-1',
               '--policies',
@@ -93,8 +91,6 @@ describe('operator argument and help coverage', () => {
       parseOperatorArgs([
         'zero-trust',
         'configure',
-        '--account',
-        'account-1',
         '--identity-providers',
         'idp-1,idp-2',
         '--policies',
@@ -109,19 +105,33 @@ describe('operator argument and help coverage', () => {
       path: '/zero-trust/configure',
       tokenStdin: true,
       body: {
-        accountId: 'account-1',
         identityProviderIds: ['idp-1', 'idp-2'],
         policyIds: ['policy-1', 'policy-2'],
         existingProjects: 'public',
         protectNewProjects: true,
       },
     });
-    expect(parseOperatorArgs(['zero-trust', 'project-enable', 'project/id'])).toMatchObject({
+    expect(parseOperatorArgs(['zero-trust', 'project-protect', 'project/id'])).toMatchObject({
       path: '/zero-trust/projects/project%2Fid',
       body: { protected: true },
     });
-    expect(parseOperatorArgs(['zero-trust', 'project-disable', 'project/id'])).toMatchObject({
+    expect(parseOperatorArgs(['zero-trust', 'project-public', 'project/id'])).toMatchObject({
       body: { protected: false },
+    });
+    // Reconfiguring an enabled installation omits the existing-project choice.
+    const reconfigure = parseOperatorArgs([
+      'zero-trust',
+      'configure',
+      '--identity-providers',
+      'idp-1',
+      '--policies',
+      'policy-1',
+      '--token-stdin',
+    ]);
+    expect(reconfigure.body).toEqual({
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: false,
     });
     expect(() =>
       parseOperatorArgs([
@@ -129,6 +139,28 @@ describe('operator argument and help coverage', () => {
         'configure',
         '--account',
         'account-1',
+        '--identity-providers',
+        'idp-1',
+        '--policies',
+        'policy-1',
+        '--token-stdin',
+      ]),
+    ).toThrow("Unknown flag '--account'");
+    expect(parseOperatorArgs(['zero-trust', 'status'])).toMatchObject({
+      method: 'GET',
+      path: '/zero-trust',
+      query: {},
+      body: {},
+    });
+    expect(parseOperatorArgs(['zero-trust', 'status', '--check'])).toMatchObject({
+      method: 'GET',
+      query: { check: 'true' },
+      body: {},
+    });
+    expect(() =>
+      parseOperatorArgs([
+        'zero-trust',
+        'configure',
         '--identity-providers',
         'idp-1',
         '--policies',
@@ -141,8 +173,6 @@ describe('operator argument and help coverage', () => {
       parseOperatorArgs([
         'zero-trust',
         'configure',
-        '--account',
-        'account-1',
         '--identity-providers',
         'idp-1',
         '--policies',

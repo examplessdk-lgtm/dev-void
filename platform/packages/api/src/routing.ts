@@ -98,10 +98,11 @@ export type RoutingSuspensionUpdate =
 
 /**
  * Resolve a routing undo without overwriting a later authoritative mutation.
- * Exact matches restore directly. Suspension and Zero Trust rewrites still
- * belong to the attempted deployment, so restore its prior route while carrying
- * the newest protection metadata. Any other change (including deletion) wins
- * and suppresses the stale undo.
+ * Exact matches restore directly. A suspension-only rewrite still belongs to
+ * the attempted deployment, so restore its prior route while carrying the
+ * newest `suspended` marker. A Zero Trust rewrite does not block the undo
+ * either; callers set `zeroTrust` on the restored route from PostgreSQL.
+ * Any other change (including deletion) wins and suppresses the stale undo.
  */
 export function resolveRoutingUndo(
   current: string | null,
@@ -117,15 +118,12 @@ export function resolveRoutingUndo(
   try {
     const currentEntry = JSON.parse(current) as Record<string, unknown>;
     const writtenEntry = JSON.parse(written) as Record<string, unknown>;
-    const protectionFields = ['suspended', 'zeroTrust'] as const;
-    const currentProtection: Record<string, unknown> = {};
-    for (const field of protectionFields) {
-      if (Object.hasOwn(currentEntry, field)) {
-        currentProtection[field] = currentEntry[field];
-      }
-      delete currentEntry[field];
-      delete writtenEntry[field];
-    }
+    const hasCurrentSuspension = Object.hasOwn(currentEntry, 'suspended');
+    const currentSuspension = currentEntry.suspended;
+    delete currentEntry.suspended;
+    delete writtenEntry.suspended;
+    delete currentEntry.zeroTrust;
+    delete writtenEntry.zeroTrust;
     if (JSON.stringify(currentEntry) !== JSON.stringify(writtenEntry)) {
       return { restore: false, value: null };
     }
@@ -133,12 +131,10 @@ export function resolveRoutingUndo(
       return { restore: true, value: null };
     }
     const restoredEntry = JSON.parse(previous) as Record<string, unknown>;
-    for (const field of protectionFields) {
-      if (Object.hasOwn(currentProtection, field)) {
-        restoredEntry[field] = currentProtection[field];
-      } else {
-        delete restoredEntry[field];
-      }
+    if (hasCurrentSuspension) {
+      restoredEntry.suspended = currentSuspension;
+    } else {
+      delete restoredEntry.suspended;
     }
     return { restore: true, value: JSON.stringify(restoredEntry) };
   } catch {

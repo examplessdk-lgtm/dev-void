@@ -117,14 +117,14 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Transfer project ownership to another registered user',
     path: '/projects/:id/owner',
     positional: ['id', 'userId'],
-    usage: ['void platform project owner <project-id> <user-id> [options]'],
     method: 'POST',
   },
   {
     group: 'zero-trust',
     action: 'status',
-    description: 'Inspect platform Zero Trust configuration, health, and project state counts',
+    description: 'Inspect saved platform Zero Trust configuration and project state counts',
     path: '/zero-trust',
+    booleans: ['check'],
   },
   {
     group: 'zero-trust',
@@ -132,10 +132,9 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Configure and reconcile project Zero Trust protection',
     path: '/zero-trust/configure',
     values: {
-      account: 'Cloudflare account ID',
       'identity-providers': 'Comma-separated Access identity provider IDs',
       policies: 'Comma-separated reusable Access policy IDs',
-      'existing-projects': 'Initial state: protected or public',
+      'existing-projects': 'When enabling: protect existing projects or keep them public',
     },
     booleans: ['token-stdin', 'protect-new-projects'],
     method: 'POST',
@@ -163,7 +162,7 @@ export const operatorCommands: Array<OperatorCommand> = [
   },
   {
     group: 'zero-trust',
-    action: 'project-enable',
+    action: 'project-protect',
     description: 'Protect one project, overriding the platform default',
     path: '/zero-trust/projects/:id',
     positional: ['id'],
@@ -171,7 +170,7 @@ export const operatorCommands: Array<OperatorCommand> = [
   },
   {
     group: 'zero-trust',
-    action: 'project-disable',
+    action: 'project-public',
     description: 'Make one project public, overriding the platform default',
     path: '/zero-trust/projects/:id',
     positional: ['id'],
@@ -727,7 +726,6 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     if (!parsed.tokenStdin) {
       throw new Error('platform: zero-trust configure requires --token-stdin.');
     }
-    const accountId = values.account;
     const identityProviderIds = values['identity-providers']
       ?.split(',')
       .map((entry) => entry.trim())
@@ -737,24 +735,34 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
       .map((entry) => entry.trim())
       .filter(Boolean);
     const existingProjects = values['existing-projects'];
-    if (!accountId || !identityProviderIds?.length || !policyIds?.length || !existingProjects) {
+    if (!identityProviderIds?.length || !policyIds?.length) {
       throw new Error(
-        'platform: zero-trust configure requires --account, --identity-providers, --policies, and --existing-projects.',
+        'platform: zero-trust configure requires --identity-providers and --policies.',
       );
     }
-    if (existingProjects !== 'protected' && existingProjects !== 'public') {
+    // Required only when enabling; the platform rejects it once enabled.
+    if (
+      existingProjects !== undefined &&
+      existingProjects !== 'protected' &&
+      existingProjects !== 'public'
+    ) {
       throw new Error('platform: --existing-projects must be protected or public.');
     }
     parsed.body = {
-      accountId,
       identityProviderIds,
       policyIds,
-      existingProjects,
+      ...(existingProjects ? { existingProjects } : {}),
       protectNewProjects: flags.has('protect-new-projects'),
     };
-  } else if (group === 'zero-trust' && action === 'project-enable') {
+  } else if (group === 'zero-trust' && action === 'status') {
+    // A GET carries its options in the query string.
+    delete parsed.body.check;
+    if (flags.has('check')) {
+      parsed.query.check = 'true';
+    }
+  } else if (group === 'zero-trust' && action === 'project-protect') {
     parsed.body.protected = true;
-  } else if (group === 'zero-trust' && action === 'project-disable') {
+  } else if (group === 'zero-trust' && action === 'project-public') {
     parsed.body.protected = false;
   }
   return parsed;

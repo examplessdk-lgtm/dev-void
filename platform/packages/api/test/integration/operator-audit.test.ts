@@ -109,7 +109,6 @@ test('previews Zero Trust configuration without returning or auditing the API to
   const secret = 'access-management-secret';
   const res = await request('/zero-trust/configure', {
     dryRun: true,
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: secret,
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],

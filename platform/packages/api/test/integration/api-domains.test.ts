@@ -229,7 +229,7 @@ describe('POST /projects/:id/domains', () => {
       project_id: project.id,
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     await env.db.insert(domains).values(
       Array.from({ length: 99 }, (_, index) => ({
@@ -1856,7 +1856,6 @@ describe('scheduled() — stale pending domain janitor', () => {
     } as ApiEnv['Bindings'];
 
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],

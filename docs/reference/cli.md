@@ -289,8 +289,8 @@ Inspect or override protection for a project on a Void platform:
 
 ```sh
 void project zero-trust status [--project <slug>]
-void project zero-trust enable [--project <slug>]
-void project zero-trust disable [--project <slug>]
+void project zero-trust protect [--project <slug>]
+void project zero-trust public [--project <slug>]
 void project zero-trust reconcile [--project <slug>]
 ```
 
@@ -298,7 +298,7 @@ Project selection follows `--project`, then `VOID_PROJECT`, then the linked
 project.
 
 Readers can inspect the state. The owner or a project administrator can protect
-the project, make it public, or repair drift. `disable` creates a Void-managed
+the project, make it public, or repair drift. `public` creates a Void-managed
 Access bypass; it does not change the platform default for future projects.
 These commands do not apply to direct Cloudflare deployments.
 
@@ -610,12 +610,11 @@ Search matches a project's slug, ID, or owner's login. `show` includes resources
 Configure the installation-wide Cloudflare Access policy and project overrides:
 
 ```sh
-void platform zero-trust status
+void platform zero-trust status [--check]
 printf '%s' "$ACCESS_API_TOKEN" | void platform zero-trust configure \
-  --account <account-id> \
   --identity-providers <id[,id...]> \
   --policies <id[,id...]> \
-  --existing-projects <protected|public> \
+  [--existing-projects <protected|public>] \
   --protect-new-projects \
   --token-stdin \
   --yes
@@ -623,19 +622,21 @@ void platform zero-trust reconcile
 void platform zero-trust disable
 
 void platform zero-trust project-status <project-id>
-void platform zero-trust project-enable <project-id>
-void platform zero-trust project-disable <project-id>
+void platform zero-trust project-protect <project-id>
+void platform zero-trust project-public <project-id>
 void platform zero-trust project-reconcile <project-id>
 ```
 
 Mutations support `--plan`, `--yes`, and `--timeout`; use `--plan` instead of
 `--yes` to inspect this change without applying it. The Access management token
-is accepted only on standard input and is encrypted at rest. Omit
-`--protect-new-projects` to make new projects public by default. The
-`--existing-projects` choice is applied only when Zero Trust is first enabled or
-re-enabled; later configuration changes preserve project opt-outs. If status
-remains `configuring` or `disabling`, run `void platform zero-trust reconcile`
-to resume the saved operation. Protected projects support up to 100 custom
+is accepted only on standard input and is encrypted at rest. Zero Trust uses
+the Cloudflare account that hosts the platform. Omit `--protect-new-projects`
+to make new projects public by default. `--existing-projects` is required when
+Zero Trust is enabled and rejected once it is enabled; later configuration
+changes preserve project opt-outs. `status` reports saved state; `--check`
+also compares it with Cloudflare Access. If status remains `configuring` or
+`disabling`, run `void platform zero-trust reconcile` to resume the saved
+operation. Protected projects support up to 100 custom
 domains.
 
 The token needs **Access: Apps and Policies Write** plus **Access:

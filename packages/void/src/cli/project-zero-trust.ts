@@ -1,13 +1,17 @@
 import { intro, log, note, outro } from '@clack/prompts';
 import { getToken } from './auth.ts';
-import { PlatformClient, type ProjectZeroTrustResponse } from './client.ts';
+import {
+  PlatformClient,
+  type ProjectZeroTrustResponse,
+  type ProjectZeroTrustUpdateResponse,
+} from './client.ts';
 import { cliTitle, sanitizeTerminalText } from './output.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 
 type ZeroTrustArgs = Extract<ProjectArgs, { subcommand: 'zero-trust' }> & {
-  action: 'status' | 'enable' | 'disable' | 'reconcile';
+  action: 'status' | 'protect' | 'public' | 'reconcile';
 };
 
 async function resolveTarget(root: string, args: ZeroTrustArgs) {
@@ -33,7 +37,7 @@ async function resolveTarget(root: string, args: ZeroTrustArgs) {
 
 function statusLines(result: ProjectZeroTrustResponse): string {
   const project = result.project;
-  const platformStatus = sanitizeTerminalText(result.platformStatus ?? 'unknown');
+  const platformStatus = sanitizeTerminalText(result.platformStatus);
   const unavailableMessage =
     result.platformStatus === 'invalid_configuration'
       ? 'The platform Zero Trust configuration is invalid. Ask a platform administrator to review it.'
@@ -49,9 +53,10 @@ function statusLines(result: ProjectZeroTrustResponse): string {
   return [
     `Available: ${result.available ? 'yes' : 'no'}`,
     `Platform: ${platformStatus}`,
-    ...(typeof result.protectNewProjects === 'boolean'
-      ? [`Default for new projects: ${result.protectNewProjects ? 'protected' : 'public'}`]
-      : []),
+    ...(result.platformStatus === 'not_configured' ||
+    result.platformStatus === 'invalid_configuration'
+      ? []
+      : [`Default for new projects: ${result.protectNewProjects ? 'protected' : 'public'}`]),
     `Desired: ${project ? (project.desired_protected ? 'protected' : 'public') : 'not initialized'}`,
     `Effective: ${project ? (project.effective_protected ? 'protected' : 'public') : 'not initialized'}`,
     `State: ${project?.state ?? 'not initialized'}`,
@@ -69,26 +74,24 @@ export async function runProjectZeroTrustCommand(root: string, args: ZeroTrustAr
     outro(`${slug} Zero Trust status`);
     return;
   }
-  let result: ProjectZeroTrustResponse;
-  if (args.action === 'reconcile') {
-    result = await client.reconcileProjectZeroTrust(projectId);
-  } else {
-    result = await client.setProjectZeroTrust(projectId, args.action === 'enable');
-  }
-  if (result.project?.last_error) {
+  const result: ProjectZeroTrustUpdateResponse =
+    args.action === 'reconcile'
+      ? await client.reconcileProjectZeroTrust(projectId)
+      : await client.setProjectZeroTrust(projectId, args.action === 'protect');
+  if (result.project.last_error) {
     log.warn(sanitizeTerminalText(result.project.last_error));
   }
-  if (result.project?.state === 'reconciling') {
+  if (result.project.state === 'reconciling') {
     outro(
       `${slug} Zero Trust update is still in progress. Run \`void project zero-trust reconcile\` to continue, or wait for scheduled maintenance.`,
     );
     return;
   }
   outro(
-    args.action === 'enable'
+    args.action === 'protect'
       ? `${slug} is protected by Zero Trust.`
-      : args.action === 'disable'
+      : args.action === 'public'
         ? `${slug} is public.`
-        : `${slug} Zero Trust reconciled (${result.project?.state ?? 'unknown'}).`,
+        : `${slug} Zero Trust reconciled (${result.project.state}).`,
   );
 }

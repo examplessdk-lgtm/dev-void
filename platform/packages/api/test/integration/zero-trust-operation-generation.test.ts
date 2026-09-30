@@ -14,6 +14,7 @@ import { domains, platformSettings } from '../../src/schema.ts';
 import {
   readZeroTrustConfigurationStrict,
   type ZeroTrustConfigureInput,
+  zeroTrustConfigurationStatus,
 } from '../../src/zero-trust/configuration.ts';
 import {
   configurePlatformZeroTrust,
@@ -64,7 +65,6 @@ function configurationInput(
   overrides: Partial<ZeroTrustConfigureInput> = {},
 ): ZeroTrustConfigureInput {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'old-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -180,7 +180,7 @@ describe('Zero Trust operation completion', () => {
         await disablePlatformZeroTrust(platform, env.db);
         expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
           desired_protected: false,
-          state: 'public',
+          status: 'ready',
         });
       }
       return originalTransaction(...args);
@@ -194,11 +194,11 @@ describe('Zero Trust operation completion', () => {
     }
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
       enabled: false,
-      status: 'ready',
+      lastError: null,
     });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: false,
-      state: 'public',
+      status: 'ready',
     });
     expect(await resolveProjectZeroTrustRouting(env.db, project.id)).toBeNull();
   });
@@ -239,7 +239,7 @@ describe('Zero Trust operation completion', () => {
     await reconcilePlatformZeroTrust(platform, env.db);
     const updated = (await readZeroTrustConfigurationStrict(env.db))!;
     const routing = JSON.parse((await env.ROUTING.get(project.slug))!);
-    expect(updated.status).toBe('ready');
+    expect(zeroTrustConfigurationStatus(updated)).toBe('ready');
     expect(updated.wildcardApplication!.audience).not.toBe(
       oldConfiguration.wildcardApplication!.audience,
     );
@@ -270,7 +270,7 @@ describe('Zero Trust operation completion', () => {
         newProjectId = project.id;
         operationId = (await readZeroTrustConfigurationStrict(env.db))!.operation!.id;
         expect(await initializeNewProjectZeroTrust(platform, env.db, project.id)).toMatchObject({
-          state: 'reconciling',
+          status: 'reconciling',
           effective_protected: false,
           reconciled_operation: null,
         });
@@ -283,7 +283,8 @@ describe('Zero Trust operation completion', () => {
     await reconcilePlatformZeroTrust(platform, env.db);
     const updated = (await readZeroTrustConfigurationStrict(env.db))!;
     expect(await getProjectZeroTrustState(env.db, newProjectId)).toMatchObject({
-      state: 'protected',
+      status: 'ready',
+      desired_protected: true,
       effective_protected: true,
       reconciled_operation: operationId,
     });
@@ -348,12 +349,12 @@ describe('Zero Trust operation completion', () => {
     }
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
       enabled: true,
-      status: 'ready',
+      lastError: null,
     });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
       protected_application_id: freshApplicationId,
     });
     expect(cloudflare.applications.has(freshApplicationId!)).toBe(true);
@@ -405,7 +406,8 @@ describe('Zero Trust operation completion', () => {
           ? reconcilePlatformZeroTrust(platform, env.db)
           : disablePlatformZeroTrust(platform, env.db);
       await entered.promise;
-      const nextInput = configurationInput({
+      // The pending operation does not choose existing-project protection.
+      const { existingProjects: _existingProjects, ...nextInput } = configurationInput({
         identityProviderIds: ['idp-2'],
         policyIds: ['policy-2'],
       });
@@ -435,15 +437,21 @@ describe('Zero Trust operation completion', () => {
       const result = await contender;
       transactionSpy.mockRestore();
       if (result.error) {
+        // After a completed disable, configuring enables again and needs the
+        // existing-project choice that the pending operation did not allow.
         expect(String(result.error)).toMatch(
-          /already running|operation.*changed|operation.*pending/,
+          /already running|operation.*changed|operation.*pending|choice for existing projects/,
         );
-        await configurePlatformZeroTrust(platform, env.db, nextInput);
+        await configurePlatformZeroTrust(
+          platform,
+          env.db,
+          method === 'DELETE' ? { ...nextInput, existingProjects: 'protected' } : nextInput,
+        );
       }
       const current = (await readZeroTrustConfigurationStrict(env.db))!;
       expect(current).toMatchObject({
         enabled: true,
-        status: 'ready',
+        lastError: null,
         identityProviderIds: ['idp-2'],
         policyIds: ['policy-2'],
       });

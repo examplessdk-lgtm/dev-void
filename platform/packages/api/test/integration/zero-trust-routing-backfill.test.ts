@@ -187,7 +187,6 @@ describe('legacy routing owner backfill', () => {
       const cloudflare = accessApi();
       vi.stubGlobal('fetch', cloudflare.fetcher);
       await configurePlatformZeroTrust(bindings(), env.db, {
-        accountId: env.CF_ACCOUNT_ID,
         apiToken: 'test-token',
         identityProviderIds: ['idp-1'],
         policyIds: ['policy-1'],
@@ -198,7 +197,7 @@ describe('legacy routing owner backfill', () => {
       if (protectedState === 'pending') {
         await env.db
           .update(projectZeroTrust)
-          .set({ state: 'reconciling', effective_protected: false })
+          .set({ status: 'reconciling', effective_protected: false })
           .where(eq(projectZeroTrust.project_id, project.id));
       }
       const stale = JSON.stringify({
@@ -274,7 +273,6 @@ describe('legacy routing owner backfill', () => {
       const cloudflare = accessApi();
       vi.stubGlobal('fetch', cloudflare.fetcher);
       await configurePlatformZeroTrust(bindings(), env.db, {
-        accountId: env.CF_ACCOUNT_ID,
         apiToken: 'test-token',
         identityProviderIds: ['idp-1'],
         policyIds: ['policy-1'],
@@ -340,7 +338,8 @@ describe('legacy routing owner backfill', () => {
       expect(settledBeforeRelease).toBe(false);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         effective_protected: true,
-        state: 'protected',
+        status: 'ready',
+        desired_protected: true,
       });
       for (const key of [project.slug, domainKey]) {
         const route = JSON.parse((await env.ROUTING.get(key))!);

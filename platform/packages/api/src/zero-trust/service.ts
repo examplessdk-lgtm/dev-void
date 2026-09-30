@@ -43,6 +43,7 @@ import {
   type ZeroTrustConfigureInput,
   type ZeroTrustOperation,
   parseZeroTrustApplicationTarget,
+  zeroTrustConfigurationStatus,
   readZeroTrustConfigurationStrict,
   redactedZeroTrustConfiguration,
   replaceZeroTrustConfiguration,
@@ -74,7 +75,7 @@ function requiredRoutingBudget(row: Pick<ProjectZeroTrust, 'desired_protected'>)
 /** Explain a deploy or rollback rejected because project routing cannot carry protection yet. */
 export function zeroTrustNotReadyMessage(error: unknown): string | null {
   if (error instanceof ZeroTrustConfigurationError) {
-    return 'The platform Zero Trust configuration is invalid. Ask a platform administrator to review it, then retry.';
+    return 'The platform Zero Trust configuration is invalid. Ask a platform administrator to repair it, then retry.';
   }
   if (error instanceof ZeroTrustUnavailableError) {
     return `Zero Trust protection for this project is not ready: ${error.message} Run \`void project zero-trust status\` for details. A project admin or owner can run \`void project zero-trust reconcile\` once the platform is ready, then retry.`;
@@ -140,7 +141,7 @@ async function putProjectState(
       project_id: projectId,
       desired_protected: values.desired_protected ?? values.effective_protected ?? false,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
       ...values,
     })
     .onConflictDoUpdate({
@@ -163,16 +164,23 @@ export async function getProjectZeroTrustState(
   return row ?? null;
 }
 
+export type ProjectZeroTrustState = 'public' | 'protected' | 'reconciling' | 'error';
+
+/** The one label shown to users: a settled row reports its protection. */
+export function projectZeroTrustState(
+  row: Pick<ProjectZeroTrust, 'status' | 'desired_protected'>,
+): ProjectZeroTrustState {
+  if (row.status !== 'ready') {
+    return row.status;
+  }
+  return row.desired_protected ? 'protected' : 'public';
+}
+
 type PublicProjectZeroTrustState = Readonly<
   Pick<
     ProjectZeroTrust,
-    | 'project_id'
-    | 'desired_protected'
-    | 'effective_protected'
-    | 'state'
-    | 'last_error'
-    | 'updated_at'
-  >
+    'project_id' | 'desired_protected' | 'effective_protected' | 'last_error' | 'updated_at'
+  > & { state: ProjectZeroTrustState }
 >;
 
 export function publicProjectZeroTrustState(
@@ -185,9 +193,27 @@ export function publicProjectZeroTrustState(
     project_id: row.project_id,
     desired_protected: row.desired_protected,
     effective_protected: row.effective_protected,
-    state: row.state,
+    state: projectZeroTrustState(row),
     last_error: row.last_error,
     updated_at: row.updated_at,
+  };
+}
+
+/** The user-facing project shape plus the handles only platform operators see. */
+export function operatorProjectZeroTrustState(row: ProjectZeroTrust | null) {
+  if (!row) {
+    return null;
+  }
+  return {
+    ...publicProjectZeroTrustState(row)!,
+    bypass_application_id: row.bypass_application_id,
+    bypass_application_name: row.bypass_application_name,
+    protected_application_id: row.protected_application_id,
+    protected_application_name: row.protected_application_name,
+    protected_application_audience: row.protected_application_audience,
+    routing_cursor: row.routing_cursor,
+    reconciled_operation: row.reconciled_operation,
+    created_at: row.created_at,
   };
 }
 
@@ -195,8 +221,7 @@ export function publicProjectZeroTrustState(
 export function projectZeroTrustAvailable(configuration: ZeroTrustConfiguration | null): boolean {
   return (
     !!configuration?.enabled &&
-    configuration.status === 'ready' &&
-    !configuration.operation &&
+    zeroTrustConfigurationStatus(configuration) === 'ready' &&
     !!configuration.wildcardApplication
   );
 }
@@ -314,7 +339,7 @@ async function readProjectZeroTrustRouting(
     if (
       configuration.enabled &&
       configuration.operation?.kind !== 'disable' &&
-      (!row.bypass_application_id || (!allowReconcilingPublic && row.state !== 'public'))
+      (!row.bypass_application_id || (!allowReconcilingPublic && row.status !== 'ready'))
     ) {
       throw new ZeroTrustUnavailableError('The project public exception is still reconciling.');
     }
@@ -333,10 +358,21 @@ async function readProjectZeroTrustRouting(
   return routingProtection(configuration, protectedApplication);
 }
 
-/** Read current protection inside the caller's project-row transaction before publishing KV. */
+/** An empty audience set makes dispatch deny every request until reconciliation finishes. */
+const DENY_ALL_ROUTING: ProjectZeroTrustRouting = { teamDomain: '', audiences: [] };
+
+/**
+ * Read current protection inside the caller's project-row transaction before
+ * publishing KV. When protection is not settled:
+ * - a desired or effectively protected project gets the deny-all marker;
+ * - a public project with a durable bypass stays public;
+ * - anything else is unknown. A writer that can retry later (`retryable`)
+ *   gets the error; every other writer must publish now and gets deny-all.
+ */
 export async function resolveProjectZeroTrustRoutingForPublication(
   db: DbOrTx,
   projectId: string,
+  options: Readonly<{ retryable?: boolean }> = {},
 ): Promise<ProjectZeroTrustRouting | null> {
   try {
     // A durable bypass makes PUBLIC intent safe even while paginated cleanup
@@ -345,14 +381,22 @@ export async function resolveProjectZeroTrustRoutingForPublication(
     return await readProjectZeroTrustRouting(db, projectId, true);
   } catch (error) {
     if (
-      error instanceof ZeroTrustUnavailableError ||
-      error instanceof ZeroTrustConfigurationError
+      !(error instanceof ZeroTrustUnavailableError) &&
+      !(error instanceof ZeroTrustConfigurationError)
     ) {
-      // Metadata rewrites must remain possible during recovery. An empty
-      // audience set makes dispatch deny access until reconciliation finishes.
-      return { teamDomain: '', audiences: [] };
+      throw error;
     }
-    throw error;
+    const row = await getProjectZeroTrustState(db, projectId);
+    if (row && (row.desired_protected || row.effective_protected)) {
+      return DENY_ALL_ROUTING;
+    }
+    if (row?.bypass_application_id) {
+      return null;
+    }
+    if (options.retryable) {
+      throw error;
+    }
+    return DENY_ALL_ROUTING;
   }
 }
 
@@ -514,7 +558,7 @@ async function publishProjectZeroTrustRoutingLocked(
   const complete = projectDomains.length <= domainBudget;
   await putProjectState(db, project.id, {
     routing_cursor: complete ? null : (page.at(-1)?.hostname ?? cursor ?? ''),
-    ...(!complete ? { state: 'reconciling' as const } : {}),
+    ...(!complete ? { status: 'reconciling' as const } : {}),
   });
   return complete;
 }
@@ -522,7 +566,7 @@ async function publishProjectZeroTrustRoutingLocked(
 async function markProjectError(db: DbOrTx, projectId: string, error: unknown): Promise<void> {
   await db
     .update(projectZeroTrust)
-    .set({ state: 'error', last_error: errorMessage(error), updated_at: sql`now()` })
+    .set({ status: 'error', last_error: errorMessage(error), updated_at: sql`now()` })
     .where(eq(projectZeroTrust.project_id, projectId));
 }
 
@@ -530,36 +574,36 @@ async function markProjectError(db: DbOrTx, projectId: string, error: unknown): 
 async function markPendingProjectError(db: Db, projectId: string, error: unknown): Promise<void> {
   await db
     .update(projectZeroTrust)
-    .set({ state: 'error', last_error: errorMessage(error), updated_at: sql`now()` })
+    .set({ status: 'error', last_error: errorMessage(error), updated_at: sql`now()` })
     .where(
-      and(
-        eq(projectZeroTrust.project_id, projectId),
-        sql`${projectZeroTrust.state} IN ('reconciling', 'error')`,
-      ),
+      and(eq(projectZeroTrust.project_id, projectId), sql`${projectZeroTrust.status} <> 'ready'`),
     );
 }
 
+/** Every configuration write increments the revision, so it alone identifies a snapshot. */
 function sameConfiguration(
   expected: ZeroTrustConfiguration,
   current: ZeroTrustConfiguration | null,
 ): current is ZeroTrustConfiguration {
-  return (
-    current !== null &&
-    current.revision === expected.revision &&
-    current.status === expected.status &&
-    current.operation?.owner === expected.operation?.owner &&
-    current.wildcardApplication?.id === expected.wildcardApplication?.id
-  );
+  return current !== null && current.revision === expected.revision;
 }
 
-function operationCompletionKey(operation: ZeroTrustOperation): string {
-  return operation.id ?? `${operation.kind}:${operation.startedAt}`;
-}
-
-function completedProjectOperation(configuration: ZeroTrustConfiguration): string | null {
+/**
+ * The operation a reconciled row completes. A public row is complete once its
+ * bypass and routes are done, which the public-bypass phase already does. A
+ * protected row depends on the wildcard audience, so it completes only after
+ * the wildcard phase.
+ */
+function completedProjectOperation(
+  configuration: ZeroTrustConfiguration,
+  publicProject: boolean,
+): string | null {
   const operation = configuration.operation;
-  return operation?.phase === 'projects' && operation.kind !== 'disable'
-    ? operationCompletionKey(operation)
+  if (!operation || operation.kind === 'disable') {
+    return null;
+  }
+  return operation.phase === 'projects' || (publicProject && operation.phase === 'public-bypasses')
+    ? operation.id
     : null;
 }
 
@@ -619,11 +663,13 @@ async function checkpointProjectReconciliation(
     }
     const existing = await getProjectZeroTrustState(lockedDb, projectId);
     const desired =
-      options?.desiredProtection ?? existing?.desired_protected ?? configuration.protectNewProjects;
+      options?.desiredProtection ??
+      existing?.desired_protected ??
+      initialProjectProtection(configuration, project);
     const destinations = await projectDestinations(env, lockedDb, project, desired);
     const values: Partial<typeof projectZeroTrust.$inferInsert> = {
       desired_protected: desired,
-      state: 'reconciling',
+      status: 'reconciling',
       last_error: null,
       ...(existing?.desired_protected !== desired ? { routing_cursor: null } : {}),
     };
@@ -634,6 +680,52 @@ async function checkpointProjectReconciliation(
       values.protected_application_name = await applicationName(env, `protected-${project.id}`);
     }
     return putProjectState(lockedDb, projectId, values);
+  });
+}
+
+/**
+ * Public transition, under the project lock: ensure the bypass, publish every
+ * route without enforcement, mark the project effectively public, then delete
+ * its protected custom-domain application. It needs no wildcard application.
+ */
+async function reconcilePublicProjectLocked(
+  env: ApiEnv['Bindings'],
+  lockedDb: Db,
+  project: Project,
+  current: ProjectZeroTrust,
+  platformDestinations: ReadonlyArray<string>,
+  client: ZeroTrustCloudflareClient,
+  configuration: ZeroTrustConfiguration,
+  routingBudget?: RoutingBudget,
+): Promise<ProjectZeroTrust> {
+  if (!current.bypass_application_name) {
+    throw new Error('The project public application checkpoint is missing.');
+  }
+  const bypass = await client.ensureApplication(
+    {
+      name: current.bypass_application_name,
+      destinations: platformDestinations,
+      policies: bypassPolicy('Void project is public'),
+    },
+    projectApplicationReference(current, 'bypass'),
+  );
+  await updateProjectState(lockedDb, project.id, {
+    bypass_application_id: bypass.id,
+    bypass_application_name: bypass.name,
+  });
+  if (!(await publishProjectZeroTrustRoutingLocked(env, lockedDb, project, null, routingBudget))) {
+    return (await getProjectZeroTrustState(lockedDb, project.id))!;
+  }
+  const row = await updateProjectState(lockedDb, project.id, { effective_protected: false });
+  await client.deleteApplication(row.protected_application_id, row.protected_application_name);
+  return updateProjectState(lockedDb, project.id, {
+    effective_protected: false,
+    status: 'ready',
+    reconciled_operation: completedProjectOperation(configuration, true),
+    protected_application_id: null,
+    protected_application_name: null,
+    protected_application_audience: null,
+    last_error: null,
   });
 }
 
@@ -669,43 +761,16 @@ async function reconcileProjectZeroTrustLocked(
 
   try {
     if (!row.desired_protected) {
-      if (!row.bypass_application_name) {
-        throw new Error('The project public application checkpoint is missing.');
-      }
-      const bypass = await client.ensureApplication(
-        {
-          name: row.bypass_application_name,
-          destinations: destinations.platform,
-          policies: bypassPolicy('Void project is public'),
-        },
-        projectApplicationReference(row, 'bypass'),
+      return await reconcilePublicProjectLocked(
+        env,
+        lockedDb,
+        project,
+        row,
+        destinations.platform,
+        client,
+        configuration,
+        options?.routingBudget,
       );
-      row = await updateProjectState(lockedDb, projectId, {
-        bypass_application_id: bypass.id,
-        bypass_application_name: bypass.name,
-      });
-      if (
-        !(await publishProjectZeroTrustRoutingLocked(
-          env,
-          lockedDb,
-          project,
-          null,
-          options?.routingBudget,
-        ))
-      ) {
-        return (await getProjectZeroTrustState(lockedDb, projectId))!;
-      }
-      row = await updateProjectState(lockedDb, projectId, { effective_protected: false });
-      await client.deleteApplication(row.protected_application_id, row.protected_application_name);
-      return updateProjectState(lockedDb, projectId, {
-        effective_protected: false,
-        state: 'public',
-        reconciled_operation: completedProjectOperation(configuration),
-        protected_application_id: null,
-        protected_application_name: null,
-        protected_application_audience: null,
-        last_error: null,
-      });
     }
 
     let protectedApplication: ManagedAccessApplication | null = null;
@@ -752,8 +817,8 @@ async function reconcileProjectZeroTrustLocked(
     await client.deleteApplication(row.bypass_application_id, row.bypass_application_name);
     return updateProjectState(lockedDb, projectId, {
       effective_protected: true,
-      state: 'protected',
-      reconciled_operation: completedProjectOperation(configuration),
+      status: 'ready',
+      reconciled_operation: completedProjectOperation(configuration, false),
       bypass_application_id: null,
       bypass_application_name: null,
       last_error: null,
@@ -812,7 +877,7 @@ async function ensureProjectBypassLocked(
   lockedDb: Db,
   projectId: string,
   client: ZeroTrustCloudflareClient,
-  state: 'public' | 'reconciling',
+  status: 'ready' | 'reconciling',
 ): Promise<ProjectZeroTrust | null> {
   const project = await getProject(lockedDb, projectId);
   const row = await getProjectZeroTrustState(lockedDb, projectId);
@@ -836,18 +901,24 @@ async function ensureProjectBypassLocked(
     bypass_application_name: bypass.name,
     desired_protected: false,
     effective_protected: false,
-    state,
+    status,
     last_error: null,
   });
 }
 
-async function ensurePublicProjectBeforeWildcard(
+/**
+ * Public-bypass phase: finish one public project before the wildcard changes.
+ * The row then counts as done for this operation, so the projects phase does
+ * not repeat its Access and routing writes.
+ */
+async function reconcilePublicProjectForOperation(
   env: ApiEnv['Bindings'],
   db: Db,
   projectId: string,
   configuration: ZeroTrustConfiguration,
   client: ZeroTrustCloudflareClient,
-): Promise<ProjectZeroTrust | null> {
+  routingBudget: RoutingBudget,
+): Promise<ProjectZeroTrust> {
   await checkpointProjectReconciliation(env, db, projectId, { configuration });
   let operationError: unknown;
   const result = await db.transaction(async (tx) => {
@@ -857,8 +928,26 @@ async function ensurePublicProjectBeforeWildcard(
     if (!sameConfiguration(configuration, await readZeroTrustConfigurationStrict(lockedDb))) {
       throw new ZeroTrustUnavailableError('The Zero Trust operation was replaced.');
     }
+    const project = await getProject(lockedDb, projectId);
+    const row = await getProjectZeroTrustState(lockedDb, projectId);
+    if (!project || project.status === 'deleting' || !row) {
+      throw new ZeroTrustUnavailableError('Project is unavailable.');
+    }
+    if (row.desired_protected) {
+      return row;
+    }
     try {
-      return await ensureProjectBypassLocked(env, lockedDb, projectId, client, 'public');
+      const destinations = await projectDestinations(env, lockedDb, project, false);
+      return await reconcilePublicProjectLocked(
+        env,
+        lockedDb,
+        project,
+        row,
+        destinations.platform,
+        client,
+        configuration,
+        routingBudget,
+      );
     } catch (error) {
       await markProjectError(lockedDb, projectId, error);
       operationError = error;
@@ -868,7 +957,24 @@ async function ensurePublicProjectBeforeWildcard(
   if (operationError !== undefined) {
     throw operationError;
   }
-  return result;
+  return result!;
+}
+
+/**
+ * Initial protection for a project that has no row yet. Projects that existed
+ * when an enabling configure operation started follow its existing-project
+ * choice; every later project follows the default for new projects.
+ */
+function initialProjectProtection(
+  configuration: ZeroTrustConfiguration,
+  project: Pick<Project, 'created_at'>,
+): boolean {
+  const operation = configuration.operation;
+  return operation?.kind === 'configure' &&
+    operation.existingProjects !== null &&
+    Date.parse(project.created_at) <= Date.parse(operation.startedAt)
+    ? operation.existingProjects === 'protected'
+    : configuration.protectNewProjects;
 }
 
 /** A running configure operation may start before the project exists or be seeded later. */
@@ -908,21 +1014,15 @@ export async function initializeNewProjectZeroTrust(
     if (existing) {
       return { row: existing, created: false };
     }
-    const operation = saved.operation;
-    const existingSelection =
-      operation?.kind === 'configure' &&
-      operation.existingProjects !== null &&
-      Date.parse(project.created_at) <= Date.parse(operation.startedAt)
-        ? operation.existingProjects
-        : null;
-    const desired = existingSelection
-      ? existingSelection === 'protected'
-      : saved.protectNewProjects;
+    const desired = initialProjectProtection(saved, project);
+    // A new protected project has no route or custom domain yet, so the
+    // wildcard alone settles it when no operation is running.
+    const settled = desired && !!saved.wildcardApplication && !saved.operation;
     return {
       row: await putProjectState(lockedDb, projectId, {
         desired_protected: desired,
-        effective_protected: desired && !!saved.wildcardApplication && !operation,
-        state: desired && saved.wildcardApplication && !operation ? 'protected' : 'reconciling',
+        effective_protected: settled,
+        status: settled ? 'ready' : 'reconciling',
         ...(!desired
           ? { bypass_application_name: await applicationName(env, `public-${project.id}`) }
           : {}),
@@ -953,7 +1053,7 @@ export async function initializeNewProjectZeroTrust(
         lockedDb,
         projectId,
         await clientForConfiguration(env, saved),
-        saved.operation ? 'reconciling' : 'public',
+        saved.operation ? 'reconciling' : 'ready',
       );
     } catch (error) {
       await markProjectError(lockedDb, projectId, error);
@@ -1001,7 +1101,7 @@ async function seedCandidates(
 
 /** Marks a project this operation skipped after a project-specific failure. */
 function skippedOperationKey(operation: ZeroTrustOperation): string {
-  return `skipped:${operationCompletionKey(operation)}`;
+  return `skipped:${operation.id}`;
 }
 
 /**
@@ -1026,7 +1126,7 @@ async function publicBypassCandidates(
         notSkippedByOperation(operation),
         or(
           isNull(projectZeroTrust.bypass_application_id),
-          sql`${projectZeroTrust.state} <> 'public'`,
+          sql`${projectZeroTrust.status} <> 'ready'`,
           ...(operation.applicationTarget
             ? [lt(projectZeroTrust.updated_at, operation.startedAt)]
             : []),
@@ -1049,8 +1149,8 @@ async function reconciliationCandidates(
         notSkippedByOperation(operation),
         or(
           isNull(projectZeroTrust.project_id),
-          sql`${projectZeroTrust.reconciled_operation} IS DISTINCT FROM ${operationCompletionKey(operation)}`,
-          sql`${projectZeroTrust.state} IN ('reconciling', 'error')`,
+          sql`${projectZeroTrust.reconciled_operation} IS DISTINCT FROM ${operation.id}`,
+          sql`${projectZeroTrust.status} <> 'ready'`,
           sql`${projectZeroTrust.desired_protected} <> ${projectZeroTrust.effective_protected}`,
         ),
       ),
@@ -1071,9 +1171,10 @@ async function disableCandidates(
         notSkippedByOperation(operation),
         or(
           isNull(projectZeroTrust.project_id),
-          sql`${projectZeroTrust.reconciled_operation} IS DISTINCT FROM ${operationCompletionKey(operation)}`,
+          sql`${projectZeroTrust.reconciled_operation} IS DISTINCT FROM ${operation.id}`,
           eq(projectZeroTrust.effective_protected, true),
-          sql`${projectZeroTrust.state} <> 'public'`,
+          eq(projectZeroTrust.desired_protected, true),
+          sql`${projectZeroTrust.status} <> 'ready'`,
           sql`${projectZeroTrust.protected_application_id} IS NOT NULL`,
           sql`${projectZeroTrust.protected_application_name} IS NOT NULL`,
         ),
@@ -1122,7 +1223,7 @@ async function setInitialProjectProtection(
     }
     await putProjectState(lockedDb, projectId, {
       desired_protected: protectedProject,
-      state: 'reconciling',
+      status: 'reconciling',
       last_error: null,
     });
   });
@@ -1146,13 +1247,17 @@ async function operationStartedAt(db: DbOrTx): Promise<string> {
   return result.rows[0]!.startedAt;
 }
 
+/**
+ * Claim the installation operation under the exclusive lock. A resumed
+ * operation keeps its id; a new one gets a fresh id from the claim callback.
+ */
 async function claimConfiguration(
   db: Db,
   claim: (
     current: ZeroTrustConfiguration | null,
     owner: string,
     startedAt: string,
-  ) => ZeroTrustConfiguration,
+  ) => ZeroTrustConfiguration | Promise<ZeroTrustConfiguration>,
 ): Promise<ZeroTrustConfiguration> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('zero-trust:configuration'))`);
@@ -1160,20 +1265,7 @@ async function claimConfiguration(
     if (current?.operation && leaseActive(current.operation)) {
       throw new ZeroTrustUnavailableError('Another Zero Trust operation is already running.');
     }
-    const claimed = claim(current, crypto.randomUUID(), await operationStartedAt(tx));
-    const configuration: ZeroTrustConfiguration = claimed.operation
-      ? {
-          ...claimed,
-          operation: {
-            ...claimed.operation,
-            id:
-              current?.operation?.kind === claimed.operation.kind &&
-              current.operation.startedAt === claimed.operation.startedAt
-                ? (current.operation.id ?? crypto.randomUUID())
-                : crypto.randomUUID(),
-          },
-        }
-      : claimed;
+    const configuration = await claim(current, crypto.randomUUID(), await operationStartedAt(tx));
     await writeZeroTrustConfiguration(tx, configuration);
     return configuration;
   });
@@ -1241,7 +1333,6 @@ async function failOperation(
   error: unknown,
 ): Promise<void> {
   await patchConfiguration(db, current, {
-    status: 'error',
     lastError: errorMessage(error),
     operation: current.operation
       ? { ...current.operation, owner: null, leaseExpiresAt: null }
@@ -1293,16 +1384,17 @@ async function skipFailedProject(
       .values({
         project_id: projectId,
         desired_protected:
-          configuration.operation.kind !== 'disable' && configuration.protectNewProjects,
+          configuration.operation.kind !== 'disable' &&
+          initialProjectProtection(configuration, project),
         effective_protected: false,
-        state: 'error',
+        status: 'error',
         reconciled_operation: reconciledOperation,
         last_error: lastError,
       })
       .onConflictDoUpdate({
         target: projectZeroTrust.project_id,
         set: {
-          state: 'error',
+          status: 'error',
           reconciled_operation: reconciledOperation,
           last_error: lastError,
           updated_at: sql`now()`,
@@ -1380,7 +1472,6 @@ async function completeConfigureOperation(
       await env.ROUTING.put(PLATFORM_APPLICATION_KEY, JSON.stringify(application));
     }
     return patchConfiguration(tx as unknown as Db, saved, {
-      status: 'ready',
       operation: null,
       lastError: null,
     });
@@ -1431,7 +1522,6 @@ export async function activatePlatformApplication(
     const configuration: ZeroTrustConfiguration = {
       ...current,
       revision: current.revision + 1,
-      status: 'configuring',
       operation: {
         ...(current.operation ?? {
           id: crypto.randomUUID(),
@@ -1496,7 +1586,7 @@ async function runConfigureOperation(
             await setInitialProjectProtection(
               db,
               candidate.project.id,
-              operation.existingProjects === 'protected',
+              initialProjectProtection(configuration, candidate.project),
               configuration,
             );
             projectsProcessed += 1;
@@ -1513,15 +1603,10 @@ async function runConfigureOperation(
           MAX_PROJECTS_PER_RUN - projectsProcessed,
         );
         for (const candidate of missing) {
-          const isInitial =
-            operation.existingProjects !== null &&
-            Date.parse(candidate.project.created_at) <= Date.parse(operation.startedAt);
           await setInitialProjectProtection(
             db,
             candidate.project.id,
-            isInitial
-              ? operation.existingProjects === 'protected'
-              : configuration.protectNewProjects,
+            initialProjectProtection(configuration, candidate.project),
             configuration,
           );
           projectsProcessed += 1;
@@ -1549,13 +1634,14 @@ async function runConfigureOperation(
         for (const candidate of candidates) {
           const batch = configuration;
           await runOperationProjectStep(db, batch, candidate.project.id, () =>
-            batch.wildcardApplication
-              ? reconcileProjectZeroTrust(env, db, candidate.project.id, {
-                  configuration: batch,
-                  client,
-                  routingBudget,
-                })
-              : ensurePublicProjectBeforeWildcard(env, db, candidate.project.id, batch, client),
+            reconcilePublicProjectForOperation(
+              env,
+              db,
+              candidate.project.id,
+              batch,
+              client,
+              routingBudget,
+            ),
           );
           projectsProcessed += 1;
           configuration = await heartbeatConfiguration(db, configuration);
@@ -1571,9 +1657,6 @@ async function runConfigureOperation(
       }
 
       if (operation.phase === 'wildcard') {
-        if (!configuration.wildcardApplicationName) {
-          throw new Error('The platform Access application checkpoint is missing.');
-        }
         const name = configuration.wildcardApplicationName;
         configuration = await withZeroTrustOperationLock(db, configuration, async (lockedDb) => {
           const wildcard = await client.ensureApplication(
@@ -1673,7 +1756,7 @@ async function disableProjectZeroTrust(
       // their existing protection until their own disable batch starts.
       await putProjectState(lockedDb, projectId, {
         desired_protected: false,
-        state: 'reconciling',
+        status: 'reconciling',
         // Replay older partial checkpoints that still recorded protected intent;
         // readers may have restored protection to keys before their saved cursor.
         ...(row?.desired_protected ? { routing_cursor: null } : {}),
@@ -1692,8 +1775,8 @@ async function disableProjectZeroTrust(
       await putProjectState(lockedDb, projectId, {
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
-        reconciled_operation: operationCompletionKey(saved.operation),
+        status: 'ready',
+        reconciled_operation: saved.operation.id,
         // Public exceptions must outlive the wildcard, including when a later
         // project or wildcard deletion fails. The final phase clears these handles.
         protected_application_id: null,
@@ -1734,7 +1817,7 @@ async function deleteProjectZeroTrustBypass(
       await updateProjectState(tx, projectId, {
         bypass_application_id: null,
         bypass_application_name: null,
-        state: 'public',
+        status: 'ready',
         last_error: null,
       });
     } catch (error) {
@@ -1802,7 +1885,7 @@ async function runDisableOperation(
           }
           await client.deleteApplication(
             configuration.wildcardApplication?.id,
-            configuration.wildcardApplicationName ?? configuration.wildcardApplication?.name,
+            configuration.wildcardApplicationName,
           );
           return advanceOperation(lockedDb, configuration, 'bypass-delete', {
             enabled: false,
@@ -1839,7 +1922,6 @@ async function runDisableOperation(
             return configuration;
           }
           return patchConfiguration(lockedDb, configuration, {
-            status: 'ready',
             operation: null,
             lastError: null,
           });
@@ -1896,17 +1978,48 @@ function assertWildcardExcludesControlPlane(
   }
 }
 
+/**
+ * The existing-project choice applies only when a configure starts from
+ * disabled, or when it resumes such an operation with a replacement token.
+ */
+export function assertExistingProjectsChoice(
+  current: ZeroTrustConfiguration | null,
+  input: ZeroTrustConfigureInput,
+): void {
+  const operation = current?.operation;
+  if (operation) {
+    if (
+      input.existingProjects === undefined ||
+      input.existingProjects === operation.existingProjects
+    ) {
+      return;
+    }
+    throw new ZeroTrustUnavailableError(
+      operation.existingProjects === null
+        ? 'The pending Zero Trust operation does not choose protection for existing projects. Configure again without an existing-projects choice.'
+        : `The pending Zero Trust operation keeps existing projects ${operation.existingProjects}. Configure again with that choice or without one.`,
+    );
+  }
+  if (!current?.enabled && input.existingProjects === undefined) {
+    throw new ZeroTrustUnavailableError(
+      'Enabling Zero Trust needs a choice for existing projects: protected or public.',
+    );
+  }
+  if (current?.enabled && input.existingProjects !== undefined) {
+    throw new ZeroTrustUnavailableError(
+      'Zero Trust is already enabled, so existing projects keep their protection. Omit the existing-projects choice, and change individual projects with `void platform zero-trust project-protect` or `project-public`.',
+    );
+  }
+}
+
 export async function configurePlatformZeroTrust(
   env: ApiEnv['Bindings'],
   db: Db,
   input: ZeroTrustConfigureInput,
   options: Readonly<{ requestUrl?: string }> = {},
 ): Promise<ReturnType<typeof redactedZeroTrustConfiguration>> {
-  if (input.accountId !== env.CF_ACCOUNT_ID) {
-    throw new ZeroTrustUnavailableError(
-      'Zero Trust must use the Cloudflare account that owns this Void installation.',
-    );
-  }
+  // Zero Trust always uses the Cloudflare account that owns the installation.
+  const accountId = env.CF_ACCOUNT_ID;
   env = await resolveZeroTrustApplicationEnvironment(env, db);
   const destinations = zeroTrustWildcardDestinations(readPlatformApplication(env));
   if (destinations.length === 0) {
@@ -1915,13 +2028,15 @@ export async function configurePlatformZeroTrust(
     );
   }
   const previous = await readZeroTrustConfigurationStrict(db);
+  // Fail before any Cloudflare call; the claim below checks again under the lock.
+  assertExistingProjectsChoice(previous, input);
   const replacingDisableCredential = previous?.operation?.kind === 'disable';
   // A disable removes the wildcard, so a replacement credential for it must
   // not be blocked by hostnames that moved under the wildcard afterwards.
   if (!replacingDisableCredential) {
     assertWildcardExcludesControlPlane(env, destinations, options.requestUrl);
   }
-  const client = new ZeroTrustCloudflareClient(input.accountId, input.apiToken);
+  const client = new ZeroTrustCloudflareClient(accountId, input.apiToken);
   // Teardown needs the account credential, not the IdPs/policies being removed.
   // Those selections may themselves have disappeared while cleanup was pending.
   const selection = replacingDisableCredential
@@ -1933,8 +2048,7 @@ export async function configurePlatformZeroTrust(
     ZERO_TRUST_CREDENTIAL_ID,
     input.apiToken,
   );
-  const generatedApplicationName = await applicationName(env, 'project-zero-trust');
-  const configuration = await claimConfiguration(db, (current, owner, startedAt) => {
+  const configuration = await claimConfiguration(db, async (current, owner, startedAt) => {
     if (
       replacingDisableCredential &&
       (current?.revision !== previous.revision || current.operation?.kind !== 'disable')
@@ -1943,25 +2057,23 @@ export async function configurePlatformZeroTrust(
         'The saved Zero Trust operation changed. Retry configuration.',
       );
     }
+    assertExistingProjectsChoice(current, input);
     if (current?.operation) {
       const sameIds = (left: ReadonlyArray<string>, right: ReadonlyArray<string>) =>
         left.length === right.length && left.every((id) => right.includes(id));
       if (
-        current.accountId !== input.accountId ||
+        current.accountId !== accountId ||
         current.protectNewProjects !== input.protectNewProjects ||
         !sameIds(current.identityProviderIds, input.identityProviderIds) ||
-        !sameIds(current.policyIds, input.policyIds) ||
-        (current.operation.existingProjects !== null &&
-          current.operation.existingProjects !== input.existingProjects)
+        !sameIds(current.policyIds, input.policyIds)
       ) {
         throw new ZeroTrustUnavailableError(
-          'A saved Zero Trust operation is pending. To replace its API token, configure again with the same account, identity providers, policies, and project selections.',
+          'A saved Zero Trust operation is pending. To replace its API token, configure again with the same identity providers, policies, and project selections.',
         );
       }
       return {
         ...current,
         revision: current.revision + 1,
-        status: current.operation.kind === 'disable' ? 'disabling' : 'configuring',
         credential,
         teamDomain: selection.teamDomain,
         operation: { ...current.operation, owner, leaseExpiresAt: leaseExpiresAt() },
@@ -1969,31 +2081,30 @@ export async function configurePlatformZeroTrust(
         updatedAt: new Date().toISOString(),
       };
     }
-    const enabling = !current?.enabled;
     const now = new Date().toISOString();
     return {
       version: 1,
       revision: (current?.revision ?? 0) + 1,
-      status: 'configuring',
       enabled: current?.enabled ?? false,
       protectNewProjects: input.protectNewProjects,
-      accountId: input.accountId,
+      accountId,
       teamDomain: selection.teamDomain,
       identityProviderIds: [...input.identityProviderIds],
       policyIds: [...input.policyIds],
       credential,
+      // The name is kept for the installation's lifetime so a retry or a later
+      // re-enable can recover the same wildcard application.
       wildcardApplicationName:
-        current?.wildcardApplicationName ??
-        current?.wildcardApplication?.name ??
-        generatedApplicationName,
+        current?.wildcardApplicationName ?? (await applicationName(env, 'project-zero-trust')),
       wildcardApplication: current?.wildcardApplication ?? null,
       operation: {
+        id: crypto.randomUUID(),
         kind: 'configure',
         phase: 'seed',
         owner,
         leaseExpiresAt: leaseExpiresAt(),
         startedAt,
-        existingProjects: enabling ? input.existingProjects : null,
+        existingProjects: input.existingProjects ?? null,
       },
       lastError: null,
       updatedAt: now,
@@ -2016,7 +2127,6 @@ async function claimReconcileOperation(db: Db): Promise<ZeroTrustConfiguration> 
       return {
         ...current,
         revision: current.revision + 1,
-        status: current.operation.kind === 'disable' ? 'disabling' : 'configuring',
         operation: {
           ...current.operation,
           owner,
@@ -2032,8 +2142,8 @@ async function claimReconcileOperation(db: Db): Promise<ZeroTrustConfiguration> 
     return {
       ...current,
       revision: current.revision + 1,
-      status: 'configuring',
       operation: {
+        id: crypto.randomUUID(),
         kind: 'reconcile',
         phase: 'seed',
         owner,
@@ -2078,11 +2188,11 @@ export async function disablePlatformZeroTrust(
     return {
       ...current,
       revision: current.revision + 1,
-      status: 'disabling',
       operation:
         current.operation?.kind === 'disable'
           ? { ...current.operation, owner, leaseExpiresAt: leaseExpiresAt() }
           : {
+              id: crypto.randomUUID(),
               kind: 'disable',
               phase: 'seed',
               owner,
@@ -2097,20 +2207,35 @@ export async function disablePlatformZeroTrust(
   return redactedZeroTrustConfiguration(await runDisableOperation(env, db, configuration));
 }
 
-export async function zeroTrustStatus(env: ApiEnv['Bindings'], db: Db) {
-  const projectCounts = await db
+/**
+ * Installation status from saved state. `check` also asks Cloudflare whether
+ * the account, selections, and wildcard application still match; it makes
+ * several Access API calls, so reads leave it off unless an operator asks.
+ */
+export async function zeroTrustStatus(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  options: Readonly<{ check?: boolean }> = {},
+) {
+  const groups = await db
     .select({
       desiredProtected: projectZeroTrust.desired_protected,
       effectiveProtected: projectZeroTrust.effective_protected,
-      state: projectZeroTrust.state,
+      status: projectZeroTrust.status,
       count: sql<number>`count(*)::int`,
     })
     .from(projectZeroTrust)
     .groupBy(
       projectZeroTrust.desired_protected,
       projectZeroTrust.effective_protected,
-      projectZeroTrust.state,
+      projectZeroTrust.status,
     );
+  const projectCounts = groups.map(({ desiredProtected, effectiveProtected, status, count }) => ({
+    desiredProtected,
+    effectiveProtected,
+    state: projectZeroTrustState({ status, desired_protected: desiredProtected }),
+    count,
+  }));
   let configuration: ZeroTrustConfiguration | null;
   try {
     configuration = await readZeroTrustConfigurationStrict(db);
@@ -2123,12 +2248,15 @@ export async function zeroTrustStatus(env: ApiEnv['Bindings'], db: Db) {
       enabled: false,
       status: 'invalid_configuration' as const,
       lastError: error.message,
+      checked: false,
       live: null,
       projects: projectCounts,
     };
   }
+  const checked =
+    !!options.check && !!configuration?.enabled && !!configuration.wildcardApplication;
   let live: { present: boolean; drifted: boolean } | null = null;
-  if (configuration?.enabled && configuration.wildcardApplication) {
+  if (checked && configuration?.wildcardApplication) {
     try {
       env = await resolveZeroTrustApplicationEnvironment(env, db, configuration);
       const client = await clientForConfiguration(env, configuration);
@@ -2137,7 +2265,7 @@ export async function zeroTrustStatus(env: ApiEnv['Bindings'], db: Db) {
         policyIds: configuration.policyIds,
       });
       live = await client.inspectApplication(configuration.wildcardApplication, {
-        name: configuration.wildcardApplicationName ?? configuration.wildcardApplication.name,
+        name: configuration.wildcardApplicationName,
         destinations: zeroTrustWildcardDestinations(readPlatformApplication(env)),
         allowedIdentityProviderIds: configuration.identityProviderIds,
         policies: reusablePolicyReferences(configuration.policyIds),
@@ -2152,6 +2280,7 @@ export async function zeroTrustStatus(env: ApiEnv['Bindings'], db: Db) {
   }
   return {
     ...redactedZeroTrustConfiguration(configuration),
+    checked,
     live,
     projects: projectCounts,
   };
@@ -2227,7 +2356,7 @@ async function retireDisabledProjectZeroTrust(
     try {
       await putProjectState(lockedDb, projectId, {
         desired_protected: false,
-        state: 'reconciling',
+        status: 'reconciling',
         ...(row.desired_protected ? { routing_cursor: null } : {}),
       });
       if (
@@ -2242,7 +2371,7 @@ async function retireDisabledProjectZeroTrust(
       await updateProjectState(lockedDb, projectId, {
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         protected_application_id: null,
         protected_application_name: null,
         protected_application_audience: null,
@@ -2271,7 +2400,8 @@ async function retirePendingDisabledProjectZeroTrust(
       and(
         eq(projects.status, 'active'),
         or(
-          sql`${projectZeroTrust.state} <> 'public'`,
+          sql`${projectZeroTrust.status} <> 'ready'`,
+          eq(projectZeroTrust.desired_protected, true),
           eq(projectZeroTrust.effective_protected, true),
           sql`${projectZeroTrust.protected_application_id} IS NOT NULL`,
           sql`${projectZeroTrust.protected_application_name} IS NOT NULL`,
@@ -2320,17 +2450,14 @@ export async function reconcilePendingProjectZeroTrust(
     await retirePendingDisabledProjectZeroTrust(env, db, configuration, limit);
     return;
   }
-  if (configuration.status !== 'ready') {
+  if (zeroTrustConfigurationStatus(configuration) !== 'ready') {
     return;
   }
   const rows = await candidateQuery(db)
     .where(
       and(
         eq(projects.status, 'active'),
-        or(
-          isNull(projectZeroTrust.project_id),
-          sql`${projectZeroTrust.state} IN ('reconciling', 'error')`,
-        ),
+        or(isNull(projectZeroTrust.project_id), sql`${projectZeroTrust.status} <> 'ready'`),
       ),
     )
     .orderBy(projectZeroTrust.updated_at, projects.created_at)
@@ -2384,7 +2511,7 @@ export async function resumePlatformZeroTrustOperation(
   if (
     !configuration?.operation ||
     leaseActive(configuration.operation) ||
-    (configuration.status === 'error' && !options.retryFailed)
+    (zeroTrustConfigurationStatus(configuration) === 'error' && !options.retryFailed)
   ) {
     return false;
   }

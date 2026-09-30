@@ -15,7 +15,6 @@ The same workflow is available from the operator CLI:
 ```sh
 void platform zero-trust status
 printf '%s' "$ACCESS_API_TOKEN" | void platform zero-trust configure \
-  --account <account-id> \
   --identity-providers <id[,id...]> \
   --policies <id[,id...]> \
   --existing-projects public \
@@ -24,7 +23,11 @@ printf '%s' "$ACCESS_API_TOKEN" | void platform zero-trust configure \
   --yes
 ```
 
-Use `--plan` instead of `--yes` to inspect the change without applying it.
+Use `--plan` instead of `--yes` to inspect the change without applying it. Zero Trust always uses the Cloudflare account that hosts the platform.
+
+`--existing-projects` is required when you enable Zero Trust and rejected once it is enabled. Later configuration changes keep each project's protection; use the project overrides below to change one project.
+
+`void platform zero-trust status` shows the saved state. Add `--check` to also compare it with Cloudflare Access; the administrator UI offers the same check.
 
 Use an API token scoped to the platform account with **Access: Apps and Policies Write** and **Access: Organizations, Identity Providers, and Groups Read**. Void validates the selected identity providers and reusable policies before publishing protection. It does not add these permissions to the platform runtime token.
 
@@ -36,10 +39,12 @@ Owners and project administrators may opt a project out or back in:
 
 ```sh
 void project zero-trust status
-void project zero-trust disable
-void project zero-trust enable
+void project zero-trust public
+void project zero-trust protect
 void project zero-trust reconcile
 ```
+
+Installation administrators can do the same with `void platform zero-trust project-status|project-protect|project-public|project-reconcile <project-id>`.
 
 Deploys and rollbacks wait until the project's protection is settled. If one is refused, run `void project zero-trust reconcile` and retry.
 
@@ -51,6 +56,6 @@ Cloudflare's default Access application limit is 500 per account. Void uses one 
 
 A project never becomes public by mistake while a change is in progress. A platform operation skips a project that fails and finishes the rest; the project keeps its error and is retried by hourly maintenance. A project that was already protected stays protected until then; a project being newly protected keeps its previous access until the retry succeeds. Use `void platform zero-trust reconcile` after repairing permissions or account quota. Large operations may remain `configuring` or `disabling` after one request; the same reconcile command or scheduled maintenance resumes the saved operation. Disabling removes Void-managed applications and makes all projects public.
 
-If the saved Cloudflare API token expires or is revoked during an operation, repeat `void platform zero-trust configure --token-stdin` with a replacement token and the same account, identity providers, policies, and project selections. Void resumes the saved operation, including an interrupted disable. Finish that operation before changing these settings.
+If the saved Cloudflare API token expires or is revoked during an operation, repeat `void platform zero-trust configure --token-stdin` with a replacement token and the same identity providers, policies, and project selections; omit `--existing-projects` unless the pending operation is the one that enables Zero Trust. Void resumes the saved operation, including an interrupted disable. Finish that operation before changing these settings.
 
 If a selected identity provider or policy has been deleted, use `void platform zero-trust disable` to abandon the pending setup and remove its managed applications. This makes projects public. Once cleanup finishes, configure Zero Trust again with the replacement selections.

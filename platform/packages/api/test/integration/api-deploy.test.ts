@@ -578,7 +578,6 @@ describe('POST /projects/:id/deploy', () => {
       const configuration = (audience: string, revision: number) => ({
         version: 1,
         revision,
-        status: 'ready',
         enabled: true,
         protectNewProjects: true,
         accountId: env.CF_ACCOUNT_ID,
@@ -586,6 +585,7 @@ describe('POST /projects/:id/deploy', () => {
         identityProviderIds: ['idp-1'],
         policyIds: ['policy-1'],
         credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+        wildcardApplicationName: 'void-test-projects',
         wildcardApplication: {
           id: 'access-wildcard',
           name: 'void-test-projects',
@@ -605,7 +605,7 @@ describe('POST /projects/:id/deploy', () => {
         project_id: project.id,
         desired_protected: true,
         effective_protected: true,
-        state: 'protected',
+        status: 'ready',
       });
 
       let protectionCommitted = false;

@@ -205,7 +205,6 @@ describe('deployment compensation during Zero Trust changes', () => {
         PLATFORM_INSTALLATION_ID: 'installation-test',
       } as unknown as ApiEnv['Bindings'];
       await configurePlatformZeroTrust(platform, env.db, {
-        accountId: env.CF_ACCOUNT_ID,
         apiToken: 'test-token',
         identityProviderIds: ['idp-1'],
         policyIds: ['policy-1'],

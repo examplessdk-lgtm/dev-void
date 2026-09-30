@@ -8,6 +8,7 @@ import {
 import {
   ZeroTrustConfigurationError,
   readZeroTrustConfigurationStrict,
+  zeroTrustConfigurationStatus,
 } from '../zero-trust/configuration.ts';
 import {
   getProjectZeroTrustState,
@@ -15,6 +16,7 @@ import {
   publicProjectZeroTrustState,
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
+  zeroTrustNotReadyMessage,
   ZeroTrustUnavailableError,
 } from '../zero-trust/service.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
@@ -38,6 +40,13 @@ function zeroTrustErrorResponse(
         message: `${error.message} Run \`void project zero-trust status\` for details.`,
       },
       error.status,
+    );
+  }
+  if (error instanceof ZeroTrustConfigurationError) {
+    // Only a platform administrator can repair the saved configuration.
+    return context.json(
+      { error: 'zero trust configuration invalid', message: zeroTrustNotReadyMessage(error) },
+      409,
     );
   }
   console.error(`[zero-trust] ${failure}`, { projectId, error });
@@ -75,7 +84,9 @@ const app = new Hono<ApiEnv>()
       // Whether a project admin can change protection now, not merely whether
       // the installation has Zero Trust enabled.
       available: projectZeroTrustAvailable(configuration),
-      platformStatus: configuration?.status ?? 'not_configured',
+      platformStatus: configuration
+        ? zeroTrustConfigurationStatus(configuration)
+        : 'not_configured',
       protectNewProjects: configuration?.protectNewProjects ?? false,
       project: publicProjectZeroTrustState(state),
     });

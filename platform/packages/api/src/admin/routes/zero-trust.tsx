@@ -1,16 +1,12 @@
 import { Hono } from 'hono';
 import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
-import { OperatorError } from '../../operator/common.ts';
-import {
-  ZeroTrustConfigurationError,
-  normalizeZeroTrustConfigureInput,
-} from '../../zero-trust/configuration.ts';
+import { zeroTrustOperatorError } from '../../operator/zero-trust-routes.ts';
+import { normalizeZeroTrustConfigureInput } from '../../zero-trust/configuration.ts';
 import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
   reconcilePlatformZeroTrust,
-  ZeroTrustUnavailableError,
 } from '../../zero-trust/service.ts';
 import { renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
@@ -35,18 +31,7 @@ function values(value: FormDataEntryValue | undefined): ReadonlyArray<string> {
 }
 
 function adminError(error: unknown): never {
-  if (error instanceof ZeroTrustConfigurationError) {
-    throw new OperatorError(400, error.message, 'invalid_zero_trust_configuration');
-  }
-  if (error instanceof ZeroTrustUnavailableError) {
-    throw new OperatorError(error.status, error.message, 'zero_trust_unavailable');
-  }
-  console.error('[zero-trust] admin operation failed', error);
-  throw new OperatorError(
-    502,
-    'Cloudflare Zero Trust reconciliation failed. Review the saved status and retry.',
-    'zero_trust_reconciliation_failed',
-  );
+  throw zeroTrustOperatorError(error, 'admin operation failed');
 }
 
 app.get('/', (context) => renderFateListPage(context, 'zeroTrust'));
@@ -56,7 +41,6 @@ app.post('/configure', async (context) => {
   let input;
   try {
     input = normalizeZeroTrustConfigureInput({
-      accountId: form.accountId,
       apiToken: form.apiToken,
       identityProviderIds: values(form.identityProviderIds),
       policyIds: values(form.policyIds),

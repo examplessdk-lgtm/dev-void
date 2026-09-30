@@ -127,7 +127,7 @@ describe('parseProjectArgs', () => {
         action: '',
         projectSlug: '',
       });
-      for (const action of ['status', 'enable', 'disable', 'reconcile'] as const) {
+      for (const action of ['status', 'protect', 'public', 'reconcile'] as const) {
         expect(parseProjectArgs(['zero-trust', action, '--project', 'my-app'])).toEqual({
           subcommand: 'zero-trust',
           action,
@@ -137,9 +137,11 @@ describe('parseProjectArgs', () => {
     });
 
     it('rejects unknown operations and malformed project selection', () => {
-      expect(() => parseProjectArgs(['zero-trust', 'remove'])).toThrow(
-        'status|enable|disable|reconcile',
-      );
+      for (const action of ['remove', 'enable', 'disable']) {
+        expect(() => parseProjectArgs(['zero-trust', action])).toThrow(
+          'status|protect|public|reconcile',
+        );
+      }
       expect(() => parseProjectArgs(['zero-trust', 'status', '--project'])).toThrow(
         '--project requires a value',
       );

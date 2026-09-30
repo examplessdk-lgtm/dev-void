@@ -58,7 +58,6 @@ function bindings(): ApiEnv['Bindings'] {
 
 function configurationInput() {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'test-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -210,7 +209,7 @@ describe('authoritative Zero Trust routing publication', () => {
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         desired_protected: protectedProject,
         effective_protected: protectedProject,
-        state: protectedProject ? 'protected' : 'public',
+        status: 'ready',
       });
       await reconcilePendingProjectZeroTrust(platform, env.db);
       expect((await getDomain(env.db, 'domain-stale-route'))!.status).toBe('active');
@@ -240,7 +239,7 @@ describe('authoritative Zero Trust routing publication', () => {
       await configurePlatformZeroTrust(bindings(), env.db, configurationInput());
       await env.db
         .update(projectZeroTrust)
-        .set({ state, effective_protected: false })
+        .set({ status: state, effective_protected: false })
         .where(eq(projectZeroTrust.project_id, project.id));
 
       await expect(resolveProjectZeroTrustRouting(env.db, project.id)).rejects.toThrow(

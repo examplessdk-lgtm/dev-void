@@ -1883,7 +1883,7 @@ describe('POST /projects', () => {
     expect(body).toMatchObject({
       slug: 'warning-app',
       warnings: [
-        'Project created, but its Zero Trust protection could not be initialized. Reconcile the project Zero Trust status before deployment.',
+        'Project created, but its Zero Trust protection is not set up yet, so deploys will wait. Void retries within an hour. To retry now, a project owner or admin can run `void project zero-trust reconcile`; if that reports the platform is not ready, ask a platform administrator.',
       ],
     });
     expect(body).not.toHaveProperty('warning');

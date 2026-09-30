@@ -3,14 +3,17 @@ import { getProject, type Db } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import {
   ZeroTrustConfigurationError,
+  ZeroTrustSavedConfigurationError,
   normalizeZeroTrustConfigureInput,
   readZeroTrustConfigurationStrict,
   redactedZeroTrustConfiguration,
 } from '../zero-trust/configuration.ts';
 import {
+  assertExistingProjectsChoice,
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
   getProjectZeroTrustState,
+  operatorProjectZeroTrustState,
   reconcilePlatformZeroTrust,
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
@@ -31,23 +34,36 @@ async function requireOperatorProject(db: Db, projectId: string, active: boolean
   }
 }
 
-function operationError(error: unknown): never {
+/** Map Zero Trust failures for operators; the admin UI uses the same mapping. */
+export function zeroTrustOperatorError(error: unknown, failure: string): OperatorError {
+  if (error instanceof ZeroTrustSavedConfigurationError) {
+    // Stored state, not the request, is wrong; retrying the request cannot help.
+    return new OperatorError(500, error.message, 'invalid_saved_zero_trust_configuration');
+  }
   if (error instanceof ZeroTrustConfigurationError) {
-    throw new OperatorError(400, error.message, 'invalid_zero_trust_configuration');
+    return new OperatorError(400, error.message, 'invalid_zero_trust_configuration');
   }
   if (error instanceof ZeroTrustUnavailableError) {
-    throw new OperatorError(error.status, error.message, 'zero_trust_unavailable');
+    return new OperatorError(error.status, error.message, 'zero_trust_unavailable');
   }
-  console.error('[zero-trust] operator operation failed', error);
-  throw new OperatorError(
+  console.error(`[zero-trust] ${failure}`, error);
+  return new OperatorError(
     502,
     'Cloudflare Zero Trust reconciliation failed. Inspect the saved status before retrying.',
     'zero_trust_reconciliation_failed',
   );
 }
 
+function operationError(error: unknown): never {
+  throw zeroTrustOperatorError(error, 'operator operation failed');
+}
+
 zeroTrustOperatorRoutes.get('/zero-trust', async (context) =>
-  context.json(await zeroTrustStatus(context.env, context.get('db'))),
+  context.json(
+    await zeroTrustStatus(context.env, context.get('db'), {
+      check: context.req.query('check') === 'true',
+    }),
+  ),
 );
 
 zeroTrustOperatorRoutes.post('/zero-trust/configure', async (context) => {
@@ -59,13 +75,22 @@ zeroTrustOperatorRoutes.post('/zero-trust/configure', async (context) => {
     operationError(error);
   }
   if (dryRun(body)) {
+    // A preview must fail wherever the real configure would reject the choice.
+    try {
+      assertExistingProjectsChoice(
+        await readZeroTrustConfigurationStrict(context.get('db')),
+        input,
+      );
+    } catch (error) {
+      operationError(error);
+    }
     return context.json(
       preview('zero-trust.configure', 'platform', {
-        accountId: input.accountId,
+        accountId: context.env.CF_ACCOUNT_ID,
         identityProviderIds: input.identityProviderIds,
         policyIds: input.policyIds,
         protectNewProjects: input.protectNewProjects,
-        existingProjects: input.existingProjects,
+        existingProjects: input.existingProjects ?? null,
         credential: 'replace-encrypted',
       }),
     );
@@ -129,7 +154,9 @@ zeroTrustOperatorRoutes.get('/zero-trust/projects/:id', async (context) => {
   const projectId = context.req.param('id');
   await requireOperatorProject(context.get('db'), projectId, false);
   return context.json({
-    project: await getProjectZeroTrustState(context.get('db'), projectId),
+    project: operatorProjectZeroTrustState(
+      await getProjectZeroTrustState(context.get('db'), projectId),
+    ),
   });
 });
 
@@ -143,7 +170,9 @@ zeroTrustOperatorRoutes.post('/zero-trust/projects/:id', async (context) => {
   if (dryRun(body)) {
     return context.json(
       preview('zero-trust.project', projectId, {
-        previous: await getProjectZeroTrustState(context.get('db'), projectId),
+        previous: operatorProjectZeroTrustState(
+          await getProjectZeroTrustState(context.get('db'), projectId),
+        ),
         protected: body.protected,
       }),
     );
@@ -151,11 +180,13 @@ zeroTrustOperatorRoutes.post('/zero-trust/projects/:id', async (context) => {
   try {
     return context.json({
       ok: true,
-      project: await setProjectZeroTrustProtection(
-        context.env,
-        context.get('db'),
-        projectId,
-        body.protected,
+      project: operatorProjectZeroTrustState(
+        await setProjectZeroTrustProtection(
+          context.env,
+          context.get('db'),
+          projectId,
+          body.protected,
+        ),
       ),
     });
   } catch (error) {
@@ -170,14 +201,18 @@ zeroTrustOperatorRoutes.post('/zero-trust/projects/:id/reconcile', async (contex
   if (dryRun(body)) {
     return context.json(
       preview('zero-trust.project-reconcile', projectId, {
-        project: await getProjectZeroTrustState(context.get('db'), projectId),
+        project: operatorProjectZeroTrustState(
+          await getProjectZeroTrustState(context.get('db'), projectId),
+        ),
       }),
     );
   }
   try {
     return context.json({
       ok: true,
-      project: await reconcileProjectZeroTrust(context.env, context.get('db'), projectId),
+      project: operatorProjectZeroTrustState(
+        await reconcileProjectZeroTrust(context.env, context.get('db'), projectId),
+      ),
     });
   } catch (error) {
     operationError(error);

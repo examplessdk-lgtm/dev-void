@@ -1,5 +1,5 @@
 {
-  "id": "9b9ab510-2762-45ee-84ae-046e05b40558",
+  "id": "bf6f46b9-6b39-4a16-9eae-71897ae0882b",
   "prevId": "ec460f71-8fd5-46e0-885b-e60c769eff80",
   "version": "7",
   "dialect": "postgresql",
@@ -4102,12 +4102,12 @@
           "notNull": true,
           "default": false
         },
-        "state": {
-          "name": "state",
+        "status": {
+          "name": "status",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'public'"
+          "default": "'ready'"
         },
         "bypass_application_id": {
           "name": "bypass_application_id",
@@ -4173,11 +4173,11 @@
         }
       },
       "indexes": {
-        "idx_project_zero_trust_state": {
-          "name": "idx_project_zero_trust_state",
+        "idx_project_zero_trust_status": {
+          "name": "idx_project_zero_trust_status",
           "columns": [
             {
-              "expression": "state",
+              "expression": "status",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4210,17 +4210,13 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "project_zero_trust_state_check": {
-          "name": "project_zero_trust_state_check",
-          "value": "\"project_zero_trust\".\"state\" IN ('public', 'protected', 'reconciling', 'error')"
+        "project_zero_trust_status_check": {
+          "name": "project_zero_trust_status_check",
+          "value": "\"project_zero_trust\".\"status\" IN ('ready', 'reconciling', 'error')"
         },
-        "project_zero_trust_public_check": {
-          "name": "project_zero_trust_public_check",
-          "value": "\"project_zero_trust\".\"state\" <> 'public' OR (\"project_zero_trust\".\"desired_protected\" = false AND \"project_zero_trust\".\"effective_protected\" = false)"
-        },
-        "project_zero_trust_protected_check": {
-          "name": "project_zero_trust_protected_check",
-          "value": "\"project_zero_trust\".\"state\" <> 'protected' OR (\"project_zero_trust\".\"desired_protected\" = true AND \"project_zero_trust\".\"effective_protected\" = true)"
+        "project_zero_trust_ready_check": {
+          "name": "project_zero_trust_ready_check",
+          "value": "\"project_zero_trust\".\"status\" <> 'ready' OR \"project_zero_trust\".\"desired_protected\" = \"project_zero_trust\".\"effective_protected\""
         }
       },
       "isRLSEnabled": false

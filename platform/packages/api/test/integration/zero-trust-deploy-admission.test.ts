@@ -58,7 +58,6 @@ async function seedReconcilingProtection(projectId: string): Promise<void> {
     value: {
       version: 1,
       revision: 1,
-      status: 'ready',
       enabled: true,
       protectNewProjects: true,
       accountId: env.CF_ACCOUNT_ID,
@@ -66,6 +65,7 @@ async function seedReconcilingProtection(projectId: string): Promise<void> {
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
       credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+      wildcardApplicationName: 'void-test-projects',
       wildcardApplication: {
         id: 'access-wildcard',
         name: 'void-test-projects',
@@ -81,7 +81,7 @@ async function seedReconcilingProtection(projectId: string): Promise<void> {
     project_id: projectId,
     desired_protected: true,
     effective_protected: false,
-    state: 'reconciling',
+    status: 'reconciling',
   });
 }
 

@@ -744,7 +744,7 @@ const app = new Hono<ApiEnv>()
         zeroTrust = await initializeNewProjectZeroTrust(context.env, context.get('db'), project.id);
       } catch (error) {
         zeroTrustWarning =
-          'Project created, but its Zero Trust protection could not be initialized. Reconcile the project Zero Trust status before deployment.';
+          'Project created, but its Zero Trust protection is not set up yet, so deploys will wait. Void retries within an hour. To retry now, a project owner or admin can run `void project zero-trust reconcile`; if that reports the platform is not ready, ask a platform administrator.';
         console.error('[zero-trust] new project initialization failed', {
           projectId: project.id,
           error,

@@ -156,7 +156,6 @@ async function fixture(type: RouteType, initiallyProtected: boolean) {
   await env.ROUTING.put(project.slug, route(source.id));
   await env.ROUTING.put(domainKey, route(source.id));
   await configurePlatformZeroTrust(bindings(), env.db, {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'test-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -253,7 +252,7 @@ describe('Zero Trust deployment route consistency', () => {
         stale.mockRestore();
       }
       expect(await env.ROUTING.get(project.slug)).toBe(committedRaw);
-      expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({ state: 'error' });
+      expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({ status: 'error' });
       await reconcileProjectZeroTrust(bindings(), env.db, project.id);
       await assertRoutes(project.slug, committed.id, true);
     },
@@ -286,13 +285,14 @@ describe('Zero Trust deployment route consistency', () => {
       expect(await env.ROUTING.get(key)).toBe(committedRaw);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         desired_protected: protectedAfter,
-        state: 'error',
+        status: 'error',
       });
       await reconcileProjectZeroTrust(bindings(), env.db, project.id);
       await assertRoutes(project.slug, committed.id, protectedAfter);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         effective_protected: protectedAfter,
-        state: protectedAfter ? 'protected' : 'public',
+        status: 'ready',
+        desired_protected: protectedAfter,
       });
     },
   );
@@ -326,7 +326,7 @@ describe('Zero Trust deployment route consistency', () => {
       if (staleSource) {
         expect(await env.ROUTING.get(project.slug)).toBe(candidateRaw);
         expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-          state: 'error',
+          status: 'error',
           desired_protected: true,
         });
         await reconcileProjectZeroTrust(bindings(), env.db, project.id);

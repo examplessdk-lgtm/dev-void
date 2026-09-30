@@ -18,7 +18,7 @@ export type ManagedAccessApplication = Readonly<{
 
 export type ZeroTrustOperation = Readonly<{
   /** Stable across retries; separates completion even when database clocks coincide. */
-  id?: string;
+  id: string;
   kind: 'configure' | 'reconcile' | 'disable';
   phase: 'seed' | 'public-bypasses' | 'wildcard' | 'projects' | 'wildcard-delete' | 'bypass-delete';
   owner: string | null;
@@ -31,8 +31,8 @@ export type ZeroTrustOperation = Readonly<{
 
 export type ZeroTrustConfiguration = Readonly<{
   version: 1;
+  /** Compare-and-swap token; every write increments it. */
   revision: number;
-  status: 'configuring' | 'ready' | 'disabling' | 'error';
   enabled: boolean;
   protectNewProjects: boolean;
   accountId: string;
@@ -40,26 +40,55 @@ export type ZeroTrustConfiguration = Readonly<{
   identityProviderIds: ReadonlyArray<string>;
   policyIds: ReadonlyArray<string>;
   credential: EncryptedPlatformCredential;
-  wildcardApplicationName: string | null;
+  /** Committed before the wildcard application is created, so a retry can recover it. */
+  wildcardApplicationName: string;
   wildcardApplication: ManagedAccessApplication | null;
   operation: ZeroTrustOperation | null;
   lastError: string | null;
   updatedAt: string;
 }>;
 
+export type ZeroTrustStatus = 'configuring' | 'ready' | 'disabling' | 'error';
+
+/** The installation status follows from the saved operation and its last failure. */
+export function zeroTrustConfigurationStatus(
+  configuration: ZeroTrustConfiguration,
+): ZeroTrustStatus {
+  if (configuration.lastError !== null) {
+    return 'error';
+  }
+  if (!configuration.operation) {
+    return 'ready';
+  }
+  return configuration.operation.kind === 'disable' ? 'disabling' : 'configuring';
+}
+
 export type ZeroTrustConfigureInput = Readonly<{
-  accountId: string;
   apiToken: string;
   identityProviderIds: ReadonlyArray<string>;
   policyIds: ReadonlyArray<string>;
   protectNewProjects: boolean;
-  existingProjects: 'protected' | 'public';
+  /** Required when enabling from disabled; rejected otherwise. */
+  existingProjects?: 'protected' | 'public';
 }>;
 
 export class ZeroTrustConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ZeroTrustConfigurationError';
+  }
+}
+
+/**
+ * The configuration saved in PostgreSQL cannot be read. This is a server
+ * state problem, not a bad request; only a database repair can clear it.
+ */
+export class ZeroTrustSavedConfigurationError extends ZeroTrustConfigurationError {
+  constructor(detail: string) {
+    super(
+      `The saved Zero Trust configuration is invalid (${detail}). Zero Trust changes are blocked until the \`${ZERO_TRUST_SETTING}\` platform setting is repaired or restored from a database backup.`,
+    );
+    this.name = 'ZeroTrustSavedConfigurationError';
   }
 }
 
@@ -177,7 +206,7 @@ function parseOperation(value: unknown): ZeroTrustOperation | null {
   return {
     kind,
     phase,
-    ...(input.id === undefined ? {} : { id: requiredText(input.id, 'operation id', 128) }),
+    id: requiredText(input.id, 'operation id', 128),
     owner: input.owner === null ? null : requiredText(input.owner, 'operation owner', 128),
     leaseExpiresAt:
       input.leaseExpiresAt === null ? null : timestamp(input.leaseExpiresAt, 'operation lease'),
@@ -233,9 +262,6 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) {
     throw new ZeroTrustConfigurationError('Zero Trust configuration revision is invalid');
   }
-  if (!['configuring', 'ready', 'disabling', 'error'].includes(String(input.status))) {
-    throw new ZeroTrustConfigurationError('Zero Trust configuration status is invalid');
-  }
   if (typeof input.enabled !== 'boolean' || typeof input.protectNewProjects !== 'boolean') {
     throw new ZeroTrustConfigurationError('Zero Trust configuration flags are invalid');
   }
@@ -259,20 +285,10 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
   }
   const wildcardApplication = parseApplication(input.wildcardApplication);
   const operation = parseOperation(input.operation);
-  const status = input.status as ZeroTrustConfiguration['status'];
   if (operation?.phase === 'bypass-delete' && (input.enabled || wildcardApplication)) {
     throw new ZeroTrustConfigurationError('Zero Trust bypass cleanup requires wildcard removal');
   }
-  if (
-    (status === 'ready' && operation !== null) ||
-    (status === 'configuring' && (!operation || operation.kind === 'disable')) ||
-    (status === 'disabling' && operation?.kind !== 'disable') ||
-    (operation?.kind === 'disable' && status !== 'disabling' && status !== 'error') ||
-    (operation && operation.kind !== 'disable' && status !== 'configuring' && status !== 'error')
-  ) {
-    throw new ZeroTrustConfigurationError('Zero Trust operation status is inconsistent');
-  }
-  if (input.enabled && status === 'ready' && !wildcardApplication) {
+  if (input.enabled && !wildcardApplication) {
     throw new ZeroTrustConfigurationError(
       'enabled Zero Trust configuration needs a managed Access application',
     );
@@ -280,7 +296,6 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
   return {
     version: 1,
     revision,
-    status,
     enabled: input.enabled,
     protectNewProjects: input.protectNewProjects,
     accountId: requiredText(input.accountId, 'Cloudflare account id', 128),
@@ -288,10 +303,11 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
     identityProviderIds: ids(input.identityProviderIds, 'identity providers'),
     policyIds: ids(input.policyIds, 'policies'),
     credential: parseCredential(input.credential),
-    wildcardApplicationName:
-      input.wildcardApplicationName === null || input.wildcardApplicationName === undefined
-        ? (wildcardApplication?.name ?? null)
-        : requiredText(input.wildcardApplicationName, 'managed application name', 128),
+    wildcardApplicationName: requiredText(
+      input.wildcardApplicationName,
+      'managed application name',
+      128,
+    ),
     wildcardApplication,
     operation,
     lastError: input.lastError === null ? null : requiredText(input.lastError, 'last error', 4096),
@@ -304,24 +320,36 @@ export function normalizeZeroTrustConfigureInput(input: unknown): ZeroTrustConfi
   if (typeof value.protectNewProjects !== 'boolean') {
     throw new ZeroTrustConfigurationError('protectNewProjects must be a boolean');
   }
-  if (value.existingProjects !== 'protected' && value.existingProjects !== 'public') {
+  const existingProjects = value.existingProjects ?? undefined;
+  if (
+    existingProjects !== undefined &&
+    existingProjects !== 'protected' &&
+    existingProjects !== 'public'
+  ) {
     throw new ZeroTrustConfigurationError('existingProjects must be protected or public');
   }
   const apiToken = requiredText(value.apiToken, 'Cloudflare API token', 8192);
   return {
-    accountId: requiredText(value.accountId, 'Cloudflare account id', 128),
     apiToken,
     identityProviderIds: ids(value.identityProviderIds, 'identity providers'),
     policyIds: ids(value.policyIds, 'policies'),
     protectNewProjects: value.protectNewProjects,
-    existingProjects: value.existingProjects,
+    ...(existingProjects ? { existingProjects } : {}),
   };
 }
 
 export async function readZeroTrustConfigurationStrict(
   db: DbOrTx,
 ): Promise<ZeroTrustConfiguration | null> {
-  return parseZeroTrustConfiguration(await getPlatformSetting(db, ZERO_TRUST_SETTING));
+  const value = await getPlatformSetting(db, ZERO_TRUST_SETTING);
+  try {
+    return parseZeroTrustConfiguration(value);
+  } catch (error) {
+    if (error instanceof ZeroTrustConfigurationError) {
+      throw new ZeroTrustSavedConfigurationError(error.message);
+    }
+    throw error;
+  }
 }
 
 export async function writeZeroTrustConfiguration(
@@ -373,6 +401,7 @@ export function redactedZeroTrustConfiguration(configuration: ZeroTrustConfigura
     configured: true,
     credentialConfigured: true,
     ...visible,
+    status: zeroTrustConfigurationStatus(configuration),
     operation: operation
       ? {
           kind: operation.kind,

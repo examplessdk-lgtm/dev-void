@@ -181,12 +181,25 @@ export type ProjectZeroTrustState = {
   updated_at: string;
 };
 
+/** `GET /projects/:id/zero-trust`. */
 export type ProjectZeroTrustResponse = {
-  available?: boolean;
-  platformStatus?: string;
-  protectNewProjects?: boolean;
-  ok?: boolean;
+  /** Whether a project owner or admin can change protection now. */
+  available: boolean;
+  platformStatus:
+    | 'not_configured'
+    | 'invalid_configuration'
+    | 'configuring'
+    | 'ready'
+    | 'disabling'
+    | 'error';
+  protectNewProjects: boolean;
   project: ProjectZeroTrustState | null;
+};
+
+/** `PUT /projects/:id/zero-trust` and `POST /projects/:id/zero-trust/reconcile`. */
+export type ProjectZeroTrustUpdateResponse = {
+  ok: true;
+  project: ProjectZeroTrustState;
 };
 
 export type IssuedProjectDeployCredentialResponse = ProjectDeployCredentialResponse & {
@@ -700,7 +713,7 @@ export class PlatformClient {
   async setProjectZeroTrust(
     projectId: string,
     protectedProject: boolean,
-  ): Promise<ProjectZeroTrustResponse> {
+  ): Promise<ProjectZeroTrustUpdateResponse> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/zero-trust`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders },
@@ -712,7 +725,7 @@ export class PlatformClient {
     return res.json();
   }
 
-  async reconcileProjectZeroTrust(projectId: string): Promise<ProjectZeroTrustResponse> {
+  async reconcileProjectZeroTrust(projectId: string): Promise<ProjectZeroTrustUpdateResponse> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/zero-trust/reconcile`, {
       method: 'POST',
       headers: { ...this.authHeaders },

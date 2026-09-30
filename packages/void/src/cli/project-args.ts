@@ -25,7 +25,7 @@ export const projectSubcommands: Array<SubcommandDef> = [
   },
   {
     name: 'zero-trust',
-    hint: 'status | enable | disable | reconcile',
+    hint: 'status | protect | public | reconcile',
     description: 'Inspect or override Cloudflare Zero Trust protection',
   },
   { name: 'logs', description: 'Show runtime logs from the deployed project' },
@@ -46,7 +46,7 @@ export type ProjectArgs =
   | { subcommand: 'list' }
   | {
       subcommand: 'zero-trust';
-      action: '' | 'status' | 'enable' | 'disable' | 'reconcile';
+      action: '' | 'status' | 'protect' | 'public' | 'reconcile';
       projectSlug: string;
     }
   | { subcommand: 'team'; action: '' }
@@ -202,9 +202,9 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
 
   if (subcommand === 'zero-trust') {
     const [action = '', ...args] = rest;
-    if (action && !['status', 'enable', 'disable', 'reconcile'].includes(action)) {
+    if (action && !['status', 'protect', 'public', 'reconcile'].includes(action)) {
       throw new Error(
-        'project: Usage: void project zero-trust <status|enable|disable|reconcile> [--project <slug>].',
+        'project: Usage: void project zero-trust <status|protect|public|reconcile> [--project <slug>].',
       );
     }
     let projectSlug = '';
@@ -225,7 +225,7 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     }
     return {
       subcommand,
-      action: action as '' | 'status' | 'enable' | 'disable' | 'reconcile',
+      action: action as '' | 'status' | 'protect' | 'public' | 'reconcile',
       projectSlug,
     };
   }

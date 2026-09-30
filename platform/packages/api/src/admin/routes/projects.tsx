@@ -17,13 +17,13 @@ import {
   previewOperatorProjectOwner,
   transferOperatorProjectOwner,
 } from '../../operator/tenant-service.ts';
+import { zeroTrustOperatorError } from '../../operator/zero-trust-routes.ts';
 import { getPlatformDisplayName } from '../../platform-identity.ts';
 import { deliverInvitation } from '../../routes/project-team.ts';
 import type { ProjectMemberRole } from '../../types.ts';
 import {
   reconcileProjectZeroTrust,
   setProjectZeroTrustProtection,
-  ZeroTrustUnavailableError,
 } from '../../zero-trust/service.ts';
 import { renderFateDetailPage, renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
@@ -68,15 +68,7 @@ function teamMutationError(error: unknown): never {
 }
 
 function projectZeroTrustError(error: unknown): never {
-  if (error instanceof ZeroTrustUnavailableError) {
-    throw new OperatorError(error.status, error.message, 'zero_trust_unavailable');
-  }
-  console.error('[zero-trust] admin project operation failed', error);
-  throw new OperatorError(
-    502,
-    'Cloudflare Zero Trust reconciliation failed. Review the project state and retry.',
-    'zero_trust_reconciliation_failed',
-  );
+  throw zeroTrustOperatorError(error, 'admin project operation failed');
 }
 
 // GET /projects

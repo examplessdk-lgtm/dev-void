@@ -89,16 +89,17 @@ describe('resolveRoutingUndo', () => {
     { change: 'addition', before: undefined, after: newProtection },
     { change: 'removal', before: oldProtection, after: undefined },
     { change: 'audience replacement', before: oldProtection, after: newProtection },
-  ])('preserves Zero Trust $change when restoring the prior route', ({ before, after }) => {
+  ])('restores the prior route after a Zero Trust $change', ({ before, after }) => {
     const result = resolveRoutingUndo(
       JSON.stringify({ deploymentId: 'b', zeroTrust: after, suspended: 'admin_suspended' }),
       JSON.stringify({ deploymentId: 'b', zeroTrust: before }),
       JSON.stringify({ deploymentId: 'a', zeroTrust: before }),
     );
     expect(result.restore).toBe(true);
+    // Callers replace `zeroTrust` with protection read from PostgreSQL.
     expect(JSON.parse(result.value!)).toEqual({
       deploymentId: 'a',
-      ...(after ? { zeroTrust: after } : {}),
+      ...(before ? { zeroTrust: before } : {}),
       suspended: 'admin_suspended',
     });
   });

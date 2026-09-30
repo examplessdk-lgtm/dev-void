@@ -118,18 +118,22 @@ describe('void help (subprocess)', () => {
 
     const owner = runVoid(root, ['platform', 'project', 'owner', '--help']);
     expect(owner.status).toBe(0);
-    expect(owner.output).toContain('void platform project owner <project-id> <user-id>');
+    expect(owner.output).toContain('void platform project owner <id> <userId>');
     expect(owner.output).toContain('--plan');
 
-    const projectZeroTrust = runVoid(root, ['project', 'zero-trust', 'enable', '--help']);
+    const projectZeroTrust = runVoid(root, ['project', 'zero-trust', 'protect', '--help']);
     expect(projectZeroTrust.status).toBe(0);
-    expect(projectZeroTrust.output).toContain('void project zero-trust enable');
+    expect(projectZeroTrust.output).toContain('void project zero-trust protect');
     expect(projectZeroTrust.output).toContain('--project <name>');
 
     const platformZeroTrust = runVoid(root, ['platform', 'zero-trust', 'configure', '--help']);
     expect(platformZeroTrust.status).toBe(0);
     expect(platformZeroTrust.output).toContain('--token-stdin');
     expect(platformZeroTrust.output).toContain('--identity-providers <value>');
+    expect(platformZeroTrust.output).not.toContain('--account');
+    const platformZeroTrustStatus = runVoid(root, ['platform', 'zero-trust', 'status', '--help']);
+    expect(platformZeroTrustStatus.status).toBe(0);
+    expect(platformZeroTrustStatus.output).toContain('--check');
   });
 
   it('fails unknown help topics', () => {

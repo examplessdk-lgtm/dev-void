@@ -71,7 +71,6 @@ function configurationInput(
   overrides: Partial<ZeroTrustConfigureInput> = {},
 ): ZeroTrustConfigureInput {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'access-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -175,7 +174,6 @@ async function startForeignOperation(): Promise<void> {
       value: {
         ...saved,
         revision: saved.revision + 1,
-        status: 'configuring',
         operation: {
           id: 'foreign-operation',
           kind: 'reconcile',
@@ -224,7 +222,6 @@ describe('Zero Trust operation failures', () => {
         value: {
           ...saved,
           revision: saved.revision + 1,
-          status: 'configuring',
           operation: {
             id: 'resumable-operation',
             kind: 'reconcile',
@@ -248,7 +245,6 @@ describe('Zero Trust operation failures', () => {
 
     await fast();
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'error',
       lastError: expect.stringContaining('Access token was revoked'),
       operation: { id: 'resumable-operation', owner: null },
     });
@@ -267,7 +263,7 @@ describe('Zero Trust operation failures', () => {
       createMockExecutionContext(),
     );
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'ready',
+      lastError: null,
       operation: null,
     });
   });
@@ -300,12 +296,12 @@ describe('Zero Trust operation failures', () => {
     expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     expect(await getProjectZeroTrustState(env.db, large.id)).toMatchObject({
       desired_protected: true,
       effective_protected: false,
-      state: 'error',
+      status: 'error',
       last_error: expect.stringContaining('at most 100 custom domains'),
     });
     // The skipped project wants protection, so every route writer denies it.
@@ -346,22 +342,23 @@ describe('Zero Trust operation failures', () => {
     await env.db
       .update(projectZeroTrust)
       .set({
-        state: 'error',
+        status: 'error',
         last_error: 'Earlier failure',
         updated_at: sql`now() - interval '30 minutes'`,
       })
       .where(eq(projectZeroTrust.project_id, small.id));
 
     await reconcilePendingProjectZeroTrust(platform, env.db, 1);
-    expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({ state: 'error' });
+    expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({ status: 'error' });
     expect(await getProjectZeroTrustState(env.db, large.id)).toMatchObject({
-      state: 'error',
+      status: 'error',
       last_error: expect.stringContaining('at most 100 custom domains'),
     });
 
     await reconcilePendingProjectZeroTrust(platform, env.db, 1);
     expect(await getProjectZeroTrustState(env.db, small.id)).toMatchObject({
-      state: 'protected',
+      status: 'ready',
+      desired_protected: true,
       last_error: null,
     });
   });
@@ -374,10 +371,10 @@ describe('Zero Trust operation failures', () => {
     const platform = bindings();
     await configurePlatformZeroTrust(platform, env.db, configurationInput());
     const publicRow = (await getProjectZeroTrustState(env.db, project.id))!;
-    expect(publicRow).toMatchObject({ state: 'public' });
+    expect(publicRow).toMatchObject({ status: 'ready', desired_protected: false });
     await env.db
       .update(projectZeroTrust)
-      .set({ desired_protected: true, state: 'reconciling' })
+      .set({ desired_protected: true, status: 'reconciling' })
       .where(eq(projectZeroTrust.project_id, project.id));
     const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
 
@@ -390,7 +387,7 @@ describe('Zero Trust operation failures', () => {
     expect(partial).toMatchObject({
       desired_protected: true,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
       bypass_application_id: publicRow.bypass_application_id,
     });
     expect(cloudflare.applications.has(publicRow.bypass_application_id!)).toBe(true);
@@ -402,7 +399,8 @@ describe('Zero Trust operation failures', () => {
       }),
     ).resolves.toMatchObject({
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
+      desired_protected: true,
       bypass_application_id: null,
     });
     expect(cloudflare.applications.has(publicRow.bypass_application_id!)).toBe(false);
@@ -433,7 +431,7 @@ describe('Zero Trust operation failures', () => {
     expect(row).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
       bypass_application_id: expect.any(String),
     });
     expect(cloudflare.applications.has(row!.bypass_application_id!)).toBe(true);
@@ -459,7 +457,11 @@ describe('Zero Trust operation failures', () => {
 
     const row = await reconcileProjectZeroTrustDomains(platform, env.db, project.id);
 
-    expect(row).toMatchObject({ state: 'protected', protected_application_id: expect.any(String) });
+    expect(row).toMatchObject({
+      status: 'ready',
+      desired_protected: true,
+      protected_application_id: expect.any(String),
+    });
     expect(cloudflare.applications.get(row!.protected_application_id!)).toMatchObject({
       domain: 'running.example.net',
     });
@@ -510,14 +512,16 @@ describe('Zero Trust operation failures', () => {
     cloudflare.revoke(false);
     const moved = bindings({ AUTH_REDIRECT_URI: 'https://api.apps.example.com/auth/callback' });
 
+    // A disable does not choose protection for existing projects.
+    const { existingProjects: _existingProjects, ...replacement } = configurationInput();
     await configurePlatformZeroTrust(moved, env.db, {
-      ...configurationInput(),
+      ...replacement,
       apiToken: 'replacement-token',
     });
 
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
       enabled: false,
-      status: 'ready',
+      lastError: null,
       operation: null,
       wildcardApplication: null,
     });

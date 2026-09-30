@@ -54,7 +54,6 @@ function bindings(): ApiEnv['Bindings'] {
 }
 function configurationInput(protectedProject: boolean) {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'test-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -278,7 +277,8 @@ describe('Zero Trust authoritative route metadata', () => {
       }
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         effective_protected: protectedAfter,
-        state: protectedAfter ? 'protected' : 'public',
+        status: 'ready',
+        desired_protected: protectedAfter,
       });
       for (const key of [project.slug, domainKey]) {
         const actual = JSON.parse((await env.ROUTING.get(key))!);
@@ -385,7 +385,7 @@ describe('Zero Trust authoritative route metadata', () => {
         read.mockRestore();
       }
       expect(await getProjectZeroTrustState(env.db, current.id)).toMatchObject({
-        state: 'error',
+        status: 'error',
         last_error: expect.stringContaining('Live routing'),
       });
       expect(put.mock.calls.some(([key]) => key === current.slug)).toBe(false);
@@ -395,7 +395,8 @@ describe('Zero Trust authoritative route metadata', () => {
       await reconcilePendingProjectZeroTrust(bindings(), env.db);
       expect(await env.ROUTING.get(current.slug)).toBeNull();
       expect(await getProjectZeroTrustState(env.db, current.id)).toMatchObject({
-        state: protectedProject ? 'protected' : 'public',
+        status: 'ready',
+        desired_protected: protectedProject,
       });
     },
   );

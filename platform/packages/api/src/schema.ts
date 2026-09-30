@@ -487,10 +487,8 @@ export const projectZeroTrust = pgTable(
       .references(() => projects.id, { onDelete: 'cascade' }),
     desired_protected: boolean('desired_protected').notNull().default(false),
     effective_protected: boolean('effective_protected').notNull().default(false),
-    state: text('state')
-      .notNull()
-      .default('public')
-      .$type<'public' | 'protected' | 'reconciling' | 'error'>(),
+    // `ready` means routes and Access applications match the desired protection.
+    status: text('status').notNull().default('ready').$type<'ready' | 'reconciling' | 'error'>(),
     bypass_application_id: text('bypass_application_id'),
     bypass_application_name: text('bypass_application_name'),
     protected_application_id: text('protected_application_id'),
@@ -499,26 +497,22 @@ export const projectZeroTrust = pgTable(
     // Last custom hostname whose routing protection was cleared. Public
     // projects can have more domains than fit in one reconciliation run.
     routing_cursor: text('routing_cursor'),
-    // Set only after every route and provider application reflects the
-    // current platform operation, after its wildcard preparation phase.
+    // Id of the installation operation this row last completed. Public rows
+    // complete with their bypass; protected rows only after the wildcard phase.
     reconciled_operation: text('reconciled_operation'),
     last_error: text('last_error'),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
     updated_at: timestamp('updated_at', { mode: 'string' }).notNull().defaultNow(),
   },
   (table) => [
-    index('idx_project_zero_trust_state').on(table.state, table.updated_at),
+    index('idx_project_zero_trust_status').on(table.status, table.updated_at),
     check(
-      'project_zero_trust_state_check',
-      sql`${table.state} IN ('public', 'protected', 'reconciling', 'error')`,
+      'project_zero_trust_status_check',
+      sql`${table.status} IN ('ready', 'reconciling', 'error')`,
     ),
     check(
-      'project_zero_trust_public_check',
-      sql`${table.state} <> 'public' OR (${table.desired_protected} = false AND ${table.effective_protected} = false)`,
-    ),
-    check(
-      'project_zero_trust_protected_check',
-      sql`${table.state} <> 'protected' OR (${table.desired_protected} = true AND ${table.effective_protected} = true)`,
+      'project_zero_trust_ready_check',
+      sql`${table.status} <> 'ready' OR ${table.desired_protected} = ${table.effective_protected}`,
     ),
   ],
 );

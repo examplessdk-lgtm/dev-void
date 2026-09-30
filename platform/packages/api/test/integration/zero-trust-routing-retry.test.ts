@@ -57,7 +57,6 @@ function bindings(): ApiEnv['Bindings'] {
 }
 function configurationInput(existingProjects: 'protected' | 'public' = 'protected') {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'test-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -192,7 +191,7 @@ describe('Zero Trust routing read retries', () => {
       expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
         desired_protected: false,
         effective_protected: true,
-        state: 'reconciling',
+        status: 'reconciling',
         routing_cursor: '',
       });
       expect(JSON.parse((await env.ROUTING.get(protectedProject.slug))!).zeroTrust).toBeUndefined();
@@ -208,7 +207,6 @@ describe('Zero Trust routing read retries', () => {
             value: {
               ...saved,
               revision: saved.revision + 1,
-              status: 'error',
               lastError: 'injected operation failure',
               operation: { ...saved.operation!, owner: null, leaseExpiresAt: null },
             },
@@ -236,13 +234,14 @@ describe('Zero Trust routing read retries', () => {
         expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
           desired_protected: false,
           effective_protected: true,
-          state: 'error',
+          status: 'error',
           routing_cursor: null,
           protected_application_id: protectedApplicationId,
         });
       }
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-        status: status === 'error' || status === 'provider deletion error' ? 'error' : 'disabling',
+        lastError:
+          status === 'error' || status === 'provider deletion error' ? expect.any(String) : null,
         operation: { kind: 'disable' },
       });
       const initializing = await createTestProject(env.db, owner.id, 'disable-new-project');
@@ -297,14 +296,14 @@ describe('Zero Trust routing read retries', () => {
       retryPuts.mockRestore();
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'ready',
+        lastError: null,
         operation: null,
       });
       expect(cloudflare.applications.size).toBe(0);
       expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         routing_cursor: null,
       });
       for (const key of [protectedProject.slug, domainKey]) {
@@ -316,7 +315,7 @@ describe('Zero Trust routing read retries', () => {
     },
   );
 
-  it.each(['status', 'required field'] as const)(
+  it.each(['operation id', 'required field'] as const)(
     'does not treat a disable marker with invalid %s as public intent',
     async (invalid) => {
       const owner = await createTestUser(env.db, 'invalid-disable-owner');
@@ -329,9 +328,9 @@ describe('Zero Trust routing read retries', () => {
         .set({
           value: {
             ...configuration,
-            status: invalid === 'status' ? 'ready' : 'disabling',
             ...(invalid === 'required field' ? { teamDomain: null } : {}),
             operation: {
+              ...(invalid === 'operation id' ? {} : { id: 'disable-operation' }),
               kind: 'disable',
               phase: 'projects',
               startedAt: new Date().toISOString(),
@@ -413,7 +412,7 @@ describe('Zero Trust routing read retries', () => {
             });
           }
           expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-            state: 'error',
+            status: 'error',
             routing_cursor: null,
             last_error: expect.stringContaining('Live routing'),
           });
@@ -427,14 +426,14 @@ describe('Zero Trust routing read retries', () => {
         expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
           desired_protected: false,
           effective_protected: false,
-          state: 'public',
+          status: 'ready',
           routing_cursor: null,
         });
         expect(JSON.parse((await env.ROUTING.get(missingKey))!)).toEqual(JSON.parse(route));
         if (operation === 'disable') {
           expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
             enabled: false,
-            status: 'ready',
+            lastError: null,
             operation: null,
           });
           expect(cloudflare.applications.size).toBe(0);
@@ -479,14 +478,14 @@ describe('Zero Trust routing read retries', () => {
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: true,
       effective_protected: false,
-      state: 'error',
+      status: 'error',
     });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).zeroTrust).toBeUndefined();
     await reconcilePendingProjectZeroTrust(platform, env.db);
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).zeroTrust).toBeTruthy();
   });
@@ -509,7 +508,7 @@ describe('Zero Trust routing read retries', () => {
     await configurePlatformZeroTrust(platform, env.db, configurationInput());
     await expect(
       setProjectZeroTrustProtection(platform, env.db, project.id, false),
-    ).resolves.toMatchObject({ state: 'public' });
+    ).resolves.toMatchObject({ status: 'ready', desired_protected: false });
     await expect(disablePlatformZeroTrust(platform, env.db)).resolves.toMatchObject({
       enabled: false,
       status: 'ready',
@@ -562,7 +561,7 @@ describe('Zero Trust routing read retries', () => {
       expect(puts).toHaveBeenCalledTimes(300);
       puts.mockRestore();
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-        state: 'reconciling',
+        status: 'reconciling',
         routing_cursor: domainRows[298]!.hostname,
         bypass_application_id: expect.any(String),
       });
@@ -577,7 +576,7 @@ describe('Zero Trust routing read retries', () => {
               : Reflect.apply(originalGet, env.ROUTING, [key, ...args])) as typeof env.ROUTING.get);
         await reconcilePendingProjectZeroTrust(platform, env.db);
         getSpy.mockRestore();
-        expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({ state });
+        expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({ status: state });
       }
       await expect(resolveProjectZeroTrustRouting(env.db, project.id)).rejects.toThrow(
         'public exception is still reconciling',
@@ -599,7 +598,7 @@ describe('Zero Trust routing read retries', () => {
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         routing_cursor: null,
       });
       for (const key of keys) {
@@ -618,7 +617,7 @@ describe('Zero Trust routing read retries', () => {
     await configurePlatformZeroTrust(bindings(), env.db, configurationInput('public'));
     await env.db
       .update(projectZeroTrust)
-      .set({ bypass_application_id: null, state: 'reconciling' })
+      .set({ bypass_application_id: null, status: 'reconciling' })
       .where(eq(projectZeroTrust.project_id, project.id));
 
     expect(await resolveProjectZeroTrustRoutingForPublication(env.db, project.id)).toEqual({

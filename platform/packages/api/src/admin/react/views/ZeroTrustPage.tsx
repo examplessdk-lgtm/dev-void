@@ -49,9 +49,16 @@ function statusBadge(configured: boolean, enabled: boolean, status: string | nul
     : { label: 'Disabled', variant: 'neutral' };
 }
 
-function liveLabel(live: Readonly<{ present: boolean; drifted: boolean }> | null): string {
-  if (!live) {
+function liveLabel(
+  enabled: boolean,
+  checked: boolean,
+  live: Readonly<{ present: boolean; drifted: boolean }> | null,
+): string {
+  if (!enabled) {
     return 'Not active';
+  }
+  if (!checked || !live) {
+    return 'Not checked';
   }
   return live.present && !live.drifted ? 'Healthy' : 'Missing or drifted';
 }
@@ -69,16 +76,19 @@ export function ZeroTrustPage({ path, platformName, username }: AdminPageProps) 
     enabled,
     status,
     accountId,
-    defaultAccountId,
     teamDomain,
     identityProviderIds,
     policyIds,
     protectNewProjects,
     operation,
     lastError,
+    checked,
     live,
     projects,
   } = pageData;
+  // The existing-project choice applies only when enabling, or when a
+  // replacement token resumes an enabling operation.
+  const choosesExistingProjects = operation ? operation.existingProjects !== null : !enabled;
   const [existingProjects, setExistingProjects] = useState<'protected' | 'public'>(
     operation?.existingProjects === 'public' ? 'public' : 'protected',
   );
@@ -124,7 +134,15 @@ export function ZeroTrustPage({ path, platformName, username }: AdminPageProps) 
               </div>
               <div>
                 <dt>Live application</dt>
-                <dd>{liveLabel(live)}</dd>
+                <dd>
+                  {liveLabel(enabled, checked, live)}
+                  {enabled && !checked && (
+                    <>
+                      {' '}
+                      <a href={`${HOME}?check=1`}>Check with Cloudflare</a>
+                    </>
+                  )}
+                </dd>
               </div>
             </dl>
           </Card>
@@ -172,7 +190,7 @@ export function ZeroTrustPage({ path, platformName, username }: AdminPageProps) 
               </Heading>
               <p>
                 The token needs Access Apps and Policies Write plus Organizations, Identity
-                Providers, and Groups Read for this account.
+                Providers, and Groups Read on the Cloudflare account that hosts this platform.
               </p>
               {operation && (
                 <p>
@@ -182,13 +200,6 @@ export function ZeroTrustPage({ path, platformName, username }: AdminPageProps) 
               )}
             </div>
             <form method="post" action={`${HOME}/configure`} className="void-admin-zero-trust-form">
-              <FormTextInput
-                label="Cloudflare account ID"
-                name="accountId"
-                initialValue={accountId ?? defaultAccountId}
-                required
-                width={360}
-              />
               <FormTextInput
                 label="API token"
                 name="apiToken"
@@ -219,19 +230,21 @@ export function ZeroTrustPage({ path, platformName, username }: AdminPageProps) 
                 submitValue="yes"
                 initialValue={protectNewProjects ?? true}
               />
-              <RadioList
-                label="Existing projects"
-                description="Used only when Zero Trust is first enabled or re-enabled."
-                size="sm"
-                htmlName="existingProjects"
-                value={existingProjects}
-                onChange={(value: string) =>
-                  setExistingProjects(value === 'public' ? 'public' : 'protected')
-                }
-              >
-                <RadioListItem value="protected" label="Protect existing projects" />
-                <RadioListItem value="public" label="Keep existing projects public" />
-              </RadioList>
+              {choosesExistingProjects && (
+                <RadioList
+                  label="Existing projects"
+                  description="Applies when Zero Trust is enabled. Later changes use per-project overrides."
+                  size="sm"
+                  htmlName="existingProjects"
+                  value={existingProjects}
+                  onChange={(value: string) =>
+                    setExistingProjects(value === 'public' ? 'public' : 'protected')
+                  }
+                >
+                  <RadioListItem value="protected" label="Protect existing projects" />
+                  <RadioListItem value="public" label="Keep existing projects public" />
+                </RadioList>
+              )}
               <Button type="submit" label="Save and reconcile" />
             </form>
           </Card>

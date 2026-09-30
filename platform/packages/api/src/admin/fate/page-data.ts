@@ -155,8 +155,11 @@ export async function loadUserDetailPage(context: AdminContext, path: string) {
  * belongs to the Zero Trust page.
  */
 async function loadProjectZeroTrust(db: Db, projectId: string) {
-  const { ZeroTrustConfigurationError, readZeroTrustConfigurationStrict } =
-    await import('../../zero-trust/configuration.ts');
+  const {
+    ZeroTrustConfigurationError,
+    readZeroTrustConfigurationStrict,
+    zeroTrustConfigurationStatus,
+  } = await import('../../zero-trust/configuration.ts');
   const { getProjectZeroTrustState, projectZeroTrustAvailable, publicProjectZeroTrustState } =
     await import('../../zero-trust/service.ts');
   const [row, configuration] = await Promise.all([
@@ -173,7 +176,7 @@ async function loadProjectZeroTrust(db: Db, projectId: string) {
     configured: configuration !== null,
     invalid: configuration === 'invalid',
     enabled: saved?.enabled ?? false,
-    status: saved?.status ?? null,
+    status: saved ? zeroTrustConfigurationStatus(saved) : null,
     operation: saved?.operation?.kind ?? null,
     available: projectZeroTrustAvailable(saved),
     state: publicProjectZeroTrustState(row),
@@ -436,12 +439,14 @@ export async function loadEmailProjectPage(context: AdminContext, path: string) 
 /**
  * A fixed, redacted view of the Zero Trust status. It leaves out the stored
  * credential, the configuration revision, and the managed Access application
- * identifiers.
+ * identifiers. `?check=1` adds the live Cloudflare Access check.
  */
 export async function loadZeroTrustPage(context: AdminContext, path: string) {
-  pageLocation(path, '/admin/zero-trust');
+  const url = pageLocation(path, '/admin/zero-trust');
   const { zeroTrustStatus } = await import('../../zero-trust/service.ts');
-  const status = await zeroTrustStatus(context.env, context.get('db'));
+  const status = await zeroTrustStatus(context.env, context.get('db'), {
+    check: url.searchParams.get('check') === '1',
+  });
   const saved = 'accountId' in status ? status : null;
   return {
     id: path,
@@ -449,7 +454,6 @@ export async function loadZeroTrustPage(context: AdminContext, path: string) {
     enabled: status.enabled,
     status: 'status' in status ? status.status : null,
     accountId: saved?.accountId ?? null,
-    defaultAccountId: context.env.CF_ACCOUNT_ID,
     teamDomain: saved?.teamDomain ?? null,
     identityProviderIds: [...(saved?.identityProviderIds ?? [])],
     policyIds: [...(saved?.policyIds ?? [])],
@@ -462,6 +466,7 @@ export async function loadZeroTrustPage(context: AdminContext, path: string) {
         }
       : null,
     lastError: 'lastError' in status ? status.lastError : null,
+    checked: 'checked' in status ? status.checked : false,
     live: status.live ? { present: status.live.present, drifted: status.live.drifted } : null,
     projects: status.projects.map((entry) => ({
       desiredProtected: entry.desiredProtected,

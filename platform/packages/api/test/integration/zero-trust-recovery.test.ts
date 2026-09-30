@@ -70,7 +70,6 @@ function configurationInput(
   overrides: Partial<ZeroTrustConfigureInput> = {},
 ): ZeroTrustConfigureInput {
   return {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'old-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -78,6 +77,15 @@ function configurationInput(
     existingProjects: 'protected',
     ...overrides,
   };
+}
+
+/** A token replacement for an operation that does not choose existing-project protection. */
+function replacementInput(
+  input: ZeroTrustConfigureInput,
+  overrides: Partial<ZeroTrustConfigureInput> = {},
+): ZeroTrustConfigureInput {
+  const { existingProjects: _existingProjects, ...rest } = input;
+  return { ...rest, apiToken: 'replacement-token', ...overrides };
 }
 
 function providerError(message: string, status: number): Response {
@@ -194,7 +202,7 @@ describe('Zero Trust recovery', () => {
           expect(seeded).toMatchObject({
             desired_protected: false,
             effective_protected: false,
-            state: 'public',
+            status: 'ready',
           });
           expect(seeded?.bypass_application_id).toBeTruthy();
           expect(seeded?.bypass_application_name).toBeTruthy();
@@ -232,7 +240,7 @@ describe('Zero Trust recovery', () => {
       expect(await getProjectZeroTrustState(env.db, body.id)).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: null,
         bypass_application_name: null,
       });
@@ -261,7 +269,7 @@ describe('Zero Trust recovery', () => {
       await env.db
         .update(projectZeroTrust)
         .set({
-          state,
+          status: state,
           bypass_application_id: null,
           last_error: state === 'error' ? 'Interrupted after provider creation' : null,
         })
@@ -280,7 +288,7 @@ describe('Zero Trust recovery', () => {
 
       await reconcilePendingProjectZeroTrust(platform, env.db);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-        state: 'public',
+        status: 'ready',
         desired_protected: false,
         effective_protected: false,
         bypass_application_id: completed.bypass_application_id,
@@ -321,11 +329,11 @@ describe('Zero Trust recovery', () => {
     );
     await env.db
       .update(projectZeroTrust)
-      .set({ state: 'error' })
+      .set({ status: 'error' })
       .where(eq(projectZeroTrust.project_id, first.id));
     await env.db
       .update(projectZeroTrust)
-      .set({ state: 'error' })
+      .set({ status: 'error' })
       .where(eq(projectZeroTrust.project_id, second.id));
     const originalTransaction = env.db.transaction.bind(env.db);
     let transactions = 0;
@@ -344,7 +352,7 @@ describe('Zero Trust recovery', () => {
         ).rejects.toThrow('temporary deletion failure');
         failDeletes = false;
         expect(await getProjectZeroTrustState(env.db, second.id)).toMatchObject({
-          state: 'error',
+          status: 'error',
           bypass_application_id: bypassId,
         });
       }
@@ -357,7 +365,8 @@ describe('Zero Trust recovery', () => {
     }
     expect(bypassId).toBeTruthy();
     expect(await getProjectZeroTrustState(env.db, second.id)).toMatchObject({
-      state: 'protected',
+      status: 'ready',
+      desired_protected: true,
       bypass_application_id: null,
       bypass_application_name: null,
     });
@@ -394,7 +403,7 @@ describe('Zero Trust recovery', () => {
     );
     const failed = (await readZeroTrustConfigurationStrict(env.db))!;
     expect(failed).toMatchObject({
-      status: 'error',
+      lastError: expect.any(String),
       wildcardApplication: null,
       operation: { kind: 'configure', phase: 'wildcard', owner: null },
     });
@@ -437,13 +446,13 @@ describe('Zero Trust recovery', () => {
     });
     expect(recovered).toMatchObject({
       enabled: true,
-      status: 'ready',
+      lastError: null,
       operation: null,
       wildcardApplication: { id: originalWildcard.id, name: failed.wildcardApplicationName },
     });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: false,
-      state: 'public',
+      status: 'ready',
       bypass_application_id: originalBypass,
     });
     expect(cloudflare.applications.size).toBe(2);
@@ -458,38 +467,57 @@ describe('Zero Trust recovery', () => {
   });
 
   it.each([
-    { label: 'identity providers', change: { identityProviderIds: ['idp-2'] } },
-    { label: 'policies', change: { policyIds: ['policy-2'] } },
-    { label: 'new-project protection', change: { protectNewProjects: false } },
-    { label: 'existing-project selection', change: { existingProjects: 'public' as const } },
-  ])('rejects changed $label when replacing a pending operation token', async ({ change }) => {
-    const cloudflare = accessApi();
-    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
-      if (
-        new Headers(init?.headers).get('Authorization') === 'Bearer old-token' &&
-        init?.method === 'POST'
-      ) {
-        return providerError('Authentication error', 403);
-      }
-      return cloudflare.fetcher(input, init);
-    });
-    const platform = bindings();
-    const input = configurationInput();
-    await expect(configurePlatformZeroTrust(platform, env.db, input)).rejects.toThrow(
-      'Authentication error',
-    );
-    const checkpoint = await readZeroTrustConfigurationStrict(env.db);
+    {
+      label: 'identity providers',
+      change: { identityProviderIds: ['idp-2'] },
+      message: 'same identity providers, policies, and project selections',
+    },
+    {
+      label: 'policies',
+      change: { policyIds: ['policy-2'] },
+      message: 'same identity providers, policies, and project selections',
+    },
+    {
+      label: 'new-project protection',
+      change: { protectNewProjects: false },
+      message: 'same identity providers, policies, and project selections',
+    },
+    {
+      label: 'existing-project selection',
+      change: { existingProjects: 'public' as const },
+      message: 'keeps existing projects protected',
+    },
+  ])(
+    'rejects changed $label when replacing a pending operation token',
+    async ({ change, message }) => {
+      const cloudflare = accessApi();
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        if (
+          new Headers(init?.headers).get('Authorization') === 'Bearer old-token' &&
+          init?.method === 'POST'
+        ) {
+          return providerError('Authentication error', 403);
+        }
+        return cloudflare.fetcher(input, init);
+      });
+      const platform = bindings();
+      const input = configurationInput();
+      await expect(configurePlatformZeroTrust(platform, env.db, input)).rejects.toThrow(
+        'Authentication error',
+      );
+      const checkpoint = await readZeroTrustConfigurationStrict(env.db);
 
-    await expect(
-      configurePlatformZeroTrust(platform, env.db, {
-        ...input,
-        ...change,
-        apiToken: 'replacement-token',
-      }),
-    ).rejects.toThrow('same account, identity providers, policies, and project selections');
-    expect(await readZeroTrustConfigurationStrict(env.db)).toEqual(checkpoint);
-    expect(cloudflare.applications.size).toBe(0);
-  });
+      await expect(
+        configurePlatformZeroTrust(platform, env.db, {
+          ...input,
+          ...change,
+          apiToken: 'replacement-token',
+        }),
+      ).rejects.toThrow(message);
+      expect(await readZeroTrustConfigurationStrict(env.db)).toEqual(checkpoint);
+      expect(cloudflare.applications.size).toBe(0);
+    },
+  );
 
   it('rejects token replacement and disable while another reconcile request holds an active lease', async () => {
     const cloudflare = accessApi();
@@ -519,7 +547,7 @@ describe('Zero Trust recovery', () => {
       const checkpoint = await readZeroTrustConfigurationStrict(env.db);
       expect(checkpoint?.operation?.owner).toBeTruthy();
       await expect(
-        configurePlatformZeroTrust(platform, env.db, { ...input, apiToken: 'replacement-token' }),
+        configurePlatformZeroTrust(platform, env.db, replacementInput(input)),
       ).rejects.toThrow('Another Zero Trust operation is already running');
       await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow(
         'Another Zero Trust operation is already running',
@@ -563,7 +591,7 @@ describe('Zero Trust recovery', () => {
         'Authentication error',
       );
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-        status: 'error',
+        lastError: expect.any(String),
         operation: { kind: 'disable', phase: 'wildcard-delete', owner: null },
       });
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
@@ -571,21 +599,18 @@ describe('Zero Trust recovery', () => {
       });
       cloudflare.fetcher.mockClear();
 
-      await configurePlatformZeroTrust(platform, env.db, {
-        ...input,
-        apiToken: 'replacement-token',
-      });
+      await configurePlatformZeroTrust(platform, env.db, replacementInput(input));
 
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'ready',
+        lastError: null,
         operation: null,
         wildcardApplication: null,
       });
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: null,
       });
       expect(cloudflare.applications.size).toBe(0);
@@ -649,37 +674,41 @@ describe('Zero Trust recovery', () => {
         'Selected resource was deleted',
       );
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-        status: 'error',
+        lastError: expect.any(String),
         operation: { kind, owner: null },
       });
-      const replacementInput = { ...input, ...replacement, apiToken: 'replacement-token' };
-      await expect(configurePlatformZeroTrust(platform, env.db, replacementInput)).rejects.toThrow(
-        'same account, identity providers, policies, and project selections',
+      const replacement_ = replacementInput(input, replacement);
+      await expect(configurePlatformZeroTrust(platform, env.db, replacement_)).rejects.toThrow(
+        'same identity providers, policies, and project selections',
       );
 
       await disablePlatformZeroTrust(platform, env.db);
 
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'ready',
+        lastError: null,
         operation: null,
         wildcardApplication: null,
       });
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: null,
         bypass_application_name: null,
       });
       expect(cloudflare.applications.size).toBe(0);
-      await configurePlatformZeroTrust(platform, env.db, replacementInput);
+      // Enabling again chooses protection for existing projects.
+      await configurePlatformZeroTrust(platform, env.db, {
+        ...replacement_,
+        existingProjects: 'public',
+      });
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: true,
-        status: 'ready',
+        lastError: null,
         operation: null,
-        identityProviderIds: replacementInput.identityProviderIds,
-        policyIds: replacementInput.policyIds,
+        identityProviderIds: replacement_.identityProviderIds,
+        policyIds: replacement_.policyIds,
       });
       expect(cloudflare.applications.size).toBe(2);
     },
@@ -714,10 +743,7 @@ describe('Zero Trust recovery', () => {
       'Temporary deletion failure',
     );
     selectionDeleted = true;
-    const replacing = configurePlatformZeroTrust(platform, env.db, {
-      ...input,
-      apiToken: 'replacement-token',
-    });
+    const replacing = configurePlatformZeroTrust(platform, env.db, replacementInput(input));
     const rejectedReplacement = expect(replacing).rejects.toThrow(
       'saved Zero Trust operation changed',
     );
@@ -727,7 +753,7 @@ describe('Zero Trust recovery', () => {
       await disablePlatformZeroTrust(platform, env.db);
       expect(cloudflare.applications.size).toBe(0);
       const disabled = await readZeroTrustConfigurationStrict(env.db);
-      expect(disabled).toMatchObject({ enabled: false, status: 'ready', operation: null });
+      expect(disabled).toMatchObject({ enabled: false, lastError: null, operation: null });
       cloudflare.fetcher.mockClear();
       releaseValidation.resolve();
       await rejectedReplacement;
@@ -770,14 +796,14 @@ describe('Zero Trust recovery', () => {
       );
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: true,
-        status: 'error',
+        lastError: expect.any(String),
         operation: { kind: 'disable', phase: 'wildcard-delete', owner: null },
       });
       const cleanedProject = await getProjectZeroTrustState(env.db, project.id);
       expect(cleanedProject).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: null,
       });
       cloudflare.fetcher.mockClear();
@@ -831,7 +857,7 @@ describe('Zero Trust recovery', () => {
 
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'ready',
+        lastError: null,
         wildcardApplication: null,
         operation: null,
       });
@@ -839,7 +865,7 @@ describe('Zero Trust recovery', () => {
         expect(await getProjectZeroTrustState(env.db, projectId)).toMatchObject({
           desired_protected: false,
           effective_protected: false,
-          state: 'public',
+          status: 'ready',
           bypass_application_id: null,
           bypass_application_name: null,
           protected_application_id: null,
@@ -945,7 +971,7 @@ describe('Zero Trust recovery', () => {
             operation: { kind: operation, owner: null },
           });
           expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-            state: 'reconciling',
+            status: 'reconciling',
             bypass_application_id: originalRow!.bypass_application_id,
           });
           expect(cloudflare.applications.has(originalRow!.bypass_application_id!)).toBe(true);
@@ -955,14 +981,14 @@ describe('Zero Trust recovery', () => {
       expect(remaining).toBe(0);
       expect(rewrittenKeys.size).toBe(routingKeys.length);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
-        state: 'public',
+        status: 'ready',
         desired_protected: false,
         effective_protected: false,
         routing_cursor: null,
       });
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: operation !== 'disable',
-        status: 'ready',
+        lastError: null,
         operation: null,
       });
       expect(cloudflare.applications.size).toBe(operation === 'disable' ? 0 : 2);

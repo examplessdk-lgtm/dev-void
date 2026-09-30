@@ -13,6 +13,7 @@ import {
   reconcileProjectZeroTrustDomains,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
+  ZeroTrustUnavailableError,
 } from '../zero-trust/service.ts';
 import {
   type CustomHostnameInfo,
@@ -127,7 +128,19 @@ export async function tryActivateDomain(
       if (!slugRouting) {
         return;
       }
-      const protection = await resolveProjectZeroTrustRoutingForPublication(txDb, project.id);
+      // Activation is retried while the domain stays pending, so unknown
+      // protection keeps it pending instead of publishing a denied route.
+      let protection;
+      try {
+        protection = await resolveProjectZeroTrustRoutingForPublication(txDb, project.id, {
+          retryable: true,
+        });
+      } catch (error) {
+        if (error instanceof ZeroTrustUnavailableError) {
+          return;
+        }
+        throw error;
+      }
       await env.ROUTING.put(
         `domain:${lockedDomain.hostname}`,
         withProjectZeroTrustRouting(slugRouting, protection),

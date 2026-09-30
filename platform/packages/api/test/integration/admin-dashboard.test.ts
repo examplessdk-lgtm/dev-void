@@ -458,7 +458,6 @@ function zeroTrustSetting(overrides: Record<string, unknown> = {}) {
     value: {
       version: 1,
       revision: 918273645,
-      status: 'ready',
       enabled: true,
       protectNewProjects: true,
       accountId: 'zero-trust-account',
@@ -482,11 +481,10 @@ function zeroTrustSetting(overrides: Record<string, unknown> = {}) {
 }
 
 const configuringZeroTrust = {
-  status: 'configuring',
   enabled: false,
-  wildcardApplicationName: null,
   wildcardApplication: null,
   operation: {
+    id: 'configure-operation',
     kind: 'configure',
     phase: 'public-bypasses',
     owner: null,
@@ -541,7 +539,7 @@ describe('admin Zero Trust', () => {
       project_id: project.id,
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
     });
 
     const res = await req('/admin/zero-trust', admin.adminJwt);
@@ -565,6 +563,8 @@ describe('admin Zero Trust', () => {
     expect(html.toLowerCase()).toContain('autocomplete="new-password"');
     expect(checkedValues(html, 'existingProjects')).toEqual(['public']);
     expect(html).toContain('name="protectNewProjects" value="yes"');
+    // Zero Trust always uses the installation account; there is no account field.
+    expect(html).not.toContain('name="accountId"');
     expectNoZeroTrustSecrets(html);
     expectNoZeroTrustSecrets(pageSnapshot(html));
   });
@@ -580,11 +580,25 @@ describe('admin Zero Trust', () => {
     const html = await res.text();
     const visible = visibleMarkup(html);
     expect(visible).toContain('Enabled');
-    expect(visible).toContain('Missing or drifted');
+    expect(visible).toContain('Not checked');
+    expect(html).toContain('href="/admin/zero-trust?check=1"');
     expect(visible).toContain('Disable Zero Trust');
-    expect(checkedValues(html, 'existingProjects')).toEqual(['protected']);
+    // Existing projects keep their protection once Zero Trust is enabled.
+    expect(html).not.toContain('name="existingProjects"');
     expectNoZeroTrustSecrets(html);
     expectNoZeroTrustSecrets(pageSnapshot(html));
+    // A plain page view reads saved state only.
+    expect(logged).not.toHaveBeenCalledWith(
+      '[zero-trust] live status check failed',
+      expect.anything(),
+    );
+
+    const checked = await req('/admin/zero-trust?check=1', admin.adminJwt);
+    expect(checked.status).toBe(200);
+    const checkedHtml = await checked.text();
+    expect(visibleMarkup(checkedHtml)).toContain('Missing or drifted');
+    expectNoZeroTrustSecrets(checkedHtml);
+    expectNoZeroTrustSecrets(pageSnapshot(checkedHtml));
     expect(logged).toHaveBeenCalledWith('[zero-trust] live status check failed', expect.anything());
   });
 
@@ -597,13 +611,13 @@ describe('admin Zero Trust', () => {
       'enabled',
       'status',
       'accountId',
-      'defaultAccountId',
       'teamDomain',
       'identityProviderIds',
       'policyIds',
       'protectNewProjects',
       'operation',
       'lastError',
+      'checked',
       'live',
       'projects',
     ];
@@ -626,13 +640,13 @@ describe('admin Zero Trust', () => {
       enabled: false,
       status: 'configuring',
       accountId: 'zero-trust-account',
-      defaultAccountId: env.CF_ACCOUNT_ID,
       teamDomain: 'https://company.cloudflareaccess.com',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
       protectNewProjects: true,
       operation: { kind: 'configure', phase: 'public-bypasses', existingProjects: 'public' },
       lastError: null,
+      checked: false,
       live: null,
       projects: [],
     });
@@ -687,7 +701,7 @@ describe('admin Zero Trust', () => {
       project_id: project.id,
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     const fetched = vi.spyOn(globalThis, 'fetch');
     // The seeded credential cannot be decrypted, so a live status check would fail before
@@ -720,8 +734,8 @@ describe('admin Zero Trust', () => {
     const project = await createTestProject(env.db, admin.id, 'zt-project-busy');
     await env.db.insert(platformSettings).values(
       zeroTrustSetting({
-        status: 'configuring',
         operation: {
+          id: 'reconcile-operation',
           kind: 'reconcile',
           phase: 'projects',
           owner: null,
@@ -742,7 +756,9 @@ describe('admin Zero Trust', () => {
   test('hides project protection actions while the installation needs attention', async () => {
     const admin = await createTestUser(env.db, 'zt-error', 'github', undefined, 'free', 'admin');
     const project = await createTestProject(env.db, admin.id, 'zt-project-error');
-    await env.db.insert(platformSettings).values(zeroTrustSetting({ status: 'error' }));
+    await env.db
+      .insert(platformSettings)
+      .values(zeroTrustSetting({ lastError: 'Access token was revoked' }));
 
     const html = await (await req(`/admin/projects/${project.id}`, admin.adminJwt)).text();
     const visible = visibleMarkup(html);
@@ -779,7 +795,6 @@ describe('admin Zero Trust', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        accountId: 'zero-trust-account',
         apiToken: 'form-token-value',
         identityProviderIds: '',
         policyIds: 'policy-1',

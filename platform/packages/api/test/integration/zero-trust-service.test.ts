@@ -133,7 +133,7 @@ describe('project Zero Trust reconciliation', () => {
       project_id: project.id,
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     await env.db.insert(platformSettings).values({
       key: 'zeroTrust.configuration',
@@ -154,7 +154,6 @@ describe('project Zero Trust reconciliation', () => {
       PLATFORM_INSTALLATION_ID: 'installation-test',
     } as unknown as ApiEnv['Bindings'];
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -167,8 +166,8 @@ describe('project Zero Trust reconciliation', () => {
       .set({
         value: {
           ...configuration,
-          status: 'configuring',
           operation: {
+            id: 'reconcile-operation',
             kind: 'reconcile',
             phase: 'seed',
             owner: null,
@@ -195,7 +194,6 @@ describe('project Zero Trust reconciliation', () => {
       PLATFORM_INSTALLATION_ID: 'installation-test',
     } as unknown as ApiEnv['Bindings'];
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -213,7 +211,7 @@ describe('project Zero Trust reconciliation', () => {
       project_id: incomplete.id,
       desired_protected: true,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
     });
     await expect(resolveProjectZeroTrustRouting(env.db, incomplete.id)).rejects.toThrow(
       'still reconciling',
@@ -231,7 +229,6 @@ describe('project Zero Trust reconciliation', () => {
       PLATFORM_INSTALLATION_ID: 'installation-test',
     } as unknown as ApiEnv['Bindings'];
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -244,8 +241,8 @@ describe('project Zero Trust reconciliation', () => {
       .set({
         value: {
           ...configuration,
-          status: 'disabling',
           operation: {
+            id: 'disable-operation',
             kind: 'disable',
             phase: 'projects',
             owner: null,
@@ -277,7 +274,6 @@ describe('project Zero Trust reconciliation', () => {
       PLATFORM_INSTALLATION_ID: 'installation-test',
     } as unknown as ApiEnv['Bindings'];
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -286,8 +282,14 @@ describe('project Zero Trust reconciliation', () => {
     });
 
     await expect(
+      zeroTrustStatus({ ...bindings, SITE_DOMAIN: 'new.example.com' }, env.db, { check: true }),
+    ).resolves.toMatchObject({ checked: true, live: { present: true, drifted: true } });
+    cloudflare.fetcher.mockClear();
+    // Reads use saved state unless an operator asks for the live check.
+    await expect(
       zeroTrustStatus({ ...bindings, SITE_DOMAIN: 'new.example.com' }, env.db),
-    ).resolves.toMatchObject({ live: { present: true, drifted: true } });
+    ).resolves.toMatchObject({ enabled: true, status: 'ready', checked: false, live: null });
+    expect(cloudflare.fetcher).not.toHaveBeenCalled();
   });
 
   // Exercises several persisted reconciliation batches across more than 100 projects.
@@ -309,7 +311,6 @@ describe('project Zero Trust reconciliation', () => {
     } as unknown as ApiEnv['Bindings'];
 
     const initial = await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -329,7 +330,7 @@ describe('project Zero Trust reconciliation', () => {
     expect(unseeded).toBeDefined();
     await expect(
       initializeNewProjectZeroTrust(bindings, env.db, unseeded!.id),
-    ).resolves.toMatchObject({ desired_protected: false, state: 'reconciling' });
+    ).resolves.toMatchObject({ desired_protected: false, status: 'reconciling' });
 
     const controller = {
       cron: FAST_CRON,
@@ -341,20 +342,34 @@ describe('project Zero Trust reconciliation', () => {
     } as unknown as ExecutionContext;
     await scheduled(controller, bindings, context);
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'configuring',
+      lastError: null,
       operation: { kind: 'configure', phase: 'public-bypasses' },
     });
 
+    // Public projects finish in the public-bypass phase, so the projects
+    // phase has nothing left to repeat and the operation completes.
     await scheduled(controller, bindings, context);
-    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'configuring',
-      operation: { phase: 'projects' },
-    });
-    await scheduled(controller, bindings, context);
-    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'ready',
-      operation: null,
-    });
+    const completed = (await readZeroTrustConfigurationStrict(env.db))!;
+    expect(completed).toMatchObject({ lastError: null, operation: null });
+    const bypassWrites = new Map<string, number>();
+    for (const [input, init] of cloudflare.fetcher.mock.calls) {
+      if ((init?.method === 'POST' || init?.method === 'PUT') && String(input).includes('/apps')) {
+        const name = String(JSON.parse(String(init.body)).name);
+        if (name.includes('-public-')) {
+          bypassWrites.set(name, (bypassWrites.get(name) ?? 0) + 1);
+        }
+      }
+    }
+    expect(bypassWrites.size).toBe(101);
+    // Only the project initialized during the operation is written twice:
+    // once at creation and once by the operation batch.
+    expect([...bypassWrites.values()].filter((count) => count > 1)).toHaveLength(1);
+    expect(
+      await env.db
+        .select({ id: projectZeroTrust.project_id })
+        .from(projectZeroTrust)
+        .where(isNull(projectZeroTrust.reconciled_operation)),
+    ).toEqual([]);
   }, 10_000);
 
   it('creates public exceptions before the wildcard app and preserves owner opt-outs on reconfigure', async () => {
@@ -370,7 +385,6 @@ describe('project Zero Trust reconciliation', () => {
     } as unknown as ApiEnv['Bindings'];
 
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -381,12 +395,12 @@ describe('project Zero Trust reconciliation', () => {
     expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
     });
     expect(await getProjectZeroTrustState(env.db, publicProject.id)).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
     });
     expect(
       [...cloudflare.applications.values()].filter((application) =>
@@ -408,27 +422,25 @@ describe('project Zero Trust reconciliation', () => {
     expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
 
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'replacement-access-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-2'],
       protectNewProjects: false,
-      existingProjects: 'public',
     });
 
     expect(await getProjectZeroTrustState(env.db, protectedProject.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     expect(await getProjectZeroTrustState(env.db, publicProject.id)).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
     });
     expect(
       [...cloudflare.applications.values()].find((application) =>
@@ -474,7 +486,6 @@ describe('project Zero Trust reconciliation', () => {
     } as unknown as ApiEnv['Bindings'];
 
     await configurePlatformZeroTrust(bindings, env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'access-management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -488,12 +499,18 @@ describe('project Zero Trust reconciliation', () => {
     const protectedTransition = setProjectZeroTrustProtection(bindings, env.db, project.id, true);
     releaseBypassCreation();
 
-    await expect(publicTransition).resolves.toMatchObject({ state: 'public' });
-    await expect(protectedTransition).resolves.toMatchObject({ state: 'protected' });
+    await expect(publicTransition).resolves.toMatchObject({
+      status: 'ready',
+      desired_protected: false,
+    });
+    await expect(protectedTransition).resolves.toMatchObject({
+      status: 'ready',
+      desired_protected: true,
+    });
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
       bypass_application_id: null,
       bypass_application_name: null,
     });
@@ -536,7 +553,7 @@ describe('project Zero Trust reconciliation', () => {
       project_id: project.id,
       desired_protected: false,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
       bypass_application_id: 'app-cleanup',
       bypass_application_name: 'void-installation-public-cleanup',
     });

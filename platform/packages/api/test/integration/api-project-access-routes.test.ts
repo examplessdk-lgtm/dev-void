@@ -79,7 +79,6 @@ async function seedZeroTrustConfiguration(
     value: {
       version: 1,
       revision: 1,
-      status,
       enabled: true,
       protectNewProjects: false,
       accountId: env.CF_ACCOUNT_ID,
@@ -87,6 +86,7 @@ async function seedZeroTrustConfiguration(
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
       credential: { ciphertext: 'unused', iv: 'unused', keyVersion: 'v1' },
+      wildcardApplicationName: 'void-test-projects',
       wildcardApplication: {
         id: 'access-wildcard',
         name: 'void-test-projects',
@@ -95,6 +95,7 @@ async function seedZeroTrustConfiguration(
       },
       operation: operationKind
         ? {
+            id: 'saved-operation',
             kind: operationKind,
             phase: 'projects',
             owner: null,
@@ -322,7 +323,7 @@ describe('project route membership capabilities', () => {
       project_id: project.id,
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
       protected_application_id: 'access-app-internal',
       protected_application_name: 'void-internal-name',
       protected_application_audience: 'internal-audience',
@@ -416,7 +417,7 @@ describe('project route membership capabilities', () => {
         project_id: project.id,
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: 'access-bypass',
         bypass_application_name: 'void-test-public',
       });
@@ -469,7 +470,6 @@ describe('project route membership capabilities', () => {
       value: {
         version: 1,
         revision: 1,
-        status: 'ready',
         enabled: false,
         protectNewProjects: true,
         accountId: env.CF_ACCOUNT_ID,
@@ -477,6 +477,7 @@ describe('project route membership capabilities', () => {
         identityProviderIds: ['idp-1'],
         policyIds: ['policy-1'],
         credential: { ciphertext: 'saved', iv: 'saved', keyVersion: 'v1' },
+        wildcardApplicationName: 'void-test-projects',
         wildcardApplication: null,
         operation: null,
         lastError: null,

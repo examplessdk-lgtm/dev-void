@@ -131,7 +131,6 @@ function accessApi() {
 
 async function configurePublicProjects(platform: ApiEnv['Bindings']): Promise<void> {
   await configurePlatformZeroTrust(platform, env.db, {
-    accountId: env.CF_ACCOUNT_ID,
     apiToken: 'access-token',
     identityProviderIds: ['idp-1'],
     policyIds: ['policy-1'],
@@ -213,7 +212,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
 
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
       enabled: false,
-      status: 'ready',
+      lastError: null,
       operation: null,
     });
     expect(cloudflare.deletedIds[0]).toBe(wildcard.id);
@@ -222,7 +221,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       expect(row).toMatchObject({
         desired_protected: false,
         effective_protected: false,
-        state: 'public',
+        status: 'ready',
         bypass_application_id: null,
         bypass_application_name: null,
       });
@@ -329,14 +328,14 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     expect(await getProjectZeroTrustState(env.db, unvisitedProject.id)).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
     });
     expect(JSON.parse((await env.ROUTING.get(unvisitedProject.slug))!).zeroTrust).toBeUndefined();
     // The skipped project keeps its protected route: without an Access
     // assertion dispatch denies it rather than serving it publicly.
     expect(await getProjectZeroTrustState(env.db, failingProject.id)).toMatchObject({
       desired_protected: false,
-      state: 'error',
+      status: 'error',
       last_error: 'Later protected project routing failed',
     });
     expect(await env.ROUTING.get(failingProject.slug)).toBe(failingRoute);
@@ -346,7 +345,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     expect(await getProjectZeroTrustState(env.db, failingProject.id)).toMatchObject({
       desired_protected: false,
       effective_protected: false,
-      state: 'public',
+      status: 'ready',
       last_error: null,
     });
     expect(JSON.parse((await env.ROUTING.get(failingProject.slug))!).zeroTrust).toBeUndefined();
@@ -389,7 +388,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
 
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'error',
+        lastError: expect.any(String),
         wildcardApplication: null,
         operation: { kind: 'disable', phase: 'bypass-delete', owner: null },
       });
@@ -405,12 +404,10 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       if (recovery === 'replacement credential') {
         oldTokenRevoked = true;
         await configurePlatformZeroTrust(platform, env.db, {
-          accountId: env.CF_ACCOUNT_ID,
           apiToken: 'replacement-token',
           identityProviderIds: ['idp-1'],
           policyIds: ['policy-1'],
           protectNewProjects: true,
-          existingProjects: 'public',
         });
       } else {
         await reconcilePlatformZeroTrust(platform, env.db);
@@ -422,7 +419,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       ]);
       expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
         enabled: false,
-        status: 'ready',
+        lastError: null,
         operation: null,
       });
       expect(cloudflare.applications.size).toBe(0);
@@ -472,7 +469,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       bypass_application_id: null,
       bypass_application_name: bypass.bypass_application_name,
-      state: 'error',
+      status: 'error',
     });
     expect(cloudflare.applications.size).toBe(0);
 
@@ -481,7 +478,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       bypass_application_id: null,
       bypass_application_name: null,
-      state: 'public',
+      status: 'ready',
+      desired_protected: false,
     });
     expect(cloudflare.deletedIds).toEqual([wildcard.id, bypass.bypass_application_id]);
   });

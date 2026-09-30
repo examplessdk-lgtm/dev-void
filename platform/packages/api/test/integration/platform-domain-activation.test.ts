@@ -12,7 +12,10 @@ import {
 import type { ApiEnv } from '../../src/env.ts';
 import app, { FAST_CRON, scheduled } from '../../src/index.ts';
 import { projects as projectTable } from '../../src/schema.ts';
-import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
+import {
+  readZeroTrustConfigurationStrict,
+  zeroTrustConfigurationStatus,
+} from '../../src/zero-trust/configuration.ts';
 import {
   activatePlatformApplication,
   configurePlatformZeroTrust,
@@ -202,7 +205,6 @@ describe('installer domain activation', () => {
       );
     }
     await configurePlatformZeroTrust(bindings(), env.db, {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -217,7 +219,7 @@ describe('installer domain activation', () => {
       await reconcilePlatformZeroTrust(bindings(), env.db);
     }
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'ready',
+      lastError: null,
       enabled: true,
     });
     const protectedProject = projects[0]!;
@@ -248,7 +250,9 @@ describe('installer domain activation', () => {
         { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
       );
     }
-    expect((await readZeroTrustConfigurationStrict(env.db))?.status).toBe('ready');
+    expect(zeroTrustConfigurationStatus((await readZeroTrustConfigurationStrict(env.db))!)).toBe(
+      'ready',
+    );
     expect(JSON.parse((await env.ROUTING.get(PLATFORM_APPLICATION_KEY))!)).toEqual(target);
     const route = JSON.parse((await env.ROUTING.get(protectedProject.slug))!);
     expect(route.workerName).toBe('original-worker');
@@ -277,7 +281,7 @@ describe('installer domain activation', () => {
     expect(wildcard?.destinations).toContain(
       'void-123456abcdef-*.' + original.workersDev.subdomain + '.workers.dev',
     );
-    expect(await zeroTrustStatus(bindings(), env.db)).toMatchObject({
+    expect(await zeroTrustStatus(bindings(), env.db, { check: true })).toMatchObject({
       live: { present: true, drifted: false },
     });
     const requestsBeforeRetry = cloudflare.fetcher.mock.calls.length;
@@ -300,7 +304,6 @@ describe('installer domain activation', () => {
       JSON.stringify({ workerName: 'preserved-worker', projectId: project.id }),
     );
     const input = {
-      accountId: env.CF_ACCOUNT_ID,
       apiToken: 'management-token',
       identityProviderIds: ['idp-1'],
       policyIds: ['policy-1'],
@@ -319,24 +322,25 @@ describe('installer domain activation', () => {
     expect(await env.ROUTING.get(PLATFORM_APPLICATION_KEY)).toBeNull();
     expect(await env.ROUTING.get(project.slug)).toBe(previousRoute);
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
-      status: 'error',
+      lastError: expect.any(String),
       operation: { applicationTarget: target, owner: null },
     });
     const added = await createTestProject(env.db, owner.id, 'domain-new-protected');
     expect(await initializeNewProjectZeroTrust(bindings(), env.db, added.id)).toMatchObject({
       desired_protected: true,
       effective_protected: false,
-      state: 'reconciling',
+      status: 'reconciling',
     });
     vi.stubGlobal('fetch', cloudflare.fetcher);
+    const { existingProjects: _existingProjects, ...replacement } = input;
     await expect(
-      configurePlatformZeroTrust(bindings(), env.db, { ...input, protectNewProjects: false }),
+      configurePlatformZeroTrust(bindings(), env.db, { ...replacement, protectNewProjects: false }),
     ).rejects.toThrow('saved Zero Trust operation');
     expect(await activatePlatformApplication(bindings(), env.db, target)).toEqual({ ready: true });
     expect(await getProjectZeroTrustState(env.db, added.id)).toMatchObject({
       desired_protected: true,
       effective_protected: true,
-      state: 'protected',
+      status: 'ready',
     });
     expect(JSON.parse((await env.ROUTING.get(PLATFORM_APPLICATION_KEY))!)).toEqual(target);
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).zeroTrust.audiences).toEqual(

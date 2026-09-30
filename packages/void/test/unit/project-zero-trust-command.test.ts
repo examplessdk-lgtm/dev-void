@@ -58,7 +58,7 @@ describe('project Zero Trust command', () => {
       output.push(String(chunk));
       return true;
     });
-    await runProjectCommand(root, { subcommand: 'zero-trust', action: 'disable', projectSlug: '' });
+    await runProjectCommand(root, { subcommand: 'zero-trust', action: 'public', projectSlug: '' });
     expect(output.join('')).toContain('still in progress');
     expect(output.join('')).toContain('void project zero-trust reconcile');
     expect(output.join('')).not.toContain('linked-app is public');
@@ -155,6 +155,10 @@ describe('project Zero Trust command', () => {
     expect(rendered).toContain(`Platform: ${platformStatus}`);
     expect(rendered).toContain(message);
     expect(rendered).toContain('Effective: protected');
+    // The default for new projects is meaningful only for a readable configuration.
+    expect(rendered.includes('Default for new projects: protected')).toBe(
+      platformStatus !== 'invalid_configuration',
+    );
   });
 
   it('sends project protection mutations through the command runner', async () => {
@@ -180,12 +184,12 @@ describe('project Zero Trust command', () => {
 
     await runProjectCommand(root, {
       subcommand: 'zero-trust',
-      action: 'enable',
+      action: 'protect',
       projectSlug: '',
     });
     await runProjectCommand(root, {
       subcommand: 'zero-trust',
-      action: 'disable',
+      action: 'public',
       projectSlug: '',
     });
     await runProjectCommand(root, {
