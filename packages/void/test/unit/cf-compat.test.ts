@@ -9,6 +9,58 @@ import { pathToFileURL } from 'node:url';
 import { expect, it } from 'vite-plus/test';
 import { resolveWranglerArgv } from '../../src/cli/preset.ts';
 
+it.each([200, 503])(
+  'reports HTTP %i when domain cleanup returns a non-JSON response',
+  async (status) => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-cf-domain-error-'));
+    const server = createServer((request, response) => {
+      request.resume();
+      response.statusCode = status;
+      response.end('temporary upstream response');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const configPath = join(directory, 'wrangler.json');
+      writeFileSync(
+        configPath,
+        JSON.stringify({ name: 'test-worker', account_id: 'test-account' }),
+      );
+      const [command, ...prefix] = resolveWranglerArgv(directory);
+      const output = await new Promise<{ status: number; stderr: string }>((resolve) => {
+        execFile(
+          command!,
+          [...prefix, 'triggers', 'clear-domains', '-c', configPath, '--name', 'test-worker'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            timeout: 20_000,
+            env: {
+              PATH: process.env.PATH,
+              SYSTEMROOT: process.env.SYSTEMROOT,
+              WINDIR: process.env.WINDIR,
+              CI: 'true',
+              CLOUDFLARE_API_TOKEN: 'synthetic-token',
+              CLOUDFLARE_ACCOUNT_ID: 'test-account',
+              CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+            },
+          },
+          (error, _stdout, stderr) => resolve({ status: error ? 1 : 0, stderr }),
+        );
+      });
+      expect(output.status).toBe(1);
+      expect(output.stderr).toContain(`HTTP ${status}`);
+      expect(output.stderr).not.toContain('synthetic-token');
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
 it.each(['clear-crons', 'clear-domains'])(
   'clears %s through the pinned account API',
   async (operation) => {

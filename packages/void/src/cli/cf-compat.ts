@@ -315,8 +315,18 @@ async function clearWorkerCustomDomains(worker: string): Promise<Result> {
       signal: AbortSignal.timeout(30_000),
       ...(proxy ? { dispatcher: proxy } : {}),
     });
-    const body = object(await response.json());
-    if (!response.ok || body.success !== true) {
+    if (!response.ok) {
+      throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error(
+        `Cloudflare returned HTTP ${response.status} with a non-JSON custom-domain response.`,
+      );
+    }
+    if (object(body).success !== true) {
       throw new Error(`Cloudflare rejected the empty custom-domain set (HTTP ${response.status}).`);
     }
     return result(0);
