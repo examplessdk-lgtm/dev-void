@@ -254,6 +254,53 @@ it(
   CF_BUILD_TIMEOUT_MS,
 );
 
+it(
+  'preserves binary font modules in a deployable Worker bundle',
+  async () => {
+    const output = worker({
+      name: 'void-test',
+      compatibility_date: '2026-09-29',
+      main: 'index.js',
+    });
+    mkdirSync(join(output, 'assets'));
+    writeFileSync(
+      join(output, 'index.js'),
+      "import font from './assets/font.woff2'; export default { fetch() { return new Response(String(font.byteLength)) } };\n",
+    );
+    writeFileSync(join(output, 'assets/font.woff2'), Buffer.from([1, 2, 3]));
+    const prepared = await prepareCfBuildOutput(output, 'account-id');
+    expect(prepared).not.toBeNull();
+    if (!prepared) {
+      return;
+    }
+    try {
+      const built = await readBuildOutput(prepared.directory);
+      expect(built.workers.default.config.manifest).toMatchObject({
+        mainModule: 'index.js',
+        modules: { 'assets/font.woff2': { type: 'data' } },
+      });
+      const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
+      const dryRun = spawnSync(
+        process.execPath,
+        [cf, 'workers', 'versions', 'create', '--prebuilt', '--dry-run'],
+        { cwd: prepared.directory, encoding: 'utf8' },
+      );
+      expect(dryRun.status, `${dryRun.stdout}\n${dryRun.stderr}`).toBe(0);
+    } finally {
+      prepared.dispose();
+    }
+  },
+  CF_BUILD_TIMEOUT_MS,
+);
+
+it('names the file when a plugin emits an unsupported module', async () => {
+  const output = worker({ name: 'void-test', compatibility_date: '2026-09-29', main: 'index.js' });
+  writeFileSync(join(output, 'plugin.unknown'), 'unexpected');
+  await expect(prepareCfBuildOutput(output, 'account-id')).rejects.toThrow(
+    'unsupported module "plugin.unknown"',
+  );
+});
+
 it('preserves worker settings that the previous bridge dropped', async () => {
   const output = worker({
     name: 'void-test',

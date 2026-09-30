@@ -52,6 +52,11 @@ const moduleTypes: Record<string, ModuleType> = {
   '.cjs': 'cjs',
   '.wasm': 'wasm',
   '.bin': 'data',
+  '.woff': 'data',
+  '.woff2': 'data',
+  '.ttf': 'data',
+  '.otf': 'data',
+  '.eot': 'data',
   '.txt': 'text',
   '.html': 'text',
   '.sql': 'text',
@@ -96,8 +101,11 @@ function copyBundle(
     }
     const type = moduleTypes[extname(entry.name).toLowerCase()];
     if (!type) {
-      return null;
+      throw new Error(
+        `The built Worker contains an unsupported module ${JSON.stringify(name)}. Emit public assets into the client output or configure the plugin that produced this file to run only in the client environment.`,
+      );
     }
+
     const destinationPath = join(destination, name);
     mkdirSync(dirname(destinationPath), { recursive: true });
     if (entry.isSymbolicLink()) {
