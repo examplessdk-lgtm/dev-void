@@ -1064,7 +1064,7 @@ async function processUserRollover(
             routing.userId = current.user_id;
             await env.ROUTING.put(
               key,
-              withProjectZeroTrustRouting(JSON.stringify(routing), protection),
+              withProjectZeroTrustRouting(JSON.stringify(routing), protection, current.id),
             );
           }
         }

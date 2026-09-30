@@ -684,6 +684,7 @@ async function republishProjectOwnerState(
       await context.env.ROUTING.put(
         key,
         rewriteProjectRouteMetadata(JSON.parse(raw) as Record<string, unknown>, {
+          projectId: project.id,
           userId: owner.id,
           limits: dispatchLimits,
           suspended: routingSuspensionReason(owner.suspended_reason),

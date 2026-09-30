@@ -3,6 +3,7 @@ import { sql as drizzleSql } from 'drizzle-orm';
 import { getDomainsByProjectIds, getProject, type Db } from './db.ts';
 import type { AssetConfig, DeployManifest } from './types.ts';
 import {
+  assertRouteBelongsToProject,
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
 } from './zero-trust/routing.ts';
@@ -152,21 +153,33 @@ export function resolveRoutingUndo(
  * mid-deploy), and skips the write whenever the entry already satisfies the
  * update (set → same reason / weaker reason preserved, clear → no matching
  * marker) so repeated suspend/unsuspend is a cheap no-op.
- * Production callers supply protection read under the project lock, because a
- * stale KV value must never decide protection for a newly published route.
+ * Production callers supply the project and its protection read under the
+ * project lock, because a stale KV value must never decide protection for a
+ * newly published route. A cached route of another project (reused slug or
+ * hostname) is left untouched; the remaining keys are still updated, and the
+ * first rejection is thrown afterwards so the caller retries.
  */
 export async function applyRoutingSuspension(
   routing: KVNamespace,
   keys: ReadonlyArray<string>,
   update: RoutingSuspensionUpdate,
-  protection?: ProjectZeroTrustRouting | null,
+  project?: Readonly<{ id: string; protection: ProjectZeroTrustRouting | null }>,
 ): Promise<void> {
+  let rejected: unknown = null;
   for (const key of keys) {
     const raw = await routing.get(key);
     if (!raw) {
       continue;
     }
     const entry = JSON.parse(raw) as Record<string, unknown>;
+    if (project) {
+      try {
+        assertRouteBelongsToProject(entry, project.id);
+      } catch (error) {
+        rejected ??= error;
+        continue;
+      }
+    }
     if (update.op === 'suspend') {
       if (entry.suspended === update.reason) {
         continue; // already carries this reason
@@ -187,8 +200,11 @@ export async function applyRoutingSuspension(
     const next = JSON.stringify(entry);
     await routing.put(
       key,
-      protection === undefined ? next : withProjectZeroTrustRouting(next, protection),
+      project ? withProjectZeroTrustRouting(next, project.protection, project.id) : next,
     );
+  }
+  if (rejected) {
+    throw rejected;
   }
 }
 
@@ -211,8 +227,9 @@ export async function applyRoutingSuspension(
  *
  * Each project's KV mutation runs under its project-row lock so deploy,
  * rollback, domain lifecycle, and failure compensation cannot overwrite a
- * newer suspension decision with a stale routing snapshot. No-ops for an
- * empty project list.
+ * newer suspension decision with a stale routing snapshot. One project's
+ * failure does not stop the others; the first failure is thrown after every
+ * project was attempted. No-ops for an empty project list.
  */
 export async function setProjectsRoutingSuspension(
   routing: KVNamespace,
@@ -223,26 +240,37 @@ export async function setProjectsRoutingSuspension(
   if (projects.length === 0) {
     return;
   }
+  let failure: unknown = null;
   for (const project of projects) {
-    await db.transaction(async (tx) => {
-      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
-      const current = await getProject(tx as unknown as Db, project.id);
-      // If ownership changed before this lock, transfer convergence owns the
-      // route and this stale fan-out must stand down.
-      if (!current || current.user_id !== project.user_id || current.status === 'deleting') {
-        return;
-      }
-      // Resolve domains only after the project lock. Domain activation takes
-      // the same lock before publishing a route, so this read must happen
-      // behind it or a domain activated between the eager read and this lock
-      // could escape the suspension entirely.
-      const domainMap = await getDomainsByProjectIds(tx as unknown as Db, [project.id]);
-      const protection = await resolveProjectZeroTrustRoutingForPublication(tx, project.id);
-      const domainKeys = (domainMap.get(project.id) ?? []).map(
-        (domain) => `domain:${domain.hostname}`,
-      );
-      await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update, protection);
-    });
+    await db
+      .transaction(async (tx) => {
+        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${project.id} FOR UPDATE`);
+        const current = await getProject(tx as unknown as Db, project.id);
+        // If ownership changed before this lock, transfer convergence owns the
+        // route and this stale fan-out must stand down.
+        if (!current || current.user_id !== project.user_id || current.status === 'deleting') {
+          return;
+        }
+        // Resolve domains only after the project lock. Domain activation takes
+        // the same lock before publishing a route, so this read must happen
+        // behind it or a domain activated between the eager read and this lock
+        // could escape the suspension entirely.
+        const domainMap = await getDomainsByProjectIds(tx as unknown as Db, [project.id]);
+        const protection = await resolveProjectZeroTrustRoutingForPublication(tx, project.id);
+        const domainKeys = (domainMap.get(project.id) ?? []).map(
+          (domain) => `domain:${domain.hostname}`,
+        );
+        await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update, {
+          id: project.id,
+          protection,
+        });
+      })
+      .catch((error: unknown) => {
+        failure ??= error;
+      });
+  }
+  if (failure) {
+    throw failure;
   }
 }
 

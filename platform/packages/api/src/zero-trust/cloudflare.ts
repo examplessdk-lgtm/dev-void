@@ -396,8 +396,10 @@ export class ZeroTrustCloudflareClient {
 
   /**
    * Find the application Void recorded: by id first, then by its Void-owned
-   * name. An id that is gone while another application holds its name is an
-   * error, never a match. `inventory` is set when the name lookup ran.
+   * name. The name carries a random nonce committed before any create, so when
+   * the recorded id is gone, the single application holding that name is
+   * Void's own replacement whose create response was lost. `inventory` is
+   * set when the name lookup ran.
    */
   private async locateOwnedApplication(
     id: string | null | undefined,
@@ -415,11 +417,6 @@ export class ZeroTrustCloudflareClient {
     }
     const inventory = await this.applications();
     const sameName = [...inventory.values()].filter((entry) => entry.name === name);
-    if (id && sameName.length > 0) {
-      throw new Error(
-        `The recorded Access application ${id} is missing and its name is now owned by another application.`,
-      );
-    }
     if (sameName.length > 1) {
       throw new Error(`Multiple Cloudflare Access applications are named ${name}.`);
     }

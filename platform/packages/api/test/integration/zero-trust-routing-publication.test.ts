@@ -11,7 +11,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { ProjectAccessVerifier } from '../../../dispatch/src/access.ts';
-import { getDomain, getProject } from '../../src/db.ts';
+import { deleteProjectCascade, getDomain, getProject } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
 import { domains, platformSettings, projectZeroTrust } from '../../src/schema.ts';
@@ -251,6 +251,7 @@ describe('authoritative Zero Trust routing publication', () => {
         withProjectZeroTrustRouting(
           JSON.stringify({ worker: 'live-worker', suspended: true }),
           protection,
+          project.id,
         ),
       );
       expect(rewritten).toEqual({ worker: 'live-worker', suspended: true, zeroTrust: protection });
@@ -266,6 +267,76 @@ describe('authoritative Zero Trust routing publication', () => {
       expect(fetcher).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps a domain pending while its reused slug still serves the deleted project route', async () => {
+    const hostname = 'reused-slug.example.net';
+    await env.ROUTING.delete('domain:' + hostname);
+    const previousOwner = await createTestUser(env.db, 'reused-slug-previous-owner');
+    const previous = await createTestProject(env.db, previousOwner.id, 'reused-slug-project');
+    await deleteProjectCascade(env.db, previous.id);
+    const owner = await createTestUser(env.db, 'reused-slug-owner');
+    const project = await createTestProject(env.db, owner.id, previous.slug);
+    const cloudflare = accessApi();
+    const platform = bindings();
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(input.toString()).pathname.endsWith('/custom_hostnames/cf-reused-slug')) {
+        return Response.json({
+          success: true,
+          result: {
+            id: 'cf-reused-slug',
+            hostname,
+            status: 'active',
+            ssl: { status: 'active', method: 'http', type: 'dv' },
+          },
+        });
+      }
+      return cloudflare.fetcher(input, init);
+    });
+    await configurePlatformZeroTrust(platform, env.db, {
+      ...configurationInput(),
+      protectNewProjects: false,
+      existingProjects: 'public',
+    });
+    await env.db.insert(domains).values({
+      id: 'domain-reused-slug',
+      project_id: project.id,
+      hostname,
+      cf_hostname_id: 'cf-reused-slug',
+      status: 'pending',
+    });
+    const previousRoute = JSON.stringify({
+      workerName: 'user-' + previous.slug + '-dpl_previous',
+      projectId: previous.id,
+      userId: previousOwner.id,
+      version: 'dpl_previous',
+      zeroTrust: {
+        teamDomain: 'company.cloudflareaccess.com',
+        audiences: [{ hostname: previous.slug + '.apps.example.com', audience: 'aud-previous' }],
+      },
+    });
+    // Each KV read is independent: domain reconciliation can see the missing
+    // slug route while the activation copy still sees the deleted project's.
+    const originalGet = env.ROUTING.get.bind(env.ROUTING);
+    let slugReads = 0;
+    vi.spyOn(env.ROUTING, 'get').mockImplementation((async (
+      key: string | Array<string>,
+      ...rest: Array<unknown>
+    ) =>
+      key === project.slug && ++slugReads > 1
+        ? previousRoute
+        : Reflect.apply(originalGet, env.ROUTING, [key, ...rest])) as typeof env.ROUTING.get);
+    const put = vi.spyOn(env.ROUTING, 'put');
+    const activated = await tryActivateDomain(
+      platform,
+      env.db,
+      (await getDomain(env.db, 'domain-reused-slug'))!,
+      (await getProject(env.db, project.id))!,
+    );
+    expect(slugReads).toBe(2);
+    expect(activated.activated).toBe(false);
+    expect(put.mock.calls.some(([key]) => key === 'domain:' + hostname)).toBe(false);
+    expect((await getDomain(env.db, 'domain-reused-slug'))!.status).toBe('pending');
+  });
 
   it('publishes a deny-all marker for malformed saved configuration', async () => {
     const owner = await createTestUser(env.db, 'invalid-publication-owner');

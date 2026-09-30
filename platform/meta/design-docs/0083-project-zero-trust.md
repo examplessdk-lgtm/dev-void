@@ -24,7 +24,8 @@ written under version 1 unreadable, so they render once after upgrade.
 
 Void owns only applications recorded in PostgreSQL by ID or by a name committed
 before the create request (names carry a random nonce, so recovery never adopts
-a pre-existing application):
+a pre-existing application). When a recorded ID is gone, the single application
+holding its name is Void's own replacement and is adopted:
 
 - one wildcard application for the project domain and workers.dev project
   origins (limited to the installation's ingress prefix);
@@ -87,7 +88,8 @@ not from KV. The publication resolver never fails open: unsettled or invalid
 protection publishes an empty audience set (dispatch denies) for desired or
 effective protected rows; a public row with a recorded bypass stays public;
 unknown rows make domain activation keep the domain pending and every other
-writer publish deny-all.
+writer publish deny-all. A cached route whose `projectId` names another project
+(reused slug or hostname) is never rewritten; the writer fails and retries.
 
 Dispatch re-verifies `Cf-Access-Jwt-Assertion` against the team JWKS (no
 redirects; RS256, issuer, audience, `iat`, `exp`, `type=app`; exact custom

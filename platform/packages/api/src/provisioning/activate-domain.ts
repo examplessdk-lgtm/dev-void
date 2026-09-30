@@ -129,22 +129,21 @@ export async function tryActivateDomain(
         return;
       }
       // Activation is retried while the domain stays pending, so unknown
-      // protection keeps it pending instead of publishing a denied route.
-      let protection;
+      // protection, or a cached slug route that still belongs to a deleted
+      // project, keeps it pending instead of publishing a route.
+      let published;
       try {
-        protection = await resolveProjectZeroTrustRoutingForPublication(txDb, project.id, {
+        const protection = await resolveProjectZeroTrustRoutingForPublication(txDb, project.id, {
           retryable: true,
         });
+        published = withProjectZeroTrustRouting(slugRouting, protection, project.id);
       } catch (error) {
         if (error instanceof ZeroTrustUnavailableError) {
           return;
         }
         throw error;
       }
-      await env.ROUTING.put(
-        `domain:${lockedDomain.hostname}`,
-        withProjectZeroTrustRouting(slugRouting, protection),
-      );
+      await env.ROUTING.put(`domain:${lockedDomain.hostname}`, published);
       await updateDomainStatus(txDb, lockedDomain.id, 'active');
       activated = true;
       domain.status = 'active';

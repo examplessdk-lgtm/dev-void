@@ -3156,7 +3156,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
               await context.env.ROUTING.put(
                 key,
                 key === project.slug || key.startsWith('domain:')
-                  ? withProjectZeroTrustRouting(undo.value, zeroTrust)
+                  ? withProjectZeroTrustRouting(undo.value, zeroTrust, projectId)
                   : undo.value,
               );
             }
@@ -5493,6 +5493,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
                     : withProjectZeroTrustRouting(
                         rawRouting,
                         await resolveProjectZeroTrustRoutingForPublication(txDb, projectId),
+                        projectId,
                       );
                 await reconcileProjectDomainRoutes(context.env, currentDomains, restoredRouting);
               }

@@ -431,22 +431,53 @@ describe('ZeroTrustCloudflareClient', () => {
         expect(fetcher.mock.calls[0]![1]?.method).toBeUndefined();
       });
 
-      it("does not adopt a different application with a missing recorded ID's name", async () => {
+      it("recovers the replacement holding a missing recorded ID's name", async () => {
+        const { applications, client, fetcher } = applicationFixture();
+        const spec = applicationSpec('void-project');
+        const created = await client.ensureApplication(spec);
+        const recorded = applications.get(created.id)!;
+        applications.delete(created.id);
+        // Void recreated the application, but the create response was lost.
+        applications.set('replacement-app', {
+          ...recorded,
+          id: 'replacement-app',
+          aud: 'aud-replacement-app',
+        });
+        fetcher.mockClear();
+
+        if (operation === 'ensure') {
+          await expect(client.ensureApplication(spec, created)).resolves.toMatchObject({
+            id: 'replacement-app',
+            audience: 'aud-replacement-app',
+          });
+          expect(fetcher.mock.calls.map(([, init]) => init?.method ?? 'GET')).toEqual([
+            'GET',
+            'GET',
+            'PUT',
+          ]);
+          expect([...applications.keys()]).toEqual(['replacement-app']);
+        } else {
+          await expect(client.deleteApplication(created.id, spec.name)).resolves.toBeUndefined();
+          expect(applications.size).toBe(0);
+        }
+      });
+
+      it('rejects a missing recorded ID when several applications hold its name', async () => {
         const { applications, client, fetcher } = applicationFixture();
         const spec = applicationSpec('void-project');
         const created = await client.ensureApplication(spec);
         applications.delete(created.id);
         applications.set('replacement-app', { id: 'replacement-app', name: spec.name });
+        applications.set('duplicate-app', { id: 'duplicate-app', name: spec.name });
         fetcher.mockClear();
 
         const result =
           operation === 'ensure'
             ? client.ensureApplication(spec, created)
             : client.deleteApplication(created.id, spec.name);
-        await expect(result).rejects.toThrow('its name is now owned by another application');
-        expect(fetcher).toHaveBeenCalledTimes(2);
+        await expect(result).rejects.toThrow('Multiple Cloudflare Access applications');
         expect(fetcher.mock.calls.every(([, init]) => !init?.method)).toBe(true);
-        expect(applications.has('replacement-app')).toBe(true);
+        expect(applications.size).toBe(2);
       });
 
       it('treats an authoritative 404 as an absent recorded application', async () => {

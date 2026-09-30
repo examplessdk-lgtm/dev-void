@@ -172,11 +172,30 @@ export async function resolveProjectZeroTrustRoutingForPublication(
   }
 }
 
+/**
+ * KV can still return the previous project's route for a reused slug or
+ * hostname. That payload carries its own project's Worker and protection, so
+ * applying this project's protection to it could strip the Access gate from
+ * a still-live Worker. Callers retry once KV converges.
+ */
+export function assertRouteBelongsToProject(
+  entry: Record<string, unknown>,
+  projectId: string,
+): void {
+  if (entry.projectId !== undefined && entry.projectId !== projectId) {
+    throw new ZeroTrustUnavailableError(
+      'Live routing still belongs to another project. Retry once routing converges.',
+    );
+  }
+}
+
 export function withProjectZeroTrustRouting(
   raw: string,
   protection: ProjectZeroTrustRouting | null,
+  projectId: string,
 ): string {
   const entry = JSON.parse(raw) as Record<string, unknown>;
+  assertRouteBelongsToProject(entry, projectId);
   if (protection) {
     entry.zeroTrust = protection;
   } else {
@@ -193,12 +212,14 @@ export function withProjectZeroTrustRouting(
 export function rewriteProjectRouteMetadata(
   entry: Record<string, unknown>,
   metadata: Readonly<{
+    projectId: string;
     userId: string;
     limits: ReturnType<typeof computeDispatchLimits>;
     suspended: string | null;
     zeroTrust: ProjectZeroTrustRouting | null;
   }>,
 ): string {
+  assertRouteBelongsToProject(entry, metadata.projectId);
   entry.userId = metadata.userId;
   if ('workerName' in entry) {
     if (metadata.limits) {
@@ -345,6 +366,7 @@ export async function publishProjectZeroTrustRoutingLocked(
     await env.ROUTING.put(
       key,
       rewriteProjectRouteMetadata(entry, {
+        projectId: project.id,
         userId: owner.id,
         limits: dispatchLimits,
         suspended: suspensionReason,

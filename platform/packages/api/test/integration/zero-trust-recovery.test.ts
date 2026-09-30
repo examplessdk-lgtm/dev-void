@@ -375,6 +375,62 @@ describe('Zero Trust recovery', () => {
     expect(cloudflare.applications.has(bypassId!)).toBe(false);
   });
 
+  it('adopts its own wildcard replacement after the recreate response is lost', async () => {
+    const owner = await createTestUser(env.db, 'replacement-owner');
+    const project = await createTestProject(env.db, owner.id, 'replacement-project');
+    const cloudflare = accessApi();
+    let loseWildcardCreate = false;
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await cloudflare.fetcher(input, init);
+      if (
+        loseWildcardCreate &&
+        init?.method === 'POST' &&
+        JSON.parse(String(init.body)).domain === '*.apps.example.com'
+      ) {
+        loseWildcardCreate = false;
+        // The provider committed the replacement, but Void never received its ID.
+        return providerError('Gateway timeout', 504);
+      }
+      return response;
+    });
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configurationInput());
+    const configured = (await readZeroTrustConfigurationStrict(env.db))!;
+    const original = configured.wildcardApplication!;
+    cloudflare.applications.delete(original.id);
+
+    loseWildcardCreate = true;
+    await expect(reconcilePlatformZeroTrust(platform, env.db)).rejects.toThrow('Gateway timeout');
+    const replacement = [...cloudflare.applications.values()].find(
+      (application) => application.name === configured.wildcardApplicationName,
+    )!;
+    expect(replacement.id).not.toBe(original.id);
+    expect((await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication?.id).not.toBe(
+      replacement.id,
+    );
+
+    await reconcilePlatformZeroTrust(platform, env.db);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      enabled: true,
+      operation: null,
+      wildcardApplication: { id: replacement.id, audience: replacement.aud },
+    });
+    expect(
+      [...cloudflare.applications.values()].filter(
+        (application) => application.name === configured.wildcardApplicationName,
+      ),
+    ).toHaveLength(1);
+    expect((await resolveProjectZeroTrustRouting(env.db, project.id))!.audiences).toContainEqual({
+      hostname: '*.apps.example.com',
+      audience: replacement.aud,
+    });
+
+    await expect(disablePlatformZeroTrust(platform, env.db)).resolves.toMatchObject({
+      enabled: false,
+    });
+    expect(cloudflare.applications.size).toBe(0);
+  });
+
   it('replaces a revoked token and recovers a provider application from the saved creation checkpoint', async () => {
     const owner = await createTestUser(env.db, 'credential-owner');
     const project = await createTestProject(env.db, owner.id, 'credential-project');

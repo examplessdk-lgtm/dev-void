@@ -1446,7 +1446,7 @@ const app = new Hono<ApiEnv>()
                 await context.env.ROUTING.put(
                   key,
                   key === lockedProject.slug || key.startsWith('domain:')
-                    ? withProjectZeroTrustRouting(undo.value, currentZeroTrust)
+                    ? withProjectZeroTrustRouting(undo.value, currentZeroTrust, lockedProject.id)
                     : undo.value,
                 );
               }
@@ -1771,7 +1771,9 @@ const app = new Hono<ApiEnv>()
               try {
                 const rawRouting = await context.env.ROUTING.get(project.slug);
                 restoredProjectRouting =
-                  rawRouting === null ? null : withProjectZeroTrustRouting(rawRouting, zeroTrust);
+                  rawRouting === null
+                    ? null
+                    : withProjectZeroTrustRouting(rawRouting, zeroTrust, projectId);
               } catch (compensationError) {
                 compensationErrors.push(compensationError);
               }

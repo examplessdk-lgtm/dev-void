@@ -12,6 +12,7 @@ import {
 import { beginDeploymentCutover, deleteProjectCascade, getProject, getUser } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
+import { setProjectsRoutingSuspension } from '../../src/routing.ts';
 import { domains, deployments } from '../../src/schema.ts';
 import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
 import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
@@ -398,4 +399,123 @@ describe('Zero Trust authoritative route metadata', () => {
       });
     },
   );
+  it.each(['plan', 'suspend', 'unsuspend'] as const)(
+    'never rewrites a moved hostname cached for its previous protected project on %s',
+    async (mutation) => {
+      const previousOwner = await createTestUser(env.db, 'moved-previous-owner');
+      const previous = await createTestProject(env.db, previousOwner.id, 'moved-previous');
+      const previousDeployment = await createTestDeployment(env.db, previous.id, 'live');
+      const owner = await createTestUser(env.db, 'moved-current-owner');
+      const current = await createTestProject(env.db, owner.id, 'moved-current');
+      const token = await createOperatorToken(
+        env.db,
+        await createTestUser(env.db, 'moved-admin', 'github', undefined, 'free', 'admin'),
+      );
+      vi.stubGlobal('fetch', accessApi().fetcher);
+      await configurePlatformZeroTrust(bindings(), env.db, configurationInput(false));
+      // The previous project released the hostname and the current public
+      // project registered it; KV may still serve the previous project's route.
+      const domainKey = 'domain:moved.example.com';
+      await env.db.insert(domains).values({
+        id: 'dom_moved',
+        project_id: current.id,
+        hostname: 'moved.example.com',
+        cf_hostname_id: 'cf-moved',
+        status: 'pending',
+      });
+      const stale = JSON.stringify({
+        workerName: 'user-' + previous.slug + '-' + previousDeployment.id,
+        projectId: previous.id,
+        userId: previousOwner.id,
+        version: previousDeployment.id,
+        ...(mutation === 'unsuspend' ? { suspended: 'operator_review' } : {}),
+        zeroTrust: {
+          teamDomain: 'company.cloudflareaccess.com',
+          audiences: [{ hostname: 'moved.example.com', audience: 'aud-previous' }],
+        },
+      });
+      const put = vi.spyOn(env.ROUTING, 'put');
+      const read = staleRouteRead([domainKey], stale);
+      try {
+        if (mutation === 'plan') {
+          const response = await app.fetch(
+            new Request('http://localhost/operator/v1/users/' + owner.id + '/plan', {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ plan: 'pro' }),
+            }),
+            bindings(),
+          );
+          expect(response.status).toBe(500);
+          expect(await response.json()).toMatchObject({ error: 'partial_failure' });
+        } else {
+          await expect(
+            setProjectsRoutingSuspension(
+              env.ROUTING,
+              env.db,
+              [{ ...current, user_id: owner.id }],
+              mutation === 'suspend'
+                ? { op: 'suspend', reason: 'operator_review', force: true }
+                : { op: 'unsuspend', matchReason: null },
+            ),
+          ).rejects.toThrow('belongs to another project');
+        }
+      } finally {
+        read.mockRestore();
+      }
+      expect(put.mock.calls.some(([key]) => key === domainKey)).toBe(false);
+      expect(await env.ROUTING.get(domainKey)).toBeNull();
+    },
+  );
+
+  it('suspends every owned route before reporting a moved hostname cached for another project', async () => {
+    const previousOwner = await createTestUser(env.db, 'fanout-previous-owner');
+    const previous = await createTestProject(env.db, previousOwner.id, 'fanout-previous');
+    const owner = await createTestUser(env.db, 'fanout-owner');
+    const first = await createTestProject(env.db, owner.id, 'fanout-first');
+    const second = await createTestProject(env.db, owner.id, 'fanout-second');
+    vi.stubGlobal('fetch', accessApi().fetcher);
+    await configurePlatformZeroTrust(bindings(), env.db, configurationInput(false));
+    await env.db.insert(domains).values({
+      id: 'dom_fanout',
+      project_id: first.id,
+      hostname: 'fanout.example.com',
+      cf_hostname_id: 'cf-fanout',
+      status: 'pending',
+    });
+    for (const project of [first, second]) {
+      await env.ROUTING.put(
+        project.slug,
+        JSON.stringify({
+          workerName: 'user-' + project.slug,
+          projectId: project.id,
+          userId: owner.id,
+        }),
+      );
+    }
+    const domainKey = 'domain:fanout.example.com';
+    const read = staleRouteRead(
+      [domainKey],
+      JSON.stringify({ workerName: 'user-' + previous.slug, projectId: previous.id }),
+    );
+    try {
+      await expect(
+        setProjectsRoutingSuspension(
+          env.ROUTING,
+          env.db,
+          [first, second].map((project) => ({ ...project, user_id: owner.id })),
+          { op: 'suspend', reason: 'operator_review', force: true },
+        ),
+      ).rejects.toThrow('belongs to another project');
+    } finally {
+      read.mockRestore();
+    }
+    for (const project of [first, second]) {
+      expect(JSON.parse((await env.ROUTING.get(project.slug)) ?? '{}')).toMatchObject({
+        projectId: project.id,
+        suspended: 'operator_review',
+      });
+    }
+    expect(await env.ROUTING.get(domainKey)).toBeNull();
+  });
 });
