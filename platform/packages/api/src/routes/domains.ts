@@ -21,9 +21,11 @@ import {
   type CustomHostnameInfo,
 } from '../provisioning/cloudflare-api.ts';
 import type { DomainVerificationData } from '../schema.ts';
+import { lockZeroTrustConfiguration } from '../zero-trust/lock.ts';
 import { reconcileProjectZeroTrustDomains } from '../zero-trust/project.ts';
 import {
   getProjectZeroTrustState,
+  markProjectCustomDomainsChanged,
   MAX_ZERO_TRUST_CUSTOM_DOMAINS_PER_PROJECT,
 } from '../zero-trust/state.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
@@ -356,6 +358,11 @@ const app = new Hono<ApiEnv>()
           `Failed to delete routing entry: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
+      // The project's custom domain application still lists this hostname.
+      // Record that with the deletion, so the hostname is never freed while
+      // no retry would remove it from that application.
+      await lockZeroTrustConfiguration(tx, 'shared');
+      await markProjectCustomDomainsChanged(txDb, projectId);
       await deleteDomain(txDb, domain.id);
       return null;
     });

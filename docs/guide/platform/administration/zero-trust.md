@@ -275,7 +275,7 @@ When you **disable** Zero Trust:
 
 A custom domain on a protected project goes live only after Void adds it to the project's custom domain application. If Access cannot be updated, the domain stays pending and is not reachable. Void tries again each time it checks the domain.
 
-When you remove a custom domain, Void removes it from the project first, then from the Access application. A protected project can have up to 100 custom domains. Custom domains on public projects need no Access change.
+When you remove a custom domain, Void removes it from the project first, then from the Access application. If the Access update fails, the project shows `reconciling` or `error` and Void retries every hour. A protected project can have up to 100 custom domains. Custom domains on public projects need no Access change.
 
 #### New Projects
 

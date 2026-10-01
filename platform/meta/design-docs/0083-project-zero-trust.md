@@ -163,6 +163,13 @@ and then owns that invocation. The hourly tier also retries failed operations,
 pending project rows (errored rows move behind others), and, after a finished
 disable, clears protection left on skipped rows.
 
+Custom domain removal marks a settled row that records a custom domain
+application as `reconciling` in the transaction that deletes the domain. The
+follow-up reconcile then rewrites the application; if it fails or never runs,
+the hourly tier does. A freed hostname left in the old application is fail
+closed: a new owner's visitors meet the installation's policies, and dispatch
+checks the new owner's audience.
+
 ## Status and removal
 
 Status reads return saved state. The live check (account, selections,

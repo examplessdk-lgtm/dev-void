@@ -1,5 +1,5 @@
 import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, or, sql } from 'drizzle-orm';
 import type { Db, DbOrTx } from '../db.ts';
 import { getDomainsByProjectId } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
@@ -198,6 +198,31 @@ export async function projectDestinations(
     );
   }
   return { platform, custom };
+}
+
+/**
+ * A removed custom domain stays in the project's custom domain application
+ * until reconciliation rewrites it. Call this in the transaction that deletes
+ * the domain: a settled row then reads as pending, so hourly maintenance
+ * repairs the application even if the follow-up reconciliation never runs.
+ */
+export async function markProjectCustomDomainsChanged(
+  db: DbOrTx,
+  projectId: string,
+): Promise<void> {
+  await db
+    .update(projectZeroTrust)
+    .set({ status: 'reconciling', updated_at: sql`now()` })
+    .where(
+      and(
+        eq(projectZeroTrust.project_id, projectId),
+        eq(projectZeroTrust.status, 'ready'),
+        or(
+          isNotNull(projectZeroTrust.protected_application_id),
+          isNotNull(projectZeroTrust.protected_application_name),
+        ),
+      ),
+    );
 }
 
 export async function markProjectError(
