@@ -116,6 +116,8 @@ import {
 } from './platform-traffic.ts';
 import { platformWorkerLiveTriggersMatch } from './platform-trigger-proof.ts';
 import {
+  fencePlatformProjectZeroTrustConnection,
+  liftPlatformProjectZeroTrustFenceConnection,
   lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
   type PlatformProjectZeroTrustState,
@@ -207,6 +209,10 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
   /** Block Zero Trust writers in the API until the returned release runs. */
   lockProjectZeroTrust?: () => Promise<() => Promise<void>>;
+  /** Make API Zero Trust writers refuse until the fence is lifted. */
+  fenceProjectZeroTrust?: () => Promise<void>;
+  /** Let API Zero Trust writers run again; called before traffic is enabled. */
+  liftProjectZeroTrustFence?: () => Promise<void>;
   requiredSafetyProtocols?: Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>;
   verifyDatabase?: (
     runtimeDirectory: string,
@@ -2721,6 +2727,9 @@ export async function installPlatform(
         createPlatformHealthProbeToken(manifest.ownershipNonce),
       );
     }
+    // A failed uninstall, or one whose database is reused, leaves its record
+    // behind. Remove it before traffic opens so Zero Trust writers run again.
+    await releaseDatabaseLock.liftProjectZeroTrustFence?.();
     if (dependencies.client.deleteKvValue) {
       await dependencies.client.deleteKvValue(
         plan.account.id,
@@ -3929,6 +3938,8 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
   };
   release.readProjectZeroTrust = () => readPlatformProjectZeroTrustStateConnection(client);
   release.lockProjectZeroTrust = () => lockPlatformProjectZeroTrustConnection(client);
+  release.fenceProjectZeroTrust = () => fencePlatformProjectZeroTrustConnection(client);
+  release.liftProjectZeroTrustFence = () => liftPlatformProjectZeroTrustFenceConnection(client);
   release.requiredSafetyProtocols = await readRequiredPlatformSafetyProtocols(client);
   release.checkpoint = async (manifest) => {
     if (released) {

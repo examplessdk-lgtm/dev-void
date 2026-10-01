@@ -305,11 +305,15 @@ const uninstallArgs = {
   yes: true,
 };
 
-const unlockedProjectZeroTrust = async () => async () => {};
+const unlockedProjectZeroTrust = {
+  lockProjectZeroTrust: async () => async () => {},
+  fenceProjectZeroTrust: async () => {},
+  liftProjectZeroTrustFence: async () => {},
+};
 
 const uninstallDependencies = {
   interactive: false,
-  lockProjectZeroTrust: unlockedProjectZeroTrust,
+  ...unlockedProjectZeroTrust,
   readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
 };
 
@@ -466,7 +470,7 @@ describe('uninstall with project Zero Trust', () => {
     const read = (rows: Parameters<typeof projectZeroTrustUninstallState>[1]) => () =>
       uninstallPlatform(fake, manifest, uninstallArgs, {
         interactive: false,
-        lockProjectZeroTrust: unlockedProjectZeroTrust,
+        ...unlockedProjectZeroTrust,
         readProjectZeroTrust: async () => projectZeroTrustUninstallState(disabledZeroTrust, rows),
       }).catch((reason: unknown) => reason as Error);
     const deleting = {
@@ -542,7 +546,7 @@ describe('uninstall with project Zero Trust', () => {
     const fake = client(manifest);
     await uninstallPlatform(fake, manifest, uninstallArgs, {
       interactive: false,
-      lockProjectZeroTrust: unlockedProjectZeroTrust,
+      ...unlockedProjectZeroTrust,
       readProjectZeroTrust: async () =>
         projectZeroTrustUninstallState(setting, [projectApplications('proj_settled', null, null)]),
     });
@@ -550,31 +554,46 @@ describe('uninstall with project Zero Trust', () => {
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
-  // Models the PostgreSQL advisory lock: an API Zero Trust writer that asks for
-  // it while uninstall holds it commits only after the release.
+  // Models the PostgreSQL advisory lock and the uninstall fence: an API Zero
+  // Trust writer that asks for the lock while uninstall holds it gets it only
+  // after the release, then refuses if the fence is still in place.
   function zeroTrustLock(events: Array<string>) {
     let release: (() => void) | undefined;
     let free = Promise.resolve();
+    let fence = false;
     return {
-      lock: async () => {
-        await free;
-        free = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        events.push('lock');
-        return async () => {
-          events.push('unlock');
-          release!();
-        };
+      get fenced() {
+        return fence;
+      },
+      dependencies: {
+        lockProjectZeroTrust: async () => {
+          await free;
+          free = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          events.push('lock');
+          return async () => {
+            events.push('unlock');
+            release!();
+          };
+        },
+        fenceProjectZeroTrust: async () => {
+          fence = true;
+          events.push('fence');
+        },
+        liftProjectZeroTrustFence: async () => {
+          fence = false;
+          events.push('lift fence');
+        },
       },
       writer: async () => {
         await free;
-        events.push('zero-trust write');
+        events.push(fence ? 'zero-trust write refused' : 'zero-trust write');
       },
     };
   }
 
-  it('keeps Zero Trust writers out from the final check until traffic is disabled', async () => {
+  it('refuses Zero Trust writers that were waiting on the lock once traffic is disabled', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = client(manifest);
@@ -590,11 +609,12 @@ describe('uninstall with project Zero Trust', () => {
     let writer: Promise<void> | undefined;
     await uninstallPlatform(fake, manifest, uninstallArgs, {
       interactive: false,
-      lockProjectZeroTrust: gate.lock,
+      ...gate.dependencies,
       readProjectZeroTrust: async () => {
         events.push('check');
         if (events.includes('lock')) {
-          // A configure request arrives right after the final check.
+          // A configure request admitted before traffic was disabled arrives
+          // right after the final check and waits on the lock.
           writer = gate.writer();
         }
         return projectZeroTrustUninstallState(disabledZeroTrust, []);
@@ -605,11 +625,70 @@ describe('uninstall with project Zero Trust', () => {
       'check',
       'lock',
       'check',
+      'fence',
       'disable traffic',
       'unlock',
-      'zero-trust write',
+      'zero-trust write refused',
     ]);
+    expect(gate.fenced).toBe(true);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('lifts the fence when uninstall stops before it disables traffic', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    const events: Array<string> = [];
+    fake.putKvValue = async () => {
+      throw new Error('KV write failed');
+    };
+    const gate = zeroTrustLock(events);
+    let writer: Promise<void> | undefined;
+    await expect(
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        ...gate.dependencies,
+        readProjectZeroTrust: async () => {
+          if (events.includes('lock')) {
+            writer = gate.writer();
+          }
+          return projectZeroTrustUninstallState(disabledZeroTrust, []);
+        },
+      }),
+    ).rejects.toThrow('KV write failed');
+    await writer;
+    // The platform still serves traffic, so the waiting writer proceeds.
+    expect(events).toEqual(['lock', 'fence', 'lift fence', 'unlock', 'zero-trust write']);
+    expect(gate.fenced).toBe(false);
+    expect(fake.disabledWrites).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
+  });
+
+  it('keeps the fence when uninstall fails after it started disabling traffic', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    const events: Array<string> = [];
+    const putKvValue = fake.putKvValue;
+    fake.putKvValue = async (account, namespace, key, value) => {
+      if (key === PLATFORM_DISABLED_KEY) {
+        events.push('disable traffic');
+        throw new Error('KV write failed after it was applied');
+      }
+      await putKvValue(account, namespace, key, value);
+    };
+    const gate = zeroTrustLock(events);
+    await expect(
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        ...gate.dependencies,
+        readProjectZeroTrust: async () => projectZeroTrustUninstallState(disabledZeroTrust, []),
+      }),
+    ).rejects.toThrow('KV write failed after it was applied');
+    // Only enabling the platform again lifts the fence.
+    expect(events).toEqual(['lock', 'fence', 'disable traffic', 'unlock']);
+    expect(gate.fenced).toBe(true);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
   });
 
   it('checks again under the lock and refuses when Zero Trust changed after the first check', async () => {
@@ -633,11 +712,12 @@ describe('uninstall with project Zero Trust', () => {
     await expect(
       uninstallPlatform(fake, manifest, uninstallArgs, {
         interactive: false,
-        lockProjectZeroTrust: gate.lock,
+        ...gate.dependencies,
         readProjectZeroTrust: async () => states.shift()!,
       }),
     ).rejects.toThrow('Refusing to uninstall while project Zero Trust is enabled');
     expect(events).toEqual(['lock', 'unlock']);
+    expect(gate.fenced).toBe(false);
     expectNothingChanged(fake);
   });
 
@@ -648,6 +728,14 @@ describe('uninstall with project Zero Trust', () => {
     await expect(
       uninstallPlatform(fake, manifest, uninstallArgs, {
         interactive: false,
+        readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
+      }),
+    ).rejects.toThrow('no platform database connection is available');
+    const { fenceProjectZeroTrust: _fence, ...withoutFence } = unlockedProjectZeroTrust;
+    await expect(
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        ...withoutFence,
         readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
       }),
     ).rejects.toThrow('no platform database connection is available');

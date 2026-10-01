@@ -1,13 +1,24 @@
 import { sql } from 'drizzle-orm';
 import type { Db, DbOrTx } from '../db.ts';
+import { getPlatformSetting } from '../platform-settings.ts';
+import { ZeroTrustUnavailableError } from './errors.ts';
 import { markProjectError } from './state.ts';
+
+/**
+ * Written by platform uninstall while it holds the configuration lock, after
+ * its final check. Mirrored in packages/void/src/cli/platform-zero-trust-uninstall.ts.
+ */
+export const PLATFORM_UNINSTALL_SETTING = 'platform.uninstall';
 
 /**
  * The installation configuration lock. Project mutations, deployments and
  * route publication hold it shared; installation operations take it exclusive
  * to claim, checkpoint and finish, so they never overtake project work.
  * Platform uninstall holds the same key from its final check until it disables
- * traffic (packages/void/src/cli/platform-zero-trust-uninstall.ts).
+ * traffic (packages/void/src/cli/platform-zero-trust-uninstall.ts), and records
+ * the uninstall before it releases. A request admitted before traffic was
+ * disabled may still be waiting here, so every holder refuses once that record
+ * exists rather than create an Access application uninstall did not see.
  */
 export async function lockZeroTrustConfiguration(
   db: DbOrTx,
@@ -18,6 +29,13 @@ export async function lockZeroTrustConfiguration(
       ? sql`SELECT pg_advisory_xact_lock_shared(hashtext('zero-trust:configuration'))`
       : sql`SELECT pg_advisory_xact_lock(hashtext('zero-trust:configuration'))`,
   );
+  // A separate statement takes a snapshot after the lock is granted, so it
+  // sees a record committed while this request waited.
+  if ((await getPlatformSetting(db, PLATFORM_UNINSTALL_SETTING)) !== null) {
+    throw new ZeroTrustUnavailableError(
+      'The platform is being uninstalled, so Zero Trust changes and deployments are refused.',
+    );
+  }
 }
 
 /** Carries a failure out of the transaction once its project error is recorded. */

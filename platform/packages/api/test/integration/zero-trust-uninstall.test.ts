@@ -11,6 +11,8 @@ import {
 } from 'vite-plus/test';
 import {
   assertProjectZeroTrustAllowsUninstall,
+  fencePlatformProjectZeroTrustConnection,
+  liftPlatformProjectZeroTrustFenceConnection,
   lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
 } from '../../../../../packages/void/src/cli/platform-zero-trust-uninstall.ts';
@@ -24,6 +26,7 @@ import {
 } from '../../src/zero-trust/installation.ts';
 import { lockZeroTrustConfiguration } from '../../src/zero-trust/lock.ts';
 import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import { resolveProjectZeroTrustRouting } from '../../src/zero-trust/routing.ts';
 import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
 import {
   clearTables,
@@ -212,8 +215,33 @@ describe('platform uninstall check against the API database', () => {
     await expect(check()).resolves.toBeUndefined();
   });
 
+  it('refuses every Zero Trust lock holder while the uninstall fence is in place', async () => {
+    const owner = await createTestUser(env.db, 'fenced-owner');
+    const project = await createTestProject(env.db, owner.id, 'fenced');
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const platform = bindings();
+    const connection = (env.db as unknown as { $client: QueryConnection }).$client;
+
+    await fencePlatformProjectZeroTrustConnection(connection);
+    await expect(configurePlatformZeroTrust(platform, env.db, configureInput)).rejects.toThrow(
+      'The platform is being uninstalled',
+    );
+    // Deployments read project routing under the same lock.
+    await expect(resolveProjectZeroTrustRouting(env.db, project.id)).rejects.toThrow(
+      'The platform is being uninstalled',
+    );
+    expect(cloudflare.applications.size).toBe(0);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toBeNull();
+
+    // Enabling the platform again lifts the fence before traffic opens.
+    await liftPlatformProjectZeroTrustFenceConnection(connection);
+    await configurePlatformZeroTrust(platform, env.db, configureInput);
+    expect(cloudflare.applications.size).toBeGreaterThan(0);
+  });
+
   it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
-    'holds off Zero Trust writers while uninstall holds the configuration lock',
+    'refuses Zero Trust writers that waited on the uninstall lock once it is released',
     async () => {
       const cloudflare = accessApi();
       vi.stubGlobal('fetch', cloudflare.fetcher);
@@ -225,27 +253,32 @@ describe('platform uninstall check against the API database', () => {
         const check = () => readPlatformProjectZeroTrustStateConnection(session);
         expect(await check()).toMatchObject({ active: false, applications: [] });
 
-        const events: Array<string> = [];
-        const configure = configurePlatformZeroTrust(platform, env.db, configureInput).then(() =>
-          events.push('configure'),
+        // Both requests were admitted before traffic was disabled and now
+        // wait on the lock uninstall holds.
+        const configure = configurePlatformZeroTrust(platform, env.db, configureInput).then(
+          () => 'configured',
+          (error: Error) => error.message,
         );
         // Project protection changes and deployments take the shared side.
-        const projectWriter = env.db.transaction(async (tx) => {
-          await lockZeroTrustConfiguration(tx, 'shared');
-          events.push('project write');
-        });
+        const projectWriter = env.db
+          .transaction(async (tx) => {
+            await lockZeroTrustConfiguration(tx, 'shared');
+            return 'project written';
+          })
+          .catch((error: Error) => error.message);
         await new Promise((resolve) => setTimeout(resolve, 200));
-        expect(events).toEqual([]);
         expect(cloudflare.applications.size).toBe(0);
         expect(await check()).toMatchObject({ active: false, applications: [] });
 
-        events.push('traffic disabled');
+        await fencePlatformProjectZeroTrustConnection(session);
         await unlock();
-        await Promise.all([configure, projectWriter]);
-        expect(events[0]).toBe('traffic disabled');
-        expect(events).toContain('configure');
-        expect(await check()).toMatchObject({ active: true });
+        const [configured, written] = await Promise.all([configure, projectWriter]);
+        expect(configured).toContain('The platform is being uninstalled');
+        expect(written).toContain('The platform is being uninstalled');
+        expect(cloudflare.applications.size).toBe(0);
+        expect(await check()).toMatchObject({ active: false, applications: [] });
       } finally {
+        await liftPlatformProjectZeroTrustFenceConnection(session);
         await session.end();
       }
     },

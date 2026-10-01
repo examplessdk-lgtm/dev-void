@@ -12,6 +12,8 @@
 const ZERO_TRUST_SETTING = 'zeroTrust.configuration';
 // Mirrors lockZeroTrustConfiguration in platform/packages/api/src/zero-trust/lock.ts.
 const ZERO_TRUST_LOCK = "hashtext('zero-trust:configuration')";
+// Mirrors PLATFORM_UNINSTALL_SETTING in platform/packages/api/src/zero-trust/lock.ts.
+const UNINSTALL_SETTING = 'platform.uninstall';
 const LISTED_APPLICATIONS = 20;
 
 type QueryConnection = Readonly<{
@@ -205,6 +207,45 @@ export async function lockPlatformProjectZeroTrustConnection(
     released = true;
     await client.query(`SELECT pg_advisory_unlock(${ZERO_TRUST_LOCK})`);
   };
+}
+
+async function hasSettingsTable(client: QueryConnection): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass('public.platform_settings') IS NOT NULL AS "present"`,
+  );
+  return result.rows[0]?.present === true;
+}
+
+/**
+ * Record that uninstall passed its final check. Runs while the configuration
+ * lock is held. An API request admitted before traffic was disabled may be
+ * waiting on that lock; once it gets the lock it reads this record and
+ * refuses. Without the settings table the API has no Zero Trust writers.
+ */
+export async function fencePlatformProjectZeroTrustConnection(
+  client: QueryConnection,
+): Promise<void> {
+  if (!(await hasSettingsTable(client))) {
+    return;
+  }
+  await client.query(
+    `INSERT INTO "platform_settings" ("key", "value") VALUES ($1, $2::jsonb)
+     ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value", "updated_at" = now()`,
+    [UNINSTALL_SETTING, JSON.stringify({ startedAt: new Date().toISOString() })],
+  );
+}
+
+/**
+ * Remove the uninstall record. Uninstall does this when it stops before
+ * disabling traffic; installing or enabling does it before traffic opens.
+ */
+export async function liftPlatformProjectZeroTrustFenceConnection(
+  client: QueryConnection,
+): Promise<void> {
+  if (!(await hasSettingsTable(client))) {
+    return;
+  }
+  await client.query('DELETE FROM "platform_settings" WHERE "key" = $1', [UNINSTALL_SETTING]);
 }
 
 function formatApplications(applications: ReadonlyArray<PlatformZeroTrustApplication>): string {
