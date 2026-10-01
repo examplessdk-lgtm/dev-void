@@ -1,0 +1,19 @@
+docs/guide/edge/redirects.md
+  s_6a47d9031c1157::t_19f257f52a4bd6 26,31,47,50,52,56,58-61,63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2c6ed8dbd5f8b4ac449fc29286fb784920d14fed",
+  "prompts": {},
+  "sessions": {
+    "s_6a47d9031c1157": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99f-31f0-78e3-b5d0-5630084ef63a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
