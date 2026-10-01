@@ -1,0 +1,19 @@
+platform/meta/lessons.md
+  s_8eeb2dc3bf8d33::t_12991367130f9c 19-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "65c9cafed6b2c05263f7a916d273ae64d8e9cb12",
+  "prompts": {},
+  "sessions": {
+    "s_8eeb2dc3bf8d33": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c3-2069-7541-900e-8888a4d3db9c",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
