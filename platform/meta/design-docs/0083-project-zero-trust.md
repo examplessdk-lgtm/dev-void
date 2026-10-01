@@ -176,7 +176,12 @@ application names for dashboard cleanup. After confirmation,
 uninstall takes `zero-trust:configuration` exclusively as a session lock on
 its lifecycle connection, checks again, and holds it until the routing KV
 disable write. API Zero Trust writers take that lock, never the lifecycle
-lock, so none can commit between the check and the disable write. Disable and
+lock, so none can commit between the check and the disable write. A writer
+that was already waiting on the lock, or that reads the disable key before it
+propagates, can still commit after the release. Closing that window would need
+a database uninstall marker checked inside every locked API path, which
+deployments share; it is accepted because it needs an operator to change Zero
+Trust while uninstalling the same installation. Disable and
 hourly maintenance skip projects marked `deleting`, so for those rows the
 error asks for the project deletion to be rerun; its Access cleanup is
 idempotent and the cascade drops the row.
