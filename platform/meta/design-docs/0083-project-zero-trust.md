@@ -151,6 +151,12 @@ protected row keeps its protection and a row becoming protected keeps its
 previous routes. During disable, the row is already public by intent: routes
 cleared before the failure open with every other project at wildcard
 deletion, and uncleared routes stay denied until the post-disable cleanup.
+First-domain activation never publishes its target while a project is skipped:
+such a project lacks the new hostnames (a protected route has no audience for
+them, a public bypass does not cover them). Completion instead clears the skip
+markers, records an error naming the projects and releases the lease, so the
+hourly tier, `reconcile` or the rerun domain command retries those projects.
+The fast tier does not, because the operation is in error.
 
 The two-minute tier resumes an operation with a free lease that has not failed
 and then owns that invocation. The hourly tier also retries failed operations,

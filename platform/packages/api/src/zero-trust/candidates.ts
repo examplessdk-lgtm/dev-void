@@ -50,6 +50,32 @@ function notSkippedByOperation(operation: ZeroTrustOperation) {
   return sql`${projectZeroTrust.reconciled_operation} IS DISTINCT FROM ${skippedOperationKey(operation)}`;
 }
 
+/** Active projects this operation skipped, oldest first. */
+export async function skippedProjectIds(
+  db: Db,
+  operation: ZeroTrustOperation,
+  limit: number,
+): Promise<ReadonlyArray<string>> {
+  const rows = await candidateQuery(db)
+    .where(
+      and(
+        eq(projects.status, 'active'),
+        eq(projectZeroTrust.reconciled_operation, skippedOperationKey(operation)),
+      ),
+    )
+    .orderBy(projects.created_at, projects.id)
+    .limit(limit);
+  return rows.map((row) => row.project.id);
+}
+
+/** Make the projects this operation skipped candidates again for its next run. */
+export async function retrySkippedProjects(db: Db, operation: ZeroTrustOperation): Promise<void> {
+  await db
+    .update(projectZeroTrust)
+    .set({ reconciled_operation: null })
+    .where(eq(projectZeroTrust.reconciled_operation, skippedOperationKey(operation)));
+}
+
 export async function publicBypassCandidates(
   db: Db,
   limit: number,

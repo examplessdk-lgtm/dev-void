@@ -18,8 +18,10 @@ import {
   disableCandidates,
   publicBypassCandidates,
   reconciliationCandidates,
+  retrySkippedProjects,
   seedCandidates,
   skippedOperationKey,
+  skippedProjectIds,
 } from './candidates.ts';
 import {
   ZeroTrustCloudflareClient,
@@ -210,7 +212,9 @@ function isOperationWideFailure(error: unknown): boolean {
 /**
  * Record a project failure and let the operation continue. The row keeps a
  * skip marker so later batches pass over it; scheduled per-project maintenance
- * retries it after the operation finishes. The skip never marks a row
+ * retries it after the operation finishes. An operation with an application
+ * target cannot finish while such a row remains (completeConfigureOperation).
+ * The skip never marks a row
  * effectively public. Routes a disable already cleared stay cleared; they open
  * with every other project when the wildcard is deleted. Returns false,
  * writing nothing, when a newer operation has replaced this one.
@@ -308,6 +312,12 @@ async function withZeroTrustOperationLock(
   });
 }
 
+function skippedProjectsError(projectIds: ReadonlyArray<string>): string {
+  const shown = projectIds.slice(0, 5).join(', ');
+  const more = projectIds.length > 5 ? ' and others' : '';
+  return `The new application domain stays unpublished until Zero Trust can update projects ${shown}${more}. See each project's last error with \`void platform zero-trust project-status <project-id>\`, fix the cause, then run \`void platform zero-trust reconcile\`. Void also retries every hour.`;
+}
+
 async function completeConfigureOperation(
   env: ApiEnv['Bindings'],
   db: Db,
@@ -325,6 +335,19 @@ async function completeConfigureOperation(
       return null;
     }
     if (saved.operation.applicationTarget) {
+      // A skipped project still lacks the new hostnames: a protected route has
+      // no audience for them (dispatch answers 403) and a public bypass does
+      // not cover them (Access asks for sign-in). Keep the domain unpublished,
+      // make those projects candidates for the next run, and stop this run
+      // failed so only the hourly tier or an operator retries it.
+      const skipped = await skippedProjectIds(tx as unknown as Db, saved.operation, 6);
+      if (skipped.length > 0) {
+        await retrySkippedProjects(tx as unknown as Db, saved.operation);
+        return patchConfiguration(tx as unknown as Db, saved, {
+          lastError: skippedProjectsError(skipped),
+          operation: { ...saved.operation, owner: null, leaseExpiresAt: null },
+        });
+      }
       const application = saved.operation.applicationTarget;
       await setPlatformSetting(tx, PLATFORM_APPLICATION_SETTING, application);
       await env.ROUTING.put(PLATFORM_APPLICATION_KEY, JSON.stringify(application));

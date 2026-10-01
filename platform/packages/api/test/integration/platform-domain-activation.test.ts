@@ -296,6 +296,71 @@ describe('installer domain activation', () => {
     expect(cloudflare.fetcher.mock.calls.length).toBe(requestsBeforeRetry);
   }, 10_000);
 
+  it('keeps the domain unpublished while a project the cutover skipped lacks the new hostnames', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const owner = await createTestUser(env.db, 'domain-skip-owner');
+    const healthy = await createTestProject(env.db, owner.id, 'domain-skip-healthy');
+    const stuck = await createTestProject(env.db, owner.id, 'domain-skip-stuck');
+    for (const project of [healthy, stuck]) {
+      await env.ROUTING.put(
+        project.slug,
+        JSON.stringify({ workerName: `${project.slug}-worker`, projectId: project.id }),
+      );
+    }
+    await configurePlatformZeroTrust(bindings(), env.db, {
+      apiToken: 'management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    // A cached read still returns another project's route, a project-specific
+    // failure that the operation skips instead of failing as a whole.
+    const stuckRoute = await env.ROUTING.get(stuck.slug);
+    await env.ROUTING.put(
+      stuck.slug,
+      JSON.stringify({ workerName: 'other-worker', projectId: 'proj_other' }),
+    );
+
+    expect(await activatePlatformApplication(bindings(), env.db, target)).toEqual({
+      ready: false,
+    });
+    expect(await env.ROUTING.get(PLATFORM_APPLICATION_KEY)).toBeNull();
+    const saved = await readZeroTrustConfigurationStrict(env.db);
+    expect(saved).toMatchObject({
+      lastError: expect.stringContaining(stuck.id),
+      operation: { applicationTarget: target, owner: null },
+    });
+    expect(zeroTrustConfigurationStatus(saved!)).toBe('error');
+    expect(await getProjectZeroTrustState(env.db, stuck.id)).toMatchObject({
+      status: 'error',
+      reconciled_operation: null,
+    });
+    expect(JSON.parse((await env.ROUTING.get(healthy.slug))!).zeroTrust.audiences).toEqual(
+      expect.arrayContaining([expect.objectContaining({ hostname: '*.apps.example.com' })]),
+    );
+
+    // The two-minute tier leaves the failed run alone.
+    await scheduled(
+      { cron: FAST_CRON, scheduledTime: Date.now() } as ScheduledController,
+      bindings(),
+      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
+    );
+    expect(await env.ROUTING.get(PLATFORM_APPLICATION_KEY)).toBeNull();
+
+    await env.ROUTING.put(stuck.slug, stuckRoute!);
+    expect(await activatePlatformApplication(bindings(), env.db, target)).toEqual({ ready: true });
+    expect(JSON.parse((await env.ROUTING.get(PLATFORM_APPLICATION_KEY))!)).toEqual(target);
+    expect(await getProjectZeroTrustState(env.db, stuck.id)).toMatchObject({
+      status: 'ready',
+      effective_protected: true,
+    });
+    expect(JSON.parse((await env.ROUTING.get(stuck.slug))!).zeroTrust.audiences).toEqual(
+      expect.arrayContaining([expect.objectContaining({ hostname: '*.apps.example.com' })]),
+    );
+  });
+
   it('keeps the domain unpublished on provider failure and reconciles protected projects created before retry', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
