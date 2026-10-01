@@ -1,0 +1,19 @@
+packages/react/test/integration/react-pages-navigation-fallback.test.ts
+  s_a330f5d13a394c::t_b687dbcd02ba8f 5,16-28,113,175-176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9eab21e803f44be9a530a66f9e7377d596db360b",
+  "prompts": {},
+  "sessions": {
+    "s_a330f5d13a394c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f867-9fe1-7361-b715-c37ba32760a6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
