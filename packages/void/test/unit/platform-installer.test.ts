@@ -3011,6 +3011,17 @@ describe('platform installer', () => {
       'zeroTrust.configuration',
     ]);
     expect(queries.some(({ sql }) => sql.includes('FROM "project_zero_trust"'))).toBe(true);
+
+    // The same key the API's Zero Trust writers lock, held on this session.
+    const unlock = await lock.lockProjectZeroTrust!();
+    await unlock();
+    await unlock();
+    expect(
+      queries.filter(({ sql }) => sql.includes("hashtext('zero-trust:configuration')")),
+    ).toEqual([
+      { sql: "SELECT pg_advisory_lock(hashtext('zero-trust:configuration'))", values: undefined },
+      { sql: "SELECT pg_advisory_unlock(hashtext('zero-trust:configuration'))", values: undefined },
+    ]);
     await lock();
   });
 

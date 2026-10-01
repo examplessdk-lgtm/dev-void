@@ -116,6 +116,7 @@ import {
 } from './platform-traffic.ts';
 import { platformWorkerLiveTriggersMatch } from './platform-trigger-proof.ts';
 import {
+  lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
   type PlatformProjectZeroTrustState,
 } from './platform-zero-trust-uninstall.ts';
@@ -204,6 +205,8 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   ) => Promise<PlatformSandboxDrainPreparation>;
   /** Project Zero Trust state that decides whether uninstall may start. */
   readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
+  /** Block Zero Trust writers in the API until the returned release runs. */
+  lockProjectZeroTrust?: () => Promise<() => Promise<void>>;
   requiredSafetyProtocols?: Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>;
   verifyDatabase?: (
     runtimeDirectory: string,
@@ -3925,6 +3928,7 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
       : null;
   };
   release.readProjectZeroTrust = () => readPlatformProjectZeroTrustStateConnection(client);
+  release.lockProjectZeroTrust = () => lockPlatformProjectZeroTrustConnection(client);
   release.requiredSafetyProtocols = await readRequiredPlatformSafetyProtocols(client);
   release.checkpoint = async (manifest) => {
     if (released) {

@@ -6,6 +6,8 @@ import { markProjectError } from './state.ts';
  * The installation configuration lock. Project mutations, deployments and
  * route publication hold it shared; installation operations take it exclusive
  * to claim, checkpoint and finish, so they never overtake project work.
+ * Platform uninstall holds the same key from its final check until it disables
+ * traffic (packages/void/src/cli/platform-zero-trust-uninstall.ts).
  */
 export async function lockZeroTrustConfiguration(
   db: DbOrTx,

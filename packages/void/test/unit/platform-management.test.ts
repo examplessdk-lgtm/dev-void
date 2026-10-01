@@ -305,8 +305,11 @@ const uninstallArgs = {
   yes: true,
 };
 
+const unlockedProjectZeroTrust = async () => async () => {};
+
 const uninstallDependencies = {
   interactive: false,
+  lockProjectZeroTrust: unlockedProjectZeroTrust,
   readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
 };
 
@@ -501,11 +504,116 @@ describe('uninstall with project Zero Trust', () => {
     const fake = client(manifest);
     await uninstallPlatform(fake, manifest, uninstallArgs, {
       interactive: false,
+      lockProjectZeroTrust: unlockedProjectZeroTrust,
       readProjectZeroTrust: async () =>
         projectZeroTrustUninstallState(setting, [projectApplications('proj_settled', null, null)]),
     });
     expect(fake.disabledWrites).toEqual([PLATFORM_DISABLED_VALUE]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  // Models the PostgreSQL advisory lock: an API Zero Trust writer that asks for
+  // it while uninstall holds it commits only after the release.
+  function zeroTrustLock(events: Array<string>) {
+    let release: (() => void) | undefined;
+    let free = Promise.resolve();
+    return {
+      lock: async () => {
+        await free;
+        free = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        events.push('lock');
+        return async () => {
+          events.push('unlock');
+          release!();
+        };
+      },
+      writer: async () => {
+        await free;
+        events.push('zero-trust write');
+      },
+    };
+  }
+
+  it('keeps Zero Trust writers out from the final check until traffic is disabled', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    const events: Array<string> = [];
+    const putKvValue = fake.putKvValue;
+    fake.putKvValue = async (account, namespace, key, value) => {
+      if (key === PLATFORM_DISABLED_KEY) {
+        events.push('disable traffic');
+      }
+      await putKvValue(account, namespace, key, value);
+    };
+    const gate = zeroTrustLock(events);
+    let writer: Promise<void> | undefined;
+    await uninstallPlatform(fake, manifest, uninstallArgs, {
+      interactive: false,
+      lockProjectZeroTrust: gate.lock,
+      readProjectZeroTrust: async () => {
+        events.push('check');
+        if (events.includes('lock')) {
+          // A configure request arrives right after the final check.
+          writer = gate.writer();
+        }
+        return projectZeroTrustUninstallState(disabledZeroTrust, []);
+      },
+    });
+    await writer;
+    expect(events).toEqual([
+      'check',
+      'lock',
+      'check',
+      'disable traffic',
+      'unlock',
+      'zero-trust write',
+    ]);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('checks again under the lock and refuses when Zero Trust changed after the first check', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    const events: Array<string> = [];
+    const gate = zeroTrustLock(events);
+    const states = [
+      projectZeroTrustUninstallState(disabledZeroTrust, []),
+      projectZeroTrustUninstallState(
+        zeroTrustSetting({
+          enabled: false,
+          wildcardApplication: null,
+          healthApplication: null,
+          operation: { id: 'operation', kind: 'configure', phase: 'seed' },
+        }),
+        [],
+      ),
+    ];
+    await expect(
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        lockProjectZeroTrust: gate.lock,
+        readProjectZeroTrust: async () => states.shift()!,
+      }),
+    ).rejects.toThrow('Refusing to uninstall while project Zero Trust is enabled');
+    expect(events).toEqual(['lock', 'unlock']);
+    expectNothingChanged(fake);
+  });
+
+  it('refuses without a database session that can hold off Zero Trust changes', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    await expect(
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
+      }),
+    ).rejects.toThrow('no platform database connection is available');
+    expectNothingChanged(fake);
   });
 });
 

@@ -172,7 +172,11 @@ can remove them, so before any change, and in `--plan`, the CLI reads
 refuses while Zero Trust is enabled, an operation is pending, or any row still
 records an application handle (rows a finished disable skipped). It also
 refuses when the state cannot be read. The error lists the recorded
-application names for dashboard cleanup.
+application names for dashboard cleanup. After confirmation,
+uninstall takes `zero-trust:configuration` exclusively as a session lock on
+its lifecycle connection, checks again, and holds it until the routing KV
+disable write. API Zero Trust writers take that lock, never the lifecycle
+lock, so none can commit between the check and the disable write.
 
 Code: `platform/packages/api/src/zero-trust/` (`installation`, `operation`,
 `project`, `routing`, `maintenance`, `status`, `lock`, `state`); the uninstall

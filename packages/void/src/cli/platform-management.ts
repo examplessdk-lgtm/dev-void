@@ -151,6 +151,8 @@ export type PlatformManagementDependencies = Readonly<{
   interactive?: boolean;
   /** Uninstall refuses to start when this is missing or cannot read the state. */
   readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
+  /** Holds off Zero Trust writers from the final check until traffic is disabled. */
+  lockProjectZeroTrust?: () => Promise<() => Promise<void>>;
 }>;
 
 export function selectAuthoritativePlatformManifest(
@@ -240,6 +242,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           ? databaseLock.readProjectZeroTrust
           : () =>
               readPlatformProjectZeroTrustState(databaseUrl, manifest.id, manifest.ownershipNonce),
+        lockProjectZeroTrust: databaseLock?.lockProjectZeroTrust,
       });
       return;
     }
@@ -877,8 +880,24 @@ export async function uninstallPlatform(
     missingResources = new Set();
   }
 
-  let next = transitionInstallation(manifest, 'uninstalling', new Date().toISOString());
-  writeInstallationManifest(next);
+  // Zero Trust writers in the API take this lock and never the lifecycle lock.
+  // Holding it from the final check until traffic is disabled keeps them from
+  // creating Access applications the check did not see.
+  if (!dependencies.lockProjectZeroTrust) {
+    throw new Error(
+      'platform: Refusing to uninstall because no platform database connection is available to hold off project Zero Trust changes.',
+    );
+  }
+  const releaseProjectZeroTrust = await dependencies.lockProjectZeroTrust();
+  let next = manifest;
+  try {
+    await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust);
+    next = transitionInstallation(manifest, 'uninstalling', new Date().toISOString());
+    writeInstallationManifest(next);
+  } catch (error) {
+    await releaseProjectZeroTrust();
+    throw error;
+  }
   try {
     await writeRemoteManifestIfPresent(client, next);
     const routing = next.resources.find(
@@ -892,6 +911,7 @@ export async function uninstallPlatform(
         PLATFORM_DISABLED_VALUE,
       );
     }
+    await releaseProjectZeroTrust();
     for (const key of missingResources) {
       const resource = requireResource(next, key);
       next = updateResourceState(
@@ -1007,6 +1027,7 @@ export async function uninstallPlatform(
         : `${next.deployment.displayName} was uninstalled.`,
     );
   } catch (error) {
+    await releaseProjectZeroTrust().catch(() => {});
     next = transitionInstallation(next, 'failed', new Date().toISOString());
     writeInstallationManifest(next);
     await writeRemoteManifestIfPresent(client, next).catch(() => {});

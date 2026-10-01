@@ -10,6 +10,8 @@
 
 // Mirrors the platform setting key in platform/packages/api/src/zero-trust/configuration.ts.
 const ZERO_TRUST_SETTING = 'zeroTrust.configuration';
+// Mirrors lockZeroTrustConfiguration in platform/packages/api/src/zero-trust/lock.ts.
+const ZERO_TRUST_LOCK = "hashtext('zero-trust:configuration')";
 const LISTED_APPLICATIONS = 20;
 
 type QueryConnection = Readonly<{
@@ -168,6 +170,25 @@ export async function readPlatformProjectZeroTrustStateConnection(
       ).rows
     : [];
   return projectZeroTrustUninstallState(setting, projectRows);
+}
+
+/**
+ * Take the Zero Trust configuration lock exclusively on this session. Every
+ * API path that records or creates a Void-managed Access application holds
+ * the same lock, so none can commit until the returned release runs.
+ */
+export async function lockPlatformProjectZeroTrustConnection(
+  client: QueryConnection,
+): Promise<() => Promise<void>> {
+  await client.query(`SELECT pg_advisory_lock(${ZERO_TRUST_LOCK})`);
+  let released = false;
+  return async () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    await client.query(`SELECT pg_advisory_unlock(${ZERO_TRUST_LOCK})`);
+  };
 }
 
 function formatApplications(applications: ReadonlyArray<PlatformZeroTrustApplication>): string {
