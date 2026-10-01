@@ -1,0 +1,34 @@
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_d3a659b66468f6::t_1675d63d213fe3 263
+packages/void/src/cli/platform-setup.ts
+  s_d3a659b66468f6::t_108f27402edaa6 31,39,45,152-153
+packages/void/src/cli/help.ts
+  s_d3a659b66468f6::t_6b4fd34bc5614c 446,452
+packages/void/src/cli/platform-lifecycle.ts
+  s_d3a659b66468f6::t_3bc1e49e7ede1d 346,453,950,966,977
+packages/void/test/unit/platform-setup.test.ts
+  s_d3a659b66468f6::t_933875955022ac 153-155
+packages/void/test/unit/platform-plan.test.ts
+  s_d3a659b66468f6::t_1ac4040dbdfdc9 498-502,505
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_d3a659b66468f6::t_cc16fe14d64c97 805,885
+  s_d3a659b66468f6::t_96748c2ca970cf 493
+packages/void/src/cli/platform-plan.ts
+  s_d3a659b66468f6::t_2b484208d06519 1235-1236,1239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "11ddddad4d88066cd7da56309a582499dec8d74b",
+  "prompts": {},
+  "sessions": {
+    "s_d3a659b66468f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7cd-1c2d-7d11-a77a-3d3ce37e036d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
