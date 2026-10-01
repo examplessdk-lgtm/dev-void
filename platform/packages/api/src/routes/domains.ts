@@ -21,6 +21,7 @@ import {
   type CustomHostnameInfo,
 } from '../provisioning/cloudflare-api.ts';
 import type { DomainVerificationData } from '../schema.ts';
+import { ZeroTrustUnavailableError } from '../zero-trust/errors.ts';
 import { lockZeroTrustConfiguration } from '../zero-trust/lock.ts';
 import { reconcileProjectZeroTrustDomains } from '../zero-trust/project.ts';
 import {
@@ -332,8 +333,18 @@ const app = new Hono<ApiEnv>()
     // CF cleanup is best-effort. KV + DB deletion serialize with deploy,
     // rollback, activation, and failed-cutover compensation through the
     // project row so none can resurrect this hostname from a stale snapshot.
+    // The shared Zero Trust lock comes before any cleanup: when it refuses
+    // during uninstall, nothing outside the database has been removed yet.
     const lockedResponse = await context.get('db').transaction(async (tx) => {
       await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+      try {
+        await lockZeroTrustConfiguration(tx, 'shared');
+      } catch (error) {
+        if (error instanceof ZeroTrustUnavailableError) {
+          return context.json({ error: error.message }, error.status);
+        }
+        throw error;
+      }
       const txDb = tx as unknown as Db;
       const lockedAccess = await requireProjectRouteCapability(
         context,
@@ -361,7 +372,6 @@ const app = new Hono<ApiEnv>()
       // The project's custom domain application still lists this hostname.
       // Record that with the deletion, so the hostname is never freed while
       // no retry would remove it from that application.
-      await lockZeroTrustConfiguration(tx, 'shared');
       await markProjectCustomDomainsChanged(txDb, projectId);
       await deleteDomain(txDb, domain.id);
       return null;

@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -10,8 +11,10 @@ import {
 } from 'vite-plus/test';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
+import { setPlatformSetting } from '../../src/platform-settings.ts';
 import { domains } from '../../src/schema.ts';
 import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import { PLATFORM_UNINSTALL_SETTING } from '../../src/zero-trust/lock.ts';
 import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
 import { reconcileProjectZeroTrustDomains } from '../../src/zero-trust/project.ts';
 import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
@@ -174,6 +177,60 @@ describe('Zero Trust custom domain removal', () => {
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       status: 'ready',
       effective_protected: true,
+    });
+  });
+
+  describe('while the platform is being uninstalled', () => {
+    async function seedDomain(status: 'active' | 'pending') {
+      const owner = await createTestUser(env.db, 'uninstall-domain-owner');
+      const project = await createTestProject(env.db, owner.id, 'uninstall-domain');
+      await env.db.insert(domains).values({
+        id: 'dom_uninstall',
+        project_id: project.id,
+        hostname: 'fenced.customer.test',
+        cf_hostname_id: 'ch-uninstall',
+        status,
+        created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+      await env.ROUTING.put(
+        'domain:fenced.customer.test',
+        JSON.stringify({ workerName: 'user-uninstall-domain', projectId: project.id }),
+      );
+      await setPlatformSetting(env.db, PLATFORM_UNINSTALL_SETTING, { startedAt: 'now' });
+      return { owner, project };
+    }
+
+    async function expectDomainUntouched(fetcher: ReturnType<typeof cloudflareApi>['fetcher']) {
+      expect(
+        fetcher.mock.calls.filter(
+          ([request, init]) =>
+            request.toString().includes('/custom_hostnames/') && init?.method === 'DELETE',
+        ),
+      ).toEqual([]);
+      expect(await env.ROUTING.get('domain:fenced.customer.test')).not.toBeNull();
+      expect(
+        await env.db.select().from(domains).where(eq(domains.id, 'dom_uninstall')),
+      ).toHaveLength(1);
+    }
+
+    it('refuses a domain removal before deleting its hostname or route', async () => {
+      const cloudflare = cloudflareApi();
+      vi.stubGlobal('fetch', cloudflare.fetcher);
+      const { owner, project } = await seedDomain('active');
+
+      const removed = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/domains/dom_uninstall`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${owner.jwt}` },
+        }),
+        bindings(),
+      );
+
+      await expectDomainUntouched(cloudflare.fetcher);
+      expect(removed.status).toBe(409);
+      expect(await removed.json()).toEqual({
+        error: expect.stringContaining('The platform is being uninstalled'),
+      });
     });
   });
 });
