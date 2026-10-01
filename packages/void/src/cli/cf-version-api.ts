@@ -1,16 +1,34 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 import {
   getWorkerAssetsDir,
   getWorkerBundleDir,
   readBuildOutput,
 } from '@cloudflare/build-output-utils';
+import type { CloudflareCommandResult } from '@void/deploy-cloudflare';
 import ignore from 'ignore';
 import mime from 'mime';
 import { extname, join, relative } from 'pathslash';
 import type { CfBuildOutput } from './cf-build-output.ts';
 
 type Json = Record<string, unknown>;
+type ContainerCommand = (
+  args: Array<string>,
+  options: { cwd: string; capture: boolean; timeoutMs?: number; maxOutputBytes?: number },
+) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
+
+class CloudflareApiError extends Error {
+  readonly status: number;
+  readonly code?: number;
+  constructor(message: string, status: number, code?: number) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
 
 function object(value: unknown): Json | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : null;
@@ -108,6 +126,101 @@ function bindingsFromOutput(
             : {}),
         });
         break;
+      case 'unsafe:durable_object_namespace':
+        // The config translator uses this exact local form for Container DOs.
+        // Do not turn arbitrary unsafe bindings into upload metadata.
+        if (Object.keys(value).some((key) => !['type', 'class_name', 'dev'].includes(key))) {
+          throw new Error(`Cloudflare binding ${name} is not a verified local Durable Object.`);
+        }
+        bindings.push({
+          name,
+          type: 'durable_object_namespace',
+          class_name: requiredString(value.class_name, name),
+        });
+        break;
+      case 'queue':
+        bindings.push({
+          name,
+          type: 'queue',
+          queue_name: requiredString(value.name, name),
+          ...(value.deliveryDelay === undefined ? {} : { delivery_delay: value.deliveryDelay }),
+        });
+        break;
+      case 'ai':
+      case 'browser':
+      case 'images':
+        bindings.push({ name, type: value.type });
+        break;
+      case 'hyperdrive':
+        bindings.push({ name, type: 'hyperdrive', id: requiredString(value.id, name) });
+        break;
+      case 'worker':
+        bindings.push({
+          name,
+          type: 'service',
+          service: requiredString(value.worker, name),
+          ...(value.exportName === undefined ? {} : { entrypoint: value.exportName }),
+          ...(value.props === undefined ? {} : { props: value.props }),
+        });
+        break;
+      case 'workflow':
+        bindings.push({
+          name,
+          type: 'workflow',
+          workflow_name: requiredString(value.name, name),
+          ...(value.worker === workerName
+            ? { class_name: requiredString(value.exportName, name) }
+            : { script_name: requiredString(value.worker, name) }),
+        });
+        break;
+      case 'send-email':
+        bindings.push({
+          name,
+          type: 'send_email',
+          ...(value.destinationAddress === undefined
+            ? {}
+            : { destination_address: value.destinationAddress }),
+          ...(value.allowedDestinationAddresses === undefined
+            ? {}
+            : { allowed_destination_addresses: value.allowedDestinationAddresses }),
+          ...(value.allowedSenderAddresses === undefined
+            ? {}
+            : { allowed_sender_addresses: value.allowedSenderAddresses }),
+        });
+        break;
+      case 'analytics-engine-dataset':
+        bindings.push({
+          name,
+          type: 'analytics_engine',
+          ...(value.name === undefined ? {} : { dataset: value.name }),
+        });
+        break;
+      case 'vectorize':
+        bindings.push({
+          name,
+          type: 'vectorize',
+          index_name: requiredString(value.name, name),
+        });
+        break;
+      case 'dispatch-namespace': {
+        const outbound = object(value.outbound);
+        bindings.push({
+          name,
+          type: 'dispatch_namespace',
+          namespace: requiredString(value.namespace, name),
+          ...(outbound
+            ? {
+                outbound: {
+                  worker: { service: requiredString(outbound.worker, name) },
+                  ...(Array.isArray(outbound.parameters)
+                    ? { params: outbound.parameters.map((parameter) => ({ name: parameter })) }
+                    : {}),
+                },
+              }
+            : {}),
+        });
+        break;
+      }
       case 'assets':
         bindings.push({ name, type: 'assets' });
         break;
@@ -132,13 +245,46 @@ function exportsFromOutput(exports: unknown): Json | undefined {
   const result: Json = {};
   for (const [name, raw] of Object.entries(entries)) {
     const value = object(raw);
+    if (value?.type === 'worker') {
+      result[name] = {
+        type: 'worker',
+        ...(value.cache === undefined ? {} : { cache: value.cache }),
+      };
+      continue;
+    }
     if (!value || value.type !== 'durable-object') {
       throw new Error(`Cloudflare export ${name} cannot be uploaded with pinned secrets.`);
     }
     if (value.state === 'deleted') {
       result[name] = { type: 'durable-object', state: 'deleted' };
+    } else if (value.state === 'renamed' || value.state === 'transferred') {
+      const renamed = value.state === 'renamed';
+      result[name] = {
+        type: 'durable-object',
+        state: value.state,
+        [renamed ? 'renamed_to' : 'transferred_to']: requiredString(
+          value[renamed ? 'renamedTo' : 'transferredTo'],
+          name,
+        ),
+      };
     } else if (value.storage === 'sqlite' || value.storage === 'legacy-kv') {
-      result[name] = { type: 'durable-object', storage: value.storage, state: 'created' };
+      if (
+        value.state !== undefined &&
+        !['created', 'expecting-transfer'].includes(String(value.state))
+      ) {
+        throw new Error(`Cloudflare Durable Object export ${name} has an unsupported state.`);
+      }
+      result[name] = {
+        type: 'durable-object',
+        storage: value.storage,
+        state: value.state ?? 'created',
+        ...(value.container === undefined
+          ? {}
+          : { container: requiredString(value.container, name) }),
+        ...(value.state === 'expecting-transfer'
+          ? { transfer_from: requiredString(value.transferFrom, name) }
+          : {}),
+      };
     } else {
       throw new Error(`Cloudflare Durable Object export ${name} has no storage type.`);
     }
@@ -195,10 +341,454 @@ async function apiResult(
   if (!response.ok || parsed?.success !== true || !result) {
     const error = Array.isArray(parsed?.errors) ? object(parsed.errors[0]) : null;
     const code = Number.isSafeInteger(error?.code) ? ` [code: ${error!.code}]` : '';
-    const message = typeof error?.message === 'string' ? ` ${error.message}` : '';
-    throw new Error(`Cloudflare version upload failed (${response.status})${code}.${message}`);
+    throw new CloudflareApiError(
+      `Cloudflare version upload failed (${response.status})${code}.`,
+      response.status,
+      typeof error?.code === 'number' ? error.code : undefined,
+    );
   }
   return result;
+}
+
+type ContainerPlan = { name: string; className: string; images: Json; settings: Json };
+
+function assertContainerApplicationIdentity(
+  application: Json,
+  plan: ContainerPlan,
+  namespace: string,
+): void {
+  if (
+    application.id !== namespace ||
+    application.name !== plan.name ||
+    application.scheduling_policy !== 'durable_object' ||
+    object(application.durable_objects)?.namespace_id !== namespace
+  ) {
+    throw new Error(
+      `Cloudflare Container ${plan.name} application identity does not match the uploaded namespace.`,
+    );
+  }
+}
+
+async function preflightContainerApplications(
+  plans: Array<ContainerPlan>,
+  bindings: Array<unknown>,
+  accountUrl: string,
+  workerName: string,
+  token: string,
+  verifyUploader: () => boolean,
+): Promise<void> {
+  for (const plan of plans) {
+    const matches = bindings
+      .map(object)
+      .filter(
+        (binding) =>
+          binding?.type === 'durable_object_namespace' &&
+          binding.class_name === plan.className &&
+          (binding.script_name === undefined || binding.script_name === workerName) &&
+          binding.environment === undefined &&
+          binding.dispatch_namespace === undefined &&
+          binding.namespace_id !== undefined,
+      );
+    const namespaces = new Set(matches.map((binding) => binding!.namespace_id));
+    if (namespaces.size > 1) {
+      throw new Error(`Cloudflare Container ${plan.name} active namespace was ambiguous.`);
+    }
+    const namespace = [...namespaces][0];
+    if (namespace === undefined) {
+      if (Object.keys(plan.images).length === 0) {
+        throw new Error(
+          `Cloudflare Container ${plan.name} has no images and no verified existing namespace application.`,
+        );
+      }
+      continue;
+    }
+    if (typeof namespace !== 'string' || !/^[a-f0-9]{32}$/.test(namespace)) {
+      throw new Error('The active Container namespace ID was invalid.');
+    }
+    try {
+      const application = await apiResult(
+        `${accountUrl}/containers/applications/${encodeURIComponent(namespace)}`,
+        token,
+        'GET',
+        undefined,
+        verifyUploader,
+      );
+      assertContainerApplicationIdentity(application, plan, namespace);
+    } catch (cause) {
+      if (
+        !(cause instanceof CloudflareApiError) ||
+        cause.status !== 404 ||
+        Object.keys(plan.images).length === 0
+      ) {
+        throw cause;
+      }
+    }
+  }
+}
+
+function containerPlansFromOutput(
+  containers: Awaited<ReturnType<typeof readBuildOutput>>['containers'],
+  exports: Json | undefined,
+  bindings: Array<Json>,
+): Array<ContainerPlan> {
+  const plans: Array<ContainerPlan> = [];
+  for (const { config } of containers) {
+    if (config.schedulingPolicy !== 'durable-object') {
+      throw new Error(
+        'Scheduler-managed Cloudflare Containers cannot be uploaded with pinned secrets.',
+      );
+    }
+    const classes = Object.entries(exports ?? {}).filter(
+      ([, value]) => object(value)?.container === config.name,
+    );
+    if (classes.length !== 1) {
+      throw new Error(`Cloudflare Container ${config.name} needs exactly one local SQLite export.`);
+    }
+    const [className, raw] = classes[0];
+    const declaration = object(raw)!;
+    const localBindings = bindings.filter(
+      (binding) =>
+        binding.type === 'durable_object_namespace' &&
+        binding.class_name === className &&
+        binding.script_name === undefined,
+    );
+    if (declaration.storage !== 'sqlite' || localBindings.length === 0) {
+      throw new Error(
+        `Cloudflare Container ${config.name} needs a local SQLite Durable Object binding.`,
+      );
+    }
+    const unsafe = object(config.unsafe);
+    const configuration = object(unsafe?.configuration);
+    if (
+      (unsafe && Object.keys(unsafe).some((key) => key !== 'configuration')) ||
+      (configuration && Object.keys(configuration).some((key) => key !== 'experimental_flags'))
+    ) {
+      throw new Error(`Cloudflare Container ${config.name} has an unsupported setting.`);
+    }
+    const settings: Json = {
+      ...(configuration || config.ssh || config.authorizedKeys
+        ? {
+            configuration: {
+              ...(configuration ?? {}),
+              ...(config.ssh ? { wrangler_ssh: config.ssh } : {}),
+              ...(config.authorizedKeys
+                ? {
+                    authorized_keys: config.authorizedKeys.map(({ name, publicKey }) => ({
+                      name,
+                      public_key: publicKey,
+                    })),
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(config.observability
+        ? {
+            observability: {
+              logs: {
+                enabled:
+                  config.observability.enabled === true ||
+                  config.observability.logs?.enabled === true,
+              },
+            },
+          }
+        : {}),
+    };
+    plans.push({ name: config.name, className, images: config.images ?? {}, settings });
+  }
+  for (const [name, raw] of Object.entries(exports ?? {})) {
+    const container = object(raw)?.container;
+    if (
+      container !== undefined &&
+      !plans.some((plan) => plan.name === container && plan.className === name)
+    ) {
+      throw new Error(
+        `Cloudflare export ${name} references a Container outside the verified output.`,
+      );
+    }
+  }
+  return plans;
+}
+
+async function dockerImageDigest(
+  image: string,
+  timeout: number,
+  verifyUploader: () => boolean,
+): Promise<string> {
+  if (!verifyUploader()) {
+    throw new Error('The Cloudflare uploader changed during deployment.');
+  }
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(
+      process.env.WRANGLER_DOCKER_BIN ?? 'docker',
+      ['image', 'inspect', '--format', '{{json .RepoDigests}}', image],
+      {
+        encoding: 'utf8',
+        timeout,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+      },
+      (error, stdout) =>
+        error
+          ? reject(new Error('Cloudflare Container image digest could not be verified after push.'))
+          : resolve(stdout),
+    );
+  });
+  const digests: unknown = JSON.parse(stdout);
+  const repository = image.replace(/:[^/:]+$/, '');
+  const matching = Array.isArray(digests)
+    ? digests.filter(
+        (digest) =>
+          typeof digest === 'string' &&
+          digest.startsWith(`${repository}@sha256:`) &&
+          /^[a-f0-9]{64}$/.test(digest.slice(digest.lastIndexOf(':') + 1)),
+      )
+    : [];
+  if (matching.length !== 1) {
+    throw new Error('Cloudflare Container image digest could not be verified after push.');
+  }
+  return matching[0] as string;
+}
+
+async function prepareContainerMetadata(options: {
+  plans: Array<ContainerPlan>;
+  directory: string;
+  accountUrl: string;
+  accountId: string;
+  token: string;
+  verifyUploader: () => boolean;
+  runCf?: ContainerCommand;
+}): Promise<Array<Json>> {
+  if (options.plans.length === 0) {
+    return [];
+  }
+  const deadline = Date.now() + 15 * 60_000;
+  const remaining = () => {
+    const duration = deadline - Date.now();
+    if (duration <= 0) {
+      throw new Error('Cloudflare Container image preparation timed out.');
+    }
+    return duration;
+  };
+  const prepared = new Map<string, string>();
+  const result: Array<Json> = [];
+  for (const plan of options.plans) {
+    const images: Json = {};
+    for (const [name, raw] of Object.entries(plan.images)) {
+      const source = object(raw)!;
+      const reference = requiredString(
+        source.localReference ?? source.reference,
+        `Container ${plan.name} image`,
+      );
+      let image = prepared.get(reference);
+      if (!image) {
+        image = reference;
+        if (source.localReference !== undefined) {
+          if (!options.runCf || !options.verifyUploader()) {
+            throw new Error('The verified Cloudflare Container image uploader is unavailable.');
+          }
+          const pushed = await options.runCf(['containers', 'push', '--tag', reference], {
+            cwd: options.directory,
+            capture: true,
+            timeoutMs: remaining(),
+            maxOutputBytes: 16 * 1024 * 1024,
+          });
+          if (pushed.status !== 0 || pushed.signal || pushed.error) {
+            throw new Error('Cloudflare Container image push failed.');
+          }
+          const matches = [...pushed.stdout.matchAll(/Pushed image:\s*(\S+)/g)];
+          const remote = matches.length === 1 ? matches[0][1] : '';
+          if (
+            !remote.startsWith(`registry.cloudflare.com/${options.accountId}/`) ||
+            [...remote].some(
+              (character) => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
+            )
+          ) {
+            throw new Error(
+              'Cloudflare Container image push did not return the verified account registry.',
+            );
+          }
+          image = await dockerImageDigest(
+            remote,
+            Math.min(120_000, remaining()),
+            options.verifyUploader,
+          );
+        }
+        for (;;) {
+          const ready = await apiResult(
+            `${options.accountUrl}/containers/image-preparations`,
+            options.token,
+            'POST',
+            { image },
+            options.verifyUploader,
+            Math.min(120_000, remaining()),
+          );
+          if (ready.image !== image) {
+            throw new Error('Cloudflare Container image preparation returned another image.');
+          }
+          if (ready.status === 'ready') {
+            break;
+          }
+          if (ready.status !== 'pending') {
+            throw new Error(
+              'Cloudflare Container image preparation failed or returned an unsupported state.',
+            );
+          }
+          await delay(Math.min(2_000, remaining()));
+        }
+        prepared.set(reference, image);
+      }
+      images[name] = image;
+    }
+    result.push({
+      name: plan.name,
+      class_name: plan.className,
+      ...(Object.keys(images).length ? { images } : {}),
+    });
+  }
+  return result;
+}
+
+async function ensureContainerApplications(options: {
+  plans: Array<ContainerPlan>;
+  containers: Array<Json>;
+  accountUrl: string;
+  workerName: string;
+  versionId: string;
+  token: string;
+  verifyUploader: () => boolean;
+}): Promise<void> {
+  if (options.plans.length === 0) {
+    return;
+  }
+  const deadline = Date.now() + 60_000;
+  let version: Json;
+  for (;;) {
+    try {
+      version = await apiResult(
+        `${options.accountUrl}/workers/scripts/${encodeURIComponent(options.workerName)}/versions/${encodeURIComponent(options.versionId)}`,
+        options.token,
+        'GET',
+        undefined,
+        options.verifyUploader,
+        Math.max(1, Math.min(30_000, deadline - Date.now())),
+      );
+      break;
+    } catch (cause) {
+      if (
+        !(cause instanceof CloudflareApiError) ||
+        cause.code !== 100146 ||
+        Date.now() >= deadline
+      ) {
+        throw cause;
+      }
+      await delay(Math.min(2_000, deadline - Date.now()));
+    }
+  }
+  const versionBindings = object(version.resources)?.bindings;
+  if (version.id !== options.versionId || !Array.isArray(versionBindings)) {
+    throw new Error('The uploaded Container namespace could not be verified.');
+  }
+  const metadata = object(object(version.resources)?.script_runtime)?.containers;
+  if (
+    !Array.isArray(metadata) ||
+    metadata.length !== options.containers.length ||
+    options.containers.some((expected) => {
+      const matching = metadata
+        .map(object)
+        .filter(
+          (entry) =>
+            entry !== null &&
+            entry.name === expected.name &&
+            entry.class_name === expected.class_name,
+        );
+      return (
+        matching.length !== 1 ||
+        !isDeepStrictEqual(matching[0]!.images ?? {}, expected.images ?? {})
+      );
+    })
+  ) {
+    throw new Error(
+      'The uploaded Worker version did not retain the verified Container image metadata.',
+    );
+  }
+  for (const plan of options.plans) {
+    const matches = versionBindings
+      .map(object)
+      .filter(
+        (binding) =>
+          binding?.type === 'durable_object_namespace' &&
+          binding.class_name === plan.className &&
+          (binding.script_name === undefined || binding.script_name === options.workerName) &&
+          binding.environment === undefined &&
+          binding.dispatch_namespace === undefined,
+      );
+    const namespaces = new Set(matches.map((binding) => binding!.namespace_id));
+    if (matches.length === 0 || namespaces.size !== 1) {
+      throw new Error(
+        `Cloudflare Container ${plan.name} has no unambiguous uploaded local namespace.`,
+      );
+    }
+    const namespace = requiredString([...namespaces][0], `Container ${plan.name} namespace`);
+    if (!/^[a-f0-9]{32}$/.test(namespace)) {
+      throw new Error('The uploaded Container namespace ID was invalid.');
+    }
+    const url = `${options.accountUrl}/containers/applications/${encodeURIComponent(namespace)}`;
+    let application: Json;
+    try {
+      application = await apiResult(url, options.token, 'GET', undefined, options.verifyUploader);
+    } catch (cause) {
+      if (!(cause instanceof CloudflareApiError) || cause.status !== 404) {
+        throw cause;
+      }
+      application = await apiResult(
+        `${options.accountUrl}/containers/applications`,
+        options.token,
+        'POST',
+        {
+          name: plan.name,
+          scheduling_policy: 'durable_object',
+          durable_objects: { namespace_id: namespace },
+          ...plan.settings,
+        },
+        options.verifyUploader,
+      );
+    }
+    assertContainerApplicationIdentity(application, plan, namespace);
+    const changed = Object.entries(plan.settings).some(
+      ([key, value]) => !isDeepStrictEqual(application[key], value),
+    );
+    if (changed) {
+      const updated = await apiResult(
+        url,
+        options.token,
+        'PATCH',
+        plan.settings,
+        options.verifyUploader,
+      );
+      assertContainerApplicationIdentity(updated, plan, namespace);
+      if (
+        Object.entries(plan.settings).some(
+          ([key, value]) => !isDeepStrictEqual(updated[key], value),
+        )
+      ) {
+        throw new Error(
+          `Cloudflare Container ${plan.name} application changed during configuration.`,
+        );
+      }
+    }
+    const confirmed = await apiResult(url, options.token, 'GET', undefined, options.verifyUploader);
+    assertContainerApplicationIdentity(confirmed, plan, namespace);
+    if (
+      Object.entries(plan.settings).some(
+        ([key, value]) => !isDeepStrictEqual(confirmed[key], value),
+      )
+    ) {
+      throw new Error(
+        `Cloudflare Container ${plan.name} settings were not confirmed after deployment.`,
+      );
+    }
+  }
 }
 
 async function uploadAssets(options: {
@@ -313,6 +903,7 @@ export async function uploadPinnedCloudflareVersion(options: {
   secretsFilePath?: string;
   atomic: boolean;
   verifyUploader: () => boolean;
+  runCf?: ContainerCommand;
 }): Promise<{ id: string; urls: Array<string> }> {
   const activeSecrets = options.output.activeSecrets;
   if (!activeSecrets) {
@@ -373,6 +964,8 @@ export async function uploadPinnedCloudflareVersion(options: {
     activeSecrets,
     explicitSecrets,
   );
+  const exports = exportsFromOutput(config.exports);
+  const containerPlans = containerPlansFromOutput(built.containers, exports, bindings);
   // The scripts uploader normally carries forward remote vars. Preserve only
   // those implicit bindings from the live version, never the inactive upload.
   const active = await apiResult(
@@ -410,7 +1003,6 @@ export async function uploadPinnedCloudflareVersion(options: {
   if (activeSecrets.bindings.some(({ name }) => !activeBindingNames.has(name))) {
     throw new Error('The active Cloudflare Worker secrets changed before upload.');
   }
-  const exports = exportsFromOutput(config.exports);
   const assetConfig = assetConfigFromOutput(config.assets);
   if (bindings.some((binding) => binding.type === 'assets') && !options.output.assetsDirectory) {
     throw new Error('The Cloudflare Worker has an assets binding without verified assets.');
@@ -430,6 +1022,23 @@ export async function uploadPinnedCloudflareVersion(options: {
     });
   }
   const accountUrl = `${options.apiBaseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(options.accountId)}`;
+  await preflightContainerApplications(
+    containerPlans,
+    active.bindings,
+    accountUrl,
+    options.workerName,
+    options.token,
+    options.verifyUploader,
+  );
+  const containers = await prepareContainerMetadata({
+    plans: containerPlans,
+    directory: options.output.directory,
+    accountUrl,
+    accountId: options.accountId,
+    token: options.token,
+    verifyUploader: options.verifyUploader,
+    runCf: options.runCf,
+  });
   const jwt = await uploadAssets({
     output: options.output,
     accountUrl,
@@ -448,13 +1057,38 @@ export async function uploadPinnedCloudflareVersion(options: {
       compatibility_flags: config.compatibilityFlags,
       bindings,
       ...(exports ? { exports } : {}),
+      ...(containers.length ? { containers } : {}),
       ...(jwt ? { assets: { jwt, ...(assetConfig ? { config: assetConfig } : {}) } } : {}),
       annotations: { 'workers/message': options.message ?? '' },
     },
     options.verifyUploader,
   );
+  const versionId = uploaded.id;
+  if (
+    typeof versionId !== 'string' ||
+    !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(versionId)
+  ) {
+    throw new Error(
+      'Cloudflare accepted the Worker upload but returned an invalid version identity. Read back the Worker deployment before retrying.',
+    );
+  }
+  try {
+    await ensureContainerApplications({
+      plans: containerPlans,
+      containers,
+      accountUrl,
+      workerName: options.workerName,
+      versionId,
+      token: options.token,
+      verifyUploader: options.verifyUploader,
+    });
+  } catch {
+    throw new Error(
+      `Cloudflare Worker version ${versionId} was uploaded${options.atomic ? ' and may already be published' : ''}, but its Container applications could not be verified. Read back the Worker deployment and Container identities before retrying.`,
+    );
+  }
   return {
-    id: requiredString(uploaded.id, 'Worker Version ID'),
+    id: versionId,
     urls: Array.isArray(uploaded.urls)
       ? uploaded.urls.filter((url): url is string => typeof url === 'string')
       : [],

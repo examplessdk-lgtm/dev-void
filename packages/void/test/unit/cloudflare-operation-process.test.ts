@@ -471,6 +471,157 @@ it('finds existing Queues beyond the first cf API page', async () => {
   }
 }, 30_000);
 
+it.each([
+  {
+    label: 'Cloudflare script_name',
+    consumers: [{ script_name: 'test-worker', consumer_id: 'owned-consumer', type: 'worker' }],
+    deleted: ['owned-consumer'],
+    status: 0,
+  },
+  {
+    label: 'matching legacy alias',
+    consumers: [
+      { script_name: 'test-worker', script: 'test-worker', consumer_id: 'owned-consumer' },
+    ],
+    deleted: ['owned-consumer'],
+    status: 0,
+  },
+  {
+    label: 'foreign Worker and HTTP pull consumers',
+    consumers: [
+      { script_name: 'other-worker', consumer_id: 'foreign-consumer', type: 'worker' },
+      { consumer_id: 'pull-consumer', type: 'http_pull' },
+    ],
+    deleted: [],
+    status: 0,
+  },
+  {
+    label: 'conflicting aliases',
+    consumers: [
+      { script_name: 'other-worker', script: 'test-worker', consumer_id: 'foreign-consumer' },
+    ],
+    deleted: [],
+    status: 1,
+  },
+  {
+    label: 'missing Worker identity',
+    consumers: [{ consumer_id: 'unknown-consumer', type: 'worker' }],
+    deleted: [],
+    status: 1,
+  },
+  {
+    label: 'null Worker identity',
+    consumers: [{ script_name: null, consumer_id: 'unknown-consumer' }],
+    deleted: [],
+    status: 1,
+  },
+  {
+    label: 'missing consumer ID',
+    consumers: [{ script_name: 'test-worker', type: 'worker' }],
+    deleted: [],
+    status: 1,
+  },
+  {
+    label: 'duplicate owned consumers',
+    consumers: [
+      { script_name: 'test-worker', consumer_id: 'first-consumer', type: 'worker' },
+      { script_name: 'test-worker', consumer_id: 'second-consumer', type: 'worker' },
+    ],
+    deleted: [],
+    status: 1,
+  },
+  {
+    label: 'option-shaped consumer ID',
+    consumers: [{ script_name: 'test-worker', consumer_id: '--help', type: 'worker' }],
+    deleted: [],
+    status: 1,
+  },
+])(
+  'cleans up Queue consumers using verified identities: $label',
+  async ({ consumers, deleted, status }) => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-cf-queue-cleanup-'));
+    const deletes: Array<string> = [];
+    const server = createServer((request, response) => {
+      const url = new URL(request.url ?? '', 'http://127.0.0.1');
+      request.resume();
+      response.setHeader('Content-Type', 'application/json');
+      const queuePath = '/client/v4/accounts/test-account/queues';
+      if (request.method === 'GET' && url.pathname === queuePath) {
+        response.end(
+          JSON.stringify({
+            success: true,
+            result: [{ queue_id: 'queue-id', queue_name: 'existing-queue' }],
+            result_info: { page: 1, total_pages: 1 },
+          }),
+        );
+      } else if (request.method === 'GET' && url.pathname === `${queuePath}/queue-id/consumers`) {
+        response.end(JSON.stringify({ success: true, result: consumers }));
+      } else if (
+        request.method === 'DELETE' &&
+        url.pathname.startsWith(`${queuePath}/queue-id/consumers/`)
+      ) {
+        deletes.push(url.pathname.split('/').at(-1)!);
+        response.end(JSON.stringify({ success: true, result: {} }));
+      } else {
+        response.statusCode = 400;
+        response.end(
+          JSON.stringify({ success: false, errors: [{ message: 'Unexpected request' }] }),
+        );
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const configPath = join(directory, 'wrangler.json');
+      writeFileSync(
+        configPath,
+        JSON.stringify({ account_id: 'test-account', name: 'test-worker' }),
+      );
+      const [command, ...prefix] = resolveCloudflareOperationArgv(directory);
+      const output = await new Promise<{ status: number; stdout: string; stderr: string }>(
+        (resolve) => {
+          execFile(
+            command!,
+            [
+              ...prefix,
+              ...encodeCloudflareOperation({
+                type: 'queues.consumer.remove',
+                queueName: 'existing-queue',
+                workerName: 'test-worker',
+                configPath,
+              }),
+            ],
+            {
+              cwd: directory,
+              encoding: 'utf8',
+              timeout: 20_000,
+              env: {
+                PATH: process.env.PATH,
+                SYSTEMROOT: process.env.SYSTEMROOT,
+                WINDIR: process.env.WINDIR,
+                CI: 'true',
+                CF_API_TOKEN: 'synthetic-token',
+                CLOUDFLARE_ACCOUNT_ID: 'test-account',
+                CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+              },
+            },
+            (error, stdout, stderr) => resolve({ status: error ? 1 : 0, stdout, stderr }),
+          );
+        },
+      );
+      expect(output.status, output.stderr).toBe(status);
+      expect(deletes).toEqual(deleted);
+      expect(output.stderr).not.toContain('synthetic-token');
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
 it('uses pinned cf despite a project-local CLI and preserves D1 results and the CF token alias', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'void-cf-d1-contract-'));
   const requests: Array<{ method: string; path: string; authorization: string | undefined }> = [];

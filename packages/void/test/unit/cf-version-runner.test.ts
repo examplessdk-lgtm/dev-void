@@ -7,7 +7,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { getWorkerConfigPath } from '@cloudflare/build-output-utils';
+import {
+  getWorkerConfigPath,
+  readBuildOutput,
+  writeContainerConfig,
+} from '@cloudflare/build-output-utils';
+import { OutputContainerSchema } from '@cloudflare/config';
 import { afterEach, expect, it, vi } from 'vite-plus/test';
 import {
   activateCloudflareVersion,
@@ -33,6 +38,8 @@ const pinnedCfVersion = JSON.parse(
   readFileSync(fileURLToPath(import.meta.resolve('cf/package.json')), 'utf8'),
 ).version as string;
 afterEach(() => {
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -232,6 +239,82 @@ it('captures a version list larger than Node’s default child-process buffer', 
   }
 });
 
+it.runIf(process.platform !== 'win32')(
+  'bounds a Container command by terminating its actual child and descendant before returning',
+  async () => {
+    const originalSpawn = childProcess.spawn;
+    let group: number | undefined;
+    const spawn = vi.spyOn(childProcess, 'spawn').mockImplementation((_file, args, options) => {
+      expect(args!.slice(1)).toEqual(['containers', 'push', '--tag', 'fixture:local']);
+      expect(options).toMatchObject({ detached: true });
+      const child = originalSpawn(
+        process.execPath,
+        [
+          '-e',
+          `
+      const {spawn}=require('node:child_process');
+      const descendant=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});
+      console.log(JSON.stringify({pid:process.pid,descendant:descendant.pid}));
+      setInterval(()=>{},1000);
+    `,
+        ],
+        options,
+      );
+      group = child.pid;
+      return child;
+    });
+    syncBuiltinESMExports();
+    try {
+      const command = createCfCommand({
+        accountId: 'account-id',
+        apiBaseUrl: 'http://127.0.0.1:1',
+        env: () => ({ PATH: process.env.PATH }),
+        verifyUploader: () => true,
+      });
+      const started = Date.now();
+      const result = await command(['containers', 'push', '--tag', 'fixture:local'], {
+        cwd: tmpdir(),
+        capture: true,
+        timeoutMs: 500,
+        maxOutputBytes: 1024,
+      });
+      expect(result).toMatchObject({
+        status: 1,
+        signal: 'SIGKILL',
+        error: 'Cloudflare command timed out.',
+      });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      const identity = JSON.parse(result.stdout.trim()) as { pid: number; descendant: number };
+      expect(identity.pid).toBe(group);
+      for (const pid of [identity.pid, identity.descendant]) {
+        const deadline = Date.now() + 2_000;
+        for (;;) {
+          try {
+            process.kill(pid, 0);
+          } catch (cause) {
+            expect((cause as NodeJS.ErrnoException).code).toBe('ESRCH');
+            break;
+          }
+          if (Date.now() >= deadline) {
+            throw new Error('Container command descendant survived termination.');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      }
+    } finally {
+      spawn.mockRestore();
+      syncBuiltinESMExports();
+      if (group) {
+        try {
+          process.kill(-group, 'SIGKILL');
+        } catch {
+          /* Already terminated. */
+        }
+      }
+    }
+  },
+);
+
 it('treats a verified empty deployment list as missing but rejects malformed status', async () => {
   const prepared = await output();
   try {
@@ -308,6 +391,43 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
       keep_secrets: true,
       keep_vars: true,
       assets: { directory: '../client', binding: 'ASSETS', not_found_handling: 'none' },
+      queues: { producers: [{ binding: 'JOBS', queue: 'jobs', delivery_delay: 7 }] },
+      ai: { binding: 'AI' },
+      hyperdrive: [{ binding: 'POSTGRES', id: 'a'.repeat(32) }],
+      services: [
+        {
+          binding: 'SERVICE',
+          service: 'utility-worker',
+          entrypoint: 'Rpc',
+          props: { enabled: true },
+        },
+      ],
+      send_email: [
+        {
+          name: 'MAIL',
+          allowed_destination_addresses: ['fixture@example.test'],
+          allowed_sender_addresses: ['sender@example.test'],
+        },
+      ],
+      analytics_engine_datasets: [{ binding: 'METRICS', dataset: 'metrics' }],
+      vectorize: [{ binding: 'VECTORS', index_name: 'vectors' }],
+      browser: { binding: 'BROWSER' },
+      images: { binding: 'IMAGES' },
+      dispatch_namespaces: [
+        {
+          binding: 'DISPATCH',
+          namespace: 'dispatch',
+          outbound: { service: 'outbound-worker', parameters: ['tenant'] },
+        },
+      ],
+      workflows: [
+        {
+          name: 'external-workflow',
+          binding: 'WORKFLOW',
+          class_name: 'ExternalJob',
+          script_name: 'external-worker',
+        },
+      ],
     },
     true,
   );
@@ -327,6 +447,17 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
     ).toBe(true);
     const worker = JSON.parse(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8'));
     expect(worker.env.AUTH_SECRET).toEqual({ type: 'secret' });
+    worker.exports = {
+      Rpc: { type: 'worker', cache: { enabled: false } },
+      Departed: { type: 'durable-object', state: 'transferred', transferredTo: 'target-worker' },
+      Arriving: {
+        type: 'durable-object',
+        state: 'expecting-transfer',
+        storage: 'sqlite',
+        transferFrom: 'source-worker',
+      },
+    };
+    writeFileSync(getWorkerConfigPath(prepared.directory), JSON.stringify(worker));
     expect(prepared.activeSecrets).toEqual({
       versionId: activeVersionId,
       bindings: [
@@ -400,14 +531,58 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
           { name: 'KEY', type: 'inherit', version_id: activeVersionId },
           { name: 'DASHBOARD_VAR', type: 'inherit', version_id: activeVersionId },
           { name: 'APP_VERSION', type: 'version_metadata' },
+          { name: 'JOBS', type: 'queue', queue_name: 'jobs', delivery_delay: 7 },
+          { name: 'AI', type: 'ai' },
+          { name: 'POSTGRES', type: 'hyperdrive', id: 'a'.repeat(32) },
+          {
+            name: 'SERVICE',
+            type: 'service',
+            service: 'utility-worker',
+            entrypoint: 'Rpc',
+            props: { enabled: true },
+          },
+          {
+            name: 'MAIL',
+            type: 'send_email',
+            allowed_destination_addresses: ['fixture@example.test'],
+            allowed_sender_addresses: ['sender@example.test'],
+          },
+          { name: 'METRICS', type: 'analytics_engine', dataset: 'metrics' },
+          { name: 'VECTORS', type: 'vectorize', index_name: 'vectors' },
+          { name: 'BROWSER', type: 'browser' },
+          { name: 'IMAGES', type: 'images' },
+          {
+            name: 'DISPATCH',
+            type: 'dispatch_namespace',
+            namespace: 'dispatch',
+            outbound: { worker: { service: 'outbound-worker' }, params: [{ name: 'tenant' }] },
+          },
+          {
+            name: 'WORKFLOW',
+            type: 'workflow',
+            workflow_name: 'external-workflow',
+            script_name: 'external-worker',
+          },
         ]),
       );
       expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
+      expect(body.exports).toEqual({
+        Rpc: { type: 'worker', cache: { enabled: false } },
+        Departed: { type: 'durable-object', state: 'transferred', transferred_to: 'target-worker' },
+        Arriving: {
+          type: 'durable-object',
+          state: 'expecting-transfer',
+          storage: 'sqlite',
+          transfer_from: 'source-worker',
+        },
+      });
       expect(body.assets).toEqual({
         jwt: 'completion-token',
         config: { not_found_handling: 'none' },
       });
       expect(body.bindings).toContainEqual({ name: 'ASSETS', type: 'assets' });
+      expect(body.containers).toBeUndefined();
+      expect(requests.some(({ url }) => url.includes('/containers/'))).toBe(false);
       const session = requests.find(({ url }) => url.endsWith('/assets-upload-session'));
       const manifest = JSON.parse(session!.body).manifest as Record<string, { hash: string }>;
       expect(Object.keys(manifest)).toEqual(
@@ -452,6 +627,503 @@ it('uploads live secrets and multiple asset batches when the latest upload is in
 
 it('uploads live secrets and multiple asset batches for atomic publication', () =>
   verifyPinnedUpload(true));
+
+it.each([
+  'unsafe binding',
+  'local Workflow export',
+  'scheduler Container',
+  'explicit secret collision',
+] as const)(
+  'refuses unsupported pinned output before provider or image mutations: %s',
+  async (mode) => {
+    const prepared =
+      mode === 'local Workflow export'
+        ? await output({
+            secrets: { required: ['AUTH_SECRET'] },
+            workflows: [{ name: 'jobs', binding: 'JOBS', class_name: 'Job' }],
+          })
+        : await output({ secrets: { required: ['AUTH_SECRET'] } });
+    try {
+      expect(
+        await pinActiveWorkerSecrets({
+          output: prepared,
+          activeVersionId: '11111111-1111-4111-8111-111111111111',
+          bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+          requiredNames: ['AUTH_SECRET'],
+        }),
+      ).toBe(true);
+      const workerPath = getWorkerConfigPath(prepared.directory);
+      const worker = JSON.parse(readFileSync(workerPath, 'utf8'));
+      if (mode === 'unsafe binding') {
+        worker.env.BAD = { type: 'unsafe:unknown_product', value: 'unapproved' };
+      }
+      if (mode === 'explicit secret collision') {
+        worker.env.AUTH_SECRET = { type: 'ai' };
+      }
+      writeFileSync(workerPath, JSON.stringify(worker));
+      if (mode === 'scheduler Container') {
+        await writeContainerConfig({
+          root: prepared.directory,
+          directoryName: 'scheduler',
+          config: OutputContainerSchema.parse({
+            name: 'scheduler',
+            image: { reference: 'example.test/image:tag' },
+          }),
+        });
+      }
+      const secretsFilePath =
+        mode === 'explicit secret collision' ? join(roots.at(-1)!, 'secrets.json') : undefined;
+      if (secretsFilePath) {
+        writeFileSync(secretsFilePath, JSON.stringify({ AUTH_SECRET: 'private-secret' }));
+      }
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      const runCf = vi.fn();
+      await expect(
+        uploadPinnedCloudflareVersion({
+          output: prepared,
+          accountId: 'account-id',
+          apiBaseUrl: 'http://127.0.0.1:1',
+          workerName: 'void-test',
+          token: 'synthetic-token',
+          atomic: true,
+          verifyUploader: () => true,
+          secretsFilePath,
+          runCf,
+        }),
+      ).rejects.toThrow(
+        mode === 'local Workflow export'
+          ? 'export Job'
+          : mode === 'scheduler Container'
+            ? 'Scheduler-managed'
+            : mode === 'explicit secret collision'
+              ? 'invalid explicit value or binding'
+              : 'binding BAD',
+      );
+      expect(fetch).not.toHaveBeenCalled();
+      expect(runCf).not.toHaveBeenCalled();
+    } finally {
+      prepared.dispose();
+    }
+  },
+);
+
+it('refuses a new imageless Container before version publication', async () => {
+  const prepared = await containerOutput();
+  try {
+    const built = await readBuildOutput(prepared.directory);
+    await writeContainerConfig({
+      root: prepared.directory,
+      directoryName: 'sandbox',
+      config: OutputContainerSchema.parse({ ...built.containers[0].config, images: {} }),
+    });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({
+        success: true,
+        result: {
+          id: activePinnedVersion,
+          bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+        },
+      }),
+    );
+    const runCf = vi.fn();
+    await expect(
+      uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: 'http://127.0.0.1:1',
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: true,
+        verifyUploader: () => true,
+        runCf,
+      }),
+    ).rejects.toThrow('no images and no verified existing namespace application');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][1]?.method).toBe('GET');
+    expect(runCf).not.toHaveBeenCalled();
+  } finally {
+    prepared.dispose();
+  }
+});
+
+it('bounds pending Container image preparation before uploading a Worker version', async () => {
+  const prepared = await containerOutput();
+  try {
+    let pending = false;
+    vi.spyOn(Date, 'now').mockImplementation(() => (pending ? 900_001 : 0));
+    const requests: Array<string> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      requests.push(String(url));
+      if (String(url).endsWith('/image-preparations')) {
+        pending = true;
+        return Response.json({
+          success: true,
+          result: { image: containerImage, status: 'pending' },
+        });
+      }
+      return Response.json({
+        success: true,
+        result: {
+          id: activePinnedVersion,
+          bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+        },
+      });
+    });
+    await expect(
+      uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: 'http://127.0.0.1:1',
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: true,
+        verifyUploader: () => true,
+      }),
+    ).rejects.toThrow('image preparation timed out');
+    expect(requests).toHaveLength(2);
+    expect(requests.at(-1)).toContain('/image-preparations');
+  } finally {
+    prepared.dispose();
+  }
+});
+
+const activePinnedVersion = '11111111-1111-4111-8111-111111111111';
+const uploadedPinnedVersion = '22222222-2222-4222-8222-222222222222';
+const containerNamespace = 'c'.repeat(32);
+const containerImage = `registry.cloudflare.com/account-id/sandbox@sha256:${'d'.repeat(64)}`;
+
+async function containerOutput() {
+  const prepared = await output({
+    secrets: { required: ['AUTH_SECRET'] },
+    durable_objects: { bindings: [{ name: 'SANDBOX', class_name: 'Sandbox' }] },
+    migrations: [
+      { tag: 'history', new_sqlite_classes: ['OldRoom', 'Removed'] },
+      {
+        tag: 'current',
+        new_sqlite_classes: ['Sandbox'],
+        renamed_classes: [{ from: 'OldRoom', to: 'Room' }],
+        deleted_classes: ['Removed'],
+      },
+    ],
+    containers: [
+      {
+        name: 'sandbox',
+        class_name: 'Sandbox',
+        scheduling_policy: 'durable_object',
+        images: { default: { image: containerImage } },
+      },
+    ],
+  });
+  expect(
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: activePinnedVersion,
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    }),
+  ).toBe(true);
+  return prepared;
+}
+
+async function verifyContainerUpload(
+  mode:
+    | 'create'
+    | 'existing'
+    | 'pending'
+    | 'image-error'
+    | 'foreign'
+    | 'lost-readback'
+    | 'local'
+    | 'lost-image-metadata'
+    | 'foreign-namespace'
+    | 'key-order',
+) {
+  const prepared = await containerOutput();
+  const built = await readBuildOutput(prepared.directory);
+  const existing = ['existing', 'foreign', 'lost-readback', 'key-order'].includes(mode);
+  const expectedImages =
+    mode === 'key-order'
+      ? { first: containerImage, second: containerImage }
+      : { default: containerImage };
+  await writeContainerConfig({
+    root: prepared.directory,
+    directoryName: 'sandbox',
+    config: OutputContainerSchema.parse({
+      ...built.containers[0].config,
+      observability: { logs: { enabled: true } },
+      ...(mode === 'key-order'
+        ? {
+            ssh: { enabled: true, port: 2222 },
+            images: { first: { reference: containerImage }, second: { reference: containerImage } },
+          }
+        : {}),
+      ...(mode === 'local'
+        ? { images: { default: { localReference: 'void-sandbox-build:fixture' } } }
+        : {}),
+    }),
+  });
+  const requests: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+  let application: Record<string, unknown> | undefined = existing
+    ? {
+        id: containerNamespace,
+        name: mode === 'foreign' ? 'foreign-app' : 'sandbox',
+        scheduling_policy: 'durable_object',
+        durable_objects: { namespace_id: containerNamespace },
+        observability: { logs: { enabled: mode === 'key-order' } },
+        ...(mode === 'key-order'
+          ? { configuration: { wrangler_ssh: { port: 2222, enabled: true } } }
+          : {}),
+      }
+    : undefined;
+  let imageAttempts = 0;
+  let versionVisibleAttempts = 0;
+  let patched = false;
+  const server = createServer(async (request, response) => {
+    const chunks: Array<Buffer> = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
+    const row = { method: request.method!, url: request.url!, body: text ? JSON.parse(text) : {} };
+    requests.push(row);
+    let status = 200;
+    let result: unknown;
+    let code = 0;
+    const binding = {
+      name: 'SANDBOX',
+      type: 'durable_object_namespace',
+      class_name: 'Sandbox',
+      namespace_id: containerNamespace,
+    };
+    if (row.url.endsWith(`/versions/${activePinnedVersion}`)) {
+      result = {
+        id: activePinnedVersion,
+        bindings: [
+          { name: 'AUTH_SECRET', type: 'secret_text' },
+          ...(existing ? [{ ...binding, script_name: 'void-test' }] : []),
+        ],
+      };
+    } else if (row.url.endsWith('/image-preparations')) {
+      result = {
+        image: row.body.image,
+        status:
+          mode === 'image-error'
+            ? 'error'
+            : mode === 'pending' && ++imageAttempts === 1
+              ? 'pending'
+              : 'ready',
+      };
+    } else if (row.method === 'POST' && row.url.includes('/workers/workers/void-test/versions')) {
+      result = { id: uploadedPinnedVersion };
+    } else if (row.url.endsWith(`/scripts/void-test/versions/${uploadedPinnedVersion}`)) {
+      if (mode === 'pending' && ++versionVisibleAttempts === 1) {
+        status = 404;
+        code = 100146;
+      } else {
+        result = {
+          id: uploadedPinnedVersion,
+          resources: {
+            bindings:
+              mode === 'foreign-namespace'
+                ? [{ ...binding, script_name: 'foreign-worker' }]
+                : [binding],
+            script_runtime: {
+              containers:
+                mode === 'lost-image-metadata'
+                  ? [{ class_name: 'Sandbox' }]
+                  : [
+                      {
+                        name: 'sandbox',
+                        class_name: 'Sandbox',
+                        images:
+                          mode === 'key-order'
+                            ? { second: containerImage, first: containerImage }
+                            : expectedImages,
+                      },
+                    ],
+            },
+          },
+        };
+      }
+    } else if (row.url.endsWith(`/applications/${containerNamespace}`)) {
+      if (!application) {
+        status = 404;
+      } else if (row.method === 'PATCH') {
+        application = { ...application, ...row.body };
+        patched = true;
+        result = application;
+      } else {
+        result =
+          mode === 'lost-readback' && patched
+            ? { ...application, durable_objects: { namespace_id: 'f'.repeat(32) } }
+            : application;
+      }
+    } else if (row.url.endsWith('/applications') && row.method === 'POST') {
+      application = { ...row.body, id: containerNamespace };
+      result = application;
+    } else {
+      status = 500;
+    }
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        success: status === 200,
+        result: result ?? null,
+        errors: status === 200 ? [] : [{ code, message: 'private-provider-detail' }],
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const runCf = vi.fn(() => ({
+    status: 0,
+    stdout: 'Pushed image: registry.cloudflare.com/account-id/sandbox:fixture\n',
+    stderr: '',
+  }));
+  const inspect =
+    mode === 'local'
+      ? vi
+          .spyOn(childProcess, 'execFile')
+          .mockImplementation((_file, _args, _options, callback) => {
+            (callback as (error: null, stdout: string, stderr: string) => void)(
+              null,
+              JSON.stringify([containerImage]),
+              '',
+            );
+            return {} as ReturnType<typeof execFile>;
+          })
+      : undefined;
+  syncBuiltinESMExports();
+  try {
+    const upload = uploadPinnedCloudflareVersion({
+      output: prepared,
+      accountId: 'account-id',
+      apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+      workerName: 'void-test',
+      token: 'synthetic-token',
+      atomic: true,
+      verifyUploader: () => true,
+      runCf,
+    });
+    if (mode === 'image-error' || mode === 'foreign') {
+      await expect(upload).rejects.toThrow(
+        mode === 'image-error' ? 'image preparation failed' : 'application identity',
+      );
+      expect(
+        requests.some(
+          (row) => row.method === 'POST' && row.url.includes('/workers/workers/void-test/versions'),
+        ),
+      ).toBe(false);
+    } else if (['lost-readback', 'lost-image-metadata', 'foreign-namespace'].includes(mode)) {
+      await expect(upload).rejects.toThrow(
+        `version ${uploadedPinnedVersion} was uploaded and may already be published`,
+      );
+      expect(requests.filter((row) => row.method === 'PATCH')).toHaveLength(
+        mode === 'lost-readback' ? 1 : 0,
+      );
+      if (mode !== 'lost-readback') {
+        expect(requests.some((row) => row.url.includes('/applications'))).toBe(false);
+      }
+    } else {
+      expect((await upload).id).toBe(uploadedPinnedVersion);
+      const post = requests.find(
+        (row) => row.method === 'POST' && row.url.includes('/workers/workers/void-test/versions'),
+      )!;
+      expect(post.body.bindings).toContainEqual({
+        name: 'AUTH_SECRET',
+        type: 'inherit',
+        version_id: activePinnedVersion,
+      });
+      expect(post.body.bindings).toContainEqual({
+        name: 'SANDBOX',
+        type: 'durable_object_namespace',
+        class_name: 'Sandbox',
+      });
+      expect(post.body.containers).toEqual([
+        { name: 'sandbox', class_name: 'Sandbox', images: expectedImages },
+      ]);
+      expect(post.body.exports).toEqual({
+        OldRoom: { type: 'durable-object', state: 'renamed', renamed_to: 'Room' },
+        Room: { type: 'durable-object', storage: 'sqlite', state: 'created' },
+        Removed: { type: 'durable-object', state: 'deleted' },
+        Sandbox: {
+          type: 'durable-object',
+          storage: 'sqlite',
+          state: 'created',
+          container: 'sandbox',
+        },
+      });
+      expect(requests.findIndex((row) => row.url.endsWith('/image-preparations'))).toBeLessThan(
+        requests.indexOf(post),
+      );
+      const creates = requests.filter(
+        (row) => row.method === 'POST' && row.url.endsWith('/applications'),
+      );
+      expect(creates).toHaveLength(existing ? 0 : 1);
+      if (!existing) {
+        expect(creates[0].body).toEqual({
+          name: 'sandbox',
+          scheduling_policy: 'durable_object',
+          durable_objects: { namespace_id: containerNamespace },
+          observability: { logs: { enabled: true } },
+        });
+      } else {
+        expect(requests.filter((row) => row.method === 'PATCH')).toHaveLength(
+          mode === 'key-order' ? 0 : 1,
+        );
+      }
+      expect(requests.at(-1)?.method).toBe('GET');
+      if (mode === 'pending') {
+        expect(imageAttempts).toBe(2);
+        expect(versionVisibleAttempts).toBe(2);
+      }
+      if (mode === 'local') {
+        expect(runCf).toHaveBeenCalledWith(
+          ['containers', 'push', '--tag', 'void-sandbox-build:fixture'],
+          expect.objectContaining({
+            cwd: prepared.directory,
+            capture: true,
+            timeoutMs: expect.any(Number),
+            maxOutputBytes: 16 * 1024 * 1024,
+          }),
+        );
+        expect(inspect).toHaveBeenCalledWith(
+          expect.any(String),
+          [
+            'image',
+            'inspect',
+            '--format',
+            '{{json .RepoDigests}}',
+            'registry.cloudflare.com/account-id/sandbox:fixture',
+          ],
+          expect.objectContaining({ timeout: expect.any(Number) }),
+          expect.any(Function),
+        );
+      } else {
+        expect(runCf).not.toHaveBeenCalled();
+      }
+    }
+  } finally {
+    inspect?.mockRestore();
+    syncBuiltinESMExports();
+    prepared.dispose();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+it.each([
+  'create',
+  'existing',
+  'pending',
+  'image-error',
+  'foreign',
+  'lost-readback',
+  'local',
+  'lost-image-metadata',
+  'foreign-namespace',
+  'key-order',
+] as const)('preserves pinned Sandbox image and application lifecycle: %s', verifyContainerUpload);
 
 it.each([false, true])(
   'publishes the intended custom domain before pinned-secret bootstrap readiness (atomic=%s)',
@@ -1093,6 +1765,98 @@ it.each(['restore', 'remove'] as const)(
   },
 );
 
+it.each([
+  {
+    rows: [{ type: 'worker', script_name: 'void-test', consumer_id: 'owned-id' }],
+    status: 0,
+    remove: true,
+  },
+  { rows: [{ script: 'void-test', consumer_id: 'owned-id' }], status: 0, remove: true },
+  {
+    rows: [
+      { type: 'worker', script_name: 'void-test', script: 'foreign', consumer_id: 'owned-id' },
+    ],
+    status: 1,
+    remove: false,
+  },
+  {
+    rows: [{ type: 'worker', script_name: null, script: 'void-test', consumer_id: 'owned-id' }],
+    status: 1,
+    remove: false,
+  },
+  {
+    rows: [{ type: 'worker', script_name: '', consumer_id: 'owned-id' }],
+    status: 1,
+    remove: false,
+  },
+  {
+    rows: [{ type: 'worker', script_name: 'void-test', consumer_id: '' }],
+    status: 1,
+    remove: false,
+  },
+  {
+    rows: [{ type: 'http_pull', script_name: 'void-test', consumer_id: 'owned-id' }],
+    status: 1,
+    remove: false,
+  },
+  { rows: [{ type: 'worker', consumer_id: 'owned-id' }], status: 1, remove: false },
+  {
+    rows: [
+      { type: 'worker', script_name: 'void-test', consumer_id: 'one' },
+      { type: 'worker', script_name: 'void-test', consumer_id: 'two' },
+    ],
+    status: 1,
+    remove: false,
+  },
+  {
+    rows: [
+      { type: 'worker', script_name: 'foreign', consumer_id: 'foreign-id' },
+      { type: 'http_pull', consumer_id: 'pull-id' },
+    ],
+    status: 0,
+    remove: false,
+  },
+])(
+  'removes only an unambiguous Queue consumer Worker identity: $rows',
+  async ({ rows, status, remove }) => {
+    const prepared = await output();
+    const calls: Array<Array<string>> = [];
+    try {
+      const runner = createCfVersionRunner({
+        output: prepared,
+        workerName: 'void-test',
+        verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
+        runCf: (args) => {
+          calls.push(args);
+          return {
+            status: 0,
+            stdout: JSON.stringify(
+              args[1] === 'list'
+                ? [{ queue_name: 'jobs', queue_id: 'queue-id' }]
+                : args[2] === 'list'
+                  ? rows
+                  : {},
+            ),
+            stderr: '',
+          };
+        },
+      });
+      const result = await runner(
+        { type: 'queues.consumer.remove', queueName: 'jobs', workerName: 'void-test' },
+        { capture: true },
+      );
+      expect(result.status).toBe(status);
+      expect(calls.filter((args) => args[2] === 'delete')).toEqual(
+        remove
+          ? [['queues', 'consumers', 'delete', 'owned-id', '--queue-id', 'queue-id', '--force']]
+          : [],
+      );
+    } finally {
+      prepared.dispose();
+    }
+  },
+);
+
 it('uses cf for Queue triggers, consumer cleanup, and version binding reads', async () => {
   const prepared = await output();
   const triggerConfig = join(roots.at(-1)!, 'legacy-trigger.json');
@@ -1118,7 +1882,9 @@ it('uses cf for Queue triggers, consumer cleanup, and version binding reads', as
         if (args[0] === 'queues' && args[1] === 'consumers' && args[2] === 'list') {
           return {
             status: 0,
-            stdout: JSON.stringify([{ script: 'void-test', consumer_id: 'consumer-id' }]),
+            stdout: JSON.stringify([
+              { type: 'worker', script_name: 'void-test', consumer_id: 'consumer-id' },
+            ]),
             stderr: '',
           };
         }

@@ -987,11 +987,37 @@ async function workerChanges(): Promise<Result> {
     if (!Array.isArray(members)) {
       throw new Error('Queue consumer list was malformed.');
     }
-    for (const item of members
-      .map(object)
-      .filter((entry) => entry.script === operation.workerName)) {
-      if (typeof item.consumer_id !== 'string') {
-        throw new Error('Queue consumer ID is missing.');
+    const matching = members.map(object).filter((entry) => {
+      const name = entry.script_name ?? entry.script;
+      if (
+        (entry.script_name !== undefined &&
+          (typeof entry.script_name !== 'string' || !entry.script_name)) ||
+        (entry.script !== undefined && (typeof entry.script !== 'string' || !entry.script)) ||
+        (entry.script_name !== undefined &&
+          entry.script !== undefined &&
+          entry.script_name !== entry.script) ||
+        (entry.type === 'worker' && name === undefined)
+      ) {
+        throw new Error('Queue consumer Worker identity is ambiguous.');
+      }
+      return name === operation.workerName;
+    });
+    if (matching.length > 1) {
+      throw new Error('Queue consumer Worker identity is ambiguous.');
+    }
+    for (const item of matching) {
+      if (
+        typeof item.consumer_id !== 'string' ||
+        !item.consumer_id ||
+        item.consumer_id.startsWith('-') ||
+        /\s/.test(item.consumer_id) ||
+        [...item.consumer_id].some((character) => {
+          const code = character.charCodeAt(0);
+          return code < 32 || code === 127;
+        }) ||
+        (item.type !== undefined && item.type !== 'worker')
+      ) {
+        throw new Error('Queue consumer ID or type is invalid.');
       }
       const deleted = runCf([
         'queues',

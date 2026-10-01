@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import { uploadPinnedCloudflareVersion } from './cf-version-api.ts';
 
 type CfCommand = (
   args: Array<string>,
-  options: { cwd: string; capture: boolean },
+  options: { cwd: string; capture: boolean; timeoutMs?: number; maxOutputBytes?: number },
 ) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
 
 function failed(message: string): CloudflareCommandResult {
@@ -279,24 +279,66 @@ export function createCfCommand(options: {
       env.CLOUDFLARE_API_TOKEN = options.token;
     }
     return await new Promise<CloudflareCommandResult>((resolve) => {
+      const bounded = run.timeoutMs !== undefined;
+      const processGroup = bounded && process.platform !== 'win32';
       const child = spawn(process.execPath, [cf, ...args], {
         cwd: run.cwd,
         env,
         shell: false,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: processGroup,
       });
       const stdout: Array<Buffer> = [];
       const stderr: Array<Buffer> = [];
       let bytes = 0;
       let error: string | null = null;
+      const stop = () => {
+        if (processGroup && child.pid) {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code !== 'ESRCH') {
+              child.kill('SIGKILL');
+            }
+          }
+        } else if (bounded && process.platform === 'win32' && child.pid) {
+          execFile(
+            'taskkill',
+            ['/PID', String(child.pid), '/T', '/F'],
+            { windowsHide: true, timeout: 10_000 },
+            (cause) => {
+              if (cause) {
+                child.kill('SIGKILL');
+              }
+            },
+          );
+        } else {
+          child.kill('SIGKILL');
+        }
+      };
+      const interrupted = () => {
+        error = 'Cloudflare command interrupted.';
+        stop();
+      };
+      if (bounded) {
+        process.on('SIGINT', interrupted);
+        process.on('SIGTERM', interrupted);
+      }
+      const timer =
+        run.timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              error = 'Cloudflare command timed out.';
+              stop();
+            }, run.timeoutMs);
       // Version lists contain full Worker records. Preserve the previous 256 MiB
       // limit while letting Void's spinner animate during the network operation.
       const collect = (chunks: Array<Buffer>, chunk: Buffer) => {
         bytes += chunk.length;
-        if (bytes > 256 * 1024 * 1024) {
-          error = 'Cloudflare command output exceeded 256 MiB.';
-          child.kill();
+        if (bytes > (run.maxOutputBytes ?? 256 * 1024 * 1024)) {
+          error = 'Cloudflare command output exceeded its verified limit.';
+          stop();
         } else {
           chunks.push(chunk);
         }
@@ -307,6 +349,11 @@ export function createCfCommand(options: {
         error = cause.message;
       });
       child.on('close', (status, signal) => {
+        clearTimeout(timer);
+        if (bounded) {
+          process.off('SIGINT', interrupted);
+          process.off('SIGTERM', interrupted);
+        }
         const output = Buffer.concat(stdout).toString('utf8');
         const diagnostic = Buffer.concat(stderr).toString('utf8');
         const completed = typeof status === 'number' && signal == null && error == null;
@@ -421,6 +468,7 @@ export function createCfVersionRunner(options: {
         ...(operation.secretsFilePath ? { secretsFilePath: operation.secretsFilePath } : {}),
         atomic,
         verifyUploader: options.pinnedUpload.verifyUploader,
+        runCf,
       });
       const preview = version.urls.find((url) => /^https:\/\//.test(url));
       return {
@@ -777,14 +825,33 @@ export function createCfVersionRunner(options: {
       if (!Array.isArray(allConsumers)) {
         return failed('The Cloudflare Queue consumers were not readable.');
       }
-      const matching = allConsumers.filter((item) => record(item) && item.script === workerName);
+      const matching: Array<Record<string, unknown>> = [];
+      for (const item of allConsumers) {
+        if (!record(item)) {
+          return failed('The Cloudflare Queue consumers were not readable.');
+        }
+        const name = item.script_name ?? item.script;
+        if (
+          (item.script_name !== undefined && !safePositional(item.script_name)) ||
+          (item.script !== undefined && !safePositional(item.script)) ||
+          (item.script_name !== undefined &&
+            item.script !== undefined &&
+            item.script_name !== item.script) ||
+          (item.type === 'worker' && name === undefined)
+        ) {
+          return failed('The Cloudflare Queue consumer Worker identity was ambiguous.');
+        }
+        if (name === workerName) {
+          matching.push(item);
+        }
+      }
       if (matching.length === 0) {
         return { status: 0, stdout: '', stderr: '' };
       }
       if (
         matching.length !== 1 ||
-        !record(matching[0]) ||
-        typeof matching[0].consumer_id !== 'string'
+        !safePositional(matching[0].consumer_id) ||
+        (matching[0].type !== undefined && matching[0].type !== 'worker')
       ) {
         return failed('The Cloudflare Queue consumer identity was ambiguous.');
       }
