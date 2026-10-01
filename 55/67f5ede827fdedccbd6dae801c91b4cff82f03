@@ -1,0 +1,29 @@
+docs/guide/email.md
+  s_565d22f42c34d7::t_a9ca69b3deb85a 398
+docs/guide/platform/administration/email.md
+  s_565d22f42c34d7::t_ab707d11430841 9,11
+platform/packages/api/README.md
+  s_565d22f42c34d7::t_39ae46730942e1 310-315
+platform/packages/api/src/email/shared-recipient-service.ts
+  s_565d22f42c34d7::t_e90bf2af1bf12b 1,7,25-43,419,421-429,450-451,826-833,844
+platform/packages/api/src/routes/deploy.ts
+  s_565d22f42c34d7::t_80248f8211baf5 2098-2103
+platform/packages/api/test/integration/email-shared-recipients.test.ts
+  s_565d22f42c34d7::t_c7bb0ec6debedc 27,34,98,101-108,113-246,503,533,556,594,770,772,844
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5567f5ede827fdedccbd6dae801c91b4cff82f03",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
