@@ -5,12 +5,14 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CloudflareOperation } from '@void/deploy-cloudflare';
-import type { PlatformInstallationManifest } from '@void/platform';
+import { PLATFORM_DISABLED_KEY, type PlatformInstallationManifest } from '@void/platform';
 import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test';
 import { hyperdriveOriginFromConnectionString } from '../../src/cli/platform-cloudflare.ts';
 import {
   createPlatformInstallationSecrets,
   installPlatform,
+  verifyPlatformWorkerCutoverVersions,
+  type PlatformInstallerDependencies,
 } from '../../src/cli/platform-installer.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { listInstallationManifests } from '../../src/cli/platform-registry.ts';
@@ -293,17 +295,25 @@ async function createFakeCloudflare() {
     },
     kv,
     planningClient,
+    replaceActiveVersion: (name: string) => {
+      const worker = workers.get(name)!;
+      const active = worker.versions.get(worker.deployments[0]!.versions[0]!.version_id)!;
+      const replacement = { ...structuredClone(active), id: randomUUID() };
+      worker.versions.set(replacement.id, replacement);
+      activate(name, replacement.id);
+    },
   };
 }
 
 const DATABASE_URL = 'postgres://user:password@db.example.com/testing';
 
-function installationSecrets() {
+function installationSecrets(sharedEmail = false) {
   return createPlatformInstallationSecrets({
     bootstrapGitHubId: '583231',
     bootstrapGitHubLogin: 'octocat',
     cloudflareApiToken: 'test-token',
     databaseUrl: DATABASE_URL,
+    emailEnabled: sharedEmail,
     githubClientId: 'id',
     githubClientSecret: 'secret',
     jwtSecret: TEST_PLATFORM_JWT_SECRET,
@@ -316,6 +326,7 @@ function installationSecrets() {
 function planInstallation(
   cloud: Awaited<ReturnType<typeof createFakeCloudflare>>,
   existing: PlatformInstallationManifest | null,
+  sharedEmail = false,
 ) {
   return createPlatformInstallPlan(
     cloud.planningClient,
@@ -325,6 +336,9 @@ function planInstallation(
       controlPlaneDomain: '',
       dedicatedZone: false,
       displayName: 'Testing',
+      ...(sharedEmail
+        ? { emailSenderDomain: 'mail.example.com', emailSharedZoneId: 'email-zone' }
+        : {}),
       installationSlug: 'testing',
       workersDev: true,
       zoneName: '',
@@ -336,9 +350,13 @@ function planInstallation(
 async function runInstall(
   cloud: Awaited<ReturnType<typeof createFakeCloudflare>>,
   existing: PlatformInstallationManifest | null,
+  options: {
+    sharedEmail?: boolean;
+    bootstrapEmail?: PlatformInstallerDependencies['bootstrapEmail'];
+  } = {},
 ) {
-  const plan = await planInstallation(cloud, existing);
-  return installPlatform(plan, installationSecrets(), existing, {
+  const plan = await planInstallation(cloud, existing, options.sharedEmail);
+  return installPlatform(plan, installationSecrets(options.sharedEmail), existing, {
     acquireDatabaseLifecycleLock: async () =>
       Object.assign(async () => {}, {
         prepareSandboxDrain: async () => ({
@@ -360,6 +378,7 @@ async function runInstall(
     migrateDatabase: async () => {},
     revalidateBeforeWorkerDeploy: async () => {},
     verifyHealth: async () => {},
+    ...(options.bootstrapEmail ? { bootstrapEmail: options.bootstrapEmail } : {}),
   });
 }
 
@@ -440,4 +459,84 @@ it('retries a restored enabling generation with every Worker restaged', async ()
   expect(stagedKeys(retried.manifest, 3)).not.toContain('tail');
   expect(stagedKeys(retried.manifest, 4)).toEqual([...WORKER_KEYS].sort());
   expect(workerStepKeys(retried.manifest)).toContain('worker-cutover:4:committed');
+});
+
+it('rechecks the committed immutable versions after shared email routing is prepared', async () => {
+  const cloud = await createFakeCloudflare();
+  const bootstrapEmail = vi.fn(async () => {
+    expect(workerStepKeys(currentManifest())).toContain('worker-cutover:2:committed');
+    return 'email-operation';
+  });
+
+  const result = await runInstall(cloud, null, { sharedEmail: true, bootstrapEmail });
+
+  expect(result.manifest.status).toBe('installed');
+  expect(bootstrapEmail).toHaveBeenCalledOnce();
+  expect(stagedKeys(result.manifest, 2)).toEqual([...WORKER_KEYS].sort());
+  const routing = result.manifest.resources.find((resource) => resource.key === 'routing-kv')!;
+  expect(cloud.kv.has(`${routing.id}/${PLATFORM_DISABLED_KEY}`)).toBe(false);
+});
+
+it('rejects a concurrent version replacement after shared email commits the Worker generation', async () => {
+  const cloud = await createFakeCloudflare();
+  const plan = await planInstallation(cloud, null, true);
+  const bootstrapEmail = async () => {
+    cloud.replaceActiveVersion(plan.deployment.resources.apiWorker);
+    return 'email-operation';
+  };
+
+  await expect(runInstall(cloud, null, { sharedEmail: true, bootstrapEmail })).rejects.toThrow(
+    'changed concurrently from staged version',
+  );
+
+  const failed = currentManifest();
+  expect(failed.status).toBe('failed');
+  expect(workerStepKeys(failed)).toContain('worker-cutover:2:committed');
+  expect(workerStepKeys(failed)).not.toContain('worker-cutover:2:restored');
+  const routing = failed.resources.find((resource) => resource.key === 'routing-kv')!;
+  expect(cloud.kv.has(`${routing.id}/${PLATFORM_DISABLED_KEY}`)).toBe(true);
+});
+
+it('resumes a shared email failure with a fresh verified immutable generation', async () => {
+  const cloud = await createFakeCloudflare();
+  const bootstrapEmail = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('mail unavailable'))
+    .mockResolvedValue('email-operation');
+  await expect(runInstall(cloud, null, { sharedEmail: true, bootstrapEmail })).rejects.toThrow(
+    'mail unavailable',
+  );
+  const failed = currentManifest();
+  expect(workerStepKeys(failed)).toContain('worker-cutover:2:committed');
+
+  const result = await runInstall(cloud, failed, { sharedEmail: true, bootstrapEmail });
+
+  expect(result.manifest.status).toBe('installed');
+  expect(bootstrapEmail).toHaveBeenCalledTimes(2);
+  expect(stagedKeys(result.manifest, 4)).toEqual([...WORKER_KEYS].sort());
+  expect(workerStepKeys(result.manifest)).toContain('worker-cutover:4:committed');
+});
+
+it('does not use a restored generation as authority to enable traffic', async () => {
+  const cloud = await createFakeCloudflare();
+  const result = await runInstall(cloud, null);
+  const restored = {
+    ...result.manifest,
+    steps: result.manifest.steps.map((step) =>
+      step.key === 'worker-cutover:2:committed'
+        ? { ...step, key: 'worker-cutover:2:restored', resultHash: 'restored' }
+        : step,
+    ),
+  };
+  const runner = vi.fn();
+  await expect(
+    verifyPlatformWorkerCutoverVersions(
+      restored,
+      2,
+      {} as Parameters<typeof verifyPlatformWorkerCutoverVersions>[2],
+      'account',
+      runner,
+    ),
+  ).rejects.toThrow('missing a complete immutable-version checkpoint');
+  expect(runner).not.toHaveBeenCalled();
 });

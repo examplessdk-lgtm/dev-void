@@ -15,6 +15,7 @@ import {
   parsePlatformAdmissionPolicy,
   parsePlatformAuthenticationSetup,
   parsePlatformLoginConfiguration,
+  platformDashboardUrl,
   type PlatformDeploymentManifest,
   type PlatformLoginKind,
 } from '@void/platform';
@@ -209,6 +210,9 @@ export async function collectInstallationAuthentication(
       (accessEntry && (!selection.file || selection.file.cloudflareAccess)))
       ? await preparePlatformAccessSetup({
           plan,
+          ...(platformDashboardUrl(plan.deployment)
+            ? { additionalOrigins: [platformDashboardUrl(plan.deployment)!] }
+            : {}),
           ownershipNonce: access.ownershipNonce,
           protection: !!selection.authentication.accessProtection,
           ...(accessEntry

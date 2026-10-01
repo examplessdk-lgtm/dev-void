@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  boolean,
   check,
   index,
   integer,
@@ -11,6 +12,45 @@ import {
 } from 'drizzle-orm/pg-core';
 // Ownership IDs remain as audit identities after a user or project is deleted;
 // authorization always joins the current user/project records.
+
+/** Retained provider ownership, including ambiguous writes and project deletion. */
+export const emailSharedRecipients = pgTable(
+  'email_shared_recipients',
+  {
+    id: text('id').primaryKey(),
+    installation_id: text('installation_id').notNull(),
+    project_id: text('project_id').notNull(),
+    route_id: text('route_id').notNull(),
+    recipient: text('recipient').notNull(),
+    rule_name: text('rule_name').notNull(),
+    rule_id: text('rule_id'),
+    create_started_at: timestamp('create_started_at', { mode: 'string', withTimezone: true }),
+    removing: boolean('removing').notNull().default(false),
+    status: text('status')
+      .notNull()
+      .default('pending')
+      .$type<'pending' | 'reconciling' | 'ready' | 'blocked' | 'unknown' | 'removed'>(),
+    reason: text('reason'),
+    attempt: integer('attempt').notNull().default(0),
+    lease_started_at: timestamp('lease_started_at', { mode: 'string', withTimezone: true }),
+    observed_at: timestamp('observed_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp('updated_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('email_shared_recipients_project_address_uq').on(
+      table.installation_id,
+      table.project_id,
+      table.recipient,
+    ),
+    uniqueIndex('email_shared_recipients_rule_name_uq').on(table.rule_name),
+    index('email_shared_recipients_reconcile_idx').on(table.status, table.updated_at),
+  ],
+);
 
 /** One Cloudflare catch-all and ingress Worker per account/zone in an installation. */
 export const emailZoneConnections = pgTable(

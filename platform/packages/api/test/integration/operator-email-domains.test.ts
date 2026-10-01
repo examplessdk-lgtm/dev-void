@@ -39,9 +39,28 @@ import {
 } from './helpers.ts';
 
 let env: TestEnv, operatorToken: string;
-const zones = {
-  'example.com': { id: 'zone-platform', name: 'example.com', accountId: CF_ACCOUNT_ID },
-};
+// Each custom mail hostname is the apex of its own test zone.
+const zones = Object.fromEntries(
+  [
+    'email-gateway.example.test',
+    'mail.example.com',
+    'recovery.example.com',
+    'blocked.example.com',
+    'deleted-cleanup.example.com',
+    'deleted-owner-cleanup.example.com',
+    'replacement-cleanup.example.com',
+    'guarded-replacement.example.com',
+    'replacement-sibling.example.com',
+    'teardown-first.example.com',
+    'teardown-second.example.com',
+    'stale-teardown.example.com',
+    'unknown-cleanup.example.com',
+  ].map((name) => [
+    name,
+    { id: 'zone-' + name.replaceAll('.', '-'), name, accountId: CF_ACCOUNT_ID },
+  ]),
+);
+
 const OWNER_TOKEN = 'owner-scoped-token';
 function bindings(): ApiEnv['Bindings'] {
   return {
@@ -495,13 +514,17 @@ describe('operator email domain management', () => {
       (await env.db.select().from(emailOperations)).filter(
         (operation) => operation.kind === 'remove',
       ),
-    ).toHaveLength(1);
-    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+    ).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
 
     expect((await request('/email/domains/teardown-second.example.com/remove', {})).status).toBe(
       200,
     );
-    expect((await env.db.select().from(emailZoneConnections))[0]?.credential_id).not.toBeNull();
+    expect(
+      (await env.db.select().from(emailZoneConnections)).find(
+        (row) => row.zone_name === 'teardown-second.example.com',
+      )?.credential_id,
+    ).not.toBeNull();
     expect(
       (
         await app.fetch(
@@ -517,7 +540,7 @@ describe('operator email domain management', () => {
     const removals = (await env.db.select().from(emailOperations)).filter(
       (operation) => operation.kind === 'remove',
     );
-    expect(removals).toHaveLength(3);
+    expect(removals).toHaveLength(4);
     expect(removals).toContainEqual(
       expect.objectContaining({
         route_id: secondAdded.routeId,
@@ -526,7 +549,7 @@ describe('operator email domain management', () => {
       }),
     );
     expect((await env.db.select().from(emailZoneConnections))[0]?.credential_id).toBeNull();
-    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(2);
   });
 
   it('does not let a stale project teardown remove a reassigned route', async () => {

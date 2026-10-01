@@ -21,6 +21,13 @@ describe('Cloudflare static deployment', () => {
     );
   });
 
+  it('passes an authored metadata binding to the native static readiness handler', () => {
+    expect(renderCloudflareStaticEntry({ versionMetadataBinding: 'APP_VERSION' })).toContain(
+      '"versionMetadataBinding":"APP_VERSION"',
+    );
+    expect(renderCloudflareStaticEntry({})).not.toContain('versionMetadataBinding');
+  });
+
   it('updates target fields, detaches worker-only configuration, and preserves migration history', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-static-config-'));
     const configPath = join(root, 'wrangler.jsonc');

@@ -1,7 +1,7 @@
 /**
  * Kitchen Sink Playwright Smoke Test
  *
- * Standalone script that runs 11 smoke tests against a deployed kitchen-sink app.
+ * Standalone smoke tests against a deployed kitchen-sink app.
  * Uses node:test + node:assert — no vitest needed.
  *
  * Usage:
@@ -12,8 +12,15 @@
  */
 
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { describe, it, before, after } from 'node:test';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import {
+  resetKitchenSink,
+  waitForChangedRender,
+  waitForFreshHeartbeat,
+  waitForIsrCacheHit,
+} from './kitchen-sink-observations.ts';
 
 if (!process.env.SMOKE_URL) {
   throw new Error(
@@ -36,6 +43,9 @@ if (
 const BASE = target.origin;
 const TIMEOUT = 15_000;
 const uid = Date.now().toString(36);
+const testSandbox = process.env.SMOKE_SANDBOX === '1';
+const acceptanceToken = process.env.SMOKE_E2E_TOKEN;
+const testRuntime = process.env.SMOKE_RUNTIME === '1';
 
 // Supply a Cloudflare Access service-token pair if the selected test app is
 // protected by Access. These credentials belong to the explicit SMOKE_URL target.
@@ -51,6 +61,7 @@ type MarkerWindow = Window & { __SPA_MARKER?: boolean };
 type StampedNav = HTMLElement & { __stamp?: number };
 
 let browser: Browser;
+let resetCompletedAt = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,8 +72,23 @@ async function waitForHydration(page: Page) {
 }
 
 async function goto(page: Page, path: string) {
-  await page.goto(`${BASE}${path}`, { waitUntil: 'domcontentloaded' });
+  const response = await page.goto(`${BASE}${path}`, { waitUntil: 'domcontentloaded' });
   await waitForHydration(page);
+  return response;
+}
+
+function readTimestamp(page: Page, label: string): Promise<string | null> {
+  return page.evaluate((field) => {
+    const heading = Array.from(document.querySelectorAll('h2')).find(
+      (element) => element.textContent === field,
+    );
+    const paragraph =
+      heading?.nextElementSibling ??
+      Array.from(document.querySelectorAll('p')).find((element) =>
+        element.textContent?.trim().startsWith(field),
+      );
+    return paragraph?.querySelector('code')?.textContent || null;
+  }, label);
 }
 
 /** Wait for body text to include `text`, polling with page reloads. */
@@ -124,13 +150,8 @@ async function deleteRowContaining(page: Page, needle: string) {
 
 void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
   before(async () => {
+    resetCompletedAt = await resetKitchenSink(BASE, CF_ACCESS);
     browser = await chromium.launch();
-
-    // Reset all app state for a clean slate
-    const res = await fetch(`${BASE}/api/reset`, { method: 'POST', headers: CF_ACCESS });
-    if (!res.ok) {
-      console.warn(`  ⚠ Reset endpoint returned ${res.status} — tests may see stale data`);
-    }
   });
 
   after(async () => {
@@ -414,24 +435,14 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         page.click('button:has-text("Send to Queue")'),
       ]);
 
-      // Poll for consumer processing — consumer invocation timing is CF
-      // infrastructure, not our code. Soft-pass on timeout (like cron test)
-      // since we've already verified the queue binding and send work.
-      try {
-        await pollForText(page, '/queues', key, 60_000);
-
-        // Cleanup
-        try {
-          await deleteRowContaining(page, key);
-          await waitForTextGone(page, key);
-        } catch {
-          // best-effort
-        }
-      } catch {
-        console.log(
-          `  ⚠ Queue consumer did not process "${key}" within 60s (warning, not a failure)`,
+      // Submission alone does not establish end-to-end queue delivery.
+      await pollForText(page, '/queues', key, 60_000).catch(() => {
+        throw new Error(
+          'Queue consumer did not process the submitted message within 60s; check queue registration and dispatch logs, then the fixture D1 queue_results table.',
         );
-      }
+      });
+      await deleteRowContaining(page, key);
+      await waitForTextGone(page, key);
     } finally {
       await ctx.close();
     }
@@ -509,30 +520,13 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
   void it('10 — Cron heartbeat', async () => {
     const { ctx, page } = await freshPage();
     try {
-      await goto(page, '/cron');
-
-      const body = await page.textContent('body');
-
-      if (body?.includes('No heartbeat recorded yet')) {
-        console.log('  ⚠ Cron heartbeat not recorded yet (warning, not a failure)');
-        return; // soft pass
-      }
-
-      // Find the heartbeat timestamp (code element after "Last Heartbeat" heading)
-      const timestamp = await page.evaluate(() => {
-        const h2 = Array.from(document.querySelectorAll('h2')).find(
-          (heading) => heading.textContent === 'Last Heartbeat',
-        );
-        const nextP = h2?.nextElementSibling;
-        return nextP?.querySelector('code')?.textContent || null;
-      });
-      assert.ok(timestamp, 'heartbeat timestamp found');
-
-      const date = new Date(timestamp!);
-      assert.ok(!isNaN(date.getTime()), `timestamp is a valid date (got: ${timestamp})`);
-
-      const ageMs = Date.now() - date.getTime();
-      assert.ok(ageMs < 5 * 60 * 1000, `heartbeat is recent (${Math.round(ageMs / 1000)}s ago)`);
+      await waitForFreshHeartbeat(
+        async () => {
+          await goto(page, '/cron');
+          return readTimestamp(page, 'Last Heartbeat');
+        },
+        { timeoutMs: 150_000, notBefore: resetCompletedAt },
+      );
     } finally {
       await ctx.close();
     }
@@ -544,14 +538,36 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
   void it('11 — ISR revalidation', async () => {
     const { ctx, page } = await freshPage();
     try {
-      await goto(page, '/revalidate');
-
-      // Note the initial "Rendered at" timestamp
-      const renderedAt = await page.textContent('p:has(code) code');
-      assert.ok(renderedAt, "initial 'Rendered at' timestamp found");
+      if (Object.keys(CF_ACCESS).length === 0) {
+        await waitForIsrCacheHit(
+          async () => {
+            const response = await goto(page, '/revalidate');
+            return response?.headers()['x-isr-cache'] ?? null;
+          },
+          { timeoutMs: 15_000, intervalMs: 500 },
+        );
+      } else {
+        await goto(page, '/revalidate');
+      }
+      const renderedAt = await readTimestamp(page, 'Rendered at:');
+      assert.ok(
+        renderedAt && Number.isFinite(Date.parse(renderedAt)),
+        'initial rendered timestamp is valid',
+      );
 
       // Click "Revalidate /revalidate"
+      const completed = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === '/revalidate' &&
+          response.request().method() === 'POST',
+        { timeout: TIMEOUT },
+      );
       await page.click('button:has-text("Revalidate /revalidate")');
+      const actionResponse = await completed;
+      assert.ok(
+        actionResponse.ok(),
+        `Revalidation action failed (HTTP ${actionResponse.status()}); inspect the app and provider purge logs.`,
+      );
 
       // Wait for button to return to non-disabled state
       await page.waitForFunction(
@@ -564,24 +580,106 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         { timeout: TIMEOUT },
       );
 
-      // Reload and check "Last revalidation" is no longer "never"
-      await goto(page, '/revalidate');
-      const body = await page.textContent('body');
-      assert.ok(
-        !body?.includes('never') || body?.includes('Last revalidation'),
-        "last revalidation is no longer 'never'",
+      await waitForChangedRender(
+        async () => {
+          await goto(page, '/revalidate');
+          return readTimestamp(page, 'Rendered at:');
+        },
+        renderedAt,
+        { timeoutMs: 15_000, intervalMs: 500 },
       );
+    } finally {
+      await ctx.close();
+    }
+  });
 
-      // More precise: check the last revalidation code element
-      const lastReval = await page.evaluate(() => {
-        const paragraphs = Array.from(document.querySelectorAll('p'));
-        const revalidationParagraph = paragraphs.find((paragraph) =>
-          paragraph.textContent?.includes('Last revalidation'),
+  void describe('Sandbox', { concurrency: false, skip: !testSandbox }, () => {
+    void it('12 — Sandbox files, command execution, and output', async () => {
+      const { ctx, page } = await freshPage();
+      try {
+        await goto(page, '/sandbox');
+        await page.fill(
+          'textarea',
+          `export default function(requests) { console.error('sandbox-smoke-${uid}'); return { marker: '${uid}', count: requests.length }; }`,
         );
-        const code = revalidationParagraph?.querySelector('code');
-        return code?.textContent || null;
+        const completed = page.waitForResponse(
+          (response) =>
+            response.url() === `${BASE}/api/sandbox` && response.request().method() === 'POST',
+          { timeout: 90_000 },
+        );
+        await page.click('button:has-text("Run in Sandbox")');
+        const response = await completed;
+        assert.equal(response.status(), 200, `Sandbox request succeeds (got ${response.status()})`);
+        const body = await response.json();
+        assert.equal(body.ok, true, JSON.stringify(body));
+        assert.equal(body.exitCode, 0);
+        assert.equal(body.output.value.marker, uid);
+        assert.ok(body.output.value.count > 0, 'Sandbox reads the input file');
+        assert.ok(body.stdout.includes(uid), 'Sandbox stdout includes its written result');
+        assert.ok(body.stderr.includes(`sandbox-smoke-${uid}`), 'Sandbox stderr is returned');
+        await waitForText(page, uid);
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    void it('13 — Sandbox runtime acceptance', { skip: !acceptanceToken }, async () => {
+      const response = await fetch(`${BASE}/api/acceptance/sandbox`, {
+        method: 'POST',
+        headers: { ...CF_ACCESS, 'x-void-e2e-token': acceptanceToken! },
+        signal: AbortSignal.timeout(180_000),
       });
-      assert.ok(lastReval, `last revalidation has a timestamp (got: ${lastReval})`);
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.ok, true, JSON.stringify(body));
+      assert.equal(body.checks.length, 12, 'All Sandbox runtime acceptance checks completed');
+    });
+  });
+
+  void it('14 — WebSocket message round trip', { skip: !testRuntime }, async () => {
+    assert.ok(acceptanceToken, 'Runtime acceptance requires the configured app secret');
+    const { ctx, page } = await freshPage();
+    try {
+      await ctx.setExtraHTTPHeaders({ ...CF_ACCESS, 'x-void-e2e-token': acceptanceToken });
+      await goto(page, '/');
+      const marker = `void-e2e-${randomBytes(8).toString('hex')}`;
+      const echoed = await page.evaluate(
+        ({ origin, marker }) =>
+          new Promise<unknown>((resolve, reject) => {
+            const url = new URL('/ws/acceptance', origin);
+            url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(url);
+            const timer = setTimeout(() => {
+              socket.close();
+              reject(new Error('WebSocket echo timed out'));
+            }, 30_000);
+            socket.addEventListener('open', () => socket.send(JSON.stringify({ marker })));
+            socket.addEventListener(
+              'message',
+              (event) => {
+                clearTimeout(timer);
+                socket.close();
+                try {
+                  resolve(JSON.parse(String(event.data)));
+                } catch {
+                  reject(new Error('WebSocket echo was not JSON'));
+                }
+              },
+              { once: true },
+            );
+            socket.addEventListener(
+              'error',
+              () => {
+                clearTimeout(timer);
+                socket.close();
+                reject(new Error('WebSocket connection failed'));
+              },
+              { once: true },
+            );
+          }),
+        { origin: BASE, marker },
+      );
+      assert.deepEqual(echoed, { kind: 'echo', marker });
     } finally {
       await ctx.close();
     }

@@ -12,6 +12,7 @@ import { afterEach, expect, it, vi } from 'vite-plus/test';
 import {
   activateCloudflareVersion,
   deployCloudflareVersionTriggers,
+  encodeCloudflareVersionMessage,
 } from '../../../deploy-cloudflare/src/version.ts';
 import {
   operationFixture,
@@ -303,6 +304,7 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
   const prepared = await output(
     {
       secrets: { required: ['AUTH_SECRET'] },
+      version_metadata: { binding: 'APP_VERSION' },
       keep_secrets: true,
       keep_vars: true,
       assets: { directory: '../client', binding: 'ASSETS', not_found_handling: 'none' },
@@ -397,6 +399,7 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
           { name: 'AUTH_SECRET', type: 'inherit', version_id: activeVersionId },
           { name: 'KEY', type: 'inherit', version_id: activeVersionId },
           { name: 'DASHBOARD_VAR', type: 'inherit', version_id: activeVersionId },
+          { name: 'APP_VERSION', type: 'version_metadata' },
         ]),
       );
       expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
@@ -449,6 +452,137 @@ it('uploads live secrets and multiple asset batches when the latest upload is in
 
 it('uploads live secrets and multiple asset batches for atomic publication', () =>
   verifyPinnedUpload(true));
+
+it.each([false, true])(
+  'publishes the intended custom domain before pinned-secret bootstrap readiness (atomic=%s)',
+  async (atomic) => {
+    const current = '11111111-1111-4111-8111-111111111111';
+    const next = '22222222-2222-4222-8222-222222222222';
+    const domain = 'app.example.com';
+    const triggerConfig = {
+      workers_dev: false,
+      preview_urls: false,
+      routes: [{ pattern: domain, custom_domain: true }],
+      crons: [],
+      queueConsumers: [],
+      workflows: [],
+    };
+    const prepared = await output({
+      workers_dev: false,
+      preview_urls: false,
+      routes: triggerConfig.routes,
+      secrets: { required: ['AUTH_SECRET'] },
+    });
+    const events: Array<string> = [];
+    let active = current;
+    let published = false;
+    const server = createServer(async (request, response) => {
+      request.resume();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      const upload = request.method === 'POST';
+      if (upload && request.url?.endsWith('?deploy=true')) {
+        active = next;
+        events.push('activate');
+      }
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result: upload
+            ? { id: next, urls: [] }
+            : { id: current, bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }] },
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const pinActiveSecrets = createActiveSecretPinner({
+        output: prepared,
+        handoffPending: false,
+        requiredNames: ['AUTH_SECRET'],
+      })!;
+      // A secret-only first Worker can already require version-pinned inheritance.
+      await pinActiveSecrets(current, [{ name: 'AUTH_SECRET', type: 'secret_text' }]);
+      const runCf = async (args: Array<string>, options: { cwd: string }) => {
+        if (args.slice(0, 3).join(' ') === 'workers deployments list') {
+          return {
+            status: 0,
+            stderr: '',
+            stdout: JSON.stringify({
+              deployments: [{ versions: [{ version_id: active, percentage: 100 }] }],
+            }),
+          };
+        }
+        if (args.slice(0, 3).join(' ') === 'workers versions get') {
+          return {
+            status: 0,
+            stderr: '',
+            stdout: JSON.stringify({
+              id: args[3],
+              bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+            }),
+          };
+        }
+        expect(args).toEqual(['workers', 'triggers', 'deploy', '--prebuilt']);
+        const config = JSON.parse(readFileSync(getWorkerConfigPath(options.cwd), 'utf8'));
+        expect(active).toBe(next);
+        expect(config.domains).toEqual([domain]);
+        expect(config.workersDev).toBe(false);
+        expect(config.previewUrls).toBe(false);
+        expect(config.env).toEqual({ AUTH_SECRET: { type: 'secret' } });
+        published = true;
+        events.push('publish-domain');
+        return { status: 0, stdout: '', stderr: '' };
+      };
+      const runner = createCfVersionRunner({
+        output: prepared,
+        workerName: 'void-test',
+        runCf,
+        verifyResources: createCfResourceVerifier({
+          configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+          runCf,
+          runWrangler: () => {
+            throw new Error('An app without paid bindings must not probe paid services.');
+          },
+          verifyCompatibilityRunner: () => true,
+        }),
+        pinnedUpload: {
+          accountId: 'account-id',
+          apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+          getToken: async () => 'synthetic-token',
+          verifyUploader: () => true,
+        },
+      });
+      const result = await activateCloudflareVersion({
+        runWrangler: runner,
+        workerName: 'void-test',
+        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+        verifyUploader: () => true,
+        pinActiveSecrets,
+        atomic,
+        allowFirstDeploymentBootstrap: true,
+        readinessAttempts: 1,
+        message: encodeCloudflareVersionMessage([], triggerConfig),
+        fetch: async (url) => {
+          expect(url).toBe(`https://${domain}/__void/ready`);
+          events.push('readiness');
+          return Response.json({ ready: published });
+        },
+      });
+      expect(result, JSON.stringify({ result, events })).toMatchObject({
+        ok: true,
+        versionId: next,
+        previewUrl: `https://${domain}`,
+      });
+      expect(events).toEqual(['activate', 'publish-domain', 'readiness']);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await prepared.dispose();
+    }
+  },
+);
 
 it('does not pin active secrets during an existing-Worker handoff', async () => {
   const prepared = await output();

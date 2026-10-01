@@ -13,6 +13,7 @@ import type { PlatformInstallationManifest } from '@void/platform';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
   PlatformAccessClient,
+  platformAccessIdentityProvider,
   provisionPlatformAccess,
   type PlatformAccessCheckpoint,
   type PlatformAccessProvisionResult,
@@ -354,9 +355,10 @@ export async function preparePlatformAccessSetup(input: {
             required: true,
             options: providers
               .filter((provider) => typeof provider.id === 'string')
+              .map(platformAccessIdentityProvider)
               .map((provider) => ({
-                value: String(provider.id),
-                label: stripVTControlCharacters(String(provider.name ?? provider.id)),
+                value: provider.id,
+                label: stripVTControlCharacters(provider.name),
               })),
           }),
         )

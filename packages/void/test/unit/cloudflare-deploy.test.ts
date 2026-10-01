@@ -260,6 +260,20 @@ describe('Cloudflare activation diagnostics', () => {
     expect(message).toContain('create an Access application');
   });
 
+  it.each(['bootstrap-readiness-failed', 'atomic-readiness-failed'] as const)(
+    'prints Custom Domain propagation retry guidance after %s',
+    (reason) => {
+      const message = formatCloudflareActivationError({
+        ok: false,
+        reason,
+        diagnostic: 'Check DNS and TLS, then retry `void deploy --platform cloudflare`.',
+      });
+      expect(message).toContain('Worker');
+      expect(message).toContain('Check DNS and TLS');
+      expect(message).toContain('retry `void deploy --platform cloudflare`');
+    },
+  );
+
   it('distinguishes opaque trigger recovery from a first deployment', () => {
     const opaque = formatCloudflareActivationError({
       ok: false,
@@ -267,8 +281,8 @@ describe('Cloudflare activation diagnostics', () => {
       rollback: 'unavailable',
       previousVersionId: '11111111-1111-4111-8111-111111111111',
     });
-    expect(opaque).toContain('Traffic was restored to the previous version');
-    expect(opaque).toContain('trigger configuration was unavailable');
+    expect(opaque).toContain('Traffic or trigger restoration could not be completed');
+    expect(opaque).not.toContain('Traffic was restored');
     expect(opaque).not.toContain('first deployment');
 
     expect(
@@ -279,6 +293,21 @@ describe('Cloudflare activation diagnostics', () => {
         previousVersionId: null,
       }),
     ).toContain('This was the first deployment');
+  });
+
+  it('reports uncertain status after publication without claiming nothing was uploaded', () => {
+    const published = formatCloudflareActivationError({
+      ok: false,
+      reason: 'status-failed',
+      versionId: '22222222-2222-4222-8222-222222222222',
+      status: 1,
+    });
+    expect(published).toContain('was published');
+    expect(published).toContain('Inspect `void project status` before retrying');
+    expect(published).not.toContain('no version was uploaded');
+    expect(
+      formatCloudflareActivationError({ ok: false, reason: 'status-failed', status: 1 }),
+    ).toContain('no version was uploaded');
   });
 });
 
@@ -2329,6 +2358,7 @@ describe('runCloudflareDeploy — static, SPA, and SSG apps', () => {
     expect(config).toMatchObject({
       name: 'spaapp',
       account_id: 'acc123',
+      version_metadata: { binding: '__VOID_VERSION_METADATA' },
       main: 'static-edge.mjs',
       assets: {
         directory: '../../../dist',
@@ -2394,6 +2424,8 @@ describe('runCloudflareDeploy — static, SPA, and SSG apps', () => {
     const { deps, exitCalls } = harness({
       activateVersion: async (options) => {
         readinessHeaders = options.readinessHeaders;
+        expect(options.requireVersionMetadata).toBe(true);
+        expect(options.requirePreviewForReadiness).toBe(false);
         return {
           ok: true,
           versionId: '22222222-2222-4222-8222-222222222222',
@@ -3462,7 +3494,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
         explicitBootstrapProof = options.allowFirstDeploymentBootstrap;
         return activateCloudflareVersionPrimitive({
           ...options,
-          fetch: async () => Response.json({ ready: true }),
+          fetch: async () => Response.json({ ready: true, versionId: next }),
         });
       },
     });

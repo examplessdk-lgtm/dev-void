@@ -4,7 +4,11 @@ import {
   parsePlatformLoginId,
   type PlatformLoginDescriptor,
 } from './authentication.ts';
-import { normalizeApplicationDomain, type PlatformCapabilities } from './manifest.ts';
+import {
+  normalizeApplicationDomain,
+  normalizePlatformDashboardUrl,
+  type PlatformCapabilities,
+} from './manifest.ts';
 
 export const PLATFORM_DISCOVERY_SCHEMA_VERSION = 1 as const;
 
@@ -22,6 +26,7 @@ export type PlatformDiscoveryDocument = Readonly<{
   authentication?: PlatformAuthenticationDiscovery;
   capabilities: PlatformCapabilities;
   displayName: string;
+  dashboardUrl?: string;
   installationId: string | null;
   platformVersion: string;
   proxyUrl: string;
@@ -118,6 +123,9 @@ export function createPlatformDiscoveryDocument(
     authenticationProviders: [...input.authenticationProviders],
     ...(authentication ? { authentication } : {}),
     displayName: input.displayName.trim(),
+    ...(input.dashboardUrl !== undefined
+      ? { dashboardUrl: normalizePlatformDashboardUrl(input.dashboardUrl) }
+      : {}),
     installationId: input.installationId?.trim() || null,
     platformVersion: input.platformVersion.trim(),
     proxyUrl: normalizeOrigin(input.proxyUrl, 'proxyUrl'),
@@ -221,6 +229,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
     ...(authentication ? { authentication } : {}),
     capabilities: parsedCapabilities,
     displayName: string('displayName'),
+    ...(document.dashboardUrl !== undefined ? { dashboardUrl: string('dashboardUrl') } : {}),
     installationId: document.installationId === null ? null : string('installationId'),
     platformVersion: string('platformVersion'),
     proxyUrl,

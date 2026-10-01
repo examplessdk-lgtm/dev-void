@@ -5,7 +5,9 @@ import {
   createPlatformResourceOwnershipMarker,
   createPlatformResourceNames,
   normalizeApplicationDomain,
+  normalizePlatformDashboardUrl,
   normalizeInstallationSlug,
+  platformDashboardUrl,
   parsePlatformInstallationManifest,
   parsePlatformResourceOwnershipMarker,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
@@ -20,6 +22,8 @@ import type {
   CloudflareAccount,
   CloudflareDnsRecord,
   CloudflareNamedResource,
+  CloudflareWorkerDomain,
+  CloudflareWorkerRoute,
   CloudflareZone,
   PlatformCloudflareClient,
 } from './platform-cloudflare.ts';
@@ -57,6 +61,7 @@ export type PlatformInstallPlanInput = Readonly<{
   accountId: string;
   applicationDomain: string;
   controlPlaneDomain: string;
+  dashboardUrl?: string;
   dedicatedZone: boolean;
   displayName: string;
   externalHyperdrive?: PlatformExternalHyperdrive;
@@ -102,6 +107,17 @@ export async function createPlatformInstallPlan(
     deploymentExecution?: boolean;
   },
 ): Promise<PlatformInstallPlan> {
+  // Validate before even the first provider read; omission retains recorded intent.
+  const dashboardUrl =
+    input.dashboardUrl !== undefined
+      ? normalizePlatformDashboardUrl(input.dashboardUrl)
+      : existing
+        ? (existing.deployment.controlPlane.dashboardUrl ??
+          (existing.endpoints.dashboardUrl
+            ? normalizePlatformDashboardUrl(existing.endpoints.dashboardUrl)
+            : null) ??
+          platformDashboardUrl(existing.deployment))
+        : null;
   const accounts = await client.listAccounts();
   const account = resolveAccount(accounts, input.accountId);
   if (existing && existing.account.id !== account.id) {
@@ -196,7 +212,8 @@ export async function createPlatformInstallPlan(
     },
     controlPlane: {
       apiHostname: input.controlPlaneDomain || null,
-      dashboardHostname: null,
+      dashboardHostname: dashboardUrl ? new URL(dashboardUrl).hostname : null,
+      ...(dashboardUrl ? { dashboardUrl } : {}),
       proxyHostname: null,
     },
     displayName: input.displayName,
@@ -222,13 +239,25 @@ export async function createPlatformInstallPlan(
           capabilities: { ...existingWithoutEmailZone.capabilities, sandbox: true },
         }
       : existingWithoutEmailZone;
+  const existingWithDashboard = {
+    ...existingWithSandbox,
+    // The dashboard is separately deployed. Only the explicit option or the
+    // normalized recorded origin can update this configuration during maintenance.
+    controlPlane: {
+      ...existingWithSandbox.controlPlane,
+      dashboardHostname: deployment.controlPlane.dashboardHostname,
+      ...(deployment.controlPlane.dashboardUrl
+        ? { dashboardUrl: deployment.controlPlane.dashboardUrl }
+        : {}),
+    },
+  };
   const comparableExistingWithoutEmailZone =
     existing && deployment.capabilities.email && !existing.deployment.capabilities.email
       ? {
-          ...existingWithSandbox,
-          capabilities: { ...existingWithSandbox.capabilities, email: true },
+          ...existingWithDashboard,
+          capabilities: { ...existingWithDashboard.capabilities, email: true },
         }
-      : existingWithSandbox;
+      : existingWithDashboard;
   if (
     existing &&
     (JSON.stringify(comparableExistingWithoutEmailZone) !==
@@ -387,7 +416,11 @@ export async function createPlatformInstallPlan(
           resource.name === expectedWorker &&
           resource.state === 'ready',
       );
-    const conflicts = (await client.listWorkerRoutes(zone.id)).filter(
+    const [workerRoutes, workerDomains] = await Promise.all([
+      client.listWorkerRoutes(zone.id),
+      client.listWorkerDomains(account.id),
+    ]);
+    const conflicts = workerRoutes.filter(
       (route) =>
         expectedPatterns.has(route.pattern) && (route.script !== expectedWorker || !ownedWorker),
     );
@@ -397,6 +430,14 @@ export async function createPlatformInstallPlan(
         `platform: Application route ${JSON.stringify(conflict.pattern)} is already assigned to ${JSON.stringify(conflict.script ?? 'no Worker')}. Choose another application domain.`,
       );
     }
+    assertApplicationRoutesPreserveWorkerDomains(
+      [...expectedPatterns],
+      expectedWorker,
+      ownedWorker === true,
+      zone.name,
+      workerRoutes,
+      workerDomains,
+    );
   }
   if (deployment.controlPlane.apiHostname) {
     const apiHostname = deployment.controlPlane.apiHostname;
@@ -1160,6 +1201,72 @@ const RESOURCE_NAME_KEY_BY_ACTION: Readonly<
   'usage-queue': 'usageQueue',
 };
 
+function assertApplicationRoutesPreserveWorkerDomains(
+  patterns: ReadonlyArray<string>,
+  dispatchWorker: string,
+  ownedDispatchWorker: boolean,
+  zoneName: string,
+  workerRoutes: ReadonlyArray<CloudflareWorkerRoute>,
+  workerDomains: ReadonlyArray<CloudflareWorkerDomain>,
+): void {
+  const plannedRoutes = patterns.map(parseWorkerRoutePattern);
+  const existingRoutes = workerRoutes.map((route) => ({
+    ...parseWorkerRoutePattern(route.pattern),
+    script: route.script,
+  }));
+  for (const domain of workerDomains) {
+    const hostname = domain.hostname.toLowerCase();
+    const inZone = domain.zoneName
+      ? domain.zoneName.toLowerCase() === zoneName.toLowerCase()
+      : hostname === zoneName.toLowerCase() || hostname.endsWith(`.${zoneName.toLowerCase()}`);
+    if (!inZone || (domain.service === dispatchWorker && ownedDispatchWorker)) {
+      continue;
+    }
+    for (const planned of plannedRoutes) {
+      if (!workerRouteHostMatches(planned.host, hostname)) {
+        continue;
+      }
+      // Routes run before Custom Domain origins. Only more-specific routes covering every
+      // path and both schemes preserve the origin; a no-Worker route is also an exclusion.
+      // https://developers.cloudflare.com/workers/configuration/routing/routes/#matching-behavior
+      const protectedByExistingRoutes = ['http', 'https'].every((scheme) =>
+        existingRoutes.some(
+          (route) =>
+            route.script !== dispatchWorker &&
+            route.path === '/*' &&
+            (!route.scheme || route.scheme === scheme) &&
+            workerRouteHostMatches(route.host, hostname) &&
+            route.host.replace(/^\*/, '').length > planned.host.replace(/^\*/, '').length,
+        ),
+      );
+      if (!protectedByExistingRoutes) {
+        throw new Error(
+          `platform: Application route ${JSON.stringify(planned.pattern)} would intercept Worker custom domain ${JSON.stringify(domain.hostname)}, currently served by ${JSON.stringify(domain.service)}. Choose another application domain, or use \`void platform install --workers-dev\` for a new installation and add a suitable domain later.`,
+        );
+      }
+    }
+  }
+}
+
+function parseWorkerRoutePattern(pattern: string): {
+  host: string;
+  path: string;
+  pattern: string;
+  scheme: string | null;
+} {
+  const match = /^(?:(https?):\/\/)?([^/]+)(\/.*)?$/.exec(pattern);
+  return {
+    host: match?.[2]?.toLowerCase() ?? '',
+    path: match?.[3] ?? '/',
+    pattern,
+    scheme: match?.[1] ?? null,
+  };
+}
+
+function workerRouteHostMatches(host: string, hostname: string): boolean {
+  return host.startsWith('*') ? hostname.endsWith(host.slice(1)) : host === hostname;
+}
+
 export function platformProvisionIntentHash(
   manifest: Pick<PlatformInstallationManifest, 'ownershipNonce'>,
   key: string,
@@ -1239,6 +1346,9 @@ export function formatPlatformInstallPlan(plan: PlatformInstallPlan): string {
       : `${pc.bold('Applications:')} workers.dev for testing. Add a domain with void platform domain set <domain>`,
     `${pc.bold('Control plane:')} ${plan.apiUrl}`,
     `${pc.bold('Resource proxy:')} ${plan.proxyUrl}`,
+    ...(platformDashboardUrl(plan.deployment)
+      ? [`${pc.bold('Dashboard:')} ${platformDashboardUrl(plan.deployment)} (deploy separately)`]
+      : []),
     `${pc.bold('Login methods:')} ${plan.deployment.authentication.providers.join(', ')}`,
     `${pc.bold('Access protection:')} ${plan.deployment.authentication.accessProtection ? 'Enabled' : 'Not enabled'}`,
     `${pc.bold('Login callback:')} ${plan.apiUrl}/auth/callback`,

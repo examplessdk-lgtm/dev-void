@@ -21,7 +21,12 @@ import { getPlatformPageTitle } from '../platform-identity.ts';
 const app = new Hono<ApiEnv>();
 const noStore: MiddlewareHandler<ApiEnv> = async (context, next) => {
   context.header('Cache-Control', 'no-store');
-  context.header('Referrer-Policy', 'no-referrer');
+  // Native form submissions need their same-origin Origin header. no-referrer
+  // serializes that header as null, while strict-origin hides paths and codes.
+  context.header(
+    'Referrer-Policy',
+    context.req.path === '/setup' ? 'strict-origin' : 'no-referrer',
+  );
   await next();
 };
 for (const path of [

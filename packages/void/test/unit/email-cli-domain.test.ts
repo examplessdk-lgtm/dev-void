@@ -300,25 +300,28 @@ describe('emailDomainAdd', () => {
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
 
-  it('chooses a mail subdomain when the apex already receives mail', async () => {
+  it('refuses foreign apex mail without proposing an unsupported subdomain or opening credentials', async () => {
     const api = client();
-    const resolveMx = vi.fn(async (name: string) =>
-      name === 'acme.com' ? [{ exchange: 'mx.example.net', priority: 10 }] : [],
+    const deps = addDeps({
+      dns: { resolveMx: async () => [{ exchange: 'mx.example.net', priority: 10 }] },
+    });
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps)).rejects.toThrow(
+      'exit 1',
     );
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps({ dns: { resolveMx } }));
-    expect(api.addEmailDomain).toHaveBeenCalledWith(
-      'prj_1',
-      expect.objectContaining({ domain: 'mail.acme.com' }),
-    );
+    expect(printed(errorSpy)).toContain('unused Cloudflare zone apex');
+    expect(deps.openUrl).not.toHaveBeenCalled();
+    expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
 
-  it('honors an explicitly selected mail subdomain', async () => {
+  it('refuses --subdomain before any credential prompt', async () => {
     const api = client();
-    await emailDomainAdd(api, 'prj_1', 'acme.com', 'notifications', addDeps());
-    expect(api.addEmailDomain).toHaveBeenCalledWith(
-      'prj_1',
-      expect.objectContaining({ domain: 'notifications.acme.com' }),
+    const deps = addDeps();
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', 'notifications', deps)).rejects.toThrow(
+      'exit 1',
     );
+    expect(printed(errorSpy)).toContain('Omit --subdomain');
+    expect(deps.openUrl).not.toHaveBeenCalled();
+    expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
 
   it('rejects invalid domains before opening a browser', async () => {

@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { getSandbox, SandboxLimitError } from 'void/sandbox';
+import { getSandbox, SandboxLimitError, type SandboxClient } from 'void/sandbox';
 import { sampleRequests } from '../../lib/sandbox-demo.ts';
 
 const MAX_CODE_LENGTH = 8_000;
@@ -45,8 +45,12 @@ export const POST = defineHandler(async (c) => {
     );
   }
 
+  let sandbox: SandboxClient | undefined;
   try {
-    const sandbox = await getSandbox('kitchen-sink-code-lab');
+    // Programs from concurrent callers must never share files or processes.
+    sandbox = await getSandbox(`kitchen-sink-${crypto.randomUUID()}`, {
+      inactivityTimeoutMs: 30_000,
+    });
 
     await sandbox.files.mkdir(WORKDIR, { recursive: true });
     await sandbox.files.writeFile(
@@ -89,5 +93,15 @@ export const POST = defineHandler(async (c) => {
     }
     const message = err instanceof Error ? err.message : String(err);
     return c.json({ ok: false, error: message }, 500);
+  } finally {
+    if (sandbox) {
+      try {
+        await sandbox.destroy();
+      } catch (error) {
+        // Preserve the execution result. The bounded idle timeout still stops
+        // the container if a transient provider error prevents explicit cleanup.
+        console.error('[sandbox] cleanup failed', error);
+      }
+    }
   }
 });

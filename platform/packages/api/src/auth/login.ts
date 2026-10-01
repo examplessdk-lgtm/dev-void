@@ -538,7 +538,9 @@ export async function completePlatformLogin(context: Context<ApiEnv>): Promise<R
         maxAge: 300,
       });
       context.header('Cache-Control', 'no-store');
-      context.header('Referrer-Policy', 'no-referrer');
+      // This page submits an origin-checked confirmation form. Keep the origin
+      // while withholding the OAuth callback path and query from referrers.
+      context.header('Referrer-Policy', 'strict-origin');
       return context.html(
         '<!doctype html><title>' +
           escapeHtml(
@@ -606,6 +608,9 @@ export async function completePlatformLogin(context: Context<ApiEnv>): Promise<R
       context.header('Cache-Control', 'no-store');
       context.header('Referrer-Policy', 'no-referrer');
       if (attempt.purpose === 'link') {
+        // Native confirmation needs its same-origin Origin header; retain only
+        // the origin so OAuth callback codes and state stay out of referrers.
+        context.header('Referrer-Policy', 'strict-origin');
         const proof = randomLoginProof();
         await db.insert(platformAuthAttempts).values({
           id: saved.testId!,

@@ -457,9 +457,13 @@ describe('platform installer', () => {
     },
   );
 
-  it.each([false, true])(
-    'installs all four Workers without a zone and probes the actual dispatch hostname (credential draft: %s)',
-    async (fromDraft) => {
+  it.each([
+    { fromDraft: false, dashboardUrl: undefined },
+    { fromDraft: true, dashboardUrl: undefined },
+    { fromDraft: true, dashboardUrl: 'https://dash.example.org:8443' },
+  ])(
+    'installs core Workers without a zone and probes the dispatch hostname (draft: $fromDraft, dashboard: $dashboardUrl)',
+    async ({ fromDraft, dashboardUrl }) => {
       const directory = mkdtempSync(join(tmpdir(), 'void-platform-workers-dev-test-'));
       directories.push(directory);
       process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
@@ -480,6 +484,7 @@ describe('platform installer', () => {
           zoneName: '',
           workersDev: true,
           controlPlaneDomain: '',
+          ...(dashboardUrl ? { dashboardUrl } : {}),
           dedicatedZone: false,
           displayName: 'Testing',
           installationSlug: 'testing',
@@ -564,6 +569,15 @@ describe('platform installer', () => {
         },
       });
       expect(result.manifest.status).toBe('installed');
+      expect(result.manifest.endpoints.dashboardUrl).toBe(dashboardUrl ?? null);
+      const apiConfig = configs.find(
+        (config) => config.name === plan.deployment.resources.apiWorker,
+      )!;
+      if (dashboardUrl) {
+        expect(apiConfig.vars).toHaveProperty('DASHBOARD_URL', dashboardUrl);
+      } else {
+        expect(apiConfig.vars).not.toHaveProperty('DASHBOARD_URL');
+      }
       expect(
         result.manifest.resources.some(
           (resource) => resource.kind === 'zone' || resource.kind === 'dns-record',
@@ -2229,6 +2243,184 @@ describe('platform installer', () => {
     expect(requests.every((entry) => entry.redirect === 'manual')).toBe(true);
   });
 
+  describe('shared email bootstrap progress', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('allows a durable bootstrap response to take longer than thirty seconds', async () => {
+      vi.useFakeTimers();
+      const timeouts = vi.spyOn(AbortSignal, 'timeout').mockImplementation((delay) => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('timeout', 'TimeoutError')), delay);
+        return controller.signal;
+      });
+      const fetcher = vi.fn(
+        async (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+            setTimeout(
+              () => resolve(Response.json({ version: 1, state: 'ready', operationId: 'eop-slow' })),
+              35_000,
+            );
+          }),
+      );
+      const result = bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher as typeof fetch,
+      ).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+
+      await vi.advanceTimersByTimeAsync(35_000);
+
+      expect(await result).toEqual({ value: 'eop-slow' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(timeouts).toHaveBeenCalledWith(120_000);
+    });
+
+    it('replays the same protected request after a timeout and polls its durable operation', async () => {
+      vi.useFakeTimers();
+      const fetcher = vi
+        .fn()
+        .mockRejectedValueOnce(new DOMException('untrusted-provider-secret', 'TimeoutError'))
+        .mockResolvedValueOnce(
+          Response.json(
+            {
+              version: 1,
+              state: 'incomplete',
+              operationId: 'eop-resume',
+              operationStatus: 'running',
+              currentStep: 'subaddressing_ensure',
+              failureCode: null,
+            },
+            { status: 503 },
+          ),
+        )
+        .mockResolvedValueOnce(
+          Response.json({ version: 1, state: 'ready', operationId: 'eop-resume' }),
+        );
+      const result = bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher,
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(await result).toBe('eop-resume');
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      for (const [url, init] of fetcher.mock.calls) {
+        expect(url).toBe('https://api.example.com/internal/platform/email-bootstrap');
+        expect(init).toMatchObject({ method: 'POST', redirect: 'manual' });
+        expect(new Headers(init.headers).get('X-Void-Platform-Probe')).toBe('probe-token');
+      }
+    });
+
+    it('bounds repeated timeouts and reports the named bootstrap without provider details', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const timeouts = vi.spyOn(AbortSignal, 'timeout');
+      const fetcher = vi.fn(async () => {
+        vi.setSystemTime(Date.now() + timeouts.mock.calls.at(-1)![0]);
+        throw new DOMException('untrusted-provider-secret', 'TimeoutError');
+      });
+      const result = bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher,
+      ).catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const error = String(await result);
+      expect(error).toContain('Shared email bootstrap did not finish within five minutes');
+      expect(error).toContain('Traffic remains disabled');
+      expect(error).toContain('repair or resume command');
+      expect(error).not.toContain('untrusted-provider-secret');
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(timeouts.mock.calls.map(([delay]) => delay)).toEqual([120_000, 120_000, 58_000]);
+    });
+
+    it.each(['blocked', 'unknown', 'failed'])(
+      'does not replay a terminal %s operation',
+      async (operationStatus) => {
+        const fetcher = vi.fn(async () =>
+          Response.json(
+            {
+              version: 1,
+              state: 'incomplete',
+              operationId: 'eop-terminal',
+              operationStatus,
+              currentStep: 'subaddressing_ensure',
+              failureCode: 'outcome_unknown',
+            },
+            { status: 503 },
+          ),
+        );
+
+        await expect(
+          bootstrapPlatformSharedEmail('https://api.example.com', 'probe-token', fetcher),
+        ).rejects.toThrow(`Operation eop-terminal: ${operationStatus}`);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('rejects a changed durable operation identity while polling', async () => {
+      vi.useFakeTimers();
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json(
+            {
+              version: 1,
+              state: 'incomplete',
+              operationId: 'eop-first',
+              operationStatus: 'pending',
+            },
+            { status: 503 },
+          ),
+        )
+        .mockResolvedValueOnce(
+          Response.json({ version: 1, state: 'ready', operationId: 'eop-other' }),
+        );
+      const result = bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher,
+      ).catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(String(await result)).toContain('operation identity changed');
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      { operationId: 'provider-secret\nAuthorization: Bearer private-value' },
+      { operationId: 'eop-contradictory', operationStatus: 'blocked' },
+      { operationId: 'eop-contradictory', operationStatus: 'unknown' },
+      { operationId: 'eop-contradictory', operationStatus: 'pending' },
+      { operationId: 'eop-contradictory', failureCode: 'outcome_unknown' },
+    ])('rejects malformed or contradictory ready checkpoints: %j', async (fields) => {
+      const fetcher = vi.fn(async () => Response.json({ version: 1, state: 'ready', ...fields }));
+
+      const error = await bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher,
+      ).catch((error: unknown) => error);
+
+      expect(String(error)).toContain('did not reach inbound readiness');
+      expect(String(error)).not.toContain('provider-secret');
+      expect(String(error)).not.toContain('private-value');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('requires the shared email bootstrap probe to report durable inbound readiness', async () => {
     const requests: Array<{ headers: Headers; method?: string; redirect?: RequestRedirect }> = [];
     const readyFetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -2260,6 +2452,46 @@ describe('platform installer', () => {
           { status: 503 },
         )) as typeof fetch),
     ).rejects.toThrow('Operation eop-blocked: blocked. Traffic remains disabled');
+  });
+
+  it('reports safe shared-email routing prerequisites without exposing provider details', async () => {
+    const fetcher = (failureDetail: string) =>
+      (async () =>
+        Response.json(
+          {
+            version: 1,
+            state: 'incomplete',
+            operationId: 'eop-blocked',
+            operationStatus: 'blocked',
+            currentStep: 'inbound_probe',
+            failureCode: 'blocked',
+            domain: 'mail.example.com',
+            inboundStatus: 'needs_dns',
+            failureDetail,
+            providerError: 'secret-provider-token',
+          },
+          { status: 503 },
+        )) as typeof fetch;
+    const mxDetail =
+      'MX records for mail.example.com do not route mail to Cloudflare Email Routing';
+    await expect(
+      bootstrapPlatformSharedEmail('https://api.example.com', 'probe-token', fetcher(mxDetail)),
+    ).rejects.toThrow(
+      'Step: inbound_probe. Failure: blocked. Domain: mail.example.com (inbound: needs_dns). MX records for mail.example.com do not route mail to Cloudflare Email Routing. Enable Email Routing for mail.example.com in the Cloudflare dashboard, then resume this installation.',
+    );
+    try {
+      await bootstrapPlatformSharedEmail(
+        'https://api.example.com',
+        'probe-token',
+        fetcher('provider rejected Bearer secret-provider-token'),
+      );
+      throw new Error('Expected readiness failure');
+    } catch (error) {
+      expect(String(error)).toContain('Step: inbound_probe');
+      expect(String(error)).not.toContain('secret-provider-token');
+      expect(String(error)).not.toContain('provider rejected');
+      expect(String(error)).not.toContain('Enable Email Routing');
+    }
   });
 
   it.each([
@@ -2614,6 +2846,76 @@ describe('platform installer', () => {
     expect(connection.queries).toContain('BEGIN');
     expect(connection.queries).toContain('COMMIT');
     expect(connection.queries).not.toContain('ROLLBACK');
+  });
+
+  it('migrates the exact canonical 0.22.0 predecessor to the recipient deletion fence and refuses unreviewed versions', async () => {
+    const database = readPlatformRuntimeManifest().database;
+    const baseline = database.migrations.filter((migration) => migration.index <= 55);
+    expect(baseline.at(-1)?.tag).toBe('0055_durable_deployment_execution');
+    expect(database.migrations.at(-1)?.tag).toBe('0056_email_shared_recipients');
+    const rows = baseline.map((migration, index) => ({
+      id: index + 1,
+      hash: migration.sha256,
+      created_at: migration.timestampMillis,
+    }));
+    const rejected = migrationConnection(rows);
+    await expect(
+      preparePlatformDatabaseConnection(
+        rejected,
+        getPlatformRuntimeDirectory(),
+        database,
+        '0.21.9',
+        true,
+      ),
+    ).rejects.toThrow('cannot safely roll back');
+    expect(rejected.queries).not.toContain('BEGIN');
+    const accepted = migrationConnection(rows);
+    const result = await preparePlatformDatabaseConnection(
+      accepted,
+      getPlatformRuntimeDirectory(),
+      database,
+      '0.22.0',
+      true,
+    );
+    expect(result.appliedMigrations).toBe(1);
+    expect(
+      accepted.queries.some((query) =>
+        query.includes('CREATE TRIGGER "void_shared_email_recipient_teardown_guard"'),
+      ),
+    ).toBe(true);
+    expect(accepted.rows).toHaveLength(database.migrations.length);
+  });
+
+  it('rejects the isolated legacy email0054 fork without rewriting its history or applying canonical migrations', async () => {
+    const database = readPlatformRuntimeManifest().database;
+    const commonPrefix = database.migrations.filter((migration) => migration.index <= 53);
+    const email = database.migrations.find(
+      (migration) => migration.tag === '0056_email_shared_recipients',
+    )!;
+    expect(email).toBeDefined();
+    // The unreleased E2E runtime applied these same SQL bytes under its original
+    // 0054 timestamp. Equivalent SQL is not an exact canonical migration lineage.
+    const rows = [
+      ...commonPrefix.map((migration, index) => ({
+        id: index + 1,
+        hash: migration.sha256,
+        created_at: migration.timestampMillis,
+      })),
+      { id: commonPrefix.length + 1, hash: email.sha256, created_at: 1790860822162 },
+    ];
+    const connection = migrationConnection(rows);
+    await expect(
+      preparePlatformDatabaseConnection(
+        connection,
+        getPlatformRuntimeDirectory(),
+        database,
+        '0.21.9',
+        true,
+      ),
+    ).rejects.toThrow('not an exact prefix');
+    expect(connection.queries).not.toContain('BEGIN');
+    expect(connection.rows).toEqual(rows);
+    expect(connection.queries.some((query) => query.startsWith('INSERT INTO'))).toBe(false);
   });
 
   it('requires an exact rollback compatibility edge before an existing install migrates', async () => {

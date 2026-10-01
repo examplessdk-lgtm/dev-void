@@ -431,4 +431,74 @@ describe('cf-customer client', () => {
       await expect(client.deleteRelayScript(ACCOUNT, RELAY)).rejects.toThrow('boom');
     });
   });
+  describe('owned literal recipient rules', () => {
+    const wire = {
+      id: 'rule-1',
+      name: 'owned-name',
+      enabled: true,
+      matchers: [{ type: 'literal', field: 'to', value: 'project@mail.example.com' }],
+      actions: [{ type: 'worker', value: ['gateway'] }],
+    };
+    it('PATCHes only the per-zone subaddress flag', async () => {
+      fetchMock.mockResolvedValueOnce(cfSuccess({ support_subaddress: true }));
+      await createCfCustomerClient(CREDENTIAL).enableSubaddressing(ZONE);
+      const { url, init } = lastCall(fetchMock);
+      expect(url).toBe(CF_CUSTOMER_API_BASE + '/zones/' + ZONE + '/email/routing');
+      expect(init.method).toBe('PATCH');
+      expect(JSON.parse(init.body as string)).toEqual({ support_subaddress: true });
+    });
+    it.each([null, 'rule-1'])(
+      'creates or updates one exact literal rule without a catch-all: %s',
+      async (id) => {
+        fetchMock.mockResolvedValueOnce(cfSuccess(wire));
+        const rule = await createCfCustomerClient(CREDENTIAL).putLiteralRule(ZONE, id, {
+          name: wire.name,
+          address: 'project@mail.example.com',
+          workerName: 'gateway',
+        });
+        expect(rule).toMatchObject({
+          id: wire.id,
+          name: wire.name,
+          literalWorker: true,
+          workerName: 'gateway',
+          addresses: ['project@mail.example.com'],
+        });
+        const { url, init } = lastCall(fetchMock);
+        expect(url).toBe(
+          CF_CUSTOMER_API_BASE + '/zones/' + ZONE + '/email/routing/rules' + (id ? '/' + id : ''),
+        );
+        expect(init.method).toBe(id ? 'PUT' : 'POST');
+        expect(JSON.parse(init.body as string)).toEqual({
+          name: wire.name,
+          enabled: true,
+          matchers: wire.matchers,
+          actions: wire.actions,
+        });
+      },
+    );
+    it.each([
+      { matchers: [{ type: 'all' }] },
+      { matchers: [...wire.matchers, ...wire.matchers] },
+      { actions: [{ type: 'worker', value: ['gateway', 'foreign'] }] },
+      { actions: [{ type: 'forward', value: ['foreign@example.com'] }] },
+    ])(
+      'does not claim malformed or broader provider rules as a literal Worker rule',
+      async (change) => {
+        fetchMock.mockResolvedValueOnce(cfSuccess({ ...wire, ...change }));
+        expect(
+          await createCfCustomerClient(CREDENTIAL).getRoutingRule(ZONE, 'rule-1'),
+        ).toMatchObject({ literalWorker: false });
+      },
+    );
+    it('treats exact GET/DELETE 404 as absent, and preserves permission errors', async () => {
+      fetchMock
+        .mockResolvedValueOnce(cfError('not found', 404))
+        .mockResolvedValueOnce(cfError('not found', 404))
+        .mockResolvedValueOnce(cfError('denied', 403));
+      const client = createCfCustomerClient(CREDENTIAL);
+      expect(await client.getRoutingRule(ZONE, 'rule-1')).toBeNull();
+      await expect(client.deleteRoutingRule(ZONE, 'rule-1')).resolves.toBeUndefined();
+      await expect(client.deleteRoutingRule(ZONE, 'rule-1')).rejects.toMatchObject({ status: 403 });
+    });
+  });
 });

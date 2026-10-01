@@ -6,6 +6,7 @@ import {
   createPlatformResourceNames,
   recordInstallationResource,
   recordInstallationStep,
+  setInstallationEndpoints,
 } from '@void/platform';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import { pc } from '../../src/cli/output.ts';
@@ -13,6 +14,7 @@ import {
   PlatformCloudflareApiError,
   PlatformCloudflareClient,
 } from '../../src/cli/platform-cloudflare.ts';
+import { platformDomainTarget } from '../../src/cli/platform-domain.ts';
 import { installPlatform } from '../../src/cli/platform-installer.ts';
 import { verifyPlatformAiGatewayPlan } from '../../src/cli/platform-lifecycle.ts';
 import {
@@ -181,6 +183,60 @@ describe('platform installation planning', () => {
     );
   });
 
+  it('keeps dashboard configuration optional and preserves it across resumed lifecycle plans', async () => {
+    const without = await createPlatformInstallPlan(client(), input, null);
+    const withDashboard = await createPlatformInstallPlan(
+      client(),
+      { ...input, dashboardUrl: 'https://dash.example.org:8443/' },
+      null,
+    );
+    expect(without.deployment.controlPlane.dashboardHostname).toBeNull();
+    expect(without.deployment.controlPlane).not.toHaveProperty('dashboardUrl');
+    expect(withDashboard.actions).toEqual(without.actions);
+    expect(withDashboard.deployment.capabilities).toEqual(without.deployment.capabilities);
+    expect(withDashboard.installationId).toEqual(without.installationId);
+    const recorded = createPlatformInstallationManifest({
+      account: withDashboard.account,
+      createdAt: '2026-10-01T00:00:00.000Z',
+      deployment: withDashboard.deployment,
+      id: withDashboard.installationId,
+      ownershipNonce: 'a'.repeat(43),
+      platformVersion: '1.0.0',
+    });
+    const resumed = await createPlatformInstallPlan(client(), input, recorded, {
+      repairMissing: true,
+    });
+    expect(resumed.deployment.controlPlane).toMatchObject({
+      dashboardHostname: 'dash.example.org',
+      dashboardUrl: 'https://dash.example.org:8443',
+    });
+    const changed = await createPlatformInstallPlan(
+      client(),
+      { ...input, dashboardUrl: 'https://new.example.org' },
+      recorded,
+    );
+    expect(changed.deployment.controlPlane.dashboardUrl).toBe('https://new.example.org');
+    expect(formatPlatformInstallPlan(resumed)).toContain('https://dash.example.org:8443');
+  });
+
+  it('retains an existing advertised origin and rejects malformed configuration before provider reads', async () => {
+    const recorded = setInstallationEndpoints(
+      legacyInstallation(),
+      { apiUrl: null, proxyUrl: null, dashboardUrl: 'https://legacy.example.org:8443' },
+      '2026-09-14T00:00:01.000Z',
+    );
+    const plan = await createPlatformInstallPlan(client(), input, recorded);
+    expect(plan.deployment.controlPlane.dashboardUrl).toBe('https://legacy.example.org:8443');
+    const listAccounts = vi.fn(async () => []);
+    await expect(
+      createPlatformInstallPlan(
+        client({ listAccounts }),
+        { ...input, dashboardUrl: 'https://user:secret@dash.example.org' },
+        null,
+      ),
+    ).rejects.toThrow('HTTPS origin');
+    expect(listAccounts).not.toHaveBeenCalled();
+  });
   it('adopts an explicitly selected Hyperdrive without coupling its name to the installation', async () => {
     const fake = client({
       listHyperdriveConfigs: async () => [
@@ -879,6 +935,257 @@ describe('platform installation planning', () => {
     ).rejects.toThrow('Application route');
   });
 
+  it.each(['fresh install', 'upgrade', 'domain set'])(
+    'preserves unrelated Worker custom domains during %s',
+    async (operation) => {
+      let existing = operation === 'upgrade' ? legacyInstallation() : null;
+      if (operation === 'domain set') {
+        const initial = await createPlatformInstallPlan(
+          client(),
+          { ...input, applicationDomain: '', zoneName: '', workersDev: true },
+          null,
+        );
+        const manifest = {
+          ...createPlatformInstallationManifest({
+            account: initial.account,
+            createdAt: '2026-09-14T00:00:00.000Z',
+            deployment: initial.deployment,
+            id: initial.installationId,
+            ownershipNonce: '0123456789abcdef0123456789abcdef',
+            platformVersion: '1.0.0',
+          }),
+          status: 'installed' as const,
+        };
+        existing = {
+          ...manifest,
+          deployment: createPlatformDeploymentManifest({
+            ...manifest.deployment,
+            application: platformDomainTarget(manifest, 'example.app', 'example.app', false),
+          }),
+        };
+      }
+      await expect(
+        createPlatformInstallPlan(
+          client({
+            findZone: async () => ({
+              id: 'zone',
+              name: 'example.app',
+              nameServers: [],
+              status: 'active',
+            }),
+            listWorkerDomains: async () => [
+              { hostname: 'ai.example.app', id: 'custom-domain', service: 'existing-ai' },
+            ],
+          }),
+          input,
+          existing,
+        ),
+      ).rejects.toThrow(
+        'would intercept Worker custom domain "ai.example.app", currently served by "existing-ai". Choose another application domain, or use `void platform install --workers-dev`',
+      );
+    },
+  );
+
+  it.each([
+    {
+      hostname: 'ai.example.app',
+      routes: [{ pattern: 'ai.example.app/*', script: 'existing-ai' }],
+    },
+    { hostname: 'ai.example.app', routes: [{ pattern: 'ai.example.app/*', script: null }] },
+    {
+      hostname: 'ai.example.app',
+      routes: [
+        { pattern: 'http://ai.example.app/*', script: null },
+        { pattern: 'https://ai.example.app/*', script: 'existing-ai' },
+      ],
+    },
+    {
+      hostname: 'ai.services.example.app',
+      routes: [{ pattern: '*.services.example.app/*', script: 'existing-ai' }],
+    },
+  ])(
+    'preserves custom domains protected by more-specific routes: $routes',
+    async ({ hostname, routes }) => {
+      const plan = await createPlatformInstallPlan(
+        client({
+          findZone: async () => ({
+            id: 'zone',
+            name: 'example.app',
+            nameServers: [],
+            status: 'active',
+          }),
+          listWorkerDomains: async () => [
+            { hostname, id: 'custom-domain', service: 'existing-ai' },
+          ],
+          listWorkerRoutes: async () =>
+            routes.map((route, index) => ({ ...route, id: `${index}` })),
+        }),
+        input,
+        null,
+      );
+      expect(plan.deployment.application.baseDomain).toBe('example.app');
+    },
+  );
+
+  it.each([
+    { pattern: 'ai.example.app', script: 'existing-ai' },
+    { pattern: 'ai.example.app/', script: null },
+    { pattern: 'ai.example.app/api/*', script: 'existing-ai' },
+    { pattern: 'https://ai.example.app/*', script: 'existing-ai' },
+    { pattern: 'ai.example.app/*', script: 'void-example-dispatch' },
+  ])('rejects routes that leave custom-domain traffic exposed: $pattern', async (route) => {
+    await expect(
+      createPlatformInstallPlan(
+        client({
+          findZone: async () => ({
+            id: 'zone',
+            name: 'example.app',
+            nameServers: [],
+            status: 'active',
+          }),
+          listWorkerDomains: async () => [
+            { hostname: 'ai.example.app', id: 'custom-domain', service: 'existing-ai' },
+          ],
+          listWorkerRoutes: async () => [{ ...route, id: 'existing-route' }],
+        }),
+        input,
+        null,
+      ),
+    ).rejects.toThrow('would intercept Worker custom domain');
+  });
+
+  it('leaves apex and other application namespaces outside a shared-zone wildcard', async () => {
+    const plan = await createPlatformInstallPlan(
+      client({
+        findZone: async () => ({
+          id: 'zone',
+          name: 'example.app',
+          nameServers: [],
+          status: 'active',
+        }),
+        listWorkerDomains: async () => [
+          { hostname: 'example.app', id: 'apex', service: 'existing-apex' },
+          {
+            hostname: 'ai.other.app',
+            id: 'other-zone',
+            service: 'existing-ai',
+            zoneName: 'other.app',
+          },
+        ],
+      }),
+      input,
+      null,
+    );
+    expect(plan.deployment.application.dedicatedZone).toBe(false);
+    const nested = await createPlatformInstallPlan(
+      client({
+        findZone: async () => ({
+          id: 'zone',
+          name: 'example.app',
+          nameServers: [],
+          status: 'active',
+        }),
+        listWorkerDomains: async () => [
+          { hostname: 'ai.example.app', id: 'existing-ai', service: 'existing-ai' },
+          { hostname: 'apps.example.app', id: 'application-apex', service: 'existing-apps' },
+        ],
+      }),
+      { ...input, applicationDomain: 'apps.example.app' },
+      null,
+    );
+    expect(nested.deployment.application.baseDomain).toBe('apps.example.app');
+  });
+
+  it('preserves unrelated apex custom domains against dedicated-zone catch-all routes', async () => {
+    await expect(
+      createPlatformInstallPlan(
+        client({
+          findZone: async () => ({
+            id: 'zone',
+            name: 'example.app',
+            nameServers: [],
+            status: 'active',
+          }),
+          listWorkerDomains: async () => [
+            { hostname: 'example.app', id: 'apex', service: 'existing-apex' },
+          ],
+        }),
+        { ...input, dedicatedZone: true },
+        null,
+      ),
+    ).rejects.toThrow('Application route "*/*" would intercept Worker custom domain "example.app"');
+  });
+
+  it('does not infer custom-domain ownership from a matching new dispatch Worker name', async () => {
+    await expect(
+      createPlatformInstallPlan(
+        client({
+          findZone: async () => ({
+            id: 'zone',
+            name: 'example.app',
+            nameServers: [],
+            status: 'active',
+          }),
+          listWorkerDomains: async () => [
+            { hostname: 'ai.example.app', id: 'custom-domain', service: 'void-example-dispatch' },
+          ],
+        }),
+        input,
+        null,
+      ),
+    ).rejects.toThrow('would intercept Worker custom domain');
+  });
+
+  it('preserves custom-domain origins owned by a recorded legacy dispatch Worker', async () => {
+    const original = legacyInstallation();
+    const workerName = original.deployment.resources.dispatchWorker;
+    const manifest = recordInstallationResource(
+      original,
+      {
+        configHash: 'legacy-worker-config',
+        id: workerName,
+        key: 'dispatch-worker',
+        kind: 'worker',
+        name: workerName,
+        ownership: 'created',
+        state: 'ready',
+      },
+      '2026-09-14T00:00:01.000Z',
+    );
+    const plan = await createPlatformInstallPlan(
+      client({
+        findZone: async () => ({
+          id: 'zone',
+          name: 'example.app',
+          nameServers: [],
+          status: 'active',
+        }),
+        listWorkerDomains: async () => [
+          { hostname: 'owned.example.app', id: 'custom-domain', service: workerName },
+        ],
+        listWorkerNames: async () => [workerName],
+      }),
+      input,
+      manifest,
+    );
+    expect(plan.deployment.resources.dispatchWorker).toBe(workerName);
+    expect(plan.actions.find((action) => action.key === 'dispatch-worker')).toMatchObject({
+      action: 'update',
+      id: workerName,
+    });
+  });
+
+  it('does not inspect custom domains for an isolated workers.dev installation', async () => {
+    const listWorkerDomains = vi.fn().mockRejectedValue(new Error('Unexpected domain inspection'));
+    const plan = await createPlatformInstallPlan(
+      client({ listWorkerDomains }),
+      { ...input, applicationDomain: '', zoneName: '', workersDev: true },
+      null,
+    );
+    expect(plan.deployment.application.workersDev?.subdomain).toBe('example');
+    expect(listWorkerDomains).not.toHaveBeenCalled();
+  });
+
   it('does not treat a local provision intent as remote ownership proof', async () => {
     let manifest = createPlatformInstallationManifest({
       account: { id: 'account', name: 'Account' },
@@ -1225,6 +1532,9 @@ describe('platform installation planning', () => {
         }),
         getWorkerPlainTextBindings: async () => ({ PLATFORM_OWNERSHIP_MARKER: marker }),
         listWorkerNames: async () => [workerName],
+        listWorkerDomains: async () => [
+          { hostname: 'owned.example.app', id: 'custom-domain', service: workerName },
+        ],
         listWorkerRoutes: async () => [
           { id: 'route', pattern: '*.example.app/*', script: workerName },
         ],

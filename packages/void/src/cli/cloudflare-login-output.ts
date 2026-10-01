@@ -11,6 +11,21 @@ export function cloudflareDeviceCode(output: string): string | null {
   );
 }
 
+export function cloudflareVerificationUrl(output: string): string | null {
+  const plain = stripVTControlCharacters(output);
+  return (
+    /(?:Opening a link in your default browser:|Visit this link to authenticate:)\s*(https?:\/\/\S+)\s/i.exec(
+      plain,
+    )?.[1] ??
+    /please visit:\s*(https?:\/\/\S+)\s/i.exec(plain)?.[1] ??
+    null
+  );
+}
+
+export function printCloudflareLoginLink(url: string): void {
+  console.log(`Open this link if your browser did not open: ${url}`);
+}
+
 export function printCloudflareLoginPrompt(code: string | null): void {
   console.log(
     code

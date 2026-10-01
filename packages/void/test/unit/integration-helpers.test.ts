@@ -10,6 +10,9 @@ describe('shouldCopyPlaygroundPath', () => {
       false,
     );
     expect(shouldCopyPlaygroundPath(sourceRoot, String.raw`${sourceRoot}\.void`)).toBe(false);
+    expect(
+      shouldCopyPlaygroundPath(sourceRoot, String.raw`${sourceRoot}\.next\types\routes.d.ts`),
+    ).toBe(false);
     expect(shouldCopyPlaygroundPath(sourceRoot, String.raw`${sourceRoot}\src\index.ts`)).toBe(true);
   });
 
@@ -17,7 +20,11 @@ describe('shouldCopyPlaygroundPath', () => {
     const sourceRoot = '/workspace/playground/spa';
 
     expect(shouldCopyPlaygroundPath(sourceRoot, `${sourceRoot}/dist`)).toBe(false);
+    expect(shouldCopyPlaygroundPath(sourceRoot, `${sourceRoot}/.next/types/routes.d.ts`)).toBe(
+      false,
+    );
     expect(shouldCopyPlaygroundPath(sourceRoot, `${sourceRoot}/src/dist/example.ts`)).toBe(true);
+    expect(shouldCopyPlaygroundPath(sourceRoot, `${sourceRoot}/src/.next/example.ts`)).toBe(true);
   });
 });
 

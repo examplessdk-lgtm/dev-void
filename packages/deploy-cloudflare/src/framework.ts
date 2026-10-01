@@ -14,6 +14,7 @@ export type CloudflareFrameworkDeployConfig = Readonly<{
   assetsIgnore?: ReadonlyArray<string>;
   crons?: ReadonlyArray<string>;
   requiredSecrets?: ReadonlyArray<string>;
+  versionMetadataBinding?: string;
   ai?: Readonly<{ binding: string; gateway?: string }>;
 }>;
 
@@ -44,6 +45,9 @@ export function writeCloudflareFrameworkDeployConfig(
   upsert(['account_id'], options.accountId);
   upsert(['main'], options.main);
   upsert(['compatibility_date'], options.compatibilityDate);
+  if (options.versionMetadataBinding && parse(content).version_metadata === undefined) {
+    upsert(['version_metadata'], { binding: options.versionMetadataBinding });
+  }
   if (options.compatibilityFlags && options.compatibilityFlags.length > 0) {
     const config = parse(content) as { compatibility_flags?: unknown };
     const current = Array.isArray(config.compatibility_flags)

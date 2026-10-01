@@ -1172,6 +1172,8 @@ function deriveEmailRuntimePath(runtimeEnvPath: string): string {
 }
 
 export interface WorkerEntryOptions {
+  /** Native readiness proves the actual served Worker version through this binding. */
+  versionMetadataBinding?: string;
   hasQueues?: boolean;
   remote?: {
     remotePath: string;
@@ -1234,6 +1236,7 @@ export interface WorkerEntryOptions {
 export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
   const {
     hasQueues = false,
+    versionMetadataBinding,
     remote,
     assetsDir = 'assets',
     webSocketClasses = [],
@@ -1330,7 +1333,7 @@ const __filterInternalBindings = (env) => __filterBindings(env, ${JSON.stringify
     app, assets: serveWithAssets, withRawEnv: __withRawEnv, withRuntimeEnv,
     filterBindings: __filterInternalBindings,
     internalRoute: __voidHandleInternalRoute,
-    collectPrerenderPaths: __voidCollectPrerenderPaths${envSchemaModule ? ', validateEnv: _validateEnvOnce' : ''}${remotePath ? ', remoteEnv: (env) => ' + createRemoteEnvCall : ''}${hasEmail ? ', emailReceipt: __handleEmailReceipt' : ''}${isr ? ', isr: { deploymentId: __VOID_ISR_DEPLOYMENT_ID, handle: (request, env, ctx, render) => handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, pages: __VOID_ISR_PAGES, pathRevalidate: __VOID_ISR_PATH_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ' + JSON.stringify(isr.queryAllowlist) + ' }, render) }' : ''}
+    collectPrerenderPaths: __voidCollectPrerenderPaths${versionMetadataBinding ? ', versionMetadataBinding: ' + JSON.stringify(versionMetadataBinding) : ''}${envSchemaModule ? ', validateEnv: _validateEnvOnce' : ''}${remotePath ? ', remoteEnv: (env) => ' + createRemoteEnvCall : ''}${hasEmail ? ', emailReceipt: __handleEmailReceipt' : ''}${isr ? ', isr: { deploymentId: __VOID_ISR_DEPLOYMENT_ID, handle: (request, env, ctx, render) => handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, pages: __VOID_ISR_PAGES, pathRevalidate: __VOID_ISR_PATH_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ' + JSON.stringify(isr.queryAllowlist) + ' }, render) }' : ''}
   })`;
   const scheduledHandler = remotePath
     ? `async function handleScheduled(controller, env, ctx) {

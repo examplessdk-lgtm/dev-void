@@ -29,6 +29,7 @@ const heldServers = new Map<number, Server>();
 
 const GENERATED_PLAYGROUND_ENTRIES = new Set([
   '.astro',
+  '.next',
   '.nuxt',
   '.output',
   '.react-router',

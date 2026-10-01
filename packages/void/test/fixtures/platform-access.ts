@@ -7,11 +7,13 @@ export function platformAccessFixture(): {
   calls: Array<{ method: string; path: string; body?: RecordValue }>;
   apps: Map<string, RecordValue>;
   tokens: Map<string, RecordValue>;
+  identityProviders: Array<RecordValue>;
   policy: RecordValue;
   loseNextApplicationResponse: () => void;
 } {
   const apps = new Map<string, RecordValue>();
   const tokens = new Map<string, RecordValue>();
+  const identityProviders: Array<RecordValue> = [{ id: 'company-idp', name: 'Company SSO' }];
   const policy: RecordValue = {
     id: 'employees',
     name: 'Employees and managed devices',
@@ -32,7 +34,7 @@ export function platformAccessFixture(): {
       if (target === 'organizations') {
         result = { auth_domain: 'company.cloudflareaccess.com' };
       } else if (target === 'identity_providers') {
-        result = [{ id: 'company-idp', name: 'Company SSO' }];
+        result = identityProviders;
       } else if (target === 'policies') {
         result = [policy];
       } else if (target === 'policies/employees') {
@@ -87,6 +89,7 @@ export function platformAccessFixture(): {
     calls,
     apps,
     tokens,
+    identityProviders,
     policy,
     loseNextApplicationResponse() {
       loseApplicationResponse = true;

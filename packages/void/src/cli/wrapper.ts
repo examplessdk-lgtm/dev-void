@@ -26,6 +26,8 @@ export type WrapperFeatures = {
   hasMigrations?: boolean;
   /** Expose the readiness endpoint used by direct version activation. */
   readiness?: boolean;
+  /** Preserve an authored metadata binding name for native readiness proof. */
+  versionMetadataBinding?: string;
   /** Database dialect for migration handler. */
   migrationDialect?: 'sqlite' | 'postgresql' | 'mysql';
   /** Direct Cloudflare ISR policy; managed deployments cache in dispatch instead. */
@@ -491,7 +493,9 @@ function generateWrapperSource(
       features.hasMigrations
     ) {
       lines.push('  if (request.method === "GET" && url.pathname === "/__void/ready") {');
-      lines.push('    return Response.json({ ready: true });');
+      lines.push(
+        `    return Response.json({ ready: true${features.versionMetadataBinding ? `, versionId: env[${JSON.stringify(features.versionMetadataBinding)}]?.id` : ''} }${features.versionMetadataBinding ? ', { headers: { "cache-control": "no-store" } }' : ''});`,
+      );
       lines.push('  }');
     }
 

@@ -35,6 +35,7 @@ import {
 import { drainProjectEmailAdmissions } from '../email/admission.ts';
 import { emailDomainRoutes, emailZoneConnections } from '../email/connection-schema.ts';
 import { requestEmailDomainRemove, runEmailOperation } from '../email/connection-service.ts';
+import { removeSharedEmailRecipients } from '../email/shared-recipient-service.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
@@ -865,6 +866,7 @@ export async function teardownProject(
   }
 
   await cleanupCriticalResources(context, projectId, project);
+  await removeSharedEmailRecipients(context.get('db'), context.env, projectId);
   // Customer-side cleanup is durable and may continue after project deletion.
   await cleanupProjectEmailAssignments(context, projectId);
   const { warnings: bestEffortWarnings, cleanedCfIds } = await cleanupBestEffortResources(

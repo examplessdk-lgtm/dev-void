@@ -272,6 +272,9 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         : {}),
       applicationDomain: deployment.application.baseDomain,
       controlPlaneDomain: deployment.controlPlane.apiHostname ?? '',
+      ...(args.subcommand !== 'rollback' && args.dashboardUrl !== undefined
+        ? { dashboardUrl: args.dashboardUrl }
+        : {}),
       dedicatedZone: deployment.application.dedicatedZone,
       displayName: deployment.displayName,
       installationSlug: deployment.installationSlug,

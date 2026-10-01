@@ -79,6 +79,16 @@ async function fixture() {
 }
 
 describe('installed Access protection preflight', () => {
+  it('refuses a newly configured dashboard outside the active protected-origin coverage', async () => {
+    const { env, input } = await fixture();
+    await expect(
+      verifyInstalledPlatformAccessProtection({
+        ...input,
+        dashboardUrl: 'https://dash.example.org',
+      }),
+    ).rejects.toThrow('complete origin coverage');
+    expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
+  });
   it('checks current policies, audiences, coverage, and machine admission with reads only', async () => {
     const { env, input } = await fixture();
     await verifyInstalledPlatformAccessProtection(input);

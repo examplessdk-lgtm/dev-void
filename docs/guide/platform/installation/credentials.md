@@ -57,9 +57,11 @@ void platform upgrade your-installation-id
 
 Set the same two variables before `void platform install` to enable email during a new installation. Void records the pair for later upgrades; an ordinary upgrade cannot replace it.
 
+Before installing, enable [Cloudflare Email Routing](https://developers.cloudflare.com/email-service/get-started/route-emails/) for the exact shared sender domain and confirm that its MX records point to Cloudflare. For a subdomain, add that name under the zone's **Email Routing → Settings → Subdomains**. Cloudflare adds the required MX and SPF records. The installer's shared-mail bootstrap verifies those records; it does not add them. Keep existing mail-provider records on other domain names in place.
+
 Enabling email lets administrators [register email domains for projects](/guide/platform/administration/email#registering-email-domains-for-projects) and lets projects register destination addresses through the runtime token. That needs **Email Routing Addresses: Edit** and **Email Sending: Edit** on the account, plus **Zone: Read**, **Zone Settings: Edit** and **Email Routing Rules: Edit** on the zones that will carry mail. The runtime-token link preselects them when email is enabled. Email Sending onboarding for arbitrary recipients needs Workers Paid.
 
-The installer deploys the email gateway, prepares the shared mail route, and verifies inbound readiness before opening platform traffic. If setup fails, correct the reported permission, mail-zone configuration, or routing conflict, then rerun the same install or upgrade command. A fresh install resumes with `void platform install --resume --name <installation-id>`.
+The installer deploys the email gateway, prepares the shared mail route, and verifies inbound readiness before opening platform traffic. If setup fails, correct the reported permission, exact-domain MX records, or routing conflict, then rerun the same install or upgrade command. A fresh install resumes with `void platform install --resume --name <installation-id>`; it continues the recorded email operation after the configuration is corrected.
 
 ## R2 Upload Credentials
 

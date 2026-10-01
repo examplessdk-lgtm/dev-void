@@ -1,12 +1,23 @@
 # Kitchen Sink Smoke Tests
 
 Use `playground/kitchen-sink` to verify a platform with a disposable app. The automated suite resets the app's database, KV, and storage, then exercises navigation, mutations, authentication, queues, and caching.
+The reset must return a successful response with `ok: true`; otherwise the suite stops before acceptance checks. It deletes the heartbeat and revalidation keys with the rest of the fixture KV state.
 
-Managed Sandboxes are paused. Prepare the hosted fixture with `node platform/scripts/kitchen-sink-platform-fixture.ts`, then deploy the isolated app directory it prints to the platform you want to test. This copy omits the unsupported Sandbox routes and navigation; the original playground and native Cloudflare Sandbox build coverage are preserved. Pass the deployed URL explicitly from the repository root:
+Queue submission must also produce its consumer result within 60 seconds. A
+consumer timeout fails acceptance with queue/dispatch and D1 diagnostics.
+
+Prepare with `--runtime` to add an isolated queue retry consumer, authenticated
+version/log/AI routes, and typed WebSocket echo. Set `SMOKE_RUNTIME=1` and supply
+the app's existing secret privately through `SMOKE_E2E_TOKEN` to enable browser
+test 14, which requires a fresh message round trip within 30 seconds. The
+WebSocket handshake carries the secret as a header. These fixtures require a
+configured nonempty secret and remain separate from the default hosted CI app.
+
+Prepare the hosted fixture with `oxnode platform/scripts/kitchen-sink-platform-fixture.ts`, then deploy the isolated app directory it prints to the platform you want to test. The basic fixture omits Sandbox so it works on platforms without Containers access. For Sandbox acceptance, pass `--sandbox` when preparing the fixture and set `SMOKE_SANDBOX=1` when running the tests. The platform must enable Sandbox and have Workers Paid, Containers access, and the required runtime-token permissions described in the [Sandbox guide](../../docs/guide/sandboxes.md). Pass the deployed URL explicitly from the repository root:
 
 ```sh
 vp exec playwright install chromium
-SMOKE_URL=https://kitchen-sink.apps.example.com node platform/scripts/kitchen-sink-smoke-test.ts
+SMOKE_URL=https://kitchen-sink.apps.example.com oxnode platform/scripts/kitchen-sink-smoke-test.ts
 ```
 
 Use an app whose data can be deleted. The script has no default destination. If Cloudflare Access protects the app, supply that application's `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` from your secret manager.
@@ -17,6 +28,25 @@ Setup failures report the operation and HTTP status when available, without prin
 If the API confirms a value was stored but updating the old worker failed, setup verifies the stored name and continues without retrying the write. The following deployment applies all stored values and must pass the smoke tests. Other errors, or a missing stored name, still fail setup.
 
 The checklist below can also be run manually or with browser automation. Use unique values for created records, wait for each mutation to appear, and remove test records afterward. KV listings are eventually consistent; poll them instead of relying on a fixed delay. Record each result and report failures after completing the remaining cases.
+
+## Email acceptance fixture
+
+Pass `--email` when preparing the fixture to add inbound handlers and `/api/acceptance/email`. Deploy it only to a disposable project on an email-enabled platform. Both `GET` and `POST` require `x-void-e2e-token` to match the app's `SECRET_KEY`; the fixture never copies local `.env` values. Set the required `APP_NAME`, `API_URL`, and random `SECRET_KEY` through the linked project's secret commands before deployment.
+
+- `POST /api/acceptance/email` accepts `sendEmail()` options as JSON. Send a unique subject to a verified test mailbox and confirm both provider acceptance and actual mailbox delivery. Repeat the identical body and `idempotencyKey` to confirm one delivery; change the body with the same key to confirm `IDEMPOTENCY_CONFLICT`. Check partial recipients, sender restrictions, and administrator-configured quotas separately.
+- Send inbound mail to `<slug>+support@<shared-mail-domain>` and confirm `GET /api/acceptance/email?subject=<encoded-subject>` returns the `support` route, original text/HTML, and attachment metadata. For a registered custom domain, use `support@<domain>` instead. The KV receipt expires after one hour; poll because KV reads can be eventually consistent.
+- Verify tag precedence with `<slug>+support+ticket-42@<shared-mail-domain>` (`support-ticket`, `params.ticket= ticket-42`) and `<slug>+support+vip@<shared-mail-domain>` (`support-vip`). An unmatched recipient reaches `default`.
+- Subjects beginning with `REPLY ` send a threaded reply. Verify its arrival and `In-Reply-To`/`References`, and inspect `void email logs` for the action outcome.
+- Subjects beginning with `FORWARD ` forward to the verified address in the original message's `x-void-e2e-forward` header. Shared-domain native events support forwarding; customer-zone relayed mail records `UNSUPPORTED_ACTION` without sending. Confirm that recorded distinction.
+- Subjects beginning with `REJECT ` reject with `Void email acceptance reject`. Verify the sender's non-delivery outcome and the platform's inbound log.
+
+Use `void email usage`, `destinations`, and `logs` to compare API outcomes with recorded provider outcomes. Test admin email policy/caps and custom-domain readiness, secret rotation, and removal through the operator UI or CLI. A provider acceptance result alone does not prove mailbox delivery.
+
+## Sandbox runtime acceptance fixture
+
+`--sandbox` also adds `POST /api/acceptance/sandbox`, authenticated by `x-void-e2e-token` matching the app's `SECRET_KEY`. The endpoint runs through lazy startup; text, binary, Blob, streaming and relative file operations; metadata, rename, listing and removal; process cwd/env/stdout/stderr; piped stdin; PTY/resize/kill; cancellation; HTTP port access; disabled and enabled Internet access; isolation between IDs; and destroy/restart with ephemeral files. It uses unique IDs, limits idle time to 30 seconds, and stops its containers after the checks.
+
+Set `SMOKE_SANDBOX=1` and `SMOKE_E2E_TOKEN` to the fixture's secret when running the smoke script to include this test. Select a test user plan with enough runtime and at least two concurrent Sandbox instances, such as `solo`; the platform's `free` user tier has only one runtime second per month. The result includes the checks completed before any failure. The test allows up to three minutes for cold starts, and makes one permitted GET to Cloudflare's trace endpoint while testing Internet access.
 
 ## Test Cases
 
@@ -130,15 +160,24 @@ The checklist below can also be run manually or with browser automation. Use uni
 ### 10. Cron — heartbeat is running
 
 1. Visit `/cron`.
-2. Check if a heartbeat timestamp is displayed (a `<code>` element with an ISO timestamp).
-3. If present, assert it is a valid ISO date and was recorded within the last 5 minutes.
-4. If "No heartbeat recorded yet" is shown, note this as a warning (cron may not have fired yet) — not a hard failure.
+2. Poll for up to 150 seconds for the heartbeat timestamp, allowing the next scheduled invocation and KV propagation.
+3. Assert it is a valid date recorded after the fixture reset, within the last 5 minutes, and no more than one second in the future. An old heartbeat cannot satisfy the check.
+4. If no fresh heartbeat arrives, fail the test. Check cron registration and dispatch logs, then verify the fixture's KV binding and `cron:last-heartbeat` key.
 
 ### 11. ISR Revalidation
 
 1. Visit `/revalidate`.
-2. Note the "Rendered at" timestamp.
-3. Click the "Revalidate /revalidate" button.
-4. Wait for the button to return to its non-disabled state.
-5. Reload the page (navigate to `/revalidate` again).
-6. Check the "Last revalidation" field — assert it is no longer "never" (shows a timestamp).
+2. For a public target, poll for up to 15 seconds for an actual `x-isr-cache: HIT` response before continuing. Access-authenticated targets bypass the shared cache.
+3. Note the valid date in the **Rendered at** field.
+4. Click **Revalidate /revalidate** and assert the POST response succeeds. The app displays a failed purge as an error and does not record a success timestamp.
+5. Wait for the button to return to its non-disabled state.
+6. Poll reloads for up to 15 seconds until **Rendered at** is a different valid date. A nonempty **Last revalidation** field alone does not establish that the cached page was purged.
+
+### 12. Sandbox — files, command execution, and output
+
+Prepare and deploy the fixture with `--sandbox`, then run with `SMOKE_SANDBOX=1`.
+
+1. Visit `/sandbox` and replace the analyzer with a function that returns a unique marker and the request count, and writes a marker to stderr.
+2. Click **Run in Sandbox** and allow up to 90 seconds for the first container start.
+3. Assert the API returns `ok: true`, exit code `0`, the unique marker and a positive request count. This exercises writing input and executable files, running Node, and reading the output file.
+4. Assert stdout contains the result and stderr contains the marker, then confirm the result appears in the page.

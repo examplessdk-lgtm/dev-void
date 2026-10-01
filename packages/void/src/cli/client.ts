@@ -360,6 +360,12 @@ export type EmailSettingsResponse = {
     projectSlug?: string;
   };
   recipientPolicy?: { mode: 'verified' | 'domains' | 'any'; domains: Array<string> };
+  sharedInbound?: {
+    recipient: string;
+    status: string;
+    reason: string | null;
+    observedAt: string | null;
+  } | null;
 };
 
 export type EmailDomainResponse = {

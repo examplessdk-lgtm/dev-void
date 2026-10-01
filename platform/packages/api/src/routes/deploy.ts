@@ -94,6 +94,10 @@ import {
   type DeploymentOperation,
 } from '../deployment-execution.ts';
 import { sendDeployFailedEmail } from '../email.ts';
+import {
+  getSharedEmailRecipientReadiness,
+  reconcileSharedEmailRecipient,
+} from '../email/shared-recipient-service.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
 import { checkCliVersionOrRespond } from '../middleware/cli-version.ts';
@@ -2085,6 +2089,29 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
       },
       400,
     );
+  }
+  if (
+    incomingManifest.emailProtocolVersion === 1 &&
+    getPlatformCapabilities(context.env).email &&
+    context.env.EMAIL_SENDER_DOMAIN
+  ) {
+    await reconcileSharedEmailRecipient(context.get('db'), context.env, projectId);
+    const readiness = await getSharedEmailRecipientReadiness(
+      context.get('db'),
+      context.env,
+      projectId,
+    );
+    if (readiness?.status !== 'ready') {
+      return context.json(
+        {
+          event: 'error',
+          message:
+            readiness?.reason ??
+            'Shared email recipient routing is not ready; ask a platform administrator to reconcile shared email',
+        },
+        409,
+      );
+    }
   }
   if (incomingManifest.sandbox && incomingManifest.sandbox.controllerProtocol !== 2) {
     return context.json(

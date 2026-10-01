@@ -734,6 +734,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isCandidatePreviewUrl(
+  value: string,
+  workerName: string,
+  versionId: string,
+  alias: string,
+): boolean {
+  try {
+    const url = new URL(value);
+    const label = url.hostname.split('.')[0];
+    return (
+      url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      extractWorkersDevSubdomain(value) !== undefined &&
+      (label === `${versionId.slice(0, 8)}-${workerName}` || label === `${alias}-${workerName}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type CloudflareVersionActivationOptions = {
   /** Human-readable deployment phases; the caller owns terminal rendering. */
   onProgress?: (message: string) => void;
@@ -778,6 +799,10 @@ export type CloudflareVersionActivationOptions = {
   fetch?: typeof globalThis.fetch;
   sleep?: (milliseconds: number) => Promise<void>;
   readinessAttempts?: number;
+  /** Require readiness to report the uploaded Worker's actual version UUID. */
+  requireVersionMetadata?: boolean;
+  /** A binding-preserving handoff without metadata may use only a genuine version preview. */
+  requirePreviewForReadiness?: boolean;
   /** Verify that omitted remote secrets come from the active Worker Version before uploading. */
   verifyInheritedSecrets?: boolean;
   /** Pin opaque secret bindings to the live version when an unpublished upload is newer. */
@@ -853,6 +878,16 @@ async function activateCloudflareVersionWithSecretsFile(
     return { ok: false, reason: 'uploader-changed' };
   }
   const previousVersionId = previous.versionId;
+  if (options.atomic && options.requirePreviewForReadiness) {
+    return {
+      ok: false,
+      reason: 'preview-unavailable',
+      previousVersionId,
+      rollback: 'not-needed',
+      diagnostic:
+        'This binding-preserving handoff requires a candidate preview before activation. Configure version metadata on the existing Worker or retry without atomic publication; production traffic is unchanged.',
+    };
+  }
   // Activation can succeed before trigger synchronization or the local receipt
   // cleanup fails. Once its last recorded candidate owns all live traffic, the
   // receipt no longer authorizes any *inactive* successor. The history checks
@@ -1036,7 +1071,13 @@ async function activateCloudflareVersionWithSecretsFile(
         await options.pinActiveSecrets(previous.versionId, activeSecrets);
       }
     }
-    return bootstrapFirstDeployment({ ...options, message }, configPath, previous.versionId, true);
+    return bootstrapFirstDeployment(
+      { ...options, message },
+      configPath,
+      previous.versionId,
+      true,
+      previousTriggerConfig,
+    );
   }
   options.onProgress?.('Uploading the Worker and assets...');
   const upload = await Promise.resolve(
@@ -1068,7 +1109,13 @@ async function activateCloudflareVersionWithSecretsFile(
         options.allowFirstDeploymentBootstrap === true ||
         (await previousIsSecretOnlyDraft()))
     ) {
-      return bootstrapFirstDeployment({ ...options, message }, configPath, previous.versionId);
+      return bootstrapFirstDeployment(
+        { ...options, message },
+        configPath,
+        previous.versionId,
+        false,
+        previousTriggerConfig,
+      );
     }
     return {
       ok: false,
@@ -1128,7 +1175,27 @@ async function activateCloudflareVersionWithSecretsFile(
     }
     await options.recordVerifiedCandidate(versionId, previous.versionId);
   }
-  const reportedPreviewUrl = uploaded?.previewUrl;
+  const reportedPreviewUrl =
+    desiredTriggerConfig.preview_urls ||
+    desiredTriggerConfig.preservePreviewUrls ||
+    desiredTriggerConfig.preserve
+      ? uploaded?.previewUrl
+      : undefined;
+  if (
+    options.requirePreviewForReadiness &&
+    (!reportedPreviewUrl ||
+      !isCandidatePreviewUrl(reportedPreviewUrl, options.workerName, versionId, alias))
+  ) {
+    return {
+      ok: false,
+      reason: 'preview-unavailable',
+      versionId,
+      previousVersionId,
+      rollback: 'not-needed',
+      diagnostic:
+        'This existing Worker has no version metadata binding and no genuine candidate preview URL. Keep its bindings unchanged; configure version metadata on the existing Worker or use an admitted version preview, then retry the handoff. Production traffic is unchanged.',
+    };
+  }
   let authenticatedWorkersDevSubdomain = reportedPreviewUrl
     ? extractWorkersDevSubdomain(reportedPreviewUrl)
     : undefined;
@@ -1142,7 +1209,13 @@ async function activateCloudflareVersionWithSecretsFile(
         options.allowFirstDeploymentBootstrap === true ||
         (await previousIsSecretOnlyDraft()))
     ) {
-      return bootstrapFirstDeployment({ ...options, message }, configPath, previous.versionId);
+      return bootstrapFirstDeployment(
+        { ...options, message },
+        configPath,
+        previous.versionId,
+        false,
+        previousTriggerConfig,
+      );
     }
     readinessUrl = desiredTriggerConfig.workers_dev
       ? workersDevReadinessUrl(options.workerName, options.workersDevSubdomain)
@@ -1210,6 +1283,8 @@ async function activateCloudflareVersionWithSecretsFile(
     options.fetch ?? globalThis.fetch,
     options.sleep ?? defaultSleep,
     options.readinessAttempts ?? 6,
+    Number.POSITIVE_INFINITY,
+    options.requireVersionMetadata ? versionId : undefined,
   );
 
   // Account-wide Access default-deny commonly blocks Wrangler's generated preview alias even
@@ -1219,7 +1294,12 @@ async function activateCloudflareVersionWithSecretsFile(
   // explicitly through the stable, policy-covered hostname. This requires a prior active version
   // whose traffic can remain untouched while the new version is staged; a truly empty first
   // deployment has no safe zero-percent fallback.
-  if (ready === 'access-denied' && !stagedVersionOverride && previous.versionId !== null) {
+  if (
+    ready === 'access-denied' &&
+    !stagedVersionOverride &&
+    previous.versionId !== null &&
+    !options.requirePreviewForReadiness
+  ) {
     const stableReadinessUrl = desiredTriggerConfig.workers_dev
       ? workersDevReadinessUrl(
           options.workerName,
@@ -1277,6 +1357,8 @@ async function activateCloudflareVersionWithSecretsFile(
         options.fetch ?? globalThis.fetch,
         options.sleep ?? defaultSleep,
         options.readinessAttempts ?? 6,
+        Number.POSITIVE_INFINITY,
+        options.requireVersionMetadata ? versionId : undefined,
       );
     }
   }
@@ -1814,6 +1896,7 @@ async function bootstrapFirstDeployment(
   configPath: string | undefined,
   previousVersionId: string | null,
   atomic = false,
+  previousTriggerConfig?: CloudflareTriggerConfig,
 ): Promise<CloudflareVersionActivation> {
   if (!options.verifyUploader()) {
     return { ok: false, reason: 'uploader-changed' };
@@ -1882,25 +1965,84 @@ async function bootstrapFirstDeployment(
       ...(versionId ? { versionId } : {}),
     };
   }
+  if (!options.verifyUploader()) {
+    return {
+      ok: false,
+      reason: 'uploader-changed',
+      versionId,
+      previousVersionId,
+      rollback: 'unsafe',
+    };
+  }
+  // A version-aware atomic upload activates code without publishing routes.
+  // Publish only the active owner's snapshot before probing a first Custom
+  // Domain; enabling an unrequested workers.dev URL would expose the app.
+  options.onProgress?.('Updating routes and triggers...');
+  const triggerOptions = {
+    runWrangler: options.runWrangler,
+    workerName: options.workerName,
+    configPath: options.configPath,
+    targetVersionId: versionId,
+    targetTriggerConfig: options.preserveTriggers
+      ? { ...desiredTriggerConfig, preserve: true }
+      : desiredTriggerConfig,
+    previousTriggerConfig,
+    ...(previousVersionId && previousTriggerConfig
+      ? { knownTriggerConfigs: { [previousVersionId]: previousTriggerConfig } }
+      : {}),
+    publishEmptyCustomDomains: options.publishEmptyCustomDomains,
+    publishEmptyCrons: options.publishEmptyCrons,
+  };
+  const triggers = await stabilizeCloudflareVersionTriggers(triggerOptions);
+  if (!triggers.ok || !triggers.targetOwnsTraffic) {
+    const superseded =
+      triggers.activeVersionId !== undefined &&
+      triggers.activeVersionId !== null &&
+      triggers.activeVersionId !== versionId;
+    return {
+      ok: false,
+      reason: superseded ? 'deployment-changed' : 'triggers-failed',
+      ...(!triggers.ok ? { status: triggers.status } : {}),
+      versionId,
+      previousVersionId,
+      activeVersionId: triggers.activeVersionId,
+      rollback: superseded ? 'not-needed' : triggers.activeVersionId ? 'unavailable' : 'unsafe',
+      ...(superseded
+        ? {
+            triggerRepair: triggers.ok
+              ? 'succeeded'
+              : triggers.reason === 'metadata-unavailable'
+                ? 'unavailable'
+                : 'failed',
+          }
+        : {}),
+    };
+  }
   const previewUrl = publishedCloudflareUrl(
     options.workerName,
     desiredTriggerConfig,
     reportedOrConfiguredUrl,
   );
+  const usesCustomDomain =
+    !desiredTriggerConfig.workers_dev &&
+    desiredTriggerConfig.routes.some((route) => isRecord(route) && route.custom_domain === true);
+  const customDomainBootstrap = !atomic && usesCustomDomain;
+  const readinessTimeoutMs = customDomainBootstrap ? 300_000 : 60_000;
   options.onProgress?.('Waiting for the Worker to become ready...');
   const ready = await probeReadiness(
     `${previewUrl.replace(/\/$/, '')}/__void/ready`,
     options.workerName,
-    reportedUrl || desiredTriggerConfig.workers_dev ? options.readinessHeaders : undefined,
+    extractWorkersDevSubdomain(previewUrl) ? options.readinessHeaders : undefined,
     extractWorkersDevSubdomain(previewUrl),
     undefined,
     options.fetch ?? globalThis.fetch,
     options.sleep ?? defaultSleep,
-    // A new Worker also needs its public route/DNS to propagate. Subsequent
-    // version previews can use the shorter retry window, but bootstrap needs
-    // more than its roughly six seconds of backoff. Keep an overall deadline.
-    options.readinessAttempts ?? 30,
-    60_000,
+    // A first Custom Domain needs DNS and certificate propagation. Existing
+    // previews and explicitly atomic releases retain their shorter window.
+    // Keep an overall deadline even when requests time out individually.
+    options.readinessAttempts ?? (customDomainBootstrap ? 150 : 30),
+    readinessTimeoutMs,
+    options.requireVersionMetadata ? versionId : undefined,
   );
   if (ready !== 'ready') {
     return {
@@ -1916,6 +2058,50 @@ async function bootstrapFirstDeployment(
       versionId,
       previousVersionId,
       rollback: 'unavailable',
+      ...(ready === 'failed' && usesCustomDomain
+        ? {
+            diagnostic:
+              'The Custom Domain may still be propagating DNS or its TLS certificate. Check the configured domain in Cloudflare, then retry `void deploy --platform cloudflare` once its /__void/ready endpoint is reachable.',
+          }
+        : {}),
+    };
+  }
+  if (!options.verifyUploader()) {
+    return {
+      ok: false,
+      reason: 'uploader-changed',
+      versionId,
+      previousVersionId,
+      rollback: 'unsafe',
+    };
+  }
+  // DNS propagation can outlast another deploy. A successful response alone
+  // must not record this version as live after a newer owner took over.
+  const ownerAfterReadiness = await readCurrentProductionVersion(options, configPath);
+  if (ownerAfterReadiness.kind === 'failed') {
+    return {
+      ok: false,
+      reason: 'status-failed',
+      status: ownerAfterReadiness.status,
+      versionId,
+      previousVersionId,
+      rollback: 'unsafe',
+    };
+  }
+  if (ownerAfterReadiness.kind !== 'ok' || ownerAfterReadiness.versionId !== versionId) {
+    const repair = await stabilizeCloudflareVersionTriggers(triggerOptions);
+    return {
+      ok: false,
+      reason: 'deployment-changed',
+      versionId,
+      previousVersionId,
+      activeVersionId: repair.activeVersionId,
+      rollback: 'not-needed',
+      triggerRepair: repair.ok
+        ? 'succeeded'
+        : repair.reason === 'metadata-unavailable'
+          ? 'unavailable'
+          : 'failed',
     };
   }
   return {
@@ -2116,6 +2302,7 @@ async function probeReadiness(
   sleep: (milliseconds: number) => Promise<void>,
   attempts: number,
   timeoutMs = Number.POSITIVE_INFINITY,
+  expectedVersionId?: string,
 ): Promise<'ready' | 'failed' | 'access-denied'> {
   const headers = guardedReadinessHeaders(
     url,
@@ -2148,8 +2335,11 @@ async function probeReadiness(
         signal: AbortSignal.timeout(Math.max(1, Math.min(10_000, remaining))),
       });
       if (response.ok) {
-        const body = (await response.json()) as { ready?: unknown };
-        if (body.ready === true) {
+        const body = (await response.json()) as { ready?: unknown; versionId?: unknown };
+        if (
+          body.ready === true &&
+          (expectedVersionId === undefined || body.versionId === expectedVersionId)
+        ) {
           return 'ready';
         }
       } else if (await isCloudflareAccessDenial(response)) {

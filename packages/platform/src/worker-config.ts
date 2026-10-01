@@ -1,5 +1,9 @@
 import { createPlatformResourceOwnershipMarker } from './installation.ts';
-import { createApplicationRoutes, type PlatformDeploymentManifest } from './manifest.ts';
+import {
+  createApplicationRoutes,
+  platformDashboardUrl,
+  type PlatformDeploymentManifest,
+} from './manifest.ts';
 
 export type PlatformProvisionedResourceIds = Readonly<{
   hyperdrive: string;
@@ -49,6 +53,7 @@ export function createPlatformWorkerConfigs(input: {
   const publicEndpoints = input.publicEndpoints ?? true;
   const trafficState = input.trafficState ?? 'enabled';
   const names = deployment.resources;
+  const dashboardUrl = platformDashboardUrl(deployment);
   const sharedEmailIngress = deployment.emailSharedZoneId
     ? {
         EMAIL_SHARED_ACCOUNT_ID: accountId,
@@ -160,6 +165,7 @@ export function createPlatformWorkerConfigs(input: {
     },
     vars: {
       AUTH_REDIRECT_URI: `${apiUrl}/auth/callback`,
+      ...(dashboardUrl ? { DASHBOARD_URL: dashboardUrl } : {}),
       AI_GATEWAY_ID: names.aiGateway,
       CRON_FIRES_QUEUE_NAME: names.cronQueue,
       ...(input.deploymentExecution === 1 ? { DEPLOYMENTS_QUEUE_NAME: names.deploymentQueue } : {}),

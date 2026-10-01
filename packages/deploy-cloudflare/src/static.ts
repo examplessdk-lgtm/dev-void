@@ -28,11 +28,15 @@ export function renderCloudflareStaticEntry(options: {
   headerRules?: ReadonlyArray<HeaderRule>;
   redirectRules?: ReadonlyArray<RedirectRule>;
   fallbackRules?: ReadonlyArray<RedirectRule>;
+  versionMetadataBinding?: string;
 }): string {
   const config = JSON.stringify({
     ...(options.headerRules?.length ? { headerRules: options.headerRules } : {}),
     ...(options.redirectRules?.length ? { redirectRules: options.redirectRules } : {}),
     ...(options.fallbackRules?.length ? { fallbackRules: options.fallbackRules } : {}),
+    ...(options.versionMetadataBinding
+      ? { versionMetadataBinding: options.versionMetadataBinding }
+      : {}),
   });
   return [
     `import { createStaticEdgeHandler } from ${JSON.stringify(options.runtimeImport ?? '@void/edge')};`,

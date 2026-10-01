@@ -34,6 +34,24 @@ describe('platform args', () => {
       expect(() => parsePlatformArgs(['install', ...flags])).toThrow();
     }
   });
+
+  it('configures dashboard origins only in install, upgrade, and repair', () => {
+    for (const command of ['install', 'upgrade', 'repair']) {
+      expect(
+        parsePlatformArgs([command, '--dashboard-url', 'https://DASH.example.com:8443/']),
+      ).toMatchObject({ dashboardUrl: 'https://dash.example.com:8443' });
+      expect(parsePlatformArgs([command])).not.toHaveProperty('dashboardUrl');
+      expect(() =>
+        parsePlatformArgs([command, '--dashboard-url', 'https://dash.example.com/account']),
+      ).toThrow('HTTPS origin');
+      expect(() => parsePlatformArgs([command, '--dashboard-url'])).toThrow('requires a value');
+    }
+    for (const command of ['enable', 'disable', 'rollback', 'uninstall']) {
+      expect(() =>
+        parsePlatformArgs([command, '--dashboard-url', 'https://dash.example.com']),
+      ).toThrow();
+    }
+  });
   it('parses resumable domain setup without confusing app-domain commands', () => {
     expect(
       parsePlatformArgs(['domain', 'set', 'example.com', '--installation', 'team', '--plan']),

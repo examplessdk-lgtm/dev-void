@@ -39,6 +39,7 @@ import {
   skipOrphanSweepDelay,
   type TestEnv,
 } from './helpers.ts';
+import { nativeFormSubmission } from './native-form-browser.ts';
 
 let env: TestEnv;
 let manifestCounter = 0;
@@ -524,6 +525,34 @@ function expectNoZeroTrustSecrets(text: string) {
 }
 
 describe('admin Zero Trust', () => {
+  test('admits native setup form validation while retaining its exact-origin CSRF guard', async () => {
+    const admin = await createTestUser(env.db, 'zt-native', 'github', undefined, 'free', 'admin');
+    const origin = 'https://api.example.com';
+    const input = {
+      env,
+      origin,
+      cookie: `admin_token=${admin.adminJwt}`,
+      path: '/admin/zero-trust?test=private-query',
+      fields: {
+        apiToken: 'synthetic-form-token',
+        identityProviderIds: '   ',
+        policyIds: 'policy-1',
+      },
+      button: 'Save and reconcile',
+    };
+    expect(await nativeFormSubmission({ ...input, noReferrer: true })).toEqual({
+      pagePolicy: 'strict-origin',
+      submission: { origin: 'null', referrer: undefined, status: 403 },
+    });
+    expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+    expect(await nativeFormSubmission(input)).toEqual({
+      pagePolicy: 'strict-origin',
+      submission: { origin, referrer: `${origin}/`, status: 400 },
+    });
+    // Empty provider IDs fail validation before any Cloudflare request or mutation.
+    expect(await env.db.select().from(platformSettings)).toHaveLength(0);
+  });
+
   test('renders the installation page without exposing a credential', async () => {
     const admin = await createTestUser(
       env.db,
@@ -545,7 +574,7 @@ describe('admin Zero Trust', () => {
     const res = await req('/admin/zero-trust', admin.adminJwt);
     expect(res.status).toBe(200);
     expect(res.headers.get('Cache-Control')).toBe('no-store');
-    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(res.headers.get('Referrer-Policy')).toBe('strict-origin');
     const html = await res.text();
     const visible = visibleMarkup(html);
     expect(visible).toContain('Project Zero Trust');
@@ -670,7 +699,7 @@ describe('admin Zero Trust', () => {
     expect(navigation.status).toBe(200);
     expect(navigation.headers.get('X-VoidPages')).toBe('true');
     expect(navigation.headers.get('Cache-Control')).toBe('no-store');
-    expect(navigation.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(navigation.headers.get('Referrer-Policy')).toBe('strict-origin');
     const pageObject = (await navigation.json()) as { component: string; shared: object };
     expect(pageObject.component).toBe('zeroTrust');
     expect(pageObject.shared).not.toHaveProperty('adminFateSnapshot');
@@ -804,7 +833,7 @@ describe('admin Zero Trust', () => {
 
     expect(res.status).toBe(400);
     expect(res.headers.get('Cache-Control')).toBe('no-store');
-    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(res.headers.get('Referrer-Policy')).toBe('strict-origin');
     const html = await res.text();
     expect(visibleMarkup(html)).toContain('identity providers must contain between 1 and 16 ids');
     expect(html).not.toContain('form-token-value');

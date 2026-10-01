@@ -465,6 +465,10 @@ const HELP_TREE: HelpTree = {
             command: '--no-control-plane-domain',
             description: 'Use the default workers.dev API hostname',
           },
+          {
+            command: '--dashboard-url <origin>',
+            description: 'HTTPS origin of a separately deployed dashboard',
+          },
           { command: '--plan', description: 'Print the exact plan without changing Cloudflare' },
           { command: '--resume', description: 'Resume the matching local installation' },
           {
@@ -816,7 +820,7 @@ const HELP_TREE: HelpTree = {
         'void email disallow <address> [options]',
       ),
       // The one nested group: verbs parse in email-args.ts (`domain <add|status|list|sync|rotate-secret|remove>`).
-      // Void-platform-only, so `--project` is global here; `--subdomain` is `add`-only.
+      // Void-platform-only; custom inbound requires a zone apex.
       domain: {
         summary: 'Send and receive at your own domain on a Cloudflare zone.',
         usage: ['void email domain <verb> [<domain>] [options]'],
@@ -843,25 +847,12 @@ const HELP_TREE: HelpTree = {
             description: 'Disable the domain assignment and reconcile shared resources',
           },
         ],
-        options: [
-          {
-            command: '--subdomain <label|host>',
-            description: 'On add: register this subdomain instead of the proposed mail.<domain>',
-          },
-          { command: '--project <name>', description: 'Project name override' },
-        ],
+        options: [{ command: '--project <name>', description: 'Project name override' }],
         children: {
           add: {
-            summary:
-              'Register a domain on a Cloudflare zone you own for sending and receiving. Proposes mail.<domain> when the apex already carries MX.',
+            summary: 'Register a Cloudflare zone apex you own for sending and receiving.',
             usage: ['void email domain add <domain> [options]'],
-            options: [
-              {
-                command: '--subdomain <label|host>',
-                description: 'Register this subdomain instead of the proposed mail.<domain>',
-              },
-              { command: '--project <name>', description: 'Project name override' },
-            ],
+            options: [{ command: '--project <name>', description: 'Project name override' }],
           },
           status: withProjectOption(
             'Show a registered domain and its recorded readiness.',
@@ -1319,7 +1310,7 @@ function lifecycleHelp(
   return {
     summary,
     usage: [
-      `void platform ${command} [id] [--plan]${command === 'disable' ? '' : ' [--runtime <path>]'} [--yes]`,
+      `void platform ${command} [id] [--plan]${command === 'disable' ? '' : ' [--runtime <path>]'}${command === 'upgrade' || command === 'repair' ? ' [--dashboard-url <origin>]' : ''} [--yes]`,
     ],
     options: [
       { command: '--plan', description: 'Print the exact plan without making changes' },
@@ -1331,6 +1322,15 @@ function lifecycleHelp(
               description: 'Deploy an integrity-checked runtime directory instead of the package',
             },
           ]),
+      ...(command === 'upgrade' || command === 'repair'
+        ? [
+            {
+              command: '--dashboard-url <origin>',
+              description:
+                'Configure a separately deployed dashboard; omission keeps its saved origin',
+            },
+          ]
+        : []),
       { command: '--yes', description: 'Acknowledge non-interactive Cloudflare changes' },
     ],
   };

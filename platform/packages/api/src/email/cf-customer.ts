@@ -78,7 +78,45 @@ export type CfEmailRoutingRule = Readonly<{
   enabled: boolean;
   name: string | null;
   addresses: ReadonlyArray<string>;
+  id: string | null;
+  workerName: string | null;
+  /** Only a single literal `to` matcher and a single Worker action can be owned. */
+  literalWorker: boolean;
 }>;
+
+function parseRoutingRule(value: unknown): CfEmailRoutingRule {
+  const rule = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const matchers = Array.isArray(rule.matchers) ? rule.matchers : [];
+  const actions = Array.isArray(rule.actions) ? rule.actions : [];
+  const addresses = matchers.flatMap((matcher: unknown) => {
+    if (!matcher || typeof matcher !== 'object') {
+      return [];
+    }
+    const m = matcher as Record<string, unknown>;
+    return m.type === 'literal' && m.field === 'to' && typeof m.value === 'string'
+      ? [m.value.toLowerCase()]
+      : [];
+  });
+  const action =
+    actions.length === 1 && actions[0] && typeof actions[0] === 'object'
+      ? (actions[0] as Record<string, unknown>)
+      : null;
+  const workerName =
+    action?.type === 'worker' &&
+    Array.isArray(action.value) &&
+    action.value.length === 1 &&
+    typeof action.value[0] === 'string'
+      ? action.value[0]
+      : null;
+  return {
+    id: typeof rule.id === 'string' && rule.id ? rule.id : null,
+    enabled: rule.enabled === true,
+    name: typeof rule.name === 'string' ? rule.name : null,
+    addresses,
+    workerName,
+    literalWorker: matchers.length === 1 && addresses.length === 1 && workerName !== null,
+  };
+}
 
 /** One entry of the sending-subdomain list; name + enabled are required on the wire. */
 export type CfSendingSubdomain = Readonly<{
@@ -135,6 +173,18 @@ export type CfCustomerClient = Readonly<{
   getCatchAll: (zoneId: string) => Promise<CfCatchAllRule | null>;
   /** Enabled explicit address rules outrank a zone catch-all. */
   listRoutingRules: (zoneId: string) => Promise<ReadonlyArray<CfEmailRoutingRule>>;
+  getRoutingRule: (zoneId: string, ruleId: string) => Promise<CfEmailRoutingRule | null>;
+  putLiteralRule: (
+    zoneId: string,
+    ruleId: string | null,
+    input: {
+      name: string;
+      address: string;
+      workerName: string;
+    },
+  ) => Promise<CfEmailRoutingRule>;
+  deleteRoutingRule: (zoneId: string, ruleId: string) => Promise<void>;
+  enableSubaddressing: (zoneId: string) => Promise<void>;
   /** PUT catch-all with wrangler's reset shape: one drop action, disabled. */
   resetCatchAll: (zoneId: string) => Promise<void>;
   /**
@@ -352,26 +402,7 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
           throw new Error('Cloudflare routing rules response was not an array');
         }
         for (const value of result) {
-          if (!value || typeof value !== 'object') {
-            continue;
-          }
-          const rule = value as { enabled?: unknown; name?: unknown; matchers?: unknown };
-          const addresses = Array.isArray(rule.matchers)
-            ? rule.matchers.flatMap((matcher: unknown) => {
-                if (!matcher || typeof matcher !== 'object') {
-                  return [];
-                }
-                const m = matcher as { type?: unknown; field?: unknown; value?: unknown };
-                return m.type === 'literal' && typeof m.value === 'string'
-                  ? [m.value.toLowerCase()]
-                  : [];
-              })
-            : [];
-          rules.push({
-            enabled: rule.enabled === true,
-            name: typeof rule.name === 'string' ? rule.name : null,
-            addresses,
-          });
+          rules.push(parseRoutingRule(value));
         }
         if (result.length < 50) {
           break;
@@ -381,6 +412,52 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
         }
       }
       return rules;
+    },
+
+    getRoutingRule: async (zoneId, ruleId) => {
+      try {
+        return parseRoutingRule(
+          await call(`/zones/${zoneId}/email/routing/rules/${encodeURIComponent(ruleId)}`),
+        );
+      } catch (error) {
+        if (error instanceof CloudflareApiError && error.status === 404) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    putLiteralRule: async (zoneId, ruleId, input) =>
+      parseRoutingRule(
+        await call(
+          `/zones/${zoneId}/email/routing/rules${ruleId ? `/${encodeURIComponent(ruleId)}` : ''}`,
+          {
+            method: ruleId ? 'PUT' : 'POST',
+            body: JSON.stringify({
+              name: input.name,
+              enabled: true,
+              matchers: [{ type: 'literal', field: 'to', value: input.address }],
+              actions: [{ type: 'worker', value: [input.workerName] }],
+            }),
+          },
+        ),
+      ),
+    deleteRoutingRule: async (zoneId, ruleId) => {
+      try {
+        await call(`/zones/${zoneId}/email/routing/rules/${encodeURIComponent(ruleId)}`, {
+          method: 'DELETE',
+        });
+      } catch (error) {
+        if (!(error instanceof CloudflareApiError && error.status === 404)) {
+          throw error;
+        }
+      }
+    },
+    // PATCH changes only plus-address matching; DNS and other zone settings are preserved.
+    enableSubaddressing: async (zoneId) => {
+      await call(`/zones/${zoneId}/email/routing`, {
+        method: 'PATCH',
+        body: JSON.stringify({ support_subaddress: true }),
+      });
     },
 
     resetCatchAll: async (zoneId) => {

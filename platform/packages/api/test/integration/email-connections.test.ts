@@ -52,9 +52,81 @@ import {
   type TestEnv,
 } from './helpers.ts';
 
-const zones = {
-  'example.com': { id: 'zone-example', name: 'example.com', accountId: 'customer-account' },
-};
+// Each fixture domain below is the apex of its own visible test zone.
+const zones = Object.fromEntries(
+  [
+    'example.com',
+    'active.example.com',
+    'alerts.example.com',
+    'blocked-removal.example.com',
+    'blocked-rotation.example.com',
+    'catchall-preflight.example.com',
+    'concurrent-one.example.com',
+    'concurrent-two.example.com',
+    'first.example.com',
+    'foreign.example.com',
+    'gone.example.com',
+    'hr.example.com',
+    'late-failure.example.com',
+    'late-success.example.com',
+    'limits.example.com',
+    'lost.example.com',
+    'mail.example.com',
+    'manager-retained-replacement.example.com',
+    'manager-retained-staged.example.com',
+    'manager.example.com',
+    'mutation-race.example.com',
+    'mutation-replay.example.com',
+    'mx.example.com',
+    'not-applied-delete.example.com',
+    'not-applied-rotation.example.com',
+    'occupied.example.com',
+    'one.example.com',
+    'other.example.com',
+    'pending-original.example.com',
+    'pending-replacement.example.com',
+    'pending-rotation.example.com',
+    'permission.example.com',
+    'probe-removal.example.com',
+    'probe-route.example.com',
+    'queue-a.example.com',
+    'queue-b.example.com',
+    'race.example.com',
+    'readd-conflict.example.com',
+    'readd-staged.example.com',
+    'readd.example.com',
+    'recover-relay.example.com',
+    'recover-routing.example.com',
+    'recovery-timezone.example.com',
+    'refused.example.com',
+    'replacement-staged.example.com',
+    'replay.example.com',
+    'rotate.example.com',
+    'rotation-credential.example.com',
+    'rotation-repair.example.com',
+    'second.example.com',
+    'sending-negative.example.com',
+    'sending-removal.example.com',
+    'sending.example.com',
+    'setup-repair.example.com',
+    'stale-removal.example.com',
+    'status-removal.example.com',
+    'support.example.com',
+    'sync-staged-rotation.example.com',
+    'timeout.example.com',
+    'transfer.example.com',
+    'two.example.com',
+    'unknown-delete.example.com',
+    'unknown.example.com',
+  ].map((name) => [
+    name,
+    {
+      id: name === 'example.com' ? 'zone-example' : 'zone-' + name.replaceAll('.', '-'),
+      name,
+      accountId: 'customer-account',
+    },
+  ]),
+);
 const TOKEN = 'customer-scoped-token';
 let env: TestEnv;
 function bindings(): ApiEnv['Bindings'] {
@@ -280,7 +352,7 @@ describe('durable zone email connections', () => {
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(1);
   });
 
-  it('repairs a pending reused connection and its superseded original route', async () => {
+  it('repairs a pending apex connection while fencing its superseded original operation', async () => {
     const owner = await createTestUser(env.db);
     const project = await createTestProject(env.db, owner.id, 'pending-connection-repair');
     const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {
@@ -308,13 +380,13 @@ describe('durable zone email connections', () => {
     delete failures.routingDns;
     const replacement = await requestEmailDomainAdd(env.db, bindings(), {
       projectId: project.id,
-      domain: 'pending-replacement.example.com',
+      domain: 'pending-original.example.com',
       token: 'corrected-customer-token',
       actor,
     });
     await runEmailOperation(env.db, bindings(), replacement.operationId);
 
-    const replacementRoute = (await resolveEmailDomain(env.db, 'pending-replacement.example.com'))!;
+    const replacementRoute = (await resolveEmailDomain(env.db, 'pending-original.example.com'))!;
     expect(replacementRoute.route.inbound_status).toBe('ready');
     expect(replacementRoute.connection.desired_generation).toBeGreaterThan(
       blocked.desired_generation,
@@ -340,7 +412,7 @@ describe('durable zone email connections', () => {
       (await resolveEmailDomain(env.db, 'pending-original.example.com'))?.route.inbound_status,
     ).toBe('ready');
     expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
-    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
+    expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(1);
   });
 
   it('blocks a failed provider read before its write and resumes without an ambiguous mutation', async () => {
@@ -543,7 +615,7 @@ describe('durable zone email connections', () => {
     delete failures.scriptPut;
     const second = await requestEmailDomainAdd(env.db, bindings(), {
       projectId: project.id,
-      domain: 'mail.other.test',
+      domain: 'other.test',
       actor,
       token: TOKEN,
     });
@@ -1275,7 +1347,7 @@ describe('durable zone email connections', () => {
     { credentialStatus: 'expired', interruptStep: 'catchall_detach' },
     { credentialStatus: 'expired', interruptStep: 'ingress_delete' },
   ] as const)(
-    'keeps sibling ingress with $credentialStatus credentials after interruption at $interruptStep',
+    'keeps unrelated zone ingress with $credentialStatus credentials after interruption at $interruptStep',
     async ({ credentialStatus, interruptStep }) => {
       const user = await createTestUser(env.db);
       const first = await createTestProject(env.db, user.id, 'disabled-first');
@@ -1299,7 +1371,15 @@ describe('durable zone email connections', () => {
         .update(emailDomainRoutes)
         .set({ desired_state: 'disabled', inbound_status: 'disabled' })
         .where(eq(emailDomainRoutes.id, b.routeId));
-      await env.db.update(emailCredentials).set({ status: credentialStatus });
+      await env.db
+        .update(emailCredentials)
+        .set({ status: credentialStatus })
+        .where(
+          eq(
+            emailCredentials.id,
+            (await resolveEmailDomain(env.db, 'two.example.com'))!.connection.credential_id!,
+          ),
+        );
       const callsBeforeRemoval = stub.calls.length;
       const remove = await requestEmailDomainRemove(env.db, bindings(), a.routeId, {
         kind: 'owner',
@@ -1324,8 +1404,17 @@ describe('durable zone email connections', () => {
         );
         await env.db
           .update(emailOperationSteps)
-          .set({ started_at: sql`now() - interval '10 minutes'` })
+          .set({ started_at: sql`now() - interval '25 hours'` })
           .where(eq(emailOperationSteps.operation_id, remove));
+        await runEmailOperation(env.db, bindings(), remove);
+        const fence = await inspectUnknownEmailOperationRecovery(env.db, bindings(), remove);
+        await resolveUnknownEmailOperation(env.db, bindings(), {
+          ...fence,
+          ended: true,
+          outcome: 'not-applied',
+          reason:
+            'Stub provider audit confirms the interrupted driver did not execute its deletion',
+        });
       }
       await runEmailOperation(env.db, bindings(), remove);
       expect((await resolveEmailDomain(env.db, 'one.example.com'))?.route.desired_state).toBe(
@@ -1335,8 +1424,8 @@ describe('durable zone email connections', () => {
         (await env.db.select().from(emailOperations).where(eq(emailOperations.id, remove)))[0]
           ?.status,
       ).toBe('completed');
-      expect(stub.calls).toHaveLength(callsBeforeRemoval);
-      expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+      expect(stub.calls.length).toBeGreaterThan(callsBeforeRemoval);
+      expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
       expect((await resolveEmailDomain(env.db, 'two.example.com'))?.route.desired_state).toBe(
         'disabled',
       );
@@ -1448,7 +1537,7 @@ describe('durable zone email connections', () => {
     expect(await env.db.select().from(emailCacheOutbox)).toHaveLength(3);
   });
 
-  it.each(['readd-staged.example.com', 'replacement-staged.example.com'])(
+  it.each(['readd-staged.example.com'])(
     'retires a blocked rotation when the last removed connection is reused by %s',
     async (replacementDomain) => {
       const user = await createTestUser(env.db);
@@ -1509,7 +1598,7 @@ describe('durable zone email connections', () => {
     },
   );
 
-  it('retires a blocked rotation when a manager-retained connection gets a new domain', async () => {
+  it('retires a blocked rotation when a manager-retained connection reuses its zone apex', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'manager-retained-staged');
     const failures: NonNullable<Parameters<typeof stubCustomerCf>[0]>['failOn'] = {};
@@ -1544,16 +1633,13 @@ describe('durable zone email connections', () => {
     delete failures.secretPut;
     const replacement = await requestEmailDomainAdd(env.db, bindings(), {
       projectId: project.id,
-      domain: 'manager-retained-replacement.example.com',
+      domain: 'manager-retained-staged.example.com',
       actor,
       token: 'manager-retained-corrected-token',
     });
     await runEmailOperation(env.db, bindings(), replacement.operationId);
 
-    const repaired = (await resolveEmailDomain(
-      env.db,
-      'manager-retained-replacement.example.com',
-    ))!;
+    const repaired = (await resolveEmailDomain(env.db, 'manager-retained-staged.example.com'))!;
     expect(repaired.route.inbound_status).toBe('ready');
     expect(repaired.connection.active_secret_generation).toBe(original.active_secret_generation);
     expect(repaired.connection.staged_secret_generation).toBeNull();
@@ -1785,7 +1871,7 @@ describe('durable zone email connections', () => {
       await resolveEmailIngress(env.db, {
         installationId: 'void-hosted',
         accountId: 'customer-account',
-        zoneId: 'zone-example',
+        zoneId: zones['transfer.example.com'].id,
         ingressName: (await resolveEmailDomain(env.db, 'transfer.example.com'))!.connection
           .ingress_worker_name,
         recipient: 'hello@transfer.example.com',
@@ -1846,7 +1932,7 @@ describe('durable zone email connections', () => {
     const live = await resolveEmailIngress(env.db, {
       installationId: 'void-hosted',
       accountId: 'customer-account',
-      zoneId: 'zone-example',
+      zoneId: zones['transfer.example.com'].id,
       ingressName: (await resolveEmailDomain(env.db, 'transfer.example.com'))!.connection
         .ingress_worker_name,
       recipient: 'hello@transfer.example.com',
@@ -1857,7 +1943,7 @@ describe('durable zone email connections', () => {
     expect(Number(newHint)).toBeGreaterThan(Number(oldHint));
   });
 
-  it('serializes two sibling removals behind an unresolved connection write', async () => {
+  it('keeps independent apex removal progress separate from an unresolved zone write', async () => {
     const user = await createTestUser(env.db);
     const aProject = await createTestProject(env.db, user.id, 'queued-a');
     const bProject = await createTestProject(env.db, user.id, 'queued-b');
@@ -1889,7 +1975,7 @@ describe('durable zone email connections', () => {
     const queuedB = (
       await env.db.select().from(emailOperations).where(eq(emailOperations.id, removeB))
     )[0]!;
-    expect(queuedB.current_step).toBe(`wait:${removeA}`);
+    expect(queuedB.current_step).toBe(`wait:${b.operationId}`);
     await runEmailOperation(env.db, bindings(), removeA);
     await runEmailOperation(env.db, bindings(), removeB);
     expect(
@@ -1910,7 +1996,7 @@ describe('durable zone email connections', () => {
       'removed',
     );
   });
-  it('shares one ingress across exact sibling routes and retains it on one removal', async () => {
+  it('keeps independent apex ingress and credentials isolated when one zone is removed', async () => {
     const user = await createTestUser(env.db);
     const first = await createTestProject(env.db, user.id, 'first-mail');
     const second = await createTestProject(env.db, user.id, 'second-mail');
@@ -1940,14 +2026,14 @@ describe('durable zone email connections', () => {
       resolveEmailDomain(env.db, 'support.example.com'),
       env.db.select().from(emailZoneConnections),
     ]);
-    expect(connections).toHaveLength(1);
-    expect(aRoute?.connection.id).toBe(bRoute?.connection.id);
+    expect(connections).toHaveLength(2);
+    expect(aRoute?.connection.id).not.toBe(bRoute?.connection.id);
     expect(aRoute?.route.project_id).toBe(first.id);
     expect(bRoute?.route.project_id).toBe(second.id);
     expect(aRoute?.route.outbound_status).toBe('ready');
     expect(bRoute?.route.outbound_status).toBe('ready');
     expect(callsByTag(stub.calls, 'onboardSending')).toHaveLength(2);
-    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(1);
+    expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(2);
     const removed = await requestEmailDomainRemove(env.db, bindings(), a.routeId, {
       kind: 'owner',
       userId: user.id,
@@ -1959,7 +2045,7 @@ describe('durable zone email connections', () => {
     expect((await resolveEmailDomain(env.db, 'support.example.com'))?.route.inbound_status).toBe(
       'ready',
     );
-    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
+    expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(1);
     expect(
       (await resolveEmailDomain(env.db, 'support.example.com'))?.connection.credential_id,
     ).not.toBeNull();
@@ -2836,7 +2922,7 @@ describe('durable zone email connections', () => {
       project = await createTestProject(env.db, owner.id, 'shared-sibling');
     const shared = {
       ...bindings(),
-      EMAIL_SENDER_DOMAIN: 'example.com',
+      EMAIL_SENDER_DOMAIN: 'mail.example.com',
       EMAIL_SHARED_ACCOUNT_ID: env.CF_ACCOUNT_ID,
       EMAIL_SHARED_ZONE_ID: 'platform-mail-zone',
       EMAIL_SHARED_INGRESS_NAME: 'void-email-gateway',
@@ -2849,18 +2935,18 @@ describe('durable zone email connections', () => {
           accountId: env.CF_ACCOUNT_ID,
         },
       },
-      mx: { 'example.com': ['route1.mx.cloudflare.net'] },
+      mx: { 'mail.example.com': ['route1.mx.cloudflare.net'] },
     });
     const bootstrap = await ensureSharedEmailConnection(env.db, shared);
     expect(bootstrap).toBeTruthy();
     await runEmailOperation(env.db, shared, bootstrap!);
     const added = await requestEmailDomainAdd(env.db, shared, {
       projectId: project.id,
-      domain: 'alerts.example.com',
+      domain: 'example.com',
       actor: { kind: 'admin', userId: owner.id },
     });
     await runEmailOperation(env.db, shared, added.operationId);
-    const route = await resolveEmailDomain(env.db, 'alerts.example.com');
+    const route = await resolveEmailDomain(env.db, 'example.com');
     expect(route?.route.inbound_status).toBe('ready');
     expect(route?.route.outbound_status).toBe('ready');
     expect(route?.connection.ingress_worker_name).toBe('void-email-gateway');
@@ -2869,7 +2955,7 @@ describe('durable zone email connections', () => {
       accountId: env.CF_ACCOUNT_ID,
       zoneId: 'platform-mail-zone',
       ingressName: 'void-email-gateway',
-      recipient: 'inbox@alerts.example.com',
+      recipient: 'inbox@example.com',
     });
     expect(nativeRoute?.route.project_id).toBe(project.id);
     expect(nativeRoute?.route.addressing).toBe('custom');
@@ -2880,7 +2966,7 @@ describe('durable zone email connections', () => {
     await runEmailOperation(env.db, shared, sync);
     const retried = await requestEmailDomainAdd(env.db, shared, {
       projectId: project.id,
-      domain: 'alerts.example.com',
+      domain: 'example.com',
       actor: { kind: 'admin', userId: owner.id },
       attemptId: 'shared-active-retry',
     });
@@ -2898,20 +2984,18 @@ describe('durable zone email connections', () => {
     await runEmailOperation(env.db, shared, remove);
     const readded = await requestEmailDomainAdd(env.db, shared, {
       projectId: project.id,
-      domain: 'alerts.example.com',
+      domain: 'example.com',
       actor: { kind: 'admin', userId: owner.id },
       attemptId: 'shared-removed-retry',
     });
     await runEmailOperation(env.db, shared, readded.operationId);
-    expect((await resolveEmailDomain(env.db, 'alerts.example.com'))?.route.inbound_status).toBe(
-      'ready',
-    );
+    expect((await resolveEmailDomain(env.db, 'example.com'))?.route.inbound_status).toBe('ready');
     const finalRemove = await requestEmailDomainRemove(env.db, shared, added.routeId, {
       kind: 'admin',
       userId: owner.id,
     });
     await runEmailOperation(env.db, shared, finalRemove);
-    const removedRoute = (await resolveEmailDomain(env.db, 'alerts.example.com'))!.route;
+    const removedRoute = (await resolveEmailDomain(env.db, 'example.com'))!.route;
     expect(removedRoute.desired_state).toBe('removed');
     expect(
       await env.db.transaction((tx) => disableEmailDomainRouteAndDrainTx(tx, removedRoute.id)),
@@ -2919,16 +3003,18 @@ describe('durable zone email connections', () => {
       cancelled: 0,
       inFlight: 0,
     });
-    const repeatedRemoval = (await resolveEmailDomain(env.db, 'alerts.example.com'))!.route;
+    const repeatedRemoval = (await resolveEmailDomain(env.db, 'example.com'))!.route;
     expect(repeatedRemoval.desired_state).toBe('removed');
     expect(repeatedRemoval.desired_generation).toBe(removedRoute.desired_generation);
     expect(callsByTag(stub.calls, 'scriptPut')).toHaveLength(0);
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(0);
     expect(callsByTag(stub.calls, 'scriptDelete')).toHaveLength(0);
-    expect((await resolveEmailDomain(env.db, 'example.com'))?.route.desired_state).toBe('active');
+    expect((await resolveEmailDomain(env.db, 'mail.example.com'))?.route.desired_state).toBe(
+      'active',
+    );
   });
 
-  it('requires the zone manager for sibling claims and blocks credential renewal while outcome is unknown', async () => {
+  it('rejects another project claiming an assigned apex and blocks credential renewal while outcome is unknown', async () => {
     const manager = await createTestUser(env.db, 'zone-manager'),
       other = await createTestUser(env.db, 'zone-other');
     const first = await createTestProject(env.db, manager.id, 'manager-project'),
@@ -2945,11 +3031,11 @@ describe('durable zone email connections', () => {
     await expect(
       requestEmailDomainAdd(env.db, bindings(), {
         projectId: second.id,
-        domain: 'other.example.com',
+        domain: 'manager.example.com',
         actor: { kind: 'owner', userId: other.id },
         token: TOKEN,
       }),
-    ).rejects.toThrow('manager approval');
+    ).rejects.toThrow('assigned to another project');
     const connection = (await resolveEmailDomain(env.db, 'manager.example.com'))!.connection;
     const rotation = await requestEmailSecretRotation(env.db, bindings(), connection.id, {
       kind: 'owner',

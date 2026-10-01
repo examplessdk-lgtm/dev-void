@@ -54,6 +54,8 @@ Runtime artifacts include migration SQL, the journal, and compatibility metadata
 
 Platform migrations are forward-only. `platform/packages/api/drizzle/compatibility.json` declares exact source-version/schema-digest edges whose old Workers are safe against the target schema. The runtime build validates that each source digest is a prefix of the same PostgreSQL lineage and hashes the journal and every SQL file. When adding a migration, use an expand-compatible change, add only edges verified against the old runtime, and keep destructive contract cleanup for a later release after rollback to the old Workers is no longer possible.
 
+After rollback, an older runtime may stop partway through deleting a project that uses shared email or refuse to rename it. Restore the current runtime and reconcile the project's shared recipient cleanup before retrying deletion or renaming.
+
 Post-success rollback uses the installed runtime's integrity-checked compatibility manifest and an explicitly supplied earlier runtime. The installation checkpoint records running-runtime provenance separately from the actual forward-only database schema. Rollback never reverses migrations, and it rejects a target whose declared safety protocols are older than the installation or authoritative database state.
 
 See the [self-hosted platform guide](../../docs/guide/self-hosted-platform.md) for the supported core feature set, Cloudflare footprint, and lifecycle commands.

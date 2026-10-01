@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -114,6 +115,8 @@ describe('frameworkTriggersPlugin', () => {
       const target = frameworkTriggersDispatchPath(root);
       mkdirSync(join(root, '.void'), { recursive: true });
       writeFileSync(target, '// stale\n', { mode: 0o644 });
+      // Seed the legacy permissions even under a restrictive developer umask.
+      chmodSync(target, 0o644);
       expect(statSync(target).mode & 0o777).toBe(0o644);
 
       const plugin = frameworkTriggersPlugin(root, { devTriggerToken: 'dev-token-test' });

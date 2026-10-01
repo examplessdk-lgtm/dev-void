@@ -216,7 +216,7 @@ Choose Cloudflare during `void init`, then deploy:
 void deploy
 ```
 
-Void opens your browser to sign in when needed. If you have access to several accounts, it asks which one to use and records the account in `void.lock.json`. Credentials are stored in your operating system's keychain. Press Ctrl+C to cancel login, or manage your session with `void cloudflare login`, `status`, and `logout`.
+Void opens your browser to sign in when needed. If it doesn't open, use the login link printed in the terminal and confirm the displayed code. If you have access to several accounts, it asks which one to use and records the account in `void.lock.json`. Credentials are stored in your operating system's keychain. Press Ctrl+C to cancel login, or manage your session with `void cloudflare login`, `status`, and `logout`.
 
 To configure deployment separately from project setup, run `void connect --platform cloudflare`. It uses the same browser login and account selection as `void init`, and saves Cloudflare as the target for subsequent `void deploy` commands.
 
@@ -241,6 +241,8 @@ void deploy
 If the project has no deployment destination, Void asks whether to link and deploy to Cloudflare using the existing Worker and resources. Accept to sign in, verify the configured Worker, and deploy in the same command. Your account and Worker name stay the same. The next deployment is just `void deploy`.
 
 The first handoff preserves resource bindings, production variables, encrypted secrets, event handlers, and existing routes and schedules. It builds the app, checks the uploaded version's bindings and handler set, and verifies readiness before activating it. Void saves `keep_vars: true` in your config so later deployments retain dashboard-only variables too. The active version must also be the latest uploaded version; activate or remove an unpublished candidate in Cloudflare before retrying so secret inheritance has an unambiguous source.
+
+Readiness also needs to identify the uploaded version. Keep an existing [version metadata binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) in your config, or allow Void to access the Worker's [Version URLs](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/) through its existing access policy. If neither is available, the handoff stops before activation and explains how to retry.
 
 Keep this first deployment focused on the existing site. Apart from the explicit ISR cache choice below, new resources, auth setup, runtime features, database migrations, and secret overrides stop the handoff before activation. A later code-only deploy continues to preserve dashboard-managed routes and visibility. Before adding a cron, queue consumer, workflow, or visibility change when those values exist only in the dashboard, add the current `routes`, `workers_dev`, and `preview_urls` values under `cloudflare` in `void.config.ts`. If the build fails, fix it and rerun `void deploy`; Void remembers the destination and checks the existing Worker again.
 
@@ -361,6 +363,8 @@ ISR uses the shared cache protocol. Entries are scoped to a deployment and hostn
 With Cloudflare selected, `void secret`, `void domain`, `void project status|list|logs|rollback`, and remote `void db` commands use the saved Worker and account. Database commands operate on the selected D1 database. Logs are a live tail; Void doesn't provide hosted log history for direct deploys.
 
 Custom domain changes update routes immediately without rewriting schedules, queues, or workflows. Removing the final custom domain uses your browser session from `void cloudflare login` or an API token with Workers Scripts: Edit permission.
+
+The first deployment to a Custom Domain waits up to five minutes for the app to become reachable while DNS and its TLS certificate propagate. If readiness times out, the Worker is already active. Check the domain in Cloudflare and retry `void deploy --platform cloudflare` once the domain's `/__void/ready` endpoint is reachable.
 
 `void project delete` doesn't remove direct Cloudflare resources, which may be shared. Review their use and remove them explicitly in Cloudflare.
 

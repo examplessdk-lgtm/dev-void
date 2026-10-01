@@ -184,6 +184,7 @@ export async function getEmailDomainStatusForProject(
         client,
         snapshot.connection,
         snapshot.route.domain,
+        snapshot.route.addressing,
       );
       try {
         const senders = await client.listSendingSubdomains(snapshot.connection.zone_id);

@@ -11,6 +11,8 @@ export type StaticEdgeEnv = Readonly<{
 }>;
 
 export type StaticEdgeConfig = Readonly<{
+  /** Optional native Worker self-metadata used to identify the served version. */
+  versionMetadataBinding?: string;
   assetConfig?: AssetConfig;
   headerRules?: ReadonlyArray<HeaderRule>;
   redirectRules?: ReadonlyArray<RedirectRule>;
@@ -32,7 +34,18 @@ export function createStaticEdgeHandler(config: StaticEdgeConfig): StaticEdgeHan
     async fetch(request, env): Promise<Response> {
       const originalUrl = new URL(request.url);
       if (request.method === 'GET' && originalUrl.pathname === '/__void/ready') {
-        return Response.json({ ready: true });
+        if (!config.versionMetadataBinding) {
+          return Response.json({ ready: true });
+        }
+        const metadata = config.versionMetadataBinding
+          ? (env as unknown as Record<string, { id?: unknown } | undefined>)[
+              config.versionMetadataBinding
+            ]
+          : undefined;
+        return Response.json(
+          { ready: true, ...(config.versionMetadataBinding ? { versionId: metadata?.id } : {}) },
+          { headers: { 'cache-control': 'no-store' } },
+        );
       }
       let effectiveUrl = new URL(originalUrl);
       let effectiveRequest = request;

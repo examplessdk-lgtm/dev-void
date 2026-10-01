@@ -111,8 +111,12 @@ export default defineQueue<Message>(async (batch, env) => {
 
 - `maxBatchSize`: maximum number of messages per batch (default `10`)
 - `maxBatchTimeout`: maximum seconds to wait before delivering an incomplete batch (default `5`)
-- `maxRetries`: maximum number of retries before a message is dead-lettered (default `3`)
+- `maxRetries`: maximum number of retries before delivery is exhausted (default `3`)
 - `retryDelay`: seconds to wait between retries (default `0`)
+
+Void-managed queues do not configure a dead-letter queue. Cloudflare permanently
+deletes messages that exhaust their retries without one; see
+[Cloudflare's dead-letter queue guide](https://developers.cloudflare.com/queues/configuration/dead-letter-queues/).
 
 ## Deployment behavior
 

@@ -75,6 +75,26 @@ describe('dashboard auth callback', () => {
     );
   });
 
+  it('returns to login when the code exchange cannot reach the API', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const app = createApp(vi.fn().mockRejectedValue(new Error('API request timed out')));
+
+    const response = await app.request(
+      'https://dashboard.example.com/auth/callback?code=auth-code&login_nonce=nonce',
+      {
+        headers: { Cookie: 'void_auth_nonce=nonce', Host: 'dashboard.example.com' },
+        redirect: 'manual',
+      },
+      { API_URL: 'https://api.example.com' },
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe('https://dashboard.example.com/login');
+    expect(response.headers.getSetCookie().some((cookie) => cookie.startsWith('void_token='))).toBe(
+      false,
+    );
+  });
+
   it('redeems localhost managed-login codes with the cookie-bound PKCE verifier', async () => {
     const request = vi.fn(async () => Response.json({ token: 'managed-local-jwt' }));
     const app = createApp(request as typeof fetch);

@@ -36,6 +36,7 @@ import {
   createPlatformInstallationManifest,
   createPlatformResourceOwnershipMarker,
   createPlatformWorkerConfigs,
+  normalizeApplicationDomain,
   parsePlatformInstallationManifest,
   parsePlatformResourceOwnershipMarker,
   PLATFORM_DISABLED_KEY,
@@ -48,6 +49,7 @@ import {
   recordInstallationStep,
   setInstallationDesiredState,
   setInstallationEndpoints,
+  platformDashboardUrl,
   transitionInstallation,
   type InstallationResource,
   type PlatformInstallationManifest,
@@ -1701,6 +1703,7 @@ export async function installPlatform(
         client: dependencies.client,
         manifest,
         plan,
+        dashboardUrl: platformDashboardUrl(plan.deployment),
         protection,
         checkpoint: secretCheckpoint(secrets, workerSecretUpdateIntent),
       });
@@ -2352,7 +2355,11 @@ export async function installPlatform(
 
     manifest = setInstallationEndpoints(
       manifest,
-      { apiUrl: plan.apiUrl, dashboardUrl: null, proxyUrl: plan.proxyUrl },
+      {
+        apiUrl: plan.apiUrl,
+        dashboardUrl: platformDashboardUrl(plan.deployment),
+        proxyUrl: plan.proxyUrl,
+      },
       now(),
     );
     if (preserveDisabled) {
@@ -6220,13 +6227,11 @@ function parseWorkerCutoverSnapshot(value: string): PlatformWorkerCutoverSnapsho
   }
 }
 
-function interruptedWorkerCutover(
-  manifest: PlatformInstallationManifest,
-): InterruptedWorkerCutover | null {
+function workerCutoverGenerations(manifest: PlatformInstallationManifest) {
   const generations = new Map<
     number,
     {
-      resolved: boolean;
+      resolution: 'committed' | 'restored' | null;
       staged: Map<
         PlatformWorkerKey,
         {
@@ -6244,11 +6249,11 @@ function interruptedWorkerCutover(
     if (resolution) {
       const generation = Number(resolution[1]);
       const entry = generations.get(generation) ?? {
-        resolved: false,
+        resolution: null,
         staged: new Map(),
         unsafeTraffic: new Set(),
       };
-      entry.resolved = true;
+      entry.resolution = resolution[2] as 'committed' | 'restored';
       generations.set(generation, entry);
       continue;
     }
@@ -6257,7 +6262,7 @@ function interruptedWorkerCutover(
     if (unsafeTraffic) {
       const generation = Number(unsafeTraffic[1]);
       const entry = generations.get(generation) ?? {
-        resolved: false,
+        resolution: null,
         staged: new Map(),
         unsafeTraffic: new Set(),
       };
@@ -6277,15 +6282,21 @@ function interruptedWorkerCutover(
       throw new Error(`platform: Invalid Worker cutover checkpoint ${step.key}.`);
     }
     const entry = generations.get(generation) ?? {
-      resolved: false,
+      resolution: null,
       staged: new Map(),
       unsafeTraffic: new Set(),
     };
     entry.staged.set(staged[2] as PlatformWorkerKey, snapshot);
     generations.set(generation, entry);
   }
-  const unresolved = [...generations.entries()]
-    .filter(([, entry]) => !entry.resolved && entry.staged.size > 0)
+  return generations;
+}
+
+function interruptedWorkerCutover(
+  manifest: PlatformInstallationManifest,
+): InterruptedWorkerCutover | null {
+  const unresolved = [...workerCutoverGenerations(manifest).entries()]
+    .filter(([, entry]) => entry.resolution === null && entry.staged.size > 0)
     .sort(([left], [right]) => right - left)[0];
   return unresolved
     ? {
@@ -6310,8 +6321,10 @@ export async function verifyPlatformWorkerCutoverVersions(
     'dispatch',
   ],
 ): Promise<void> {
-  const cutover = interruptedWorkerCutover(manifest);
-  if (cutover?.generation !== generation || cutover.staged.size !== workerKeys.length) {
+  // Shared email setup commits the retained Worker set before its provider
+  // mutations. Final verification must still inspect that exact generation.
+  const cutover = workerCutoverGenerations(manifest).get(generation);
+  if (!cutover || cutover.resolution === 'restored' || cutover.staged.size !== workerKeys.length) {
     throw new Error(
       `platform: Worker cutover generation ${generation} is missing a complete immutable-version checkpoint.`,
     );
@@ -6673,45 +6686,155 @@ export async function bootstrapPlatformSharedEmail(
   healthProbeToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<string> {
-  const response = await fetcher(`${apiUrl}/internal/platform/email-bootstrap`, {
-    method: 'POST',
-    headers: {
-      'X-Void-Platform-Probe': healthProbeToken,
-      ...cfAccessHeaders(process.env, apiUrl),
-    },
-    signal: AbortSignal.timeout(30_000),
-    redirect: 'manual',
-  });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(
-      `platform: Shared email bootstrap failed at ${apiUrl} (HTTP ${response.status}). Traffic remains disabled.`,
+  // One bootstrap request drives several durable PostgreSQL/provider steps.
+  // A timeout does not cancel its recorded operation; replay the same endpoint
+  // so its idempotency key and step leases reconcile rather than repeat writes.
+  const deadline = Date.now() + 5 * 60_000;
+  let operationId: string | null = null;
+  const timedOut = () =>
+    new Error(
+      `platform: Shared email bootstrap did not finish within five minutes at ${apiUrl}.${operationId ? ` Operation ${operationId} remains incomplete.` : ''} Traffic remains disabled. Retry the installation's repair or resume command to reconcile the existing email operation.`,
     );
+  const waitForProgress = async () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw timedOut();
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(1_000, remaining)));
+  };
+  let response: Response;
+  let value: unknown;
+  let status: Record<string, unknown> | null;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw timedOut();
+    }
+    const signal = AbortSignal.timeout(Math.min(120_000, remaining));
+    try {
+      response = await fetcher(`${apiUrl}/internal/platform/email-bootstrap`, {
+        method: 'POST',
+        headers: {
+          'X-Void-Platform-Probe': healthProbeToken,
+          ...cfAccessHeaders(process.env, apiUrl),
+        },
+        signal,
+        redirect: 'manual',
+      });
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
+        await waitForProgress();
+        continue;
+      }
+      throw new Error(
+        `platform: Shared email bootstrap request failed at ${apiUrl}. Traffic remains disabled. Retry the installation's repair or resume command to reconcile the existing email operation.`,
+      );
+    }
+    try {
+      value = await response.json();
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
+        await waitForProgress();
+        continue;
+      }
+      throw new Error(
+        `platform: Shared email bootstrap failed at ${apiUrl} (HTTP ${response.status}). Traffic remains disabled.`,
+      );
+    }
+    status =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+    const observedOperationId =
+      typeof status?.operationId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(status.operationId)
+        ? status.operationId
+        : null;
+    if (status?.version === 1 && observedOperationId) {
+      if (operationId && operationId !== observedOperationId) {
+        throw new Error(
+          'platform: Shared email bootstrap operation identity changed while waiting. Traffic remains disabled. Inspect the installation before retrying.',
+        );
+      }
+      operationId = observedOperationId;
+    }
+    if (
+      [200, 202, 503].includes(response.status) &&
+      status?.version === 1 &&
+      status.state === 'incomplete' &&
+      observedOperationId &&
+      (status.operationStatus === 'pending' || status.operationStatus === 'running') &&
+      status.failureCode == null
+    ) {
+      await waitForProgress();
+      continue;
+    }
+    break;
   }
-  const status =
-    value && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
   if (
     !response.ok ||
     status?.version !== 1 ||
     status.state !== 'ready' ||
-    typeof status.operationId !== 'string' ||
-    status.operationId.length === 0
+    operationId === null ||
+    status.operationId !== operationId ||
+    (status.operationStatus != null && status.operationStatus !== 'completed') ||
+    status.failureCode != null
   ) {
-    const detail =
-      status && typeof status.operationId === 'string'
-        ? ` Operation ${status.operationId}: ${typeof status.operationStatus === 'string' ? status.operationStatus : 'incomplete'}.`
-        : status && typeof status.operationStatus === 'string'
-          ? ` Operation status: ${status.operationStatus}.`
-          : '';
+    const code = (value: unknown) =>
+      typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value) ? value : null;
+    const operationStatus = code(status?.operationStatus);
+    const operationId =
+      typeof status?.operationId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(status.operationId)
+        ? status.operationId
+        : null;
+    const details = operationId
+      ? [`Operation ${operationId}: ${operationStatus ?? 'incomplete'}.`]
+      : operationStatus
+        ? [`Operation status: ${operationStatus}.`]
+        : [];
+    const currentStep = code(status?.currentStep);
+    const failureCode = code(status?.failureCode);
+    if (currentStep) {
+      details.push(`Step: ${currentStep}.`);
+    }
+    if (failureCode) {
+      details.push(`Failure: ${failureCode}.`);
+    }
+    let domain: string | null = null;
+    if (typeof status?.domain === 'string') {
+      try {
+        domain = normalizeApplicationDomain(status.domain);
+      } catch {
+        // Provider bodies are not diagnostic authority; show only a valid domain.
+      }
+    }
+    const inboundStatus = code(status?.inboundStatus);
+    if (domain) {
+      details.push(`Domain: ${domain}${inboundStatus ? ` (inbound: ${inboundStatus})` : ''}.`);
+    }
+    const mxDetail = domain
+      ? `MX records for ${domain} do not route mail to Cloudflare Email Routing`
+      : null;
+    const safeDetails = [
+      ...(domain
+        ? [mxDetail, `enabled explicit Cloudflare email rules conflict with ${domain}`]
+        : []),
+      'zone catch-all does not point to this ingress',
+      'another enabled catch-all owns this zone',
+    ];
+    if (typeof status?.failureDetail === 'string' && safeDetails.includes(status.failureDetail)) {
+      details.push(`${status.failureDetail}.`);
+      if (currentStep === 'inbound_probe' && status.failureDetail === mxDetail) {
+        details.push(
+          `Enable Email Routing for ${domain} in the Cloudflare dashboard, then resume this installation.`,
+        );
+      }
+    }
+    const detail = details.length ? ` ${details.join(' ')}` : '';
     throw new Error(
       `platform: Shared email bootstrap did not reach inbound readiness at ${apiUrl} (HTTP ${response.status}).${detail} Traffic remains disabled.`,
     );
   }
-  return status.operationId;
+  return operationId;
 }
 
 export function createPlatformHealthProbeToken(ownershipNonce: string): string {

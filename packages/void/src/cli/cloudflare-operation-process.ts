@@ -12,7 +12,12 @@ import { parse } from 'jsonc-parser';
 import { dirname, join, resolve } from 'pathslash';
 import { EnvHttpProxyAgent, fetch as httpFetch } from 'undici';
 import { persistCfKeyringPreference, readCfSessionCredential } from './cf-session.ts';
-import { cloudflareDeviceCode, printCloudflareLoginPrompt } from './cloudflare-login-output.ts';
+import {
+  cloudflareDeviceCode,
+  cloudflareVerificationUrl,
+  printCloudflareLoginLink,
+  printCloudflareLoginPrompt,
+} from './cloudflare-login-output.ts';
 
 type Result = {
   status: number;
@@ -124,6 +129,7 @@ function runInteractiveCf(command: Array<string>): Promise<Result> {
     });
     let output = '';
     let announced = false;
+    let announcedLink = false;
     let settled = false;
     const finish = (value: Result) => {
       if (!settled) {
@@ -138,6 +144,13 @@ function runInteractiveCf(command: Array<string>): Promise<Result> {
         if (code) {
           announced = true;
           printCloudflareLoginPrompt(code);
+        }
+      }
+      if (!announcedLink) {
+        const url = cloudflareVerificationUrl(output);
+        if (url) {
+          announcedLink = true;
+          printCloudflareLoginLink(url);
         }
       }
     };

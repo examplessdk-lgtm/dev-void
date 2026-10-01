@@ -17,7 +17,7 @@ const app = new Hono<ApiEnv>();
 app.use('*', async (context, next) => {
   await next();
   context.res.headers.set('Cache-Control', 'no-store');
-  context.res.headers.set('Referrer-Policy', 'no-referrer');
+  context.res.headers.set('Referrer-Policy', 'strict-origin');
 });
 app.onError(renderOperationError);
 

@@ -74,6 +74,7 @@ type RoutingPluginOptions = {
     refresh?: boolean,
   ) => ApplicationAnalysis;
   isAuthEnabled: () => boolean;
+  getVersionMetadataBinding?: () => string | undefined;
   devTriggerToken?: string;
   headConfig?: import('./pages/head.ts').HeadConfig;
   output?: 'server' | 'static';
@@ -459,6 +460,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     writeFileIfChanged(
       join(outDir, 'entry.ts'),
       compileWorkerEntry({
+        versionMetadataBinding: options.getVersionMetadataBinding?.(),
         remote,
         webSocketClasses: options.websocketTombstones,
         runtimeEnvPath: compileOptions.runtimeEnvPath,
@@ -615,6 +617,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         writeFileIfChanged(
           join(outDir, 'entry.ts'),
           compileWorkerEntry({
+            versionMetadataBinding: options.getVersionMetadataBinding?.(),
             hasQueues: scan!.queues.length > 0,
             remote,
             assetsDir: resolvedConfig?.build.assetsDir,
@@ -762,6 +765,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           writeFileIfChanged(
             join(outDir, 'entry.ts'),
             compileWorkerEntry({
+              versionMetadataBinding: options.getVersionMetadataBinding?.(),
               hasQueues: scan!.queues.length > 0,
               remote,
               assetsDir: resolvedConfig?.build.assetsDir,

@@ -111,6 +111,11 @@ import { trustedCloudflareWorkerAccessHeaders } from '../shared/cf-access.ts';
 import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV, resolveRemoteMode } from '../shared/env.ts';
 import { buildEnv, WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
+import {
+  CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV,
+  readVersionMetadataBinding,
+  selectNativeVersionMetadataBinding,
+} from '../shared/version-metadata.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
 import { getApiUrl, getToken, getTokenSource } from './auth.ts';
 import {
@@ -656,6 +661,7 @@ const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
 function scrubManagedDeployBuildMarkers(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const { deleteEnvVarCaseAware } = requireProvisionModule();
   deleteEnvVarCaseAware(env, 'VOID_DEPLOY_PROJECT_ID');
+  deleteEnvVarCaseAware(env, CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV);
   for (const name of Object.keys(MANAGED_DEPLOY_BUILD_ENV)) {
     deleteEnvVarCaseAware(env, name);
   }
@@ -5481,6 +5487,13 @@ export async function runCloudflareDeploy(
   // but local files cannot be serialized into the artifact this command uploads.
   requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, CLOUDFLARE_DEPLOY_BUILD_ENV);
   buildChildEnv[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
+  requireProvisionModule().deleteEnvVarCaseAware(
+    buildChildEnv,
+    CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV,
+  );
+  if (existingWorker) {
+    buildChildEnv[CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV] = '1';
+  }
   // Pin NODE_ENV=production for the build too, so the build and the env-schema probes evaluate
   // env.ts under the SAME environment. `vite build` only DEFAULTS NODE_ENV to production when it
   // is unset (`if (!isNodeEnvSet) process.env.NODE_ENV = defaultNodeEnv`), so an ambient
@@ -5523,6 +5536,7 @@ export async function runCloudflareDeploy(
         frameworkPreset,
         schemaFacts.requiredKeys,
         needsAI ? { binding: aiBindingName } : undefined,
+        existingWorker !== null,
       );
     } catch (error) {
       log.error(
@@ -6019,6 +6033,12 @@ export async function runCloudflareDeploy(
       workerName,
       configPath: generatedConfigPath,
       preserveTriggers: existingWorker !== null,
+      requireVersionMetadata:
+        existingWorker === null ||
+        readVersionMetadataBinding(parseRootWranglerConfig(generatedConfigPath)) !== undefined,
+      requirePreviewForReadiness:
+        existingWorker !== null &&
+        readVersionMetadataBinding(parseRootWranglerConfig(generatedConfigPath)) === undefined,
       expectedPreviousVersionId: existingWorker?.versionId,
       trustedInheritanceVersionIds: existingWorker
         ? candidateReceipt?.parentVersionId === existingWorker.versionId
@@ -6210,6 +6230,9 @@ export function formatCloudflareActivationError(
       }
       return 'deploy: the verified Wrangler uploader changed before version activation.';
     case 'status-failed':
+      if (result.versionId) {
+        return `deploy: Worker version ${result.versionId} was published, but current deployment status could not be verified${status}. Inspect \`void project status\` before retrying.`;
+      }
       return `deploy: could not snapshot the current Cloudflare deployment${status}; no version was uploaded.`;
     case 'deployment-changed':
       return result.triggerRepair === 'succeeded'
@@ -6239,6 +6262,9 @@ export function formatCloudflareActivationError(
     case 'upload-output-invalid':
       return 'deploy: Wrangler uploaded a version but did not report its version id; production traffic is unchanged.';
     case 'preview-unavailable':
+      if (result.diagnostic) {
+        return `deploy: candidate readiness cannot be verified.\n\n${result.diagnostic}`;
+      }
       return [
         'deploy: the uploaded Worker Version has no preview URL, so Void cannot verify readiness.',
         'Set CLOUDFLARE_WORKERS_SUBDOMAIN to your account subdomain (for example "my-team")',
@@ -6252,7 +6278,7 @@ export function formatCloudflareActivationError(
       return 'deploy: Cloudflare published atomically but did not report a version id or URL. Inspect `void project status` immediately.';
     case 'atomic-readiness-failed':
     case 'atomic-readiness-access-denied':
-      return 'deploy: the atomic Worker deployment is live, but /__void/ready could not be verified. Inspect `void project status` and Worker logs immediately.';
+      return `deploy: the atomic Worker deployment is live, but /__void/ready could not be verified. Inspect \`void project status\` and Worker logs immediately.${diagnostic}`;
     case 'readiness-failed':
       return [
         'deploy: the uploaded Worker Version did not pass /__void/ready.',
@@ -6274,11 +6300,13 @@ export function formatCloudflareActivationError(
         'did not report its version id and workers.dev URL. Inspect `void project status` before retrying.',
       ].join('\n');
     case 'bootstrap-readiness-failed':
-      return [
-        'deploy: the first Worker deployment did not pass /__void/ready.',
-        'Cloudflare requires this bootstrap to be non-versioned, so the new Worker is already active;',
-        'inspect its logs and `void project status` before retrying.',
-      ].join('\n');
+      return (
+        [
+          'deploy: the first Worker deployment did not pass /__void/ready.',
+          'Cloudflare requires this bootstrap to be non-versioned, so the new Worker is already active;',
+          'inspect its logs and `void project status` before retrying.',
+        ].join('\n') + diagnostic
+      );
     case 'bootstrap-readiness-access-denied':
       return [
         'deploy: Cloudflare Access blocked the first Worker deployment readiness probe.',
@@ -6297,7 +6325,7 @@ export function formatCloudflareActivationError(
           : result.rollback === 'unavailable'
             ? result.previousVersionId === null
               ? 'This was the first deployment, so no previous version was available to restore.'
-              : 'Traffic was restored to the previous version, but its trigger configuration was unavailable. Inspect its routes, schedules, queues, and workflows in Cloudflare before retrying.'
+              : 'Traffic or trigger restoration could not be completed. Inspect its routes, schedules, queues, and workflows in Cloudflare before retrying.'
             : 'Automatic traffic restoration failed; inspect `void project status` immediately.';
       return `deploy: the Worker activated, but Cloudflare trigger synchronization failed${status}. ${rollback}`;
     }
@@ -6341,6 +6369,7 @@ export async function prepareCloudflareFrameworkArtifact(
   preset: FrameworkPreset,
   requiredSecretNames: ReadonlyArray<string> = [],
   ai?: { binding: string },
+  preserveBindings = false,
 ): Promise<void> {
   const workerMain = join(root, preset.workerDir, preset.workerMain);
   const assetsDirectory = join(root, preset.assetsDir);
@@ -6358,6 +6387,11 @@ export async function prepareCloudflareFrameworkArtifact(
   const crons = analysis.jobs;
   const queues = analysis.queues;
   const revalidate = collectRevalidate(voidConfig, null);
+  const rootConfig = parseRootWranglerConfig(configPath);
+  const versionMetadataBinding = selectNativeVersionMetadataBinding(rootConfig, {
+    nativeBuild: true,
+    preserveBindings,
+  });
   await generateDeployWrapperIfNeeded(root, join(root, preset.workerDir), preset.workerMain, {
     crons,
     queues,
@@ -6366,6 +6400,7 @@ export async function prepareCloudflareFrameworkArtifact(
     hasMigrations: false,
     migrationDialect: analysis.dialect,
     readiness: true,
+    versionMetadataBinding,
     ...(hasRevalidate(revalidate) && {
       isr: {
         revalidate: revalidate!,
@@ -6376,7 +6411,6 @@ export async function prepareCloudflareFrameworkArtifact(
   if (preset.cloudflareArtifact === 'vite-plugin') {
     return;
   }
-  const rootConfig = parseRootWranglerConfig(configPath);
   writeCloudflareFrameworkDeployConfig({
     configPath,
     deployPointerPath: deployPointerPath(root),
@@ -6391,6 +6425,7 @@ export async function prepareCloudflareFrameworkArtifact(
     compatibilityFlags: preset.cloudflareCompatibilityFlags,
     crons: [...new Set(crons.flatMap((job) => job.crons))],
     requiredSecrets: requiredSecretNames,
+    versionMetadataBinding,
     ...(ai ? { ai: { ...ai, gateway: voidConfig.ai?.gateway } } : {}),
     ...(preset.workerDir === preset.assetsDir
       ? {
@@ -6660,15 +6695,6 @@ async function runCloudflareStaticDeploy(
   });
   const entryPath = join(root, '.void', 'deploy', 'cloudflare', 'static-edge.mjs');
   mkdirSync(dirname(entryPath), { recursive: true });
-  writeFileSync(
-    entryPath,
-    renderCloudflareStaticEntry({
-      runtimeImport: 'void/edge',
-      headerRules: manifest.headerRules,
-      redirectRules: manifest.redirectRules,
-      fallbackRules: manifest.fallbackRules,
-    }),
-  );
 
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   // Static deployment needs a fetch-only entry and must detach Worker-only
@@ -6691,6 +6717,28 @@ async function runCloudflareStaticDeploy(
     assetConfig: manifest.assetConfig ?? { not_found_handling: 'none' },
   });
   deduplicateGeneratedCompatibilityFlags(staticConfigPath, configPath);
+  const staticConfig = parseRootWranglerConfig(staticConfigPath);
+  const versionMetadataBinding = selectNativeVersionMetadataBinding(staticConfig, {
+    nativeBuild: true,
+    preserveBindings: existingWorker !== null,
+  });
+  if (versionMetadataBinding && staticConfig.version_metadata === undefined) {
+    writeFileSync(
+      staticConfigPath,
+      `${JSON.stringify({ ...staticConfig, version_metadata: { binding: versionMetadataBinding } }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+  }
+  writeFileSync(
+    entryPath,
+    renderCloudflareStaticEntry({
+      runtimeImport: 'void/edge',
+      headerRules: manifest.headerRules,
+      redirectRules: manifest.redirectRules,
+      fallbackRules: manifest.fallbackRules,
+      versionMetadataBinding,
+    }),
+  );
 
   if (existingWorker) {
     assertExistingCloudflareConfig(existingWorker, parseRootWranglerConfig(staticConfigPath), true);
@@ -6768,6 +6816,8 @@ async function runCloudflareStaticDeploy(
       verifyUploader: cfOutput ? cfUploaderIsPinned : uploaderIsPinned,
       configPath: staticConfigPath,
       preserveTriggers: existingWorker !== null,
+      requireVersionMetadata: existingWorker === null || versionMetadataBinding !== undefined,
+      requirePreviewForReadiness: existingWorker !== null && versionMetadataBinding === undefined,
       expectedPreviousVersionId: existingWorker?.versionId,
       trustedInheritanceVersionIds: existingWorker
         ? candidateReceipt?.parentVersionId === existingWorker.versionId

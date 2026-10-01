@@ -509,6 +509,11 @@ export async function emailDomainAdd(
   if (!isValidEmailDomainInput(domain)) {
     return fail(`email: invalid domain '${rawDomain}'.`);
   }
+  if (subdomain !== undefined) {
+    return fail(
+      'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.',
+    );
+  }
   let target: { emailDomain: string; forced: boolean };
   try {
     target = resolveEmailDomainTarget(domain, subdomain);
@@ -516,39 +521,20 @@ export async function emailDomainAdd(
     return fail(err instanceof Error ? err.message : String(err));
   }
 
-  // The MX decision. Forced (--subdomain) needs no default, only a warning
-  // when the named host already carries MX; unforced reads the apex and
-  // falls back to mail.<domain>. Shared by the owner flow and the printed
-  // administrator command, so the handoff names the target setup accepts.
+  // Keep the requested apex. The server checks DNS and zone authority again.
   const dns = deps.dns ?? (await createNodeEmailDns());
   const decideTarget = async (): Promise<void> => {
-    if (target.forced) {
-      const mx = await lookupMxForRender(dns, target.emailDomain);
-      if (mx !== null && mx.length > 0) {
-        log.warn(
-          `MX        ${target.emailDomain} already carries MX (${mx.join(', ')}) — the platform re-checks over public DNS and may refuse it.`,
-        );
-      }
+    const mx = await lookupMxForRender(dns, domain);
+    if (mx === null) {
+      log.info(
+        `MX        could not read ${domain}'s MX from here — the platform decides over public DNS.`,
+      );
+    } else if (mx.some((exchange) => !/\.mx\.cloudflare\.net$/i.test(exchange))) {
+      fail(
+        `email: ${domain} already receives mail from another provider. Platform custom inbound email requires an unused Cloudflare zone apex; choose another apex or use the platform shared mail address.`,
+      );
     } else {
-      const mx = await lookupMxForRender(dns, domain);
-      if (mx === null) {
-        log.info(
-          `MX        could not read ${domain}'s MX from here — the platform decides over public DNS.`,
-        );
-      } else if (mx.length > 0) {
-        target = { emailDomain: `mail.${domain}`, forced: false };
-        log.info(
-          `MX        ${domain} carries MX for ${mx[0]} → apex is off limits\n          using ${target.emailDomain}  [change with --subdomain]`,
-        );
-        const subMx = await lookupMxForRender(dns, target.emailDomain);
-        if (subMx !== null && subMx.length > 0) {
-          log.warn(
-            `MX        ${target.emailDomain} also carries MX (${subMx.join(', ')}) — the platform may refuse it; pick another with --subdomain.`,
-          );
-        }
-      } else {
-        log.info(`MX        ${domain} has no MX records → using the apex`);
-      }
+      log.info(`MX        using the requested apex ${domain}`);
     }
   };
 
@@ -562,7 +548,7 @@ export async function emailDomainAdd(
   const settings = await client.getEmailSettings(projectId);
   if (settings.domains.management === 'admin') {
     const rows = await client.listEmailDomains(projectId);
-    const candidates = [target.emailDomain, ...(target.forced ? [] : [`mail.${domain}`])];
+    const candidates = [target.emailDomain];
     const existing = candidates
       .map((candidate) =>
         rows.find((row) => row.domain === candidate && row.managed_by !== 'admin'),

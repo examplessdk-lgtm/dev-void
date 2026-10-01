@@ -42,7 +42,7 @@ function plan(domain = ''): PlatformInstallPlan {
   };
 }
 describe('platform credential setup links', () => {
-  it('round-trips planned defaults, Hyperdrive, and login choices into install arguments', () => {
+  it('round-trips planned defaults, Hyperdrive, dashboard, and login choices into install arguments', () => {
     const command = formatPlatformInstallCommand({
       commandName: 'void',
       accountId: 'account',
@@ -51,6 +51,7 @@ describe('platform credential setup links', () => {
       applicationDomain: 'example.com',
       zoneName: 'example.com',
       controlPlaneDomain: '',
+      dashboardUrl: 'https://dash.example.com:8443',
       dedicatedZone: false,
       workersDev: false,
       authentication: { providers: ['google', 'oidc'], configurable: true, accessProtection: true },
@@ -64,6 +65,7 @@ describe('platform credential setup links', () => {
       hyperdrive: 'drive-id',
       loginMethods: ['google', 'oidc'],
       accessProtection: true,
+      dashboardUrl: 'https://dash.example.com:8443',
     });
   });
   it('keeps planned domain, authentication, and runtime choices in a copyable command', () => {
@@ -78,13 +80,14 @@ describe('platform credential setup links', () => {
       dedicatedZone: true,
       workersDev: false,
       authConfig: './auth config.json',
+      dashboardUrl: 'https://dash.example.com:8443',
       runtime: './build output',
       yes: true,
     });
     const quotedName =
       process.platform === 'win32' ? "'Team''s Platform'" : "'Team'\\''s Platform'";
     expect(command).toBe(
-      `void-dev platform install --name team --account account --display-name ${quotedName} --application-domain apps.example.com --zone example.com --dedicated-zone --control-plane-domain api.example.com --auth-config './auth config.json' --runtime './build output' --yes`,
+      `void-dev platform install --name team --account account --display-name ${quotedName} --application-domain apps.example.com --zone example.com --dedicated-zone --control-plane-domain api.example.com --auth-config './auth config.json' --dashboard-url https://dash.example.com:8443 --runtime './build output' --yes`,
     );
   });
 

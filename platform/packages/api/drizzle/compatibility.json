@@ -73,6 +73,10 @@
     {
       "platformVersion": "0.22.0",
       "schemaDigest": "bb024ebddf7375f4f01a3a3d8c2853212f7d9c1355c8fa8d6262134025c3c429"
+    },
+    {
+      "platformVersion": "0.22.0",
+      "schemaDigest": "bef2a1cfaad1dcad4aca2a4932ef9aa9b9d8025dca495e3b1027902405da902a"
     }
   ]
 }

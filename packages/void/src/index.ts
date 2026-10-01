@@ -32,6 +32,7 @@ import {
   ensureWranglerCompat,
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
+  findBindingNameOwner,
   hasDurableObjectSqliteMigration,
   LIVE_MIGRATION_TAG,
   normalizeWranglerCompatibilityFlags,
@@ -94,6 +95,10 @@ import {
   resolveRemoteMode,
   stripInternalEnvKeys,
 } from './shared/env.ts';
+import {
+  CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV,
+  selectNativeVersionMetadataBinding,
+} from './shared/version-metadata.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 import { injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
 
@@ -1260,6 +1265,7 @@ export function voidPlugin(options?: {
   // Tracks whether vite is running in dev or build mode. Set early in
   // envPlugin.config so mergeBindings can gate credential injection on 'serve'.
   let viteCommand: 'serve' | 'build' = 'build';
+  let versionMetadataBinding: string | undefined;
 
   // Merge curated wrangler fields from void.config.ts
   const wranglerCompat = isNodeTarget(config.target) ? undefined : readWranglerCompat(root, config);
@@ -1800,6 +1806,24 @@ export function voidPlugin(options?: {
       }
     }
 
+    versionMetadataBinding = selectNativeVersionMetadataBinding(
+      resolved as Record<string, unknown>,
+      {
+        nativeBuild: viteCommand === 'build' && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1',
+        preserveBindings: process.env[CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV] === '1',
+      },
+    );
+    if (versionMetadataBinding) {
+      const owner = findBindingNameOwner(result, 'version_metadata', versionMetadataBinding);
+      if (owner) {
+        throw new Error(
+          `Cloudflare version metadata binding ${versionMetadataBinding} conflicts with ${owner}.`,
+        );
+      }
+      if (!resolved.version_metadata) {
+        result.version_metadata = { binding: versionMetadataBinding };
+      }
+    }
     return result as Partial<WorkerConfig>;
   }
 
@@ -2402,6 +2426,7 @@ export function voidPlugin(options?: {
     routingPlugin(root, {
       getApplicationAnalysis,
       isAuthEnabled: () => authEnabled,
+      getVersionMetadataBinding: () => versionMetadataBinding,
       devTriggerToken,
       headConfig: config.head,
       output: config.output,

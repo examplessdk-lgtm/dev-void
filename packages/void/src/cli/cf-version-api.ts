@@ -111,6 +111,9 @@ function bindingsFromOutput(
       case 'assets':
         bindings.push({ name, type: 'assets' });
         break;
+      case 'version-metadata':
+        bindings.push({ name, type: 'version_metadata' });
+        break;
       default:
         throw new Error(`Cloudflare binding ${name} cannot be uploaded with pinned secrets.`);
     }

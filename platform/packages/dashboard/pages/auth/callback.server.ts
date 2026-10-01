@@ -46,12 +46,20 @@ export const loader = defineHandler(async (context) => {
       return context.redirect(loginUrl(context));
     }
     const exchangePath = isLocal ? '/auth/cli/token' : '/auth/exchange';
-    const resp = await fetchApi(context, exchangePath, {
-      method: 'POST',
-      body: JSON.stringify(
-        isLocal ? { code, state: pkceState, code_verifier: pkceVerifier } : { code },
-      ),
-    });
+    let resp: Response;
+    try {
+      resp = await fetchApi(context, exchangePath, {
+        method: 'POST',
+        body: JSON.stringify(
+          isLocal ? { code, state: pkceState, code_verifier: pkceVerifier } : { code },
+        ),
+      });
+    } catch (error) {
+      console.warn(
+        `[dashboard] ${exchangePath} request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return context.redirect(loginUrl(context));
+    }
     if (!resp.ok) {
       console.warn(
         `[dashboard] ${exchangePath} returned ${resp.status}: ${await getApiErrorMessage(resp)}`,

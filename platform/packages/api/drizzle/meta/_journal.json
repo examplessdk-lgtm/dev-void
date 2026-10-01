@@ -344,6 +344,13 @@
       "when": 1790864531640,
       "tag": "0055_durable_deployment_execution",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1790875562555,
+      "tag": "0056_email_shared_recipients",
+      "breakpoints": true
     }
   ]
 }

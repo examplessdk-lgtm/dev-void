@@ -744,32 +744,30 @@ describe('admin email domain controls', () => {
       },
     });
     const add = await post(`/admin/email/${projectId}/domains/add`, adminJwt, {
-      domain: 'mail.example.com',
+      domain: 'example.com',
     });
     expect(add.status).toBe(302);
     const html = await (await get(`/admin/email/${projectId}`, adminJwt)).text();
-    expect(html).toContain('mail.example.com');
+    expect(html).toContain('example.com');
     expect(html).toContain('Rotate secret');
     expect(html).not.toContain(env.CF_API_TOKEN);
     expect(await env.db.select().from(emailZoneConnections)).toHaveLength(1);
     const rotate = await post(
-      `/admin/email/${projectId}/domains/mail.example.com/rotate-secret`,
+      `/admin/email/${projectId}/domains/example.com/rotate-secret`,
       adminJwt,
     );
     expect(rotate.status).toBe(302);
     expect(callsByTag(stub.calls, 'secretPut')).toHaveLength(2);
     const unconfirmed = await post(
-      `/admin/email/${projectId}/domains/mail.example.com/revoke`,
+      `/admin/email/${projectId}/domains/example.com/revoke`,
       adminJwt,
       { confirm: 'wrong' },
     );
     expect(unconfirmed.status).toBe(400);
     expect((await env.db.select().from(emailDomainRoutes))[0]?.desired_state).toBe('active');
-    const removed = await post(
-      `/admin/email/${projectId}/domains/mail.example.com/revoke`,
-      adminJwt,
-      { confirm: slug },
-    );
+    const removed = await post(`/admin/email/${projectId}/domains/example.com/revoke`, adminJwt, {
+      confirm: slug,
+    });
     expect(removed.status).toBe(302);
     expect((await env.db.select().from(emailDomainRoutes))[0]?.desired_state).toBe('removed');
   });

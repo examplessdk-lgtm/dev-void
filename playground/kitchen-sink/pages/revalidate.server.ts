@@ -15,10 +15,6 @@ export const loader = defineHandler(async () => {
 });
 
 export const action = defineHandler(async () => {
-  try {
-    await reval({ paths: ['/revalidate'] });
-  } catch (err) {
-    console.error('revalidate() failed:', err);
-  }
+  await reval({ paths: ['/revalidate'] });
   await kv.put('revalidate:last', new Date().toISOString());
 });

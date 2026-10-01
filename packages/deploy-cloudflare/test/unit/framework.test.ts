@@ -5,6 +5,33 @@ import { describe, expect, it } from 'vite-plus/test';
 import { parseRootWranglerConfig, writeCloudflareFrameworkDeployConfig } from '../../src/index.ts';
 
 describe('Cloudflare framework deployment', () => {
+  it.each([undefined, 'AUTHORED_VERSION'])(
+    'adds native readiness metadata without overwriting an existing binding (%s)',
+    (authored) => {
+      const root = mkdtempSync(join(tmpdir(), 'void-framework-metadata-'));
+      const configPath = join(root, 'wrangler.jsonc');
+      writeFileSync(
+        configPath,
+        JSON.stringify(authored ? { version_metadata: { binding: authored } } : {}),
+      );
+      const input = {
+        configPath,
+        deployPointerPath: join(root, '.wrangler/deploy/config.json'),
+        name: 'framework-app',
+        accountId: 'account-id',
+        main: 'dist/worker.js',
+        assetsDirectory: 'dist/assets',
+        compatibilityDate: '2026-09-11',
+        versionMetadataBinding: '__VOID_VERSION_METADATA',
+      };
+      writeCloudflareFrameworkDeployConfig(input);
+      expect(parseRootWranglerConfig(configPath).version_metadata).toEqual({
+        binding: authored ?? '__VOID_VERSION_METADATA',
+      });
+      expect(writeCloudflareFrameworkDeployConfig(input)).toBe(false);
+    },
+  );
+
   it('preserves root state and points Wrangler at the standalone Worker', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-framework-config-'));
     const configPath = join(root, 'wrangler.jsonc');

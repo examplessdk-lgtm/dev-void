@@ -92,7 +92,7 @@ export async function renderFateListPage(
     username: context.get('user').login,
   };
   if (page === 'authSettings' || page === 'authNew' || page === 'authEdit') {
-    context.header('Referrer-Policy', 'no-referrer');
+    context.header('Referrer-Policy', 'strict-origin');
   }
   if (context.req.header('X-VoidPages') === 'true') {
     return renderAdminPage(context, page, title, props);

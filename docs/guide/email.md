@@ -77,7 +77,7 @@ void email domain add acme.com
 
 `add` opens a Cloudflare API-token template. Restrict the token to the selected account and mail zone before creating it; Workers Scripts permission applies across that account. The CLI accepts a masked paste or a newly copied token and asks you to confirm those restrictions. The platform encrypts the credential for the zone connection, so projects sharing that zone do not need separate ingress Workers.
 
-When an apex already receives mail, the CLI proposes `mail.<domain>`. Use `--subdomain <label|host>` to choose another mail subdomain. Void refuses to replace a foreign enabled catch-all. A domain belongs to one project; multiple exact domains can share a zone, and a project can register more than one domain.
+Platform-managed custom inbound email requires the apex of a Cloudflare zone. Cloudflare’s catch-all only covers that apex, so a subdomain of the selected zone cannot receive arbitrary addresses. Choose an apex without another mail provider, or use the platform’s shared mail address. Void preserves foreign MX records and enabled catch-alls. Each custom apex belongs to one project; a project can register more than one apex.
 
 Setup returns an operation ID. If your connection drops, the platform keeps the recorded operation and the CLI checks that operation's status. An uncertain Cloudflare write stops conflicting changes until its outcome can be established.
 
@@ -395,7 +395,7 @@ remain available through that domain's sending capability.
 ### Configuring inbound delivery
 
 On an email-enabled platform, `<slug>+anything@<mail domain>` reaches your
-deployed `email/` handlers without per-project DNS setup. A
+deployed `email/` handlers without per-project DNS setup once the platform has verified your recipient rule and enabled plus addressing. Deployment reports a routing conflict or capacity limit if setup cannot complete. A
 [registered custom domain](#your-own-domain-on-the-platform) reaches those
 handlers once its inbound readiness is `ready`. Use `void email domain status`
 to check current provider routing and any remaining setup steps.

@@ -54,6 +54,7 @@ import {
   tryCreateEmailDestination,
   ACTIVE_BUILD_STATUSES,
 } from '../db.ts';
+import { reconcileSharedEmailRecipient } from '../email/shared-recipient-service.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
 import { ensureTrackingTable, queryD1, runRemoteMigrations } from '../migrations/remote-runner.ts';
@@ -743,6 +744,12 @@ const app = new Hono<ApiEnv>()
     const userId = context.get('user').id;
     try {
       const project = await createProject(context.get('db'), userId, body.slug);
+      if (getPlatformCapabilities(context.env).email && context.env.EMAIL_SENDER_DOMAIN) {
+        await scheduleAfterResponse(
+          context,
+          reconcileSharedEmailRecipient(context.get('db'), context.env, project.id),
+        );
+      }
       let zeroTrust: Awaited<ReturnType<typeof initializeNewProjectZeroTrust>> = null;
       let zeroTrustWarning: string | undefined;
       try {

@@ -31,6 +31,23 @@ const config = {
   kv_namespaces: [{ binding: 'KV', id: 'existing-id' }],
 };
 
+it('preserves an existing authored version metadata binding without permitting additions', () => {
+  const metadata = { type: 'version_metadata', name: 'APP_VERSION' };
+  const existing = { ...worker, bindings: [...worker.bindings, metadata] };
+  const authored = { ...config, version_metadata: { binding: 'APP_VERSION' } };
+  expect(() => assertExistingCloudflareConfig(existing, authored)).not.toThrow();
+  expect(() => assertCloudflareBindingsPreserved(existing, existing)).not.toThrow();
+  expect(() => assertExistingCloudflareConfig(existing, config)).toThrow('version_metadata');
+  expect(() => assertExistingCloudflareConfig(worker, authored)).toThrow('cannot add or replace');
+  expect(() =>
+    assertExistingCloudflareConfig(existing, {
+      ...authored,
+      version_metadata: { binding: '__VOID_VERSION_METADATA' },
+    }),
+  ).toThrow('cannot add or replace');
+  expect(() => assertCloudflareBindingsPreserved(worker, existing)).toThrow('preserve');
+});
+
 describe('assets-only Worker handoff', () => {
   const assetsOnly: ExistingCloudflareWorker = {
     versionId: 'original',

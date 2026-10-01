@@ -147,6 +147,28 @@ function worker(overrides: Partial<Parameters<typeof createWorkerFetch>[0]> = {}
   });
 }
 describe('typed Worker fetch execution', () => {
+  it('proves the actual named metadata version and never echoes requested override or private metadata', async () => {
+    const fetch = worker({ versionMetadataBinding: '__VOID_VERSION_METADATA' });
+    const request = new Request('https://app.test/__void/ready', {
+      headers: { 'Cloudflare-Workers-Version-Overrides': 'app="candidate-version"' },
+    });
+    const response = await fetch(
+      request,
+      {
+        __VOID_VERSION_METADATA: {
+          id: 'served-version',
+          tag: 'private-tag',
+          timestamp: 'private-time',
+        },
+      },
+      context,
+    );
+    expect(await response.json()).toEqual({ ready: true, versionId: 'served-version' });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const missing = await fetch(request, {}, context);
+    expect(await missing.json()).toEqual({ ready: true });
+    expect(missing.headers.get('cache-control')).toBe('no-store');
+  });
   it('validates readiness and app requests while discovery skips validation and checks its token', async () => {
     const validateEnv = vi.fn(async () => {});
     const fetch = worker({ validateEnv });

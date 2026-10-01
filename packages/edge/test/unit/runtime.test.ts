@@ -23,6 +23,16 @@ describe('createStaticEdgeHandler', () => {
     expect(binding.fetch).not.toHaveBeenCalled();
   });
 
+  it('returns the actual native version from the selected metadata binding without caching', async () => {
+    const env = { ASSETS: assets({}), USER_VERSION: { id: 'served-version' } };
+    const response = await createStaticEdgeHandler({
+      versionMetadataBinding: 'USER_VERSION',
+    }).fetch(new Request('https://example.com/__void/ready'), env);
+    expect(await response.json()).toEqual({ ready: true, versionId: 'served-version' });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(env.ASSETS.fetch).not.toHaveBeenCalled();
+  });
+
   it('serves assets through the mandatory edge Worker', async () => {
     const binding = assets({ '/': new Response('home') });
     const response = await createStaticEdgeHandler({}).fetch(new Request('https://example.com/'), {

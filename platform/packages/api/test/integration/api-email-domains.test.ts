@@ -30,8 +30,54 @@ import {
 
 let env: TestEnv;
 const token = 'customer-scoped-token';
+// Each fixture domain below is the apex of its own visible test zone.
 const zones = {
   'example.com': { id: 'zone-example', name: 'example.com', accountId: 'customer-account' },
+  'expiry.example.com': {
+    id: 'zone-expiry-example-com',
+    name: 'expiry.example.com',
+    accountId: 'customer-account',
+  },
+  'gone.example.com': {
+    id: 'zone-gone-example-com',
+    name: 'gone.example.com',
+    accountId: 'customer-account',
+  },
+  'lease.example.com': {
+    id: 'zone-lease-example-com',
+    name: 'lease.example.com',
+    accountId: 'customer-account',
+  },
+  'mail.example.com': {
+    id: 'zone-mail-example-com',
+    name: 'mail.example.com',
+    accountId: 'customer-account',
+  },
+  'moved.example.com': {
+    id: 'zone-moved-example-com',
+    name: 'moved.example.com',
+    accountId: 'customer-account',
+  },
+  'nlease.example.com': {
+    id: 'zone-nlease-example-com',
+    name: 'nlease.example.com',
+    accountId: 'customer-account',
+  },
+  'other.example.com': {
+    id: 'zone-other-example-com',
+    name: 'other.example.com',
+    accountId: 'customer-account',
+  },
+  'status.example.com': {
+    id: 'zone-status-example-com',
+    name: 'status.example.com',
+    accountId: 'customer-account',
+  },
+  'team.example.com': {
+    id: 'zone-team-example-com',
+    name: 'team.example.com',
+    accountId: 'customer-account',
+  },
 };
 function runtime() {
   return { ...env, EMAIL_GATEWAY_ORIGIN: 'https://email-gateway.example.test' } as typeof env;

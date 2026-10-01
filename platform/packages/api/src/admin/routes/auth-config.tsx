@@ -22,9 +22,11 @@ import { renderAdminPage } from '../react/server.ts';
 const app = new Hono<ApiEnv>();
 const HOME = '/admin/config/auth';
 app.use('*', async (context, next) => {
-  context.header('Cache-Control', 'no-store');
-  context.header('Referrer-Policy', 'no-referrer');
   await next();
+  // React pages return their own Response; set form-compatible privacy headers
+  // on that final response, keeping callback paths and queries out of referrers.
+  context.res.headers.set('Cache-Control', 'no-store');
+  context.res.headers.set('Referrer-Policy', 'strict-origin');
 });
 app.onError((error, context) => {
   if (error instanceof OperatorError || error instanceof AuthenticationConfigurationError) {

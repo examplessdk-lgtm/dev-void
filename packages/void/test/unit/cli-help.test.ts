@@ -198,7 +198,7 @@ describe('rendered help advertises the flags the parser honours', () => {
     ]) {
       expect(page).toContain(verb);
     }
-    expect(page).toContain('--subdomain <label|host>');
+    expect(page).not.toContain('--subdomain');
     expect(page).toContain('--project <name>');
 
     for (const verb of ['add', 'status', 'list', 'sync', 'rotate-secret', 'remove']) {
@@ -207,6 +207,8 @@ describe('rendered help advertises the flags the parser honours', () => {
     expect(render(['email', 'domain', 'add'])).toContain(
       'void email domain add <domain> [options]',
     );
+    expect(render(['email', 'domain', 'add'])).not.toContain('--subdomain');
+    expect(render(['email', 'domain', 'add'])).toContain('--project <name>');
 
     const removePage = render(['email', 'domain', 'remove']);
     expect(removePage).not.toContain('--force');

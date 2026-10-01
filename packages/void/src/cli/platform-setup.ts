@@ -199,6 +199,7 @@ export function formatPlatformInstallCommand(options: {
   applicationDomain: string;
   zoneName: string;
   controlPlaneDomain: string;
+  dashboardUrl?: string;
   dedicatedZone: boolean;
   workersDev: boolean;
   authConfig?: string;
@@ -253,6 +254,7 @@ export function formatPlatformInstallCommand(options: {
       options.authentication.accessProtection ? '--access-protection' : '--no-access-protection',
     );
   }
+  flag('--dashboard-url', options.dashboardUrl ?? '');
   flag('--runtime', options.runtime);
   if (options.yes) {
     parts.push('--yes');

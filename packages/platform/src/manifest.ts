@@ -17,6 +17,8 @@ export type PlatformCapabilities = Readonly<{
 export type PlatformControlPlane = Readonly<{
   apiHostname: string | null;
   dashboardHostname: string | null;
+  /** Optional separately deployed dashboard origin, including its HTTPS port. */
+  dashboardUrl?: string;
   proxyHostname: string | null;
 }>;
 
@@ -148,6 +150,41 @@ export function normalizeApplicationDomain(value: string): string {
   return domain;
 }
 
+export function normalizePlatformDashboardUrl(value: string): string {
+  const text = value.trim();
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error('The dashboard URL must be an HTTPS origin.');
+  }
+  if (
+    !/^https:\/\/[^/?#]+\/?$/i.test(text) ||
+    /[\s\\]/.test(text) ||
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      'The dashboard URL must be an HTTPS origin without credentials, a path, query, or fragment.',
+    );
+  }
+  url.hostname = normalizeApplicationDomain(url.hostname);
+  return url.origin;
+}
+
+export function platformDashboardUrl(deployment: PlatformDeploymentManifest): string | null {
+  const url =
+    deployment.controlPlane.dashboardUrl ??
+    (deployment.controlPlane.dashboardHostname
+      ? `https://${deployment.controlPlane.dashboardHostname}`
+      : null);
+  return url === null ? null : normalizePlatformDashboardUrl(url);
+}
+
 export function createPlatformResourceNames(installationSlug: string): PlatformResourceNames {
   const slug = normalizeInstallationSlug(installationSlug);
   const prefix = `void-${slug}`;
@@ -251,6 +288,10 @@ export function createPlatformDeploymentManifest(
   if (providers.includes('google') !== capabilities.googleOAuth) {
     throw new Error('The Google provider and googleOAuth capability must agree.');
   }
+  const dashboardUrl =
+    input.controlPlane?.dashboardUrl === undefined
+      ? undefined
+      : normalizePlatformDashboardUrl(input.controlPlane.dashboardUrl);
   const manifest: PlatformDeploymentManifest = {
     application: {
       baseDomain,
@@ -273,7 +314,17 @@ export function createPlatformDeploymentManifest(
     ...(input.emailSenderDomain !== undefined
       ? { emailSenderDomain: normalizeApplicationDomain(input.emailSenderDomain) }
       : {}),
-    controlPlane: { ...CONTROL_PLANE_DEFAULTS, ...input.controlPlane },
+    controlPlane: {
+      ...CONTROL_PLANE_DEFAULTS,
+      ...input.controlPlane,
+      ...(dashboardUrl !== undefined
+        ? {
+            dashboardUrl,
+            dashboardHostname:
+              input.controlPlane?.dashboardHostname ?? new URL(dashboardUrl).hostname,
+          }
+        : {}),
+    },
     displayName: requiredString(input.displayName, 'displayName').trim(),
     installationSlug,
     resources,
@@ -281,11 +332,20 @@ export function createPlatformDeploymentManifest(
   };
   createApplicationRoutes(manifest.application);
   for (const [key, value] of Object.entries(manifest.controlPlane)) {
+    if (key === 'dashboardUrl') {
+      continue;
+    }
     if (value !== null) {
       normalizeApplicationDomain(value);
     }
     if (value === '') {
       throw new Error(`controlPlane.${key} must be a hostname or null.`);
+    }
+  }
+  if (manifest.controlPlane.dashboardUrl) {
+    const hostname = new URL(manifest.controlPlane.dashboardUrl).hostname;
+    if (manifest.controlPlane.dashboardHostname !== hostname) {
+      throw new Error('The dashboard URL and dashboard hostname must agree.');
     }
   }
   for (const [key, value] of Object.entries(manifest.resources)) {
@@ -373,7 +433,9 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
       `resources.${key}`,
     );
   }
-  const readHostname = (key: keyof PlatformControlPlane): string | null => {
+  const readHostname = (
+    key: 'apiHostname' | 'dashboardHostname' | 'proxyHostname',
+  ): string | null => {
     const hostname = controlPlane[key];
     return hostname === null ? null : requiredString(hostname, `controlPlane.${key}`);
   };
@@ -407,6 +469,9 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
     controlPlane: {
       apiHostname: readHostname('apiHostname'),
       dashboardHostname: readHostname('dashboardHostname'),
+      ...(controlPlane.dashboardUrl !== undefined
+        ? { dashboardUrl: requiredString(controlPlane.dashboardUrl, 'controlPlane.dashboardUrl') }
+        : {}),
       proxyHostname: readHostname('proxyHostname'),
     },
     displayName: requiredString(value.displayName, 'displayName'),

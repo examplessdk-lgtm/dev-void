@@ -37,6 +37,25 @@ describe('isAllowedRedirect', () => {
     ).toBe(true);
   });
 
+  it('admits only the configured self-hosted dashboard origin including its port', () => {
+    const dashboard = 'https://void-e2e-dashboard.readwise.dev:8443';
+    expect(
+      isAllowedRedirect(
+        `${dashboard}/auth/callback?login_nonce=real-browser-nonce`,
+        dashboard,
+        'isolated-installation',
+      ),
+    ).toBe(true);
+    for (const callback of [
+      'https://void-e2e-dashboard.readwise.dev/auth/callback',
+      'https://void-e2e-dashboard.readwise.dev.attacker.example:8443/auth/callback',
+      'https://other.readwise.dev:8443/auth/callback',
+      'http://void-e2e-dashboard.readwise.dev:8443/auth/callback',
+    ]) {
+      expect(isAllowedRedirect(callback, dashboard, 'isolated-installation')).toBe(false);
+    }
+  });
+
   // Subdomain attack vectors
   it('rejects subdomain prefix attack', () => {
     expect(isAllowedRedirect('https://dash.void.cloud.attacker.com/steal')).toBe(false);

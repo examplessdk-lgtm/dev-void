@@ -12,22 +12,26 @@ export const head = defineHead<Props>((_context, props) => ({
   title: platformPageTitle('Login methods', props.platformName),
 }));
 export const loader = defineHandler<Props>(async (context) => {
-  const response = await fetchApi(context, '/.well-known/void-platform');
-  if (!response.ok) {
+  try {
+    const response = await fetchApi(context, '/.well-known/void-platform');
+    if (!response.ok) {
+      throw new Error('Login methods unavailable');
+    }
+    const discovery = (await response.json()) as {
+      displayName?: unknown;
+      authentication?: { methods?: Props['methods'] };
+    };
+    return {
+      methods: discovery.authentication?.methods ?? [],
+      platformName: discoveryDisplayName(discovery),
+    };
+  } catch {
     return {
       methods: [],
       platformName: 'Void Cloud',
       error: 'Login methods are unavailable. Try again shortly.',
     };
   }
-  const discovery = (await response.json()) as {
-    displayName?: unknown;
-    authentication?: { methods?: Props['methods'] };
-  };
-  return {
-    methods: discovery.authentication?.methods ?? [],
-    platformName: discoveryDisplayName(discovery),
-  };
 });
 export const action = defineHandler(async (context) => {
   // Cookie-authenticated mutations must originate in this dashboard.
@@ -41,10 +45,15 @@ export const action = defineHandler(async (context) => {
   if (typeof body.connectionId !== 'string') {
     return context.text('Choose a login method.', 400);
   }
-  const response = await fetchApi(context, '/auth/link', {
-    method: 'POST',
-    body: JSON.stringify({ connectionId: body.connectionId }),
-  });
+  let response: Response;
+  try {
+    response = await fetchApi(context, '/auth/link', {
+      method: 'POST',
+      body: JSON.stringify({ connectionId: body.connectionId }),
+    });
+  } catch {
+    return context.text('The service is temporarily unavailable. Try again shortly.', 503);
+  }
   if (!response.ok) {
     return context.text(await getApiErrorMessage(response), response.status as 400);
   }

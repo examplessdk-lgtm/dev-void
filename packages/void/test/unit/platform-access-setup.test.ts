@@ -25,6 +25,36 @@ afterEach(() => {
 });
 
 describe('Access installer setup', () => {
+  it('creates and resumes login with the unnamed built-in Cloudflare provider', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const env = platformAccessFixture();
+    env.identityProviders[0] = { id: 'company-idp', type: 'cloudflare', name: '' };
+    const checkpoint: Record<string, string> = {};
+    const input = {
+      plan,
+      ownershipNonce: 'owned-installation',
+      login: { id: 'access', label: 'Cloudflare Access' },
+      protection: false,
+      yes: true,
+      spec: {
+        mode: 'create' as const,
+        identityProviderIds: ['company-idp'],
+        policyIds: ['employees'],
+      },
+      client: env.transport as PlatformCloudflareClient,
+      checkpoint,
+      save: (values: Record<string, string>) => Object.assign(checkpoint, values),
+    };
+    const result = await preparePlatformAccessSetup(input);
+    expect(result?.login?.configuration.kind).toBe('cloudflare-access');
+    expect([...env.apps.values()][0]).toMatchObject({
+      allowed_idps: ['company-idp'],
+      policies: [{ id: 'employees', precedence: 1 }],
+    });
+    expect(await preparePlatformAccessSetup({ ...input, spec: undefined })).toEqual(result);
+    expect(env.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(env.tokens.size).toBe(0);
+  });
   it('publishes recovered ambiguous resource IDs without replacing deployment configuration', () => {
     const deployment = createPlatformDeploymentManifest({
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },

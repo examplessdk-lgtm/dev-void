@@ -138,12 +138,23 @@ const SYNC_STEPS = [
 const SIBLING_STEPS = [
   'routing_enable',
   'gateway_probe',
+  'catchall_ensure',
   'inbound_probe',
   'sending_onboard',
   'publish',
 ] as const;
 const SHARED_SYNC_STEPS = [
   'routing_enable',
+  'subaddressing_ensure',
+  'inbound_probe',
+  'sending_onboard',
+  'publish',
+] as const;
+// Custom apex routes can share the installation Worker, while their catch-all
+// still needs to be provisioned. Native Worker secrets are deployment-owned.
+const NATIVE_CUSTOM_SYNC_STEPS = [
+  'routing_enable',
+  'catchall_ensure',
   'inbound_probe',
   'sending_onboard',
   'publish',
@@ -160,6 +171,7 @@ type StepKind =
   | (typeof SETUP_STEPS)[number]
   | (typeof STAGED_SECRET_REPAIR_STEPS)[number]
   | (typeof REMOVE_STEPS)[number]
+  | (typeof SHARED_SYNC_STEPS)[number]
   | (typeof ROTATE_STEPS)[number];
 const OPERATOR_RECOVERABLE_WRITE_STEPS = [
   'routing_enable',
@@ -167,6 +179,7 @@ const OPERATOR_RECOVERABLE_WRITE_STEPS = [
   'probe_route_enable',
   'secret_put',
   'catchall_ensure',
+  'subaddressing_ensure',
   'sending_onboard',
   'catchall_detach',
   'ingress_delete',
@@ -536,6 +549,9 @@ function emailStepResourceIdentity(
   }
   if (kind === 'catchall_ensure' || kind === 'catchall_detach') {
     return `${base}/catch-all/${kind === 'catchall_ensure' ? 'ensure' : 'detach'}`;
+  }
+  if (kind === 'subaddressing_ensure') {
+    return `${base}/settings/subaddressing`;
   }
   if (kind === 'ingress_delete') {
     return `${base}/relay/delete`;
@@ -1211,9 +1227,36 @@ async function forgetUnusedEmailCredential(
 
 export async function inspectEmailInboundRoute(
   client: ReturnType<typeof createCfCustomerClient>,
-  connection: Pick<typeof emailZoneConnections.$inferSelect, 'zone_id' | 'ingress_worker_name'>,
+  connection: Pick<
+    typeof emailZoneConnections.$inferSelect,
+    'zone_id' | 'zone_name' | 'ingress_worker_name'
+  >,
   domain: string,
+  addressing: 'custom' | 'shared' = 'custom',
 ): Promise<string | null> {
+  if (addressing === 'custom' && domain !== connection.zone_name) {
+    return 'Cloudflare catch-all routing requires a zone apex; use the apex domain for custom inbound email';
+  }
+  if (addressing === 'shared') {
+    const [settings, exchanges] = await Promise.all([
+      client.getRoutingSettings(connection.zone_id),
+      lookupMxOverDns(domain),
+    ]);
+    if (!exchanges.length || exchanges.some((exchange) => !isCloudflareEmailRoutingMx(exchange))) {
+      return `MX records for ${domain} do not route mail to Cloudflare Email Routing`;
+    }
+    if (
+      !settings ||
+      typeof settings !== 'object' ||
+      (settings as { enabled?: unknown }).enabled !== true ||
+      (settings as { support_subaddress?: unknown }).support_subaddress !== true
+    ) {
+      return 'Cloudflare Email Routing and subaddressing must be enabled for shared email';
+    }
+    // Domain readiness does not assert recipient coverage. Each project's
+    // exact provider rule is verified by the shared-recipient service.
+    return null;
+  }
   const [catchall, rules, exchanges] = await Promise.all([
     client.getCatchAll(connection.zone_id),
     client.listRoutingRules(connection.zone_id),
@@ -1337,6 +1380,12 @@ export async function requestEmailDomainAdd(
   const zone = await findZoneForEmailDomain(client, domain);
   if (!zone) {
     throw new EmailOperationError(`no Cloudflare zone found for ${domain}`, 404);
+  }
+  if (domain !== zone.name) {
+    throw new EmailOperationError(
+      'Cloudflare catch-all routing requires a zone apex; use the apex domain for custom inbound email',
+      400,
+    );
   }
   const shared = env as Bindings & {
     EMAIL_SHARED_ACCOUNT_ID?: string;
@@ -1666,7 +1715,7 @@ export async function requestEmailDomainAdd(
           desired_generation: generation,
         });
         const steps = isSharedGatewayConnection(env, connection)
-          ? SHARED_SYNC_STEPS
+          ? NATIVE_CUSTOM_SYNC_STEPS
           : connection.staged_secret_generation !== null
             ? STAGED_SECRET_REPAIR_STEPS
             : connection.inbound_status !== 'ready' ||
@@ -1839,7 +1888,7 @@ export async function requestEmailDomainAdd(
         desired_generation: connection.desired_generation,
       });
       const steps = isSharedGatewayConnection(env, connection)
-        ? SHARED_SYNC_STEPS
+        ? NATIVE_CUSTOM_SYNC_STEPS
         : repairStaged
           ? STAGED_SECRET_REPAIR_STEPS
           : created || connection.inbound_status !== 'ready'
@@ -1920,7 +1969,7 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
   }
   gatewayOrigin(env);
   const installationId = emailInstallationId(env);
-  const key = `shared:${domain}`;
+  const key = `shared:${domain}:literal-v1`;
   const previous = (
     await db
       .select()
@@ -1951,13 +2000,9 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
       503,
     );
   }
-  const existingRule = await client.getCatchAll(zone.id);
   const worker = shared.EMAIL_SHARED_INGRESS_NAME;
-  if (existingRule?.enabled && existingRule.workerName !== worker) {
-    throw new EmailOperationError('shared sender zone has a foreign catch-all', 409);
-  }
-  const routeId = generateId('eroute'),
-    connectionId = generateId('econ'),
+  let routeId = generateId('eroute');
+  const connectionId = generateId('econ'),
     credentialId = generateId('ecred'),
     operationId = generateId('eop');
   const secret = await encryptPlatformCredential(
@@ -1983,7 +2028,7 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
           .orderBy(sql`${emailOperations.created_at} DESC`)
           .limit(1)
       )[0];
-      if (latest) {
+      if (latest && !['completed', 'cancelled'].includes(latest.status)) {
         await resumeBlockedEmailOperationTx(
           tx,
           env,
@@ -1991,8 +2036,12 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
           { kind: 'system' },
           existingRoute.id,
         );
+        return latest.id;
       }
-      return latest?.id ?? null;
+      if (existingRoute.desired_state !== 'active') {
+        throw new EmailOperationError('shared email domain is disabled');
+      }
+      routeId = existingRoute.id;
     }
     let connection = (
       await tx
@@ -2008,7 +2057,6 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
         .for('update')
         .limit(1)
     )[0];
-    const created = !connection;
     if (connection && connection.managed_by !== 'admin') {
       throw new EmailOperationError('shared sender zone connection must be administrator-managed');
     }
@@ -2050,22 +2098,49 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
           .limit(1)
       )[0]!;
     }
-    await tx.insert(emailDomainRoutes).values({
-      id: routeId,
-      domain,
-      connection_id: connection.id,
-      project_id: null,
-      addressing: 'shared',
-      managed_by: 'admin',
-      desired_state: 'active',
-    });
+    if (existingRoute) {
+      // A completed legacy catch-all observation says nothing about shared
+      // subdomain recipients or plus addressing. Re-probe before readiness.
+      await tx
+        .update(emailZoneConnections)
+        .set({
+          inbound_status: 'pending',
+          inbound_reason: null,
+          inbound_observed_at: null,
+          updated_at: sql`now()`,
+        })
+        .where(eq(emailZoneConnections.id, connection.id));
+    }
+    const [route] = existingRoute
+      ? await tx
+          .update(emailDomainRoutes)
+          .set({
+            inbound_status: 'pending',
+            inbound_reason: null,
+            desired_generation: sql`${emailDomainRoutes.desired_generation} + 1`,
+            updated_at: sql`now()`,
+          })
+          .where(eq(emailDomainRoutes.id, routeId))
+          .returning()
+      : await tx
+          .insert(emailDomainRoutes)
+          .values({
+            id: routeId,
+            domain,
+            connection_id: connection.id,
+            project_id: null,
+            addressing: 'shared',
+            managed_by: 'admin',
+            desired_state: 'active',
+          })
+          .returning();
     const requestDigest = await digest({ shared: domain, connectionId: connection.id });
     await tx.insert(emailOperations).values({
       id: operationId,
       installation_id: installationId,
       connection_id: connection.id,
       route_id: routeId,
-      route_generation: 1,
+      route_generation: route!.desired_generation,
       actor_kind: 'system',
       actor_scope: 'system:shared',
       kind: 'setup',
@@ -2075,10 +2150,12 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
     });
     // Native gateway is deployed with the platform. Uploading the customer
     // relay source here would replace it and sever shared mail delivery.
-    const steps = created
-      ? (['catchall_ensure', 'inbound_probe', 'publish'] as const)
-      : (['inbound_probe', 'publish'] as const);
-    const stepRoute: EmailStepRoute = { id: routeId, domain, desired_generation: 1 };
+    const steps = ['routing_enable', 'subaddressing_ensure', 'inbound_probe', 'publish'] as const;
+    const stepRoute: EmailStepRoute = {
+      id: routeId,
+      domain,
+      desired_generation: route!.desired_generation,
+    };
     for (let i = 0; i < steps.length; i++) {
       await tx.insert(emailOperationSteps).values({
         id: generateId('estep'),
@@ -2643,7 +2720,9 @@ async function requestExistingOperation(
     const steps =
       kind === 'sync'
         ? isSharedGatewayConnection(env, connection)
-          ? SHARED_SYNC_STEPS
+          ? route.addressing === 'shared'
+            ? SHARED_SYNC_STEPS
+            : NATIVE_CUSTOM_SYNC_STEPS
           : connection.staged_secret_generation !== null
             ? STAGED_SECRET_REPAIR_STEPS
             : connection.inbound_status !== 'ready' || route.inbound_status !== 'ready'
@@ -3141,6 +3220,19 @@ async function executeEmailStep(
       throw new EmailOperationError('route is unavailable');
     }
     const subdomain = route.domain !== connection.zone_name;
+    if (subdomain && route.addressing === 'custom') {
+      throw new EmailOperationError(
+        'Cloudflare catch-all routing requires a zone apex; use the apex domain for custom inbound email',
+      );
+    }
+    if (route.addressing === 'shared') {
+      const exchanges = await emailOperationPreflight(() => lookupMxOverDns(route.domain));
+      if (exchanges.some((exchange) => !isCloudflareEmailRoutingMx(exchange))) {
+        throw new EmailOperationError(
+          `${route.domain} already has MX records for another mail provider; choose an unused shared mail domain`,
+        );
+      }
+    }
     await client.enableRouting(connection.zone_id, subdomain ? route.domain : undefined);
     return { domain: route.domain };
   }
@@ -3232,7 +3324,46 @@ async function executeEmailStep(
     }
     return { generation: connection.staged_secret_generation };
   }
+  if (
+    kind === 'subaddressing_ensure' ||
+    (kind === 'catchall_ensure' && route?.addressing === 'shared')
+  ) {
+    if (!route || route.addressing !== 'shared') {
+      throw new EmailOperationError('shared email route is unavailable');
+    }
+    // Compatibility for interrupted catch-all-era shared bootstrap operations.
+    if (kind === 'catchall_ensure') {
+      await client.enableRouting(
+        connection.zone_id,
+        route.domain === connection.zone_name ? undefined : route.domain,
+      );
+    }
+    const settings = await emailOperationPreflight(() =>
+      client.getRoutingSettings(connection.zone_id),
+    );
+    if (
+      !settings ||
+      typeof settings !== 'object' ||
+      (settings as { support_subaddress?: unknown }).support_subaddress !== true
+    ) {
+      await client.enableSubaddressing(connection.zone_id);
+    }
+    const verified = await client.getRoutingSettings(connection.zone_id);
+    if (
+      !verified ||
+      typeof verified !== 'object' ||
+      (verified as { support_subaddress?: unknown }).support_subaddress !== true
+    ) {
+      throw new EmailOperationError('Cloudflare did not enable shared email subaddressing', 503);
+    }
+    return { subaddressing: true };
+  }
   if (kind === 'catchall_ensure') {
+    if (route && route.domain !== connection.zone_name) {
+      throw new EmailOperationError(
+        'Cloudflare catch-all routing requires a zone apex; use the apex domain for custom inbound email',
+      );
+    }
     const current = await emailOperationPreflight(() => client.getCatchAll(connection.zone_id));
     if (current?.enabled && current.workerName !== connection.ingress_worker_name) {
       throw new EmailOperationError('another enabled catch-all owns this zone');
@@ -3246,7 +3377,12 @@ async function executeEmailStep(
     if (!route) {
       throw new EmailOperationError('email route is unavailable');
     }
-    const issue = await inspectEmailInboundRoute(client, connection, route.domain);
+    const issue = await inspectEmailInboundRoute(
+      client,
+      connection,
+      route.domain,
+      route.addressing,
+    );
     if (issue) {
       await db
         .update(emailDomainRoutes)
@@ -3999,13 +4135,46 @@ export async function reconcileUnknownEmailOperation(
                 .limit(1)
             )[0]
           : null;
-        if (route && !(await inspectEmailInboundRoute(client, connection, route.domain))) {
+        if (
+          route &&
+          !(await inspectEmailInboundRoute(client, connection, route.domain, route.addressing))
+        ) {
           outcome = { ready: true };
         }
+      } else if (step.kind === 'subaddressing_ensure') {
+        const settings = await client.getRoutingSettings(connection.zone_id);
+        if (
+          settings &&
+          typeof settings === 'object' &&
+          (settings as { support_subaddress?: unknown }).support_subaddress === true
+        ) {
+          outcome = { subaddressing: true };
+        }
       } else if (step.kind === 'catchall_ensure') {
-        const catchall = await client.getCatchAll(connection.zone_id);
-        if (catchall?.enabled && catchall.workerName === connection.ingress_worker_name) {
-          outcome = { workerName: connection.ingress_worker_name };
+        const route = op.route_id
+          ? (
+              await db
+                .select()
+                .from(emailDomainRoutes)
+                .where(eq(emailDomainRoutes.id, op.route_id))
+                .limit(1)
+            )[0]
+          : null;
+        if (route?.addressing === 'shared') {
+          // Legacy shared-domain operations used this step for an apex-only
+          // catch-all. Recovery must confirm the new subdomain prerequisites.
+          if (!(await inspectEmailInboundRoute(client, connection, route.domain, 'shared'))) {
+            outcome = { subaddressing: true };
+          }
+        } else {
+          const catchall = await client.getCatchAll(connection.zone_id);
+          if (
+            catchall?.enabled &&
+            catchall.workerName === connection.ingress_worker_name &&
+            route?.domain === connection.zone_name
+          ) {
+            outcome = { workerName: connection.ingress_worker_name };
+          }
         }
       } else if (step.kind === 'catchall_detach') {
         const catchall = await client.getCatchAll(connection.zone_id);

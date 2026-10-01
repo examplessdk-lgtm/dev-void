@@ -115,6 +115,8 @@ export type WorkerFetchOptions = {
   withRuntimeEnv: (env: RuntimeEnvironment, fn: () => Promise<Response>) => Promise<Response>;
   filterBindings: (env: RuntimeEnvironment) => RuntimeEnvironment;
   validateEnv?: (env: RuntimeEnvironment) => Promise<void>;
+  /** Authored/generated version metadata binding used to prove the served native version. */
+  versionMetadataBinding?: string;
   remoteEnv?: (env: RuntimeEnvironment) => RuntimeEnvironment;
   internalRoute: (
     request: Request,
@@ -164,7 +166,15 @@ export function createWorkerFetch(
           return options.emailReceipt(request, env, ctx);
         }
         if (request.method === 'GET' && url.pathname === '/__void/ready') {
-          return Response.json({ ready: true });
+          const metadata = options.versionMetadataBinding
+            ? (env[options.versionMetadataBinding] as { id?: unknown } | undefined)
+            : undefined;
+          return Response.json(
+            { ready: true, ...(options.versionMetadataBinding ? { versionId: metadata?.id } : {}) },
+            options.versionMetadataBinding
+              ? { headers: { 'cache-control': 'no-store' } }
+              : undefined,
+          );
         }
         const internal = await options.internalRoute(request, env, ctx);
         if (internal) {

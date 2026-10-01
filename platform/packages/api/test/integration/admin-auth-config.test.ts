@@ -15,6 +15,7 @@ import {
   platformLoginConnections,
 } from '../../src/schema.ts';
 import { clearTables, createTestUser, setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
+import { nativeFormSubmission } from './native-form-browser.ts';
 
 let env: TestEnv;
 let cookie: string;
@@ -53,6 +54,46 @@ function request(path: string, form?: Record<string, string>, requestOrigin = or
   );
 }
 describe('browser authentication configuration', () => {
+  it.each([home, `${home}/new?kind=oidc`, `${home}/connections/google`])(
+    'keeps form-compatible origin-only referrers on %s and page navigation',
+    async (path) => {
+      for (const pageNavigation of [false, true]) {
+        const response = await app.fetch(
+          new Request(`${origin}${path}`, {
+            headers: { Cookie: cookie, ...(pageNavigation ? { 'X-VoidPages': 'true' } : {}) },
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get('Referrer-Policy')).toBe('strict-origin');
+        expect(response.headers.get('Cache-Control')).toBe('no-store');
+      }
+    },
+  );
+
+  it('accepts a native provider-settings form without leaking the page query', async () => {
+    const input = {
+      env,
+      origin,
+      cookie,
+      path: `${home}/connections/google?test=private-test-query`,
+      fields: { label: 'Native Google login', clientId: env.GOOGLE_CLIENT_ID },
+      button: 'Save configuration',
+    };
+    const suppressed = await nativeFormSubmission({ ...input, noReferrer: true });
+    expect(suppressed).toEqual({
+      pagePolicy: 'strict-origin',
+      submission: { origin: 'null', referrer: undefined, status: 403 },
+    });
+    expect((await readLoginConnection(env.db, 'google'))?.revision).toBe(1);
+    expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+    expect(await nativeFormSubmission(input)).toEqual({
+      pagePolicy: 'strict-origin',
+      submission: { origin, referrer: `${origin}/`, status: 302 },
+    });
+    expect((await readLoginConnection(env.db, 'google'))?.revision).toBe(2);
+  });
+
   it('links from authentication settings to the unified Access page without secrets', async () => {
     const response = await request(home);
     expect(response.status).toBe(200);

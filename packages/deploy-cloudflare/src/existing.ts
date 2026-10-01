@@ -556,6 +556,19 @@ export function assertExistingCloudflareConfig(
     }
   }
   const vars = record(config.vars) ? config.vars : {};
+  const metadataBindings = existing.bindings.filter(
+    (binding) => binding.type === 'version_metadata',
+  );
+  const metadata = record(config.version_metadata) ? config.version_metadata : undefined;
+  if (
+    metadataBindings.length > 1 ||
+    (metadataBindings.length === 1 && metadata?.binding !== metadataBindings[0]!.name) ||
+    (metadataBindings.length === 0 && config.version_metadata !== undefined)
+  ) {
+    throw new Error(
+      'Keep the existing Worker version_metadata binding when linking; linking cannot add or replace it.',
+    );
+  }
   const remote = new Map(existing.bindings.map((binding) => [binding.name, binding]));
   for (const [name, value] of Object.entries(vars)) {
     const binding = remote.get(name);
@@ -588,6 +601,9 @@ export function assertExistingCloudflareConfig(
       throw new Error('Cloudflare returned a binding without a name.');
     }
     if (['plain_text', 'json', 'secret_text', 'secret_key'].includes(String(binding.type))) {
+      continue;
+    }
+    if (binding.type === 'version_metadata') {
       continue;
     }
     if (binding.type === 'assets') {

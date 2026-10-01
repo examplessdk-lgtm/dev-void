@@ -31,5 +31,6 @@ const form = useForm('/revalidate', {});
         {{ form.pending ? 'Revalidating...' : 'Revalidate /revalidate' }}
       </button>
     </form>
+    <p v-if="form.error" role="alert" style="color: red">{{ form.error.message }}</p>
   </div>
 </template>

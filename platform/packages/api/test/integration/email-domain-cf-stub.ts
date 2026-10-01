@@ -23,6 +23,11 @@ export type StubFailTag =
   | 'catchAllGet'
   | 'routingRulesGet'
   | 'routingSettingsGet'
+  | 'subaddressing'
+  | 'literalRuleCreate'
+  | 'literalRuleUpdate'
+  | 'literalRuleGet'
+  | 'literalRuleDelete'
   | 'scriptDelete';
 
 export type RecordedCall = {
@@ -52,7 +57,13 @@ export function stubCustomerCf(
     catchAllRule?: { enabled: boolean; workerName: string | null } | null;
     /** GET email/routing's result; default { enabled: true }. */
     routingSettings?: Record<string, unknown>;
-    routingRules?: Array<{ enabled: boolean; addresses: Array<string> }>;
+    routingRules?: Array<{
+      enabled: boolean;
+      addresses: Array<string>;
+      id?: string;
+      name?: string;
+      workerName?: string;
+    }>;
     /** GET sending/subdomains entries; default []. */
     sendingSubdomains?: ReadonlyArray<{ name: string; enabled: boolean }>;
     failOn?: Partial<Record<StubFailTag, { message: string; status: number; code?: number }>>;
@@ -79,6 +90,54 @@ export function stubCustomerCf(
   const secretHashes = new Map<string, string>();
   const relaySecrets = new Map<string, string>();
   const scriptSubdomains = new Map<string, boolean>();
+  const routingSettingsStates = new Map<string, Record<string, unknown>>();
+  const routingRuleStates = new Map<string, Map<string, Record<string, unknown>>>();
+  const rulesFor = (zoneId: string) => {
+    if (!routingRuleStates.has(zoneId)) {
+      routingRuleStates.set(
+        zoneId,
+        new Map(
+          (config.routingRules ?? []).map((rule, index) => {
+            const id = rule.id ?? `foreign-rule-${index}`;
+            return [
+              id,
+              {
+                id,
+                name: rule.name ?? null,
+                enabled: rule.enabled,
+                matchers: rule.addresses.map((value) => ({ type: 'literal', field: 'to', value })),
+                actions: [{ type: 'worker', value: [rule.workerName ?? 'foreign-ingress'] }],
+              },
+            ];
+          }),
+        ),
+      );
+    }
+    // Status tests may introduce a foreign rule after setup to model drift.
+    for (const [index, rule] of (config.routingRules ?? []).entries()) {
+      const id = rule.id ?? `foreign-rule-${index}`;
+      if (!routingRuleStates.get(zoneId)!.has(id)) {
+        routingRuleStates.get(zoneId)!.set(id, {
+          id,
+          name: rule.name ?? null,
+          enabled: rule.enabled,
+          matchers: rule.addresses.map((value) => ({ type: 'literal', field: 'to', value })),
+          actions: [{ type: 'worker', value: [rule.workerName ?? 'foreign-ingress'] }],
+        });
+      }
+    }
+    return routingRuleStates.get(zoneId)!;
+  };
+  const settingsFor = (zoneId: string) => {
+    if (!routingSettingsStates.has(zoneId)) {
+      routingSettingsStates.set(zoneId, {
+        enabled: true,
+        support_subaddress: false,
+        ...config.routingSettings,
+      });
+    }
+    return routingSettingsStates.get(zoneId)!;
+  };
   const catchAllStateFor = (zoneId: string) => {
     if (!catchAllStates.has(zoneId)) {
       catchAllStates.set(
@@ -269,20 +328,61 @@ export function stubCustomerCf(
       if (failure) {
         return failure;
       }
-      return cfSuccess(config.routingSettings ?? { enabled: true });
+      return cfSuccess(settingsFor(path.split('/')[2]!));
+    }
+
+    if (/\/zones\/[^/]+\/email\/routing$/.test(path) && method === 'PATCH') {
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      await record({ tag: 'subaddressing', method, url, body });
+      if (config.failBeforeEffect?.includes('subaddressing')) {
+        return fail('subaddressing') ?? cfSuccess({});
+      }
+      Object.assign(settingsFor(path.split('/')[2]!), body);
+      return fail('subaddressing') ?? cfSuccess(settingsFor(path.split('/')[2]!));
     }
 
     if (/\/zones\/[^/]+\/email\/routing\/rules\?/.test(path) && method === 'GET') {
       await record({ tag: 'routingRulesGet', method, url });
+      const params = new URL(url).searchParams;
+      const page = Number(params.get('page') ?? 1),
+        perPage = Number(params.get('per_page') ?? 50);
       return (
         fail('routingRulesGet') ??
         cfSuccess(
-          (config.routingRules ?? []).map((rule) => ({
-            enabled: rule.enabled,
-            matchers: rule.addresses.map((value) => ({ type: 'literal', field: 'to', value })),
-          })),
+          [...rulesFor(path.split('/')[2]!).values()].slice((page - 1) * perPage, page * perPage),
         )
       );
+    }
+
+    const literal = /^\/zones\/([^/]+)\/email\/routing\/rules(?:\/([^/?]+))?$/.exec(path);
+    if (literal && literal[2] !== 'catch_all') {
+      const rules = rulesFor(literal[1]!);
+      if (method === 'GET' && literal[2]) {
+        await record({ tag: 'literalRuleGet', method, url });
+        return (
+          fail('literalRuleGet') ??
+          (rules.has(literal[2]) ? cfSuccess(rules.get(literal[2])) : cfError('not found', 404))
+        );
+      }
+      if (method === 'POST' || method === 'PUT') {
+        const tag = method === 'POST' ? 'literalRuleCreate' : 'literalRuleUpdate';
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        await record({ tag, method, url, body });
+        if (config.failBeforeEffect?.includes(tag)) {
+          return fail(tag) ?? cfSuccess({});
+        }
+        const id = literal[2] ?? `owned-rule-${rules.size + 1}`;
+        rules.set(id, { ...body, id });
+        return fail(tag) ?? cfSuccess(rules.get(id));
+      }
+      if (method === 'DELETE' && literal[2]) {
+        await record({ tag: 'literalRuleDelete', method, url });
+        if (config.failBeforeEffect?.includes('literalRuleDelete')) {
+          return fail('literalRuleDelete') ?? cfSuccess({});
+        }
+        rules.delete(literal[2]);
+        return fail('literalRuleDelete') ?? cfSuccess({});
+      }
     }
 
     const catchAllMatch = /\/zones\/([^/]+)\/email\/routing\/rules\/catch_all$/.exec(path);
@@ -393,7 +493,7 @@ export function stubCustomerCf(
   });
 
   vi.stubGlobal('fetch', fn);
-  return { calls, fn, catchAllStates, secretHashes };
+  return { calls, fn, catchAllStates, secretHashes, routingRuleStates, routingSettingsStates };
 }
 
 export function callsByTag(calls: Array<RecordedCall>, tag: StubFailTag): Array<RecordedCall> {

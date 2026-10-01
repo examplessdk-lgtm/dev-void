@@ -802,7 +802,9 @@ void platform email domain-rotate-secret <domain>
 void platform email domain-remove <domain> [--token-stdin]
 ```
 
-`domain-add` uses the platform's Cloudflare credential for zones in its account. For another account, pipe a scoped Cloudflare API token on standard input with `--token-stdin --yes`. Name the exact mail domain (`mail.example.com`, or the apex when it receives no mail yet). `domain-status` shows inbound, outbound, and credential-management readiness with the latest operation. A blocked operation resumes through `domain-sync`; a blocked rotation resumes through `domain-rotate-secret`, preserving already confirmed steps and its staged credential. An uncertain operation remains stopped until read-back proves the result or an administrator uses `operation-resolve`. Domains an administrator adds show `managed_by: admin`; their owners can list and inspect them but use these commands for `sync`, `domain-rotate-secret`, and `remove`.
+`domain-add` uses the platform's Cloudflare credential for zones in its account. For another account, pipe a scoped Cloudflare API token on standard input with `--token-stdin --yes`. Managed custom inbound email requires the Cloudflare zone apex (`example.com`). If its MX records already belong to another mail provider, use the project's shared email address or choose another unused zone. Native Cloudflare deployments also support literal recipient addresses on subdomains; see [Your own Cloudflare account](../guide/email.md#your-own-cloudflare-account).
+
+`domain-status` shows inbound, outbound, and credential-management readiness with the latest operation. A blocked operation resumes through `domain-sync`; a blocked rotation resumes through `domain-rotate-secret`, preserving already confirmed steps and its staged credential. An uncertain operation remains stopped until read-back proves the result or an administrator uses `operation-resolve`. Domains an administrator adds show `managed_by: admin`; their owners can list and inspect them but use these commands for `sync`, `domain-rotate-secret`, and `remove`.
 
 If project deletion leaves cleanup blocked by an expired or revoked Cloudflare token, use `domain-remove <domain> --token-stdin --yes` with a replacement scoped to the same account and zone. This resumes the retained cleanup only when no other project uses the connection. For a live project, renew its token through `domain-add` instead.
 
@@ -878,6 +880,7 @@ void platform install [options] [--yes]
 | `--no-dedicated-zone`             | Skip zone-wide application catch-all routes                                          |
 | `--control-plane-domain <domain>` | Optional API custom hostname; defaults to `workers.dev`                              |
 | `--no-control-plane-domain`       | Use the default `workers.dev` API hostname                                           |
+| `--dashboard-url <origin>`        | HTTPS origin of an optional dashboard deployed separately                            |
 | `--plan`                          | Resolve and print a read-only plan                                                   |
 | `--resume`                        | Continue the matching checkpointed installation                                      |
 | `--runtime <path>`                | Deploy a locally built, integrity-checked runtime directory                          |
@@ -891,7 +894,13 @@ The installed platform needs a separate runtime token to provision resources for
 
 To enable email during install or upgrade, set both `VOID_EMAIL_SENDER_DOMAIN` and `VOID_EMAIL_SHARED_ZONE_ID`. Void records the pair for later upgrades; supplying only one is an error.
 
-`--plan` shows resource names, login methods, the callback URL, and a brief credential checklist with setup links without opening credential pages or saving a draft. Cloudflare browser login can still open if needed. It highlights the next install command at the end of the output. The command preserves your configuration choices, including the default API hostname, Hyperdrive selection, login methods, and Access protection. Run that command to recalculate and confirm the plan without answering the same configuration questions again. Missing credentials are collected during installation. For unfinished installations, the plan prints the saved `--resume` command instead. Use `--auth-config` on its own for login configuration, or use `--login-methods` and the Access protection flags.
+Use `--dashboard-url https://dash.example.com` when deploying the optional user
+dashboard separately. The URL must be an HTTPS origin without credentials, a
+path, query, or fragment. Void permits that origin's login callbacks and saves
+it for later maintenance; it does not deploy a dashboard Worker. Omission keeps
+an existing installation's saved dashboard origin.
+
+`--plan` shows resource names, login methods, the callback URL, and a brief credential checklist with setup links without opening credential pages or saving a draft. Cloudflare browser login can still open if needed. It highlights the next install command at the end of the output. The command preserves your configuration choices, including the default API hostname, Hyperdrive selection, login methods, Access protection, and dashboard origin. Run that command to recalculate and confirm the plan without answering the same configuration questions again. Missing credentials are collected during installation. For unfinished installations, the plan prints the saved `--resume` command instead. Use `--auth-config` on its own for login configuration, or use `--login-methods` and the Access protection flags.
 
 New resources use `void-<name>-<role>` names. Existing installations keep their recorded names; an unowned name conflict stops installation. After confirmation, Void opens setup pages for missing credentials. The runtime-token link preselects required account permissions, including Workers Tail, Hyperdrive, and AI Gateway when needed; select the indicated zone for domain installs. Supplied credentials skip those pages.
 
@@ -927,9 +936,9 @@ Use these commands to recover, update, pause, or remove an installation:
 
 ```sh
 void platform discover [--account <id>] [--installation <id-or-name>]
-void platform upgrade [id] [--runtime <path>] [--plan] [--yes]
+void platform upgrade [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
 void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-path>] [--plan] [--yes]
-void platform repair [id] [--runtime <path>] [--plan] [--yes]
+void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
 void platform disable [id] [--plan] [--yes]
 void platform enable [id] [--runtime <path>] [--plan] [--yes]
 void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
@@ -938,6 +947,11 @@ void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
 `discover --installation` limits recovery and endpoint verification to one installation in a shared Cloudflare account.
 
 Omit `id` when only one installation is configured, or choose from the interactive picker. Non-interactive commands need an ID when several installations exist. Commands that make changes also require `--yes`; `--plan` only previews changes.
+
+To add or explicitly change a separately deployed dashboard after installation,
+use `repair --dashboard-url <origin>` or `upgrade --dashboard-url <origin>`.
+Preview with `--plan` first. Existing Access protection must cover the configured
+dashboard origin before maintenance can proceed. See [Optional Dashboard](../guide/platform/installation/domains.md#optional-dashboard).
 
 After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. An upgrade that preserves every deployed Worker also preserves its secrets. For an email-enabled installation without its encrypted recovery file, restore `VOID_PLATFORM_EMAIL_SIGNING_SECRET`; recreating only the email gateway needs that key and does not need the Cloudflare runtime token or JWT signing key. Recreating the API or proxy also requires the email key when email is enabled, in addition to their normal secrets. Recreating the API requires its original runtime-token, GitHub, R2, JWT, and project-encryption values; recreating the proxy requires the runtime token and JWT signing key.
 
@@ -1710,10 +1724,10 @@ Send and receive at your own domain on a Cloudflare zone you own, registered to 
 #### `void email domain add`
 
 ```
-void email domain add <domain> [--subdomain <label|host>] [--project <name>]
+void email domain add <domain> [--project <name>]
 ```
 
-Register an exact domain with the project using a scoped Cloudflare API token. The CLI opens a token template, accepts a masked paste or newly copied token, and asks you to confirm account and zone restrictions. Credentials are encrypted for the zone connection. The CLI proposes `mail.<domain>` when the apex already has MX records; `--subdomain` overrides that proposal. Several domains can share a zone connection, but each domain belongs to one project. Setup returns an operation ID so an interrupted request can be checked without restarting the operation.
+Register an exact domain with the project using a scoped Cloudflare API token. The CLI opens a token template, accepts a masked paste or newly copied token, and asks you to confirm account and zone restrictions. Credentials are encrypted for the zone connection. Custom inbound email requires a Cloudflare zone apex because its catch-all does not cover subdomains. Foreign MX records and catch-alls are preserved; use another zone apex or the platform shared mail address when the apex already receives mail. Each custom apex belongs to one project. Setup returns an operation ID so an interrupted request can be checked without restarting the operation.
 
 #### `void email domain status`
 

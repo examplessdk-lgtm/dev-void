@@ -286,6 +286,26 @@ describe('installed platform upgrade', () => {
     );
   });
 
+  it.each(['upgrade', 'repair'] as const)(
+    'passes an explicitly configured dashboard origin through %s planning',
+    async (subcommand) => {
+      await runInstalledPlatformCommand({
+        subcommand,
+        selector: state.manifest!.id,
+        plan: true,
+        runtime: '',
+        yes: true,
+        dashboardUrl: 'https://dash.example.org:8443',
+      });
+      expect(createPlatformInstallPlan).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ dashboardUrl: 'https://dash.example.org:8443' }),
+        expect.anything(),
+        expect.anything(),
+      );
+    },
+  );
+
   it('borrows database preparation from the held lifecycle lock', async () => {
     await runInstalledPlatformCommand({
       plan: false,

@@ -2122,6 +2122,7 @@ describe('GET /projects/:id/email/settings', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       domains: { management: 'self-serve', projectSlug: 'settings-project' },
+      sharedInbound: null,
       recipientPolicy: { mode: 'verified', domains: [] },
     });
     expect(await env.ROUTING.get('email-recipient-policy')).toBe(

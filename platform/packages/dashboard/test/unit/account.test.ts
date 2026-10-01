@@ -39,6 +39,31 @@ describe('account linking error responses', () => {
     expect(head({} as never, props)?.title).toBe('Login methods · Example Platform · Void');
   });
 
+  it('keeps the account page available when discovery times out', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('API request timed out')));
+
+    const response = await accountPage.request('https://dashboard.example.com/account', undefined, {
+      API_URL: 'https://api.example.com',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      methods: [],
+      error: 'Login methods are unavailable. Try again shortly.',
+    });
+  });
+
+  it('gives a retry action when a linking request cannot reach the API', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('API request timed out')));
+
+    const response = await submit();
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe(
+      'The service is temporarily unavailable. Try again shortly.',
+    );
+  });
+
   it('renders the API recovery message while preserving its rejection status', async () => {
     vi.stubGlobal(
       'fetch',

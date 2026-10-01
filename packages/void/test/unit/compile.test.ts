@@ -27,6 +27,7 @@ import {
   createManifestLoader,
   createSsrFallback,
   createAssetNotFound,
+  createWorkerFetch,
   type RoutingRuntime,
 } from '../../src/runtime/routing.ts';
 
@@ -1626,6 +1627,45 @@ describe('default-target dev parity', () => {
 });
 
 describe('compileWorkerEntry', () => {
+  it('serves the actual metadata version without echoing the requested version override', async () => {
+    const code = compileWorkerEntry({ versionMetadataBinding: 'AUTHORED_VERSION' });
+    const source = code.match(
+      /const __voidFetch = (__createWorkerFetch\([\s\S]*?\n {2}\}\));/,
+    )?.[1];
+    expect(source).toBeDefined();
+    const handler = new Function(
+      '__createWorkerFetch',
+      'app',
+      'serveWithAssets',
+      '__withRawEnv',
+      'withRuntimeEnv',
+      '__filterInternalBindings',
+      '__voidHandleInternalRoute',
+      '__voidCollectPrerenderPaths',
+      `return (${source});`,
+    )(
+      createWorkerFetch,
+      { fetch: () => new Response('application') },
+      (_request: Request, _env: object, response: Response) => response,
+      (_env: object, callback: () => Promise<Response>) => callback(),
+      (_env: object, callback: () => Promise<Response>) => callback(),
+      (env: object) => env,
+      async () => null,
+      async () => [],
+    ) as (request: Request, env: Record<string, unknown>, ctx: object) => Promise<Response>;
+    const response = await handler(
+      new Request('https://app.example/__void/ready', {
+        headers: { 'Cloudflare-Workers-Version-Overrides': 'app="new-version"' },
+      }),
+      { AUTHORED_VERSION: { id: 'old-version', tag: 'private-tag', timestamp: 'private-time' } },
+      {},
+    );
+    expect(await response.json()).toEqual({ ready: true, versionId: 'old-version' });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    const missing = await handler(new Request('https://app.example/__void/ready'), {}, {});
+    expect(await missing.json()).toEqual({ ready: true });
+  });
+
   it('re-exports typed Durable Object modules as worker classes', () => {
     const code = compileWorkerEntry({
       durableObjects: [

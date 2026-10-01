@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 import {
+  inspectPlatformAccess,
   provisionPlatformAccess,
   type PlatformAccessCheckpoint,
   type PlatformAccessProvisionInput,
@@ -16,6 +17,35 @@ const base: PlatformAccessProvisionInput = {
 };
 
 describe('Cloudflare Access provisioning', () => {
+  it.each(['', '  ', undefined, null])(
+    'uses the provider ID for a missing built-in provider label (%j) without changing identity selection',
+    async (name) => {
+      const env = fixture();
+      env.identityProviders[0] = { id: 'company-idp', type: 'cloudflare', name };
+      const result = await inspectPlatformAccess(env.client, base);
+      expect(result.identityProviders).toEqual([{ id: 'company-idp', name: 'company-idp' }]);
+      expect(result.policies).toEqual([env.policy]);
+      expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
+    },
+  );
+  it.each([
+    { id: '', name: '' },
+    { name: '' },
+    { id: 'company-idp', name: 123 },
+    { id: 'company-idp', name: 'x'.repeat(8193) },
+  ])('rejects malformed provider identity or label before writes (%j)', async (provider) => {
+    const env = fixture();
+    env.identityProviders[0] = provider;
+    await expect(
+      provisionPlatformAccess(
+        env.client,
+        { ...base, login: { id: 'access', label: 'Company Access' } },
+        undefined,
+        () => {},
+      ),
+    ).rejects.toThrow('Cloudflare Access did not return identity provider');
+    expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
+  });
   it('connects externally managed protection and records its service token without writes', async () => {
     const env = fixture();
     env.tokens.set('ci-token', { id: 'ci-token', name: 'Managed CI', client_id: 'external-ci' });

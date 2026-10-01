@@ -534,6 +534,7 @@ export async function clearTables(db: Db): Promise<void> {
     schema.emailDestinationCleanups,
     schema.emailOperationSteps,
     schema.emailOperations,
+    schema.emailSharedRecipients,
     schema.emailDomainRoutes,
     schema.emailZoneConnections,
     schema.emailCredentials,

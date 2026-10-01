@@ -1,4 +1,8 @@
-import { PLATFORM_LOGIN_KINDS, type PlatformLoginKind } from '@void/platform';
+import {
+  normalizePlatformDashboardUrl,
+  PLATFORM_LOGIN_KINDS,
+  type PlatformLoginKind,
+} from '@void/platform';
 import { operatorGroups, parseOperatorArgs, type OperatorArgs } from './operator-args.ts';
 import { parsePlatformConfigArgs, type PlatformConfigArgs } from './platform-config-args.ts';
 import type { SubcommandDef } from './subcommand-prompt.ts';
@@ -37,7 +41,11 @@ export const platformSubcommands: Array<SubcommandDef> = [
   },
   { name: 'upgrade', arg: '[id]', description: 'Upgrade an installed Void platform' },
   { name: 'rollback', arg: '[id]', description: 'Restore a compatible earlier platform runtime' },
-  { name: 'repair', arg: '[id]', description: 'Reconcile an installed Void platform' },
+  {
+    name: 'repair',
+    arg: '[id]',
+    description: 'Reconcile a platform or configure its dashboard origin',
+  },
   { name: 'disable', arg: '[id]', description: 'Disable traffic without deleting data' },
   { name: 'enable', arg: '[id]', description: 'Restore traffic for a disabled platform' },
   { name: 'uninstall', arg: '[id]', description: 'Safely remove an installed Void platform' },
@@ -70,6 +78,7 @@ export type PlatformArgs =
       account: string;
       applicationDomain: string;
       controlPlaneDomain: string;
+      dashboardUrl?: string;
       dedicatedZone: boolean;
       displayName: string;
       name: string;
@@ -82,6 +91,7 @@ export type PlatformArgs =
     }
   | {
       subcommand: 'upgrade' | 'repair' | 'disable' | 'enable';
+      dashboardUrl?: string;
       selector: string;
       plan: boolean;
       runtime: string;
@@ -142,10 +152,18 @@ function parseSelector(
 function parseLifecycleSelector(
   rest: Array<string>,
   subcommand: 'upgrade' | 'rollback' | 'repair' | 'disable' | 'enable',
-): { selector: string; plan: boolean; runtime: string; fromRuntime: string; yes: boolean } {
+): {
+  selector: string;
+  plan: boolean;
+  runtime: string;
+  fromRuntime: string;
+  yes: boolean;
+  dashboardUrl?: string;
+} {
   const positional: Array<string> = [];
   let runtime = '';
   let fromRuntime = '';
+  let dashboardUrl: string | undefined;
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index]!;
     if (arg === '--runtime') {
@@ -154,6 +172,10 @@ function parseLifecycleSelector(
       }
       const [value, next] = readValue(rest, index, arg);
       runtime = value;
+      index = next;
+    } else if (arg === '--dashboard-url' && (subcommand === 'upgrade' || subcommand === 'repair')) {
+      const [value, next] = readValue(rest, index, arg);
+      dashboardUrl = normalizePlatformDashboardUrl(value);
       index = next;
     } else if (arg === '--from-runtime' && subcommand === 'rollback') {
       const [value, next] = readValue(rest, index, arg);
@@ -167,7 +189,12 @@ function parseLifecycleSelector(
   if (subcommand === 'rollback' && !runtime) {
     throw new Error('platform: rollback requires --runtime <earlier-runtime-directory>.');
   }
-  return { ...parsed, runtime, fromRuntime };
+  return {
+    ...parsed,
+    runtime,
+    fromRuntime,
+    ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
+  };
 }
 
 export function parsePlatformArgs(args: Array<string>): PlatformArgs {
@@ -281,10 +308,20 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     subcommand === 'disable' ||
     subcommand === 'enable'
   ) {
-    const { selector, plan, runtime, fromRuntime, yes } = parseLifecycleSelector(rest, subcommand);
+    const { selector, plan, runtime, fromRuntime, yes, dashboardUrl } = parseLifecycleSelector(
+      rest,
+      subcommand,
+    );
     return subcommand === 'rollback'
       ? { subcommand, selector, plan, runtime, fromRuntime, yes }
-      : { subcommand, selector, plan, runtime, yes };
+      : {
+          subcommand,
+          selector,
+          plan,
+          runtime,
+          yes,
+          ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
+        };
   }
   if (subcommand === 'uninstall') {
     const parsed = parseSelector(
@@ -324,6 +361,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
       '--hyperdrive',
       '--application-domain',
       '--control-plane-domain',
+      '--dashboard-url',
       '--display-name',
       '--name',
       '--runtime',
@@ -407,6 +445,9 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
       account: values.get('--account') ?? '',
       applicationDomain: values.get('--application-domain') ?? '',
       controlPlaneDomain: values.get('--control-plane-domain') ?? '',
+      ...(values.has('--dashboard-url')
+        ? { dashboardUrl: normalizePlatformDashboardUrl(values.get('--dashboard-url')!) }
+        : {}),
       dedicatedZone,
       displayName: values.get('--display-name') ?? '',
       name: values.get('--name') ?? '',

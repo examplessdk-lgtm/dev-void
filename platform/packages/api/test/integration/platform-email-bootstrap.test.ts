@@ -10,7 +10,13 @@ import {
   it,
   vi,
 } from 'vite-plus/test';
-import { emailDomainRoutes, emailOperations } from '../../src/email/connection-schema.ts';
+import { createCfCustomerClient } from '../../src/email/cf-customer.ts';
+import {
+  emailDomainRoutes,
+  emailOperations,
+  emailOperationSteps,
+  emailZoneConnections,
+} from '../../src/email/connection-schema.ts';
 import * as emailConnections from '../../src/email/connection-service.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { app } from '../../src/index.ts';
@@ -70,6 +76,78 @@ function request(token = 'probe-token') {
 }
 
 describe('POST /internal/platform/email-bootstrap', () => {
+  it('invalidates completed legacy catch-all readiness and durably verifies subaddressing on upgrade', async () => {
+    const provider = stubCustomerCf({
+      zones: {
+        'example.com': {
+          id: 'platform-mail-zone',
+          name: 'example.com',
+          accountId: env.CF_ACCOUNT_ID,
+        },
+      },
+      mx: { 'mail.example.com': ['route1.mx.cloudflare.net'] },
+      catchAllRule: { enabled: true, workerName: 'void-email-gateway' },
+    });
+    // Retain the real installed identities and completed operation, but model
+    // the old bootstrap's exact key/step and provider observation.
+    const first = await emailConnections.ensureSharedEmailConnection(env.db, bindings());
+    await emailConnections.runEmailOperation(env.db, bindings(), first!);
+    const [legacy] = await env.db.select().from(emailOperations);
+    const [originalRoute] = await env.db.select().from(emailDomainRoutes);
+    await env.db
+      .update(emailOperations)
+      .set({ idempotency_key: 'shared:mail.example.com' })
+      .where(eq(emailOperations.id, first!));
+    const [plusStep] = (await env.db.select().from(emailOperationSteps)).filter(
+      (step) => step.kind === 'subaddressing_ensure',
+    );
+    await env.db
+      .update(emailOperationSteps)
+      .set({ kind: 'catchall_ensure', outcome: { workerName: 'void-email-gateway' } })
+      .where(eq(emailOperationSteps.id, plusStep!.id));
+    provider.routingSettingsStates.get('platform-mail-zone')!.support_subaddress = false;
+    provider.calls.length = 0;
+
+    const upgraded = await emailConnections.ensureSharedEmailConnection(env.db, bindings());
+    expect(upgraded).not.toBe(first);
+    expect((await env.db.select().from(emailDomainRoutes))[0]).toMatchObject({
+      id: originalRoute!.id,
+      inbound_status: 'pending',
+      desired_generation: originalRoute!.desired_generation + 1,
+    });
+    expect((await env.db.select().from(emailZoneConnections))[0]).toMatchObject({
+      id: legacy!.connection_id,
+      inbound_status: 'pending',
+    });
+    const pending = (await env.db.select().from(emailOperationSteps)).filter(
+      (step) => step.operation_id === upgraded,
+    );
+    expect(pending.map((step) => step.kind)).toEqual([
+      'routing_enable',
+      'subaddressing_ensure',
+      'inbound_probe',
+      'publish',
+    ]);
+
+    // The installer endpoint resumes this exact new operation, without
+    // trusting the completed legacy checkpoint or duplicating PATCH.
+    const response = await app.fetch(request(), bindings());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: 'ready', operationId: upgraded });
+    expect(callsByTag(provider.calls, 'subaddressing')[0]?.body).toEqual({
+      support_subaddress: true,
+    });
+    expect(callsByTag(provider.calls, 'subaddressing')).toHaveLength(1);
+    expect(callsByTag(provider.calls, 'catchAll')).toHaveLength(0);
+    expect(callsByTag(provider.calls, 'literalRuleCreate')).toHaveLength(0);
+    expect(
+      await createCfCustomerClient(bindings().CF_API_TOKEN).getCatchAll('platform-mail-zone'),
+    ).toMatchObject({ enabled: true, workerName: 'void-email-gateway' });
+    const retry = await app.fetch(request(), bindings());
+    expect(retry.status).toBe(200);
+    expect(callsByTag(provider.calls, 'subaddressing')).toHaveLength(1);
+    expect(await env.db.select().from(emailOperations)).toHaveLength(2);
+  });
   it('retains the durable operation ID if execution fails after setup was recorded', async () => {
     stubCustomerCf({
       zones: {
@@ -110,7 +188,8 @@ describe('POST /internal/platform/email-bootstrap', () => {
       state: 'ready',
       operationId: expect.any(String),
     });
-    expect(callsByTag(cloudflare.calls, 'catchAll')).toHaveLength(1);
+    expect(callsByTag(cloudflare.calls, 'catchAll')).toHaveLength(0);
+    expect(callsByTag(cloudflare.calls, 'subaddressing')).toHaveLength(1);
     const operation = (await env.db.select().from(emailOperations))[0];
     const route = (
       await env.db
@@ -142,16 +221,47 @@ describe('POST /internal/platform/email-bootstrap', () => {
         },
       },
       mx: { 'mail.example.com': ['route1.mx.cloudflare.net'] },
-      failOn: { catchAll: { message: 'permission denied', status: 403 } },
+      failOn: { subaddressing: { message: 'permission denied: provider-secret', status: 403 } },
+      failBeforeEffect: ['subaddressing'],
     });
 
     const response = await app.fetch(request(), bindings());
     expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
+    const body = await response.json();
+    expect(body).toMatchObject({
       version: 1,
       state: 'incomplete',
       operationStatus: 'blocked',
+      currentStep: 'subaddressing_ensure',
+      failureCode: 'blocked',
+      failureDetail: null,
+      domain: 'mail.example.com',
+      inboundStatus: 'pending',
     });
+    expect(JSON.stringify(body)).not.toContain('provider-secret');
+  });
+
+  it('provisions the shared subdomain without taking over unrelated literal rules or the apex catch-all', async () => {
+    const provider = stubCustomerCf({
+      zones: {
+        'example.com': {
+          id: 'platform-mail-zone',
+          name: 'example.com',
+          accountId: env.CF_ACCOUNT_ID,
+        },
+      },
+      mx: { 'mail.example.com': ['route1.mx.cloudflare.net'] },
+      routingRules: [{ enabled: true, addresses: ['support@mail.example.com'] }],
+      catchAllRule: { enabled: true, workerName: 'unrelated-apex-worker' },
+    });
+
+    const response = await app.fetch(request(), bindings());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: 'ready' });
+    expect(callsByTag(provider.calls, 'catchAll')).toHaveLength(0);
+    expect(callsByTag(provider.calls, 'literalRuleCreate')).toHaveLength(0);
+    expect(callsByTag(provider.calls, 'literalRuleUpdate')).toHaveLength(0);
+    expect(callsByTag(provider.calls, 'routingDns')[0]?.body).toEqual({ name: 'mail.example.com' });
   });
 
   it('resumes the same blocked shared operation after configuration is corrected', async () => {
@@ -163,7 +273,7 @@ describe('POST /internal/platform/email-bootstrap', () => {
           accountId: env.CF_ACCOUNT_ID,
         },
       },
-      mx: {},
+      mx: { 'mail.example.com': [] },
     };
     const cloudflare = stubCustomerCf(config);
 
@@ -175,6 +285,11 @@ describe('POST /internal/platform/email-bootstrap', () => {
       state: 'incomplete',
       operationStatus: 'blocked',
       currentStep: 'inbound_probe',
+      failureCode: 'blocked',
+      failureDetail:
+        'MX records for mail.example.com do not route mail to Cloudflare Email Routing',
+      domain: 'mail.example.com',
+      inboundStatus: 'drifted',
     });
 
     config.mx!['mail.example.com'] = ['route1.mx.cloudflare.net'];
@@ -185,7 +300,8 @@ describe('POST /internal/platform/email-bootstrap', () => {
       state: 'ready',
       operationId: blockedBody.operationId,
     });
-    expect(callsByTag(cloudflare.calls, 'catchAll')).toHaveLength(1);
+    expect(callsByTag(cloudflare.calls, 'catchAll')).toHaveLength(0);
+    expect(callsByTag(cloudflare.calls, 'routingDns')).toHaveLength(1);
     expect(await env.db.select().from(emailOperations)).toHaveLength(1);
   });
 });

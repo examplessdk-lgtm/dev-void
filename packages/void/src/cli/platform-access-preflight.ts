@@ -32,6 +32,7 @@ export async function verifyInstalledPlatformAccessProtection(input: {
   client: CloudflareReader;
   manifest: PlatformInstallationManifest;
   plan: Pick<PlatformInstallPlan, 'apiUrl' | 'proxyUrl' | 'actions'>;
+  dashboardUrl?: string | null;
   protection: PlatformAccessProtection | null;
   checkpoint: Readonly<Record<string, string>>;
 }): Promise<void> {
@@ -113,6 +114,7 @@ export async function verifyInstalledPlatformAccessProtection(input: {
   const requiredOrigins = [
     input.plan.apiUrl,
     input.plan.proxyUrl,
+    ...(input.dashboardUrl ? [input.dashboardUrl] : []),
     ...(input.manifest.endpoints.dashboardUrl ? [input.manifest.endpoints.dashboardUrl] : []),
   ].map((value) => new URL(value).origin);
   if (

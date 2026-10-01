@@ -16,6 +16,7 @@ import {
   resolveEmailIngress,
 } from './connection-service.ts';
 import { EmailInternalBodyError, readBoundedInternalJson } from './internal-body.ts';
+import { getSharedEmailRecipientReadiness } from './shared-recipient-service.ts';
 
 const app = new Hono<ApiEnv>();
 app.use('*', async (context, next) => {
@@ -242,6 +243,9 @@ app.post('/resolve-ingress', async (context) => {
     }
     projectId = project.id;
     slug = project.slug;
+    if ((await getSharedEmailRecipientReadiness(db, context.env, projectId))?.status !== 'ready') {
+      return context.json({ error: 'shared recipient routing is not ready' }, 503);
+    }
   } else {
     const project = (
       await db
