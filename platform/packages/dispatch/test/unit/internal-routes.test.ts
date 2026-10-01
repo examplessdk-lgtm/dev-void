@@ -96,35 +96,6 @@ describe('internal route blocking', () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
-  it('serves only the authenticated health probe on the platform health hostname', async () => {
-    const env = createEnv(false, true, 'probe-token');
-    const probe = await app.fetch(
-      new Request('https://void-platform-health.void.app/health', {
-        headers: { 'X-Void-Platform-Probe': 'probe-token' },
-      }),
-      env,
-      createCtx(),
-    );
-    expect(probe.status).toBe(200);
-    expect(await probe.json()).toEqual({ ok: true });
-
-    // Project Zero Trust leaves this hostname outside Access, so nothing else
-    // there may reach project routing, even when a route uses its slug.
-    for (const request of [
-      new Request('https://void-platform-health.void.app/health'),
-      new Request('https://void-platform-health.void.app/health', {
-        headers: { 'X-Void-Platform-Probe': 'wrong-token' },
-      }),
-      new Request('https://void-platform-health.void.app/'),
-    ]) {
-      const response = await app.fetch(request, env, createCtx());
-      expect(response.status).toBe(404);
-      expect(response.headers.get('Cache-Control')).toBe('no-store');
-    }
-    expect(env.ROUTING.get).not.toHaveBeenCalled();
-    expect(env.DISPATCH.get).not.toHaveBeenCalled();
-  });
-
   it('rejects the legacy public installer header while disabled', async () => {
     const response = await app.fetch(
       new Request('https://my-app.void.app/health', {
@@ -246,5 +217,65 @@ describe('internal route blocking', () => {
     );
     expect(response.status).not.toBe(404);
     expect(await response.text()).toContain('worker');
+  });
+});
+
+// Zero Trust leaves the health hostname outside Cloudflare Access. A project
+// created before its slug was reserved may still own it, so dispatch routes it
+// like any other hostname and relies on its own Access check.
+describe('platform health hostname', () => {
+  const healthHost = 'https://void-platform-health.void.app';
+
+  function createHealthHostEnv(route: Record<string, unknown> | null): Env {
+    const env = createEnv(false, true, 'probe-token');
+    env.ROUTING.get = vi.fn(async (key: string) =>
+      key === 'void-platform-health' && route ? JSON.stringify(route) : null,
+    ) as unknown as Env['ROUTING']['get'];
+    return env;
+  }
+
+  it('serves an existing project with the reserved slug', async () => {
+    const env = createHealthHostEnv({ workerName: 'user-app', projectId: 'proj_1' });
+    const response = await app.fetch(new Request(`${healthHost}/`), env, createCtx());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('worker');
+  });
+
+  it('requires an Access assertion when that project is protected', async () => {
+    const env = createHealthHostEnv({
+      workerName: 'user-app',
+      projectId: 'proj_1',
+      zeroTrust: {
+        teamDomain: 'https://company.cloudflareaccess.com',
+        audiences: [{ hostname: '*.void.app', audience: 'project-audience' }],
+      },
+    });
+    const response = await app.fetch(new Request(`${healthHost}/`), env, createCtx());
+    expect(response.status).toBe(403);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
+  });
+
+  it('answers the health probe before routing', async () => {
+    const env = createHealthHostEnv({ workerName: 'user-app', projectId: 'proj_1' });
+    const response = await app.fetch(
+      new Request(`${healthHost}/health`, {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      env,
+      createCtx(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(env.ROUTING.get).not.toHaveBeenCalled();
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
+  });
+
+  it('returns the normal not found response without a project', async () => {
+    const env = createHealthHostEnv(null);
+    const response = await app.fetch(new Request(`${healthHost}/`), env, createCtx());
+    expect(response.status).toBe(404);
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=30');
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
   });
 });

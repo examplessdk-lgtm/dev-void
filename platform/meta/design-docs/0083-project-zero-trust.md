@@ -41,9 +41,13 @@ custom domains, against Cloudflare's default 500 applications per account.
 
 Health probes (admin system health, installer verification, domain
 activation) send the probe token to `/health` on the health hostname; every
-other project-domain hostname gets the wildcard's login redirect. Dispatch answers only that token probe on this hostname and
-returns a non-cacheable 404 for everything else before routing, and the slug is
-reserved, so the bypass never exposes a project. The wildcard phase creates the
+other project-domain hostname gets the wildcard's login redirect. Dispatch
+answers the token probe before routing and routes everything else on this
+hostname normally. The slug is reserved for new projects, but an installation
+may already have a project that owns it. That project stays reachable: public,
+or with Zero Trust disabled, it is served as before; protected, the bypass
+forwards requests without an Access assertion, and dispatch's own check on the
+route's audiences answers the non-cacheable 403. The wildcard phase creates the
 bypass before the wildcard; `wildcard-delete` deletes it right after the
 wildcard. A configuration saved without its name gets one committed (separate
 CAS write) before the create. `status --check` reports it missing as drift.

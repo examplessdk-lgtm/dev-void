@@ -1,10 +1,5 @@
 import type { ProjectZeroTrustRouting } from '@void/edge';
-import {
-  PLATFORM_HEALTH_HOSTNAME_LABEL,
-  platformHealthHostname,
-  readPlatformApplication,
-  resolvePlatformApplicationEnvironment,
-} from '@void/platform';
+import { resolvePlatformApplicationEnvironment } from '@void/platform';
 import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
 import { createErrorResponse } from './error-page.ts';
@@ -642,14 +637,6 @@ export default {
         ...(env.PLATFORM_APPLICATION ? { installationId: env.PLATFORM_INSTALLATION_ID } : {}),
       });
     }
-    // Project Zero Trust leaves this hostname outside Cloudflare Access so the
-    // probe above can reach dispatch. It must never serve a project.
-    if (
-      url.hostname.startsWith(`${PLATFORM_HEALTH_HOSTNAME_LABEL}.`) &&
-      url.hostname === platformHealthHostname(readPlatformApplication(env))
-    ) {
-      return createErrorResponse(request, 404, 'Not Found', { 'Cache-Control': 'no-store' });
-    }
     if (
       env.PLATFORM_TRAFFIC_STATE === 'staging' ||
       env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
@@ -703,7 +690,9 @@ export default {
 
     // Access normally rejects unauthenticated traffic before dispatch. This
     // independent assertion check makes an accidentally deleted or drifted
-    // Access application fail closed instead of publishing the project.
+    // Access application fail closed instead of publishing the project. It is
+    // also the only gate for a protected project that owns the platform health
+    // hostname, which Access bypasses for health probes.
     if (
       routing.zeroTrust &&
       !(await projectAccessVerifier.verify(

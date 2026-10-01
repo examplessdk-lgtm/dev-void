@@ -100,9 +100,10 @@ export function platformProjectWorkersDevHostname(
 }
 
 /**
- * Project slug the platform keeps for its own health probe. Dispatch answers
- * only the authenticated probe on this hostname and never routes it to a
- * project, so project Zero Trust can leave it outside Cloudflare Access.
+ * Project slug the platform keeps for its own health probe. Project Zero Trust
+ * leaves this hostname outside Cloudflare Access so the authenticated probe
+ * reaches dispatch. New projects cannot claim it; a project that already owns
+ * it is still protected by dispatch's own Access check.
  */
 export const PLATFORM_HEALTH_HOSTNAME_LABEL = 'void-platform-health';
 
