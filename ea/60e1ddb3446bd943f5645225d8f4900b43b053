@@ -1,0 +1,19 @@
+docs/integrations/cloudflare.md
+  s_14b3de9dcb5198::t_b3c9d672880455 7,11,19,23,28,31,35,45,49-56,58,60,62,72-75,79,81,83,93,95,101,105,111,113,115,117,119,121,125,127,129,133,135-141,143,147,153,157,159,161,163,167,169,171-175,177,179,186,190,192-197,199,203,205,207,211,213,215,217,223,227,231,235,237,239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea60e1ddb3446bd943f5645225d8f4900b43b053",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
