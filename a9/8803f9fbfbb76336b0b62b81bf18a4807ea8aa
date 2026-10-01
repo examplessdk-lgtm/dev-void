@@ -1,0 +1,123 @@
+docs/guide/platform/installation/first-deployment.md
+  s_8eeb2dc3bf8d33::t_f1cc4a5a253400 24-25
+docs/reference/cli.md
+  s_8eeb2dc3bf8d33::t_8c3e1197b02575 964-965
+packages/platform/scripts/build-runtime.mjs
+  s_f0fb751d46544c::t_63ed5ed8719b37 143
+packages/platform/src/installation.ts
+  s_f0fb751d46544c::t_b2b3b7e99ebb4a 94-95,252,273,393-395,413
+packages/platform/src/installer.ts
+  s_f0fb751d46544c::t_c9a438818754f5 38-39,94-96,212
+packages/platform/src/manifest.ts
+  s_f0fb751d46544c::t_548846d4f674e4 28,160,369-372
+packages/platform/src/worker-config.ts
+  s_f0fb751d46544c::t_2c175de6901d0a 21,138-140,145-155,158-160,165
+packages/platform/test/unit/deployment-execution.test.ts
+  s_f0fb751d46544c::t_467afb0678f5e6 1-113
+packages/void/skills/void/SKILL.md
+  s_8eeb2dc3bf8d33::t_7e3e9366314147 108-109
+packages/void/src/cli/platform-installer.ts
+  s_f0fb751d46544c::t_a370ad86ee82b2 382,1604-1622,1971,2374,2797,6657-6701
+packages/void/src/cli/platform-lifecycle.ts
+  s_f0fb751d46544c::t_5b9ad7121c9415 562,912,1032
+packages/void/src/cli/platform-management.ts
+  s_f0fb751d46544c::t_d38e109b090be7 286,439
+packages/void/src/cli/platform-plan.ts
+  s_f0fb751d46544c::t_9169ff5481fd29 102,294,307-310,564-579,774,1150
+packages/void/test/unit/platform-deployment-execution.test.ts
+  s_9f0529547da987::t_eeaa5b8a788f0d 1-195
+packages/void/test/unit/platform-plan.test.ts
+  s_9f0529547da987::t_ae15bbdf122fa4 83-183
+packages/void/test/unit/platform-runtime.test.ts
+  s_f0fb751d46544c::t_5f4236d057476d 17-28
+platform/packages/api/drizzle/0055_durable_deployment_execution.sql
+  s_8eeb2dc3bf8d33::t_708db9b718a887 1-24
+platform/packages/api/drizzle/meta/0055_snapshot.json
+  s_8eeb2dc3bf8d33::t_5872e59026a703 1-6339
+platform/packages/api/drizzle/meta/_journal.json
+  s_8eeb2dc3bf8d33::t_c3cb2624fb22bf 340-346
+platform/packages/api/src/assets.ts
+  s_4c934cc76ffeb1::t_b7376bb4cfcc35 735
+platform/packages/api/src/db.ts
+  s_8eeb2dc3bf8d33::t_963454f57c2102 1636,1657-1673
+platform/packages/api/src/deployment-execution.ts
+  s_8eeb2dc3bf8d33::t_5fa0719bd7e4f1 1-425
+platform/packages/api/src/deployment-operation-types.ts
+  s_8eeb2dc3bf8d33::t_54c6cc6b26b8de 1-28
+platform/packages/api/src/deployment-recovery.ts
+  s_4c934cc76ffeb1::t_7dc0ae5aefad94 1-176
+platform/packages/api/src/env.ts
+  s_8eeb2dc3bf8d33::t_01a31749087a34 103-104,219-223
+platform/packages/api/src/index.ts
+  s_8eeb2dc3bf8d33::t_66aa0815a4be45 52,188,406-414,569-575,584,1207
+platform/packages/api/src/middleware/auth.ts
+  s_8eeb2dc3bf8d33::t_60b9e8f482d71f 46,67-71
+platform/packages/api/src/middleware/platform-access.ts
+  s_8eeb2dc3bf8d33::t_22d4d0b856c97a 68
+platform/packages/api/src/platform-queue.ts
+  s_8eeb2dc3bf8d33::t_d40d84149a9f6b 3,10,16,24-29
+platform/packages/api/src/provisioning/cleanup.ts
+  s_8eeb2dc3bf8d33::t_96cc4c03265360 27,560-564
+platform/packages/api/src/routes/deploy.ts
+  s_8eeb2dc3bf8d33::t_bcc74ab0c2de17 39,84-95,146,491,493,612,615,618,635-636,646-650,706,714-715,2263-2265,2364-2378,2387,2393-2398,2412-2458,2461-2466,2739-2761,2763,2780-2786,2792-2797,2834-2842,2864-2865,2867-2879,2897,2937-2939,5507-5515,5517-5521,5571,5574-5576,5583-5608,5614-5756
+platform/packages/api/src/routes/projects.ts
+  s_8eeb2dc3bf8d33::t_a43c58af06370d 39,1115-1118,1279-1282
+platform/packages/api/src/schema.ts
+  s_8eeb2dc3bf8d33::t_3244860638f957 577-620
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_c7e7962da548f8::t_580221a61f61e4 1-781
+platform/packages/api/test/integration/deployment-recovery.test.ts
+  s_4c934cc76ffeb1::t_1ef1f8da81dea3 1-291
+platform/packages/api/test/unit/platform-deployment-manifest.test.ts
+  s_f0fb751d46544c::t_0cf45593448801 16
+platform/packages/api/wrangler.jsonc
+  s_f0fb751d46544c::t_217ce26d5fb68c 152,168-174,190,313,327-333,346,460,474-480,492
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a98803f9fbfbb76336b0b62b81bf18a4807ea8aa",
+  "prompts": {},
+  "sessions": {
+    "s_4c934cc76ffeb1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c4-0a30-7522-8387-c5a7d16ec773",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_8eeb2dc3bf8d33": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c3-2069-7541-900e-8888a4d3db9c",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_9f0529547da987": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c2-890b-7d61-80da-f014e8dd4c00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_c7e7962da548f8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c4-2adb-7cd3-968a-ee59725accb7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_f0fb751d46544c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c4-507c-7071-a492-cc779391e5ca",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
