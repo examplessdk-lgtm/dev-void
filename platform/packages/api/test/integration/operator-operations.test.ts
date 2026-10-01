@@ -1,5 +1,5 @@
 import { PLATFORM_APPLICATION_KEY, PLATFORM_SANDBOX_DRAIN_KEY } from '@void/platform';
-import { eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -1076,7 +1076,12 @@ describe('operator installation-aware system and worker operations', () => {
       state: 'complete',
     });
     expect(await env.ROUTING.get(PLATFORM_SANDBOX_DRAIN_KEY)).toBeNull();
-    const events = await env.db.select().from(operatorEvents);
+    // Each audit row is inserted, then updated with its outcome, so its physical
+    // position does not follow request order.
+    const events = await env.db
+      .select()
+      .from(operatorEvents)
+      .orderBy(asc(operatorEvents.created_at), asc(operatorEvents.id));
     expect(events).toHaveLength(1 + resumedPages.length);
     expect(events.at(-1)).toEqual(
       expect.objectContaining({
