@@ -79,6 +79,7 @@ beforeEach(async () => {
   token = await createOperatorToken(env.db, admin);
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -192,6 +193,10 @@ describe('operator tenant reads', () => {
     const formerOwner = await createTestUser(env.db, 'operator-usage-former');
     const currentOwner = await createTestUser(env.db, 'operator-usage-current');
     const project = await createTestProject(env.db, currentOwner.id, 'operator-usage-project');
+    // Both ownership intervals must fall inside the billing period anchored on
+    // the 1st, so pin the clock mid-month instead of relying on today's date.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
     const ownedFrom = new Date(Date.now() - 5 * 24 * 60 * 60 * 1_000);
     const transferredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
     transferredAt.setMilliseconds(500);
