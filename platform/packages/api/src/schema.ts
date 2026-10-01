@@ -1200,16 +1200,16 @@ export const githubConnections = pgTable(
     // could match a DIFFERENT repository to this connection and deploy to the
     // wrong project. Webhook (`repository.id`) and OIDC (`claims.repository_id`)
     // resolution match on this immutable id, treating `repo_full_name` as
-    // display/fetch metadata. Every connection populates it at connect time;
-    // a row without one never matches a resolver (fail closed).
-    repository_id: text('repository_id'),
+    // display/fetch metadata.
+    repository_id: text('repository_id').notNull(),
     // The project owner or administrator who proved repository access during
     // connect. Runtime authorization accepts the row only while this still
-    // names the owner or a project administrator; a row without one has no
-    // authority.
-    authorized_by_user_id: text('authorized_by_user_id').references(() => users.id, {
-      onDelete: 'set null',
-    }),
+    // names the owner or a project administrator. Every path that removes that
+    // authority deletes the connection first, so deleting a user that still
+    // authorizes a connection fails instead of leaving it behind.
+    authorized_by_user_id: text('authorized_by_user_id')
+      .notNull()
+      .references(() => users.id),
     branch: text('branch').notNull().default('main'),
     build_executor: text('build_executor')
       .notNull()

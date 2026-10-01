@@ -3,34 +3,6 @@
   "lineage": "void-platform-postgresql-v1",
   "rollbackSafeFrom": [
     {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "9631e7ad6596fc8cd12715d5263d32e94aafd398e5b1689321038232f64dcd74"
-    },
-    {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "6a8a3e502f01162731bdf0bdc8b2e86beac443f87629789ee312bfbc03125e47"
-    },
-    {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "07b5142d4caea007bb8dc8d0fae2c273e56fd6878282fc2b9a76e414210e2fe3"
-    },
-    {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "06c6f91f87d2ad95b1631ae48e2cd671aa6976fe53313947748c07bf2a7d6fda"
-    },
-    {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "3dbf4c31d4bc97a11edca35c59b34ffad1f072df0ad7174d69e2de1057e2610b"
-    },
-    {
-      "platformVersion": "0.10.14",
-      "schemaDigest": "680a0af38a079d371ee8caa019a2cb6351855361b28d1041017c12fdf2abac46"
-    },
-    {
-      "platformVersion": "0.20.1",
-      "schemaDigest": "6de871d9524b082bba675d0d653ade45f95206895a962fea2b9be4b85d486313"
-    },
-    {
       "platformVersion": "0.20.3",
       "schemaDigest": "089431e230970d03afa429c102613598e88371155cb693c076002c5d632bb0b6"
     },
@@ -77,6 +49,14 @@
     {
       "platformVersion": "0.22.0",
       "schemaDigest": "bef2a1cfaad1dcad4aca2a4932ef9aa9b9d8025dca495e3b1027902405da902a"
+    },
+    {
+      "platformVersion": "0.23.0",
+      "schemaDigest": "3e3458ba1268853dc8e9a887270863557c2a4c5a5210f8615d247bf1f4bf6bcc"
+    },
+    {
+      "platformVersion": "0.24.0",
+      "schemaDigest": "3e3458ba1268853dc8e9a887270863557c2a4c5a5210f8615d247bf1f4bf6bcc"
     }
   ]
 }

@@ -1522,21 +1522,17 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // the enqueue-time check is stale. A fresh plain (non-locking) Postgres
       // read here observes the committed revocation and fails closed before we
       // mint a live deploy token, rather than relying solely on the installation
-      // token mint failing once its ~55-min cache expires. A missing connection
-      // or repository id fails closed. Treat an
+      // token mint failing once its ~55-min cache expires. Treat an
       // uncovered build like the non-identical freshness branch: cancel (not a
       // build failure), don't mint or start. Nothing is started yet, so there is
       // no container to tear down.
-      const repositoryId = config.repositoryId;
-      const covered =
-        repositoryId !== null &&
-        (await installationCoversRepo(
-          this.db(),
-          config.connectionId,
-          config.projectId,
-          config.installationId,
-          repositoryId,
-        ));
+      const covered = await installationCoversRepo(
+        this.db(),
+        config.connectionId,
+        config.projectId,
+        config.installationId,
+        config.repositoryId,
+      );
       if (!covered) {
         const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'cancelled', {
           error: 'github repository authorization is no longer valid; reconnect the repository',
@@ -1716,7 +1712,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // caps that blast radius to this single repo instead of every repo the
       // install covers.
       const sourceToken = await getInstallationToken(this.env, config.installationId, {
-        repositoryIds: [repositoryId],
+        repositoryIds: [config.repositoryId],
         permissions: { contents: 'read' },
       });
       // The installation-token fetch is the longest pre-launch await and was the

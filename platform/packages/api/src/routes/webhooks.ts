@@ -1074,7 +1074,7 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         for (const conn of connections) {
-          if (conn.repository_id === null || !removedRepositoryIds.has(conn.repository_id)) {
+          if (!removedRepositoryIds.has(conn.repository_id)) {
             continue;
           }
           acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));

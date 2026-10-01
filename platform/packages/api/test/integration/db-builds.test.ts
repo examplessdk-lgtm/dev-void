@@ -1419,35 +1419,6 @@ describe('builds', () => {
     expect(result.build!.commit_sha).toBe('aaa');
   });
 
-  // A missing repository id can't prove coverage, even on an `all`-repos install.
-  it('supersedeAndCreateContainerBuild skips a missing repo id even on an ALL install (fails closed)', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await createGitHubConnection(env.db, {
-      projectId: project.id,
-      installationId: '12345',
-      repoFullName: 'acme/app',
-      repositoryId: DEFAULT_REPO_ID,
-      branch: 'main',
-      buildExecutor: 'container',
-    });
-    // Default `all`-repos install (membership not enforced).
-    await seedActiveInstall(env.db, '12345');
-
-    const result = await supersedeAndCreateContainerBuild(env.db, {
-      projectId: project.id,
-      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      branch: 'main',
-      commitSha: 'aaa',
-      installationId: '12345',
-      repositoryId: null,
-    });
-    expect(result.build).toBeNull();
-    expect(result.skipped).toBe('install-revoked');
-    expect(result.cancelled).toEqual([]);
-    expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
-  });
-
   // The enqueue tx must assert the LOCKED connection is the SAME row the
   // caller resolved. `github_connections.project_id` is UNIQUE, so a
   // disconnect+reconnect to a DIFFERENT repo (same branch/executor, and crucially
@@ -2994,7 +2965,7 @@ describe('github_connections', () => {
 
   // The build manager re-checks coverage from stored build state, which may lack
   // either id; both fail closed even on an `all`-repos install.
-  it('installationCoversRepo fails closed without a connection or repository id', async () => {
+  it('installationCoversRepo fails closed without a connection id', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     await seedActiveInstall(env.db, '12345');
@@ -3015,7 +2986,6 @@ describe('github_connections', () => {
         '42',
       ),
     ).toBe(false);
-    expect(await installationCoversRepo(env.db, conn.id, project.id, '12345', null)).toBe(false);
   });
 });
 
@@ -3163,6 +3133,31 @@ describe('github_installations', () => {
       repositories: [],
     });
     expect(adopted.user_id).toBe(userB.id);
+  });
+
+  // GitHub can convert a personal account into an organization; later payloads
+  // report the same installation with the organization type.
+  it('upsert drops the owner when a personal installation becomes an organization', async () => {
+    const owner = await createTestUser(env.db, 'converted');
+    await upsertGitHubInstallation(env.db, {
+      installationId: '559',
+      userId: owner.id,
+      accountLogin: 'acme',
+      accountId: 'acc_z',
+      accountType: 'User',
+      repositories: [],
+    });
+
+    const converted = await upsertGitHubInstallation(env.db, {
+      installationId: '559',
+      userId: null,
+      accountLogin: 'acme',
+      accountId: 'acc_z',
+      accountType: 'Organization',
+      repositories: [],
+    });
+    expect(converted.account_type).toBe('Organization');
+    expect(converted.user_id).toBeNull();
   });
 
   it('getGitHubInstallation + getGitHubInstallationsByUser read by key/user', async () => {

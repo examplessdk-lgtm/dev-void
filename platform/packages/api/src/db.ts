@@ -3276,7 +3276,7 @@ export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<Term
       // Pending invitations are in the lock set so acceptance cannot add a
       // membership after discovery. Re-read the connections under every lock:
       // a creator that acquired a project lock first may have inserted after
-      // discovery and must not be left with NULL provenance by the FK.
+      // discovery and would otherwise block the user delete below.
       const authorizedConnections = await tx
         .select({ projectId: githubConnections.project_id })
         .from(githubConnections)
@@ -4253,8 +4253,7 @@ export async function hasQueuedContainerBuilds(db: Db): Promise<boolean> {
  * FAILS CLOSED unless the exact connection still belongs to the project, has
  * durable authority, and its active installation still covers the repo. Every
  * connection records the project owner/admin who completed the repository proof;
- * that authorizer must still be the owner or an admin. A connection without an
- * authorizer (its user was deleted) has no authority.
+ * that authorizer must still be the owner or an admin.
  * An `all` install covers every repo; a `selected` install requires the immutable
  * repo id in its cache. This is the shared predicate used by webhook and OIDC
  * resolvers as well as enqueue and final startup checks.
@@ -4309,13 +4308,8 @@ async function installationCoversRepoInTx(
   connectionId: string,
   projectId: string,
   installationId: string,
-  repositoryId: string | null,
+  repositoryId: string,
 ): Promise<boolean> {
-  // Every connection records its immutable repository id; a row without one
-  // cannot prove coverage.
-  if (repositoryId === null) {
-    return false;
-  }
   const [row] = await tx
     .select({ id: githubConnections.id })
     .from(githubConnections)
@@ -4347,8 +4341,8 @@ async function installationCoversRepoInTx(
  * repo. Identical fail-closed predicate — returns false unless the
  * `github_installations` row exists AND `status === 'active'` AND the repo is
  * still in the install's selection (`repository_selection === 'all'`, or the
- * immutable numeric repo id is in the cached `repositories` set). A missing
- * connection id or repository id fails closed.
+ * immutable numeric repo id is in the cached `repositories` set). A stored
+ * build config without a connection id fails closed.
  *
  * Used by the container `BuildManager.startBuild` to re-verify coverage at token
  * mint, AFTER a queue wait during which an uninstall/suspension/repo-removal
@@ -4362,9 +4356,9 @@ export async function installationCoversRepo(
   connectionId: string,
   projectId: string,
   installationId: string,
-  repositoryId: string | null,
+  repositoryId: string,
 ): Promise<boolean> {
-  if (!connectionId || !repositoryId) {
+  if (!connectionId) {
     return false;
   }
   const [row] = await db
@@ -4406,7 +4400,7 @@ export async function supersedeAndCreateContainerBuild(
     commitSha: string;
     connectionId: string;
     installationId: string;
-    repositoryId: string | null;
+    repositoryId: string;
   },
 ): Promise<{
   build: Build | null;
@@ -4861,7 +4855,7 @@ export async function createGithubActionsBuildWithinLimit(
     logsUrl?: string | null;
     connectionId: string;
     installationId: string;
-    repositoryId: string | null;
+    repositoryId: string;
     // The authorized workflow path the OIDC gate matched (the token's own
     // workflow file). Re-checked under the connection lock so a concurrent
     // PATCH that re-pins `workflow_path` can't let a now-de-authorized workflow
@@ -5500,8 +5494,9 @@ export async function upsertGitHubInstallation(
     .onConflictDoUpdate({
       target: githubInstallations.installation_id,
       set: {
-        // Only personal (account_type='User') installs carry an owner;
-        // organization installs always pass a null user. Preserve an
+        // Only personal (account_type='User') installs carry an owner. A
+        // personal account converted into an organization arrives here with the
+        // organization type, so it drops its owner. Otherwise preserve an
         // already-linked user_id when a webhook upsert arrives with no user
         // (install-before-signin can be backfilled later). When a user is
         // provided, adopt it ONLY if the row is unowned or already owned by the
@@ -5510,9 +5505,11 @@ export async function upsertGitHubInstallation(
         // would freeze repositories/status refreshes on the webhook re-upsert,
         // and `user_id = NULL` is never true.)
         user_id:
-          args.userId === undefined || args.userId === null
-            ? sql`${githubInstallations.user_id}`
-            : sql`CASE WHEN ${githubInstallations.user_id} IS NULL OR ${githubInstallations.user_id} = ${args.userId} THEN ${args.userId} ELSE ${githubInstallations.user_id} END`,
+          args.accountType === 'Organization'
+            ? null
+            : args.userId === undefined || args.userId === null
+              ? sql`${githubInstallations.user_id}`
+              : sql`CASE WHEN ${githubInstallations.user_id} IS NULL OR ${githubInstallations.user_id} = ${args.userId} THEN ${args.userId} ELSE ${githubInstallations.user_id} END`,
         account_login: args.accountLogin,
         account_id: args.accountId,
         account_type: args.accountType,

@@ -2906,7 +2906,10 @@ describe('platform installer', () => {
     const database = readPlatformRuntimeManifest().database;
     const baseline = database.migrations.filter((migration) => migration.index <= 55);
     expect(baseline.at(-1)?.tag).toBe('0055_durable_deployment_execution');
-    expect(database.migrations.at(-1)?.tag).toBe('0056_email_shared_recipients');
+    expect(database.migrations.slice(baseline.length).map((migration) => migration.tag)).toEqual([
+      '0056_email_shared_recipients',
+      '0057_github_authority_constraints',
+    ]);
     const rows = baseline.map((migration, index) => ({
       id: index + 1,
       hash: migration.sha256,
@@ -2931,7 +2934,7 @@ describe('platform installer', () => {
       '0.22.0',
       true,
     );
-    expect(result.appliedMigrations).toBe(1);
+    expect(result.appliedMigrations).toBe(2);
     expect(
       accepted.queries.some((query) =>
         query.includes('CREATE TRIGGER "void_shared_email_recipient_teardown_guard"'),
@@ -2939,6 +2942,44 @@ describe('platform installer', () => {
     ).toBe(true);
     expect(accepted.rows).toHaveLength(database.migrations.length);
   });
+
+  it.each(['0.23.0', '0.24.0'])(
+    'upgrades a %s installation through the GitHub authority constraints',
+    async (sourceVersion) => {
+      const database = readPlatformRuntimeManifest().database;
+      const baseline = database.migrations.filter((migration) => migration.index <= 56);
+      expect(baseline.at(-1)?.tag).toBe('0056_email_shared_recipients');
+      const rows = baseline.map((migration, index) => ({
+        id: index + 1,
+        hash: migration.sha256,
+        created_at: migration.timestampMillis,
+      }));
+      const rejected = migrationConnection(rows);
+      await expect(
+        preparePlatformDatabaseConnection(
+          rejected,
+          getPlatformRuntimeDirectory(),
+          database,
+          '0.22.0',
+          true,
+        ),
+      ).rejects.toThrow('cannot safely roll back');
+      expect(rejected.queries).not.toContain('BEGIN');
+      const accepted = migrationConnection(rows);
+      const result = await preparePlatformDatabaseConnection(
+        accepted,
+        getPlatformRuntimeDirectory(),
+        database,
+        sourceVersion,
+        true,
+      );
+      expect(result.appliedMigrations).toBe(1);
+      expect(
+        accepted.queries.some((query) => query.includes('"authorized_by_user_id" SET NOT NULL')),
+      ).toBe(true);
+      expect(accepted.rows).toHaveLength(database.migrations.length);
+    },
+  );
 
   it('rejects the isolated legacy email0054 fork without rewriting its history or applying canonical migrations', async () => {
     const database = readPlatformRuntimeManifest().database;

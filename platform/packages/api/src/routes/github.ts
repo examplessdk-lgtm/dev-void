@@ -875,9 +875,9 @@ export const githubRoutes = new Hono<ApiEnv>()
           continue;
         }
         // The signed join_code lists only Organization installs (the callback's
-        // eligibility gate), and account_type is immutable, so every install here
-        // is an organization install with no owner. The installer joins like any
-        // other member.
+        // eligibility gate), and GitHub never converts an organization back into a
+        // personal account, so every install here is an organization install with
+        // no owner. The installer joins like any other member.
         //
         // Skip installs whose join_code predates a revocation (stale replay). A
         // legit re-join AFTER re-add mints a fresh join_code with iat > revoked_at,
@@ -1441,8 +1441,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       // Org-share connect is Organization-only. Memberships are only ever written for
       // organization installs; this gate keeps a personal install unreachable through
       // membership even if one existed, with the SAME opaque 404 (never reveal the
-      // install exists / its type to a non-member). account_type is immutable, so the
-      // pre-lock row is authoritative (no locked re-read).
+      // install exists / its type to a non-member). GitHub never converts an
+      // organization back into a personal account, so the pre-lock row is
+      // authoritative (no locked re-read).
       if (installation.account_type !== 'Organization') {
         return context.json({ error: 'installation not found' }, 404);
       }

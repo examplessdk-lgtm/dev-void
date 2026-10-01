@@ -20,8 +20,9 @@ it('declares only the exact canonical 0.22.0 predecessor and fences legacy delet
     { idx: 54, tag: '0054_project_mode', when: 1790841384175 },
     { idx: 55, tag: '0055_durable_deployment_execution', when: 1790864531640 },
   ]);
-  expect(journal.entries.at(-1)).toMatchObject({ idx: 56, tag: '0056_email_shared_recipients' });
-  expect(journal.entries.at(-1)!.when).toBeGreaterThan(baseline.at(-1)!.when);
+  const migration = journal.entries.find((entry) => entry.idx === 56);
+  expect(migration).toMatchObject({ idx: 56, tag: '0056_email_shared_recipients' });
+  expect(migration!.when).toBeGreaterThan(baseline.at(-1)!.when);
   const previousSnapshot = JSON.parse(
     readFileSync(resolve(root, 'meta/0055_snapshot.json'), 'utf8'),
   );

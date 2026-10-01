@@ -124,7 +124,7 @@ export function ProjectOwnerPreviewPage({
       {result.github ? (
         <p>
           {result.github.repository} installation {result.github.installationId}, authorized by{' '}
-          {result.github.authorizedByUserId ?? 'unknown'} ({result.github.executor}).
+          {result.github.authorizedByUserId} ({result.github.executor}).
         </p>
       ) : (
         <p>No GitHub connection.</p>

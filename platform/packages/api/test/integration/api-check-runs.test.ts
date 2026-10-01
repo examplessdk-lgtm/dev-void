@@ -156,9 +156,9 @@ vi.mock('../../src/db.ts', () => ({
       connectionId: string,
       _projectId: string,
       _installationId: string,
-      repositoryId: string | null,
+      _repositoryId: string,
     ) => {
-      if (!connectionId || !repositoryId) {
+      if (!connectionId) {
         return false;
       }
       return dbState.installationCovered;

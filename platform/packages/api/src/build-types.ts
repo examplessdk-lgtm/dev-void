@@ -28,11 +28,10 @@ export type BuildConfig = {
   /**
    * The connection's immutable numeric GitHub repository id (as text). Carried
    * so `BuildManager.startBuild` can re-verify the App installation still
-   * covers this repo at token-mint time; a missing id fails that check closed.
-   * Sourced from the github connection bound to this build (the build row
-   * itself does not store a repository id).
+   * covers this repo at token-mint time. Sourced from the github connection
+   * bound to this build (the build row itself does not store a repository id).
    */
-  repositoryId: string | null;
+  repositoryId: string;
   instanceType: string;
   timeoutMinutes: number;
 };

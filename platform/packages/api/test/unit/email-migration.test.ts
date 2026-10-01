@@ -14,9 +14,9 @@ it('adds the email ledger without changing tables used by the previous runtime',
   expect(journal.entries[emailIndex]?.idx).toBe(47);
   const previous = journal.entries.slice(0, emailIndex);
   const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8'));
-  expect(compatibility.rollbackSafeFrom).toContainEqual({
-    platformVersion: '0.20.1',
-    schemaDigest: platformDatabaseSchemaDigest(
+  // The schema used by the 0.20.1 runtime.
+  expect(
+    platformDatabaseSchemaDigest(
       compatibility.lineage,
       previous.map((entry) => ({
         index: entry.idx,
@@ -27,7 +27,7 @@ it('adds the email ledger without changing tables used by the previous runtime',
           .digest('hex'),
       })),
     ),
-  });
+  ).toBe('6de871d9524b082bba675d0d653ade45f95206895a962fea2b9be4b85d486313');
   const db = new PGlite();
   try {
     for (const entry of previous) {

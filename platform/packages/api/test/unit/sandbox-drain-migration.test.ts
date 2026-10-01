@@ -19,7 +19,6 @@ describe('Sandbox drain database compatibility', () => {
   it('pins the verified 0036 baseline digest and keeps 0037 additive', () => {
     const compatibility = readJson(new URL('compatibility.json', drizzleRoot)) as {
       lineage: string;
-      rollbackSafeFrom: Array<{ platformVersion: string; schemaDigest: string }>;
     };
     const journal = readJson(new URL('meta/_journal.json', drizzleRoot)) as {
       entries: Array<{ idx: number; tag: string; when: number }>;
@@ -36,10 +35,6 @@ describe('Sandbox drain database compatibility', () => {
       JSON.stringify({ lineage: compatibility.lineage, migrations: baselineMigrations }),
     );
     expect(baselineDigest).toBe('06c6f91f87d2ad95b1631ae48e2cd671aa6976fe53313947748c07bf2a7d6fda');
-    expect(compatibility.rollbackSafeFrom).toContainEqual({
-      platformVersion: '0.10.14',
-      schemaDigest: baselineDigest,
-    });
 
     const drainMigration = readFileSync(new URL('0037_unusual_bloodaxe.sql', drizzleRoot), 'utf8');
     const statements = drainMigration
