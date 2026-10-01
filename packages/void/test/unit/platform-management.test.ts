@@ -149,7 +149,7 @@ function client(manifest: PlatformInstallationManifest) {
   const disabledWrites: Array<string> = [];
   const deletedKvValues: Array<string> = [];
   let removedRoutes = 0;
-  return {
+  const fake = {
     deleted,
     emptiedBuckets,
     preservedBucketKeys,
@@ -160,7 +160,15 @@ function client(manifest: PlatformInstallationManifest) {
     get removedRoutes() {
       return removedRoutes;
     },
-    deleteResource: async (_account: string, kind: string, id: string) => {
+    deleteResource: async (_account: string, kind: string, id: string): Promise<void> => {
+      // Like Cloudflare, refuse to delete a Queue while a platform Worker
+      // still binds it.
+      const bindingWorker = (await fake.listWorkerNames())[0];
+      if (kind === 'queue' && bindingWorker) {
+        throw new Error(
+          `Cloudflare API error: Cannot delete queue '${id}' that is still referenced by a binding in a Worker. Unbind queue '${id}' from the Workers '${bindingWorker}'; then try again. (HTTP 400)`,
+        );
+      }
       deleted.push([kind, id]);
     },
     deleteKvValue: async (_account: string, _namespace: string, key: string) => {
@@ -258,6 +266,7 @@ function client(manifest: PlatformInstallationManifest) {
       removedRoutes++;
     },
   };
+  return fake;
 }
 
 function namedResources(manifest: PlatformInstallationManifest, kind: InstallationResourceKind) {
@@ -785,7 +794,7 @@ describe('platform lifecycle management', () => {
     await uninstallPlatform(fake, manifest, uninstallArgs, {
       interactive: false,
     });
-    expect(fake.deleted.map(([kind]) => kind).sort()).toEqual(['queue', 'queue']);
+    expect(fake.deleted).toEqual([]);
     expect(fake.deleted.some(([kind]) => kind === 'zone')).toBe(false);
     const result = listInstallationManifests()[0]!;
     expect(result.status).toBe('uninstalled');
@@ -875,7 +884,7 @@ describe('platform lifecycle management', () => {
 
     await uninstallPlatform(fake, manifest, uninstallArgs, { interactive: false });
 
-    expect(fake.deleted.map(([kind]) => kind).sort()).toEqual(['queue', 'queue']);
+    expect(fake.deleted).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
     expect(
       listInstallationManifests()[0]?.resources.find(
@@ -891,12 +900,12 @@ describe('platform lifecycle management', () => {
     await uninstallPlatform(fake, manifest, uninstallArgs, {
       interactive: false,
     });
-    expect(fake.deleted.map(([kind]) => kind).sort()).toEqual(['queue', 'queue']);
+    expect(fake.deleted).toEqual([]);
     expect(fake.remoteWrites.map((value) => JSON.parse(value).status)).toContain('uninstalled');
     const retained = listInstallationManifests()[0]!.resources.filter(
       (resource) => resource.state === 'retained',
     );
-    expect(retained).toHaveLength(13);
+    expect(retained).toHaveLength(15);
   });
 
   it('refuses automatic deletion of an installer-created zone', async () => {
@@ -929,7 +938,8 @@ describe('platform lifecycle management', () => {
         interactive: false,
       },
     );
-    expect(fake.deleted).toHaveLength(7);
+    expect(fake.deleted).toHaveLength(5);
+    expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
     expect(fake.deleted).not.toContainEqual(['ai-gateway', 'ai-gateway-id']);
     expect(fake.emptiedBuckets).toEqual([]);
     expect(fake.preservedBucketKeys).toEqual([]);
@@ -1019,25 +1029,108 @@ describe('platform lifecycle management', () => {
     const first = client(manifest);
     const originalDelete = first.deleteResource;
     first.deleteResource = async (account, kind, id) => {
-      if (kind === 'queue') {
+      if (kind === 'dispatch-namespace') {
         throw new Error('temporary deletion failure');
       }
       await originalDelete(account, kind, id);
     };
     await expect(
-      uninstallPlatform(first, manifest, uninstallArgs, {
-        interactive: false,
-      }),
+      uninstallPlatform(
+        first,
+        manifest,
+        { ...uninstallArgs, purgeData: true },
+        { interactive: false },
+      ),
     ).rejects.toThrow('temporary deletion failure');
     const checkpoint = listInstallationManifests()[0]!;
     expect(checkpoint.status).toBe('failed');
     expect(checkpoint.resources.filter((resource) => resource.state === 'deleted')).toHaveLength(0);
 
     const second = client(checkpoint);
-    await uninstallPlatform(second, checkpoint, uninstallArgs, {
-      interactive: false,
-    });
+    await uninstallPlatform(
+      second,
+      checkpoint,
+      { ...uninstallArgs, purgeData: true },
+      { interactive: false },
+    );
     expect(second.deleted.filter(([kind]) => kind === 'worker')).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('retains Queues that retained Workers still use', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+
+    await uninstallPlatform(
+      fake,
+      manifest,
+      { ...uninstallArgs, purgeData: true },
+      { interactive: false },
+    );
+
+    expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
+    const result = listInstallationManifests()[0]!;
+    expect(result.status).toBe('uninstalled');
+    expect(
+      result.resources
+        .filter((resource) => resource.kind === 'queue')
+        .map((resource) => resource.state),
+    ).toEqual(['retained', 'retained']);
+  });
+
+  it('finishes an uninstall that stopped on a Queue still bound to a retained Worker', async () => {
+    let manifest = installedManifest();
+    manifest = transitionInstallation(manifest, 'uninstalling', '2026-09-14T00:00:03.000Z');
+    manifest = transitionInstallation(
+      {
+        ...manifest,
+        resources: manifest.resources.map((resource) =>
+          resource.kind === 'worker' ? { ...resource, state: 'retained' as const } : resource,
+        ),
+      },
+      'failed',
+      '2026-09-14T00:00:04.000Z',
+    );
+    persist(manifest);
+    const fake = client(manifest);
+    fake.listWorkerNames = async () =>
+      manifest.resources
+        .filter((resource) => resource.kind === 'worker')
+        .map((resource) => resource.name);
+
+    await uninstallPlatform(
+      fake,
+      manifest,
+      { ...uninstallArgs, purgeData: true },
+      { interactive: false },
+    );
+
+    expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
+    const result = listInstallationManifests()[0]!;
+    expect(result.status).toBe('uninstalled');
+    expect(
+      result.resources
+        .filter((resource) => resource.kind === 'queue')
+        .map((resource) => resource.state),
+    ).toEqual(['retained', 'retained']);
+  });
+
+  it('deletes Queues once no installation Worker remains', async () => {
+    const installed = installedManifest();
+    const manifest = {
+      ...installed,
+      resources: installed.resources.filter((resource) => resource.kind !== 'worker'),
+    };
+    persist(manifest);
+    const fake = client(manifest);
+
+    await uninstallPlatform(fake, manifest, uninstallArgs, { interactive: false });
+
+    expect(fake.deleted).toEqual([
+      ['queue', 'cron-queue-id'],
+      ['queue', 'usage-queue-id'],
+    ]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 

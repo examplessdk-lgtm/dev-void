@@ -798,7 +798,7 @@ export async function uninstallPlatform(
       ? 'Delete safely identifiable installer-owned data (--purge-data); retain Workers, R2, AI Gateway, and external PostgreSQL for manual cleanup.'
       : 'Retain installer-owned data; external PostgreSQL is never deleted.';
   note(
-    `Disable all platform traffic through installation-owned routing storage.\nRetain DNS records, routes, and custom domains for explicit dashboard cleanup.\nDelete installer-owned Queues.\n${dataMessage}\n${
+    `Disable all platform traffic through installation-owned routing storage.\nRetain DNS records, routes, and custom domains for explicit dashboard cleanup.\nDelete installer-owned Queues unless a retained Worker still uses them.\n${dataMessage}\n${
       createdZone
         ? `Keep zone ${createdZone.name} for explicit manual cleanup.`
         : 'Never delete the adopted application zone.'
@@ -930,6 +930,15 @@ export async function uninstallPlatform(
         resourceDeletionPriority(left, deletionPriority) -
         resourceDeletionPriority(right, deletionPriority),
     );
+    // Uninstall retains Workers, and Cloudflare refuses to delete a Queue that
+    // a Worker still binds. Delete Queues only once none of this installation's
+    // Workers exist, so a retained Worker keeps its bindings intact.
+    const queuesInUse =
+      hasRoutingCheckpoint &&
+      resources.some(
+        (resource) => resource.kind === 'queue' && shouldDeleteResource(resource, retainData),
+      ) &&
+      (await hasLiveInstallationWorker(client, next));
     for (const resource of resources) {
       if (resource.state !== 'ready') {
         continue;
@@ -944,7 +953,7 @@ export async function uninstallPlatform(
         await writeLifecycleCheckpoint(client, next);
         continue;
       }
-      if (resource.kind === 'dns-record' && !zone) {
+      if ((resource.kind === 'dns-record' && !zone) || (resource.kind === 'queue' && queuesInUse)) {
         next = updateResourceState(next, resource.key, 'retained');
         await writeLifecycleCheckpoint(client, next);
         continue;
@@ -1114,6 +1123,26 @@ function shouldDeleteResource(resource: InstallationResource, retainData: boolea
     return false;
   }
   return !(retainData && DATA_RESOURCE_KINDS.has(resource.kind));
+}
+
+async function hasLiveInstallationWorker(
+  client: Pick<PlatformManagementClient, 'listWorkerNames'>,
+  manifest: PlatformInstallationManifest,
+): Promise<boolean> {
+  const names = manifest.deployment.resources;
+  const installationWorkers = new Set([
+    names.apiWorker,
+    names.proxyWorker,
+    names.emailGatewayWorker,
+    names.tailWorker,
+    names.dispatchWorker,
+    ...manifest.resources
+      .filter((resource) => resource.kind === 'worker')
+      .map((resource) => resource.name),
+  ]);
+  return (await client.listWorkerNames(manifest.account.id)).some((name) =>
+    installationWorkers.has(name),
+  );
 }
 
 function resourceDeletionPriority(
