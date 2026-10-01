@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   bypassPolicy,
   reusablePolicyReferences,
@@ -57,7 +57,31 @@ function applicationFixture() {
   };
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('ZeroTrustCloudflareClient', () => {
+  it('calls the global fetch without binding it to the client by default', async () => {
+    const requests: Array<string> = [];
+    // Workers rejects a host fetch invoked with any receiver other than the global object.
+    vi.stubGlobal('fetch', function (this: unknown, input: string | URL | Request) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+      }
+      requests.push(input.toString());
+      return Promise.resolve(envelope({ auth_domain: 'company.cloudflareaccess.com' }));
+    });
+    const client = new ZeroTrustCloudflareClient('account-1', 'secret');
+
+    await expect(client.getOrganization()).resolves.toEqual({
+      teamDomain: 'https://company.cloudflareaccess.com',
+    });
+    expect(requests).toEqual([
+      'https://api.cloudflare.com/client/v4/accounts/account-1/access/organizations',
+    ]);
+  });
+
   it('validates the organization, selected identity providers, and reusable policies', async () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const path = new URL(input.toString()).pathname;

@@ -1,5 +1,5 @@
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { beforeAll, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vite-plus/test';
 import { ProjectAccessVerifier, resolveAccessAudience } from '../../src/access.ts';
 
 const teamDomain = 'https://company.cloudflareaccess.com';
@@ -10,6 +10,10 @@ beforeAll(async () => {
   const pair = await generateKeyPair('RS256', { extractable: true });
   privateKey = pair.privateKey;
   jwk = { ...(await exportJWK(pair.publicKey)), alg: 'RS256', kid: 'key-1', use: 'sig' };
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 const routing = {
@@ -136,6 +140,24 @@ describe('project Access verification', () => {
         routing,
       ),
     ).resolves.toBe(false);
+  });
+
+  it('calls the global fetch without binding it to the verifier by default', async () => {
+    const requests: Array<string> = [];
+    // Workers rejects a host fetch invoked with any receiver other than the global object.
+    vi.stubGlobal('fetch', function (this: unknown, input: string | URL | Request) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+      }
+      requests.push(input.toString());
+      return Promise.resolve(Response.json({ keys: [jwk] }));
+    });
+    const verifier = new ProjectAccessVerifier();
+
+    await expect(
+      verifier.verify('project.apps.example.com', await assertion(), routing),
+    ).resolves.toBe(true);
+    expect(requests).toEqual([`${teamDomain}/cdn-cgi/access/certs`]);
   });
 
   it('rejects redirects from the signing-key endpoint', async () => {

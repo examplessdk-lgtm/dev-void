@@ -39,7 +39,7 @@ export function resolveAccessAudience(
 export class ProjectAccessVerifier {
   private readonly keys = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
-  constructor(private readonly request: typeof fetch = fetch) {}
+  constructor(private readonly request: typeof fetch = (input, options) => fetch(input, options)) {}
 
   async verify(
     hostname: string,

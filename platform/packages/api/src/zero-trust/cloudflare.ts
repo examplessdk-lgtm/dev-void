@@ -148,7 +148,7 @@ export class ZeroTrustCloudflareClient {
   constructor(
     accountId: string,
     private readonly token: string,
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly fetcher: typeof fetch = (input, options) => fetch(input, options),
     apiBase = 'https://api.cloudflare.com/client/v4',
   ) {
     this.#base = `${apiBase.replace(/\/+$/, '')}/accounts/${encodeURIComponent(accountId)}/access`;
