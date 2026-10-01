@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigEnv, Plugin, UserConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { createWorkerFetch } from '../../src/runtime/routing-worker.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../../src/shared/env.ts';
 import {
   CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV,
@@ -65,6 +66,38 @@ async function generate(resolved: Record<string, unknown>, command: 'build' | 's
   return { patch, entry: readFileSync(join(root, '.void/entry.ts'), 'utf8') };
 }
 
+async function readiness(entry: string, env: Record<string, unknown>): Promise<Response> {
+  const source = entry.match(/const __voidFetch = (__createWorkerFetch\([\s\S]*?\n {2}\}\));/)?.[1];
+  expect(source).toBeDefined();
+  const fetch = new Function(
+    '__createWorkerFetch',
+    'app',
+    'serveWithAssets',
+    '__withRawEnv',
+    'withRuntimeEnv',
+    '__filterInternalBindings',
+    '__voidHandleInternalRoute',
+    '__voidCollectPrerenderPaths',
+    `return (${source});`,
+  )(
+    createWorkerFetch,
+    { fetch: () => new Response('application') },
+    (_request: Request, _env: object, response: Response) => response,
+    (_env: object, callback: () => Promise<Response>) => callback(),
+    (_env: object, callback: () => Promise<Response>) => callback(),
+    (bindings: object) => bindings,
+    async () => null,
+    async () => [],
+  ) as ReturnType<typeof createWorkerFetch>;
+  return fetch(
+    new Request('https://app.test/__void/ready', {
+      headers: { 'Cloudflare-Workers-Version-Overrides': 'app="requested-candidate"' },
+    }),
+    env,
+    { waitUntil() {}, passThroughOnException() {}, props: {} },
+  );
+}
+
 describe('native metadata configuration and generated runtime', () => {
   it('adds Free-compatible self-metadata and threads its name to readiness without paid bindings', async () => {
     vi.stubEnv(CLOUDFLARE_DEPLOY_BUILD_ENV, '1');
@@ -73,7 +106,16 @@ describe('native metadata configuration and generated runtime', () => {
       .mockRejectedValue(new Error('Unexpected provider probe'));
     const { patch, entry } = await generate({});
     expect(patch.version_metadata).toEqual({ binding: DEFAULT_VERSION_METADATA_BINDING });
-    expect(entry).toContain(`versionId: env["${DEFAULT_VERSION_METADATA_BINDING}"]?.id`);
+    expect(entry).toContain(`versionMetadataBinding: "${DEFAULT_VERSION_METADATA_BINDING}"`);
+    const response = await readiness(entry, {
+      [DEFAULT_VERSION_METADATA_BINDING]: {
+        id: 'actual-served-version',
+        tag: 'private-tag',
+        timestamp: 'private-time',
+      },
+    });
+    expect(await response.json()).toEqual({ ready: true, versionId: 'actual-served-version' });
+    expect(response.headers.get('cache-control')).toBe('no-store');
     expect(patch.containers).toBeUndefined();
     expect(patch.ai).toBeUndefined();
     expect(patch.hyperdrive).toBeUndefined();
@@ -86,7 +128,13 @@ describe('native metadata configuration and generated runtime', () => {
     const { patch, entry } = await generate(resolved);
     expect(patch.version_metadata).toBeUndefined();
     expect(resolved.version_metadata).toEqual({ binding: 'AUTHORED_VERSION' });
-    expect(entry).toContain('versionId: env["AUTHORED_VERSION"]?.id');
+    expect(entry).toContain('versionMetadataBinding: "AUTHORED_VERSION"');
+    const response = await readiness(entry, {
+      AUTHORED_VERSION: { id: 'authored-served-version' },
+      [DEFAULT_VERSION_METADATA_BINDING]: { id: 'wrong-default-version' },
+    });
+    expect(await response.json()).toEqual({ ready: true, versionId: 'authored-served-version' });
+    expect(await (await readiness(entry, {})).json()).toEqual({ ready: true });
   });
 
   it('leaves handoff bindings and its legacy runtime unchanged when no metadata exists', async () => {
@@ -94,7 +142,7 @@ describe('native metadata configuration and generated runtime', () => {
     vi.stubEnv(CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV, '1');
     const { patch, entry } = await generate({});
     expect(patch.version_metadata).toBeUndefined();
-    expect(entry).not.toContain('versionId: env[');
+    expect(entry).not.toContain('versionMetadataBinding:');
   });
 
   it.each(['build', 'serve'] as const)(
@@ -103,7 +151,7 @@ describe('native metadata configuration and generated runtime', () => {
       vi.stubEnv(CLOUDFLARE_DEPLOY_BUILD_ENV, '');
       const { patch, entry } = await generate({}, command);
       expect(patch.version_metadata).toBeUndefined();
-      expect(entry).not.toContain('versionId: env[');
+      expect(entry).not.toContain('versionMetadataBinding:');
     },
   );
 

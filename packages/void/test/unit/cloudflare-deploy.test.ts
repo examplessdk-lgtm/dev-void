@@ -5,6 +5,7 @@ import { log } from '@clack/prompts';
 import {
   CloudflareWorkerInspectionError,
   parseCloudflareVersionMessage,
+  type CloudflareOperation,
 } from '@void/deploy-cloudflare';
 import { toSlash } from 'pathslash';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -3428,22 +3429,22 @@ describe('runCloudflareDeploy — secrets gate', () => {
     const current = '11111111-1111-4111-8111-111111111111';
     const next = '22222222-2222-4222-8222-222222222222';
     let active = current;
-    const commands: Array<Array<string>> = [];
-    const runWrangler: DeployWranglerRun = operationFixture((args) => {
-      commands.push(args);
-      if (args[0] === 'whoami') {
-        return { ...cleanExit, stdout: '{"loggedIn":true,"accounts":[]}' };
+    const operations: Array<CloudflareOperation> = [];
+    const runWrangler: DeployWranglerRun = (operation) => {
+      operations.push(operation);
+      if (operation.type === 'auth.whoami') {
+        return { ...cleanExit, data: { loggedIn: true, accounts: [] } };
       }
-      if (args[0] === 'deployments') {
+      if (operation.type === 'deployments.status') {
         return {
           ...cleanExit,
-          stdout: JSON.stringify({ versions: [{ version_id: active, percentage: 100 }] }),
+          data: { versions: [{ version_id: active, percentage: 100 }] },
         };
       }
-      if (args[0] === 'versions' && args[1] === 'list') {
+      if (operation.type === 'versions.list') {
         return {
           ...cleanExit,
-          stdout: JSON.stringify([
+          data: [
             {
               id: current,
               number: 1,
@@ -3458,25 +3459,34 @@ describe('runCloudflareDeploy — secrets gate', () => {
                 script_runtime: { usage_model: 'standard', limits: {} },
               },
             },
-          ]),
+          ],
         };
       }
-      if (args[0] === 'versions' && args[1] === 'upload') {
+      if (operation.type === 'versions.upload') {
         return {
           ...cleanExit,
           status: 1,
+          failure: 'durable-migration',
+          errorCode: 10211,
           stderr: 'Durable Object migrations require deploy. [code: 10211]',
         };
       }
-      if (args[0] === 'deploy') {
+      if (operation.type === 'worker.deploy') {
         active = next;
         return {
           ...cleanExit,
-          stdout: `Current Version ID: ${next}\nhttps://secret-do-app.example.workers.dev`,
+          data: {
+            versionId: next,
+            workersDevUrl: 'https://secret-do-app.example.workers.dev',
+          },
         };
       }
-      return cleanExit;
-    });
+      if (operation.type === 'triggers.deploy' || operation.type === 'triggers.clear-crons') {
+        expect(active).toBe(next);
+        return cleanExit;
+      }
+      throw new Error(`Unexpected Cloudflare operation: ${operation.type}`);
+    };
     let explicitBootstrapProof: boolean | undefined;
     const { deps } = harness({
       runWrangler,
@@ -3494,7 +3504,11 @@ describe('runCloudflareDeploy — secrets gate', () => {
         explicitBootstrapProof = options.allowFirstDeploymentBootstrap;
         return activateCloudflareVersionPrimitive({
           ...options,
-          fetch: async () => Response.json({ ready: true, versionId: next }),
+          fetch: async () => {
+            expect(operations.at(-2)?.type).toBe('triggers.clear-crons');
+            expect(operations.at(-1)?.type).toBe('deployments.status');
+            return Response.json({ ready: true, versionId: active });
+          },
         });
       },
     });
@@ -3502,8 +3516,15 @@ describe('runCloudflareDeploy — secrets gate', () => {
     await runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps);
 
     expect(explicitBootstrapProof).not.toBe(true);
-    expect(commands.some((args) => args[0] === 'versions' && args[1] === 'upload')).toBe(true);
-    expect(commands.some((args) => args[0] === 'deploy')).toBe(true);
+    expect(
+      operations
+        .map((operation) => operation.type)
+        .filter(
+          (type) =>
+            type !== 'auth.whoami' && type !== 'deployments.status' && type !== 'versions.list',
+        ),
+    ).toEqual(['versions.upload', 'worker.deploy', 'triggers.deploy', 'triggers.clear-crons']);
+    expect(active).toBe(next);
   });
 });
 

@@ -253,8 +253,9 @@ describe('followBuildLogs', () => {
 
   it('follows an initially terminal build whose producer has not drained', async () => {
     vi.useFakeTimers();
-    vi.stubEnv('VOID_TOKEN', 'token');
-    vi.stubEnv('VOID_API_URL', '');
+    // Bind this fixture token explicitly so a saved platform cannot select the destination.
+    vi.stubEnv('VOID_TOKEN', 'test-build-logs-token');
+    vi.stubEnv('VOID_API_URL', 'https://api.example.test');
     vi.stubEnv('VOID_PROJECT', '');
     vi.spyOn(PlatformClient.prototype, 'listProjects').mockResolvedValue([
       { id: 'project', slug: 'project' } as Awaited<
