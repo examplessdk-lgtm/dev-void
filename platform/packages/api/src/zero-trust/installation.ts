@@ -262,6 +262,9 @@ export async function configurePlatformZeroTrust(
       wildcardApplicationName:
         current?.wildcardApplicationName ?? (await applicationName(env, 'project-zero-trust')),
       wildcardApplication: current?.wildcardApplication ?? null,
+      healthApplicationName:
+        current?.healthApplicationName ?? (await applicationName(env, 'platform-health')),
+      healthApplication: current?.healthApplication ?? null,
       operation: {
         id: crypto.randomUUID(),
         kind: 'configure',

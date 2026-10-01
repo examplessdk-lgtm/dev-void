@@ -18,7 +18,11 @@ import {
   projectZeroTrust,
 } from '../../src/schema.ts';
 import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
-import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import {
+  configurePlatformZeroTrust,
+  disablePlatformZeroTrust,
+  reconcilePlatformZeroTrust,
+} from '../../src/zero-trust/installation.ts';
 import {
   cleanupProjectZeroTrust,
   initializeNewProjectZeroTrust,
@@ -290,6 +294,147 @@ describe('project Zero Trust reconciliation', () => {
       zeroTrustStatus({ ...bindings, SITE_DOMAIN: 'new.example.com' }, env.db),
     ).resolves.toMatchObject({ enabled: true, status: 'ready', checked: false, live: null });
     expect(cloudflare.fetcher).not.toHaveBeenCalled();
+  });
+
+  it('keeps the platform health hostname outside the wildcard for its whole lifetime', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    const applicationWrites = () =>
+      cloudflare.fetcher.mock.calls
+        .filter(([, init]) => init?.method === 'POST' || init?.method === 'DELETE')
+        .map(([input, init]) => ({
+          method: init!.method,
+          domain: init?.body
+            ? (JSON.parse(String(init.body)) as { domain: string }).domain
+            : new URL(input.toString()).pathname.split('/').at(-1),
+        }));
+
+    await configurePlatformZeroTrust(bindings, env.db, {
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+
+    const configured = (await readZeroTrustConfigurationStrict(env.db))!;
+    const health = configured.healthApplication!;
+    expect(health).toMatchObject({
+      name: configured.healthApplicationName,
+      destinations: ['void-platform-health.apps.example.com'],
+    });
+    expect(health.name).toMatch(/-platform-health$/);
+    expect(cloudflare.applications.get(health.id)).toMatchObject({
+      domain: 'void-platform-health.apps.example.com',
+      policies: [{ decision: 'bypass', include: [{ everyone: {} }] }],
+    });
+    // The exception exists before the wildcard covers its hostname.
+    expect(applicationWrites()).toEqual([
+      { method: 'POST', domain: 'void-platform-health.apps.example.com' },
+      { method: 'POST', domain: '*.apps.example.com' },
+    ]);
+    await expect(zeroTrustStatus(bindings, env.db, { check: true })).resolves.toMatchObject({
+      live: { present: true, drifted: false },
+    });
+
+    cloudflare.applications.delete(health.id);
+    await expect(zeroTrustStatus(bindings, env.db, { check: true })).resolves.toMatchObject({
+      live: { present: false, drifted: true },
+    });
+    await reconcilePlatformZeroTrust(bindings, env.db);
+    const restored = (await readZeroTrustConfigurationStrict(env.db))!.healthApplication!;
+    expect(restored.name).toBe(health.name);
+    expect(cloudflare.applications.get(restored.id)).toMatchObject({
+      domain: 'void-platform-health.apps.example.com',
+    });
+
+    cloudflare.fetcher.mockClear();
+    await disablePlatformZeroTrust(bindings, env.db);
+    const { wildcardApplication } = configured;
+    // The exception outlives the wildcard.
+    expect(applicationWrites()).toEqual([
+      { method: 'DELETE', domain: wildcardApplication!.id },
+      { method: 'DELETE', domain: restored.id },
+    ]);
+    expect(cloudflare.applications.size).toBe(0);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      enabled: false,
+      healthApplication: null,
+      healthApplicationName: health.name,
+    });
+  });
+
+  it('adds the health exception to a configuration saved before it existed', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    const {
+      healthApplication,
+      healthApplicationName: _name,
+      ...legacy
+    } = (await readZeroTrustConfigurationStrict(env.db))!;
+    cloudflare.applications.delete(healthApplication!.id);
+    await env.db
+      .update(platformSettings)
+      .set({ value: legacy })
+      .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+    await expect(readZeroTrustConfigurationStrict(env.db)).resolves.toMatchObject({
+      healthApplicationName: null,
+      healthApplication: null,
+    });
+
+    await reconcilePlatformZeroTrust(bindings, env.db);
+
+    const repaired = (await readZeroTrustConfigurationStrict(env.db))!;
+    expect(repaired.healthApplicationName).toMatch(/-platform-health$/);
+    expect(repaired.healthApplication).toMatchObject({
+      name: repaired.healthApplicationName,
+      destinations: ['void-platform-health.apps.example.com'],
+    });
+    expect(cloudflare.applications.has(repaired.healthApplication!.id)).toBe(true);
+  });
+
+  it('creates no health exception for a workers.dev-only installation', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'test-account.workers.dev',
+      PLATFORM_INSTALLATION_ID: 'example-123456abcdef',
+      PLATFORM_APPLICATION: JSON.stringify({
+        baseDomain: 'test-account.workers.dev',
+        zoneName: '',
+        dedicatedZone: false,
+        workersDev: { subdomain: 'test-account', installationId: 'example-123456abcdef' },
+      }),
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    expect((await readZeroTrustConfigurationStrict(env.db))!.healthApplication).toBeNull();
+    expect([...cloudflare.applications.values()].map((application) => application.domain)).toEqual([
+      'void-123456abcdef-*.test-account.workers.dev',
+    ]);
   });
 
   // Exercises several persisted reconciliation batches across more than 100 projects.

@@ -170,10 +170,12 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     vi.stubGlobal('fetch', cloudflare.fetcher);
     const platform = bindings();
     await configurePublicProjects(platform);
-    const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+    const { wildcardApplication: wildcard, healthApplication: health } =
+      (await readZeroTrustConfigurationStrict(env.db))!;
     const originalRows = await env.db.select().from(projectZeroTrust);
     expect(originalRows).toHaveLength(101);
-    expect(cloudflare.applications.size).toBe(102);
+    // 101 public exceptions, the shared application, and the health exception.
+    expect(cloudflare.applications.size).toBe(103);
 
     await disablePlatformZeroTrust(platform, env.db);
 
@@ -181,7 +183,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       enabled: true,
       operation: { kind: 'disable', phase: 'projects', owner: null },
     });
-    expect(cloudflare.applications.has(wildcard.id)).toBe(true);
+    expect(cloudflare.applications.has(wildcard!.id)).toBe(true);
     expect(cloudflare.deletedIds).toEqual([]);
     for (const project of publicProjects) {
       const row = originalRows.find((entry) => entry.project_id === project.id)!;
@@ -194,8 +196,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       wildcardApplication: null,
       operation: { kind: 'disable', phase: 'bypass-delete', owner: null },
     });
-    expect(cloudflare.applications.has(wildcard.id)).toBe(false);
-    expect(cloudflare.deletedIds[0]).toBe(wildcard.id);
+    expect(cloudflare.applications.has(wildcard!.id)).toBe(false);
+    expect(cloudflare.deletedIds.slice(0, 2)).toEqual([wildcard!.id, health!.id]);
     const remainingBypasses = (await env.db.select().from(projectZeroTrust)).filter(
       (row) => row.bypass_application_id !== null,
     );
@@ -215,7 +217,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       lastError: null,
       operation: null,
     });
-    expect(cloudflare.deletedIds[0]).toBe(wildcard.id);
+    expect(cloudflare.deletedIds[0]).toBe(wildcard!.id);
     expect(cloudflare.applications.size).toBe(0);
     for (const row of await env.db.select().from(projectZeroTrust)) {
       expect(row).toMatchObject({
@@ -244,15 +246,16 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     });
     const platform = bindings();
     await configurePublicProjects(platform);
-    const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+    const { wildcardApplication: wildcard, healthApplication: health } =
+      (await readZeroTrustConfigurationStrict(env.db))!;
     const bypass = (await getProjectZeroTrustState(env.db, project.id))!;
-    failedWildcardId = wildcard.id;
+    failedWildcardId = wildcard!.id;
 
     await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow(
       'Wildcard deletion unavailable',
     );
 
-    expect(cloudflare.applications.has(wildcard.id)).toBe(true);
+    expect(cloudflare.applications.has(wildcard!.id)).toBe(true);
     expectPublicBypass(cloudflare, bypass.bypass_application_id!, project.slug);
     expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
       bypass_application_id: bypass.bypass_application_id,
@@ -263,7 +266,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
 
     failedWildcardId = null;
     await reconcilePlatformZeroTrust(platform, env.db);
-    expect(cloudflare.deletedIds).toEqual([wildcard.id, bypass.bypass_application_id]);
+    expect(cloudflare.deletedIds).toEqual([wildcard!.id, health!.id, bypass.bypass_application_id]);
     expect(cloudflare.applications.size).toBe(0);
   });
 
@@ -298,7 +301,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     for (const project of [failingProject, unvisitedProject]) {
       await setProjectZeroTrustProtection(platform, env.db, project.id, true);
     }
-    const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+    const { wildcardApplication: wildcard, healthApplication: health } =
+      (await readZeroTrustConfigurationStrict(env.db))!;
     const bypass = (await getProjectZeroTrustState(env.db, publicProject.id))!;
     const originalUnvisitedRoute = await env.ROUTING.get(unvisitedProject.slug);
     expect(JSON.parse(originalUnvisitedRoute!).zeroTrust).toBeDefined();
@@ -322,7 +326,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       putSpy.mockRestore();
     }
 
-    expect(cloudflare.deletedIds).toEqual([wildcard.id, bypass.bypass_application_id]);
+    expect(cloudflare.deletedIds).toEqual([wildcard!.id, health!.id, bypass.bypass_application_id]);
     expect(cloudflare.applications.size).toBe(0);
     await expect(resolveProjectZeroTrustRouting(env.db, publicProject.id)).resolves.toBeNull();
     expect(await getProjectZeroTrustState(env.db, unvisitedProject.id)).toMatchObject({
@@ -378,7 +382,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       });
       const platform = bindings();
       await configurePublicProjects(platform);
-      const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+      const { wildcardApplication: wildcard, healthApplication: health } =
+        (await readZeroTrustConfigurationStrict(env.db))!;
       const bypass = (await getProjectZeroTrustState(env.db, project.id))!;
       failedBypassId = bypass.bypass_application_id;
 
@@ -392,7 +397,7 @@ describe('Zero Trust disable public bypass lifecycle', () => {
         wildcardApplication: null,
         operation: { kind: 'disable', phase: 'bypass-delete', owner: null },
       });
-      expect(cloudflare.applications.has(wildcard.id)).toBe(false);
+      expect(cloudflare.applications.has(wildcard!.id)).toBe(false);
       expectPublicBypass(cloudflare, bypass.bypass_application_id!, project.slug);
       expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
         bypass_application_id: bypass.bypass_application_id,
@@ -413,7 +418,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
         await reconcilePlatformZeroTrust(platform, env.db);
       }
       expect(deleteAttempts).toEqual([
-        wildcard.id,
+        wildcard!.id,
+        health!.id,
         bypass.bypass_application_id,
         bypass.bypass_application_id,
       ]);
@@ -433,7 +439,8 @@ describe('Zero Trust disable public bypass lifecycle', () => {
     vi.stubGlobal('fetch', cloudflare.fetcher);
     const platform = bindings();
     await configurePublicProjects(platform);
-    const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+    const { wildcardApplication: wildcard, healthApplication: health } =
+      (await readZeroTrustConfigurationStrict(env.db))!;
     const bypass = (await getProjectZeroTrustState(env.db, project.id))!;
     await env.db
       .update(projectZeroTrust)
@@ -481,6 +488,6 @@ describe('Zero Trust disable public bypass lifecycle', () => {
       status: 'ready',
       desired_protected: false,
     });
-    expect(cloudflare.deletedIds).toEqual([wildcard.id, bypass.bypass_application_id]);
+    expect(cloudflare.deletedIds).toEqual([wildcard!.id, health!.id, bypass.bypass_application_id]);
   });
 });

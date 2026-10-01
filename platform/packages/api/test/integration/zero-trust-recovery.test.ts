@@ -232,7 +232,7 @@ describe('Zero Trust recovery', () => {
       expect(await getProjectZeroTrustState(env.db, body.id)).toEqual(seeded);
       expect(cloudflare.fetcher).not.toHaveBeenCalled();
       await expect(resolveProjectZeroTrustRouting(env.db, body.id)).resolves.toBeNull();
-      expect(cloudflare.applications.size).toBe(2);
+      expect(cloudflare.applications.size).toBe(3);
 
       await expect(disablePlatformZeroTrust(platform, env.db)).resolves.toMatchObject({
         enabled: false,
@@ -298,7 +298,7 @@ describe('Zero Trust recovery', () => {
         last_error: null,
       });
       await expect(resolveProjectZeroTrustRouting(env.db, project.id)).resolves.toBeNull();
-      expect(cloudflare.applications.size).toBe(2);
+      expect(cloudflare.applications.size).toBe(3);
       await disablePlatformZeroTrust(platform, env.db);
       expect(cloudflare.applications.size).toBe(0);
     },
@@ -513,7 +513,7 @@ describe('Zero Trust recovery', () => {
       status: 'ready',
       bypass_application_id: originalBypass,
     });
-    expect(cloudflare.applications.size).toBe(2);
+    expect(cloudflare.applications.size).toBe(3);
     expect(
       await decryptPlatformCredential(
         platform,
@@ -768,7 +768,7 @@ describe('Zero Trust recovery', () => {
         identityProviderIds: replacement_.identityProviderIds,
         policyIds: replacement_.policyIds,
       });
-      expect(cloudflare.applications.size).toBe(2);
+      expect(cloudflare.applications.size).toBe(3);
     },
   );
 
@@ -847,7 +847,8 @@ describe('Zero Trust recovery', () => {
       });
       const platform = bindings();
       await configurePlatformZeroTrust(platform, env.db, configurationInput());
-      const wildcard = (await readZeroTrustConfigurationStrict(env.db))!.wildcardApplication!;
+      const { wildcardApplication: wildcard, healthApplication: health } =
+        (await readZeroTrustConfigurationStrict(env.db))!;
       failWildcardDelete = true;
       await expect(disablePlatformZeroTrust(platform, env.db)).rejects.toThrow(
         'Temporary wildcard deletion failure',
@@ -934,7 +935,9 @@ describe('Zero Trust recovery', () => {
         .filter(([, init]) => init?.method === 'DELETE')
         .map(([input]) => new URL(input.toString()).pathname.split('/').at(-1));
       expect(deletedIds).toEqual(
-        lateChange === 'saved bypass checkpoint' ? [wildcard.id, 'late-bypass'] : [wildcard.id],
+        lateChange === 'saved bypass checkpoint'
+          ? [wildcard!.id, health!.id, 'late-bypass']
+          : [wildcard!.id, health!.id],
       );
       expect(
         cloudflare.fetcher.mock.calls.some(
@@ -990,7 +993,7 @@ describe('Zero Trust recovery', () => {
         setProjectZeroTrustProtection(platform, env.db, project.id, true),
       ).rejects.toThrow('at most 100 custom domains');
       expect(await getProjectZeroTrustState(env.db, project.id)).toEqual(originalRow);
-      expect(cloudflare.applications.size).toBe(2);
+      expect(cloudflare.applications.size).toBe(3);
 
       const routingPut = vi.spyOn(env.ROUTING, 'put');
       const rewrittenKeys = new Set<string>();
@@ -1049,7 +1052,7 @@ describe('Zero Trust recovery', () => {
         lastError: null,
         operation: null,
       });
-      expect(cloudflare.applications.size).toBe(operation === 'disable' ? 0 : 2);
+      expect(cloudflare.applications.size).toBe(operation === 'disable' ? 0 : 3);
     },
   );
 });

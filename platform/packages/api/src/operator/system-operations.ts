@@ -1,4 +1,4 @@
-import { readPlatformApplication } from '@void/platform';
+import { platformHealthHostname, readPlatformApplication } from '@void/platform';
 import { sql } from 'drizzle-orm';
 import { backfillQueueTokens } from '../admin/backfill-queue-tokens.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
@@ -150,10 +150,12 @@ export async function systemHealth(
   const siteDomain = env.SITE_DOMAIN ?? SITE_DOMAIN;
   const proxyUrl = env.PROXY_URL ?? `https://proxy.${cloudDomain}`;
   let dispatchUrl: string | null = `https://test.${siteDomain}/health`;
-  if (installed && env.PLATFORM_APPLICATION) {
+  if (installed) {
     const application = readPlatformApplication(env);
-    if (application.zoneName) {
-      dispatchUrl = `https://test.${application.baseDomain}/health`;
+    // Project Zero Trust covers every other project-domain hostname with Access.
+    const healthHostname = platformHealthHostname(application);
+    if (healthHostname) {
+      dispatchUrl = `https://${healthHostname}/health`;
     } else {
       const worker = env.DISPATCH_WORKER_NAME;
       const workersDev = application.workersDev;

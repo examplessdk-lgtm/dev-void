@@ -83,6 +83,8 @@ export {
   type PlatformWorkerConfigSet,
 } from './worker-config.ts';
 export {
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
+  platformHealthHostname,
   platformProjectHostname,
   platformProjectHostnames,
   platformProjectIngressName,

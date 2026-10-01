@@ -1,10 +1,10 @@
-import { readPlatformApplication } from '@void/platform';
+import { platformHealthHostname, readPlatformApplication } from '@void/platform';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { projectZeroTrust } from '../schema.ts';
 import { resolveZeroTrustApplicationEnvironment } from './application.ts';
-import { reusablePolicyReferences } from './cloudflare.ts';
+import { healthCheckApplication, reusablePolicyReferences } from './cloudflare.ts';
 import {
   type ZeroTrustConfiguration,
   ZeroTrustConfigurationError,
@@ -16,8 +16,9 @@ import { clientForConfiguration, projectZeroTrustState } from './state.ts';
 
 /**
  * Installation status from saved state. `check` also asks Cloudflare whether
- * the account, selections, and wildcard application still match; it makes
- * several Access API calls, so reads leave it off unless an operator asks.
+ * the account, selections, wildcard application, and platform health exception
+ * still match; it makes several Access API calls, so reads leave it off unless
+ * an operator asks.
  */
 export async function zeroTrustStatus(
   env: ApiEnv['Bindings'],
@@ -77,6 +78,20 @@ export async function zeroTrustStatus(
         allowedIdentityProviderIds: configuration.identityProviderIds,
         policies: reusablePolicyReferences(configuration.policyIds),
       });
+      const healthHostname = platformHealthHostname(readPlatformApplication(env));
+      if (healthHostname) {
+        // A missing health exception sends platform health probes to Access.
+        const health = configuration.healthApplication
+          ? await client.inspectApplication(
+              configuration.healthApplication,
+              healthCheckApplication(configuration.healthApplication.name, healthHostname),
+            )
+          : { present: false, drifted: true };
+        live = {
+          present: live.present && health.present,
+          drifted: live.drifted || health.drifted,
+        };
+      }
       if (selection.teamDomain !== configuration.teamDomain) {
         live = { ...live, drifted: true };
       }

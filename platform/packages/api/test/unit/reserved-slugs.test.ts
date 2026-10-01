@@ -13,6 +13,10 @@ describe('reserved slugs (real implementation)', () => {
     }
   });
 
+  it('blocks the hostname dispatch keeps for platform health probes', () => {
+    expect(RESERVED_SLUGS.has('void-platform-health')).toBe(true);
+  });
+
   it('blocks infrastructure slugs', () => {
     for (const slug of ['mail', 'smtp', 'ns1', 'ns2', 'ftp']) {
       expect(RESERVED_SLUGS.has(slug)).toBe(true);

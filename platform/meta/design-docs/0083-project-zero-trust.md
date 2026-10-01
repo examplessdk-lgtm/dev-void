@@ -31,10 +31,22 @@ holding its name is Void's own replacement and is adopted:
   origins (limited to the installation's ingress prefix);
 - one exact-host bypass per public project;
 - one exact application per protected project with custom domains (at most
-  100 domains).
+  100 domains);
+- with a zone, one exact-host bypass for the health hostname
+  `void-platform-health.<domain>` (`healthApplicationName`,
+  `healthApplication`).
 
-Footprint: `1 + public projects + protected projects with custom domains`
-against Cloudflare's default 500 applications per account.
+Footprint: 1 + (1 with a zone) + public projects + protected projects with
+custom domains, against Cloudflare's default 500 applications per account.
+
+Health probes (admin system health, installer verification, domain
+activation) send the probe token to `/health` on the health hostname; every
+other project-domain hostname gets the wildcard's login redirect. Dispatch answers only that token probe on this hostname and
+returns a non-cacheable 404 for everything else before routing, and the slug is
+reserved, so the bypass never exposes a project. The wildcard phase creates the
+bypass before the wildcard; `wildcard-delete` deletes it right after the
+wildcard. A configuration saved without its name gets one committed (separate
+CAS write) before the create. `status --check` reports it missing as drift.
 
 The Access token is separate from the runtime token, always used with the
 installation's `CF_ACCOUNT_ID`, encrypted with the platform credential keyring,

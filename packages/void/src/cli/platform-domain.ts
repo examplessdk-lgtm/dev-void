@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { confirm, isCancel, log, note, text } from '@clack/prompts';
 import {
   createApplicationRoutes,
   createPlatformDeploymentManifest,
   normalizeApplicationDomain,
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
   type PlatformApplication,
   type PlatformInstallationManifest,
@@ -188,8 +188,9 @@ export async function applyPlatformDomain(
   );
   await save({ ...manifest, resources: observed.resources, updatedAt: now() });
   // The dispatcher health endpoint works while traffic is disabled and before the domain is canonical.
+  // Project Zero Trust leaves only this hostname of the domain outside Access.
   await (dependencies.probe ?? probePlatformDomain)(
-    `void-check-${randomUUID().slice(0, 8)}.${target.baseDomain}`,
+    `${PLATFORM_HEALTH_HOSTNAME_LABEL}.${target.baseDomain}`,
     manifest,
   );
   await dependencies.verifyOwnership(manifest);

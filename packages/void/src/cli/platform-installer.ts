@@ -39,6 +39,7 @@ import {
   parsePlatformResourceOwnershipMarker,
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
   PLATFORM_SANDBOX_DRAIN_KEY,
@@ -6456,7 +6457,9 @@ export async function verifyPlatformHealth(
       redirect: 'manual',
       signal: AbortSignal.timeout(30_000),
     });
-  const dispatchUrl = dispatchOrigin ?? `https://test.${applicationBaseDomain}`;
+  // Project Zero Trust leaves only this application-domain hostname outside Access.
+  const dispatchUrl =
+    dispatchOrigin ?? `https://${PLATFORM_HEALTH_HOSTNAME_LABEL}.${applicationBaseDomain}`;
   const [health, discovery, proxy, dispatch, emailGateway] = await Promise.all([
     request(`${apiUrl}/health`),
     request(`${apiUrl}/.well-known/void-platform`),

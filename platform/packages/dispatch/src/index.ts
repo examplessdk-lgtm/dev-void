@@ -1,5 +1,10 @@
 import type { ProjectZeroTrustRouting } from '@void/edge';
-import { resolvePlatformApplicationEnvironment } from '@void/platform';
+import {
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
+  platformHealthHostname,
+  readPlatformApplication,
+  resolvePlatformApplicationEnvironment,
+} from '@void/platform';
 import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
 import { createErrorResponse } from './error-page.ts';
@@ -636,6 +641,14 @@ export default {
         ok: true,
         ...(env.PLATFORM_APPLICATION ? { installationId: env.PLATFORM_INSTALLATION_ID } : {}),
       });
+    }
+    // Project Zero Trust leaves this hostname outside Cloudflare Access so the
+    // probe above can reach dispatch. It must never serve a project.
+    if (
+      url.hostname.startsWith(`${PLATFORM_HEALTH_HOSTNAME_LABEL}.`) &&
+      url.hostname === platformHealthHostname(readPlatformApplication(env))
+    ) {
+      return createErrorResponse(request, 404, 'Not Found', { 'Cache-Control': 'no-store' });
     }
     if (
       env.PLATFORM_TRAFFIC_STATE === 'staging' ||

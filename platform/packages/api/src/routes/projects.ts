@@ -1,4 +1,5 @@
 import type { ProjectZeroTrustRouting } from '@void/edge';
+import { PLATFORM_HEALTH_HOSTNAME_LABEL } from '@void/platform';
 import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { deployTokenTtlSecondsForBuildMinutes, signPrerenderToken } from '../auth/deploy-token.ts';
@@ -100,7 +101,8 @@ import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
 /**
  * Slugs no project may claim. Two overlapping reasons:
  *
- *  - hostname collisions on `*.void.app` (`www`, `api`, `dash`, `cname`, …);
+ *  - hostname collisions on `*.void.app` (`www`, `api`, `dash`, `cname`, …),
+ *    including the hostname dispatch keeps for platform health probes;
  *  - EMAIL sender identity: `EMAIL_RESERVED_SLUGS` (`../reserved-slugs.ts`).
  *    A project's outbound `from` is `<slug>[+tag]@<EMAIL_SENDER_DOMAIN>`,
  *    so owning a slug owns that mailbox, and a user registering `noreply`
@@ -111,6 +113,7 @@ import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
  */
 export const RESERVED_SLUGS = new Set([
   ...EMAIL_RESERVED_SLUGS,
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
   'admin',
   'api',
   'app',

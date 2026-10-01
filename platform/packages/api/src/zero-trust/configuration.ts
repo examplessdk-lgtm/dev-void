@@ -43,6 +43,12 @@ export type ZeroTrustConfiguration = Readonly<{
   /** Committed before the wildcard application is created, so a retry can recover it. */
   wildcardApplicationName: string;
   wildcardApplication: ManagedAccessApplication | null;
+  /**
+   * Exact-host bypass for the platform health hostname, so health probes reach
+   * dispatch through the wildcard. Its name is committed before it is created.
+   */
+  healthApplicationName: string | null;
+  healthApplication: ManagedAccessApplication | null;
   operation: ZeroTrustOperation | null;
   lastError: string | null;
   updatedAt: string;
@@ -284,6 +290,8 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
     );
   }
   const wildcardApplication = parseApplication(input.wildcardApplication);
+  // Configurations saved before the health exception existed have neither field.
+  const healthApplication = parseApplication(input.healthApplication ?? null);
   const operation = parseOperation(input.operation);
   if (operation?.phase === 'bypass-delete' && (input.enabled || wildcardApplication)) {
     throw new ZeroTrustConfigurationError('Zero Trust bypass cleanup requires wildcard removal');
@@ -309,6 +317,11 @@ function parseZeroTrustConfiguration(value: unknown): ZeroTrustConfiguration | n
       128,
     ),
     wildcardApplication,
+    healthApplicationName:
+      input.healthApplicationName === undefined || input.healthApplicationName === null
+        ? null
+        : requiredText(input.healthApplicationName, 'managed application name', 128),
+    healthApplication,
     operation,
     lastError: input.lastError === null ? null : requiredText(input.lastError, 'last error', 4096),
     updatedAt: timestamp(input.updatedAt, 'updated timestamp'),

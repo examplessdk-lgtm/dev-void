@@ -1,4 +1,8 @@
-import { PLATFORM_APPLICATION_KEY, readPlatformApplication } from '@void/platform';
+import {
+  PLATFORM_APPLICATION_KEY,
+  platformHealthHostname,
+  readPlatformApplication,
+} from '@void/platform';
 import { sql } from 'drizzle-orm';
 import type { Db, DbOrTx } from '../db.ts';
 import { getProject } from '../db.ts';
@@ -20,6 +24,7 @@ import {
 import {
   ZeroTrustCloudflareClient,
   ZeroTrustCloudflareError,
+  healthCheckApplication,
   reusablePolicyReferences,
 } from './cloudflare.ts';
 import {
@@ -39,6 +44,7 @@ import {
   type RoutingBudget,
 } from './routing.ts';
 import {
+  applicationName,
   clientForConfiguration,
   getProjectZeroTrustState,
   initialProjectProtection,
@@ -440,8 +446,30 @@ export async function runConfigureOperation(
       }
 
       if (operation.phase === 'wildcard') {
+        const healthHostname = platformHealthHostname(readPlatformApplication(env));
+        if (healthHostname && !configuration.healthApplicationName) {
+          // Configurations saved before the health exception existed lack its
+          // name. Commit it before any create so a lost response is recoverable.
+          configuration = await patchConfiguration(db, configuration, {
+            healthApplicationName: await applicationName(env, 'platform-health'),
+          });
+          continue;
+        }
         const name = configuration.wildcardApplicationName;
         configuration = await withZeroTrustOperationLock(db, configuration, async (lockedDb) => {
+          // Health probes reach dispatch through this exact-host bypass. It
+          // exists before the wildcard covers its hostname. Dispatch serves no
+          // project there.
+          const health =
+            healthHostname && configuration.healthApplicationName
+              ? await client.ensureApplication(
+                  healthCheckApplication(configuration.healthApplicationName, healthHostname),
+                  {
+                    id: configuration.healthApplication?.id,
+                    name: configuration.healthApplicationName,
+                  },
+                )
+              : configuration.healthApplication;
           const wildcard = await client.ensureApplication(
             {
               name,
@@ -454,6 +482,7 @@ export async function runConfigureOperation(
           return advanceOperation(lockedDb, configuration, 'projects', {
             enabled: true,
             wildcardApplication: wildcard,
+            healthApplication: health,
             lastError: null,
           });
         });
@@ -652,9 +681,16 @@ export async function runDisableOperation(
             configuration.wildcardApplication?.id,
             configuration.wildcardApplicationName,
           );
+          // The health exception outlives the wildcard, so health probes never
+          // meet Access. Deleting the wildcard again on a retry is a no-op.
+          await client.deleteApplication(
+            configuration.healthApplication?.id,
+            configuration.healthApplicationName,
+          );
           return advanceOperation(lockedDb, configuration, 'bypass-delete', {
             enabled: false,
             wildcardApplication: null,
+            healthApplication: null,
             lastError: null,
           });
         });

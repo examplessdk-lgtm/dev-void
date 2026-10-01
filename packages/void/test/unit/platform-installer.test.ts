@@ -2139,7 +2139,7 @@ describe('platform installer', () => {
       'https://api.example.com/health',
       'https://api.example.com/.well-known/void-platform',
       'https://proxy.example.com/health',
-      'https://test.apps.example.com/health',
+      'https://void-platform-health.apps.example.com/health',
       'https://email.example.com/health',
     ]);
     expect(

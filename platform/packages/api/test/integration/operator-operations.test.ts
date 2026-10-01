@@ -547,7 +547,7 @@ describe('operator installation-aware system and worker operations', () => {
     expect(await response.json()).toMatchObject({ allOk: true });
     expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
       'https://my-proxy.example/health',
-      'https://test.apps.example/health',
+      'https://void-platform-health.apps.example/health',
     ]);
     expect(fetch.mock.calls[1][1]?.headers).toEqual({ 'X-Void-Platform-Probe': 'probe' });
     expect(fetch.mock.calls[0][1]?.headers).toEqual({ 'X-Void-Platform-Probe': 'probe' });
@@ -599,7 +599,7 @@ describe('operator installation-aware system and worker operations', () => {
       });
       expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
         'https://custom-proxy.example/health',
-        'https://test.apps.example.com/health',
+        'https://void-platform-health.apps.example.com/health',
       ]);
     } finally {
       await env.ROUTING.delete(PLATFORM_APPLICATION_KEY);

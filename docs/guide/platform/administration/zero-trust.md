@@ -15,7 +15,7 @@ The steps below set it up. [How Protection Works](#how-protection-works) explain
 - A Cloudflare Zero Trust organization in the account that hosts the platform, with the identity providers and reusable Access policies you want to use. Select at least one Allow policy that matches people by identity. Void rejects Bypass and Service Auth policies, and rules that allow Everyone or any service token.
 - A Cloudflare API token for that account with **Access: Apps and Policies Write** and **Access: Organizations, Identity Providers, and Groups Read**. Void keeps it separate from the platform runtime token, stores it encrypted, and never shows it again.
 - Free Access applications in the account. Cloudflare's default limit is 500 per account. Count the applications you already manage outside Void, then add the ones Void needs, as described in [Access Applications Void Creates](#access-applications-void-creates).
-- Platform API, proxy, and email gateway hostnames outside the project application domain. Configuration is rejected when project protection would cover one of them. Any other hostname under the project application domain also asks for sign-in.
+- Platform API, proxy, and email gateway hostnames outside the project application domain. Configuration is rejected when project protection would cover one of them. Any other hostname under the project application domain also asks for sign-in, except `void-platform-health.<your domain>`, which Void keeps open for its health checks. It never serves a project.
 
 ## Enable Zero Trust
 
@@ -147,21 +147,22 @@ The second check does not look at your policies again. Who may sign in is decide
 
 Void creates and owns these self-hosted applications in your Zero Trust organization:
 
-| Application                | Covers                                                                    | Policy                                                       | Exists                                                 |
-| -------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------ |
-| Shared project application | `*.<your domain>` and this installation's `workers.dev` testing URLs      | Your selected policies and identity providers                | Once, while Zero Trust is enabled                      |
-| Public exception           | One public project's `<slug>.<your domain>` and `workers.dev` testing URL | A Bypass policy for Everyone, named `Void project is public` | One for each public project                            |
-| Custom domain application  | All custom domains of one protected project                               | Your selected policies and identity providers                | One for each protected project that has custom domains |
+| Application                | Covers                                                                    | Policy                                                           | Exists                                                             |
+| -------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Shared project application | `*.<your domain>` and this installation's `workers.dev` testing URLs      | Your selected policies and identity providers                    | Once, while Zero Trust is enabled                                  |
+| Public exception           | One public project's `<slug>.<your domain>` and `workers.dev` testing URL | A Bypass policy for Everyone, named `Void project is public`     | One for each public project                                        |
+| Custom domain application  | All custom domains of one protected project                               | Your selected policies and identity providers                    | One for each protected project that has custom domains             |
+| Health check exception     | `void-platform-health.<your domain>`                                      | A Bypass policy for Everyone, named `Void platform health check` | Once, while Zero Trust is enabled on an installation with a domain |
 
 Custom domains of a public project need no Access application.
 
 The number of applications Void needs is:
 
 ```text
-1 + public projects + protected projects that have custom domains
+2 + public projects + protected projects that have custom domains
 ```
 
-For example, 40 projects with 10 public and 5 protected projects that have custom domains need 1 + 10 + 5 = 16 applications. Void stops with an error when the account has more than 500 Access applications.
+Use 1 instead of 2 on an installation without a domain. For example, 40 projects with 10 public and 5 protected projects that have custom domains need 2 + 10 + 5 = 17 applications. Void stops with an error when the account has more than 500 Access applications.
 
 #### Recognizing Void's Applications
 
@@ -171,6 +172,7 @@ Void adds no tags. Its application names follow this pattern:
 void-<installation>-<code>-<random>-project-zero-trust     shared project application
 void-<installation>-<code>-<random>-public-<project-id>    public exception
 void-<installation>-<code>-<random>-protected-<project-id> custom domain application
+void-<installation>-<code>-<random>-platform-health        health check exception
 ```
 
 - `<installation>` is the start of your installation ID, which begins with your installation name.
@@ -178,7 +180,7 @@ void-<installation>-<code>-<random>-protected-<project-id> custom domain applica
 - `<random>` is 32 random characters.
 - `<project-id>` is the project ID, such as `proj_abc123def456`. The project slug is not part of the name.
 
-To see the exact names Void recorded, run `void platform zero-trust status` for the shared application and `void platform zero-trust project-status <project-id>` for a project's applications. There, the public exception is listed as `bypass application name` and the custom domain application as `protected application name`.
+To see the exact names Void recorded, run `void platform zero-trust status` for the shared application and the health check exception, and `void platform zero-trust project-status <project-id>` for a project's applications. There, the public exception is listed as `bypass application name` and the custom domain application as `protected application name`.
 
 ### Editing Applications in the Dashboard
 
@@ -196,6 +198,7 @@ Void writes an application when it updates it: during platform `configure` or `r
 | Delete the shared project application                  | Protected projects answer 403 on `<slug>.<your domain>` and `workers.dev` URLs. Their custom domains and public projects keep working.                                                                | `void platform zero-trust reconcile`                |
 | Delete a public exception                              | Visitors of that public project are asked to sign in, because the shared application now covers it.                                                                                                   | `void project zero-trust reconcile` in that project |
 | Delete a custom domain application                     | That protected project answers 403 on its custom domains.                                                                                                                                             | `void project zero-trust reconcile` in that project |
+| Delete the health check exception                      | Platform health checks fail with a redirect to sign-in, so the admin dashboard shows `dispatch` as unhealthy and `void platform upgrade` and `repair` stop at their health check.                     | `void platform zero-trust reconcile`                |
 | Rename an application                                  | Void stops updating or deleting it. Reconcile fails with `The recorded Access application no longer has its Void-owned name.` For the shared application, platform status then shows `error`.         | Rename it back to the recorded name, then reconcile |
 | Copy an application with the same name                 | Void ignores the copy while the original exists, and `disable` does not remove it. If the original is later deleted, reconcile fails with `Multiple Cloudflare Access applications are named <name>.` | Delete the copy, then reconcile                     |
 
@@ -207,7 +210,7 @@ When Void recreates a deleted shared project application, the new application is
 void platform zero-trust status --check
 ```
 
-This compares the shared project application with the saved settings, and checks your selected identity providers and policies again. The output includes:
+This compares the shared project application and the health check exception with the saved settings, and checks your selected identity providers and policies again. The output includes:
 
 ```text
 checked: true
@@ -216,18 +219,18 @@ live:
   drifted: false
 ```
 
-- `drifted: true` means the shared application no longer matches. Run `void platform zero-trust reconcile`.
+- `drifted: true` means the shared application or the health check exception no longer matches. Run `void platform zero-trust reconcile`.
 - `present: false` means Void could not read it. The application may be deleted, a selected identity provider or policy may be gone or no longer allowed, or the token may not work. Check the token and selections, then run `void platform zero-trust reconcile`.
 
 `--check` only reads. It changes nothing. It does not check public exceptions or custom domain applications. If you think one was changed, run a reconcile command.
 
 #### Repair Commands
 
-| Command                                                   | Rewrites                                                        | Who can run it                               |
-| --------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------- |
-| `void platform zero-trust reconcile`                      | The shared project application and every project's applications | Installation administrators                  |
-| `void platform zero-trust project-reconcile <project-id>` | One project's applications                                      | Installation administrators                  |
-| `void project zero-trust reconcile`                       | The linked project's applications, or pass `--project <slug>`   | The project owner and project administrators |
+| Command                                                   | Rewrites                                                                                     | Who can run it                               |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `void platform zero-trust reconcile`                      | The shared project application, the health check exception, and every project's applications | Installation administrators                  |
+| `void platform zero-trust project-reconcile <project-id>` | One project's applications                                                                   | Installation administrators                  |
+| `void project zero-trust reconcile`                       | The linked project's applications, or pass `--project <slug>`                                | The project owner and project administrators |
 
 The two project commands work only when platform status is `ready`. While a platform change runs, or after it fails, run `void platform zero-trust reconcile` first.
 
@@ -255,7 +258,7 @@ Large changes run in steps. Platform status shows `configuring` or `disabling`, 
 When you **enable** Zero Trust:
 
 1. Void adds the public exception for each project that stays public. These projects never ask visitors to sign in.
-2. Void creates the shared project application. From here, the `<slug>.<your domain>` and `workers.dev` URLs of protected projects require sign-in.
+2. Void creates the health check exception, then the shared project application. From here, the `<slug>.<your domain>` and `workers.dev` URLs of protected projects require sign-in.
 3. Void goes through the protected projects and covers their custom domains. A project's custom domains stay open until Void reaches it.
 
 If Void cannot add a project's public exception, the project shows `error`, and its visitors are asked to sign in until the next retry succeeds. Void retries every hour, or run `void project zero-trust reconcile` once platform status is `ready`.
@@ -263,7 +266,7 @@ If Void cannot add a project's public exception, the project shows `error`, and 
 When you **disable** Zero Trust:
 
 1. Void turns off its own check for each protected project and removes its custom domain application. Custom domains open here.
-2. Void deletes the shared project application. `<slug>.<your domain>` and `workers.dev` URLs open here.
+2. Void deletes the shared project application, then the health check exception. `<slug>.<your domain>` and `workers.dev` URLs open here.
 3. Void deletes the public exceptions. Public projects stay open the whole time.
 
 #### Custom Domains

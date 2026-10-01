@@ -96,6 +96,35 @@ describe('internal route blocking', () => {
     expect(await response.json()).toEqual({ ok: true });
   });
 
+  it('serves only the authenticated health probe on the platform health hostname', async () => {
+    const env = createEnv(false, true, 'probe-token');
+    const probe = await app.fetch(
+      new Request('https://void-platform-health.void.app/health', {
+        headers: { 'X-Void-Platform-Probe': 'probe-token' },
+      }),
+      env,
+      createCtx(),
+    );
+    expect(probe.status).toBe(200);
+    expect(await probe.json()).toEqual({ ok: true });
+
+    // Project Zero Trust leaves this hostname outside Access, so nothing else
+    // there may reach project routing, even when a route uses its slug.
+    for (const request of [
+      new Request('https://void-platform-health.void.app/health'),
+      new Request('https://void-platform-health.void.app/health', {
+        headers: { 'X-Void-Platform-Probe': 'wrong-token' },
+      }),
+      new Request('https://void-platform-health.void.app/'),
+    ]) {
+      const response = await app.fetch(request, env, createCtx());
+      expect(response.status).toBe(404);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+    }
+    expect(env.ROUTING.get).not.toHaveBeenCalled();
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
+  });
+
   it('rejects the legacy public installer header while disabled', async () => {
     const response = await app.fetch(
       new Request('https://my-app.void.app/health', {
