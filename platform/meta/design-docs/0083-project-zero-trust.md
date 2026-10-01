@@ -32,22 +32,30 @@ holding its name is Void's own replacement and is adopted:
 - one exact-host bypass per public project;
 - one exact application per protected project with custom domains (at most
   100 domains);
-- with a zone, one exact-host bypass for the health hostname
-  `void-platform-health.<domain>` (`healthApplicationName`,
+- with a zone, one host-and-path bypass for the health probe path
+  `void-platform-health.<domain>/health` (`healthApplicationName`,
   `healthApplication`).
 
 Footprint: 1 + (1 with a zone) + public projects + protected projects with
 custom domains, against Cloudflare's default 500 applications per account.
 
 Health probes (admin system health, installer verification, domain
-activation) send the probe token to `/health` on the health hostname; every
-other project-domain hostname gets the wildcard's login redirect. Dispatch
-answers the token probe before routing and routes everything else on this
-hostname normally. The slug is reserved for new projects, but an installation
-may already have a project that owns it. That project stays reachable: public,
-or with Zero Trust disabled, it is served as before; protected, the bypass
-forwards requests without an Access assertion, and dispatch's own check on the
-route's audiences answers the non-cacheable 403. The wildcard phase creates the
+activation) send the probe token to `/health` on the health hostname. Access
+treats the more specific host-and-path application as overriding the wildcard
+for that path and its subpaths
+([application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/));
+every other path on the health hostname, like every other project-domain
+hostname, gets the wildcard's login redirect. Dispatch answers the token probe
+before routing and answers every other request under `/health` on this hostname
+with a non-cacheable 404, matching the broadest reading of Access path matching
+(raw and normalized URL, any case, plain prefixes such as `/healthz`). All other
+paths are routed normally. The slug is reserved for new projects, but an
+installation may already have a project that owns it. That project keeps every
+path except `/health`, under the same Access applications as any other
+project hostname, so dispatch's route-based Access check is not its only gate
+while route metadata propagates. A health application saved with the whole
+hostname as its destination is drift: `status --check` reports it and
+reconcile updates it in place. The wildcard phase creates the
 bypass before the wildcard; `wildcard-delete` deletes it right after the
 wildcard. A configuration saved without its name gets one committed (separate
 CAS write) before the create. `status --check` reports it missing as drift.

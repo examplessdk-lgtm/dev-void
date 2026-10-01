@@ -326,16 +326,18 @@ describe('project Zero Trust reconciliation', () => {
     const health = configured.healthApplication!;
     expect(health).toMatchObject({
       name: configured.healthApplicationName,
-      destinations: ['void-platform-health.apps.example.com'],
+      destinations: ['void-platform-health.apps.example.com/health'],
     });
     expect(health.name).toMatch(/-platform-health$/);
+    // Only the probe path is exempt; the rest of the hostname stays under the wildcard.
     expect(cloudflare.applications.get(health.id)).toMatchObject({
-      domain: 'void-platform-health.apps.example.com',
+      domain: 'void-platform-health.apps.example.com/health',
+      destinations: [{ type: 'public', uri: 'void-platform-health.apps.example.com/health' }],
       policies: [{ decision: 'bypass', include: [{ everyone: {} }] }],
     });
     // The exception exists before the wildcard covers its hostname.
     expect(applicationWrites()).toEqual([
-      { method: 'POST', domain: 'void-platform-health.apps.example.com' },
+      { method: 'POST', domain: 'void-platform-health.apps.example.com/health' },
       { method: 'POST', domain: '*.apps.example.com' },
     ]);
     await expect(zeroTrustStatus(bindings, env.db, { check: true })).resolves.toMatchObject({
@@ -350,7 +352,7 @@ describe('project Zero Trust reconciliation', () => {
     const restored = (await readZeroTrustConfigurationStrict(env.db))!.healthApplication!;
     expect(restored.name).toBe(health.name);
     expect(cloudflare.applications.get(restored.id)).toMatchObject({
-      domain: 'void-platform-health.apps.example.com',
+      domain: 'void-platform-health.apps.example.com/health',
     });
 
     cloudflare.fetcher.mockClear();
@@ -405,9 +407,65 @@ describe('project Zero Trust reconciliation', () => {
     expect(repaired.healthApplicationName).toMatch(/-platform-health$/);
     expect(repaired.healthApplication).toMatchObject({
       name: repaired.healthApplicationName,
-      destinations: ['void-platform-health.apps.example.com'],
+      destinations: ['void-platform-health.apps.example.com/health'],
     });
     expect(cloudflare.applications.has(repaired.healthApplication!.id)).toBe(true);
+  });
+
+  it('narrows a health exception that covers the whole hostname', async () => {
+    const cloudflare = accessApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const bindings = {
+      ...env,
+      SITE_DOMAIN: 'apps.example.com',
+      PLATFORM_INSTALLATION_ID: 'installation-test',
+    } as unknown as ApiEnv['Bindings'];
+    await configurePlatformZeroTrust(bindings, env.db, {
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    const configured = (await readZeroTrustConfigurationStrict(env.db))!;
+    const health = configured.healthApplication!;
+    // An exception saved for the whole hostname would leave every project path
+    // on it outside Access.
+    const hostOnly = 'void-platform-health.apps.example.com';
+    cloudflare.applications.set(health.id, {
+      ...cloudflare.applications.get(health.id),
+      domain: hostOnly,
+      destinations: [{ type: 'public', uri: hostOnly }],
+    });
+    await env.db
+      .update(platformSettings)
+      .set({ value: { ...configured, healthApplication: { ...health, destinations: [hostOnly] } } })
+      .where(eq(platformSettings.key, 'zeroTrust.configuration'));
+
+    await expect(zeroTrustStatus(bindings, env.db, { check: true })).resolves.toMatchObject({
+      live: { present: true, drifted: true },
+    });
+
+    cloudflare.fetcher.mockClear();
+    await reconcilePlatformZeroTrust(bindings, env.db);
+    // Updated in place, so the application keeps its id and audience.
+    expect(
+      cloudflare.fetcher.mock.calls.some(
+        ([input, init]) =>
+          init?.method === 'PUT' && input.toString().endsWith(`/apps/${health.id}`),
+      ),
+    ).toBe(true);
+    expect(cloudflare.applications.get(health.id)).toMatchObject({
+      domain: 'void-platform-health.apps.example.com/health',
+      destinations: [{ type: 'public', uri: 'void-platform-health.apps.example.com/health' }],
+    });
+    expect((await readZeroTrustConfigurationStrict(env.db))!.healthApplication).toEqual({
+      ...health,
+      destinations: ['void-platform-health.apps.example.com/health'],
+    });
+    await expect(zeroTrustStatus(bindings, env.db, { check: true })).resolves.toMatchObject({
+      live: { present: true, drifted: false },
+    });
   });
 
   it('creates no health exception for a workers.dev-only installation', async () => {

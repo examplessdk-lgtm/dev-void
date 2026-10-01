@@ -1,5 +1,10 @@
 import type { ProjectZeroTrustRouting } from '@void/edge';
-import { resolvePlatformApplicationEnvironment } from '@void/platform';
+import {
+  PLATFORM_HEALTH_HOSTNAME_LABEL,
+  platformHealthHostname,
+  readPlatformApplication,
+  resolvePlatformApplicationEnvironment,
+} from '@void/platform';
 import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
 import { createErrorResponse } from './error-page.ts';
@@ -110,6 +115,31 @@ const PLATFORM_STATIC_ASSET_MISSING: FailureKind = 'platform-static-asset-missin
 // so the entry can neither refresh nor authoritatively opt-out-evict) while staying
 // far above any transient deploy-race 404 so normal stale-while-revalidate is intact.
 const ISR_STALE_EVICT_GRACE_SECONDS = 86_400; // 24h of STALE tolerance
+
+/**
+ * Whether Cloudflare Access may treat this path as part of the `/health`
+ * exception on the platform health hostname. Access covers the subpaths of a
+ * destination path. It may see the URL as sent or after the zone's URL
+ * normalization, and its handling of case and of prefixes such as `/healthz`
+ * is undocumented, so this matches the broadest reading of each.
+ */
+function platformHealthExceptionPath(request: Request, url: URL): boolean {
+  const rawPath = request.url
+    .replace(/^[a-z][a-z\d+.-]*:\/\/[^/\\?#]*/i, '')
+    .replace(/[?#].*$/s, '');
+  return [rawPath, url.pathname].some((path) => {
+    let decoded = path;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      // Malformed escapes are matched as sent.
+    }
+    return decoded
+      .replace(/[\\/]+/g, '/')
+      .toLowerCase()
+      .startsWith('/health');
+  });
+}
 
 function clientRevalidateResponse(response: Response): Response {
   const res = new Response(response.body, response);
@@ -637,6 +667,16 @@ export default {
         ...(env.PLATFORM_APPLICATION ? { installationId: env.PLATFORM_INSTALLATION_ID } : {}),
       });
     }
+    // Project Zero Trust leaves `/health` on this hostname outside Cloudflare
+    // Access for the probe above. Nothing else on that path may reach a
+    // project; every other path stays behind Access and is routed normally.
+    if (
+      url.hostname.startsWith(`${PLATFORM_HEALTH_HOSTNAME_LABEL}.`) &&
+      url.hostname === platformHealthHostname(readPlatformApplication(env)) &&
+      platformHealthExceptionPath(request, url)
+    ) {
+      return createErrorResponse(request, 404, 'Not Found', { 'Cache-Control': 'no-store' });
+    }
     if (
       env.PLATFORM_TRAFFIC_STATE === 'staging' ||
       env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
@@ -690,9 +730,7 @@ export default {
 
     // Access normally rejects unauthenticated traffic before dispatch. This
     // independent assertion check makes an accidentally deleted or drifted
-    // Access application fail closed instead of publishing the project. It is
-    // also the only gate for a protected project that owns the platform health
-    // hostname, which Access bypasses for health probes.
+    // Access application fail closed instead of publishing the project.
     if (
       routing.zeroTrust &&
       !(await projectAccessVerifier.verify(

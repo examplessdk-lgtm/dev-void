@@ -220,9 +220,9 @@ describe('internal route blocking', () => {
   });
 });
 
-// Zero Trust leaves the health hostname outside Cloudflare Access. A project
-// created before its slug was reserved may still own it, so dispatch routes it
-// like any other hostname and relies on its own Access check.
+// Zero Trust leaves `/health` on the health hostname outside Cloudflare Access.
+// A project created before its slug was reserved may still own the hostname, so
+// dispatch routes every other path there like any other hostname.
 describe('platform health hostname', () => {
   const healthHost = 'https://void-platform-health.void.app';
 
@@ -236,7 +236,51 @@ describe('platform health hostname', () => {
 
   it('serves an existing project with the reserved slug', async () => {
     const env = createHealthHostEnv({ workerName: 'user-app', projectId: 'proj_1' });
-    const response = await app.fetch(new Request(`${healthHost}/`), env, createCtx());
+    for (const path of ['/', '/about', '/api/health']) {
+      const response = await app.fetch(new Request(`${healthHost}${path}`), env, createCtx());
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('worker');
+    }
+  });
+
+  it('never routes the Access exception path to that project', async () => {
+    const env = createHealthHostEnv({ workerName: 'user-app', projectId: 'proj_1' });
+    // A URL exactly as the client sent it, before the runtime normalizes it.
+    const sent = (url: string) => {
+      const request = new Request(`${healthHost}/`);
+      Object.defineProperty(request, 'url', { value: url });
+      return request;
+    };
+    for (const request of [
+      new Request(`${healthHost}/health`),
+      new Request(`${healthHost}/health`, { headers: { 'X-Void-Platform-Probe': 'wrong-token' } }),
+      new Request(`${healthHost}/health`, { method: 'POST', body: '{}' }),
+      new Request(`${healthHost}/health?probe=1`),
+      new Request(`${healthHost}/health/`),
+      new Request(`${healthHost}/health/nested/page`),
+      new Request(`${healthHost}/healthz`),
+      new Request(`${healthHost}/HEALTH`),
+      new Request(`${healthHost}/%68ealth`),
+      new Request(`${healthHost}//health`),
+      new Request(`${healthHost}/x/../health`),
+      sent(`${healthHost}/health/../about`),
+      sent(`${healthHost}\\health`),
+    ]) {
+      const response = await app.fetch(request, env, createCtx());
+      expect(response.status, request.url).toBe(404);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+    }
+    expect(env.ROUTING.get).not.toHaveBeenCalled();
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
+  });
+
+  it('routes the health path on every other hostname', async () => {
+    const env = createEnv(false, true, 'probe-token');
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/health'),
+      env,
+      createCtx(),
+    );
     expect(response.status).toBe(200);
     expect(await response.text()).toBe('worker');
   });
@@ -250,9 +294,11 @@ describe('platform health hostname', () => {
         audiences: [{ hostname: '*.void.app', audience: 'project-audience' }],
       },
     });
-    const response = await app.fetch(new Request(`${healthHost}/`), env, createCtx());
-    expect(response.status).toBe(403);
-    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    for (const path of ['/', '/about']) {
+      const response = await app.fetch(new Request(`${healthHost}${path}`), env, createCtx());
+      expect(response.status).toBe(403);
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+    }
     expect(env.DISPATCH.get).not.toHaveBeenCalled();
   });
 

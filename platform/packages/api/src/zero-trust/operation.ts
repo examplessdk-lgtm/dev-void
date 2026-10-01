@@ -457,9 +457,9 @@ export async function runConfigureOperation(
         }
         const name = configuration.wildcardApplicationName;
         configuration = await withZeroTrustOperationLock(db, configuration, async (lockedDb) => {
-          // Health probes reach dispatch through this exact-host bypass. It
-          // exists before the wildcard covers its hostname. Dispatch serves no
-          // project there.
+          // Health probes reach dispatch through this bypass of `/health` on
+          // the health hostname. It exists before the wildcard covers that
+          // hostname, and dispatch never routes that path to a project.
           const health =
             healthHostname && configuration.healthApplicationName
               ? await client.ensureApplication(

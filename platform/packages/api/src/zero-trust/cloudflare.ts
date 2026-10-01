@@ -533,7 +533,15 @@ export function bypassPolicy(name: string): ReadonlyArray<ObjectValue> {
   ];
 }
 
-/** The exact-host bypass that keeps platform health probes outside project Access. */
+/**
+ * The bypass that keeps platform health probes outside project Access. It
+ * covers only `/health` (and, as Access matches paths, its subpaths) on the
+ * health hostname; every other path there stays under the wildcard application.
+ */
 export function healthCheckApplication(name: string, hostname: string): AccessApplicationSpec {
-  return { name, destinations: [hostname], policies: bypassPolicy('Void platform health check') };
+  return {
+    name,
+    destinations: [`${hostname}/health`],
+    policies: bypassPolicy('Void platform health check'),
+  };
 }
