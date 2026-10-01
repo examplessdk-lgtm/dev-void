@@ -71,7 +71,7 @@ void platform zero-trust disable
 
 This removes the Access applications Void created and makes all projects public. On large installations it runs in steps; run it again, or check `void platform zero-trust status`, until Zero Trust shows as disabled with no operation running.
 
-Uninstalling the platform does not remove these applications. `void platform uninstall` refuses to start while Zero Trust is enabled, a change is still running, or some Void-managed Access applications are left. Its error lists their names. Disable Zero Trust first, then uninstall. If a project's applications could not be removed, Void retries every hour while the platform is enabled.
+Uninstalling the platform does not remove these applications. `void platform uninstall` refuses to start while Zero Trust is enabled, a change is still running, or some Void-managed Access applications are left. Its error lists their names. Disable Zero Trust first, then uninstall. If a project's applications could not be removed, Void retries every hour while the platform is enabled. If the error says a project deletion stopped partway, run `void project delete` for that project again to remove them.
 
 ## How Protection Works
 

@@ -3006,6 +3006,7 @@ describe('platform installer', () => {
       active: true,
       applications: [],
       destinations: [],
+      unfinishedDeletions: [],
     });
     expect(queries.find(({ sql }) => sql.includes('FROM "platform_settings"'))?.values).toEqual([
       'zeroTrust.configuration',

@@ -459,6 +459,44 @@ describe('uninstall with project Zero Trust', () => {
     expectNothingChanged(fake);
   });
 
+  it('points to finishing the deletion of a project that stopped partway', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+    const read = (rows: Parameters<typeof projectZeroTrustUninstallState>[1]) => () =>
+      uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        lockProjectZeroTrust: unlockedProjectZeroTrust,
+        readProjectZeroTrust: async () => projectZeroTrustUninstallState(disabledZeroTrust, rows),
+      }).catch((reason: unknown) => reason as Error);
+    const deleting = {
+      ...projectApplications('proj_gone', 'void-example-public-proj_gone', null),
+      project_slug: 'gone-app',
+      project_status: 'deleting',
+    };
+
+    const onlyDeleting = (await read([deleting])())!;
+    expect(onlyDeleting.message).toContain(
+      'public exception for proj_gone: void-example-public-proj_gone',
+    );
+    expect(onlyDeleting.message).toContain('Deletion of project gone-app stopped');
+    expect(onlyDeleting.message).toContain('Rerun `void project delete <name>`');
+    expect(onlyDeleting.message).not.toContain('Hourly maintenance');
+
+    const mixed = (await read([
+      deleting,
+      {
+        ...projectApplications('proj_live', 'void-example-public-proj_live', null),
+        project_slug: 'live-app',
+        project_status: 'active',
+      },
+    ])())!;
+    expect(mixed.message).toContain('Deletion of project gone-app stopped');
+    expect(mixed.message).not.toContain('live-app');
+    expect(mixed.message).toContain('Hourly maintenance retries the other applications');
+    expectNothingChanged(fake);
+  });
+
   it('refuses when the Zero Trust state cannot be read', async () => {
     const manifest = installedManifest();
     persist(manifest);
@@ -644,6 +682,7 @@ describe('project Zero Trust database read', () => {
       active: false,
       applications: [],
       destinations: [],
+      unfinishedDeletions: [],
     });
     expect(db.queries).toHaveLength(1);
   });

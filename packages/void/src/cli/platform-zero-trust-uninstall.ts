@@ -25,6 +25,8 @@ export type PlatformZeroTrustApplication = Readonly<{
   role: string;
   id: string | null;
   name: string | null;
+  /** The owning project stopped partway through deletion. */
+  deleting?: boolean;
 }>;
 
 export type PlatformProjectZeroTrustState = Readonly<{
@@ -34,10 +36,14 @@ export type PlatformProjectZeroTrustState = Readonly<{
   destinations: ReadonlyArray<string>;
   /** Void-managed Access applications that may still exist in Cloudflare. */
   applications: ReadonlyArray<PlatformZeroTrustApplication>;
+  /** Projects whose deletion stopped before it removed their applications. */
+  unfinishedDeletions: ReadonlyArray<string>;
 }>;
 
 type ProjectApplicationRow = Readonly<{
   project_id: string;
+  project_slug?: string | null;
+  project_status?: string | null;
   bypass_application_id: string | null;
   bypass_application_name: string | null;
   protected_application_id: string | null;
@@ -116,12 +122,16 @@ export function projectZeroTrustUninstallState(
     }
     destinations = wildcard?.destinations ?? [];
   }
+  const unfinishedDeletions: Array<string> = [];
   for (const row of projectRows) {
+    const deleting = row.project_status === 'deleting';
+    const owned = applications.length;
     if (row.bypass_application_id || row.bypass_application_name) {
       applications.push({
         role: `public exception for ${row.project_id}`,
         id: row.bypass_application_id,
         name: row.bypass_application_name,
+        ...(deleting ? { deleting } : {}),
       });
     }
     if (row.protected_application_id || row.protected_application_name) {
@@ -129,10 +139,14 @@ export function projectZeroTrustUninstallState(
         role: `custom domain application for ${row.project_id}`,
         id: row.protected_application_id,
         name: row.protected_application_name,
+        ...(deleting ? { deleting } : {}),
       });
     }
+    if (deleting && applications.length > owned) {
+      unfinishedDeletions.push(row.project_slug ?? row.project_id);
+    }
   }
-  return { active, destinations, applications };
+  return { active, destinations, applications, unfinishedDeletions };
 }
 
 /** Read the project Zero Trust state from the platform database. */
@@ -158,14 +172,16 @@ export async function readPlatformProjectZeroTrustStateConnection(
   const projectRows = present.projects
     ? (
         await client.query<ProjectApplicationRow>(
-          `SELECT "project_id", "bypass_application_id", "bypass_application_name",
-                  "protected_application_id", "protected_application_name"
-           FROM "project_zero_trust"
-           WHERE "bypass_application_id" IS NOT NULL
-              OR "bypass_application_name" IS NOT NULL
-              OR "protected_application_id" IS NOT NULL
-              OR "protected_application_name" IS NOT NULL
-           ORDER BY "project_id"`,
+          `SELECT z."project_id", p."slug" AS "project_slug", p."status" AS "project_status",
+                  z."bypass_application_id", z."bypass_application_name",
+                  z."protected_application_id", z."protected_application_name"
+           FROM "project_zero_trust" z
+           LEFT JOIN "projects" p ON p."id" = z."project_id"
+           WHERE z."bypass_application_id" IS NOT NULL
+              OR z."bypass_application_name" IS NOT NULL
+              OR z."protected_application_id" IS NOT NULL
+              OR z."protected_application_name" IS NOT NULL
+           ORDER BY z."project_id"`,
         )
       ).rows
     : [];
@@ -207,6 +223,17 @@ function formatApplications(applications: ReadonlyArray<PlatformZeroTrustApplica
 const DASHBOARD_HINT =
   'To lift sign-in right away, delete these applications in the Cloudflare dashboard under Zero Trust → Access → Applications.';
 
+// Hourly maintenance skips projects being deleted, so only finishing the
+// deletion removes their applications and records.
+function unfinishedDeletionLines(state: PlatformProjectZeroTrustState): ReadonlyArray<string> {
+  if (!state.unfinishedDeletions.length) {
+    return [];
+  }
+  return [
+    `Deletion of ${state.unfinishedDeletions.length === 1 ? 'project' : 'projects'} ${state.unfinishedDeletions.join(', ')} stopped before it removed their Access applications. Rerun \`void project delete <name>\` for each, or delete it again from the admin dashboard. This removes their applications, including ones already deleted in the Cloudflare dashboard, and Void's records of them.`,
+  ];
+}
+
 /**
  * Refuse to uninstall while project Zero Trust still owns Access applications,
  * or while its state cannot be read. Runs before uninstall changes anything.
@@ -246,6 +273,7 @@ export async function assertProjectZeroTrustAllowsUninstall(
         ...(state.applications.length
           ? ['Void-managed Access applications:', formatApplications(state.applications)]
           : []),
+        ...unfinishedDeletionLines(state),
         DASHBOARD_HINT,
       ].join('\n'),
     );
@@ -254,10 +282,16 @@ export async function assertProjectZeroTrustAllowsUninstall(
     throw new Error(
       [
         'platform: Refusing to uninstall while Void-managed Access applications from project Zero Trust remain.',
-        'Zero Trust is disabled, but it could not remove the applications of some projects. Hourly maintenance retries them while the platform is enabled. Retry the uninstall once they are gone.',
+        'Zero Trust is disabled, but it could not remove the applications of some projects. Retry the uninstall once they are gone.',
         'Void-managed Access applications:',
         formatApplications(state.applications),
-        `${DASHBOARD_HINT} Hourly maintenance then clears Void's records of them.`,
+        ...(state.applications.some((application) => !application.deleting)
+          ? [
+              `Hourly maintenance retries ${state.unfinishedDeletions.length ? 'the other applications' : 'them'} while the platform is enabled, and clears Void's records of any you delete in the dashboard.`,
+            ]
+          : []),
+        ...unfinishedDeletionLines(state),
+        DASHBOARD_HINT,
       ].join('\n'),
     );
   }

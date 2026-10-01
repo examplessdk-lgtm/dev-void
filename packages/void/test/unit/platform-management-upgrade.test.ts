@@ -517,6 +517,7 @@ describe('installed platform upgrade', () => {
       active: true,
       destinations: ['*.apps.example.com'],
       applications: [{ role: 'shared project application', id: 'app', name: 'void-app' }],
+      unfinishedDeletions: [],
     };
     const uninstall = (plan: boolean) =>
       runInstalledPlatformCommand({

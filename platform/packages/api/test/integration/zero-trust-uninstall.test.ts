@@ -10,13 +10,30 @@ import {
   vi,
 } from 'vite-plus/test';
 import {
+  assertProjectZeroTrustAllowsUninstall,
   lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
 } from '../../../../../packages/void/src/cli/platform-zero-trust-uninstall.ts';
 import type { ApiEnv } from '../../src/env.ts';
-import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import app from '../../src/index.ts';
+import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
+import {
+  configurePlatformZeroTrust,
+  disablePlatformZeroTrust,
+  reconcilePlatformZeroTrust,
+} from '../../src/zero-trust/installation.ts';
 import { lockZeroTrustConfiguration } from '../../src/zero-trust/lock.ts';
-import { clearTables, setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
+import { reconcilePendingProjectZeroTrust } from '../../src/zero-trust/maintenance.ts';
+import { getProjectZeroTrustState } from '../../src/zero-trust/state.ts';
+import {
+  clearTables,
+  createTestProject,
+  createTestUser,
+  mockCfApi,
+  setupEnv,
+  teardownEnv,
+  type TestEnv,
+} from './helpers.ts';
 
 // The platform uninstall check in the CLI reads and locks this database
 // directly, so these tests run it against the API's real schema and writers.
@@ -118,7 +135,83 @@ function accessApi() {
   return { applications, fetcher };
 }
 
+async function settleOperation(platform: ApiEnv['Bindings']): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (!(await readZeroTrustConfigurationStrict(env.db))!.operation) {
+      return;
+    }
+    await reconcilePlatformZeroTrust(platform, env.db);
+  }
+  throw new Error('The Zero Trust operation did not finish within its expected batches');
+}
+
+type QueryConnection = Parameters<typeof readPlatformProjectZeroTrustStateConnection>[0];
+
 describe('platform uninstall check against the API database', () => {
+  it('lets uninstall proceed once a project deletion that stopped partway is rerun', async () => {
+    const owner = await createTestUser(env.db, 'stopped-deletion-owner');
+    const project = await createTestProject(env.db, owner.id, 'stopped-deletion');
+    await env.ROUTING.put(project.slug, JSON.stringify({ projectId: project.id }));
+    const cloudflare = accessApi();
+    const provider = mockCfApi() as unknown as typeof fetch;
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) =>
+      new URL(input.toString()).pathname.includes('/access/')
+        ? cloudflare.fetcher(input, init)
+        : provider(input, init),
+    );
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configureInput);
+    await settleOperation(platform);
+    const bypass = (await getProjectZeroTrustState(env.db, project.id))!;
+    expect(cloudflare.applications.has(bypass.bypass_application_id!)).toBe(true);
+    const deleteProject = () =>
+      app.fetch(
+        new Request(`http://localhost/projects/${project.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${owner.jwt}` },
+        }),
+        platform,
+      );
+
+    // Teardown marks the project deleting, then fails before Access cleanup.
+    const deleteRoute = env.ROUTING.delete.bind(env.ROUTING);
+    const routeDelete = vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+      if (key === project.slug) {
+        throw new Error('temporary KV failure');
+      }
+      return deleteRoute(key);
+    });
+    expect((await deleteProject()).status).toBe(500);
+    routeDelete.mockRestore();
+
+    // Disable and hourly maintenance both skip the deleting project.
+    await disablePlatformZeroTrust(platform, env.db);
+    await settleOperation(platform);
+    await reconcilePendingProjectZeroTrust(platform, env.db);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      enabled: false,
+      operation: null,
+    });
+    expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
+      bypass_application_id: bypass.bypass_application_id,
+    });
+
+    const connection = (env.db as unknown as { $client: QueryConnection }).$client;
+    const check = () =>
+      assertProjectZeroTrustAllowsUninstall(() =>
+        readPlatformProjectZeroTrustStateConnection(connection),
+      );
+    const refusal = await check().catch((error: unknown) => error as Error);
+    expect(refusal).toBeInstanceOf(Error);
+    expect(refusal!.message).toContain('Deletion of project stopped-deletion stopped');
+    expect(refusal!.message).toContain('`void project delete <name>`');
+
+    // The operator follows the dashboard hint first, then reruns the deletion.
+    cloudflare.applications.delete(bypass.bypass_application_id!);
+    expect((await deleteProject()).status).toBe(200);
+    await expect(check()).resolves.toBeUndefined();
+  });
+
   it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
     'holds off Zero Trust writers while uninstall holds the configuration lock',
     async () => {
