@@ -1,20 +1,27 @@
+import { join } from 'node:path';
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { CloudEnv } from 'void/handler';
+import { kitchenSinkSourceFixture } from './kitchen-sink-source-fixture.ts';
 
 const mocks = vi.hoisted(() => ({ revalidate: vi.fn(), put: vi.fn() }));
 vi.mock('void', async () => import('void/handler'));
 vi.mock('void/isr', () => ({ revalidate: mocks.revalidate }));
 vi.mock('void/kv', () => ({ kv: { put: mocks.put, get: vi.fn() } }));
 
-import { action } from '../../../../../playground/kitchen-sink/pages/revalidate.server.ts';
-
-const app = new Hono<CloudEnv>()
-  .post('/', async (c) => {
-    const response = await action(c);
-    return response instanceof Response ? response : c.body(null, 204);
-  })
-  .onError((error) => Response.json({ error: error.message }, { status: 502 }));
+let fixture: ReturnType<typeof kitchenSinkSourceFixture>;
+let app: Hono<CloudEnv>;
+beforeAll(async () => {
+  fixture = kitchenSinkSourceFixture(['pages/revalidate.server.ts']);
+  const { action } = await import(join(fixture.root, 'pages/revalidate.server.ts'));
+  app = new Hono<CloudEnv>()
+    .post('/', async (c) => {
+      const response = await action(c);
+      return response instanceof Response ? response : c.body(null, 204);
+    })
+    .onError((error) => Response.json({ error: error.message }, { status: 502 }));
+});
+afterAll(() => fixture?.cleanup());
 
 beforeEach(() => {
   mocks.revalidate.mockReset();

@@ -1,6 +1,8 @@
+import { join } from 'node:path';
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { CloudEnv } from 'void/handler';
+import { kitchenSinkSourceFixture } from './kitchen-sink-source-fixture.ts';
 
 const mocks = vi.hoisted(() => ({ getSandbox: vi.fn() }));
 vi.mock('void', async () => import('void/handler'));
@@ -9,9 +11,14 @@ vi.mock('void/sandbox', () => ({
   SandboxLimitError: class extends Error {},
 }));
 
-import { POST } from '../../../../../playground/kitchen-sink/routes/api/sandbox.ts';
-
-const app = new Hono<CloudEnv>().post('/', (c) => POST(c) as Promise<Response>);
+let fixture: ReturnType<typeof kitchenSinkSourceFixture>;
+let app: Hono<CloudEnv>;
+beforeAll(async () => {
+  fixture = kitchenSinkSourceFixture(['routes/api/sandbox.ts', 'lib/sandbox-demo.ts']);
+  const { POST } = await import(join(fixture.root, 'routes/api/sandbox.ts'));
+  app = new Hono<CloudEnv>().post('/', (c) => POST(c) as Promise<Response>);
+});
+afterAll(() => fixture?.cleanup());
 const request = (marker: string) =>
   app.request('/', {
     method: 'POST',
