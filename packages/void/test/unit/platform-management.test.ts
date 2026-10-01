@@ -1459,7 +1459,7 @@ describe('platform lifecycle management', () => {
       fake,
       manifest,
       { ...uninstallArgs, purgeData: true },
-      { interactive: false },
+      uninstallDependencies,
     );
 
     expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
@@ -1496,7 +1496,7 @@ describe('platform lifecycle management', () => {
       fake,
       manifest,
       { ...uninstallArgs, purgeData: true },
-      { interactive: false },
+      uninstallDependencies,
     );
 
     expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
@@ -1518,7 +1518,7 @@ describe('platform lifecycle management', () => {
     persist(manifest);
     const fake = client(manifest);
 
-    await uninstallPlatform(fake, manifest, uninstallArgs, { interactive: false });
+    await uninstallPlatform(fake, manifest, uninstallArgs, uninstallDependencies);
 
     expect(fake.deleted).toEqual([
       ['queue', 'cron-queue-id'],
