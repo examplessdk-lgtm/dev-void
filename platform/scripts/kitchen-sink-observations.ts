@@ -1,3 +1,22 @@
+import type { Page } from 'playwright';
+
+/** Observe the rendered app, excluding the unchanged SSR hydration payload. */
+export async function waitForRenderedText(
+  page: Page,
+  text: string,
+  present: boolean,
+  timeoutMs: number,
+): Promise<void> {
+  await page.waitForFunction(
+    ({ text, present }) => {
+      const app = document.getElementById('app');
+      return app !== null && app.innerText.includes(text) === present;
+    },
+    { text, present },
+    { timeout: timeoutMs },
+  );
+}
+
 type PollOptions = {
   timeoutMs: number;
   intervalMs?: number;

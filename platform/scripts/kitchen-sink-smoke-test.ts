@@ -20,6 +20,7 @@ import {
   waitForChangedRender,
   waitForFreshHeartbeat,
   waitForIsrCacheHit,
+  waitForRenderedText,
 } from './kitchen-sink-observations.ts';
 
 if (!process.env.SMOKE_URL) {
@@ -91,12 +92,12 @@ function readTimestamp(page: Page, label: string): Promise<string | null> {
   }, label);
 }
 
-/** Wait for body text to include `text`, polling with page reloads. */
+/** Wait for rendered app text to include `text`, polling with page reloads. */
 async function pollForText(page: Page, path: string, text: string, timeoutMs = 30_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     await goto(page, path);
-    const body = await page.textContent('body');
+    const body = await page.locator('#app').innerText();
     if (body?.includes(text)) {
       return;
     }
@@ -105,26 +106,14 @@ async function pollForText(page: Page, path: string, text: string, timeoutMs = 3
   throw new Error(`Timed out after ${timeoutMs}ms waiting for "${text}" on ${path}`);
 }
 
-/** Wait for body text to stop including `text` (up to timeoutMs, no reloads). */
+/** Wait for rendered app text to stop including `text`, without reloading. */
 async function waitForTextGone(page: Page, text: string, timeoutMs = TIMEOUT) {
-  await page.waitForFunction(
-    (expectedText) => !document.body.textContent?.includes(expectedText),
-    text,
-    {
-      timeout: timeoutMs,
-    },
-  );
+  await waitForRenderedText(page, text, false, timeoutMs);
 }
 
-/** Wait for body text to include `text` (no reload, just DOM polling). */
+/** Wait for rendered app text to include `text`, without reloading. */
 async function waitForText(page: Page, text: string, timeoutMs = TIMEOUT) {
-  await page.waitForFunction(
-    (expectedText) => document.body.textContent?.includes(expectedText),
-    text,
-    {
-      timeout: timeoutMs,
-    },
-  );
+  await waitForRenderedText(page, text, true, timeoutMs);
 }
 
 /** Click the Delete button in the table row containing `needle`. */
