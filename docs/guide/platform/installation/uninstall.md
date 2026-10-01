@@ -39,7 +39,20 @@ To also remove eligible data resources owned by the installer:
 void platform uninstall [id] --purge-data
 ```
 
-Even with `--purge-data`, Void retains Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, Access resources, adopted resources, external PostgreSQL, and zones. Review those in the Cloudflare dashboard if you want to remove them. Delete the platform Workers before their Queues; Cloudflare refuses to delete a Queue that a Worker still uses.
+Even with `--purge-data`, Void retains Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, Access resources, adopted resources, external PostgreSQL, and zones. Review those in the Cloudflare dashboard if you want to remove them.
+
+### Remove retained resources
+
+Cloudflare refuses to delete a resource while a platform Worker still uses it. In the Cloudflare dashboard, remove what is left in this order, skipping anything already gone:
+
+1. Delete the platform DNS record, Worker routes, and custom domains.
+2. Open each platform Queue and remove the platform API Worker from its consumers.
+3. Delete the platform Workers.
+4. Delete the platform Queues.
+5. Delete the application Workers in the dispatch namespace, then delete the namespace.
+6. Delete the platform KV namespaces and Hyperdrive configuration.
+7. Empty the R2 bucket, then delete it.
+8. Delete the AI Gateway.
 
 If installation configured Cloudflare Access, the uninstall plan lists its recorded applications and service tokens with their ownership and IDs. Review them in Zero Trust after uninstall. Remove installer-created resources only when nothing else uses them; resources connected from an existing company setup remain under their owner's control.
 
