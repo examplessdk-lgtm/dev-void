@@ -1,0 +1,99 @@
+README.md
+  s_fe834b00f92102::t_8908dd1ab1fa1d 98-99
+docs/guide/durable-state.md
+  s_e8983848868424::t_ed01c30bce0abb 9,47-83
+docs/guide/websockets.md
+  s_e8983848868424::t_95a82fdab90acd 37-79
+docs/reference/api.md
+  s_966b72ee936cdd::t_43976ce16f7f07 616,632-648
+docs/reference/cli.md
+  s_e8983848868424::t_5f19863d21d58a 17,82-96
+packages/void/AGENTS.md
+  s_966b72ee936cdd::t_076d3e7cd911a8 100
+packages/void/README.md
+  s_fe834b00f92102::t_84bbea3024abe3 60,102-103
+packages/void/skills/void/SKILL.md
+  s_e8983848868424::t_0d87916f88856f 20-21
+packages/void/src/cli/cli.ts
+  s_d2aa751b478568::t_c9231b79a9e5b2 21,216-229,287-291,453-457
+packages/void/src/cli/help.ts
+  s_d2aa751b478568::t_7d1611363a27f6 1281-1291,1349-1350
+packages/void/src/cli/info-args.ts
+  s_d2aa751b478568::t_c94df09187363a 1-16
+packages/void/src/cli/info.ts
+  s_966b72ee936cdd::t_7c8c036036846d 1-195
+packages/void/src/durable/scan.ts
+  s_e8983848868424::t_ec09181757f611 1,3-4,11,16-33,48-55,60-62,71
+packages/void/src/plugin-routing.ts
+  s_966b72ee936cdd::t_ae2518c634b65d 103-108
+packages/void/src/router/compile.ts
+  s_966b72ee936cdd::t_ec99987a02c92f 1202,1215,1221-1223,2705-2710,2775-2776
+packages/void/src/router/websocket.ts
+  s_e8983848868424::t_8f0d214b385098 12-13,29,35,42,51,54-62,67-70,72-73,89,91-94,97-103,105,107,118-121,129,139,152-165
+packages/void/src/runtime/durable.ts
+  s_966b72ee936cdd::t_fe519cbc80a3b2 2,69-70,84,133-135,295-300
+packages/void/src/runtime/ws-server.ts
+  s_966b72ee936cdd::t_a025332c5ea671 12,16-17,107,110-116,305-310,324
+packages/void/src/runtime/ws.ts
+  s_fe834b00f92102::t_2b85a3b4df9317 2,10-11,63-66,93-96,126,136,140-145
+packages/void/src/shared/resource-definition.ts
+  s_fe834b00f92102::t_e0d9c925c39b8a 1-194
+packages/void/src/shared/resource-name.ts
+  s_e8983848868424::t_9e8bc9aa341092 1-11
+packages/void/test/integration/info-cli.test.ts
+  s_d2aa751b478568::t_3ee6cb7183d569 1-103
+packages/void/test/integration/resource-name-migration.test.ts
+  s_966b72ee936cdd::t_a4f74ab9094c91 1-395
+packages/void/test/unit/cli-help.test.ts
+  s_966b72ee936cdd::t_6f1d001552e794 87-93
+packages/void/test/unit/durable-scan.test.ts
+  s_e8983848868424::t_31f67e4d9c0ef4 1,6-10,14-21,54-154
+packages/void/test/unit/info.test.ts
+  s_d2aa751b478568::t_35045671bba0f8 1-226
+packages/void/test/unit/resource-name-runtime.test.ts
+  s_966b72ee936cdd::t_bf7fde9a9c3eb2 1-82
+packages/void/test/unit/websocket-scan.test.ts
+  s_e8983848868424::t_511c2694dde72b 1-193
+platform/meta/lessons.md
+  s_966b72ee936cdd::t_fdcbdb5e887a38 19-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ec9db36a2c1134e856f430e6fc4dfdc6fc49a1e7",
+  "prompts": {},
+  "sessions": {
+    "s_966b72ee936cdd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f834-d767-7ed0-a9d1-e7852fa6bc2d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_d2aa751b478568": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f834-ae34-7eb0-a067-17c6455e9510",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_e8983848868424": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f834-81c3-7100-897f-6fcef9c72ead",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
