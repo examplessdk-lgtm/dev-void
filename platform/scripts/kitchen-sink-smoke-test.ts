@@ -620,6 +620,14 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       });
       const body = await response.json();
       assert.equal(response.status, 200, JSON.stringify(body));
+      assert.ok(
+        body &&
+          typeof body === 'object' &&
+          'ok' in body &&
+          'checks' in body &&
+          Array.isArray(body.checks),
+        'Sandbox runtime response must contain an ok flag and checks array',
+      );
       assert.equal(body.ok, true, JSON.stringify(body));
       assert.equal(body.checks.length, 12, 'All Sandbox runtime acceptance checks completed');
     });
