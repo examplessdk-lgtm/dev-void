@@ -10,7 +10,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import type { ApiEnv } from '../../src/env.ts';
-import { app } from '../../src/index.ts';
+import { app, cleanupStalePendingDomains } from '../../src/index.ts';
 import { setPlatformSetting } from '../../src/platform-settings.ts';
 import { domains } from '../../src/schema.ts';
 import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
@@ -63,7 +63,15 @@ function cloudflareApi() {
   const fetcher = vi.fn(async (request: string | URL | Request, init?: RequestInit) => {
     const url = new URL(request.toString());
     if (url.pathname.includes('/custom_hostnames/')) {
-      return Response.json({ success: true, result: { id: url.pathname.split('/').at(-1) } });
+      const id = url.pathname.split('/').at(-1);
+      if (init?.method === 'DELETE') {
+        return Response.json({ success: true, result: { id } });
+      }
+      // Hostnames that never finished validation.
+      return Response.json({
+        success: true,
+        result: { id, status: 'pending', ssl: { status: 'pending_validation', method: 'http' } },
+      });
     }
     const path = url.pathname.split('/access/')[1] ?? '';
     if (path === 'organizations') {
@@ -180,6 +188,80 @@ describe('Zero Trust custom domain removal', () => {
     });
   });
 
+  it('lets maintenance remove an expired pending hostname from Access when the follow-up reconcile failed', async () => {
+    const cloudflare = cloudflareApi();
+    vi.stubGlobal('fetch', cloudflare.fetcher);
+    const owner = await createTestUser(env.db, 'stale-domain-owner');
+    const project = await createTestProject(env.db, owner.id, 'stale-domain');
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    await env.db.insert(domains).values([
+      {
+        id: 'dom_stale_kept',
+        project_id: project.id,
+        hostname: 'kept.customer.test',
+        cf_hostname_id: 'ch-stale-kept',
+        status: 'active',
+      },
+      {
+        id: 'dom_stale_expired',
+        project_id: project.id,
+        hostname: 'expired.customer.test',
+        cf_hostname_id: 'ch-stale-expired',
+        status: 'pending',
+        created_at: eightDaysAgo,
+      },
+    ]);
+    for (const key of [project.slug, 'domain:kept.customer.test']) {
+      await env.ROUTING.put(
+        key,
+        JSON.stringify({ workerName: 'user-stale-domain', projectId: project.id }),
+      );
+    }
+    // Configuring protects every hostname of the project, including one still
+    // waiting for validation.
+    await configurePlatformZeroTrust(bindings(), env.db, {
+      apiToken: 'access-management-token',
+      identityProviderIds: ['idp-1'],
+      policyIds: ['policy-1'],
+      protectNewProjects: true,
+      existingProjects: 'protected',
+    });
+    const before = await getProjectZeroTrustState(env.db, project.id);
+    expect(before).toMatchObject({ status: 'ready', effective_protected: true });
+    const customDomainApplication = () =>
+      cloudflare.applications.get(before!.protected_application_id!) as {
+        destinations: Array<{ uri: string }>;
+      };
+    expect(customDomainApplication().destinations.map((entry) => entry.uri)).toEqual([
+      'expired.customer.test',
+      'kept.customer.test',
+    ]);
+
+    vi.mocked(reconcileProjectZeroTrustDomains).mockRejectedValueOnce(
+      new Error('Access API unavailable'),
+    );
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await cleanupStalePendingDomains(bindings(), env.db, Date.now());
+    errors.mockRestore();
+    expect(await env.db.select().from(domains).where(eq(domains.id, 'dom_stale_expired'))).toEqual(
+      [],
+    );
+    expect(customDomainApplication().destinations.map((entry) => entry.uri)).toEqual([
+      'expired.customer.test',
+      'kept.customer.test',
+    ]);
+
+    await reconcilePendingProjectZeroTrust(bindings(), env.db);
+
+    expect(customDomainApplication().destinations.map((entry) => entry.uri)).toEqual([
+      'kept.customer.test',
+    ]);
+    expect(await getProjectZeroTrustState(env.db, project.id)).toMatchObject({
+      status: 'ready',
+      effective_protected: true,
+    });
+  });
+
   describe('while the platform is being uninstalled', () => {
     async function seedDomain(status: 'active' | 'pending') {
       const owner = await createTestUser(env.db, 'uninstall-domain-owner');
@@ -231,6 +313,17 @@ describe('Zero Trust custom domain removal', () => {
       expect(await removed.json()).toEqual({
         error: expect.stringContaining('The platform is being uninstalled'),
       });
+    });
+
+    it('leaves an expired pending domain in place', async () => {
+      const cloudflare = cloudflareApi();
+      vi.stubGlobal('fetch', cloudflare.fetcher);
+      await seedDomain('pending');
+
+      await expect(cleanupStalePendingDomains(bindings(), env.db, Date.now())).rejects.toThrow(
+        'The platform is being uninstalled',
+      );
+      await expectDomainUntouched(cloudflare.fetcher);
     });
   });
 });

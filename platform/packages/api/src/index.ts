@@ -131,12 +131,14 @@ import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
 import { replayFailedWebhookDeliveries } from './webhook-replay.ts';
 import { resumePlatformZeroTrustOperation } from './zero-trust/installation.ts';
+import { lockZeroTrustConfiguration } from './zero-trust/lock.ts';
 import { reconcilePendingProjectZeroTrust } from './zero-trust/maintenance.ts';
 import { reconcileProjectZeroTrustDomains } from './zero-trust/project.ts';
 import {
   resolveProjectZeroTrustRoutingForPublication,
   withProjectZeroTrustRouting,
 } from './zero-trust/routing.ts';
+import { markProjectCustomDomainsChanged } from './zero-trust/state.ts';
 
 function isSandboxDrainMaintenanceRequest(request: Request): boolean {
   const path = new URL(request.url).pathname;
@@ -895,6 +897,10 @@ async function cleanupPendingDomainUnderProjectFence(
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT id FROM projects WHERE id = ${domain.project_id} FOR UPDATE`);
+    // Like domain removal: refuse during uninstall before any cleanup, and
+    // record the change for Zero Trust retry with the deletion, because the
+    // project's custom domain application may already list this hostname.
+    await lockZeroTrustConfiguration(tx, 'shared');
     const txDb = tx as unknown as Db;
     const current = await getDomain(txDb, domain.id);
     if (current?.status !== 'pending') {
@@ -902,6 +908,7 @@ async function cleanupPendingDomainUnderProjectFence(
     }
     await beforeDelete?.();
     await env.ROUTING.delete(`domain:${domain.hostname}`).catch(() => {});
+    await markProjectCustomDomainsChanged(txDb, domain.project_id);
     await deleteDomain(txDb, domain.id);
     return true;
   });

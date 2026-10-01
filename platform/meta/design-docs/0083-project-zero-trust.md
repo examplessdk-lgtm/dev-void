@@ -163,10 +163,14 @@ and then owns that invocation. The hourly tier also retries failed operations,
 pending project rows (errored rows move behind others), and, after a finished
 disable, clears protection left on skipped rows.
 
-Custom domain removal marks a settled row that records a custom domain
-application as `reconciling` in the transaction that deletes the domain. The
-follow-up reconcile then rewrites the application; if it fails or never runs,
-the hourly tier does. A freed hostname left in the old application is fail
+Custom domain removal, by a user or by the hourly cleanup of pending domains
+that never validated, takes the shared configuration lock right after the
+project row lock, before it deletes the Cloudflare hostname or the route, so a
+refusal during uninstall leaves the domain whole. It marks a settled row that
+records a custom domain application as `reconciling` in the transaction that
+deletes the domain; a pending domain can already be listed there, because
+activation adds it before it publishes the route. The follow-up reconcile then
+rewrites the application; if it fails or never runs, the hourly tier does. A freed hostname left in the old application is fail
 closed: a new owner's visitors meet the installation's policies, and dispatch
 checks the new owner's audience.
 
