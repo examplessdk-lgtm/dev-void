@@ -58,9 +58,9 @@ export function shouldCopyPlaygroundPath(sourceRoot: string, path: string): bool
 }
 
 /**
- * Copies a playground into the gitignored playground-local workspace so tests that rewrite configs,
- * source, or build output can run beside tests using the checked-in playground. Dependencies stay
- * linked to the installed source tree; generated state is deliberately not copied.
+ * Copies a playground outside the workspace package globs so concurrent task-graph scans never
+ * discover a manifest while the fixture is created or removed. Run Vite+ directly from the copy.
+ * Dependencies stay linked to the installed source tree; generated state is deliberately not copied.
  */
 export function createIsolatedPlayground(
   workspaceRoot: string,
@@ -71,7 +71,7 @@ export function createIsolatedPlayground(
     ? join(process.env.VOID_TEST_SOURCE_SNAPSHOTS, sourceWorkspacePath)
     : undefined;
   const copySource = snapshot && existsSync(snapshot) ? snapshot : sourceRoot;
-  const playgroundLocal = join(workspaceRoot, 'playground-local');
+  const playgroundLocal = join(workspaceRoot, 'playground-local', '.test-fixtures');
   mkdirSync(playgroundLocal, { recursive: true });
   const root = mkdtempSync(join(playgroundLocal, `test-${basename(sourceWorkspacePath)}-`));
 

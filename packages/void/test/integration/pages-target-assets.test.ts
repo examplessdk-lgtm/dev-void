@@ -51,8 +51,7 @@ for (const { target, command, args } of targets) {
     let errors = '';
 
     beforeAll(async () => {
-      // Keep relative workspace dependency links at the same depth and on the
-      // same drive. A junction into the Windows system temp directory breaks them.
+      // Keep the copy on the same drive as the installed dependency links.
       playground = createIsolatedPlayground(repository, 'playground/node-app');
       root = playground.root;
       const config = readConfig(root);

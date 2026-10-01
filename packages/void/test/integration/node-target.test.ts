@@ -1,9 +1,14 @@
-import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  createIsolatedPlayground,
+  getPort,
+  waitForServer,
+  killChild,
+  type IsolatedPlayground,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 let DEV_PORT: number;
@@ -12,34 +17,24 @@ let PROD_PORT: number;
 let PROD_BASE: string;
 
 describe('playground/node-app dev', () => {
+  let playground: IsolatedPlayground;
   let child: ReturnType<typeof spawn>;
   let stderr = '';
 
   beforeAll(async () => {
+    playground = createIsolatedPlayground(ROOT, 'playground/node-app');
     DEV_PORT = await getPort();
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
 
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/node-app',
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(DEV_PORT)], {
+      cwd: playground.root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
     child.stderr!.on('data', (chunk: Buffer) => {
       stderr += String(chunk);
     });
+    child.stdout!.resume();
 
     await waitForServer(DEV_BASE, 20_000);
   });
@@ -48,6 +43,7 @@ describe('playground/node-app dev', () => {
     if (child) {
       await killChild(child);
     }
+    playground?.cleanup();
     if (stderr.includes('error when starting dev server')) {
       throw new Error(stderr);
     }
@@ -92,17 +88,24 @@ describe('playground/node-app dev', () => {
 });
 
 describe('playground/node-app build + production', () => {
+  let playground: IsolatedPlayground;
   let child: ReturnType<typeof spawn>;
 
   beforeAll(async () => {
-    rmSync(join(ROOT, 'playground/node-app/dist'), { recursive: true, force: true });
-    execSync('vp run --filter ./playground/node-app build', { cwd: ROOT, stdio: 'pipe' });
+    playground = createIsolatedPlayground(ROOT, 'playground/node-app');
+    const build = spawn.sync('vp', ['build'], {
+      cwd: playground.root,
+      encoding: 'utf8',
+      timeout: 60_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    expect(build.status, `${build.stdout ?? ''}${build.stderr ?? ''}`).toBe(0);
 
     PROD_PORT = await getPort();
     PROD_BASE = `http://127.0.0.1:${PROD_PORT}`;
 
     child = spawn('node', ['dist/ssr/index.js'], {
-      cwd: join(ROOT, 'playground/node-app'),
+      cwd: playground.root,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: String(PROD_PORT) },
     });
@@ -116,14 +119,15 @@ describe('playground/node-app build + production', () => {
     if (child) {
       await killChild(child);
     }
+    playground?.cleanup();
   });
 
   it('emits app.js, index.js, and client assets', () => {
-    expect(existsSync(join(ROOT, 'playground/node-app/dist/ssr/app.js'))).toBe(true);
-    expect(existsSync(join(ROOT, 'playground/node-app/dist/ssr/index.js'))).toBe(true);
-    expect(existsSync(join(ROOT, 'playground/node-app/dist/client'))).toBe(true);
+    expect(existsSync(join(playground.root, 'dist/ssr/app.js'))).toBe(true);
+    expect(existsSync(join(playground.root, 'dist/ssr/index.js'))).toBe(true);
+    expect(existsSync(join(playground.root, 'dist/client'))).toBe(true);
 
-    const index = readFileSync(join(ROOT, 'playground/node-app/dist/ssr/index.js'), 'utf-8');
+    const index = readFileSync(join(playground.root, 'dist/ssr/index.js'), 'utf-8');
     expect(index).toContain('@hono/node-server');
   });
 

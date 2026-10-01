@@ -27,11 +27,12 @@ describe('explicit ISR policy in real builds', () => {
           },
         }),
       );
-      const build = spawn.sync(
-        'vp',
-        ['run', '--filter', `./${playground.workspacePath}`, 'build'],
-        { cwd: ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: 60_000 },
-      );
+      const build = spawn.sync('vp', ['build'], {
+        cwd: playground.root,
+        encoding: 'utf8',
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 60_000,
+      });
       expect(build.status, `${build.stdout ?? ''}${build.stderr ?? ''}`).toBe(0);
       const entry = readFileSync(join(playground.root, '.void/entry.ts'), 'utf8');
       expect(entry).not.toContain('handleIsr');

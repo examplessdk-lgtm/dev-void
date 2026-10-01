@@ -16,7 +16,6 @@ import { readConfig } from '../../src/config.ts';
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const SOURCE_PLAYGROUND = 'playground/spa';
 let playground: IsolatedPlayground;
-let playgroundFilter = '';
 let authMiddleware = '';
 let documentRoute = '';
 let middlewareDir = '';
@@ -115,18 +114,14 @@ async function startSpaDevServer(): Promise<string> {
   const port = await getPort();
   const base = `http://127.0.0.1:${port}`;
   stderr = '';
-  child = spawn(
-    'vp',
-    ['run', '--filter', playgroundFilter, 'dev', '--host', '127.0.0.1', '--port', String(port)],
-    {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        VOID_INSPECTOR_PORT: 'false',
-      },
+  child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port)], {
+    cwd: playground.root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      VOID_INSPECTOR_PORT: 'false',
     },
-  );
+  });
 
   child.stderr!.on('data', (chunk: Buffer) => {
     stderr += String(chunk);
@@ -142,15 +137,11 @@ async function startSpaPreviewServer(): Promise<string> {
   const port = await getPort();
   const base = `http://127.0.0.1:${port}`;
   stderr = '';
-  child = spawn(
-    'vp',
-    ['run', '--filter', playgroundFilter, 'preview', '--host', '127.0.0.1', '--port', String(port)],
-    {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
-    },
-  );
+  child = spawn('vp', ['preview', '--host', '127.0.0.1', '--port', String(port)], {
+    cwd: playground.root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+  });
   child.stderr!.on('data', (chunk: Buffer) => {
     stderr += String(chunk);
   });
@@ -175,7 +166,6 @@ function readBuiltAssetConfig(): {
 
 beforeAll(() => {
   playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
-  playgroundFilter = `./${playground.workspacePath}`;
   authMiddleware = join(playground.root, 'middleware/00.basic-auth-regression.ts');
   documentRoute = join(playground.root, 'routes/dashboard.ts');
   middlewareDir = join(playground.root, 'middleware');
