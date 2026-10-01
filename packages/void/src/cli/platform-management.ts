@@ -33,6 +33,7 @@ import {
   createPlatformInstallationSecrets,
   installPlatform,
   loadPlatformRuntime,
+  readPlatformProjectZeroTrustState,
   REMOTE_INSTALLATION_MANIFEST_KEY,
   resolveBootstrapGitHubId,
   type PlatformDatabaseLifecycleLock,
@@ -56,6 +57,10 @@ import {
   writeInstallationManifest,
 } from './platform-registry.ts';
 import { trackedPlatformWorkerTraffic } from './platform-traffic.ts';
+import {
+  assertProjectZeroTrustAllowsUninstall,
+  type PlatformProjectZeroTrustState,
+} from './platform-zero-trust-uninstall.ts';
 
 export type PlatformManagementClient = Pick<
   PlatformCloudflareClient,
@@ -144,6 +149,8 @@ export type PlatformManagementDependencies = Readonly<{
   confirm?: (message: string, initialValue: boolean) => Promise<boolean>;
   databaseUrl?: string;
   interactive?: boolean;
+  /** Uninstall refuses to start when this is missing or cannot read the state. */
+  readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
 }>;
 
 export function selectAuthoritativePlatformManifest(
@@ -228,6 +235,11 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       await uninstallPlatform(client, manifest, args, {
         checkpoint: databaseLock?.checkpoint,
         databaseUrl,
+        // A plan holds no lifecycle lock, so it opens its own read-only connection.
+        readProjectZeroTrust: databaseLock
+          ? databaseLock.readProjectZeroTrust
+          : () =>
+              readPlatformProjectZeroTrustState(databaseUrl, manifest.id, manifest.ownershipNonce),
       });
       return;
     }
@@ -792,6 +804,7 @@ export async function uninstallPlatform(
       `platform: Refusing to delete Cloudflare zone ${JSON.stringify(createdZone.name)} automatically. A zone can contain unrelated DNS, settings, and products that the installer cannot exhaustively prove ownership of. Uninstall with --keep-zone, inspect the retained zone in Cloudflare, and delete it manually if appropriate.`,
     );
   }
+  await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust);
   const dataMessage = retainData
     ? 'Retain installer-owned Workers, storage, dispatch, AI logs, and Hyperdrive by default.'
     : args.purgeData

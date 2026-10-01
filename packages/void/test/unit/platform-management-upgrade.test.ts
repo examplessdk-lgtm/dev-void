@@ -15,6 +15,8 @@ const state = vi.hoisted(() => ({
   manifest: undefined as PlatformInstallationManifest | undefined,
   prepareDatabase: vi.fn(),
   readAuthenticationState: vi.fn(),
+  readPlanZeroTrust: vi.fn(),
+  readProjectZeroTrust: vi.fn(),
   releaseDatabase: vi.fn(),
   spinner: vi.fn(),
   progress: { start: vi.fn(), message: vi.fn(), stop: vi.fn(), error: vi.fn(), clear: vi.fn() },
@@ -73,6 +75,10 @@ vi.mock('../../src/cli/platform-cloudflare.ts', async (importOriginal) => {
       async listWorkerNames() {
         return [];
       }
+
+      async putKvValue(_account: string, _namespace: string, key: string) {
+        state.events.push(`put:${key}`);
+      }
     },
   };
 });
@@ -92,6 +98,7 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
           checkpoint: vi.fn(),
           prepareDatabase: state.prepareDatabase,
           readAuthenticationState: state.readAuthenticationState,
+          readProjectZeroTrust: state.readProjectZeroTrust,
         },
       );
       return release;
@@ -129,6 +136,7 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
       };
     }),
     loadPlatformRuntime: vi.fn(() => state.runtime),
+    readPlatformProjectZeroTrustState: state.readPlanZeroTrust,
     resolveBootstrapGitHubId: vi.fn(),
   };
 });
@@ -179,7 +187,10 @@ vi.mock('../../src/cli/platform-registry.ts', async (importOriginal) => {
 });
 
 import { log, note } from '@clack/prompts';
-import { installPlatform } from '../../src/cli/platform-installer.ts';
+import {
+  acquirePlatformDatabaseLifecycleLock,
+  installPlatform,
+} from '../../src/cli/platform-installer.ts';
 import { runInstalledPlatformCommand } from '../../src/cli/platform-management.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 
@@ -499,5 +510,65 @@ describe('installed platform upgrade', () => {
     emit.mockReturnValueOnce(false);
     expect(onCancel).toThrow('test exit');
     expect(exit).toHaveBeenCalledWith(130);
+  });
+
+  describe('uninstall with project Zero Trust', () => {
+    const enabled = {
+      active: true,
+      destinations: ['*.apps.example.com'],
+      applications: [{ role: 'shared project application', id: 'app', name: 'void-app' }],
+    };
+    const uninstall = (plan: boolean) =>
+      runInstalledPlatformCommand({
+        deleteZone: null,
+        plan,
+        purgeData: true,
+        selector: state.manifest!.id,
+        subcommand: 'uninstall',
+        yes: true,
+      });
+
+    it('reads the state under the held lifecycle lock and refuses before disabling traffic', async () => {
+      state.readProjectZeroTrust.mockResolvedValueOnce(enabled);
+      await expect(uninstall(false)).rejects.toThrow(
+        'Refusing to uninstall while project Zero Trust is enabled',
+      );
+      expect(state.readProjectZeroTrust).toHaveBeenCalledOnce();
+      expect(state.readPlanZeroTrust).not.toHaveBeenCalled();
+      expect(state.events).toEqual(['outer-release', 'local-release']);
+    });
+
+    it('refuses when the held lock cannot read the state', async () => {
+      state.readProjectZeroTrust.mockRejectedValueOnce(new Error('relation is locked'));
+      await expect(uninstall(false)).rejects.toThrow(
+        'could not be read from the platform database: relation is locked',
+      );
+      expect(state.events).toEqual(['outer-release', 'local-release']);
+    });
+
+    it('reads the state for a plan without taking the lifecycle lock', async () => {
+      state.readPlanZeroTrust.mockResolvedValueOnce(enabled);
+      await expect(uninstall(true)).rejects.toThrow(
+        'Refusing to uninstall while project Zero Trust is enabled',
+      );
+      expect(state.readPlanZeroTrust).toHaveBeenCalledExactlyOnceWith(
+        'postgres://database',
+        state.manifest!.id,
+        state.manifest!.ownershipNonce,
+      );
+      expect(acquirePlatformDatabaseLifecycleLock).not.toHaveBeenCalled();
+      expect(state.events).toEqual([]);
+    });
+
+    it('plans the uninstall when Zero Trust owns nothing', async () => {
+      state.readPlanZeroTrust.mockResolvedValueOnce({
+        active: false,
+        destinations: [],
+        applications: [],
+      });
+      await uninstall(true);
+      expect(note).toHaveBeenCalledWith(expect.any(String), 'Uninstall plan');
+      expect(state.events).toEqual([]);
+    });
   });
 });

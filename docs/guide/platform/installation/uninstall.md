@@ -54,7 +54,9 @@ Cloudflare refuses to delete a resource while a platform Worker still uses it. I
 7. Empty the R2 bucket, then delete it.
 8. Delete the AI Gateway.
 
-If installation configured Cloudflare Access, the uninstall plan lists its recorded applications and service tokens with their ownership and IDs. Review them in Zero Trust after uninstall. Remove installer-created resources only when nothing else uses them; resources connected from an existing company setup remain under their owner's control. Uninstall does not remove the applications created for [project Zero Trust](/guide/platform/administration/zero-trust); run `void platform zero-trust disable` before uninstalling.
+If installation configured Cloudflare Access, the uninstall plan lists its recorded applications and service tokens with their ownership and IDs. Review them in Zero Trust after uninstall. Remove installer-created resources only when nothing else uses them; resources connected from an existing company setup remain under their owner's control.
+
+Uninstall does not remove the applications created for [project Zero Trust](/guide/platform/administration/zero-trust). While Zero Trust is enabled or still has Access applications, uninstall and `--plan` stop before any change and list those applications. Run `void platform zero-trust disable` first. Uninstall reads this from the installation database, so it also stops when the database cannot be reached.
 
 ::: details Why some resources require manual cleanup
 

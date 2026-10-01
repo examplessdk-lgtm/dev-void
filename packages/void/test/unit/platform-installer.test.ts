@@ -2964,6 +2964,56 @@ describe('platform installer', () => {
     await lock();
   });
 
+  it('reads project Zero Trust state on the held lifecycle connection', async () => {
+    const queries: Array<{ sql: string; values?: ReadonlyArray<unknown> }> = [];
+    const connection = {
+      query: async <Row extends Record<string, unknown>>(
+        sql: string,
+        values?: ReadonlyArray<unknown>,
+      ) => {
+        queries.push({ sql, values });
+        if (sql.includes('FROM "__void_platform_installation"')) {
+          return {
+            rows: [
+              { installation_id: 'install-one', ownership_nonce: 'nonce-one' },
+            ] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        if (sql.includes('pg_try_advisory_lock')) {
+          return { rows: [{ acquired: true }] as unknown as ReadonlyArray<Row> };
+        }
+        if (sql.includes('public.platform_settings')) {
+          return {
+            rows: [{ settings: true, projects: true }] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        if (sql.includes('FROM "platform_settings"')) {
+          return {
+            rows: [
+              { value: { enabled: false, operation: { kind: 'disable' } } },
+            ] as unknown as ReadonlyArray<Row>,
+          };
+        }
+        return { rows: [] as ReadonlyArray<Row> };
+      },
+    };
+    const lock = await acquirePlatformDatabaseLifecycleLockConnection(
+      connection,
+      'install-one',
+      'nonce-one',
+    );
+    await expect(lock.readProjectZeroTrust!()).resolves.toEqual({
+      active: true,
+      applications: [],
+      destinations: [],
+    });
+    expect(queries.find(({ sql }) => sql.includes('FROM "platform_settings"'))?.values).toEqual([
+      'zeroTrust.configuration',
+    ]);
+    expect(queries.some(({ sql }) => sql.includes('FROM "project_zero_trust"'))).toBe(true);
+    await lock();
+  });
+
   it('claims only an empty database or an existing matching claim', async () => {
     const queries: Array<string> = [];
     const connection = (claim: ReadonlyArray<Record<string, string>>, hasContents: boolean) => ({

@@ -166,7 +166,14 @@ Cloudflare.
 
 Project deletion removes its Access applications after retryable cleanup and
 before the database cascade. Uninstall does not remove Void-managed Access
-applications; administrators disable first.
+applications; administrators disable first. Uninstall turns off the API that
+can remove them, so before any change, and in `--plan`, the CLI reads
+`zeroTrust.configuration` and `project_zero_trust` straight from PostgreSQL and
+refuses while Zero Trust is enabled, an operation is pending, or any row still
+records an application handle (rows a finished disable skipped). It also
+refuses when the state cannot be read. The error lists the recorded
+application names for dashboard cleanup.
 
 Code: `platform/packages/api/src/zero-trust/` (`installation`, `operation`,
-`project`, `routing`, `maintenance`, `status`, `lock`, `state`).
+`project`, `routing`, `maintenance`, `status`, `lock`, `state`); the uninstall
+check is `packages/void/src/cli/platform-zero-trust-uninstall.ts`.

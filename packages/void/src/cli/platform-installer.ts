@@ -115,6 +115,10 @@ import {
   trackedPlatformWorkerTraffic,
 } from './platform-traffic.ts';
 import { platformWorkerLiveTriggersMatch } from './platform-trigger-proof.ts';
+import {
+  readPlatformProjectZeroTrustStateConnection,
+  type PlatformProjectZeroTrustState,
+} from './platform-zero-trust-uninstall.ts';
 import { resolveWranglerArgv } from './preset.ts';
 import { createDefaultRunWrangler, resolvePinnedApiBaseUrl } from './provision.ts';
 
@@ -198,6 +202,8 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   prepareSandboxDrain?: (
     requiredAdmissionProtocol?: 0 | 2 | 3,
   ) => Promise<PlatformSandboxDrainPreparation>;
+  /** Project Zero Trust state that decides whether uninstall may start. */
+  readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
   requiredSafetyProtocols?: Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>;
   verifyDatabase?: (
     runtimeDirectory: string,
@@ -3609,6 +3615,26 @@ export async function readPlatformDatabaseLifecycleManifest(
   }
 }
 
+/** Read project Zero Trust state for a plan, which holds no lifecycle lock. */
+export async function readPlatformProjectZeroTrustState(
+  databaseUrl: string,
+  installationId: string,
+  ownershipNonce: string,
+): Promise<PlatformProjectZeroTrustState> {
+  if (!databaseUrl) {
+    throw new Error('the installation database URL is not recorded on this machine');
+  }
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
+  try {
+    // Throws unless the database is claimed by this installation.
+    await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
+    return await readPlatformProjectZeroTrustStateConnection(pool);
+  } finally {
+    await pool.end();
+  }
+}
+
 type DatabaseClaimConnection = Readonly<{
   query: <Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
@@ -3898,6 +3924,7 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
         }
       : null;
   };
+  release.readProjectZeroTrust = () => readPlatformProjectZeroTrustStateConnection(client);
   release.requiredSafetyProtocols = await readRequiredPlatformSafetyProtocols(client);
   release.checkpoint = async (manifest) => {
     if (released) {
