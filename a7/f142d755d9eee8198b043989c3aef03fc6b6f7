@@ -1,0 +1,21 @@
+packages/void/src/cli/client.ts
+  s_c7e7962da548f8::t_dd27ba6095156c 507-511,515-554,1124,1212-1230,1238-1281,1284-1286,1288,1290-1295,1314-1315,1317-1319,1322-1326,1334-1351,1353-1440
+packages/void/test/unit/direct-r2-client.test.ts
+  s_c7e7962da548f8::t_ba25f3e71e1715 471-794
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a7f142d755d9eee8198b043989c3aef03fc6b6f7",
+  "prompts": {},
+  "sessions": {
+    "s_c7e7962da548f8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c4-2adb-7cd3-968a-ee59725accb7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
