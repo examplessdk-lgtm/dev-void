@@ -18,6 +18,7 @@ import {
   getGitHubInstallationsByUser,
   recordInstallationRevocations,
   upsertGitHubInstallation,
+  upsertGitHubInstallationMember,
 } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import { githubRoutes } from '../../src/routes/github.ts';
@@ -224,19 +225,17 @@ async function runJoinCallback(opts: {
   return { res, body, joinCode, target };
 }
 
-// Seed an installation Void tracks. `userId` is the owning Void user (or null for
-// an unowned install). `accountType` defaults to 'Organization' (the only account
-// type org-share admits) — pass 'User' to seed a personal install for the
-// Organization-only guard regressions.
+// Seed an installation Void tracks, with no owner. `accountType` defaults to
+// 'Organization' (the only account type org-share admits) — pass 'User' to seed
+// an unlinked personal install for the Organization-only guard regressions.
 async function seedInstall(opts: {
   installationId: string;
-  userId?: string | null;
   accountId?: string;
   accountType?: 'User' | 'Organization';
 }): Promise<void> {
   await upsertGitHubInstallation(env.db, {
     installationId: opts.installationId,
-    userId: opts.userId ?? null,
+    userId: null,
     accountLogin: `acct-${opts.installationId}`,
     accountId: opts.accountId ?? `500${opts.installationId}`,
     accountType: opts.accountType ?? 'Organization',
@@ -625,11 +624,10 @@ describe('GET /github/join-callback', () => {
 
 describe('POST /github/join/complete', () => {
   it('upserts a membership keyed on the completing token-holder and returns joined', async () => {
-    // The install is owned by a DIFFERENT Void user; the joiner is a google-only
-    // account with no github identity.
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000700');
+    // The joiner is a google-only account with no github identity.
+    const other = await createTestUser(env.db, 'other', 'github', '900000700');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const { joinCode } = await runJoinCallback({
@@ -651,18 +649,17 @@ describe('POST /github/join/complete', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'joined', count: 1 });
     expect(await countMemberRows(env.db, '700', joiner.id)).toBe(1);
-    // Never bound to the owner (who already has the install via ownership).
-    expect(await countMemberRows(env.db, '700', owner.id)).toBe(0);
+    // Never bound to any other user.
+    expect(await countMemberRows(env.db, '700', other.id)).toBe(0);
   });
 
   // THREAT L1 (the crux). A join_code minted in a callback is completed by an
   // arbitrary authed user; the membership binds to the COMPLETING bearer token,
   // NEVER to anyone named in the state/join_code.
   it('binds the membership to the completing token-holder, not the flow initiator', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000701');
     const attacker = await createTestUser(env.db, 'attacker', 'google', 'google-attacker');
     const completer = await createTestUser(env.db, 'completer', 'google', 'google-completer');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const { joinCode } = await runJoinCallback({
@@ -690,9 +687,8 @@ describe('POST /github/join/complete', () => {
   });
 
   it('is idempotent — a re-run refreshes the single (install,user) row', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000702');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     const challenge = await createCodeChallenge(CODE_VERIFIER);
 
@@ -735,9 +731,8 @@ describe('POST /github/join/complete', () => {
   });
 
   it('rejects a PKCE mismatch with invalid_verifier and binds nothing', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000703');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const { joinCode } = await runJoinCallback({
@@ -822,11 +817,19 @@ describe('POST /github/join/complete', () => {
     expect(await countAllMemberRows(env.db)).toBe(1);
   });
 
-  it('skips installs the caller already owns (not counted, no error)', async () => {
-    // The joiner OWNS install 700 (github identity matches). Joining it is a
-    // redundant no-op — skipped, not counted, no membership row.
-    const joiner = await createTestUser(env.db, 'joiner', 'github', '900000704');
-    await seedInstall({ installationId: '700', userId: joiner.id });
+  // The person who installed the App on an organization has no special standing:
+  // once the membership recorded by the install callback lapses, they rejoin like
+  // any other member and the installation becomes visible again.
+  it('lets the organization installer rejoin after their membership expires', async () => {
+    const installer = await createTestUser(env.db, 'installer', 'github', '900000704');
+    await seedInstall({ installationId: '700' });
+    await upsertGitHubInstallationMember(env.db, {
+      installationId: '700',
+      userId: installer.id,
+      githubAccountId: '900000704',
+      ttlSeconds: -60,
+    });
+    expect(await getGitHubInstallationsByUser(env.db, installer.id)).toHaveLength(0);
 
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const { joinCode } = await runJoinCallback({
@@ -839,52 +842,16 @@ describe('POST /github/join/complete', () => {
     const res = await app.fetch(
       new Request(
         'http://localhost/github/join/complete',
-        authedPost(joiner.jwt, { join_code: joinCode, code_verifier: CODE_VERIFIER }),
+        authedPost(installer.jwt, { join_code: joinCode, code_verifier: CODE_VERIFIER }),
       ),
       { ...env, ...GITHUB_APP_USER_OAUTH_ENV },
     );
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'joined', count: 0 });
-    expect(await countMemberRows(env.db, '700', joiner.id)).toBe(0);
-  });
-
-  // Org-share is Organization-only (guard b, defense behind guard a). A join_code
-  // that carries a personal (account_type='User') install id — a stale code minted
-  // before the eligibility gate existed, or a forged one — is skipped fail-soft:
-  // never counted, never minted. A same-code Organization install IS still joined,
-  // proving the skip is selective (not an all-or-nothing reject).
-  it('fail-soft skips a personal (account_type=User) install but joins the org one', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000720');
-    const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    // 700: Organization, owned by someone else → should be joined.
-    // 701: personal (User), owned by someone else → must be skipped.
-    await seedInstall({ installationId: '700', userId: owner.id, accountType: 'Organization' });
-    await seedInstall({ installationId: '701', userId: owner.id, accountType: 'User' });
-
-    const challenge = await createCodeChallenge(CODE_VERIFIER);
-    // Forge a VALID join_code listing BOTH installs (bypassing the callback's
-    // eligibility gate) to exercise the /join/complete skip directly.
-    const joinCode = await mintJoinCode({
-      installationIds: ['700', '701'],
-      codeChallenge: challenge,
-      iat: Date.now(),
-    });
-
-    const res = await app.fetch(
-      new Request(
-        'http://localhost/github/join/complete',
-        authedPost(joiner.jwt, { join_code: joinCode, code_verifier: CODE_VERIFIER }),
-      ),
-      { ...env, ...GITHUB_APP_USER_OAUTH_ENV },
-    );
-
-    expect(res.status).toBe(200);
-    // Only the Organization install is counted.
     expect(await res.json()).toEqual({ status: 'joined', count: 1 });
-    expect(await countMemberRows(env.db, '700', joiner.id)).toBe(1);
-    expect(await countMemberRows(env.db, '701', joiner.id)).toBe(0);
-    expect(await countAllMemberRows(env.db)).toBe(1);
+    expect(await countMemberRows(env.db, '700', installer.id)).toBe(1);
+    const installs = await getGitHubInstallationsByUser(env.db, installer.id);
+    expect(installs.map((i) => i.installation_id)).toEqual(['700']);
   });
 
   it('rejects a malformed body', async () => {
@@ -914,9 +881,8 @@ describe('POST /github/join/complete', () => {
   // Task 3 integration: a successful join makes the install visible via the
   // owner-OR-member by-user lookup.
   it('makes the joined install visible via getGitHubInstallationsByUser', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000705');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     // Before joining, the joiner sees nothing.
     expect(await getGitHubInstallationsByUser(env.db, joiner.id)).toHaveLength(0);
@@ -944,11 +910,10 @@ describe('POST /github/join/complete', () => {
   // Monotonic revocation (Task 14): a join_code minted BEFORE a recorded
   // revocation (iat <= revoked_at) is a stale artifact from a removed member — it
   // must NOT resurrect the membership. The install is silently skipped (not
-  // counted), exactly like an owner-skip.
+  // counted).
   it('skips an install whose join_code predates a recorded revocation (stale replay)', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000710');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     // The member was removed AFTER minting the join_code: record the tombstone
     // now (revoked_at = now()), and forge a join_code stamped a minute in the past.
@@ -977,9 +942,8 @@ describe('POST /github/join/complete', () => {
   // The tombstone is a HIGH-WATER MARK, not a permanent ban: a legit re-join AFTER
   // re-add mints a FRESH join_code (iat > revoked_at) which must be honored.
   it('restores membership when the join_code post-dates the revocation (legit re-join)', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000711');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
     // Revoke first, then the member is re-added and re-joins: the fresh join_code
     // is stamped in the future relative to the tombstone.
@@ -1004,19 +968,13 @@ describe('POST /github/join/complete', () => {
     expect(await countMemberRows(env.db, '700', joiner.id)).toBe(1);
   });
 
-  // Fail-closed hardening (Task 14): a LEGACY join_code minted before the `iat`
-  // field existed carries NO iat. The complete gate treats a missing iat as 0
-  // (predating every tombstone), so ANY recorded revocation rejects it — the
-  // install is skipped, membership never resurrected. Mint inline so the property
-  // is truly ABSENT from the signed payload (mintJoinCode would inject one). If a
-  // missing iat leaked through (a NaN compare), the membership would be wrongly
-  // restored — this test would then fail.
-  it('skips an install whose legacy join_code carries no iat against a revocation (fail closed)', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000712');
+  // A join_code without `iat` cannot be compared with revocation tombstones, so
+  // it is rejected outright. Mint inline so the property is truly ABSENT from the
+  // signed payload (mintJoinCode would inject one).
+  it('rejects a join_code without iat', async () => {
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
+    await seedInstall({ installationId: '700' });
 
-    await recordInstallationRevocations(env.db, ['700'], JOIN_ACCOUNT_ID);
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const encoded = btoa(
       JSON.stringify({
@@ -1025,24 +983,22 @@ describe('POST /github/join/complete', () => {
         githubAccountId: '5551234',
         codeChallenge: challenge,
         codeChallengeMethod: 'S256',
-        // NO `iat` field — a legacy artifact predating the monotonic gate.
         exp: Date.now() + 5 * 60 * 1000,
       }),
     );
     const signature = await hmacSignState(encoded, JWT_SECRET);
-    const legacyJoinCode = `${encoded}.${signature}`;
+    const joinCode = `${encoded}.${signature}`;
 
     const res = await app.fetch(
       new Request(
         'http://localhost/github/join/complete',
-        authedPost(joiner.jwt, { join_code: legacyJoinCode, code_verifier: CODE_VERIFIER }),
+        authedPost(joiner.jwt, { join_code: joinCode, code_verifier: CODE_VERIFIER }),
       ),
       { ...env, ...GITHUB_APP_USER_OAUTH_ENV },
     );
 
-    expect(res.status).toBe(200);
-    // Skipped, not counted — the legacy (no-iat) code cannot resurrect membership.
-    expect(await res.json()).toEqual({ status: 'joined', count: 0 });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid join_code' });
     expect(await countMemberRows(env.db, '700', joiner.id)).toBe(0);
   });
 
@@ -1053,10 +1009,9 @@ describe('POST /github/join/complete', () => {
   // unchanged. Over a multi-install join_code, the revoked install is skipped and
   // the fresh one created in a SINGLE atomic commit, and `count` excludes the skip.
   it('F5: under the tx-wrap, a multi-install join skips the revoked install and creates the fresh one', async () => {
-    const owner = await createTestUser(env.db, 'owner', 'github', '900000720');
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
-    await seedInstall({ installationId: '700', userId: owner.id });
-    await seedInstall({ installationId: '701', userId: owner.id });
+    await seedInstall({ installationId: '700' });
+    await seedInstall({ installationId: '701' });
 
     // 700 was revoked AFTER the join_code was minted (stale → skip); 701 has no
     // tombstone (fresh → create). One join_code covers both installs.

@@ -21,17 +21,16 @@ export type BuildConfig = {
   repoFullName: string;
   installationId: string;
   /**
-   * Exact connection row authorized at enqueue. Older persisted manager state
-   * may omit it; the final authority check treats that as unproven and cancels.
+   * Exact connection row authorized at enqueue. The final authority check
+   * cancels the build when it is missing.
    */
-  connectionId?: string;
+  connectionId: string;
   /**
-   * The connection's immutable numeric GitHub repository id (as text), or null
-   * for a legacy/partial connection that never populated it. Carried so
-   * `BuildManager.startBuild` can re-verify the App installation still covers
-   * this repo at token-mint time (a null id fails that check closed). Sourced
-   * from the github connection bound to this build (the build row itself does
-   * not store a repository id).
+   * The connection's immutable numeric GitHub repository id (as text). Carried
+   * so `BuildManager.startBuild` can re-verify the App installation still
+   * covers this repo at token-mint time; a missing id fails that check closed.
+   * Sourced from the github connection bound to this build (the build row
+   * itself does not store a repository id).
    */
   repositoryId: string | null;
   instanceType: string;

@@ -233,16 +233,17 @@ vi.mock('../../src/db.ts', () => ({
     return true;
   }),
   // JIT App-installation coverage recheck (fresh, non-locking Postgres read).
-  // Fails closed on a null repository id, exactly like the real helper.
+  // Fails closed on a missing connection or repository id, exactly like the real
+  // helper.
   installationCoversRepo: vi.fn(
     async (
       _db: unknown,
-      _connectionId: string | undefined,
+      connectionId: string | undefined,
       _projectId: string,
       _installationId: string,
       repositoryId: string | null,
     ) => {
-      if (repositoryId === null) {
+      if (!connectionId || !repositoryId) {
         return false;
       }
       return dbState.installationCovered;
@@ -1580,9 +1581,8 @@ describe('BuildManager.startBuild', () => {
 // The container build agent uses SOURCE_TOKEN only as the Bearer to download
 // the ONE repo's tarball, but it is injected into the container env where a
 // malicious dependency `postinstall` could read it. To cap that blast radius,
-// startBuild mints the source token REPO-SCOPED + read-only when the connection
-// carries a numeric repository id; a null (legacy/partial) id can't be scoped,
-// so it falls back to the unscoped installation-wide mint for compatibility.
+// startBuild always mints the source token REPO-SCOPED + read-only; a build
+// without a repository id is cancelled before any token is minted.
 describe('BuildManager.startBuild source-token scoping', () => {
   it('mints a repo-scoped, read-only source token when repositoryId is non-null', async () => {
     const ctx = makeStubCtx();
@@ -1616,20 +1616,15 @@ describe('BuildManager.startBuild source-token scoping', () => {
     });
   });
 
-  it('never mints a SCOPED source token when repositoryId is null (unscoped fallback path)', async () => {
+  it('mints no source token when repositoryId is null', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
     const m = makeManager(ctx, env);
 
-    // A null repository id fails the coverage recheck closed BEFORE the mint, so
-    // the scoped source-token call must never happen. The fallback (unscoped)
-    // call carries no third `opts` arg — assert no call passed scoping opts.
+    // A null repository id fails the coverage recheck closed BEFORE any mint.
     await m.startBuild(makeConfig({ repositoryId: null }));
 
-    const scopedCall = vi
-      .mocked(getInstallationToken)
-      .mock.calls.find((call) => call[2] !== undefined);
-    expect(scopedCall).toBeUndefined();
+    expect(vi.mocked(getInstallationToken)).not.toHaveBeenCalled();
     expect(containerCalls.started).toBe(0);
   });
 });
@@ -1786,8 +1781,8 @@ describe('BuildManager.startBuild installation coverage recheck (TOCTOU)', () =>
   });
 
   it('fails closed (cancels) when the connection carries a null repository id', async () => {
-    // A legacy/partial connection with no repository id can't prove membership.
-    // The helper fails closed on a null id regardless of dbState.installationCovered.
+    // A build without a repository id can't prove membership, regardless of
+    // dbState.installationCovered.
     dbState.installationCovered = true;
     const ctx = makeStubCtx();
     const env = makeEnv();
@@ -1796,6 +1791,22 @@ describe('BuildManager.startBuild installation coverage recheck (TOCTOU)', () =>
     await m.startBuild(makeConfig({ repositoryId: null }));
 
     expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(vi.mocked(signDeployToken)).not.toHaveBeenCalled();
+    expect(containerCalls.started).toBe(0);
+  });
+
+  it('fails closed (cancels) when a stored build config has no connection id', async () => {
+    // Durable Object state written before the connection id was recorded can
+    // still be replayed once; it must cancel rather than crash or start.
+    dbState.installationCovered = true;
+    const ctx = makeStubCtx();
+    const env = makeEnv();
+    const m = makeManager(ctx, env);
+
+    await m.startBuild(makeConfig({ connectionId: undefined }));
+
+    expect(dbState.status.get('b1')).toBe('cancelled');
+    expect(lastWrite('cancelled')?.opts?.error).toMatch(/reconnect the repository/i);
     expect(vi.mocked(signDeployToken)).not.toHaveBeenCalled();
     expect(containerCalls.started).toBe(0);
   });

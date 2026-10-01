@@ -388,7 +388,7 @@ describe('BuildScheduler.alarm', () => {
     expect(ctx.storage.setAlarm).not.toHaveBeenCalled();
   });
 
-  it('cancels an unproven legacy organization connection before claiming the build', async () => {
+  it('cancels a connection without current authority before claiming the build', async () => {
     db.users.set('u1', { plan: 'free', login: 'octocat' });
     enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1' });
     db.unauthorizedConnectionIds.add('connection-p1');
@@ -402,7 +402,7 @@ describe('BuildScheduler.alarm', () => {
     expect(db.cancelled).toEqual([
       {
         id: 'b1',
-        error: 'github organization repository must be reconnected to renew authorization',
+        error: 'github repository authorization is no longer valid; reconnect the repository',
       },
     ]);
   });

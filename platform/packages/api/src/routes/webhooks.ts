@@ -1,9 +1,8 @@
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import {
   ACTIVE_BUILD_STATUSES,
-  clearGitHubInstallationOwnerForUser,
   deleteGitHubConnection,
   deleteGitHubInstallationMembers,
   deleteGitHubInstallationMembersByGithubAccount,
@@ -13,7 +12,6 @@ import {
   getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getGitHubInstallationsByAccount,
-  getOwnedProjectsByUserId,
   getUserByOAuthAccount,
   markBuildTerminalIfActive,
   markGitHubInstallationStatus,
@@ -313,35 +311,27 @@ async function rerunBuildForCommit(
     installationId === undefined ||
     installationId === null ||
     !repoFullName ||
+    repoId === undefined ||
+    repoId === null ||
     typeof headSha !== 'string' ||
     headSha === ''
   ) {
     return context.json({ ok: true, ignored: `missing ${event} routing fields` });
   }
 
-  const repoIdStr = repoId === undefined || repoId === null ? null : String(repoId);
-  const connections = await getGitHubConnectionsByRepo(
-    db,
-    String(installationId),
-    repoFullName,
-    repoIdStr,
-  );
+  const repoIdStr = String(repoId);
+  const connections = await getGitHubConnectionsByRepo(db, String(installationId), repoIdStr);
 
   // Same self-heal as the push path: a connection matched by immutable id may
   // carry a stale name, and the container build uses that name as its tarball
   // source.
-  if (repoIdStr !== null) {
-    const hasStaleName = connections.some(
-      (c) => c.repository_id === repoIdStr && c.repo_full_name !== repoFullName,
+  if (connections.some((c) => c.repo_full_name !== repoFullName)) {
+    await updateGitHubConnectionRepoNamesByRepoId(
+      db,
+      String(installationId),
+      repoIdStr,
+      repoFullName,
     );
-    if (hasStaleName) {
-      await updateGitHubConnectionRepoNamesByRepoId(
-        db,
-        String(installationId),
-        repoIdStr,
-        repoFullName,
-      );
-    }
   }
 
   // `head_branch` is NOT a filter. GitHub keeps one suite per app per commit even
@@ -553,8 +543,8 @@ export async function handleVerifiedGitHubWebhook(
       const push = payload as PushPayload;
       const installationId = push.installation?.id;
       const repoFullName = push.repository?.full_name;
-      // Immutable repo id (when present) keys connection resolution so a rename/
-      // name-reuse can't deploy to the wrong project; full_name is the fallback.
+      // The immutable repo id keys connection resolution so a rename/name-reuse
+      // can't deploy to the wrong project.
       const repoId = push.repository?.id;
       const ref = push.ref;
       const after = push.after;
@@ -564,12 +554,15 @@ export async function handleVerifiedGitHubWebhook(
         installationId === undefined ||
         installationId === null ||
         !repoFullName ||
+        repoId === undefined ||
+        repoId === null ||
         typeof ref !== 'string' ||
         !ref.startsWith('refs/heads/') ||
         typeof after !== 'string'
       ) {
         return context.json({ ok: true, ignored: 'unhandled push' });
       }
+      const repoIdStr = String(repoId);
 
       // Branch delete — no source to build, but an in-flight build for the
       // now-deleted branch still holds a live deploy token: the middleware
@@ -583,7 +576,6 @@ export async function handleVerifiedGitHubWebhook(
       // here — a delete carries no source to build.)
       if (after === ZERO_SHA) {
         const deletedBranch = ref.slice('refs/heads/'.length);
-        const repoIdStr = repoId === undefined || repoId === null ? null : String(repoId);
         // Monotonic fence captured BEFORE the absence check: only builds that
         // already existed when we began confirming the branch is gone are eligible
         // for cancellation. A build enqueued during the check-to-cancel window (a
@@ -623,7 +615,7 @@ export async function handleVerifiedGitHubWebhook(
         //
         // BOUNDED LIMITATION (rename + name-reuse): this proof keys on the
         // payload's `repoFullName`, while the cancellation below keys on the
-        // immutable `repository_id` (when BOTH sides carry one). They name the
+        // immutable `repository_id`. They name the
         // SAME repo at event time, but a delete delayed across a rename whose
         // freed name is then REUSED by a different repo can make this check
         // resolve to the wrong repo (or 404 → 'absent') while cancellation still
@@ -651,7 +643,6 @@ export async function handleVerifiedGitHubWebhook(
           const conns = await tx
             .select({
               project_id: githubConnections.project_id,
-              repo_full_name: githubConnections.repo_full_name,
               repository_id: githubConnections.repository_id,
               branch: githubConnections.branch,
             })
@@ -665,22 +656,8 @@ export async function handleVerifiedGitHubWebhook(
             instance_type: string | null;
           }> = [];
           for (const conn of conns) {
-            // Per-connection repo match. This is a REVOCATION path (terminalize
-            // an orphaned build's token), so the matcher is inclusive: match by
-            // the immutable repository_id ONLY when BOTH the connection AND the
-            // payload carry one; otherwise fall back to repo_full_name. A legacy
-            // connection whose repository_id IS NULL is therefore still revoked
-            // when its repo_full_name matches, even if the delete payload carries
-            // a repository.id (the id can't disqualify a row that never stored
-            // one). Note the asymmetry vs the build path
-            // (getGitHubConnectionsByRepo): there a null-id connection must NOT match an id-bearing push
-            // — deploying to the wrong project is worse than over-revoking — so it
-            // is exclusive; here, over-revoking a stale build is safe.
-            const repoMatched =
-              conn.repository_id != null && repoIdStr != null
-                ? conn.repository_id === repoIdStr
-                : conn.repo_full_name === repoFullName;
-            if (!repoMatched || conn.branch !== deletedBranch) {
+            // Match on the immutable repository id, like the build path.
+            if (conn.repository_id !== repoIdStr || conn.branch !== deletedBranch) {
               continue;
             }
             acc.push(
@@ -698,29 +675,18 @@ export async function handleVerifiedGitHubWebhook(
       }
 
       const branch = ref.slice('refs/heads/'.length);
-      const connections = await getGitHubConnectionsByRepo(
-        db,
-        String(installationId),
-        repoFullName,
-        repoId === undefined || repoId === null ? null : String(repoId),
-      );
+      const connections = await getGitHubConnectionsByRepo(db, String(installationId), repoIdStr);
 
       // Self-heal a renamed repo: connections matched by immutable id may carry a
       // stale repo_full_name, which the container build would use as the tarball
       // source. Correct them so the build fetches the right source.
-      if (repoId !== undefined && repoId !== null) {
-        const repoIdStr = String(repoId);
-        const hasStaleName = connections.some(
-          (c) => c.repository_id === repoIdStr && c.repo_full_name !== repoFullName,
+      if (connections.some((c) => c.repo_full_name !== repoFullName)) {
+        await updateGitHubConnectionRepoNamesByRepoId(
+          db,
+          String(installationId),
+          repoIdStr,
+          repoFullName,
         );
-        if (hasStaleName) {
-          await updateGitHubConnectionRepoNamesByRepoId(
-            db,
-            String(installationId),
-            repoIdStr,
-            repoFullName,
-          );
-        }
       }
 
       // A repo may back multiple projects (e.g. staging + prod on different
@@ -864,7 +830,8 @@ export async function handleVerifiedGitHubWebhook(
         const accountType = account?.type === 'Organization' ? 'Organization' : 'User';
         await upsertGitHubInstallation(db, {
           installationId: String(installationId),
-          // user_id is backfilled in the OAuth callback (install-before-signin).
+          // Organization installs never have an owner. A personal install's
+          // owner is linked by the install callback or a later sign-in.
           userId: null,
           accountLogin: account?.login ?? '',
           accountId: account?.id === undefined ? '' : String(account.id),
@@ -1051,13 +1018,11 @@ export async function handleVerifiedGitHubWebhook(
       // in-flight OIDC exchange (which re-reads + locks the same rows before
       // inserting its build) is serialized. The DO cancel runs AFTER commit.
       const reason = 'repository removed from github app';
-      const removedNames = new Set(removed.map((r) => r.full_name));
       // `repo_full_name` is mutable (a repo can be renamed under the same
       // installation), so a rename-then-remove leaves the connection holding the
       // OLD name while the payload carries the current name + the IMMUTABLE id.
-      // Match on the immutable repository_id when present (mirroring
-      // getGitHubConnectionsByRepo), falling back to the name only for legacy rows
-      // that predate the column. Distinct from the numeric `removedIds` above —
+      // Match on the immutable repository_id (mirroring
+      // getGitHubConnectionsByRepo). Distinct from the numeric `removedIds` above —
       // this set holds the stringified ids that the text `repository_id` column
       // is compared against.
       const removedRepositoryIds = new Set(removed.map((r) => String(r.id)));
@@ -1084,7 +1049,6 @@ export async function handleVerifiedGitHubWebhook(
         const connections = await tx
           .select({
             project_id: githubConnections.project_id,
-            repo_full_name: githubConnections.repo_full_name,
             repository_id: githubConnections.repository_id,
           })
           .from(githubConnections)
@@ -1110,11 +1074,7 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         for (const conn of connections) {
-          const matched =
-            conn.repository_id != null
-              ? removedRepositoryIds.has(conn.repository_id)
-              : removedNames.has(conn.repo_full_name);
-          if (!matched) {
+          if (conn.repository_id === null || !removedRepositoryIds.has(conn.repository_id)) {
             continue;
           }
           acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
@@ -1186,14 +1146,19 @@ export async function handleVerifiedGitHubWebhook(
       const installationId = data.installation?.id;
       const repoFullName = data.repository?.full_name;
       const repoId = data.repository?.id;
-      if (installationId === undefined || installationId === null || !repoFullName) {
+      if (
+        installationId === undefined ||
+        installationId === null ||
+        !repoFullName ||
+        repoId === undefined ||
+        repoId === null
+      ) {
         return context.json({ ok: true, ignored: 'missing workflow_run routing fields' });
       }
       const connections = await getGitHubConnectionsByRepo(
         db,
         String(installationId),
-        repoFullName,
-        repoId === undefined || repoId === null ? null : String(repoId),
+        String(repoId),
       );
       if (connections.length === 0) {
         return context.json({ ok: true, ignored: 'no matching connection' });
@@ -1392,8 +1357,8 @@ export async function handleVerifiedGitHubWebhook(
       // rows serializes an in-flight OIDC exchange for the same rows (mirror
       // installation/uninstall). terminate = revoke in-flight build tokens
       // (build-row status is the token authority); delete = remove the future
-      // auto-deploy trigger. Membership cache + owner pointer are cleared
-      // regardless of connection count. The revocation tombstone is stamped ONCE,
+      // auto-deploy trigger. The membership cache is cleared regardless of
+      // connection count. The revocation tombstone is stamped ONCE,
       // keyed by the removed GitHub account id (durable, known from the payload
       // regardless of Void state) — user resolution drives only the sever. DO
       // cancel is AWAITED after commit. Idempotent in the steady state: a plain
@@ -1413,9 +1378,9 @@ export async function handleVerifiedGitHubWebhook(
       // default. (Reachability: GitHub only auto-retries a FAILED delivery, or an
       // admin manually redelivers.)
       //
-      // Connections + install owner pointers are OAUTH-backed, so the affected
-      // user for SEVERING is exactly `getUserByOAuthAccount('github', X)` — the
-      // sole driver of connection-severing + owner-clearing. Browser-proof-X
+      // Connections are OAUTH-backed, so the affected user for SEVERING is
+      // exactly `getUserByOAuthAccount('github', X)` — the sole driver of
+      // connection-severing. Browser-proof-X
       // LISTING memberships (whose `github_account_id` is decoupled from the
       // bearer's oauth id) never back a connection, so X's removal only DELETES
       // them. That resolution is deliberately NOT done out here: it runs INSIDE the
@@ -1458,8 +1423,8 @@ export async function handleVerifiedGitHubWebhook(
         // redemption) or the redemption commits first (this post-lock re-read sees
         // its freshly-inserted connection and severs it).
         //
-        // Connections record the owner/admin whose OAuth proof authorized them.
-        // Legacy rows have no provenance and retain the old owner-scoped behavior.
+        // Connections record the owner/admin whose OAuth proof authorized them,
+        // so the removed user's connections are exactly those they authorized.
         const removedUser = await getUserByOAuthAccount(
           txDb,
           'github',
@@ -1472,43 +1437,31 @@ export async function handleVerifiedGitHubWebhook(
           instance_type: string | null;
         }> = [];
         if (removedUser) {
-          const ownedProjectIds = (await getOwnedProjectsByUserId(txDb, removedUser.id)).map(
-            (project) => project.id,
-          );
-          const authorizationClause =
-            ownedProjectIds.length > 0
-              ? or(
-                  eq(githubConnections.authorized_by_user_id, removedUser.id),
-                  and(
-                    isNull(githubConnections.authorized_by_user_id),
-                    inArray(githubConnections.project_id, ownedProjectIds),
-                  ),
-                )
-              : eq(githubConnections.authorized_by_user_id, removedUser.id);
           const conns = await tx
             .select({ project_id: githubConnections.project_id })
             .from(githubConnections)
             .where(
-              and(inArray(githubConnections.installation_id, orgInstallIds), authorizationClause),
+              and(
+                inArray(githubConnections.installation_id, orgInstallIds),
+                eq(githubConnections.authorized_by_user_id, removedUser.id),
+              ),
             )
             .for('update');
           for (const conn of conns) {
             acc.push(...(await terminateBuildsForProject(txDb, conn.project_id, { reason })));
             await deleteGitHubConnection(txDb, conn.project_id);
           }
-          // Clear the removed user's membership cache + owner pointer across every
-          // org install (both guard on the user id, so a different owner/bearer is
-          // never clobbered).
+          // Clear the removed user's membership cache across every org install
+          // (guarded on the user id, so a different bearer is never clobbered).
           await deleteGitHubInstallationMembers(txDb, orgInstallIds, removedUser.id);
-          await clearGitHubInstallationOwnerForUser(txDb, orgInstallIds, removedUser.id);
         }
         // Void the BROWSER-PROOF-X LISTING memberships across every org install,
         // keyed by the GitHub id X (NOT a Void user id) so any bearer's X-keyed
         // row is removed. A membership's `github_account_id` is the browser proof
         // captured at JOIN, DECOUPLED from the bearer's oauth identity, so it never
-        // backs a connection or an owner pointer (proven oauth-backed above). This
-        // therefore deletes exactly the stale X listing entries and touches NO
-        // connection, NO owner pointer, and NO Z-keyed membership. The durable
+        // backs a connection (proven oauth-backed above). This therefore deletes
+        // exactly the stale X listing entries and touches NO connection and NO
+        // Z-keyed membership. The durable
         // tombstone is written once above (keyed by X), so a pre-mint replay is
         // caught even for a user that does not exist yet at removal time.
         await deleteGitHubInstallationMembersByGithubAccount(

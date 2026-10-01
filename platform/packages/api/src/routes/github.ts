@@ -11,7 +11,6 @@ import { capabilityMiddleware } from '../capabilities.ts';
 import { DEFAULT_DASHBOARD_URL, MEMBERSHIP_TTL_SECONDS } from '../constants.ts';
 import type { Db } from '../db.ts';
 import {
-  authorizeGitHubOrganizationConnection,
   createGitHubConnection,
   deleteGitHubConnection,
   getGitHubAccountIdForUser,
@@ -19,7 +18,6 @@ import {
   getDbNowMs,
   getGitHubInstallation,
   getGitHubInstallationsByUser,
-  hasGitHubConnectionAuthority,
   getInstallationRevocationAt,
   getInstallationRevocationsForAccount,
   GitHubIdentityAlreadyLinkedError,
@@ -131,10 +129,8 @@ type JoinCode = {
   // The moment GitHub access was PROVEN (the public callback ran). Compared
   // against the per-install revocation tombstone at /join/complete: a join_code
   // minted at or before a revocation is a stale replay from a removed member and
-  // is skipped (monotonic revocation, Task 14). Optional because a legacy code
-  // minted before this field existed carries none — the redemption treats a
-  // missing iat as 0 (predates every tombstone → fail closed).
-  iat?: number;
+  // is skipped (monotonic revocation, Task 14). A code without it is invalid.
+  iat: number;
   exp: number;
 };
 
@@ -182,9 +178,8 @@ type ConnectGrant = {
   // ran). Compared against the install's revocation tombstone inside the connect
   // gate's go-live transaction: a grant minted at or before a revocation is a
   // stale replay from a removed member and is rejected (monotonic, Task 14).
-  // Optional because a legacy grant minted before this field existed carries none
-  // — the redemption treats a missing iat as 0 (predates every tombstone).
-  iat?: number;
+  // A grant without it is invalid.
+  iat: number;
   exp: number;
 };
 
@@ -820,7 +815,11 @@ export const githubRoutes = new Hono<ApiEnv>()
     if (!joinCode || joinCode.purpose !== 'join' || !Array.isArray(joinCode.installationIds)) {
       return context.json({ error: 'invalid join_code' }, 400);
     }
-    if (typeof joinCode.exp !== 'number' || Date.now() >= joinCode.exp) {
+    if (
+      typeof joinCode.exp !== 'number' ||
+      Date.now() >= joinCode.exp ||
+      typeof joinCode.iat !== 'number'
+    ) {
       return context.json({ error: 'invalid join_code' }, 400);
     }
 
@@ -875,25 +874,16 @@ export const githubRoutes = new Hono<ApiEnv>()
         if (install === null) {
           continue;
         }
-        // Org-share is Organization-only (mirrors the eligibility gate). A join_code
-        // that somehow carries a personal (account_type='User') install id is skipped
-        // fail-soft — never counted, never minted. account_type is immutable, so this
-        // re-read is authoritative under the install-row lock held above.
-        if (install.account_type !== 'Organization') {
-          continue;
-        }
-        // Skip installs the caller already OWNS — they already have full access, so
-        // a membership row would be redundant (and is not counted).
-        if (install.user_id === user.id) {
-          continue;
-        }
+        // The signed join_code lists only Organization installs (the callback's
+        // eligibility gate), and account_type is immutable, so every install here
+        // is an organization install with no owner. The installer joins like any
+        // other member.
+        //
         // Skip installs whose join_code predates a revocation (stale replay). A
         // legit re-join AFTER re-add mints a fresh join_code with iat > revoked_at,
-        // which is NOT skipped (the tombstone is a high-water mark, not a ban). A
-        // legacy join_code minted before this field existed has no iat — treat it
-        // as 0 so ANY tombstone rejects it (fail closed).
+        // which is NOT skipped (the tombstone is a high-water mark, not a ban).
         const revokedAtMs = revocations.get(installationId);
-        if (revokedAtMs !== undefined && revokedAtMs >= (joinCode.iat ?? 0)) {
+        if (revokedAtMs !== undefined && revokedAtMs >= joinCode.iat) {
           continue;
         }
         // Threat L1: keyed on the AUTHENTICATED bearer-token holder, never on the
@@ -1270,13 +1260,11 @@ export const githubRoutes = new Hono<ApiEnv>()
         .for('update');
 
       const existing = await getGitHubInstallation(txDb, installationId);
-      // Organization installation visibility never confers repository authority.
-      // Record every org participant as a TTL membership, including the person
-      // who completed a fresh installation and users that older code marked as
-      // owner. The project connect gate consequently requires a fresh per-repo
-      // OAuth grant for every organization path. Persist the installation with a
-      // null proposed owner; on conflict this also preserves any legacy pointer,
-      // which remains inert for organization authorization.
+      // Organization installs have no owner, and installation visibility never
+      // confers repository authority. Record every org participant, including
+      // the person who completed a fresh installation, as a TTL membership. The
+      // project connect gate consequently requires a fresh per-repo OAuth grant
+      // for every organization path.
       if (account.type === 'Organization') {
         if (!authResult.authorized || authResult.callerAccountId === null) {
           return { kind: 'conflict' as const };
@@ -1450,11 +1438,11 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       if (!isMember) {
         return context.json({ error: 'installation not found' }, 404);
       }
-      // Defense-in-depth: org-share connect is Organization-only. A membership on a
-      // personal-account install cannot be minted after Task 28, but a pre-existing/stale
-      // one must still be rejected here with the SAME opaque 404 (never reveal the install
-      // exists / its type to a non-member). account_type is immutable, so the pre-lock row
-      // is authoritative (no locked re-read).
+      // Org-share connect is Organization-only. Memberships are only ever written for
+      // organization installs; this gate keeps a personal install unreachable through
+      // membership even if one existed, with the SAME opaque 404 (never reveal the
+      // install exists / its type to a non-member). account_type is immutable, so the
+      // pre-lock row is authoritative (no locked re-read).
       if (installation.account_type !== 'Organization') {
         return context.json({ error: 'installation not found' }, 404);
       }
@@ -1548,6 +1536,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         grant.purpose !== 'connect' ||
         typeof grant.exp !== 'number' ||
         Date.now() >= grant.exp ||
+        typeof grant.iat !== 'number' ||
         grant.installationId !== body.installationId ||
         grant.repoFullName !== body.repoFullName
       ) {
@@ -1649,7 +1638,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         return context.json({ error: 'project is being deleted' }, 409);
       }
       // Re-derive ownership from the LOCKED row, not the stale pre-tx snapshot. If
-      // member_removed cleared the owner pointer while we waited on the lock, the
+      // the personal owner pointer changed while we waited on the lock, the
       // pre-tx owner path is stale: we already resolved repositoryId via the
       // installation token and carry NO grant, so we must NOT fall through to the
       // member insert (that would be a confused-deputy on the install token). Reject;
@@ -1672,20 +1661,18 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         // the durable identity `member_removed` always tombstones. A non-owner
         // path always carries a grant (the member branch above set
         // memberGrantAccountId after Threat-L1); a missing one is fail-closed to
-        // the same opaque 403 (the F2 `isOwner && !lockedIsOwner` guard already
+        // the same opaque 403 (the `isOwner && !lockedIsOwner` guard already
         // rejected the owner-turned-non-owner case above, so this is only ever a
         // defensive belt).
-        if (memberGrantAccountId === undefined) {
+        if (memberGrantAccountId === undefined || memberGrantIat === undefined) {
           return { ok: false as const, status: 403 as const, error: 'invalid connect grant' };
         }
-        // A legacy grant minted before the iat field existed has memberGrantIat
-        // undefined — treat it as 0 so ANY tombstone rejects it (fail closed).
         const revokedAtMs = await getInstallationRevocationAt(
           txDb,
           installationId,
           memberGrantAccountId,
         );
-        if (revokedAtMs !== null && revokedAtMs >= (memberGrantIat ?? 0)) {
+        if (revokedAtMs !== null && revokedAtMs >= memberGrantIat) {
           return { ok: false as const, status: 403 as const, error: 'invalid connect grant' };
         }
       }
@@ -1719,24 +1706,6 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       }
       const existing = await getGitHubConnection(txDb, projectId);
       if (existing) {
-        if (lockedInstall.account_type === 'Organization') {
-          const reauthorized = await authorizeGitHubOrganizationConnection(txDb, {
-            projectId,
-            installationId,
-            repoFullName,
-            repositoryId: String(repositoryId),
-            userId: caller,
-          });
-          if (reauthorized) {
-            return { ok: true as const, connection: reauthorized };
-          }
-          return {
-            ok: false as const,
-            status: 409 as const,
-            error:
-              'organization repository authorization changed; disconnect and reconnect the repository',
-          };
-        }
         return { ok: false as const, status: 409 as const, error: 'project already connected' };
       }
       const connection = await createGitHubConnection(txDb, {
@@ -1773,15 +1742,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       return context.json({ error: 'connection not found' }, 404);
     }
 
-    const authorized = await hasGitHubConnectionAuthority(
-      context.get('db'),
-      connection.id,
-      projectId,
-    );
-    return context.json({
-      ...publicGitHubConnection(connection),
-      requires_reconnect: !authorized,
-    });
+    return context.json(publicGitHubConnection(connection));
   })
 
   // Update branch / build executor.

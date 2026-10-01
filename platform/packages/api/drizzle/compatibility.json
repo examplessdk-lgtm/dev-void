@@ -41,6 +41,10 @@
     {
       "platformVersion": "0.21.2",
       "schemaDigest": "9a9ae6677b795debd4ffaa20a05f533727063c7a21366310a2fe4b17bd918edd"
+    },
+    {
+      "platformVersion": "0.21.9",
+      "schemaDigest": "ac70deb5847c71ece9938edd27e5dbc50ce41e16771926c78e757850baf15bfa"
     }
   ]
 }

@@ -1522,18 +1522,21 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // the enqueue-time check is stale. A fresh plain (non-locking) Postgres
       // read here observes the committed revocation and fails closed before we
       // mint a live deploy token, rather than relying solely on the installation
-      // token mint failing once its ~55-min cache expires. A null repositoryId
-      // (unprovable membership) fails closed by construction. Treat an
+      // token mint failing once its ~55-min cache expires. A missing connection
+      // or repository id fails closed. Treat an
       // uncovered build like the non-identical freshness branch: cancel (not a
       // build failure), don't mint or start. Nothing is started yet, so there is
       // no container to tear down.
-      const covered = await installationCoversRepo(
-        this.db(),
-        config.connectionId,
-        config.projectId,
-        config.installationId,
-        config.repositoryId,
-      );
+      const repositoryId = config.repositoryId;
+      const covered =
+        repositoryId !== null &&
+        (await installationCoversRepo(
+          this.db(),
+          config.connectionId,
+          config.projectId,
+          config.installationId,
+          repositoryId,
+        ));
       if (!covered) {
         const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'cancelled', {
           error: 'github repository authorization is no longer valid; reconnect the repository',
@@ -1711,16 +1714,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // but it's injected into the container env where an untrusted dependency
       // `postinstall` could read it — a repo-scoped `{ contents: 'read' }` token
       // caps that blast radius to this single repo instead of every repo the
-      // install covers. A null repositoryId (legacy/partial connection) can't be
-      // scoped, so fall back to the unscoped installation-wide mint to preserve
-      // compatibility; coverage is already re-verified above.
-      const sourceToken =
-        config.repositoryId !== null
-          ? await getInstallationToken(this.env, config.installationId, {
-              repositoryIds: [config.repositoryId],
-              permissions: { contents: 'read' },
-            })
-          : await getInstallationToken(this.env, config.installationId);
+      // install covers.
+      const sourceToken = await getInstallationToken(this.env, config.installationId, {
+        repositoryIds: [repositoryId],
+        permissions: { contents: 'read' },
+      });
       // The installation-token fetch is the longest pre-launch await and was the
       // original orphan window: cancellation observed no live container, returned,
       // and this continuation launched afterward. The generation fence closes it.

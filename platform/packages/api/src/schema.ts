@@ -1039,11 +1039,12 @@ export const projectDatabaseCredentials = pgTable('project_database_credentials'
 // ---------------------------------------------------------------------------
 // github_installations — GitHub App installations.
 //
-// `user_id` is nullable to support install-before-signin: a user can install
-// the GitHub App before (or instead of) signing in, in which case the
-// installation lands here unlinked and is backfilled in the GitHub OAuth
-// callback (`linkGitHubInstallationToUser`). `repositories` mirrors the
-// installation's repository selection as a JSON array of `{ full_name, id }`.
+// `user_id` is the owner of a personal (account_type='User') installation and
+// is always null for organization installations, which are reached only
+// through `github_installation_members`. A personal installation can also be
+// unlinked (install-before-signin) until the GitHub OAuth callback backfills it
+// (`linkGitHubInstallationToUser`). `repositories` mirrors the installation's
+// repository selection as a JSON array of `{ full_name, id }`.
 // ---------------------------------------------------------------------------
 export type GitHubInstallationRepository = Readonly<{
   full_name: string;
@@ -1110,19 +1111,13 @@ export const githubConnections = pgTable(
     // could match a DIFFERENT repository to this connection and deploy to the
     // wrong project. Webhook (`repository.id`) and OIDC (`claims.repository_id`)
     // resolution match on this immutable id, treating `repo_full_name` as
-    // display/fetch metadata. Nominally nullable, but the resolvers FAIL CLOSED:
-    // when the caller has an id, a null-id row is NOT matched by `repo_full_name`
-    // fallback (a renamed-and-reused name could otherwise authorize the wrong
-    // project). New connections always populate it at connect time; the only
-    // name fallback left is for callers with no id at all (malformed/partial
-    // webhook). A `repo_full_name` match is used solely in that no-id case.
+    // display/fetch metadata. Every connection populates it at connect time;
+    // a row without one never matches a resolver (fail closed).
     repository_id: text('repository_id'),
-    // The project owner or administrator whose own GitHub OAuth token proved
-    // repository access during connect. NULL on legacy rows. Runtime
-    // authorization accepts a current row only while this still names the
-    // owner or a project administrator. Legacy organization rows without
-    // per-repository proof fail closed; legacy personal rows retain their
-    // owner-installation fallback.
+    // The project owner or administrator who proved repository access during
+    // connect. Runtime authorization accepts the row only while this still
+    // names the owner or a project administrator; a row without one has no
+    // authority.
     authorized_by_user_id: text('authorized_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),

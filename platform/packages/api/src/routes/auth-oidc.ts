@@ -119,16 +119,12 @@ app.post('/github-oidc', async (context) => {
   const db = context.get('db');
   const connections = await getGitHubActionsConnectionsByRepo(
     db,
-    claims.repository,
     claims.repository_id,
     claims.repository_owner_id,
   );
   if (connections.length === 0) {
     return context.json(
-      {
-        error:
-          'no authorized github actions connection for repository; reconnect the organization repository',
-      },
+      { error: 'no authorized github actions connection for repository; reconnect the repository' },
       401,
     );
   }

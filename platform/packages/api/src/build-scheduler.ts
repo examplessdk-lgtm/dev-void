@@ -159,7 +159,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
       }
       if (!(await hasGitHubConnectionAuthority(db, connection.id, build.project_id))) {
         await updateBuildStatus(db, build.id, 'cancelled', {
-          error: 'github organization repository must be reconnected to renew authorization',
+          error: 'github repository authorization is no longer valid; reconnect the repository',
           completedAt: new Date().toISOString(),
         });
         continue;
@@ -242,7 +242,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         // project (resolved above by the UNIQUE project_id) is the source of
         // truth — mirrors webhooks.ts / auth-oidc.ts. startBuild re-verifies the
         // App installation still covers this repo before minting the deploy
-        // token; a null id fails that check closed.
+        // token; a missing id fails that check closed.
         repositoryId: connection.repository_id,
         instanceType,
         timeoutMinutes: getPlanLimits(claimed.ownerPlan).buildTimeoutMinutes,

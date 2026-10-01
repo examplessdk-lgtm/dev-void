@@ -1210,9 +1210,9 @@ describe('POST /admin/users/:id/delete', () => {
       id: 'ghi_udel_test',
       installation_id: 'inst-udel-1',
       user_id: user.id,
-      account_login: 'octo-org',
+      account_login: 'octo',
       account_id: '4242',
-      account_type: 'Organization',
+      account_type: 'User',
     });
 
     const res = await req(`/admin/users/${user.id}/delete`, admin.adminJwt, {

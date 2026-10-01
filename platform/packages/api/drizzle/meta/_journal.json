@@ -316,6 +316,13 @@
       "when": 1790721898182,
       "tag": "0051_icy_psylocke",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1790827715142,
+      "tag": "0052_github_connection_authority",
+      "breakpoints": true
     }
   ]
 }

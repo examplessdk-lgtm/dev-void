@@ -252,7 +252,7 @@ async function mintConnectGrant(
 }
 
 // Seed the org-shared install scenario a non-owner member connects against:
-// an install OWNED by someone else, a project OWNED by the connecting member, and
+// an install the member does not own, a project OWNED by the connecting member, and
 // (unless `seedMembership: false`) an active membership row binding the member to
 // the install. The member's linked GitHub id is seeded via createTestUser's
 // provider/providerId args so getGitHubAccountIdForUser returns a known value
@@ -287,12 +287,14 @@ async function seedMemberScenario(opts: {
     opts.memberGithubId,
   );
   const project = await createTestProject(env.db, member.id, `gh-member-${opts.installationId}`);
+  const accountType = opts.accountType ?? 'Organization';
   await upsertGitHubInstallation(env.db, {
     installationId: opts.installationId,
-    userId: owner.id,
+    // Only a personal install has an owner.
+    userId: accountType === 'User' ? owner.id : null,
     accountLogin: 'org',
     accountId: `acc_${opts.installationId}`,
-    accountType: opts.accountType ?? 'Organization',
+    accountType,
     repositories: opts.repositories ?? [{ full_name: 'org/app', id: 1 }],
     repositorySelection: opts.repositorySelection,
   });
@@ -1410,96 +1412,34 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect((await getGitHubConnection(env.db, project.id))?.repository_id).toBe('4242');
   });
 
-  it('requires per-repo proof for a legacy organization owner and disables its old cross-repo connection', async () => {
-    const user = await createTestUser(env.db, 'legacy-org-owner', 'github', '5551234');
-    const authorizedProject = await createTestProject(env.db, user.id, 'legacy-org-a');
-    const inaccessibleProject = await createTestProject(env.db, user.id, 'legacy-org-b');
-    await upsertGitHubInstallation(env.db, {
+  // A connected project keeps its connection: a second organization connect is
+  // rejected exactly like a personal-install connect, and the row is unchanged.
+  it('returns 409 when an organization project is already connected', async () => {
+    const { member, project } = await seedMemberScenario({
       installationId: '3011',
-      // Older versions wrote this pointer after seeing the installation through
-      // /user/installations. It is discovery metadata, not org-wide authority.
-      userId: user.id,
-      accountLogin: 'org',
-      accountId: 'acc_3011',
-      accountType: 'Organization',
-      repositories: [
-        { full_name: 'org/authorized-a', id: 301101 },
-        { full_name: 'org/inaccessible-b', id: 301102 },
-      ],
-      repositorySelection: 'selected',
+      memberGithubId: '5551234',
     });
-    await upsertGitHubInstallationMember(env.db, {
-      installationId: '3011',
-      userId: user.id,
-      githubAccountId: '5551234',
-      ttlSeconds: 3600,
-    });
-    await createGitHubConnection(env.db, {
-      projectId: inaccessibleProject.id,
-      installationId: '3011',
-      repoFullName: 'org/inaccessible-b',
-      repositoryId: '301102',
-      authorizedByUserId: null,
-    });
-    await createGitHubConnection(env.db, {
-      projectId: authorizedProject.id,
-      installationId: '3011',
-      repoFullName: 'org/authorized-a',
-      repositoryId: '301101',
-      authorizedByUserId: null,
-    });
+    const connect = async () =>
+      memberConnect(member, project.id, {
+        installationId: '3011',
+        repoFullName: 'org/app',
+        connectGrant: await mintConnectGrant({
+          installationId: '3011',
+          repoFullName: 'org/app',
+          githubAccountId: '5551234',
+        }),
+        codeVerifier: CONNECT_VERIFIER,
+      });
 
-    const listed = await app.fetch(
-      new Request('http://localhost/github/installations', authed(user.jwt)),
-      env,
-    );
-    const installation = (
-      (await listed.json()) as Array<{ installation_id: string; repositories: Array<unknown> }>
-    ).find((row) => row.installation_id === '3011');
-    expect(installation?.repositories).toEqual([]);
+    const first = await connect();
+    expect(first.status).toBe(200);
+    const original = await getGitHubConnection(env.db, project.id);
+    expect(original?.authorized_by_user_id).toBe(member.id);
 
-    // The old unproven connection cannot resolve from a signed push, so it
-    // cannot enqueue a build or reach the installation-token clone path.
-    expect(
-      await getGitHubConnectionsByRepo(env.db, '3011', 'org/inaccessible-b', '301102'),
-    ).toEqual([]);
-    const status = await app.fetch(
-      new Request(`http://localhost/projects/${inaccessibleProject.id}/github`, authed(user.jwt)),
-      env,
-    );
-    expect(status.status).toBe(200);
-    expect(((await status.json()) as { requires_reconnect: boolean }).requires_reconnect).toBe(
-      true,
-    );
-
-    const withoutProof = await memberConnect(user, authorizedProject.id, {
-      installationId: '3011',
-      repoFullName: 'org/authorized-a',
-    });
-    expect(withoutProof.status).toBe(403);
-    expect(((await withoutProof.json()) as { error: string }).error).toBe(
-      'connect_authorization_required',
-    );
-
-    const grant = await mintConnectGrant({
-      installationId: '3011',
-      repoFullName: 'org/authorized-a',
-      repositoryId: 301101,
-      githubAccountId: '5551234',
-    });
-    const connected = await memberConnect(user, authorizedProject.id, {
-      installationId: '3011',
-      repoFullName: 'org/authorized-a',
-      connectGrant: grant,
-      codeVerifier: CONNECT_VERIFIER,
-    });
-    expect(connected.status).toBe(200);
-    expect((await getGitHubConnection(env.db, authorizedProject.id))?.authorized_by_user_id).toBe(
-      user.id,
-    );
-    expect(
-      await getGitHubConnectionsByRepo(env.db, '3011', 'org/authorized-a', '301101'),
-    ).toHaveLength(1);
+    const second = await connect();
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({ error: 'project already connected' });
+    expect(await getGitHubConnection(env.db, project.id)).toEqual(original);
   });
 
   // A grant minted for a DIFFERENT repo than the one being connected is rejected.
@@ -1835,7 +1775,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     const v = await createTestUser(env.db, 'f1-v', 'google', 'google-f1-v');
     await upsertGitHubInstallation(env.db, {
       installationId: INSTALL,
-      userId: owner.id,
+      userId: null,
       accountLogin: 'org',
       accountId: ORG,
       accountType: 'Organization',
@@ -1921,7 +1861,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     const owner = await createTestUser(env.db, 't19-owner', 'github', 'gh-owner-6200');
     await upsertGitHubInstallation(env.db, {
       installationId: INSTALL,
-      userId: owner.id,
+      userId: null,
       accountLogin: 'org',
       accountId: ORG,
       accountType: 'Organization',
@@ -2013,19 +1953,15 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // Fail-closed hardening (Task 14): a LEGACY connect_grant minted before the
-  // `iat` field existed carries NO iat. The in-tx recheck treats a missing iat as
-  // 0 (predating every tombstone), so ANY recorded revocation rejects it with the
-  // FROZEN stable 'invalid connect grant' — no connection is created. Mint inline
-  // so the property is truly ABSENT from the signed payload (mintConnectGrant
-  // would inject one). If a missing iat leaked through (a NaN compare), a removed
-  // member could still connect — this test would then fail.
-  it('returns 403 invalid connect grant when a legacy grant carries no iat against a revocation (fail closed)', async () => {
+  // A connect_grant without `iat` cannot be compared with revocation tombstones,
+  // so it is rejected with the FROZEN stable 'invalid connect grant' even when no
+  // revocation exists — no connection is created. Mint inline so the property is
+  // truly ABSENT from the signed payload (mintConnectGrant would inject one).
+  it('returns 403 invalid connect grant when the grant carries no iat', async () => {
     const { member, project } = await seedMemberScenario({
       installationId: '3019',
       memberGithubId: '5551234',
     });
-    await recordInstallationRevocations(env.db, ['3019'], '5551234');
     const encoded = btoa(
       JSON.stringify({
         purpose: 'connect',
@@ -2035,17 +1971,17 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
         githubAccountId: '5551234',
         codeChallenge: await createCodeChallenge(CONNECT_VERIFIER),
         codeChallengeMethod: 'S256',
-        // NO `iat` field — a legacy artifact predating the monotonic gate.
+        // NO `iat` field.
         exp: Date.now() + 5 * 60 * 1000,
       }),
     );
     const signature = await hmacSignState(encoded, JWT_SECRET);
-    const legacyGrant = `${encoded}.${signature}`;
+    const grantWithoutIat = `${encoded}.${signature}`;
 
     const res = await memberConnect(member, project.id, {
       installationId: '3019',
       repoFullName: 'org/app',
-      connectGrant: legacyGrant,
+      connectGrant: grantWithoutIat,
       codeVerifier: CONNECT_VERIFIER,
     });
 
@@ -2126,7 +2062,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     const owner = await createTestUser(env.db, 'r101-join-owner', 'github', 'gh-owner-7100');
     await upsertGitHubInstallation(env.db, {
       installationId: INSTALL,
-      userId: owner.id,
+      userId: null,
       accountLogin: 'org',
       accountId: 'acc_7100',
       accountType: 'Organization',
@@ -2238,42 +2174,35 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
 });
 
 // Task 15 — the connect gate re-derives ownership from the install row it locks
-// FOR UPDATE inside the go-live transaction, not the stale pre-tx snapshot. If
-// member_removed clears the owner pointer (nulls user_id) while a connect waits
-// on that lock, the pre-tx owner path is stale: repositoryId was resolved via the
-// installation token with NO member grant, so falling through to the member insert
-// would be a confused-deputy. The re-read fails closed (opaque 404) on the
-// `isOwner && !lockedIsOwner` transition, so the severed installer can no longer
-// plant a fresh connection that would auto-deploy forever.
+// FOR UPDATE inside the go-live transaction, not the stale pre-tx snapshot. If a
+// personal install's owner pointer changes while a connect waits on that lock,
+// the pre-tx owner path is stale: repositoryId was resolved via the installation
+// token with NO member grant, so falling through to the member insert would be a
+// confused-deputy. The re-read fails closed (opaque 404) on the
+// `isOwner && !lockedIsOwner` transition.
 describe('POST /projects/:id/github — locked-row ownership re-derivation (Task 15)', () => {
-  // Sequential fail-closed: an install whose owner pointer is already cleared
-  // (user_id NULL) + a caller who is NOT a member fails closed with the opaque
-  // 404 and creates no connection. Pre-tx isOwner is false (null !== caller), so
-  // the owner path is never taken and the non-member gate rejects it.
-  it('returns opaque 404 for a cleared-owner install when the caller is not a member', async () => {
-    const owner = await createTestUser(env.db, 'owner-3020', 'github', 'gh-owner-3020');
+  // Sequential fail-closed: a personal install with no linked owner (user_id
+  // NULL) + a caller who is NOT a member fails closed with the opaque 404 and
+  // creates no connection. Pre-tx isOwner is false (null !== caller), so the
+  // owner path is never taken and the non-member gate rejects it.
+  it('returns opaque 404 for an unlinked personal install when the caller is not a member', async () => {
     const caller = await createTestUser(env.db, 'caller-3020', 'github', 'gh-caller-3020');
     const project = await createTestProject(env.db, caller.id, 'gh-cleared-3020');
     await upsertGitHubInstallation(env.db, {
       installationId: '3020',
-      userId: owner.id,
-      accountLogin: 'org',
+      userId: null,
+      accountLogin: 'someone',
       accountId: 'acc_3020',
-      accountType: 'Organization',
-      repositories: [{ full_name: 'org/app', id: 1 }],
+      accountType: 'User',
+      repositories: [{ full_name: 'someone/app', id: 1 }],
       repositorySelection: 'selected',
     });
-    // member_removed nulls the owner pointer (clearGitHubInstallationOwnerForUser).
-    await env.db
-      .update(githubInstallations)
-      .set({ user_id: null })
-      .where(eq(githubInstallations.installation_id, '3020'));
 
     const res = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${caller.jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ installationId: '3020', repoFullName: 'org/app' }),
+        body: JSON.stringify({ installationId: '3020', repoFullName: 'someone/app' }),
       }),
       // Non-owner path is gated on App user OAuth (R10-1); send the configured env
       // so this test reaches the membership gate (opaque 404), not the kill switch.
@@ -2288,35 +2217,33 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
   // The true race branch, driven deterministically. On the owner + all-repos
   // path the route resolves the repo id via a live GET /repos fetch BETWEEN the
   // pre-tx read (isOwner=true) and the go-live transaction's FOR UPDATE re-read.
-  // The stubbed fetch clears the owner pointer as its side effect — exactly what
-  // a concurrent member_removed commit would do while we waited on the lock — so
-  // the locked read sees user_id=NULL and `isOwner && !lockedIsOwner` fails
-  // closed with a 404 and NO connection. This is the deterministic seam the brief
-  // calls for: the fetch is a real await point in the owner path, so the locked
-  // read observes a change made after the pre-tx snapshot without any timing race.
+  // The stubbed fetch clears the owner pointer as its side effect, so the locked
+  // read sees user_id=NULL and `isOwner && !lockedIsOwner` fails closed with a
+  // 404 and NO connection. The fetch is a real await point in the owner path, so
+  // the locked read observes a change made after the pre-tx snapshot without any
+  // timing race.
   it('fails closed (404, no connection) when the owner pointer is cleared between the pre-tx read and the locked read', async () => {
     const owner = await createTestUser(env.db, 'owner-3021', 'github', 'gh-owner-3021');
     const project = await createTestProject(env.db, owner.id, 'gh-race-3021');
     await upsertGitHubInstallation(env.db, {
       installationId: '3021',
       userId: owner.id,
-      accountLogin: 'org',
+      accountLogin: 'owner-3021',
       accountId: 'acc_3021',
-      accountType: 'Organization',
-      repositories: [{ full_name: 'org/old', id: 1 }],
+      accountType: 'User',
+      repositories: [{ full_name: 'owner-3021/old', id: 1 }],
       // `all` forces the live GET /repos resolution — the interposition seam.
       repositorySelection: 'all',
     });
 
     // The fetch stub interposes between the pre-tx owner read and the locked
-    // re-read: it nulls the owner pointer (mirroring member_removed committing
-    // while the connect blocked on the install-row lock) before returning the id.
+    // re-read: it nulls the owner pointer before returning the id.
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string | URL | Request) => {
         const url =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        if (url.includes('/repos/org/new')) {
+        if (url.includes('/repos/owner-3021/new')) {
           await env.db
             .update(githubInstallations)
             .set({ user_id: null })
@@ -2331,7 +2258,7 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ installationId: '3021', repoFullName: 'org/new' }),
+        body: JSON.stringify({ installationId: '3021', repoFullName: 'owner-3021/new' }),
       }),
       env,
     );
@@ -2340,6 +2267,8 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
     expect(((await res.json()) as { error: string }).error).toBe('installation not found');
     // The stale-owner connect must NOT have planted a connection.
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+    // The live repo id was actually resolved, so the owner path really ran.
+    expect(fetch).toHaveBeenCalled();
   });
 });
 
@@ -2526,8 +2455,9 @@ describe('GET /projects/:id/github', () => {
       env,
     );
     expect(res.status).toBe(200);
-    const connection = (await res.json()) as { repo_full_name: string };
+    const connection = (await res.json()) as Record<string, unknown>;
     expect(connection.repo_full_name).toBe('acme/app');
+    expect(connection).not.toHaveProperty('requires_reconnect');
   });
 
   it('returns 404 when there is no connection', async () => {
@@ -3242,14 +3172,13 @@ describe('GET /github/installations', () => {
     expect(installations[0]!.installation_id).toBe('901');
   });
 
-  // (a) A member of a shared org installation (owned by userB) sees it via the
-  // broadened owner-OR-active-member gate.
+  // (a) A member of a shared org installation sees it via the
+  // owner-OR-active-member gate.
   it('includes an installation the caller has an active membership in', async () => {
     const userA = await createTestUser(env.db, 'member-a');
-    const userB = await createTestUser(env.db, 'owner-b');
     await upsertGitHubInstallation(env.db, {
       installationId: '910',
-      userId: userB.id,
+      userId: null,
       accountLogin: 'org',
       accountId: 'acc_910',
       accountType: 'Organization',
@@ -3272,13 +3201,12 @@ describe('GET /github/installations', () => {
     expect(installations[0]!.installation_id).toBe('910');
   });
 
-  // (b) A non-member (no membership row) does NOT see userB's installation.
+  // (b) A non-member (no membership row) does NOT see the installation.
   it('excludes an installation the caller has no membership in', async () => {
     const userA = await createTestUser(env.db, 'stranger-a');
-    const userB = await createTestUser(env.db, 'owner-b2');
     await upsertGitHubInstallation(env.db, {
       installationId: '911',
-      userId: userB.id,
+      userId: null,
       accountLogin: 'org2',
       accountId: 'acc_911',
       accountType: 'Organization',
@@ -3297,10 +3225,9 @@ describe('GET /github/installations', () => {
   // (c) An EXPIRED membership row is excluded (TTL honored via expires_at > now()).
   it('excludes an installation whose membership has expired', async () => {
     const userA = await createTestUser(env.db, 'expired-a');
-    const userB = await createTestUser(env.db, 'owner-b3');
     await upsertGitHubInstallation(env.db, {
       installationId: '912',
-      userId: userB.id,
+      userId: null,
       accountLogin: 'org3',
       accountId: 'acc_912',
       accountType: 'Organization',
@@ -3323,40 +3250,11 @@ describe('GET /github/installations', () => {
     expect(installations).toHaveLength(0);
   });
 
-  // A legacy organization owner pointer plus an active membership still yields
-  // one row. The membership is the authority; the old pointer adds no access.
-  it('returns a legacy-owned organization installation exactly once via membership', async () => {
-    const userA = await createTestUser(env.db, 'owner-member-a');
-    await upsertGitHubInstallation(env.db, {
-      installationId: '913',
-      userId: userA.id,
-      accountLogin: 'org4',
-      accountId: 'acc_913',
-      accountType: 'Organization',
-      repositories: [],
-    });
-    await upsertGitHubInstallationMember(env.db, {
-      installationId: '913',
-      userId: userA.id,
-      githubAccountId: 'gh_a',
-      ttlSeconds: 3600,
-    });
-
-    const res = await app.fetch(
-      new Request('http://localhost/github/installations', authed(userA.jwt)),
-      env,
-    );
-    expect(res.status).toBe(200);
-    const installations = (await res.json()) as Array<{ installation_id: string }>;
-    const matching = installations.filter((i) => i.installation_id === '913');
-    expect(matching).toHaveLength(1);
-  });
-
-  // Organization owner pointers written by older versions are not repository
-  // authority. The pointed-at user sees nothing without an active membership;
-  // once membership is proven, both that user and other members see only the
-  // installation metadata. Personal installation owners retain their repo list.
-  it('never exposes organization repositories through a legacy owner pointer', async () => {
+  // Installing the App on an organization confers no standing of its own. The
+  // installer sees nothing without an active membership; once membership is
+  // proven, the installer and other members see only the installation metadata.
+  // Personal installation owners retain their repo list.
+  it('never exposes organization repositories to the installer or members', async () => {
     const owner = await createTestUser(env.db, 'repo-owner');
     const member = await createTestUser(env.db, 'repo-member');
     const seededRepos = [
@@ -3365,7 +3263,7 @@ describe('GET /github/installations', () => {
     ];
     await upsertGitHubInstallation(env.db, {
       installationId: '920',
-      userId: owner.id,
+      userId: null,
       accountLogin: 'org5',
       accountId: 'acc_920',
       accountType: 'Organization',
@@ -3385,8 +3283,8 @@ describe('GET /github/installations', () => {
       repositories: Array<{ full_name: string; id: number }>;
     };
 
-    // A stale organization owner pointer alone does not make the installation
-    // visible, much less disclose every private repository in its cache.
+    // Having installed the App does not make the installation visible, much
+    // less disclose every private repository in its cache.
     const ownerRes = await app.fetch(
       new Request('http://localhost/github/installations', authed(owner.jwt)),
       env,
@@ -3800,20 +3698,18 @@ describe('GET /github/callback', () => {
     expect(members).toHaveLength(0);
   });
 
-  // SECURITY (Task 4): a DIFFERENT Void user (A) who is a real org co-member
-  // reaches an installation the installer (B) already owns. On the PROVEN
-  // user-token path (GET /user/installations lists installation 5000 →
-  // authorized:true, and the code-holder id matches the signed state) the
-  // backstop GRANTS a cached membership row for A WITHOUT re-owning the
-  // installation — B stays the owner — and returns the owner-path redirect.
-  it('grants a cached membership (no re-own) when a co-member joins an owned org install via the user-token path', async () => {
-    const userB = await createTestUser(env.db, 'orgowner', 'github', '5555');
+  // SECURITY (Task 4): a Void user (A) who is a real org co-member reaches an
+  // existing organization installation. On the PROVEN user-token path
+  // (GET /user/installations lists installation 5000 → authorized:true, and the
+  // code-holder id matches the signed state) the backstop GRANTS a cached
+  // membership row for A WITHOUT making A the owner, and returns the redirect.
+  it('grants a cached membership (no ownership) when a co-member joins an org install via the user-token path', async () => {
     const userA = await createTestUser(env.db, 'orgmember', 'github', '4242');
 
-    // B already owns the ORG installation 5000 (account id 9001).
+    // The ORG installation 5000 (account id 9001) exists and has no owner.
     await upsertGitHubInstallation(env.db, {
       installationId: '5000',
-      userId: userB.id,
+      userId: null,
       accountLogin: 'acme-org',
       accountId: '9001',
       accountType: 'Organization',
@@ -3849,9 +3745,9 @@ describe('GET /github/callback', () => {
     expect(members[0].user_id).toBe(userA.id);
     expect(members[0].github_account_id).toBe('4242');
 
-    // The installation is NOT re-owned — B is still the owner.
+    // The organization installation stays ownerless — A is NOT made the owner.
     const persisted = await getGitHubInstallation(env.db, '5000');
-    expect(persisted?.user_id).toBe(userB.id);
+    expect(persisted?.user_id).toBeNull();
   });
 
   // Guard (c) — the install-callback membership backstop is Organization-only. A
@@ -3911,12 +3807,11 @@ describe('GET /github/callback', () => {
   // onConflict refreshes the existing row in place (exactly ONE row) and pushes
   // expires_at forward, rather than inserting duplicates.
   it('is idempotent across repeat token-path co-member joins: one refreshed membership row', async () => {
-    const userB = await createTestUser(env.db, 'orgowner', 'github', '5555');
     const userA = await createTestUser(env.db, 'orgmember', 'github', '4242');
 
     await upsertGitHubInstallation(env.db, {
       installationId: '5000',
-      userId: userB.id,
+      userId: null,
       accountLogin: 'acme-org',
       accountId: '9001',
       accountType: 'Organization',
@@ -3971,8 +3866,8 @@ describe('GET /github/callback', () => {
       new Date(seeded.expires_at).getTime(),
     );
 
-    // Still not re-owned.
-    expect((await getGitHubInstallation(env.db, '5000'))?.user_id).toBe(userB.id);
+    // Still ownerless.
+    expect((await getGitHubInstallation(env.db, '5000'))?.user_id).toBeNull();
   });
 
   // (d): personal install with NO code still succeeds via the account-id
@@ -4148,15 +4043,13 @@ describe('GET /github/callback', () => {
     });
   }
 
-  // Owner re-adopt, CONCURRENT: member_removed cleared the removed installer's
-  // owner pointer (user_id null) and tombstoned (install, ownerGithubId) AFTER
-  // the callback's proof. The re-authorizing owner must be rejected — NOT
-  // re-adopted (which would let the owner CONNECT path bypass the tombstone) —
-  // and no membership row is minted.
+  // Org re-authorize, CONCURRENT: member_removed tombstoned (install,
+  // installerGithubId) AFTER the callback's proof. The re-authorizing installer
+  // must be rejected, the install stays ownerless, and no membership row is
+  // minted.
   it('403s and does not re-adopt owner when the tombstone post-dates the proof (concurrent member_removed)', async () => {
     const owner = await createTestUser(env.db, 'org-owner', 'github', '7001');
-    // Org install whose owner pointer was CLEARED (user_id null) but the row
-    // remains — exactly the state member_removed leaves for a removed installer.
+    // Organization installs have no owner.
     await upsertGitHubInstallation(env.db, {
       installationId: '9100',
       userId: null,
@@ -4200,16 +4093,12 @@ describe('GET /github/callback', () => {
     expect(members).toHaveLength(0);
   });
 
-  // Cleared-owner org installs are MEMBER-ONLY (R15-1 fix, Option A): a null-owner
-  // org install WITH a revocation tombstone was cleared by member_removed, so it is
-  // shared/member-only and must NEVER be re-owned by a completing member. Even the
-  // ORIGINAL owner re-authorizing does NOT reclaim ownership — the tombstone routes
-  // the callback into the membership arm, so the owner gets a MEMBERSHIP row and the
-  // owner pointer stays NULL (RFC default: clear owner → fall back to members; a
-  // re-added owner reconnects via the member path with per-repo proof). This is the
-  // intended behavior change, NOT a regression. The tombstone pre-dates the proof
-  // (legit re-add), so the membership grant itself is NOT over-blocked.
-  it('cleared-owner org install is member-only: re-added original owner gets membership, not ownership (R15-1)', async () => {
+  // Org installs are MEMBER-ONLY: even the original installer re-authorizing after
+  // a removal and re-add gets a MEMBERSHIP row and the owner pointer stays NULL (a
+  // re-added installer reconnects via the member path with per-repo proof). The
+  // tombstone pre-dates the proof (legit re-add), so the membership grant itself
+  // is NOT over-blocked.
+  it('org install is member-only: a re-added original installer gets membership, not ownership', async () => {
     const owner = await createTestUser(env.db, 'org-owner', 'github', '7002');
     await upsertGitHubInstallation(env.db, {
       installationId: '9101',
@@ -4237,7 +4126,7 @@ describe('GET /github/callback', () => {
     );
 
     expect(res.status).toBe(302);
-    // Cleared install is member-only: the owner pointer stays NULL...
+    // Org install is member-only: the owner pointer stays NULL...
     expect((await getGitHubInstallation(env.db, '9101'))?.user_id).toBeNull();
     // ...and the re-added owner is recorded as a MEMBER (per-repo-proof member path),
     // NOT re-adopted as owner.
@@ -4250,19 +4139,16 @@ describe('GET /github/callback', () => {
     expect(members[0]?.github_account_id).toBe('7002');
   });
 
-  // R15-1 CLOSED — the confused-deputy: a CLEARED-owner org install (null owner +
-  // a revocation tombstone for the FORMER owner) reached by a DIFFERENT member B
-  // (own linked GitHub id, NO tombstone for B) must NOT be re-owned by B. Before
-  // the fix, the null-owner row fell through to the owner-adopt path and B (no
-  // tombstone) adopted ownership — which would let B's OWNER connect resolve org
-  // repos via the installation token and bypass the per-repo connect_grant proof.
-  // Now the tombstone routes the callback into the membership arm: B gets a
-  // MEMBERSHIP row (per-repo proof required to connect), the owner pointer stays
-  // NULL, and B is NOT the owner.
-  it('cleared-owner org install: a different member B gets membership, not ownership (R15-1 confused-deputy closed)', async () => {
+  // Confused-deputy guard: an org install (null owner + a revocation tombstone for
+  // a removed member) reached by a DIFFERENT member B (own linked GitHub id, NO
+  // tombstone for B) must NOT be owned by B — ownership would let B's OWNER
+  // connect resolve org repos via the installation token and bypass the per-repo
+  // connect_grant proof. B gets a MEMBERSHIP row (per-repo proof required to
+  // connect), the owner pointer stays NULL, and B is NOT the owner.
+  it('org install: a different member B gets membership, not ownership (confused-deputy closed)', async () => {
     const memberB = await createTestUser(env.db, 'org-member-b', 'github', '7011');
-    // Cleared state member_removed leaves: null owner + tombstone for the FORMER
-    // owner's GitHub id (7010). Member B has NO tombstone.
+    // Null owner + tombstone for a removed member's GitHub id (7010). Member B
+    // has NO tombstone.
     await upsertGitHubInstallation(env.db, {
       installationId: '9110',
       userId: null,
@@ -4343,16 +4229,14 @@ describe('GET /github/callback', () => {
     expect(members[0]?.user_id).toBe(installer.id);
   });
 
-  // Membership backstop, CONCURRENT: a co-member (A) reaches an install the
-  // installer (B) owns; member_removed tombstoned (install, A's GitHub id) AFTER
-  // A's proof. A must be rejected and NO membership row minted (B keeps
-  // ownership untouched).
+  // Membership backstop, CONCURRENT: a co-member (A) reaches an org install;
+  // member_removed tombstoned (install, A's GitHub id) AFTER A's proof. A must be
+  // rejected and NO membership row minted.
   it('403s and grants no membership when the tombstone post-dates the proof (backstop concurrent member_removed)', async () => {
-    const ownerB = await createTestUser(env.db, 'org-owner', 'github', '5555');
     const memberA = await createTestUser(env.db, 'org-member', 'github', '4242');
     await upsertGitHubInstallation(env.db, {
       installationId: '9102',
-      userId: ownerB.id,
+      userId: null,
       accountLogin: 'acme-org',
       accountId: '9003',
       accountType: 'Organization',
@@ -4381,18 +4265,17 @@ describe('GET /github/callback', () => {
       .from(githubInstallationMembers)
       .where(eq(githubInstallationMembers.installation_id, '9102'));
     expect(members).toHaveLength(0);
-    // B's ownership is untouched.
-    expect((await getGitHubInstallation(env.db, '9102'))?.user_id).toBe(ownerB.id);
+    // The installation stays ownerless.
+    expect((await getGitHubInstallation(env.db, '9102'))?.user_id).toBeNull();
   });
 
   // Membership backstop, DURABLE/legit re-add (accepted residual pass-through):
   // a tombstone that PRE-dates the proof must NOT over-block the co-member grant.
   it('grants membership when the tombstone pre-dates the proof (backstop legit re-add)', async () => {
-    const ownerB = await createTestUser(env.db, 'org-owner', 'github', '5556');
     const memberA = await createTestUser(env.db, 'org-member', 'github', '4243');
     await upsertGitHubInstallation(env.db, {
       installationId: '9103',
-      userId: ownerB.id,
+      userId: null,
       accountLogin: 'acme-org',
       accountId: '9004',
       accountType: 'Organization',
@@ -4422,7 +4305,7 @@ describe('GET /github/callback', () => {
     expect(members).toHaveLength(1);
     expect(members[0].user_id).toBe(memberA.id);
     expect(members[0].github_account_id).toBe('4243');
-    // B stays the owner — the backstop never re-owns.
-    expect((await getGitHubInstallation(env.db, '9103'))?.user_id).toBe(ownerB.id);
+    // The installation stays ownerless — the backstop never adopts it.
+    expect((await getGitHubInstallation(env.db, '9103'))?.user_id).toBeNull();
   });
 });

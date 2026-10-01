@@ -59,9 +59,8 @@ installed the App, requires a separate browser proof that the connecting GitHub
 user can access that specific repository. The signed connect grant carries the
 repository's immutable GitHub ID and is redeemed under the connecting user's
 Void identity. The platform records the authorizing Void user on the project
-connection. A legacy organization connection without that proof must be
-reconnected before builds resume. Personal installations retain their
-installation-owner path.
+connection. Organization installations have no owner. Personal installations
+retain their installation-owner path.
 
 An installation membership permits a user to see and select an organization
 installation; it does not disclose the installation's private repository list
@@ -71,7 +70,7 @@ when a repository is connected.
 ## Revocation and missed webhooks
 
 On `organization/member_removed`, the platform deletes the affected membership,
-clears applicable legacy owner access, severs affected repository connections,
+severs the repository connections that member authorized,
 and cancels their active builds. A durable revocation mark keyed by the GitHub
 account and installation rejects join or connect artifacts minted before the
 removal, including artifacts created before a Void account was linked. The

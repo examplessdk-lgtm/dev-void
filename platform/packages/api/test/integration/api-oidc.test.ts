@@ -253,7 +253,9 @@ async function seedActiveInstallation(
 
 async function createGitHubConnection(
   db: Db,
-  args: Parameters<typeof createGitHubConnectionRecord>[1],
+  args: Omit<Parameters<typeof createGitHubConnectionRecord>[1], 'authorizedByUserId'> & {
+    authorizedByUserId?: string;
+  },
 ) {
   const project = await getProject(db, args.projectId);
   if (!project) {
@@ -261,8 +263,7 @@ async function createGitHubConnection(
   }
   return createGitHubConnectionRecord(db, {
     ...args,
-    authorizedByUserId:
-      args.authorizedByUserId === undefined ? project.user_id : args.authorizedByUserId,
+    authorizedByUserId: args.authorizedByUserId ?? project.user_id,
   });
 }
 
@@ -383,9 +384,10 @@ describe('POST /auth/github-oidc', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 401 for a legacy organization connection without per-repo proof', async () => {
+  it('returns 401 when the user who authorized the connection is no longer owner or admin', async () => {
     const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'oidc-legacy-org');
+    const former = await createTestUser(env.db, 'oidc-former-owner');
+    const project = await createTestProject(env.db, user.id, 'oidc-stale-authorizer');
     await seedActiveInstallation(env.db, '1');
     await createGitHubConnection(env.db, {
       projectId: project.id,
@@ -393,7 +395,7 @@ describe('POST /auth/github-oidc', () => {
       repoFullName: 'octo/repo',
       repositoryId: '42',
       buildExecutor: 'github_actions',
-      authorizedByUserId: null,
+      authorizedByUserId: former.id,
     });
     const app = makeApp(env);
     setVerifyResult(makeClaims());
@@ -401,8 +403,8 @@ describe('POST /auth/github-oidc', () => {
     const res = await exchange(app, env, { oidcToken: 't', project: project.slug });
 
     expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toContain(
-      'reconnect the organization repository',
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'no authorized github actions connection for repository; reconnect the repository',
     );
     expect(await getProjectBuilds(env.db, project.id)).toEqual([]);
   });
@@ -451,6 +453,7 @@ describe('POST /auth/github-oidc', () => {
       projectId: project.id,
       installationId: '1',
       repoFullName: 'octo/repo',
+      repositoryId: '42',
       branch: 'main',
       buildExecutor: 'github_actions',
     });
@@ -1650,6 +1653,7 @@ describe('POST /auth/github-oidc', () => {
       projectId: project.id,
       installationId: '1',
       repoFullName: 'octo/repo',
+      repositoryId: '42',
       branch: 'main',
       buildExecutor: 'github_actions',
     });
@@ -1839,34 +1843,6 @@ describe('POST /auth/github-oidc', () => {
     expect((await getProjectBuilds(env.db, project.id)).length).toBe(1);
   });
 
-  // Fail closed on a null `repository_id` row when the caller HAS an id.
-  // A connection that predates the id column (repository_id IS NULL) must NOT be
-  // matched by `repo_full_name` when the OIDC claim carries a repository_id: a
-  // deleted-then-recreated repo that reuses the old name would otherwise match
-  // the stale null-id connection and mint a deploy token for the WRONG project.
-  it('returns 401 for a null-repository_id connection when the OIDC claim carries an id (reused name)', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id, 'oidc-null-id-reuse');
-    await seedActiveInstallation(env.db, '1');
-    // Legacy connection for octo/repo with NO repository_id (predates the column).
-    await createGitHubConnection(env.db, {
-      projectId: project.id,
-      installationId: '1',
-      repoFullName: 'octo/repo',
-      branch: 'main',
-      buildExecutor: 'github_actions',
-    });
-
-    const app = makeApp(env);
-    // A token for the SAME full_name but bearing an immutable id (the name was
-    // reused by a different/recreated repo) — the null-id row must NOT match.
-    setVerifyResult(makeClaims({ repository: 'octo/repo', repository_id: '777' }));
-
-    const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
-    expect(res.status).toBe(401);
-    expect((await getProjectBuilds(env.db, project.id)).length).toBe(0);
-  });
-
   // ---------------------------------------------------------------------------
   // A repo may back MULTIPLE github_actions projects (only project_id is
   // unique). Resolution must select the connection by the workflow's requested
@@ -1952,6 +1928,7 @@ describe('POST /auth/github-oidc', () => {
       projectId: project.id,
       installationId: '1',
       repoFullName: 'octo/repo',
+      repositoryId: '42',
       branch: 'main',
       buildExecutor: 'github_actions',
     });
@@ -1972,6 +1949,7 @@ describe('POST /auth/github-oidc', () => {
       projectId: project.id,
       installationId: '1',
       repoFullName: 'octo/repo',
+      repositoryId: '42',
       branch: 'main',
       buildExecutor: 'github_actions',
     });

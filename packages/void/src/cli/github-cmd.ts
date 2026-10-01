@@ -161,11 +161,6 @@ export function formatConnection(connection: GithubConnection): string {
     row('Build executor', connection.build_executor),
     row('Deploy workflow', workflow),
   ];
-  if (connection.requires_reconnect) {
-    rows.push(
-      row('Authorization', 'Reconnect required: run `void github connect` for this repository'),
-    );
-  }
   return rows.join('\n');
 }
 

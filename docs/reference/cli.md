@@ -1400,7 +1400,7 @@ void github connect my-app \
 
 For every organization installation, `void github connect` confirms that you personally have access to the specific repository, including when you originally installed the App. Interactively (TTY), it opens your browser once to authorize access to that repo on GitHub (a localhost + PKCE handshake), then completes the connection automatically. Without a TTY, this per-repo authorization never opens a browser: connect fails closed with an error explaining that the installation requires per-repo authorization and telling you to run `void github connect` locally. Interactively, connect joins the shared installation automatically when your account has no active installations linked, so running `void github join` first is optional. You can only connect repositories you can access on GitHub; seeing the organization installation never grants access to its other private repositories.
 
-After upgrading from a platform version that treated an organization installer as an owner, existing organization connections show **Reconnect required** and stop starting builds until their repository access is proven. Run `void github connect <project> --repo <owner/repo>` again. The command reauthorizes the same connection in place after the browser proof; if the repository or installation changed, disconnect it first and connect the intended repository.
+A project has one GitHub connection. Running `void github connect` on a project that is already connected fails. To connect a different repository, run `void github disconnect` first.
 
 ### `void github update`
 
@@ -1433,7 +1433,7 @@ void github update my-app --executor github_actions
 void github status [project]
 ```
 
-Show a project's current GitHub connection: the connected **repository**, the deploy **branch**, the **build executor** (`container` or `github_actions`), and the authorized **deploy workflow file**. Read-only — it never changes anything. The workflow file is the OIDC pin used only for `github_actions` builds; on a `container` connection it is still shown but marked unused. Legacy organization connections also show **Reconnect required** until `void github connect` proves current access to that repository. The project must already be connected (run `void github connect` first, otherwise it reports that and exits).
+Show a project's current GitHub connection: the connected **repository**, the deploy **branch**, the **build executor** (`container` or `github_actions`), and the authorized **deploy workflow file**. Read-only — it never changes anything. The workflow file is the OIDC pin used only for `github_actions` builds; on a `container` connection it is still shown but marked unused. The project must already be connected (run `void github connect` first, otherwise it reports that and exits).
 
 **Options**
 

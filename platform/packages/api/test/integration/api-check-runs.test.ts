@@ -151,8 +151,14 @@ vi.mock('../../src/db.ts', () => ({
     return true;
   }),
   installationCoversRepo: vi.fn(
-    async (_db: unknown, _installationId: string, repositoryId: string | null) => {
-      if (repositoryId === null) {
+    async (
+      _db: unknown,
+      connectionId: string,
+      _projectId: string,
+      _installationId: string,
+      repositoryId: string | null,
+    ) => {
+      if (!connectionId || !repositoryId) {
         return false;
       }
       return dbState.installationCovered;
@@ -281,6 +287,7 @@ function makeConfig(overrides: Partial<BuildConfig> = {}): BuildConfig {
     commitSha: 'sha1234567890',
     branch: 'main',
     repoFullName: 'owner/repo',
+    connectionId: 'c1',
     installationId: 'inst1',
     repositoryId: 'repo1',
     instanceType: 'standard-1',

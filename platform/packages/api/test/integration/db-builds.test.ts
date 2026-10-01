@@ -22,6 +22,7 @@ import {
   getQueuedBuilds,
   getUsersWithQueuedContainerBuilds,
   hasQueuedContainerBuilds,
+  installationCoversRepo,
   linkGitHubInstallationToUser,
   markBuildBuildingIfStarting,
   markBuildProgressIfActive,
@@ -87,7 +88,9 @@ const DEFAULT_REPO_ID = '42';
 
 async function createGitHubConnection(
   db: Db,
-  args: Parameters<typeof createGitHubConnectionRecord>[1],
+  args: Omit<Parameters<typeof createGitHubConnectionRecord>[1], 'authorizedByUserId'> & {
+    authorizedByUserId?: string;
+  },
 ) {
   const project = await getProject(db, args.projectId);
   if (!project) {
@@ -95,8 +98,7 @@ async function createGitHubConnection(
   }
   return createGitHubConnectionRecord(db, {
     ...args,
-    authorizedByUserId:
-      args.authorizedByUserId === undefined ? project.user_id : args.authorizedByUserId,
+    authorizedByUserId: args.authorizedByUserId ?? project.user_id,
   });
 }
 
@@ -1431,55 +1433,20 @@ describe('builds', () => {
     expect(result.build!.commit_sha).toBe('aaa');
   });
 
-  // A legacy connection from the 0020→0023 migration window can carry a NULL
-  // repository_id. The in-tx re-check must NOT treat that as revoked when
-  // the install is `all`-repos: membership is not enforced for `all`, so the id
-  // is irrelevant. (Before the fix, a null id short-circuited to false BEFORE the
-  // `all` branch, wrongly skipping the build as `install-revoked`.)
-  it('supersedeAndCreateContainerBuild builds for a NULL repo id on an ALL install (legacy connection)', async () => {
+  // A missing repository id can't prove coverage, even on an `all`-repos install.
+  it('supersedeAndCreateContainerBuild skips a missing repo id even on an ALL install (fails closed)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
     await createGitHubConnection(env.db, {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
-      repositoryId: null,
+      repositoryId: DEFAULT_REPO_ID,
       branch: 'main',
       buildExecutor: 'container',
     });
     // Default `all`-repos install (membership not enforced).
     await seedActiveInstall(env.db, '12345');
-
-    const result = await supersedeAndCreateContainerBuild(env.db, {
-      projectId: project.id,
-      connectionId: (await getGitHubConnection(env.db, project.id))!.id,
-      branch: 'main',
-      commitSha: 'aaa',
-      installationId: '12345',
-      repositoryId: null,
-    });
-    expect(result.skipped).toBeUndefined();
-    expect(result.build!.status).toBe('queued');
-    expect(result.build!.commit_sha).toBe('aaa');
-  });
-
-  // GUARD: the null-id relaxation above is scoped to `all` installs only. A
-  // `selected` install can NOT prove membership of a null-id repo, so it must
-  // still fail closed — otherwise a legacy null-id row would deploy through an
-  // install that no longer selects the repo.
-  it('supersedeAndCreateContainerBuild skips a NULL repo id on a SELECTED install (fails closed)', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await createGitHubConnection(env.db, {
-      projectId: project.id,
-      installationId: '12345',
-      repoFullName: 'acme/app',
-      repositoryId: null,
-      branch: 'main',
-      buildExecutor: 'container',
-    });
-    // A `selected` install: membership is enforced, and a null id can't match.
-    await seedActiveInstall(env.db, '12345', [{ full_name: 'acme/app', id: 42 }], 'selected');
 
     const result = await supersedeAndCreateContainerBuild(env.db, {
       projectId: project.id,
@@ -2362,6 +2329,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       projectId: otherProject.id,
       installationId: 'inst-cap-other',
       repoFullName: 'acme/cap-other',
+      repositoryId: DEFAULT_REPO_ID,
       buildExecutor: 'github_actions',
     });
     await seedActiveInstall(env.db, 'inst-cap-other');
@@ -2882,6 +2850,7 @@ describe('github_connections', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
     });
 
     expect(conn.id.startsWith('ghc_')).toBe(true);
@@ -2899,7 +2868,7 @@ describe('github_connections', () => {
     // + repo membership, so an active 'all'-repos install must exist.
     await upsertGitHubInstallation(env.db, {
       installationId: '12345',
-      userId: user.id,
+      userId: null,
       accountLogin: 'acme',
       accountId: '111',
       accountType: 'Organization',
@@ -2910,11 +2879,12 @@ describe('github_connections', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
       branch: 'release',
       buildExecutor: 'github_actions',
     });
 
-    const rows = await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app');
+    const rows = await getGitHubConnectionsByRepo(env.db, '12345', '42');
     expect(rows).toHaveLength(1);
     expect(rows[0].user_id).toBe(user.id);
     expect(rows[0].project_id).toBe(project.id);
@@ -2922,8 +2892,8 @@ describe('github_connections', () => {
     expect(rows[0].build_executor).toBe('github_actions');
 
     // Wrong repo / wrong installation -> empty.
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/other')).toEqual([]);
-    expect(await getGitHubConnectionsByRepo(env.db, '99999', 'acme/app')).toEqual([]);
+    expect(await getGitHubConnectionsByRepo(env.db, '12345', '43')).toEqual([]);
+    expect(await getGitHubConnectionsByRepo(env.db, '99999', '42')).toEqual([]);
   });
 
   // The push resolver is revocation-aware: a suspended/deleted install
@@ -2934,7 +2904,7 @@ describe('github_connections', () => {
     const project = await createTestProject(env.db, user.id);
     await upsertGitHubInstallation(env.db, {
       installationId: '12345',
-      userId: user.id,
+      userId: null,
       accountLogin: 'acme',
       accountId: '111',
       accountType: 'Organization',
@@ -2945,18 +2915,19 @@ describe('github_connections', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
     });
 
     // Active -> resolves.
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app')).toHaveLength(1);
+    expect(await getGitHubConnectionsByRepo(env.db, '12345', '42')).toHaveLength(1);
 
     // Suspended -> empty.
     await markGitHubInstallationStatus(env.db, '12345', 'suspended');
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app')).toEqual([]);
+    expect(await getGitHubConnectionsByRepo(env.db, '12345', '42')).toEqual([]);
 
     // Deleted -> empty.
     await markGitHubInstallationStatus(env.db, '12345', 'deleted');
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app')).toEqual([]);
+    expect(await getGitHubConnectionsByRepo(env.db, '12345', '42')).toEqual([]);
   });
 
   // A `selected` install enforces repo membership: a repo dropped from
@@ -2967,7 +2938,7 @@ describe('github_connections', () => {
     // 'selected' install whose cached set does NOT include this repo.
     await upsertGitHubInstallation(env.db, {
       installationId: '12345',
-      userId: user.id,
+      userId: null,
       accountLogin: 'acme',
       accountId: '111',
       accountType: 'Organization',
@@ -2981,8 +2952,8 @@ describe('github_connections', () => {
       repositoryId: '42',
     });
 
-    // Repo is not a member -> empty (matched by id when a repositoryId is given).
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app', '42')).toEqual([]);
+    // Repo is not a member -> empty.
+    expect(await getGitHubConnectionsByRepo(env.db, '12345', '42')).toEqual([]);
 
     // Add the repo to the cached set by id -> now a member -> resolves.
     await setGitHubInstallationRepositories(
@@ -2994,41 +2965,9 @@ describe('github_connections', () => {
       ],
       'selected',
     );
-    const byId = await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app', '42');
+    const byId = await getGitHubConnectionsByRepo(env.db, '12345', '42');
     expect(byId).toHaveLength(1);
     expect(byId[0].project_id).toBe(project.id);
-  });
-
-  // Name-fallback membership when the caller has no repositoryId (a
-  // malformed/partial webhook): membership is checked by `full_name` in the
-  // cached `repositories` set.
-  it('getGitHubConnectionsByRepo falls back to name membership without a repositoryId', async () => {
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
-    await upsertGitHubInstallation(env.db, {
-      installationId: '12345',
-      userId: user.id,
-      accountLogin: 'acme',
-      accountId: '111',
-      accountType: 'Organization',
-      repositories: [{ id: 42, full_name: 'acme/app' }],
-      repositorySelection: 'selected',
-    });
-    await createGitHubConnection(env.db, {
-      projectId: project.id,
-      installationId: '12345',
-      repoFullName: 'acme/app',
-      repositoryId: '42',
-    });
-
-    // No repositoryId arg -> match the connection by repo_full_name AND check
-    // installation membership by full_name.
-    const byName = await getGitHubConnectionsByRepo(env.db, '12345', 'acme/app');
-    expect(byName).toHaveLength(1);
-    expect(byName[0].project_id).toBe(project.id);
-
-    // A non-member full_name resolves nothing.
-    expect(await getGitHubConnectionsByRepo(env.db, '12345', 'acme/missing')).toEqual([]);
   });
 
   it('updateGitHubConnection patches only provided fields', async () => {
@@ -3038,6 +2977,7 @@ describe('github_connections', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
     });
 
     await updateGitHubConnection(env.db, project.id, { branch: 'develop' });
@@ -3059,10 +2999,37 @@ describe('github_connections', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
     });
 
     await deleteGitHubConnection(env.db, project.id);
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
+  });
+
+  // The build manager re-checks coverage from stored build state, which may lack
+  // either id; both fail closed even on an `all`-repos install.
+  it('installationCoversRepo fails closed without a connection or repository id', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    await seedActiveInstall(env.db, '12345');
+    const conn = await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '12345',
+      repoFullName: 'acme/app',
+      repositoryId: '42',
+    });
+
+    expect(await installationCoversRepo(env.db, conn.id, project.id, '12345', '42')).toBe(true);
+    expect(
+      await installationCoversRepo(
+        env.db,
+        undefined as unknown as string,
+        project.id,
+        '12345',
+        '42',
+      ),
+    ).toBe(false);
+    expect(await installationCoversRepo(env.db, conn.id, project.id, '12345', null)).toBe(false);
   });
 });
 
@@ -3075,7 +3042,7 @@ describe('github_installations', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
     expect(inserted.id.startsWith('ghi_')).toBe(true);
@@ -3093,7 +3060,7 @@ describe('github_installations', () => {
       installationId: '555',
       accountLogin: 'acme-renamed',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [
         { full_name: 'acme/app', id: 1 },
         { full_name: 'acme/web', id: 2 },
@@ -3117,7 +3084,7 @@ describe('github_installations', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
       repositorySelection: 'selected',
     });
@@ -3130,7 +3097,7 @@ describe('github_installations', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [
         { full_name: 'acme/app', id: 1 },
         { full_name: 'acme/api', id: 2 },
@@ -3152,7 +3119,7 @@ describe('github_installations', () => {
       userId: user.id,
       accountLogin: 'acme',
       accountId: 'acc_1',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
       refreshMembership: true,
     });
@@ -3160,9 +3127,8 @@ describe('github_installations', () => {
     expect(refreshedNoSelection.repositories).toEqual([{ full_name: 'acme/app', id: 1 }]);
   });
 
-  // the conflict handler must never re-own an installation already linked to
-  // a DIFFERENT user (the concurrent-callback race that the non-transactional
-  // read-then-write backstop in routes/github.ts cannot catch), but must still
+  // the conflict handler must never re-own a personal installation already
+  // linked to a DIFFERENT user (two install callbacks racing), but must still
   // adopt the user on an unowned (NULL) row.
   it('upsert never re-owns an installation linked to another user', async () => {
     const userA = await createTestUser(env.db);
@@ -3173,7 +3139,7 @@ describe('github_installations', () => {
       userId: userA.id,
       accountLogin: 'acme',
       accountId: 'acc_x',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
 
@@ -3183,7 +3149,7 @@ describe('github_installations', () => {
       userId: userB.id,
       accountLogin: 'acme',
       accountId: 'acc_x',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [{ full_name: 'acme/app', id: 1 }],
     });
     // Ownership stays with the original user; the second caller does not re-own.
@@ -3198,7 +3164,7 @@ describe('github_installations', () => {
       installationId: '558',
       accountLogin: 'acme',
       accountId: 'acc_y',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [],
     });
 
@@ -3207,7 +3173,7 @@ describe('github_installations', () => {
       userId: userB.id,
       accountLogin: 'acme',
       accountId: 'acc_y',
-      accountType: 'Organization',
+      accountType: 'User',
       repositories: [],
     });
     expect(adopted.user_id).toBe(userB.id);
@@ -3300,6 +3266,7 @@ describe('github_installations', () => {
       projectId: project.id,
       installationId: '12345',
       repoFullName: 'acme/app',
+      repositoryId: '42',
     });
 
     // Delete the project row directly; the FK ON DELETE cascade should remove

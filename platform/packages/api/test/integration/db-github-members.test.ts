@@ -2,12 +2,10 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
 import { MEMBERSHIP_TTL_SECONDS } from '../../src/constants.ts';
 import {
-  clearGitHubInstallationOwnerForUser,
   deleteGitHubInstallationMember,
   deleteGitHubInstallationMembers,
   deleteGitHubInstallationMembersByGithubAccount,
   getGitHubAccountIdForUser,
-  getGitHubInstallation,
   getGitHubInstallationMembers,
   getGitHubInstallationMembersByUser,
   getDbNowMs,
@@ -392,17 +390,16 @@ describe('github_installation_members', () => {
   });
 });
 
-// Seed an installation with an explicit account (id + type) and optional owner.
+// Seed an unowned installation with an explicit account (id + type).
 async function seedInstallForAccount(
   db: Db,
   installationId: string,
   accountId: string,
   accountType: 'User' | 'Organization',
-  userId: string | null = null,
 ): Promise<void> {
   await upsertGitHubInstallation(db, {
     installationId,
-    userId,
+    userId: null,
     accountLogin: `acct-${installationId}`,
     accountId,
     accountType,
@@ -411,7 +408,7 @@ async function seedInstallForAccount(
   });
 }
 
-describe('github_installations account queries + guarded owner clear', () => {
+describe('github_installations account queries', () => {
   it('getGitHubInstallationsByAccount scopes by BOTH account_id and account_type', async () => {
     // Two ORG1 org installs, one ORG2 org install, one ORG1 *User* install.
     await seedInstallForAccount(env.db, '100', 'ORG1', 'Organization');
@@ -435,47 +432,6 @@ describe('github_installations account queries + guarded owner clear', () => {
     expect(await getGitHubInstallationsByAccount(env.db, 'ORG_NONE', 'Organization')).toEqual([]);
     // Right account, wrong type → still empty (type filter bites).
     expect(await getGitHubInstallationsByAccount(env.db, 'ORG1', 'User')).toEqual([]);
-  });
-
-  it('clearGitHubInstallationOwnerForUser clears only caller-owned installs in the id list', async () => {
-    const alice = await createTestUser(env.db, 'alice');
-    const bob = await createTestUser(env.db, 'bob', 'google', 'google-bob');
-
-    // alice owns 100, 200, 400; bob owns 300. All under ORG1 for realism.
-    await seedInstallForAccount(env.db, '100', 'ORG1', 'Organization', alice.id);
-    await seedInstallForAccount(env.db, '200', 'ORG1', 'Organization', alice.id);
-    await seedInstallForAccount(env.db, '300', 'ORG1', 'Organization', bob.id);
-    await seedInstallForAccount(env.db, '400', 'ORG1', 'Organization', alice.id);
-
-    // Clear over [100, 200, 300] as alice: 300 is bob's (guard), 400 not listed.
-    const cleared = await clearGitHubInstallationOwnerForUser(
-      env.db,
-      ['100', '200', '300'],
-      alice.id,
-    );
-
-    // Driver-count correctness: return value equals the rows actually cleared
-    // (exactly 100 & 200). Reading the wrong rowCount/affectedRows field would
-    // surface as 0/undefined here under the PGlite test driver.
-    expect(cleared).toBe(2);
-
-    expect((await getGitHubInstallation(env.db, '100'))!.user_id).toBeNull();
-    expect((await getGitHubInstallation(env.db, '200'))!.user_id).toBeNull();
-    // 300 owned by bob — guard (`user_id = alice`) held, not clobbered.
-    expect((await getGitHubInstallation(env.db, '300'))!.user_id).toBe(bob.id);
-    // 400 owned by alice but not in the id list — untouched.
-    expect((await getGitHubInstallation(env.db, '400'))!.user_id).toBe(alice.id);
-  });
-
-  it('clearGitHubInstallationOwnerForUser no-ops (returns 0) on an empty id list', async () => {
-    const alice = await createTestUser(env.db, 'alice');
-    await seedInstallForAccount(env.db, '100', 'ORG1', 'Organization', alice.id);
-
-    const cleared = await clearGitHubInstallationOwnerForUser(env.db, [], alice.id);
-
-    expect(cleared).toBe(0);
-    // No install altered.
-    expect((await getGitHubInstallation(env.db, '100'))!.user_id).toBe(alice.id);
   });
 });
 
