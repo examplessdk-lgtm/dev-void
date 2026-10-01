@@ -17,14 +17,46 @@ SET
 	"status" = 'cancelled',
 	"error" = COALESCE("builds"."error", 'github repository authorization is no longer valid; reconnect the repository'),
 	"completed_at" = COALESCE("builds"."completed_at", now())
-FROM "github_connections"
+FROM "github_connections", "projects"
 WHERE
 	"github_connections"."project_id" = "builds"."project_id"
-	AND ("github_connections"."authorized_by_user_id" IS NULL OR "github_connections"."repository_id" IS NULL)
+	AND "projects"."id" = "github_connections"."project_id"
+	AND (
+		"github_connections"."authorized_by_user_id" IS NULL
+		OR "github_connections"."repository_id" IS NULL
+		OR NOT (
+			"github_connections"."authorized_by_user_id" = "projects"."user_id"
+			OR EXISTS (
+				SELECT 1
+				FROM "project_members"
+				WHERE
+					"project_members"."project_id" = "projects"."id"
+					AND "project_members"."user_id" = "github_connections"."authorized_by_user_id"
+					AND "project_members"."role" = 'admin'
+			)
+		)
+	)
 	AND "builds"."status" IN ('queued', 'starting', 'building', 'deploying');
 --> statement-breakpoint
 DELETE FROM "github_connections"
-WHERE "authorized_by_user_id" IS NULL OR "repository_id" IS NULL;
+USING "projects"
+WHERE
+	"projects"."id" = "github_connections"."project_id"
+	AND (
+		"github_connections"."authorized_by_user_id" IS NULL
+		OR "github_connections"."repository_id" IS NULL
+		OR NOT (
+			"github_connections"."authorized_by_user_id" = "projects"."user_id"
+			OR EXISTS (
+				SELECT 1
+				FROM "project_members"
+				WHERE
+					"project_members"."project_id" = "projects"."id"
+					AND "project_members"."user_id" = "github_connections"."authorized_by_user_id"
+					AND "project_members"."role" = 'admin'
+			)
+		)
+	);
 --> statement-breakpoint
 DELETE FROM "github_installation_members"
 USING "github_installations"

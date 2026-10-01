@@ -63,7 +63,12 @@ it('keeps only GitHub connections and memberships that current authority rules a
         ('p-personal-no-repo', 'owner', 'personal-no-repo'),
         ('p-org-legacy', 'owner', 'org-legacy'),
         ('p-org-authorized', 'owner', 'org-authorized'),
-        ('p-personal-authorized', 'owner', 'personal-authorized');
+        ('p-personal-authorized', 'owner', 'personal-authorized'),
+        ('p-org-demoted', 'owner', 'org-demoted'),
+        ('p-org-non-member', 'owner', 'org-non-member');
+      INSERT INTO project_members (project_id, user_id, role) VALUES
+        ('p-org-authorized', 'admin', 'admin'),
+        ('p-org-demoted', 'admin', 'collaborator');
       INSERT INTO github_installations (id, installation_id, user_id, account_login, account_id, account_type) VALUES
         ('ghi-user', '100', 'owner', 'owner', '1', 'User'),
         ('ghi-user-other', '101', 'other', 'other', '2', 'User'),
@@ -76,7 +81,9 @@ it('keeps only GitHub connections and memberships that current authority rules a
         ('c-personal-no-repo', 'p-personal-no-repo', '100', 'owner/c', NULL, NULL),
         ('c-org-legacy', 'p-org-legacy', '200', 'org/d', '4', NULL),
         ('c-org-authorized', 'p-org-authorized', '201', 'org2/e', '5', 'admin'),
-        ('c-personal-authorized', 'p-personal-authorized', '100', 'owner/f', NULL, 'owner');
+        ('c-personal-authorized', 'p-personal-authorized', '100', 'owner/f', NULL, 'owner'),
+        ('c-org-demoted', 'p-org-demoted', '201', 'org2/g', '7', 'admin'),
+        ('c-org-non-member', 'p-org-non-member', '201', 'org2/h', '8', 'other');
       INSERT INTO github_installation_members (id, installation_id, user_id, expires_at) VALUES
         ('m-user', '100', 'other', now() + interval '1 day'),
         ('m-org', '200', 'other', now() + interval '1 day');
@@ -86,7 +93,9 @@ it('keeps only GitHub connections and memberships that current authority rules a
         ('b-removed-queued', 'p-personal-mismatch', 'owner', 'container', 'queued', NULL),
         ('b-removed-finished', 'p-org-legacy', 'owner', 'container', 'complete', '2026-01-01 00:00:00'),
         ('b-kept', 'p-org-authorized', 'admin', 'container', 'building', NULL),
-        ('b-backfilled', 'p-personal', 'owner', 'github_actions', 'starting', NULL);
+        ('b-backfilled', 'p-personal', 'owner', 'github_actions', 'starting', NULL),
+        ('b-demoted', 'p-org-demoted', 'admin', 'container', 'building', NULL),
+        ('b-non-member', 'p-org-non-member', 'other', 'github_actions', 'deploying', NULL);
     `);
 
     for (const statement of readFileSync(resolve(root, `${MIGRATION}.sql`), 'utf8')
@@ -126,7 +135,9 @@ it('keeps only GitHub connections and memberships that current authority rules a
       ).rows,
     ).toEqual([
       { id: 'b-backfilled', status: 'starting', error: null, completed: false },
+      { id: 'b-demoted', status: 'cancelled', error: cancelled, completed: true },
       { id: 'b-kept', status: 'building', error: null, completed: false },
+      { id: 'b-non-member', status: 'cancelled', error: cancelled, completed: true },
       { id: 'b-removed-actions', status: 'cancelled', error: cancelled, completed: true },
       { id: 'b-removed-container', status: 'cancelled', error: cancelled, completed: true },
       { id: 'b-removed-finished', status: 'complete', error: null, completed: true },
