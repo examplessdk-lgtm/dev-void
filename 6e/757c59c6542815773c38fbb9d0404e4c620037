@@ -1,0 +1,83 @@
+packages/void/package.json
+  s_2f1863b1c5589b::t_09df98aac23bc9 45-46
+packages/void/src/router/compile.ts
+  s_54501aa9b9c499::t_ce74d1ecded6bf 12,16,18-19,158,283,285-287,365-367,372-374,378-380,441,444,452,1050-1056,1058,1062,1082,1107-1110,1113,1122,1147-1148,1314-1315,1329-1334,1663,1667,1673
+packages/void/src/runtime/routing-assets.ts
+  s_54501aa9b9c499::t_379a6cb129b2e0 1-201
+packages/void/src/runtime/routing-errors.ts
+  s_54501aa9b9c499::t_ab303f4c1a8fb4 1-735
+packages/void/src/runtime/routing-pages.ts
+  s_54501aa9b9c499::t_4c15a99a65b23a 1-185
+packages/void/src/runtime/routing-worker.ts
+  s_2f1863b1c5589b::t_e6b15ad326eccd 1-200
+packages/void/src/runtime/routing.ts
+  s_54501aa9b9c499::t_67aac22cff8617 1-323
+packages/void/test/integration/resource-name-migration.test.ts
+  s_448018b4bc5d86::t_55658a14330087 154
+packages/void/test/integration/typed-routing-runtime.test.ts
+  s_2f1863b1c5589b::t_982d0ecec61214 1-195
+packages/void/test/unit/compile-auth.test.ts
+  s_448018b4bc5d86::t_d510e4c58d7b65 15
+packages/void/test/unit/compile.test.ts
+  s_448018b4bc5d86::t_5af7cfe6a4d941 17-31,35,149-152,504-514,535-545,549-554,556-557,650,653-655,729,732,734-736,795-799,862-865,908-911,934-939,941,949,1355,1372-1373,1379-1388,1390-1396,1400-1402,1499,1598-1600,1622-1624,1768,1984-1994,2026,2037,2041,2057,2091-2103,2105,2107-2117,2276-2345
+packages/void/test/unit/deploy-prerender-skip.test.ts
+  s_448018b4bc5d86::t_87b0e9697d059b 76,88
+packages/void/test/unit/email-inbound.test.ts
+  s_54501aa9b9c499::t_cf59260d189e7c 357,510,915
+packages/void/test/unit/pages-compile.test.ts
+  s_448018b4bc5d86::t_379bb93921187d 8,20,57-69,75,78-80,82-99,101,103-105,107,109-110,121,123-125
+packages/void/test/unit/plugin-class-a-wrapper.test.ts
+  s_448018b4bc5d86::t_c9a0a525e7dd62 77-80,104-107
+packages/void/test/unit/plugin-routing.test.ts
+  s_54501aa9b9c499::t_767893a337d707 64-67,90-92
+packages/void/test/unit/prerender-render.test.ts
+  s_54501aa9b9c499::t_8c9ded4c45a9fc 6,85
+packages/void/test/unit/routing-runtime.test.ts
+  s_54501aa9b9c499::t_91f3dd2c660b9f 1-523
+packages/void/test/unit/scheduled-dispatch.test.ts
+  s_448018b4bc5d86::t_4414742b748d01 91
+packages/void/vite.config.ts
+  s_fe834b00f92102::t_4bc8706383115d 82
+platform/meta/design-docs/0089-typed-routing-runtime.md
+  s_fe834b00f92102::t_3d532b12c16c88 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6e757c59c6542815773c38fbb9d0404e4c620037",
+  "prompts": {},
+  "sessions": {
+    "s_2f1863b1c5589b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f846-407a-7613-ad50-3fdb31a846ac",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_448018b4bc5d86": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f846-2982-7552-87e5-7bb47e3f7b34",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_54501aa9b9c499": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f844-bf84-7e43-ab3a-bb1cc0bc4b71",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
