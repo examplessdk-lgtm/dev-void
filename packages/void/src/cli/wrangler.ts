@@ -28,6 +28,7 @@ import {
   DEFAULT_SANDBOX_BINDING,
   SANDBOX_MIGRATION_TAG,
   assertSandboxNamespaceConfig,
+  hasSandboxSqliteMigration,
   resolveSandboxConfig,
   sandboxContainerConfig,
   type ResolvedSandboxConfig,
@@ -759,11 +760,7 @@ export function syncWranglerBindings(
           new_sqlite_classes?: Array<string>;
         }>)
       : [];
-    const hasMigration = migrations.some(
-      (migration) =>
-        migration.tag === SANDBOX_MIGRATION_TAG ||
-        migration.new_sqlite_classes?.includes(className),
-    );
+    const hasMigration = hasSandboxSqliteMigration(migrations, className);
     if (!hasMigration) {
       parsed.migrations = [
         ...migrations,

@@ -102,10 +102,12 @@ import {
 import { readProjectPaths } from '../project-paths.ts';
 import { hasEmailHandlers, type EmailHandlersScan } from '../router/email.ts';
 import {
+  assertSandboxNamespaceConfig,
   requiresSandboxPlatformImage,
   resolveSandboxConfig,
   sandboxContainerConfig,
   SANDBOX_MIGRATION_TAG,
+  hasSandboxSqliteMigration,
 } from '../sandbox/config.ts';
 import { trustedCloudflareWorkerAccessHeaders } from '../shared/cf-access.ts';
 import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
@@ -1205,14 +1207,7 @@ export function reconstructExpectedDurableObjectState(
     if (!bindings.some((binding) => binding.name === sandbox.binding)) {
       bindings.push({ name: sandbox.binding, class_name: sandbox.className });
     }
-    if (
-      !migrations.some(
-        (migration) =>
-          migration.tag === SANDBOX_MIGRATION_TAG ||
-          (Array.isArray(migration.new_sqlite_classes) &&
-            migration.new_sqlite_classes.includes(sandbox.className)),
-      )
-    ) {
+    if (!hasSandboxSqliteMigration(migrations, sandbox.className)) {
       migrations.push({
         tag: SANDBOX_MIGRATION_TAG,
         new_sqlite_classes: [sandbox.className],
@@ -4833,6 +4828,14 @@ export async function runCloudflareDeploy(
   // re-parses are the account discovery's (3b) and the email step's (3b-ii), both of which write
   // BEFORE any project code runs.
   let rootConfig = parseRootWranglerConfig(configPath);
+  if (needsSandbox) {
+    try {
+      assertSandboxNamespaceConfig(rootConfig, resolveSandboxConfig(voidConfig, root));
+    } catch (error) {
+      log.error(`deploy: ${getErrorMessage(error)}`);
+      return exit(1);
+    }
+  }
 
   // 3a. Resolve + pin the ONE transport for the WHOLE deploy (build + whoami + migrate +
   // deploy), reusing the provisioner's resolver + dotenv fence. Fail closed on any

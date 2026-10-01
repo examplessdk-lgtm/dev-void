@@ -643,6 +643,38 @@ describe('syncWranglerBindings', () => {
     expect(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8')).toBe(original);
   });
 
+  it('preserves custom Sandbox SQLite rename history even when the reserved tag belongs to another class', () => {
+    const migrations = [
+      { tag: 'custom-v1', new_sqlite_classes: ['OriginalSandbox'] },
+      { tag: 'custom-v2', renamed_classes: [{ from: 'OriginalSandbox', to: 'SandboxV1' }] },
+      { tag: 'void-sandbox-v2', new_sqlite_classes: ['Unrelated'] },
+    ];
+    setup('wrangler.jsonc', JSON.stringify({ name: 'custom', migrations }));
+    expect(syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true })).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8'));
+    expect(parsed.migrations).toEqual(migrations);
+    expect(parsed.durable_objects.bindings).toEqual([{ name: 'SANDBOX', class_name: 'SandboxV1' }]);
+  });
+
+  it.each([
+    { tag: 'void-sandbox-v2', new_sqlite_classes: ['Unrelated'] },
+    { tag: 'legacy', new_classes: ['SandboxV1'] },
+    {
+      tag: 'transfer',
+      transferred_classes: [{ from_script: 'foreign', from: 'Original', to: 'SandboxV1' }],
+    },
+  ])(
+    'refuses an incompatible Sandbox migration before writing any generated config',
+    (migration) => {
+      const original = JSON.stringify({ name: 'incompatible', migrations: [migration] });
+      setup('wrangler.jsonc', original);
+      expect(() => syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true })).toThrow(
+        /another class|needs SQLite storage/,
+      );
+      expect(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8')).toBe(original);
+    },
+  );
+
   it('appends typed Durable Object migrations when new files sort earlier', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     const zeta = {

@@ -3094,6 +3094,33 @@ describe('runCloudflareDeploy — preflight', () => {
     expect(wranglerArgs.some((args) => args[0] === 'containers')).toBe(false);
   });
 
+  it.each([
+    { tag: 'occupied', new_classes: ['SandboxV1'] },
+    {
+      tag: 'transfer',
+      transferred_classes: [{ from_script: 'foreign', from: 'Original', to: 'SandboxV1' }],
+    },
+    { tag: 'void-sandbox-v2', new_sqlite_classes: ['Unrelated'] },
+  ])(
+    'rejects incompatible Sandbox history before account probes, resource provisioning or build',
+    async (migration) => {
+      const root = sandboxProject();
+      const configPath = join(root, 'wrangler.jsonc');
+      const original = JSON.stringify({
+        ...parseRootWranglerConfig(configPath),
+        migrations: [migration],
+      });
+      writeFileSync(configPath, original);
+      const { deps, trace, exitCalls } = harness();
+      await expect(
+        runCloudflareDeploy(root, { platform: 'cloudflare', provision: true }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+      expect(exitCalls).toEqual([1]);
+      expect(trace).toEqual([]);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+    },
+  );
+
   it('translates a Sandbox upload entitlement error into Workers Paid guidance', async () => {
     const root = sandboxProject();
     const errors: Array<string> = [];

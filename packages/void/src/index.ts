@@ -50,6 +50,7 @@ import {
   restoreCloudflarePreviewPointer,
   stashCloudflareDeployPointer,
 } from './cloudflare-config.ts';
+import { finalizeDurableObjectPatch } from './cloudflare-durable-patch.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { readConfig, isNodeTarget, type NotFoundHandling } from './config.ts';
 import { inferBindingsFromSource } from './inference/walk.ts';
@@ -84,6 +85,7 @@ import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/pa
 import { DEV_INBOX_ENV_VAR, DEV_INBOX_TOKEN_ENV_VAR } from './runtime/email/dev-inbox.ts';
 import {
   SANDBOX_MIGRATION_TAG,
+  hasSandboxSqliteMigration,
   resolveSandboxConfig,
   sandboxContainerConfig,
   assertSandboxNamespaceConfig,
@@ -1700,13 +1702,7 @@ export function voidPlugin(options?: {
             new_sqlite_classes?: Array<string>;
           }>)
         : [];
-      if (
-        !existingMigrations.some(
-          (migration) =>
-            migration.tag === SANDBOX_MIGRATION_TAG ||
-            migration.new_sqlite_classes?.includes(sandboxConfig.className),
-        )
-      ) {
+      if (!hasSandboxSqliteMigration(existingMigrations, sandboxConfig.className)) {
         (result as Record<string, unknown>).migrations = [
           ...existingMigrations,
           {
@@ -1824,6 +1820,22 @@ export function voidPlugin(options?: {
         result.version_metadata = { binding: versionMetadataBinding };
       }
     }
+    finalizeDurableObjectPatch(resolved as Record<string, unknown>, result, [
+      ...environmentWebsocketRoutes.map((route) => ({
+        name: route.bindingName,
+        class_name: route.className,
+      })),
+      ...durableObjects.map((module) => ({
+        name: module.bindingName,
+        class_name: module.className,
+      })),
+      ...(bindings.needsSandbox && sandboxConfig
+        ? [{ name: sandboxConfig.binding, class_name: sandboxConfig.className }]
+        : []),
+      ...(shouldEmitLive() && liveConfig
+        ? [{ name: liveConfig.bindingName, class_name: liveConfig.className }]
+        : []),
+    ]);
     return result as Partial<WorkerConfig>;
   }
 

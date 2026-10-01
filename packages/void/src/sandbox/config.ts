@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { isSandboxRegistryImage } from '@void/deploy-core';
+import type { DurableObjectMigrationStep } from '@void/deploy-core';
 import { isAbsolute, join } from 'pathslash';
 import type { VoidConfig } from '../config.ts';
 
@@ -134,6 +135,42 @@ export function sandboxContainerConfig(sandbox: ResolvedSandboxConfig): Record<s
   };
 }
 
+/** Resolve the final local storage kind without recreating a renamed or deleted class. */
+export function resolveSandboxMigrationStorage(
+  migrations: ReadonlyArray<DurableObjectMigrationStep>,
+  className: string,
+): 'sqlite' | 'legacy-kv' | 'unknown' | undefined {
+  const storage = new Map<string, 'sqlite' | 'legacy-kv' | 'unknown'>();
+  for (const migration of migrations) {
+    for (const name of migration.new_classes ?? []) {
+      storage.set(name, 'legacy-kv');
+    }
+    for (const name of migration.new_sqlite_classes ?? []) {
+      storage.set(name, 'sqlite');
+    }
+    for (const rename of migration.renamed_classes ?? []) {
+      const sqlite = storage.get(rename.from);
+      storage.delete(rename.from);
+      storage.set(rename.to, sqlite ?? 'unknown');
+    }
+    // A transferred class's source storage is not established by this local history.
+    for (const transfer of migration.transferred_classes ?? []) {
+      storage.set(transfer.to, 'unknown');
+    }
+    for (const name of migration.deleted_classes ?? []) {
+      storage.delete(name);
+    }
+  }
+  return storage.get(className);
+}
+
+export function hasSandboxSqliteMigration(
+  migrations: ReadonlyArray<DurableObjectMigrationStep>,
+  className: string,
+): boolean {
+  return resolveSandboxMigrationStorage(migrations, className) === 'sqlite';
+}
+
 /** Refuse namespace reuse before either uploader can change a live Worker. */
 export function assertSandboxNamespaceConfig(
   config: Record<string, unknown>,
@@ -141,8 +178,38 @@ export function assertSandboxNamespaceConfig(
 ): void {
   const containers = Array.isArray(config.containers) ? config.containers : [];
   const durable = config.durable_objects as
-    | { bindings?: Array<{ name: string; class_name: string }> }
+    | {
+        bindings?: Array<{
+          name: string;
+          class_name: string;
+          script_name?: string;
+          environment?: string;
+        }>;
+      }
     | undefined;
+  const binding = durable?.bindings?.find((entry) => entry.name === sandbox.binding);
+  if (binding && (binding.script_name !== undefined || binding.environment !== undefined)) {
+    throw new Error(
+      `sandbox: binding '${sandbox.binding}' must reference the local '${sandbox.className}' class. Choose another sandbox.binding name to preserve the existing external Durable Object.`,
+    );
+  }
+  const migrations = Array.isArray(config.migrations)
+    ? (config.migrations as Array<DurableObjectMigrationStep>)
+    : [];
+  const storage = resolveSandboxMigrationStorage(migrations, sandbox.className);
+  if (storage === 'legacy-kv' || storage === 'unknown') {
+    throw new Error(
+      `sandbox: class '${sandbox.className}' needs SQLite storage, but its existing namespace has ${storage} storage. Preserve the existing migration history and choose a fresh Worker name or a new sandbox.className and sandbox.binding.`,
+    );
+  }
+  if (
+    storage !== 'sqlite' &&
+    migrations.some((migration) => migration.tag === SANDBOX_MIGRATION_TAG)
+  ) {
+    throw new Error(
+      `sandbox: migration tag '${SANDBOX_MIGRATION_TAG}' is already configured for another class. Keep the existing history and choose a fresh Worker for Sandbox.`,
+    );
+  }
   if (
     containers.some(
       (container) =>
