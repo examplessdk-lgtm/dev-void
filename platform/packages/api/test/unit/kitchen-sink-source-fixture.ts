@@ -9,7 +9,6 @@ export function kitchenSinkSourceFixture(files: Array<string>) {
   // installed workspace dependency, including on a package-only CI build.
   const root = mkdtempSync(join(import.meta.dirname, '.tmp-kitchen-sink-source-'));
   try {
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
     // Keep runtime tests independent of the app's build-generated .void config.
     writeFileSync(join(root, 'tsconfig.json'), '{}');
     for (const file of files) {
