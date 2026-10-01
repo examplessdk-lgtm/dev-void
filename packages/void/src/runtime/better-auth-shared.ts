@@ -213,16 +213,35 @@ function resolveSocialProviders(
   return Object.keys(providers).length > 0 ? providers : undefined;
 }
 
-function appendAuthHeaders(c: Context, source?: Headers): void {
+function appendAuthHeaders(
+  c: Context,
+  source: Headers | undefined,
+  includeCachePolicy: boolean,
+): void {
   if (!source) {
     return;
   }
 
   source.forEach((value, key) => {
+    // getSession's response policy belongs to the session endpoint. An anonymous
+    // lookup must not make the application's public page or asset uncacheable.
+    if (!includeCachePolicy && ['cache-control', 'pragma'].includes(key.toLowerCase())) {
+      return;
+    }
     c.header(key, value, {
       append: key.toLowerCase() === 'set-cookie',
     });
   });
+  if (
+    source.has('set-cookie') &&
+    !(source.get('cache-control') ?? '')
+      .split(',')
+      .some((directive) =>
+        ['private', 'no-store', 'no-cache'].includes(directive.trim().toLowerCase()),
+      )
+  ) {
+    c.header('Cache-Control', 'private, no-store');
+  }
 }
 
 function resolveUserConfig(
@@ -391,7 +410,14 @@ export function createVoidAuthRuntime(
         await next();
       });
 
-      appendAuthHeaders(c, result.headers);
+      const credentialed = ['cookie', 'authorization', 'cf-access-jwt-assertion'].some((header) =>
+        c.req.raw.headers.has(header),
+      );
+      appendAuthHeaders(
+        c,
+        result.headers,
+        state !== null || credentialed || result.headers?.has('set-cookie') === true,
+      );
     } finally {
       await dispose();
     }

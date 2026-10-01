@@ -365,7 +365,16 @@ describe('compileRouteTable', () => {
 
   it('generates websocket durable object exports and proxy routes', () => {
     const scan: ScanResult = {
-      routes: [],
+      routes: [
+        {
+          pattern: '/chat/:room',
+          methods: ['GET'],
+          params: ['room'],
+          catchAll: false,
+          env: null,
+          filePath: 'chat/[room].ts',
+        },
+      ],
       websockets: [
         {
           pattern: '/chat/:room',
@@ -407,6 +416,43 @@ describe('compileRouteTable', () => {
     expect(code).toContain('__forwardWebSocketRequest');
     expect(code.indexOf('app.use(middleware0)')).toBeLessThan(
       code.indexOf('app.all("/chat/:room"'),
+    );
+    const fallback = 'app.all("/chat/:room", (c) => __forwardWebSocketRequest';
+    expect(code.indexOf('app.get("/chat/:room"')).toBeGreaterThan(
+      code.indexOf('app.all("/chat/:room"'),
+    );
+    expect(code.indexOf(fallback)).toBeGreaterThan(code.indexOf('app.get("/chat/:room"'));
+
+    scan.pages.pages = [
+      {
+        pattern: '/chat/:room',
+        params: ['room'],
+        catchAll: false,
+        componentPath: 'chat/[room].vue',
+        componentId: 'chat/[room]',
+        serverPath: null,
+        methods: [],
+        ssrMode: 'server',
+        prerenderMode: 'disabled',
+        renderMode: 'server',
+        shouldPrerender: false,
+      },
+    ];
+    const withPages = compileRouteTable(
+      scan,
+      '/routes',
+      '/middleware',
+      '/crons',
+      '/queues',
+      null,
+      testOptions,
+      { pagesDir: '/pages', pagesDirRelative: 'pages', clientEntryId: 'virtual:void-pages-client' },
+    );
+    expect(withPages.indexOf(fallback)).toBeGreaterThan(
+      withPages.indexOf('app.get("/chat/:room", __createPageGetHandler'),
+    );
+    expect(withPages.indexOf(fallback)).toBeLessThan(
+      withPages.indexOf('app.notFound(__createPagesFallback'),
     );
   });
 

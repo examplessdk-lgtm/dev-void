@@ -1164,46 +1164,63 @@ async function tail(): Promise<Result> {
     }
     await new Promise<void>((resolve, reject) => {
       finish = resolve;
+      let pendingMessages = Promise.resolve();
       socket = new WebSocket(tailUrl, 'trace-v1');
       socket.addEventListener('open', () => {
         socket!.send(JSON.stringify({ debug: false }));
       });
       socket.addEventListener('message', (event) => {
-        try {
-          const log = object(parsedJson(String(event.data)));
-          const detail = object(log.event ?? {});
-          const request = object(detail.request ?? {});
-          const prefix =
-            typeof request.url === 'string'
-              ? `${request.method ?? 'GET'} ${request.url}`
-              : typeof detail.queue === 'string'
-                ? `Queue ${detail.queue}`
-                : typeof detail.mailFrom === 'string'
-                  ? `Email from ${detail.mailFrom}`
-                  : 'Worker event';
-          process.stdout.write(
-            `${prefix} - ${log.outcome ?? 'unknown'} @ ${new Date(Number(log.eventTimestamp)).toLocaleString()}\n`,
-          );
-          if (Array.isArray(log.logs)) {
-            for (const line of log.logs.map(object)) {
-              process.stdout.write(
-                `  (${line.level ?? 'log'}) ${Array.isArray(line.message) ? line.message.join(' ') : ''}\n`,
-              );
+        pendingMessages = pendingMessages
+          .then(async () => {
+            const data: unknown = event.data;
+            const text =
+              typeof data === 'string'
+                ? data
+                : data instanceof Blob
+                  ? await data.text()
+                  : data instanceof ArrayBuffer
+                    ? new TextDecoder().decode(data)
+                    : null;
+            if (text === null) {
+              throw new Error('Unsupported Cloudflare tail frame.');
             }
-          }
-          if (Array.isArray(log.exceptions)) {
-            for (const exception of log.exceptions.map(object)) {
-              process.stderr.write(`  ${exception.name ?? 'Error'}: ${exception.message ?? ''}\n`);
+            const log = object(parsedJson(text));
+            const detail = object(log.event ?? {});
+            const request = object(detail.request ?? {});
+            const prefix =
+              typeof request.url === 'string'
+                ? `${request.method ?? 'GET'} ${request.url}`
+                : typeof detail.queue === 'string'
+                  ? `Queue ${detail.queue}`
+                  : typeof detail.mailFrom === 'string'
+                    ? `Email from ${detail.mailFrom}`
+                    : 'Worker event';
+            process.stdout.write(
+              `${prefix} - ${log.outcome ?? 'unknown'} @ ${new Date(Number(log.eventTimestamp)).toLocaleString()}\n`,
+            );
+            if (Array.isArray(log.logs)) {
+              for (const line of log.logs.map(object)) {
+                process.stdout.write(
+                  `  (${line.level ?? 'log'}) ${Array.isArray(line.message) ? line.message.join(' ') : ''}\n`,
+                );
+              }
             }
-          }
-        } catch {
-          process.stderr.write('Cloudflare returned a malformed tail event.\n');
-        }
+            if (Array.isArray(log.exceptions)) {
+              for (const exception of log.exceptions.map(object)) {
+                process.stderr.write(
+                  `  ${exception.name ?? 'Error'}: ${exception.message ?? ''}\n`,
+                );
+              }
+            }
+          })
+          .catch(() => {
+            process.stderr.write('Cloudflare returned a malformed tail event.\n');
+          });
       });
       socket.addEventListener('error', () =>
         reject(new Error('Cloudflare Worker tail connection failed.')),
       );
-      socket.addEventListener('close', () => resolve());
+      socket.addEventListener('close', () => void pendingMessages.then(resolve));
       if (stopped.signal.aborted) {
         resolve();
       }

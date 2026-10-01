@@ -85,6 +85,8 @@ export type CompileOptions = {
    * skips the fallback middleware entirely.
    */
   fallbackRules?: Array<DevRedirectRule>;
+  /** Resolved Vite build directory for hashed client assets. */
+  assetsDir?: string;
   /** Explicit prerender paths from void.json routing.prerender */
   explicitPrerenderPaths?: Array<string>;
   /** Absolute path to the internal WebSocket runtime module */
@@ -434,6 +436,23 @@ export function compileRouteTable(
     compilePageRoutes(lines, scan, pages, options);
   }
 
+  // Ordinary HTTP hooks are fallbacks for WebSocket paths. Explicit API and
+  // Pages handlers win for their methods; upgrades were forwarded above.
+  for (let i = 0; i < webSockets.length; i++) {
+    lines.push(
+      `app.all(${JSON.stringify(webSockets[i].pattern)}, (c) => __forwardWebSocketRequest(c.req.raw, c.env, __voidWebSocketRoutes[${i}]));`,
+    );
+  }
+  if (webSockets.length > 0) {
+    lines.push('');
+  }
+
+  if (pages && scan.pages.pages.length > 0) {
+    lines.push(
+      `app.notFound(__createPagesFallback({ routing: __routingRuntime, errors: __errorRenderer, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(emitEdgeRules && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
+    );
+  }
+
   compilePrerenderCollector(lines, scan, ssr, options);
 
   if (ssr) {
@@ -441,7 +460,7 @@ export function compileRouteTable(
       `const getClientAssetTags = __createClientAssetTags(${JSON.stringify({ entryId: ssr.clientEntryRelativePath, entryUrl: '/' + ssr.clientEntryRelativePath, kind: 'ssr', dev: options.dev === true, reactRefresh: options.reactRefresh })});`,
     );
     lines.push(
-      `app.notFound(__createSsrFallback({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, fallbackRules: ${JSON.stringify(emitEdgeRules && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)}, load: () => import(${JSON.stringify(ssr.serverEntryPath)}), assets: getClientAssetTags }));`,
+      `app.notFound(__createSsrFallback({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(emitEdgeRules && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)}, load: () => import(${JSON.stringify(ssr.serverEntryPath)}), assets: getClientAssetTags }));`,
     );
   } else if (
     emitEdgeRules &&
@@ -449,7 +468,7 @@ export function compileRouteTable(
     !(pages && scan.pages.pages.length > 0)
   ) {
     lines.push(
-      `app.notFound(__createAssetNotFound({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, fallbackRules: ${JSON.stringify(options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
+      `app.notFound(__createAssetNotFound({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
     );
   }
 
@@ -1115,12 +1134,6 @@ function compilePageRoutes(
     }
   }
   lines.push('');
-
-  const managedDispatch =
-    options.nodeTarget !== true && options.dev !== true && options.managedDispatch === true;
-  lines.push(
-    `app.notFound(__createPagesFallback({ routing: __routingRuntime, errors: __errorRenderer, fallbackRules: ${JSON.stringify(!managedDispatch && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
-  );
 }
 
 /**

@@ -29,9 +29,12 @@ describe('typed routing in generated Workers', () => {
       const middleware = join(directory, 'middleware');
       const pages = join(directory, 'pages');
       const output = join(directory, 'output');
-      for (const path of [routes, middleware, pages]) {
+      const assets = join(directory, 'client');
+      for (const path of [routes, middleware, pages, assets]) {
         mkdirSync(path);
       }
+      mkdirSync(join(assets, 'static'));
+      writeFileSync(join(assets, 'static/client-abcdefgh.js'), 'export const value = 1;');
       writeFileSync(
         join(routes, 'hello.ts'),
         `export function GET(c) { return { path: c.req.path, original: c.originalUrl()?.pathname, rewritten: c.isRewritten(), public: c.env.PUBLIC, hidden: c.env.__VOID_PROXY_TOKEN }; }\n`,
@@ -84,6 +87,7 @@ describe('typed routing in generated Workers', () => {
             reactRefresh: false,
             auth: null,
             dev,
+            assetsDir: 'static',
             redirectRules: [
               { source: '/rewrite', destination: '/hello', status: 200, force: true },
             ],
@@ -105,7 +109,11 @@ describe('typed routing in generated Workers', () => {
         plugins: [
           {
             name: 'typed-routing-fixture',
+            enforce: 'pre',
             resolveId(id) {
+              if (id.endsWith('/dist/runtime/routing.mjs')) {
+                return source('routing.ts');
+              }
               if (id === 'virtual:void-routes') {
                 return routeTable;
               }
@@ -145,12 +153,24 @@ describe('typed routing in generated Workers', () => {
           modulesRoot: output,
           scriptPath: join(output, 'worker.mjs'),
           bindings: { PUBLIC: 'public', __VOID_PROXY_TOKEN: 'secret' },
+          assets: {
+            directory: assets,
+            binding: 'ASSETS',
+            run_worker_first: true,
+            routerConfig: { has_user_worker: true },
+            assetConfig: { not_found_handling: 'none' },
+          },
         }),
       );
       const hello = await runtime.dispatchFetch('https://app.test/hello');
       expect(await hello.json()).toEqual({ path: '/hello', rewritten: false, public: 'public' });
       expect(hello.headers.get('x-user-middleware')).toBe('ran');
       expect(hello.headers.get('x-edge-rule')).toBe('ran');
+      const asset = await runtime.dispatchFetch('https://app.test/static/client-abcdefgh.js');
+      expect(asset.headers.get('x-user-middleware')).toBe('ran');
+      expect(asset.headers.get('x-edge-rule')).toBe('ran');
+      expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+      await expect(asset.text()).resolves.toBe('export const value = 1;');
       for (const [path, trace] of [
         ['/rewrite', 'rewrite[/rewrite]'],
         ['/move', 'c.rewrite'],

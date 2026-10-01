@@ -26,6 +26,45 @@ const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
 };
+
+/** Apply native static policy before application middleware adds authored headers. */
+export function applyAssetCachePolicy(
+  request: Request,
+  asset: Response,
+  assetsDir = 'assets',
+): Response {
+  if (!['GET', 'HEAD'].includes(request.method) || ![200, 206, 304].includes(asset.status)) {
+    return asset;
+  }
+  const pathname = new URL(request.url).pathname;
+  const filename = pathname.slice(pathname.lastIndexOf('/') + 1);
+  const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+  const headers = new Headers(asset.headers);
+  if (!headers.has('Content-Type') && ASSET_CONTENT_TYPES[extension]) {
+    headers.set('Content-Type', ASSET_CONTENT_TYPES[extension]);
+  }
+  const policy = headers.get('Cache-Control');
+  const directives = (policy ?? '')
+    .toLowerCase()
+    .split(',')
+    .map((part) => part.trim())
+    .sort();
+  const providerDefault = directives.join(',') === 'max-age=0,must-revalidate,public';
+  const hashed =
+    pathname.startsWith('/' + assetsDir.replace(/^\/+|\/+$/g, '') + '/') &&
+    /[-._][A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(filename) &&
+    extension !== '.html' &&
+    !(headers.get('Content-Type') ?? '').toLowerCase().includes('text/html');
+  if (!headers.has('Set-Cookie') && hashed && (!policy || providerDefault)) {
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  } else if (!policy) {
+    headers.set('Cache-Control', 'no-store');
+  }
+  // Cache API and fetch responses can have immutable headers. Preserve the
+  // original response and change only this application-owned wrapper.
+  return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
+}
+
 export function createAssetFallback(
   options: AssetFallbackOptions = {},
 ): (request: Request, env: RuntimeEnvironment, response: Response) => Promise<Response> {
@@ -41,23 +80,7 @@ export function createAssetFallback(
       new Request(request.url, { method: request.method, headers: request.headers }),
     );
     if (asset.status !== 404) {
-      const res = new Response(asset.body, asset);
-      const pathname = new URL(request.url).pathname;
-      if (!res.headers.get('Content-Type')) {
-        const filename = pathname.slice(pathname.lastIndexOf('/') + 1);
-        const contentType =
-          ASSET_CONTENT_TYPES[filename.slice(filename.lastIndexOf('.')).toLowerCase()];
-        if (contentType) {
-          res.headers.set('Content-Type', contentType);
-        }
-      }
-      res.headers.set(
-        'Cache-Control',
-        pathname.startsWith('/' + (options.assetsDir ?? 'assets') + '/')
-          ? 'public, max-age=31536000, immutable'
-          : 'no-store',
-      );
-      return res;
+      return applyAssetCachePolicy(request, asset, options.assetsDir);
     }
     const accept = request.headers.get('accept') ?? '';
     if (options.serveSpaFallback && accept.includes('text/html')) {

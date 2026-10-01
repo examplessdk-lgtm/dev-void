@@ -422,6 +422,15 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
       ],
       workflows: [
         {
+          name: 'local-workflow',
+          binding: 'LOCAL_WORKFLOW',
+          class_name: 'LocalJob',
+          limits: { steps: 7 },
+          concurrency: { limit: 2 },
+          schedules: ['0 * * * *'],
+          default_retention: { success_retention: '1 day', error_retention: '3 days' },
+        },
+        {
           name: 'external-workflow',
           binding: 'WORKFLOW',
           class_name: 'ExternalJob',
@@ -448,6 +457,8 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
     const worker = JSON.parse(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8'));
     expect(worker.env.AUTH_SECRET).toEqual({ type: 'secret' });
     worker.exports = {
+      ...worker.exports,
+      ExportOnlyJob: { type: 'workflow', name: 'export-only-workflow', limits: { steps: 3 } },
       Rpc: { type: 'worker', cache: { enabled: false } },
       Departed: { type: 'durable-object', state: 'transferred', transferredTo: 'target-worker' },
       Arriving: {
@@ -458,6 +469,7 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
       },
     };
     writeFileSync(getWorkerConfigPath(prepared.directory), JSON.stringify(worker));
+    const originalWorkerConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
     expect(prepared.activeSecrets).toEqual({
       versionId: activeVersionId,
       bindings: [
@@ -490,16 +502,22 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
           ? ++uploadedBatches === 5
             ? { jwt: 'completion-token' }
             : {}
-          : request.method === 'GET'
+          : path.includes('/workflows/')
             ? {
-                id: activeVersionId,
-                bindings: [
-                  { name: 'AUTH_SECRET', type: 'secret_text' },
-                  { name: 'KEY', type: 'secret_key' },
-                  { name: 'DASHBOARD_VAR', type: 'plain_text' },
-                ],
+                name: path.endsWith('/local-workflow') ? 'local-workflow' : 'export-only-workflow',
+                script_name: 'void-test',
+                class_name: path.endsWith('/local-workflow') ? 'LocalJob' : 'ExportOnlyJob',
               }
-            : { id: '22222222-2222-4222-8222-222222222222', urls: [] };
+            : request.method === 'GET'
+              ? {
+                  id: activeVersionId,
+                  bindings: [
+                    { name: 'AUTH_SECRET', type: 'secret_text' },
+                    { name: 'KEY', type: 'secret_key' },
+                    { name: 'DASHBOARD_VAR', type: 'plain_text' },
+                  ],
+                }
+              : { id: '22222222-2222-4222-8222-222222222222', urls: [] };
       response.end(
         JSON.stringify({
           success: true,
@@ -563,10 +581,18 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
             workflow_name: 'external-workflow',
             script_name: 'external-worker',
           },
+          {
+            name: 'LOCAL_WORKFLOW',
+            type: 'workflow',
+            workflow_name: 'local-workflow',
+            class_name: 'LocalJob',
+          },
         ]),
       );
       expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
       expect(body.exports).toEqual({
+        LocalJob: { type: 'workflow', name: 'local-workflow' },
+        ExportOnlyJob: { type: 'workflow', name: 'export-only-workflow' },
         Rpc: { type: 'worker', cache: { enabled: false } },
         Departed: { type: 'durable-object', state: 'transferred', transferred_to: 'target-worker' },
         Arriving: {
@@ -575,6 +601,17 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
           storage: 'sqlite',
           transfer_from: 'source-worker',
         },
+      });
+      expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(
+        originalWorkerConfig,
+      );
+      expect(worker.exports.LocalJob).toEqual({
+        type: 'workflow',
+        name: 'local-workflow',
+        limits: { steps: 7 },
+        concurrency: { limit: 2 },
+        schedules: ['0 * * * *'],
+        defaultRetention: { successRetention: '1 day', errorRetention: '3 days' },
       });
       expect(body.assets).toEqual({
         jwt: 'completion-token',
@@ -628,21 +665,141 @@ it('uploads live secrets and multiple asset batches when the latest upload is in
 it('uploads live secrets and multiple asset batches for atomic publication', () =>
   verifyPinnedUpload(true));
 
+it.each(['missing name', 'duplicate name', 'external collision', 'class collision'] as const)(
+  'rejects an invalid local Workflow declaration before any provider request: %s',
+  async (mode) => {
+    const prepared = await output({ secrets: { required: ['AUTH_SECRET'] } });
+    try {
+      await pinActiveWorkerSecrets({
+        output: prepared,
+        activeVersionId: '11111111-1111-4111-8111-111111111111',
+        bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+        requiredNames: ['AUTH_SECRET'],
+      });
+      const path = getWorkerConfigPath(prepared.directory);
+      const worker = JSON.parse(readFileSync(path, 'utf8'));
+      worker.exports = { Job: { type: 'workflow', name: mode === 'missing name' ? '' : 'jobs' } };
+      if (mode === 'duplicate name') {
+        worker.exports.OtherJob = { type: 'workflow', name: 'jobs' };
+      }
+      if (mode === 'external collision' || mode === 'class collision') {
+        worker.env.JOB = {
+          type: 'workflow',
+          name: 'jobs',
+          worker: mode === 'external collision' ? 'foreign-worker' : 'void-test',
+          exportName: mode === 'external collision' ? 'Job' : 'OtherJob',
+        };
+      }
+      writeFileSync(path, JSON.stringify(worker));
+      const fetch = vi.spyOn(globalThis, 'fetch');
+      await expect(
+        uploadPinnedCloudflareVersion({
+          output: prepared,
+          accountId: 'account-id',
+          apiBaseUrl: 'http://127.0.0.1:1',
+          workerName: 'void-test',
+          token: 'synthetic-token',
+          atomic: true,
+          verifyUploader: () => true,
+        }),
+      ).rejects.toThrow(
+        mode === 'missing name'
+          ? 'Workflow export Job name'
+          : mode === 'duplicate name'
+            ? 'multiple local exports'
+            : 'conflicts with its local export',
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      prepared.dispose();
+    }
+  },
+);
+
+it.each(['missing', 'owned', 'foreign', 'malformed', 'unrelated 404'] as const)(
+  'checks local Workflow ownership before uploading assets or a version: %s',
+  async (mode) => {
+    const prepared = await output({
+      secrets: { required: ['AUTH_SECRET'] },
+      assets: { directory: '../client', binding: 'ASSETS' },
+      workflows: [{ name: 'jobs', binding: 'JOB', class_name: 'Job' }],
+    });
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: '11111111-1111-4111-8111-111111111111',
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    });
+    const requests: Array<{ method: string; path: string }> = [];
+    const server = createServer((request, response) => {
+      request.resume();
+      const path = request.url ?? '';
+      requests.push({ method: request.method ?? '', path });
+      const missing =
+        path.endsWith('/workflows/jobs') && ['missing', 'unrelated 404'].includes(mode);
+      response.writeHead(missing ? 404 : 200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: !missing,
+          errors: missing ? [{ code: mode === 'missing' ? 10200 : 10000 }] : [],
+          result: path.endsWith('/workflows/jobs')
+            ? {
+                name: mode === 'malformed' ? 'another-workflow' : 'jobs',
+                script_name: mode === 'foreign' ? 'foreign-worker' : 'void-test',
+                class_name: 'PreviousJob',
+              }
+            : path.endsWith('/assets-upload-session')
+              ? { jwt: 'asset-completion', buckets: [] }
+              : request.method === 'GET'
+                ? {
+                    id: '11111111-1111-4111-8111-111111111111',
+                    bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+                  }
+                : { id: '22222222-2222-4222-8222-222222222222', urls: [] },
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const upload = uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: true,
+        verifyUploader: () => true,
+      });
+      if (mode === 'missing' || mode === 'owned') {
+        await expect(upload).resolves.toMatchObject({ id: '22222222-2222-4222-8222-222222222222' });
+        expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET', 'POST', 'POST']);
+      } else {
+        await expect(upload).rejects.toThrow(
+          mode === 'unrelated 404'
+            ? 'Cloudflare version upload failed'
+            : 'not owned by this Worker',
+        );
+        expect(requests.map(({ method }) => method)).toEqual(['GET', 'GET']);
+      }
+      expect(requests[1]?.path).toBe('/client/v4/accounts/account-id/workflows/jobs');
+    } finally {
+      prepared.dispose();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  },
+);
+
 it.each([
   'unsafe binding',
-  'local Workflow export',
+  'unknown export',
   'scheduler Container',
   'explicit secret collision',
 ] as const)(
   'refuses unsupported pinned output before provider or image mutations: %s',
   async (mode) => {
-    const prepared =
-      mode === 'local Workflow export'
-        ? await output({
-            secrets: { required: ['AUTH_SECRET'] },
-            workflows: [{ name: 'jobs', binding: 'JOBS', class_name: 'Job' }],
-          })
-        : await output({ secrets: { required: ['AUTH_SECRET'] } });
+    const prepared = await output({ secrets: { required: ['AUTH_SECRET'] } });
     try {
       expect(
         await pinActiveWorkerSecrets({
@@ -656,6 +813,9 @@ it.each([
       const worker = JSON.parse(readFileSync(workerPath, 'utf8'));
       if (mode === 'unsafe binding') {
         worker.env.BAD = { type: 'unsafe:unknown_product', value: 'unapproved' };
+      }
+      if (mode === 'unknown export') {
+        worker.exports = { Job: { type: 'unapproved', name: 'jobs' } };
       }
       if (mode === 'explicit secret collision') {
         worker.env.AUTH_SECRET = { type: 'ai' };
@@ -691,8 +851,8 @@ it.each([
           runCf,
         }),
       ).rejects.toThrow(
-        mode === 'local Workflow export'
-          ? 'export Job'
+        mode === 'unknown export'
+          ? 'invalid Worker config'
           : mode === 'scheduler Container'
             ? 'Scheduler-managed'
             : mode === 'explicit secret collision'
@@ -1764,6 +1924,104 @@ it.each(['restore', 'remove'] as const)(
     }
   },
 );
+
+it('applies all local Workflow settings through the real pinned cf trigger transport', async () => {
+  const workflow = {
+    binding: 'JOB',
+    name: 'void-job',
+    class_name: 'Job',
+    limits: { steps: 7 },
+    concurrency: { limit: 2 },
+    schedules: ['0 * * * *'],
+    default_retention: { success_retention: '1 day', error_retention: '3 days' },
+  };
+  const prepared = await output({ workers_dev: false, preview_urls: false, workflows: [workflow] });
+  const original = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Array<Buffer> = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const body = Buffer.concat(chunks).toString('utf8');
+    requests.push({
+      method: request.method ?? '',
+      path: request.url ?? '',
+      body: body ? JSON.parse(body) : undefined,
+    });
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        success: true,
+        errors: [],
+        result: request.url?.endsWith('/workers/subdomain')
+          ? { subdomain: 'fixture' }
+          : { subdomain: { enabled: false, previews_enabled: false } },
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+    const command = createCfCommand({
+      accountId: 'account-id',
+      apiBaseUrl,
+      verifyUploader: () => true,
+      env: () => ({
+        PATH: process.env.PATH,
+        SYSTEMROOT: process.env.SYSTEMROOT,
+        WINDIR: process.env.WINDIR,
+        TMP: process.env.TMP,
+        TEMP: process.env.TEMP,
+        CI: 'true',
+        CLOUDFLARE_API_TOKEN: 'synthetic-token',
+        CLOUDFLARE_ACCOUNT_ID: 'account-id',
+        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      }),
+    });
+    const runner = createCfVersionRunner({
+      output: prepared,
+      workerName: 'void-test',
+      runCf: command,
+      verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
+    });
+    const result = await deployCloudflareVersionTriggers({
+      workerName: 'void-test',
+      configPath: join(roots.at(-1)!, 'dist', 'ssr', 'wrangler.json'),
+      runWrangler: runner,
+      triggerConfig: {
+        workers_dev: false,
+        preview_urls: false,
+        routes: [],
+        crons: [],
+        queueConsumers: [],
+        workflows: [workflow],
+      },
+    });
+    expect(result, result.stdout + result.stderr).toMatchObject({ status: 0 });
+    expect(requests.filter(({ path }) => path.includes('/workflows/'))).toEqual([
+      {
+        method: 'PUT',
+        path: '/client/v4/accounts/account-id/workflows/void-job',
+        body: {
+          script_name: 'void-test',
+          class_name: 'Job',
+          limits: { steps: 7 },
+          concurrency: { limit: 2 },
+          schedules: [{ cron: '0 * * * *' }],
+          default_retention: { success_retention: '1 day', error_retention: '3 days' },
+        },
+      },
+    ]);
+    expect(requests.some(({ path }) => path.includes('/versions'))).toBe(false);
+    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(original);
+  } finally {
+    prepared.dispose();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
 
 it.each([
   {

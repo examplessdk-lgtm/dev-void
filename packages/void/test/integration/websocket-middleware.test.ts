@@ -87,7 +87,30 @@ export default {
   },
 };\n`,
     );
-    writeFileSync(httpRoutePath, 'export function GET(c) { return c.text("HTTP route"); }\n');
+    writeFileSync(
+      httpRoutePath,
+      'export function GET(c) { c.header("x-http-handler", "GET"); return c.text("HTTP route"); }\n',
+    );
+    for (const mode of ['socket', 'room'] as const) {
+      writeFileSync(
+        join(routesDir, `${mode}.ws.ts`),
+        `const schema = { "~standard": { version: 1, vendor: "test", validate: value => ({ value }) } };
+export default {
+  __kind: ${JSON.stringify(mode)},
+  messages: { client: schema, server: schema },
+  async onRequest(ctx) {
+    const requests = ((await ctx.storage.get("requests")) ?? 0) + 1;
+    await ctx.storage.put("requests", requests);
+    return Response.json({ kind: ${JSON.stringify(mode)}, id: ctx.id, params: ctx.params, method: ctx.request.method, requests${mode === 'room' ? ', active: Array.from(ctx.room.getConnections()).length' : ''} }, { headers: { "x-ws-on-request": ${JSON.stringify(mode)} } });
+  },
+};\n`,
+      );
+    }
+    writeFileSync(
+      join(routesDir, 'upgrade-only.ws.ts'),
+      `const schema = { "~standard": { version: 1, vendor: "test", validate: value => ({ value }) } };
+export default { __kind: "socket", messages: { client: schema, server: schema } };\n`,
+    );
     writeFileSync(
       middlewarePath,
       `export default async function auth(c, next) {
@@ -123,6 +146,19 @@ export default {
           mode: 'socket',
           hasAuthGate: false,
         },
+        ...(['socket', 'room', 'upgrade-only'] as const).map((mode) => ({
+          pattern: `/${mode}/:id`,
+          methods: [],
+          params: ['id'],
+          catchAll: false,
+          env: null,
+          filePath: `${mode}.ws.ts`,
+          className: mode === 'room' ? 'RoomWs' : mode === 'socket' ? 'SocketWs' : 'UpgradeOnlyWs',
+          bindingName:
+            mode === 'room' ? 'ROOM_WS' : mode === 'socket' ? 'SOCKET_WS' : 'UPGRADE_ONLY_WS',
+          mode: mode === 'room' ? ('room' as const) : ('socket' as const),
+          hasAuthGate: false,
+        })),
       ],
       middleware: [{ order: 1, filePath: '01.auth.ts' }],
       jobs: [],
@@ -142,7 +178,13 @@ export default {
         auth: null,
       }),
     );
-    writeFileSync(workerPath, compileWorkerEntry({ webSocketClasses: ['ChatWs'], runtimeEnvPath }));
+    writeFileSync(
+      workerPath,
+      compileWorkerEntry({
+        webSocketClasses: ['ChatWs', 'SocketWs', 'RoomWs', 'UpgradeOnlyWs'],
+        runtimeEnvPath,
+      }),
+    );
 
     await build({
       configFile: false,
@@ -172,7 +214,12 @@ export default {
       convertV4MiniflareOptions({
         compatibilityDate: '2026-07-01',
         compatibilityFlags: ['nodejs_compat', 'web_socket_manual_reply_to_close'],
-        durableObjects: { CHAT_WS: 'ChatWs' },
+        durableObjects: {
+          CHAT_WS: 'ChatWs',
+          SOCKET_WS: 'SocketWs',
+          ROOM_WS: 'RoomWs',
+          UPGRADE_ONLY_WS: 'UpgradeOnlyWs',
+        },
         modules: true,
         modulesRoot: output,
         scriptPath: join(output, 'worker.mjs'),
@@ -225,6 +272,73 @@ export default {
     });
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-http-handler')).toBe('GET');
     expect(await response.text()).toBe('HTTP route');
+  });
+
+  it.each(['socket', 'room'] as const)(
+    'forwards ordinary HTTP to the %s onRequest hook',
+    async (mode) => {
+      const response = await miniflare.dispatchFetch(`http://localhost/${mode}/ordinary`, {
+        headers: { Authorization: 'Bearer allowed' },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-ws-on-request')).toBe(mode);
+      expect(await response.json()).toEqual({
+        kind: mode,
+        id: 'id=ordinary',
+        params: { id: 'ordinary' },
+        method: 'GET',
+        requests: 1,
+        ...(mode === 'room' ? { active: 0 } : {}),
+      });
+    },
+  );
+
+  it('returns 426 for a WebSocket route without an ordinary HTTP hook', async () => {
+    const response = await miniflare.dispatchFetch('http://localhost/upgrade-only/ordinary', {
+      headers: { Authorization: 'Bearer allowed' },
+    });
+    expect(response.status).toBe(426);
+    expect(await response.text()).toBe('Upgrade Required');
+  });
+
+  it.each(['socket', 'room', 'upgrade-only'] as const)(
+    'authorizes ordinary %s requests before DO dispatch',
+    async (mode) => {
+      const response = await miniflare.dispatchFetch(`http://localhost/${mode}/restricted`);
+      expect(response.status).toBe(401);
+      expect(await response.text()).toBe('Unauthorized');
+      const allowed = await miniflare.dispatchFetch(`http://localhost/${mode}/restricted`, {
+        headers: { Authorization: 'Bearer allowed' },
+      });
+      expect(allowed.status).toBe(mode === 'upgrade-only' ? 426 : 200);
+      if (mode !== 'upgrade-only') {
+        expect(((await allowed.json()) as { requests: number }).requests).toBe(1);
+      }
+    },
+  );
+
+  it('keeps GET and HEAD HTTP precedence while other methods use onRequest', async () => {
+    const head = await miniflare.dispatchFetch('http://localhost/chat', {
+      method: 'HEAD',
+      headers: { Authorization: 'Bearer allowed' },
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('x-http-handler')).toBe('GET');
+    expect(await head.text()).toBe('');
+    const post = await miniflare.dispatchFetch('http://localhost/chat', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer allowed' },
+    });
+    expect(post.status).toBe(200);
+    expect(await post.json()).toEqual({ dispatches: 1 });
+    const wsHead = await miniflare.dispatchFetch('http://localhost/socket/head', {
+      method: 'HEAD',
+      headers: { Authorization: 'Bearer allowed' },
+    });
+    expect(wsHead.status).toBe(200);
+    expect(wsHead.headers.get('x-ws-on-request')).toBe('socket');
+    expect(await wsHead.text()).toBe('');
   });
 });

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { eq, sql } from 'drizzle-orm';
 import {
   afterAll,
@@ -274,7 +275,11 @@ async function assertMigrated(id: string, projectId: string, entries: Array<Asse
     });
     expect(serving[entry.path]).toBe(`!${entry.hash}`);
     const object = await env.STATIC_ASSETS_R2.get(`assets/${projectId}/${entry.hash}`);
-    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(new Uint8Array(entry.bytes));
+    // Compare every byte without Vitest walking millions of typed-array keys
+    // in the historical 2 MiB boundary case on a shared CI runner.
+    expect(Buffer.compare(Buffer.from(await object!.arrayBuffer()), Buffer.from(entry.bytes))).toBe(
+      0,
+    );
   }
 }
 

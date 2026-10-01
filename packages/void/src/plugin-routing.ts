@@ -487,6 +487,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       resolvedConfig = config;
       authClientPath = resolveAuthClientPath(config);
       compileOptions.dev = config.command === 'serve';
+      compileOptions.assetsDir = config.build.assetsDir;
       compileOptions.reactRefresh = config.plugins.some(
         (plugin) =>
           plugin.name === 'vite:react-babel' ||

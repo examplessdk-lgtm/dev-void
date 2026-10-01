@@ -10,6 +10,7 @@ vi.mock('better-auth', () => ({
   betterAuth: mocks.betterAuth,
 }));
 
+import type { AuthState } from '../../src/runtime/auth.ts';
 import {
   createVoidAuthRuntime,
   type VoidAuthRuntimeOptions,
@@ -28,7 +29,7 @@ const runtime = createVoidAuthRuntime(
   async () => {},
 );
 
-function createApp(sessionResult: { response: null; headers: Headers }): Hono {
+function createApp(sessionResult: { response: AuthState | null; headers: Headers }): Hono {
   mocks.getSession.mockResolvedValue(sessionResult);
   mocks.betterAuth.mockReturnValue({
     api: { getSession: mocks.getSession },
@@ -98,5 +99,83 @@ describe('runVoidAuthMiddleware response headers', () => {
       'session=auth; Path=/; HttpOnly',
     ]);
     await expect(response.text()).resolves.toBe('ok');
+  });
+
+  it.each(['public, max-age=60', 'private', 'no-store', 'no-cache'])(
+    'preserves an anonymous application cache policy: %s',
+    async (policy) => {
+      const app = createApp({
+        response: null,
+        headers: new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' }),
+      });
+      app.get('/public', (c) => c.text('content', 200, { 'cache-control': policy }));
+      const response = await app.request('http://localhost/public', undefined, {
+        BETTER_AUTH_SECRET: 'test-secret',
+      });
+      expect(response.headers.get('cache-control')).toBe(policy);
+      expect(response.headers.has('pragma')).toBe(false);
+    },
+  );
+
+  it.each(['cookie', 'authorization', 'cf-access-jwt-assertion'])(
+    'keeps the session lookup private for requests with %s',
+    async (header) => {
+      const app = createApp({
+        response: null,
+        headers: new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' }),
+      });
+      app.get('/private', (c) => c.text('content', 200, { 'cache-control': 'public, max-age=60' }));
+      const response = await app.request(
+        'http://localhost/private',
+        { headers: { [header]: 'synthetic-credential' } },
+        { BETTER_AUTH_SECRET: 'test-secret' },
+      );
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('pragma')).toBe('no-cache');
+    },
+  );
+
+  it('keeps a resolved authenticated session private even without a request credential header', async () => {
+    const now = new Date();
+    const app = createApp({
+      response: {
+        user: {
+          id: 'local-user',
+          name: 'Local user',
+          email: 'user@example.test',
+          emailVerified: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        session: {
+          id: 'local-session',
+          userId: 'local-user',
+          token: 'synthetic-token',
+          expiresAt: now,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      headers: new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' }),
+    });
+    app.get('/private', (c) => c.text('content', 200, { 'cache-control': 'public, max-age=60' }));
+    const response = await app.request('http://localhost/private', undefined, {
+      BETTER_AUTH_SECRET: 'test-secret',
+    });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('pragma')).toBe('no-cache');
+  });
+
+  it('does not allow a cookie rotation without its own cache policy to retain a public response', async () => {
+    const app = createApp({
+      response: null,
+      headers: new Headers({ 'set-cookie': 'session=rotated; Path=/; HttpOnly' }),
+    });
+    app.get('/refresh', (c) => c.text('content', 200, { 'cache-control': 'public, max-age=60' }));
+    const response = await app.request('http://localhost/refresh', undefined, {
+      BETTER_AUTH_SECRET: 'test-secret',
+    });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.getSetCookie()).toEqual(['session=rotated; Path=/; HttpOnly']);
   });
 });

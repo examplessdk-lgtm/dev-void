@@ -234,7 +234,7 @@ function bindingsFromOutput(
   return bindings;
 }
 
-function exportsFromOutput(exports: unknown): Json | undefined {
+function exportsFromOutput(exports: unknown, bindings: Array<Json>): Json | undefined {
   if (exports === undefined) {
     return undefined;
   }
@@ -243,8 +243,20 @@ function exportsFromOutput(exports: unknown): Json | undefined {
     throw new Error('Cloudflare Durable Object exports were not readable.');
   }
   const result: Json = {};
+  const workflows = new Map<string, string>();
   for (const [name, raw] of Object.entries(entries)) {
     const value = object(raw);
+    if (value?.type === 'workflow') {
+      const workflowName = requiredString(value.name, `Workflow export ${name} name`);
+      if (workflows.has(workflowName)) {
+        throw new Error(`Cloudflare Workflow ${workflowName} has multiple local exports.`);
+      }
+      workflows.set(workflowName, name);
+      // cf uploads identity only. Execution settings stay in the immutable
+      // Build Output and are applied by its separate typed trigger deployment.
+      result[name] = { type: 'workflow', name: workflowName };
+      continue;
+    }
     if (value?.type === 'worker') {
       result[name] = {
         type: 'worker',
@@ -289,7 +301,62 @@ function exportsFromOutput(exports: unknown): Json | undefined {
       throw new Error(`Cloudflare Durable Object export ${name} has no storage type.`);
     }
   }
+  for (const binding of bindings) {
+    if (binding.type !== 'workflow') {
+      continue;
+    }
+    const localExport = workflows.get(String(binding.workflow_name));
+    if (
+      localExport !== undefined &&
+      (binding.script_name !== undefined || binding.class_name !== localExport)
+    ) {
+      throw new Error(
+        `Cloudflare Workflow binding ${binding.name} conflicts with its local export.`,
+      );
+    }
+  }
   return result;
+}
+
+async function preflightWorkflowExports(options: {
+  exports: Json | undefined;
+  accountUrl: string;
+  workerName: string;
+  token: string;
+  verifyUploader: () => boolean;
+}): Promise<void> {
+  for (const raw of Object.values(options.exports ?? {})) {
+    const entry = object(raw);
+    if (entry?.type !== 'workflow') {
+      continue;
+    }
+    const name = requiredString(entry.name, 'Workflow name');
+    let workflow: Json;
+    try {
+      workflow = await apiResult(
+        `${options.accountUrl}/workflows/${encodeURIComponent(name)}`,
+        options.token,
+        'GET',
+        undefined,
+        options.verifyUploader,
+      );
+    } catch (cause) {
+      if (cause instanceof CloudflareApiError && cause.status === 404 && cause.code === 10200) {
+        continue;
+      }
+      throw cause;
+    }
+    // The canonical uploader prompts before reassigning an account-wide name.
+    // The pinned path must not silently adopt another Worker's Workflow.
+    if (
+      workflow.name !== name ||
+      workflow.script_name !== options.workerName ||
+      typeof workflow.class_name !== 'string' ||
+      !workflow.class_name
+    ) {
+      throw new Error(`Cloudflare Workflow ${name} is not owned by this Worker.`);
+    }
+  }
 }
 
 function assetConfigFromOutput(value: unknown): Json | undefined {
@@ -964,7 +1031,7 @@ export async function uploadPinnedCloudflareVersion(options: {
     activeSecrets,
     explicitSecrets,
   );
-  const exports = exportsFromOutput(config.exports);
+  const exports = exportsFromOutput(config.exports, bindings);
   const containerPlans = containerPlansFromOutput(built.containers, exports, bindings);
   // The scripts uploader normally carries forward remote vars. Preserve only
   // those implicit bindings from the live version, never the inactive upload.
@@ -1022,6 +1089,13 @@ export async function uploadPinnedCloudflareVersion(options: {
     });
   }
   const accountUrl = `${options.apiBaseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(options.accountId)}`;
+  await preflightWorkflowExports({
+    exports,
+    accountUrl,
+    workerName: options.workerName,
+    token: options.token,
+    verifyUploader: options.verifyUploader,
+  });
   await preflightContainerApplications(
     containerPlans,
     active.bindings,
