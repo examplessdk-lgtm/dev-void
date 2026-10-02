@@ -1,0 +1,33 @@
+docs/guide/platform/administration/zero-trust.md
+  s_313c35144715bb::t_45419a083ee875 128-131
+platform/packages/api/README.md
+  s_313c35144715bb::t_2414444c120959 357-361
+platform/packages/api/src/zero-trust/cloudflare.ts
+  s_313c35144715bb::t_3a46868964a238 499-606
+platform/packages/api/src/zero-trust/configuration.ts
+  s_313c35144715bb::t_ed96712888f2cc 51
+platform/packages/api/src/zero-trust/operation.ts
+  s_313c35144715bb::t_6b1c251f8ad28e 487-490,706-716
+platform/packages/api/src/zero-trust/status.ts
+  s_313c35144715bb::t_8cd3b699e89afc 7,86,88-89
+platform/packages/api/test/integration/zero-trust-service.test.ts
+  s_313c35144715bb::t_e430482b3e2f8a 92-97,112-118,146-221
+platform/packages/api/test/unit/zero-trust-cloudflare.test.ts
+  s_313c35144715bb::t_51e94c003a2f56 30-33,69-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1047402ff7746c236d4397ad7143c1064fcbb962",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
