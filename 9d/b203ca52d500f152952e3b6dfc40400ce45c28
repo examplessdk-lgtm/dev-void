@@ -1,0 +1,23 @@
+platform/packages/api/src/usage-counter.ts
+  s_fe834b00f92102::t_348ed5260c519e 447-450,456-460,497-500,514-530
+platform/packages/api/test/integration/plan-transitions.test.ts
+  s_fe834b00f92102::t_6e52e8346113cc 8,50-136
+platform/packages/api/test/unit/usage-counter.test.ts
+  s_fe834b00f92102::t_4950b35fbb41ed 2379-2409
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9db203ca52d500f152952e3b6dfc40400ce45c28",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
