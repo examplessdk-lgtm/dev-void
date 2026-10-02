@@ -1,0 +1,19 @@
+platform/packages/api/test/integration/operator-plans.test.ts
+  s_857317d1a18ebe::t_28291d2e37ed73 42-46,52-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "73d7de6ece38c59856604d97528a88de1e97b341",
+  "prompts": {},
+  "sessions": {
+    "s_857317d1a18ebe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fce2-c04a-7d80-92fd-2b136c45faa5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
