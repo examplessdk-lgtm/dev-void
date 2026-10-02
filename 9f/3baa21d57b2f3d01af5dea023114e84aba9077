@@ -1,0 +1,21 @@
+packages/void/src/cli/subcommand-prompt.ts
+  s_122e5a5858a175::t_1df03c00e9e170 7-14,115-135,137-143,146,149,176-180,194,198,200,204,208,211-214,217,220,224,240,242,250,256-257,260-263,279,281,285-286,289,297,302,305,309,348-353
+packages/void/test/unit/subcommand-prompt.test.ts
+  s_122e5a5858a175::t_dbe809bcb716f5 3-9,23,58,78-80,133-202
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9f3baa21d57b2f3d01af5dea023114e84aba9077",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
