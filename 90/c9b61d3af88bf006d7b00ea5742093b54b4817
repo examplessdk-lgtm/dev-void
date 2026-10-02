@@ -1,0 +1,19 @@
+docs/guide/sandboxes.md
+  s_04e496ba781942::t_e1db785b52b5ed 30,65,88-90,104,108,110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "90c9b61d3af88bf006d7b00ea5742093b54b4817",
+  "prompts": {},
+  "sessions": {
+    "s_04e496ba781942": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9f7-e7e5-7423-b5f5-68eea7153649",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
