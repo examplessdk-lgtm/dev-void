@@ -1,0 +1,21 @@
+platform/packages/api/src/middleware/platform-access.ts
+  s_313c35144715bb::t_23fc29ac55138e 70-71
+platform/packages/api/test/integration/platform-app-access.test.ts
+  s_313c35144715bb::t_253b6550d22508 8,19,25,49,81,109,114-116,208-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c98a7087a892736c1457d1e4606490c35edce938",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
