@@ -1,0 +1,23 @@
+docs/guide/platform/installation/ci.md
+  s_cdab927531343d::t_04c2d84213d389 52
+docs/reference/cli/platform-installation.md
+  s_cdab927531343d::t_c67ec49009e154 48
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_cdab927531343d::t_0692581164c662 292
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b223d6b15fbe200f4ded7c671508b50319275829",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
