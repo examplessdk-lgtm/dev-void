@@ -1,0 +1,29 @@
+docs/guide/edge/revalidation.md
+  s_ca3f46e15212e0::t_0b678c347b149a 101-102
+packages/isr/src/core.ts
+  s_ca3f46e15212e0::t_aa1a02f1a64ff6 8,283-295
+packages/void/src/pages/protocol.ts
+  s_ca3f46e15212e0::t_a91433e8426b23 87-91,96-106,492-494
+packages/void/test/unit/isr-cache.test.ts
+  s_ca3f46e15212e0::t_35944ac1b8829e 177-183,772-804,1205
+packages/void/test/unit/pages-protocol.test.ts
+  s_ca3f46e15212e0::t_c992a5e3e5e2b4 67-86
+platform/packages/dispatch/test/unit/index.test.ts
+  s_ca3f46e15212e0::t_b34629b47eaed0 5482-5517
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "022aa5d18e82d717fc41b24f3cf5307c7fd59fe2",
+  "prompts": {},
+  "sessions": {
+    "s_ca3f46e15212e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-0c30-7930-adb7-2882f4a5ef16",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
