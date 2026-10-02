@@ -40,6 +40,7 @@ import {
 } from '../../src/schema.ts';
 import {
   clearTables,
+  createTestBuild,
   createTestProject,
   createTestUser,
   setupEnv,
@@ -361,12 +362,18 @@ describe('provider-independent first administrator setup', () => {
       env.JWT_SECRET,
     );
     const project = await createTestProject(env.db, administrator.id, 'recovery-scoped-token');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: administrator.id,
+      status: 'building',
+    });
     const scopedDeployToken = await signJwt(
       {
         sub: administrator.id,
         login: administrator.login,
         aud: 'deploy',
         project: project.id,
+        build: build.id,
       },
       env.JWT_SECRET,
     );

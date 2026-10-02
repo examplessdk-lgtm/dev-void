@@ -209,7 +209,7 @@ export type ApiEnv = Env & {
     /**
      * Build id a scoped deploy token is bound to. Set by `authMiddleware` for
      * `aud:'deploy'` tokens that carry a `build` claim; absent for full
-     * `aud:'api'` tokens and legacy deploy tokens. The deploy endpoint rejects
+     * `aud:'api'` tokens and CI credential tokens. The deploy endpoint rejects
      * the token once this build is no longer active (superseded/cancelled), so
      * a stale runner can't deploy an older commit after being superseded.
      */

@@ -21,6 +21,7 @@ import { app } from '../../src/index.ts';
 import { platformAuthSettings, users } from '../../src/schema.ts';
 import {
   clearTables,
+  createTestBuild,
   createTestProject,
   createTestUser,
   setupEnv,
@@ -333,8 +334,13 @@ describe('Access-protected platform requests', () => {
     expect((await request('/auth/login', access)).status).toBe(403);
     expect((await request('/projects', access)).status).toBe(403);
     const project = await createTestProject(env.db, user.id, 'ci-project');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: user.id,
+      status: 'building',
+    });
     const deploy = await signJwt(
-      { sub: user.id, login: user.login, aud: 'deploy', project: project.id },
+      { sub: user.id, login: user.login, aud: 'deploy', project: project.id, build: build.id },
       env.JWT_SECRET,
     );
     expect((await request('/projects', access, deploy)).status).toBe(200);

@@ -152,7 +152,10 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   }
 
   if (payload.aud === 'deploy') {
-    if (!payload.project) {
+    // Every deploy token names its project and is bound to either one build
+    // (remote builds) or one revocable CI credential. A token with neither
+    // would skip both the build-state and the revocation checks below.
+    if (!payload.project || (!payload.build && !payload.credential)) {
       return context.json(
         {
           error: 'invalid or expired token',
@@ -163,10 +166,9 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
       );
     }
     context.set('deployScope', payload.project);
-    // Bind the token to its build (when present). The deploy endpoint rejects a
-    // token whose build is no longer active so a stale/superseded runner can't
-    // deploy. Undefined for legacy deploy tokens with no build claim — the
-    // guard only fires when this is set.
+    // Bind the token to its build. The deploy endpoint rejects a token whose
+    // build is no longer active so a stale/superseded runner can't deploy.
+    // Undefined for CI credential tokens, which are checked for revocation below.
     context.set('deployBuild', payload.build);
     context.set('deployTokenExpiresAt', payload.exp);
     if (payload.credential) {
@@ -219,8 +221,8 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
     // revoke centrally here, before ANY allowlisted route runs. The /deploy
     // handler keeps its own up-front guard and final-transaction re-check (the
     // latter still matters for a mid-flight supersede during the long deploy);
-    // this gates the other allowlisted endpoints too. A token WITHOUT a `build`
-    // claim (legacy deploy tokens) is unaffected.
+    // this gates the other allowlisted endpoints too. CI credential tokens carry
+    // no `build` claim and were checked for revocation above.
     if (payload.build) {
       const boundBuild = await getBuild(context.get('db'), payload.build);
       if (

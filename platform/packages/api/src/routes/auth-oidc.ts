@@ -101,6 +101,9 @@ app.post('/github-oidc', async (context) => {
   if (typeof claims.repository_owner_id !== 'string' || claims.repository_owner_id === '') {
     return context.json({ error: 'oidc token missing repository_owner_id' }, 401);
   }
+  if (typeof claims.run_attempt !== 'string' || claims.run_attempt === '') {
+    return context.json({ error: 'oidc token missing run_attempt' }, 401);
+  }
   const workflowRef =
     typeof claims.job_workflow_ref === 'string' && claims.job_workflow_ref !== ''
       ? claims.job_workflow_ref
@@ -265,8 +268,8 @@ app.post('/github-oidc', async (context) => {
   const githubRunId = String(claims.run_id);
   // A RERUN reuses the same run_id with an incremented run_attempt; persist it
   // so the workflow_run completion handler can finalize the RIGHT attempt's
-  // build. Null-tolerant: a token lacking the claim creates a NULL-attempt row.
-  const githubRunAttempt = claims.run_attempt != null ? String(claims.run_attempt) : null;
+  // build.
+  const githubRunAttempt = claims.run_attempt;
   const result = await createGithubActionsBuildWithinLimit(db, {
     projectId: connection.project_id,
     commitSha: claims.sha,

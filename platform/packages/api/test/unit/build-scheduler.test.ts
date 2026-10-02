@@ -1057,8 +1057,7 @@ describe('BuildScheduler.alarm', () => {
     // it `cancelled` ('github connection config changed') and never calls
     // startBuild. A config change is not a build failure, so it is NOT failed, and
     // the JIT branch-head check in BuildManager would not catch this (it is
-    // branch-HEAD-only). `build.branch != null` so a null-branch legacy row is
-    // exempt (covered by the existing tests that use the default 'main' branch).
+    // branch-HEAD-only).
     db.users.set('u1', { plan: 'free', login: 'octocat' });
     enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1', branch: 'main' });
     // Connection retargeted to a different branch after the build was queued.
@@ -1078,6 +1077,22 @@ describe('BuildScheduler.alarm', () => {
     // Never claimed (the guard short-circuits before the atomic claim).
     expect(db.claimArgs).toEqual([]);
     // Cancelled with the config-change reason, NOT failed.
+    expect(db.cancelled).toEqual([{ id: 'b1', error: 'github connection config changed' }]);
+    expect(db.failed).toEqual([]);
+  });
+
+  it('cancels a queued build without a branch instead of starting it', async () => {
+    db.users.set('u1', { plan: 'free', login: 'octocat' });
+    enqueue({ id: 'b1', user_id: 'u1', project_id: 'p1', branch: null });
+    const startBuild = vi.fn(async () => {});
+    const ctx = makeStubCtx();
+    const env = makeEnv(startBuild);
+    const s = makeScheduler(ctx, env);
+
+    await s.alarm();
+
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(db.claimArgs).toEqual([]);
     expect(db.cancelled).toEqual([{ id: 'b1', error: 'github connection config changed' }]);
     expect(db.failed).toEqual([]);
   });

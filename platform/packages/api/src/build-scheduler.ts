@@ -174,11 +174,8 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
       // github_actions) must not run here — the JIT freshness check in
       // BuildManager is branch-HEAD-only and does NOT catch a branch/executor
       // mismatch. A config change is not a build failure, so mark it `cancelled`.
-      // Guard `build.branch != null` so a null-branch legacy row is left alone.
-      if (
-        build.branch != null &&
-        (build.branch !== connection.branch || build.executor !== connection.build_executor)
-      ) {
+      // A row without a branch never matches, so it is cancelled the same way.
+      if (build.branch !== connection.branch || build.executor !== connection.build_executor) {
         await updateBuildStatus(db, build.id, 'cancelled', {
           error: 'github connection config changed',
           completedAt: new Date().toISOString(),
@@ -235,7 +232,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
         userId: build.user_id,
         login: user.login,
         commitSha: build.commit_sha ?? '',
-        branch: build.branch ?? connection.branch,
+        branch: build.branch,
         repoFullName: connection.repo_full_name,
         installationId: connection.installation_id,
         connectionId: connection.id,

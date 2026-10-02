@@ -135,7 +135,7 @@ type WorkflowRunPayload = {
   repository?: { full_name?: string; id?: number | string };
   workflow_run?: {
     id?: number | string;
-    run_attempt?: number | string;
+    run_attempt: number | string;
     conclusion?: string | null;
     head_sha?: string;
   };
@@ -520,7 +520,7 @@ async function rerunBuildForCommit(
     console.error('[webhooks] failed to poke build scheduler:', err);
   }
 
-  return context.json({ ok: true, buildId: buildIds[0], buildIds });
+  return context.json({ ok: true, buildIds });
 }
 
 /** Process a webhook whose caller has already verified its raw GitHub HMAC. */
@@ -814,7 +814,7 @@ export async function handleVerifiedGitHubWebhook(
         console.error('[webhooks] failed to poke build scheduler:', err);
       }
 
-      return context.json({ ok: true, buildId: buildIds[0], buildIds });
+      return context.json({ ok: true, buildIds });
     }
 
     case 'installation': {
@@ -1137,6 +1137,11 @@ export async function handleVerifiedGitHubWebhook(
       if (runId === undefined || runId === null) {
         return context.json({ ok: true, ignored: 'missing workflow_run id' });
       }
+      // GitHub always sends run_attempt; a payload without it is malformed.
+      const runAttempt: unknown = data.workflow_run?.run_attempt;
+      if (typeof runAttempt !== 'number' && typeof runAttempt !== 'string') {
+        return context.json({ ok: true, ignored: 'missing workflow_run run_attempt' });
+      }
 
       // A GitHub `run_id` is unique only WITHIN a repository, so the build must
       // be resolved by the payload's repository (mapped to a connected project)
@@ -1167,10 +1172,8 @@ export async function handleVerifiedGitHubWebhook(
       // build carries this run id (a repo may back multiple projects). A RERUN
       // reuses the same run_id with an incremented run_attempt, so resolution is
       // scoped to the attempt: a redelivered/late completion for attempt 1 must
-      // NOT resolve to attempt 2's active build. Null-tolerant — an old delivery
-      // whose payload lacks run_attempt falls back to matching null-attempt rows.
-      const runAttempt = data.workflow_run?.run_attempt;
-      const runAttemptStr = runAttempt != null ? String(runAttempt) : null;
+      // NOT resolve to attempt 2's active build.
+      const runAttemptStr = String(runAttempt);
       // A single repo can back multiple github_actions projects (matrix /
       // multiple --project jobs sharing one run_id+attempt with distinct
       // project_ids). GitHub fires workflow_run:completed ONCE, so collect EVERY
@@ -1316,9 +1319,9 @@ export async function handleVerifiedGitHubWebhook(
       if (buildIds.length === 0) {
         return context.json({ ok: true, ignored: 'build already terminal' });
       }
-      // Return both the plural list (the multi-project fan-out contract, mirrors
-      // the push handler) and the singular alias for backward compatibility.
-      return context.json({ ok: true, buildId: buildIds[0], buildIds });
+      // One completion can finalize builds for several projects (mirrors the
+      // push handler), so return every finalized build id.
+      return context.json({ ok: true, buildIds });
     }
 
     case 'organization': {

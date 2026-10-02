@@ -115,20 +115,6 @@ describe('github_installation_members', () => {
     expect(all).toHaveLength(1);
   });
 
-  it('upsert accepts a null github_account_id', async () => {
-    const user = await createTestUser(env.db);
-    await seedInstall(env.db, '100');
-
-    const row = await upsertGitHubInstallationMember(env.db, {
-      installationId: '100',
-      userId: user.id,
-      githubAccountId: null,
-      ttlSeconds: MEMBERSHIP_TTL_SECONDS,
-    });
-
-    expect(row.github_account_id).toBeNull();
-  });
-
   it('hasActiveInstallationMembership: true when fresh, false when absent, false when expired', async () => {
     const user = await createTestUser(env.db);
     await seedInstall(env.db, '100');
@@ -151,7 +137,7 @@ describe('github_installation_members', () => {
       id: generateId('ghm'),
       installation_id: '200',
       user_id: user.id,
-      github_account_id: null,
+      github_account_id: 'gh-member',
       expires_at: sql`now() - interval '1 second'`,
     });
     expect(await hasActiveInstallationMembership(env.db, '200', user.id)).toBe(false);
@@ -166,19 +152,19 @@ describe('github_installation_members', () => {
     await upsertGitHubInstallationMember(env.db, {
       installationId: '100',
       userId: alice.id,
-      githubAccountId: null,
+      githubAccountId: 'gh-member',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
     await upsertGitHubInstallationMember(env.db, {
       installationId: '100',
       userId: bob.id,
-      githubAccountId: null,
+      githubAccountId: 'gh-member',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
     await upsertGitHubInstallationMember(env.db, {
       installationId: '200',
       userId: alice.id,
-      githubAccountId: null,
+      githubAccountId: 'gh-member',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
 
@@ -199,7 +185,7 @@ describe('github_installation_members', () => {
       await upsertGitHubInstallationMember(env.db, {
         installationId: inst,
         userId: alice.id,
-        githubAccountId: null,
+        githubAccountId: 'gh-member',
         ttlSeconds: MEMBERSHIP_TTL_SECONDS,
       });
     }
@@ -207,7 +193,7 @@ describe('github_installation_members', () => {
     await upsertGitHubInstallationMember(env.db, {
       installationId: '100',
       userId: bob.id,
-      githubAccountId: null,
+      githubAccountId: 'gh-member',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
 
@@ -240,7 +226,7 @@ describe('github_installation_members', () => {
     await upsertGitHubInstallationMember(env.db, {
       installationId: '100',
       userId: user.id,
-      githubAccountId: null,
+      githubAccountId: 'gh-member',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
 
@@ -251,13 +237,13 @@ describe('github_installation_members', () => {
         id: generateId('ghm'),
         installation_id: '100',
         user_id: user.id,
-        github_account_id: null,
+        github_account_id: 'gh-member',
         expires_at: sql`now() + interval '1 hour'`,
       }),
     ).rejects.toThrow();
   });
 
-  it('deleteGitHubInstallationMembersByGithubAccount: deletes X-keyed rows for any bearer, spares Z-keyed + NULL + out-of-scope + empty ids', async () => {
+  it('deleteGitHubInstallationMembersByGithubAccount: deletes X-keyed rows for any bearer, spares Z-keyed + out-of-scope + empty ids', async () => {
     const alice = await createTestUser(env.db, 'alice');
     const bob = await createTestUser(env.db, 'bob', 'google', 'google-bob');
     const carol = await createTestUser(env.db, 'carol', 'google', 'google-carol');
@@ -294,12 +280,12 @@ describe('github_installation_members', () => {
       githubAccountId: 'Z',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
-    // Alice also holds a NULL-proof membership under 300 — not attributable to X,
-    // must SURVIVE.
+    // Bob also holds a Y-keyed membership under 300 — out of scope and not
+    // X-keyed, must SURVIVE.
     await upsertGitHubInstallationMember(env.db, {
       installationId: '300',
       userId: bob.id,
-      githubAccountId: null,
+      githubAccountId: 'Y',
       ttlSeconds: MEMBERSHIP_TTL_SECONDS,
     });
 
@@ -318,7 +304,7 @@ describe('github_installation_members', () => {
     expect(m100[0]!.github_account_id).toBe('Z');
     // Install 200: alice's X-keyed row is gone.
     expect(await getTestGitHubInstallationMembers(env.db, '200')).toHaveLength(0);
-    // Install 300: bob's NULL-proof row was out of scope AND not X-keyed → survives.
+    // Install 300: bob's Y-keyed row was out of scope AND not X-keyed → survives.
     const m300 = await getTestGitHubInstallationMembers(env.db, '300');
     expect(m300).toHaveLength(1);
     expect(m300[0]!.user_id).toBe(bob.id);
@@ -523,16 +509,6 @@ describe('github_installation_revocations — monotonic revocation tombstone', (
 
     // Empty id list → empty Map.
     expect((await getInstallationRevocationsForAccount(env.db, [], X)).size).toBe(0);
-  });
-
-  it('getInstallationRevocationsForAccount returns an empty Map for a null/empty github account id', async () => {
-    await seedInstall(env.db, '100');
-    // A tombstone exists for X, but a null-account artifact (e.g. a join_code with
-    // no proven account id) can never match — the helper short-circuits to empty.
-    await recordInstallationRevocations(env.db, ['100'], X);
-
-    expect((await getInstallationRevocationsForAccount(env.db, ['100'], null)).size).toBe(0);
-    expect((await getInstallationRevocationsForAccount(env.db, ['100'], '')).size).toBe(0);
   });
 
   it('a raw duplicate insert with a new id raises a unique violation', async () => {

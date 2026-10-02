@@ -1247,8 +1247,9 @@ export const githubConnections = pgTable(
 // installation id as text with NO `.references()`, deliberately mirroring
 // `github_connections.installation_id` (every call site has the numeric id in
 // hand). `user_id` cascades on user delete (mirrors `oauth_accounts`).
-// `github_account_id` is NULLABLE because the backstop/JOIN paths may not carry
-// a caller account id.
+// `github_account_id` is the GitHub account that proved membership. Every
+// writer sets it. The column stays nullable for now: the schema-compat CI job
+// runs the deployed runtime's tests, which still insert rows without it.
 // ---------------------------------------------------------------------------
 export const githubInstallationMembers = pgTable(
   'github_installation_members',
@@ -1399,11 +1400,10 @@ export const builds = pgTable(
     branch: text('branch'),
     deployment_id: text('deployment_id').references(() => deployments.id),
     github_run_id: text('github_run_id'),
-    // The GitHub Actions `run_attempt` (as text, nullable). A workflow RERUN
-    // reuses the same `run_id` with an incremented `run_attempt`, so the pair
+    // The GitHub Actions `run_attempt` (as text). A workflow RERUN reuses the
+    // same `run_id` with an incremented `run_attempt`, so the pair
     // `(github_run_id, github_run_attempt)` — not `run_id` alone — identifies a
-    // single attempt. Nullable for backward-compat: container builds and rows
-    // created before this column carry NULL. The `workflow_run` completion
+    // single attempt. NULL means a container build. The `workflow_run` completion
     // handler matches on the attempt so a redelivered/late completion from
     // attempt 1 cannot finalize attempt 2's active build.
     github_run_attempt: text('github_run_attempt'),
@@ -1441,9 +1441,8 @@ export const builds = pgTable(
     // attempt is still rejected. A GitHub RERUN after the prior attempt reaches
     // a terminal status (`complete`/`failed`/`cancelled`) must be able to start
     // a fresh build, so terminal rows are intentionally NOT covered. Rows with a
-    // NULL `github_run_attempt` (container builds, or rows created before this
-    // column) are not covered by the partial WHERE — fine, this feature is not
-    // yet in production.
+    // NULL `github_run_attempt` are container builds and are not covered by the
+    // partial WHERE.
     uniqueIndex('idx_builds_project_github_run_id')
       .on(table.project_id, table.github_run_id, table.github_run_attempt)
       .where(

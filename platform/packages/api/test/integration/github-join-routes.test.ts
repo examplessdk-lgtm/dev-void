@@ -169,7 +169,7 @@ async function mintJoinState(payload: {
 // be exercised without racing the DB clock.
 async function mintJoinCode(payload: {
   installationIds: Array<string>;
-  githubAccountId?: string | null;
+  githubAccountId?: string;
   codeChallenge: string;
   iat: number;
   exp?: number;
@@ -983,6 +983,39 @@ describe('POST /github/join/complete', () => {
         githubAccountId: '5551234',
         codeChallenge: challenge,
         codeChallengeMethod: 'S256',
+        exp: Date.now() + 5 * 60 * 1000,
+      }),
+    );
+    const signature = await hmacSignState(encoded, JWT_SECRET);
+    const joinCode = `${encoded}.${signature}`;
+
+    const res = await app.fetch(
+      new Request(
+        'http://localhost/github/join/complete',
+        authedPost(joiner.jwt, { join_code: joinCode, code_verifier: CODE_VERIFIER }),
+      ),
+      { ...env, ...GITHUB_APP_USER_OAUTH_ENV },
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid join_code' });
+    expect(await countMemberRows(env.db, '700', joiner.id)).toBe(0);
+  });
+
+  // A membership must record the GitHub account that proved access.
+  it.each([null, ''])('rejects a join_code with GitHub account id %j', async (githubAccountId) => {
+    const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
+    await seedInstall({ installationId: '700' });
+
+    const challenge = await createCodeChallenge(CODE_VERIFIER);
+    const encoded = btoa(
+      JSON.stringify({
+        purpose: 'join',
+        installationIds: ['700'],
+        githubAccountId,
+        codeChallenge: challenge,
+        codeChallengeMethod: 'S256',
+        iat: Date.now(),
         exp: Date.now() + 5 * 60 * 1000,
       }),
     );

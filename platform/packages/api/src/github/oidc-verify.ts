@@ -25,12 +25,10 @@ export type GithubOidcClaims = Readonly<{
   sha: string;
   run_id: string;
   // The workflow run's attempt number (as a string), incremented on each RERUN
-  // of the same `run_id`. GitHub mints it on the Actions OIDC token. Optional
-  // for backward-compat: a token lacking it must still authorize (the build is
-  // then created with a NULL attempt). The exchange persists it so the
-  // `workflow_run` completion handler can match a redelivered completion to the
-  // correct attempt's build.
-  run_attempt?: string;
+  // of the same `run_id`. GitHub mints it on every Actions OIDC token. The
+  // exchange persists it so the `workflow_run` completion handler can match a
+  // redelivered completion to the correct attempt's build.
+  run_attempt: string;
   workflow: string;
   // `workflow_ref` identifies the ENTRY workflow file for the run, in the form
   // `OWNER/REPO/.github/workflows/FILE@REF`. `job_workflow_ref` is the same for

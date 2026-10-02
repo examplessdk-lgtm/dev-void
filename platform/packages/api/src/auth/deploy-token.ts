@@ -43,11 +43,12 @@ export function deployTokenTtlSecondsForBuildMinutes(timeoutMinutes: number): nu
  * rejects any attempt to deploy a different project with it. Used by remote
  * builds (CF Containers and GitHub Actions) running the real `void deploy` CLI.
  *
- * When `buildId` is supplied the token also carries a `build` claim binding it
- * to that specific build's row. The deploy endpoint rejects the token once the
- * build is no longer active (e.g. superseded/cancelled by a newer push or run),
- * so a stale runner can't deploy an older commit after being superseded. Omit
- * it for an unbound deploy token (no build-state guard).
+ * The token also carries a `build` claim binding it to that specific build's
+ * row. The deploy endpoint rejects the token once the build is no longer
+ * active (e.g. superseded/cancelled by a newer push or run), so a stale runner
+ * can't deploy an older commit after being superseded. The auth middleware
+ * rejects any deploy token that has neither a `build` nor a `credential`
+ * claim.
  *
  * `ttlSeconds` lets a caller size the token's lifetime to the work it must
  * cover (e.g. a remote build whose token is minted *before* a multi-minute
@@ -61,7 +62,7 @@ export async function signDeployToken(
     userId,
     login,
     buildId,
-  }: { projectId: string; userId: string; login: string; buildId?: string },
+  }: { projectId: string; userId: string; login: string; buildId: string },
   secret: string,
   opts?: { ttlSeconds?: number },
 ): Promise<string> {
@@ -71,7 +72,7 @@ export async function signDeployToken(
       login,
       aud: 'deploy',
       project: projectId,
-      ...(buildId !== undefined ? { build: buildId } : {}),
+      build: buildId,
     },
     secret,
     { ttlSeconds: opts?.ttlSeconds ?? DEPLOY_TOKEN_TTL_SECONDS },

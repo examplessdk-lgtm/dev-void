@@ -348,8 +348,13 @@ describe('GET /projects/resolve', () => {
     const owner = await createTestUser(env.db, 'resolve-deploy-owner');
     const assigned = await createTestProject(env.db, owner.id, 'resolve-assigned');
     const sibling = await createTestProject(env.db, owner.id, 'resolve-sibling');
+    const build = await createTestBuild(env.db, {
+      projectId: assigned.id,
+      userId: owner.id,
+      status: 'building',
+    });
     const token = await signDeployToken(
-      { projectId: assigned.id, userId: owner.id, login: owner.login },
+      { projectId: assigned.id, userId: owner.id, login: owner.login, buildId: build.id },
       env.JWT_SECRET,
     );
 
@@ -403,8 +408,13 @@ describe('GET /projects/choices', () => {
   it('requires a full account credential', async () => {
     const owner = await createTestUser(env.db, 'choices-token-owner');
     const project = await createTestProject(env.db, owner.id, 'choices-token-project');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      status: 'building',
+    });
     const token = await signDeployToken(
-      { projectId: project.id, userId: owner.id, login: owner.login },
+      { projectId: project.id, userId: owner.id, login: owner.login, buildId: build.id },
       env.JWT_SECRET,
     );
     expect((await app.fetch(new Request('http://localhost/projects/choices'), env)).status).toBe(
@@ -459,8 +469,13 @@ describe('GET /projects/:id', () => {
     const owner = await createTestUser(env.db, 'get-deploy-owner');
     const assigned = await createTestProject(env.db, owner.id, 'get-deploy-assigned');
     const sibling = await createTestProject(env.db, owner.id, 'get-deploy-sibling');
+    const build = await createTestBuild(env.db, {
+      projectId: assigned.id,
+      userId: owner.id,
+      status: 'building',
+    });
     const token = await signDeployToken(
-      { projectId: assigned.id, userId: owner.id, login: owner.login },
+      { projectId: assigned.id, userId: owner.id, login: owner.login, buildId: build.id },
       env.JWT_SECRET,
     );
     const read = (id: string) =>
@@ -798,8 +813,13 @@ describe('POST /projects/:id/prerender-token', () => {
   it('allows the project-scoped deploy token to mint it', async () => {
     const user = await createTestUser(env.db, 'prerender-ci');
     const project = await createTestProject(env.db, user.id, 'prerender-ci-app');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: user.id,
+      status: 'building',
+    });
     const deployToken = await signDeployToken(
-      { projectId: project.id, userId: user.id, login: user.login },
+      { projectId: project.id, userId: user.id, login: user.login, buildId: build.id },
       env.JWT_SECRET,
     );
 

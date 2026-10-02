@@ -15,7 +15,8 @@ export type JwtPayload = Readonly<{
    * specific remote build (CF Container or GitHub Actions) — ties the token
    * to that build's row so the deploy endpoint can reject a stale runner once
    * its build is no longer active (e.g. superseded/cancelled by a newer push
-   * or run). Absent on full `aud:'api'` tokens and legacy deploy tokens.
+   * or run). Absent on full `aud:'api'` tokens and CI credential tokens. A
+   * deploy token must carry either this or `credential`.
    */
   build?: string;
   /** Revocable project automation credential record. */

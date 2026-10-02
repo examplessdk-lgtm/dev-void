@@ -1981,6 +1981,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: 'suspended-owner-1',
+      githubRunAttempt: '1',
       installationId: 'actions-suspended-owner',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2049,6 +2050,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: 'owner-race-1',
+      githubRunAttempt: '1',
       installationId: 'actions-owner-race',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2091,6 +2093,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       githubRunId: '9001',
+      githubRunAttempt: '1',
       installationId: 'inst-wf',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/ci.yml',
@@ -2115,6 +2118,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '1001',
+      githubRunAttempt: '1',
       installationId: 'inst-supersede',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2130,6 +2134,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '1002',
+      githubRunAttempt: '1',
       installationId: 'inst-supersede',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2165,6 +2170,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '2001',
+      githubRunAttempt: '1',
       installationId: 'inst-reuse',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2179,6 +2185,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '2001',
+      githubRunAttempt: '1',
       installationId: 'inst-reuse',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2225,6 +2232,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '3002',
+      githubRunAttempt: '1',
       installationId: 'inst-branch',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2253,6 +2261,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '4001',
+      githubRunAttempt: '1',
       installationId: 'inst-cap',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2269,6 +2278,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '4002',
+      githubRunAttempt: '1',
       installationId: 'inst-cap',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2297,6 +2307,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       // already occupies its single slot.
       branch: 'main',
       githubRunId: '4003',
+      githubRunAttempt: '1',
       installationId: 'inst-cap-other',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2319,6 +2330,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: 'ghc_absent',
       branch: 'main',
       githubRunId: '5001',
+      githubRunAttempt: '1',
       installationId: 'none',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2350,6 +2362,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '5002',
+      githubRunAttempt: '1',
       installationId: 'inst-container',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2382,6 +2395,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'feature',
       githubRunId: '7001',
+      githubRunAttempt: '1',
       installationId: 'inst-branch-mismatch',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2411,6 +2425,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       projectId: project.id,
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       githubRunId: '7002',
+      githubRunAttempt: '1',
       installationId: 'inst-no-branch',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2569,6 +2584,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '8001',
+      githubRunAttempt: '1',
       installationId: 'inst-revoked-susp',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2595,6 +2611,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '8002',
+      githubRunAttempt: '1',
       installationId: 'inst-revoked-del',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2626,6 +2643,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '8003',
+      githubRunAttempt: '1',
       installationId: 'inst-revoked-sel',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2657,6 +2675,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: (await getGitHubConnection(env.db, project.id))!.id,
       branch: 'main',
       githubRunId: '8004',
+      githubRunAttempt: '1',
       installationId: 'inst-revoked-ok',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2706,6 +2725,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: cOld.id,
       branch: 'main',
       githubRunId: '9001',
+      githubRunAttempt: '1',
       installationId: 'inst-replaced',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2719,6 +2739,7 @@ describe('createGithubActionsBuildWithinLimit', () => {
       connectionId: cNew.id,
       branch: 'main',
       githubRunId: '9001',
+      githubRunAttempt: '1',
       installationId: 'inst-replaced',
       repositoryId: DEFAULT_REPO_ID,
       expectedWorkflowPath: '.github/workflows/void-deploy.yml',
@@ -2729,12 +2750,11 @@ describe('createGithubActionsBuildWithinLimit', () => {
 });
 
 describe('getBuildByProjectRunIdAndAttempt', () => {
-  it('matches a build by run_attempt and falls back to IS NULL', async () => {
+  it('matches a build by run_id and run_attempt', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
 
-    // Attempt 1 (terminal) and attempt 2 (active) for the same run_id, plus an
-    // old null-attempt row.
+    // Attempt 1 (terminal) and attempt 2 (active) for the same run_id.
     const a1 = await createTestBuild(env.db, {
       projectId: project.id,
       userId: user.id,
@@ -2751,13 +2771,6 @@ describe('getBuildByProjectRunIdAndAttempt', () => {
       githubRunId: '7001',
       githubRunAttempt: '2',
     });
-    const aNull = await createTestBuild(env.db, {
-      projectId: project.id,
-      userId: user.id,
-      executor: 'github_actions',
-      status: 'building',
-      githubRunId: '7002',
-    });
 
     // Exact attempt match.
     expect((await getBuildByProjectRunIdAndAttempt(env.db, project.id, '7001', '1'))!.id).toBe(
@@ -2768,12 +2781,8 @@ describe('getBuildByProjectRunIdAndAttempt', () => {
     );
     // A non-matching attempt resolves nothing.
     expect(await getBuildByProjectRunIdAndAttempt(env.db, project.id, '7001', '3')).toBeNull();
-    // Null fallback matches the null-attempt row only.
-    expect((await getBuildByProjectRunIdAndAttempt(env.db, project.id, '7002', null))!.id).toBe(
-      aNull.id,
-    );
-    // Null fallback does NOT match the attempt-tagged rows.
-    expect(await getBuildByProjectRunIdAndAttempt(env.db, project.id, '7001', null)).toBeNull();
+    // A different run_id resolves nothing.
+    expect(await getBuildByProjectRunIdAndAttempt(env.db, project.id, '7002', '1')).toBeNull();
   });
 });
 

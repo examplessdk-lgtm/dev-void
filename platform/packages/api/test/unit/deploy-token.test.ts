@@ -12,7 +12,7 @@ const SECRET = 'test-secret-key-for-deploy-token';
 describe('deploy token', () => {
   it('round-trips and verifies with aud deploy', async () => {
     const token = await signDeployToken(
-      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat' },
+      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat', buildId: 'bld_123' },
       SECRET,
     );
 
@@ -22,11 +22,13 @@ describe('deploy token', () => {
     expect(payload!.sub).toBe('user_xyz');
     expect(payload!.login).toBe('octocat');
     expect(payload!.project).toBe('proj_abc');
+    expect(payload!.build).toBe('bld_123');
+    expect(payload!.credential).toBeUndefined();
   });
 
   it('mints a ~15-minute token', async () => {
     const token = await signDeployToken(
-      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat' },
+      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat', buildId: 'bld_123' },
       SECRET,
     );
     const payload = await verifyDeployToken(token, SECRET);
@@ -36,7 +38,7 @@ describe('deploy token', () => {
 
   it('a deploy token fails verifyJwt with aud api', async () => {
     const token = await signDeployToken(
-      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat' },
+      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat', buildId: 'bld_123' },
       SECRET,
     );
     expect(await verifyJwt(token, SECRET, 'api')).toBeNull();
@@ -49,7 +51,7 @@ describe('deploy token', () => {
 
   it('verifyDeployToken returns null for wrong secret', async () => {
     const token = await signDeployToken(
-      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat' },
+      { projectId: 'proj_abc', userId: 'user_xyz', login: 'octocat', buildId: 'bld_123' },
       SECRET,
     );
     expect(await verifyDeployToken(token, 'wrong-secret')).toBeNull();

@@ -478,11 +478,11 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; buildId?: string };
+    const json = (await res.json()) as { ok: boolean; buildIds: ReadonlyArray<string> };
     expect(json.ok).toBe(true);
-    expect(json.buildId).toBeTruthy();
+    expect(json.buildIds).toHaveLength(1);
 
-    const build = await getBuild(env.db, json.buildId!);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build).not.toBeNull();
     expect(build!.executor).toBe('container');
     expect(build!.status).toBe('queued');
@@ -525,10 +525,10 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; buildId?: string };
-    expect(json.buildId).toBeTruthy();
+    const json = (await res.json()) as { ok: boolean; buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
 
-    const build = await getBuild(env.db, json.buildId!);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.executor).toBe('container');
     expect(build!.user_id).toBe(user.id);
     // pro plan → standard-4, stamped at enqueue.
@@ -605,9 +605,9 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
-    const build = await getBuild(env.db, json.buildId!);
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.commit_sha).toBe('headsha1');
     expect(build!.status).toBe('queued');
   });
@@ -1225,6 +1225,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-success',
       branch: 'main',
       githubRunId: '123456',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -1232,7 +1233,7 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 321 },
       repository: { full_name: 'octo/wfr', id: 855536 },
-      workflow_run: { id: 123456, conclusion: 'success', head_sha: 'sha-success' },
+      workflow_run: { id: 123456, run_attempt: 1, conclusion: 'success', head_sha: 'sha-success' },
     });
 
     expect(res.status).toBe(200);
@@ -1262,6 +1263,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-fail',
       branch: 'main',
       githubRunId: '654321',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -1269,13 +1271,51 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 322 },
       repository: { full_name: 'octo/wfr-fail', id: 871475 },
-      workflow_run: { id: 654321, conclusion: 'failure', head_sha: 'sha-fail' },
+      workflow_run: { id: 654321, run_attempt: 1, conclusion: 'failure', head_sha: 'sha-fail' },
     });
 
     expect(res.status).toBe(200);
     const updated = await getBuild(env.db, build.id);
     expect(updated!.status).toBe('failed');
     expect(updated!.deployment_id).toBeNull();
+  });
+
+  it('ignores a workflow_run:completed without run_attempt (build unchanged)', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'wh-wfr-no-attempt');
+    await createGitHubConnection(env.db, {
+      projectId: project.id,
+      installationId: '323',
+      repoFullName: 'octo/wfr-no-attempt',
+      repositoryId: '871476',
+      branch: 'main',
+      buildExecutor: 'github_actions',
+    });
+    await seedInstallation(env.db, '323');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: user.id,
+      executor: 'github_actions',
+      status: 'building',
+      commitSha: 'sha-no-attempt',
+      branch: 'main',
+      githubRunId: '654322',
+      githubRunAttempt: '1',
+    });
+
+    const { app, appEnv } = makeApp(env);
+    const res = await post(app, appEnv, 'workflow_run', {
+      action: 'completed',
+      installation: { id: 323 },
+      repository: { full_name: 'octo/wfr-no-attempt', id: 871476 },
+      workflow_run: { id: 654322, conclusion: 'success', head_sha: 'sha-no-attempt' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, ignored: 'missing workflow_run run_attempt' });
+    const unchanged = await getBuild(env.db, build.id);
+    expect(unchanged!.status).toBe('building');
+    expect(unchanged!.completed_at).toBeNull();
   });
 
   // github_actions builds have no BuildManager DO, so the "Void Build" check run
@@ -1301,6 +1341,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-check-ok',
       branch: 'main',
       githubRunId: '424250',
+      githubRunAttempt: '1',
     });
     await setBuildCheckRunId(env.db, build.id, '5001');
 
@@ -1316,7 +1357,7 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 331 },
       repository: { full_name: 'octo/check-ok', id: 766742 },
-      workflow_run: { id: 424250, conclusion: 'success', head_sha: 'sha-check-ok' },
+      workflow_run: { id: 424250, run_attempt: 1, conclusion: 'success', head_sha: 'sha-check-ok' },
     });
 
     expect(res.status).toBe(200);
@@ -1352,6 +1393,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-check-fail',
       branch: 'main',
       githubRunId: '424251',
+      githubRunAttempt: '1',
     });
     await setBuildCheckRunId(env.db, build.id, '5002');
 
@@ -1365,7 +1407,12 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 332 },
       repository: { full_name: 'octo/check-fail', id: 739072 },
-      workflow_run: { id: 424251, conclusion: 'failure', head_sha: 'sha-check-fail' },
+      workflow_run: {
+        id: 424251,
+        run_attempt: 1,
+        conclusion: 'failure',
+        head_sha: 'sha-check-fail',
+      },
     });
 
     expect(res.status).toBe(200);
@@ -1400,6 +1447,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-check-none',
       branch: 'main',
       githubRunId: '424252',
+      githubRunAttempt: '1',
     });
     // No setBuildCheckRunId — check_run_id stays NULL.
 
@@ -1413,7 +1461,12 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 333 },
       repository: { full_name: 'octo/check-none', id: 811598 },
-      workflow_run: { id: 424252, conclusion: 'success', head_sha: 'sha-check-none' },
+      workflow_run: {
+        id: 424252,
+        run_attempt: 1,
+        conclusion: 'success',
+        head_sha: 'sha-check-none',
+      },
     });
 
     expect(res.status).toBe(200);
@@ -1443,6 +1496,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-check-throw',
       branch: 'main',
       githubRunId: '424253',
+      githubRunAttempt: '1',
     });
     await setBuildCheckRunId(env.db, build.id, '5003');
 
@@ -1458,7 +1512,12 @@ describe('POST /webhooks/github', () => {
         action: 'completed',
         installation: { id: 334 },
         repository: { full_name: 'octo/check-throw', id: 870692 },
-        workflow_run: { id: 424253, conclusion: 'success', head_sha: 'sha-check-throw' },
+        workflow_run: {
+          id: 424253,
+          run_attempt: 1,
+          conclusion: 'success',
+          head_sha: 'sha-check-throw',
+        },
       });
 
       expect(res.status).toBe(200);
@@ -1500,6 +1559,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-check-terminal',
       branch: 'main',
       githubRunId: '424260',
+      githubRunAttempt: '1',
     });
     await setBuildCheckRunId(env.db, build.id, '5010');
 
@@ -1513,7 +1573,12 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 335 },
       repository: { full_name: 'octo/check-terminal', id: 796140 },
-      workflow_run: { id: 424260, conclusion: 'cancelled', head_sha: 'sha-check-terminal' },
+      workflow_run: {
+        id: 424260,
+        run_attempt: 1,
+        conclusion: 'cancelled',
+        head_sha: 'sha-check-terminal',
+      },
     });
 
     expect(res.status).toBe(200);
@@ -1555,6 +1620,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-throw',
       branch: 'main',
       githubRunId: '777777',
+      githubRunAttempt: '1',
     });
 
     // A transient Hyperdrive/Postgres failure on the deployment lookup must NOT
@@ -1571,7 +1637,7 @@ describe('POST /webhooks/github', () => {
         action: 'completed',
         installation: { id: 323 },
         repository: { full_name: 'octo/wfr-throw', id: 823577 },
-        workflow_run: { id: 777777, conclusion: 'success', head_sha: 'sha-throw' },
+        workflow_run: { id: 777777, run_attempt: 1, conclusion: 'success', head_sha: 'sha-throw' },
       });
 
       expect(res.status).toBe(200);
@@ -1624,6 +1690,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-x',
       branch: 'main',
       githubRunId: '500',
+      githubRunAttempt: '1',
     });
     const buildY = await createTestBuild(env.db, {
       projectId: projectY.id,
@@ -1633,6 +1700,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-y',
       branch: 'main',
       githubRunId: '500',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -1641,7 +1709,7 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 900 },
       repository: { full_name: 'octo/x', id: 872525 },
-      workflow_run: { id: 500, conclusion: 'failure', head_sha: 'sha-x' },
+      workflow_run: { id: 500, run_attempt: 1, conclusion: 'failure', head_sha: 'sha-x' },
     });
 
     expect(res.status).toBe(200);
@@ -1704,6 +1772,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-multi',
       branch: 'main',
       githubRunId: '960',
+      githubRunAttempt: '1',
     });
     const buildB = await createTestBuild(env.db, {
       projectId: projectB.id,
@@ -1713,6 +1782,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-multi',
       branch: 'main',
       githubRunId: '960',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -1720,7 +1790,7 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 960 },
       repository: { full_name: 'octo/multi', id: 960960 },
-      workflow_run: { id: 960, conclusion: 'success', head_sha: 'sha-multi' },
+      workflow_run: { id: 960, run_attempt: 1, conclusion: 'success', head_sha: 'sha-multi' },
     });
 
     expect(res.status).toBe(200);
@@ -1789,9 +1859,9 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; buildId: string };
+    const body = (await res.json()) as { ok: boolean; buildIds: ReadonlyArray<string> };
     // The webhook resolved and finalized the active rerun build.
-    expect(body.buildId).toBe(rerun.id);
+    expect(body.buildIds).toEqual([rerun.id]);
     const updatedRerun = await getBuild(env.db, rerun.id);
     expect(updatedRerun!.status).toBe('complete');
     expect(updatedRerun!.completed_at).not.toBeNull();
@@ -1878,6 +1948,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-z',
       branch: 'main',
       githubRunId: '600',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -1885,7 +1956,7 @@ describe('POST /webhooks/github', () => {
       action: 'completed',
       installation: { id: 999 },
       repository: { full_name: 'octo/unknown', id: 881839 },
-      workflow_run: { id: 600, conclusion: 'success', head_sha: 'sha-z' },
+      workflow_run: { id: 600, run_attempt: 1, conclusion: 'success', head_sha: 'sha-z' },
     });
 
     expect(res.status).toBe(200);
@@ -1965,9 +2036,9 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
-    const build = await getBuild(env.db, json.buildId!);
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.project_id).toBe(project.id);
   });
 
@@ -2011,8 +2082,8 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
 
     // The stored name was healed to the new full_name.
     const healed = await getGitHubConnection(env.db, project.id);
@@ -2111,7 +2182,7 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string; buildIds?: ReadonlyArray<string> };
+    const json = (await res.json()) as { buildIds?: ReadonlyArray<string> };
     expect(json.buildIds).toHaveLength(1);
 
     const rows = await env.db.select().from(builds);
@@ -2189,6 +2260,7 @@ describe('POST /webhooks/github', () => {
       commitSha: 'sha-x',
       branch: 'main',
       githubRunId: '700',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -2197,7 +2269,7 @@ describe('POST /webhooks/github', () => {
       installation: { id: 612 },
       // Same name, DIFFERENT immutable id => resolves no connection.
       repository: { full_name: 'octo/repo', id: 999 },
-      workflow_run: { id: 700, conclusion: 'success', head_sha: 'sha-x' },
+      workflow_run: { id: 700, run_attempt: 1, conclusion: 'success', head_sha: 'sha-x' },
     });
 
     expect(res.status).toBe(200);
@@ -2322,9 +2394,9 @@ describe('POST /webhooks/github', () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
-    const build = await getBuild(env.db, json.buildId!);
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.status).toBe('queued');
     expect(build!.commit_sha).toBe('abc1234');
   });
@@ -2381,7 +2453,7 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
     app: Hono<ApiEnv>,
     appEnv: TestEnv,
     after: string,
-  ): Promise<{ buildId: string; buildIds: ReadonlyArray<string> }> {
+  ): Promise<{ buildId: string }> {
     const res = await post(app, appEnv, 'push', {
       ref: 'refs/heads/main',
       after,
@@ -2389,7 +2461,10 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
       repository: { full_name: 'octo/idem', id: 70 },
     });
     expect(res.status).toBe(200);
-    return (await res.json()) as { buildId: string; buildIds: ReadonlyArray<string> };
+    const body = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    // Each push here creates or reuses exactly one build.
+    expect(body.buildIds).toHaveLength(1);
+    return { buildId: body.buildIds[0] };
   }
 
   it('newer push supersedes the older queued build; redelivery dedups; running IS cancelled', async () => {
@@ -2473,9 +2548,10 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
     const second = await postThroughIngressOperation(app, appEnv, 'push', payload);
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
-    const firstBody = await first.json<{ buildId: string }>();
-    const secondBody = await second.json<{ buildId: string }>();
-    expect(secondBody.buildId).toBe(firstBody.buildId);
+    const firstBody = await first.json<{ buildIds: ReadonlyArray<string> }>();
+    const secondBody = await second.json<{ buildIds: ReadonlyArray<string> }>();
+    expect(firstBody.buildIds).toHaveLength(1);
+    expect(secondBody.buildIds).toEqual(firstBody.buildIds);
     expect(
       (await env.db.select().from(builds)).filter((build) => build.project_id === project.id),
     ).toHaveLength(1);
@@ -2668,8 +2744,6 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
 
     const { app, appEnv } = pokeApp();
     const res = await pushCommit(app, appEnv, 'zzz');
-    expect(res.buildId).toBeTruthy();
-    expect(res.buildIds).toHaveLength(1);
     const build = await getBuild(env.db, res.buildId);
     expect(build!.status).toBe('queued');
     expect(build!.commit_sha).toBe('zzz');
@@ -3366,9 +3440,9 @@ describe('POST /webhooks/github — supersede stale container builds on push', (
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; buildId?: string };
+    const json = (await res.json()) as { ok: boolean; buildIds: ReadonlyArray<string> };
     expect(json.ok).toBe(true);
-    expect(json.buildId).toBeTruthy();
+    expect(json.buildIds).toHaveLength(1);
     // The older active build is cancelled (token revoked + slot freed) and its
     // DO was torn down.
     const updated = await getBuild(env.db, stale.id);
@@ -3376,7 +3450,7 @@ describe('POST /webhooks/github — supersede stale container builds on push', (
     expect(updated!.error).toBe('superseded by newer push');
     expect(cancelledIds).toContain(stale.id);
     // A new queued build for c2 was created.
-    const fresh = await getBuild(env.db, json.buildId!);
+    const fresh = await getBuild(env.db, json.buildIds[0]);
     expect(fresh!.status).toBe('queued');
     expect(fresh!.commit_sha).toBe('c2');
   });
@@ -3412,10 +3486,10 @@ describe('POST /webhooks/github — supersede stale container builds on push', (
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
     // Same-commit in-flight build is REUSED (dedup), not cancelled, and no DO
     // teardown happened.
-    expect(json.buildId).toBe(fresh.id);
+    expect(json.buildIds).toEqual([fresh.id]);
     expect((await getBuild(env.db, fresh.id))!.status).toBe('building');
     expect(cancelledIds).not.toContain(fresh.id);
   });
@@ -3486,9 +3560,9 @@ describe('POST /webhooks/github — supersede stale container builds on push', (
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
     // The same-commit building build is reused, not self-cancelled.
-    expect(json.buildId).toBe(building.id);
+    expect(json.buildIds).toEqual([building.id]);
     expect((await getBuild(env.db, building.id))!.status).toBe('building');
     expect(cancelledIds).not.toContain(building.id);
     // No extra build row was created.
@@ -3728,6 +3802,7 @@ describe('POST /webhooks/github — CAS workflow_run completion', () => {
       commitSha: 'sha-cas',
       branch: 'main',
       githubRunId: '87001',
+      githubRunAttempt: '1',
     });
 
     const { app, appEnv } = makeApp(env);
@@ -3735,7 +3810,7 @@ describe('POST /webhooks/github — CAS workflow_run completion', () => {
       action: 'completed',
       installation: { id: 8201 },
       repository: { full_name: 'octo/cas', id: 791148 },
-      workflow_run: { id: 87001, conclusion: 'success', head_sha: 'sha-cas' },
+      workflow_run: { id: 87001, run_attempt: 1, conclusion: 'success', head_sha: 'sha-cas' },
     });
 
     expect(res.status).toBe(200);
@@ -4874,11 +4949,11 @@ describe('POST /webhooks/github — rerun from the check run', () => {
     const res = await post(app, appEnv, 'check_run', checkRunPayload({ externalId: failed.id }));
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
     // A NEW row — a failed build is never reused.
-    expect(json.buildId).not.toBe(failed.id);
-    const build = await getBuild(env.db, json.buildId!);
+    expect(json.buildIds[0]).not.toBe(failed.id);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.project_id).toBe(project.id);
     expect(build!.commit_sha).toBe('cafe1234');
     expect(build!.status).toBe('queued');
@@ -5021,9 +5096,9 @@ describe('POST /webhooks/github — rerun from the check run', () => {
       check_suite: { head_sha: 'cafe1234', head_branch: 'main' },
     });
 
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
-    const build = await getBuild(env.db, json.buildId!);
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
+    const build = await getBuild(env.db, json.buildIds[0]);
     expect(build!.project_id).toBe(project.id);
   });
 
@@ -5061,8 +5136,8 @@ describe('POST /webhooks/github — rerun from the check run', () => {
 
     const res = await post(app, appEnv, 'check_run', checkRunPayload({ externalId: clicked.id }));
 
-    const json = (await res.json()) as { buildId?: string };
-    expect(json.buildId).toBeTruthy();
+    const json = (await res.json()) as { buildIds: ReadonlyArray<string> };
+    expect(json.buildIds).toHaveLength(1);
     const connection = await getGitHubConnection(env.db, project.id);
     expect(connection!.repo_full_name).toBe('octo/site');
   });

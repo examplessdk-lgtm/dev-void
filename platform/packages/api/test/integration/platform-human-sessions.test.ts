@@ -8,7 +8,7 @@ import {
   revokeConnectionSessions,
   validateHumanSession,
 } from '../../src/auth/sessions.ts';
-import type { Db } from '../../src/db.ts';
+import { type Db } from '../../src/db.ts';
 import { app } from '../../src/index.ts';
 import {
   platformAuthSettings,
@@ -17,6 +17,7 @@ import {
 } from '../../src/schema.ts';
 import {
   clearTables,
+  createTestBuild,
   createTestProject,
   createTestUser,
   mockCfApi,
@@ -107,8 +108,13 @@ describe('platform human session revocation', () => {
     mockCfApi();
     await env.db.update(platformAuthSettings).set({ sessions_required: true });
     const project = await createTestProject(env.db, admin.id, 'project');
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: admin.id,
+      status: 'building',
+    });
     const deploy = await signJwt(
-      { sub: admin.id, login: admin.login, aud: 'deploy', project: project.id },
+      { sub: admin.id, login: admin.login, aud: 'deploy', project: project.id, build: build.id },
       env.JWT_SECRET,
     );
     await revokeConnectionSessions(env.db, 'github');

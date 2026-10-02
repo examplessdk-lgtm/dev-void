@@ -1226,8 +1226,8 @@ const SUPERSEDED_BUILD_ERROR_MESSAGE = 'bound build was superseded';
  * rows as it cancels them), so a build that gets superseded mid-flight is
  * observed as terminal here and the publish is aborted.
  *
- * No-op when the token carries no `build` claim (full-API tokens, legacy
- * deploy tokens). Throws SUPERSEDED_BUILD_ERROR_MESSAGE on a non-active or
+ * No-op when the token carries no `build` claim (full-API tokens, CI
+ * credential tokens). Throws SUPERSEDED_BUILD_ERROR_MESSAGE on a non-active or
  * project-mismatched build, mirroring the up-front guard's reject semantics.
  */
 async function assertBoundBuildStillActive(
@@ -1894,7 +1894,7 @@ async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promise<Respo
   // A scoped deploy token may carry the build it was minted for. Reject it once
   // that build is no longer active (e.g. superseded/cancelled by a newer push or
   // run), so a stale runner can't deploy an older commit after being superseded.
-  // Tokens without a build claim (full-API tokens, legacy deploy tokens) skip this.
+  // Tokens without a build claim (full-API tokens, CI credential tokens) skip this.
   const deployBuild = context.get('deployBuild');
   if (deployBuild) {
     const build = await getBuild(context.get('db'), deployBuild);

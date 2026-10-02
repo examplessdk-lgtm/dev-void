@@ -181,6 +181,7 @@ function makeClaims(overrides: Partial<GithubOidcClaims> = {}): GithubOidcClaims
     ref,
     sha: 'sha-oidc',
     run_id: '987654',
+    run_attempt: '1',
     workflow: 'Deploy to Void',
     workflow_ref: scaffoldRef,
     job_workflow_ref: scaffoldRef,
@@ -731,8 +732,7 @@ describe('POST /auth/github-oidc', () => {
 
   // Rerun-correctness — the exchange captures the OIDC `run_attempt` claim onto
   // the build row so the workflow_run completion handler can match a redelivered
-  // completion to the right attempt. A claim lacking it creates a NULL-attempt
-  // row (backward-compat).
+  // completion to the right attempt. A token without the claim is rejected.
   it('captures the github_run_attempt claim onto the created build', async () => {
     const user = await createTestUser(env.db, 'octo-attempt');
     const project = await createTestProject(env.db, user.id, 'oidc-attempt');
@@ -757,7 +757,7 @@ describe('POST /auth/github-oidc', () => {
     expect(projectBuilds[0]!.github_run_attempt).toBe('3');
   });
 
-  it('creates a NULL github_run_attempt build when the claim lacks run_attempt', async () => {
+  it('returns 401 and creates no build when the run_attempt claim is missing', async () => {
     const user = await createTestUser(env.db, 'octo-no-attempt');
     const project = await createTestProject(env.db, user.id, 'oidc-no-attempt');
     await seedActiveInstallation(env.db, '1');
@@ -770,15 +770,16 @@ describe('POST /auth/github-oidc', () => {
       buildExecutor: 'github_actions',
     });
     const app = makeApp(env);
-    // makeClaims default omits run_attempt.
-    setVerifyResult(makeClaims({ run_id: '626262' }));
+    setVerifyResult({
+      ...makeClaims({ run_id: '626262' }),
+      run_attempt: undefined,
+    } as unknown as GithubOidcClaims);
 
     const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });
-    expect(res.status).toBe(200);
-
-    const projectBuilds = await getProjectBuilds(env.db, project.id);
-    expect(projectBuilds.length).toBe(1);
-    expect(projectBuilds[0]!.github_run_attempt).toBeNull();
+    expect(res.status).toBe(401);
+    const json = (await res.json()) as { error?: string };
+    expect(json.error).toBe('oidc token missing run_attempt');
+    expect((await getProjectBuilds(env.db, project.id)).length).toBe(0);
   });
 
   // The minted deploy token is exchanged BEFORE the workflow runs
@@ -1494,6 +1495,7 @@ describe('POST /auth/github-oidc', () => {
       createGithubActionsBuildWithinLimit(env.db, {
         projectId: project.id,
         githubRunId: '301',
+        githubRunAttempt: '1',
         connectionId: connection.id,
         installationId: '1',
         repositoryId: '42',
@@ -1502,6 +1504,7 @@ describe('POST /auth/github-oidc', () => {
       createGithubActionsBuildWithinLimit(env.db, {
         projectId: project.id,
         githubRunId: '302',
+        githubRunAttempt: '1',
         connectionId: connection.id,
         installationId: '1',
         repositoryId: '42',

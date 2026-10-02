@@ -10,6 +10,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { signDeployToken } from '../../src/auth/deploy-token.ts';
+import { signJwt } from '../../src/auth/jwt.ts';
 import { createDeployment } from '../../src/db.ts';
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
@@ -54,13 +55,25 @@ afterEach(() => {
 // every other owner-scoped /projects/* route (delete, secrets PUT, github
 // connect, ...) and any cross-project use.
 describe('deploy token scope enforcement', () => {
+  // Without an explicit build, bind the token to a fresh active build of the
+  // scoped project, as remote builds do.
   async function deployToken(
     projectId: string,
     userId: string,
     login = 'octocat',
     buildId?: string,
   ): Promise<string> {
-    return signDeployToken({ projectId, userId, login, buildId }, env.JWT_SECRET);
+    const boundBuildId =
+      buildId ??
+      (
+        await createTestBuild(env.db, {
+          projectId,
+          userId,
+          executor: 'github_actions',
+          status: 'building',
+        })
+      ).id;
+    return signDeployToken({ projectId, userId, login, buildId: boundBuildId }, env.JWT_SECRET);
   }
 
   it('lets the real deploy endpoint through (auth passes; not 403)', async () => {
@@ -436,22 +449,41 @@ describe('deploy token scope enforcement', () => {
     expect(res.status).not.toBe(403);
   });
 
-  it('lets a deploy token with NO build claim through (backward compat)', async () => {
+  // A deploy token must be bound to a build or a CI credential. One with
+  // neither would skip both the build-state and the revocation checks.
+  it('rejects a deploy token with neither a build nor a credential claim', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'build-unbound');
-    // No buildId → no `build` claim → the build-state guard is skipped.
-    const token = await deployToken(project.id, user.id);
+    const token = await signJwt(
+      { sub: user.id, login: user.login, aud: 'deploy', project: project.id },
+      env.JWT_SECRET,
+      { ttlSeconds: 15 * 60 },
+    );
     mockCfApi();
 
-    const res = await app.fetch(
+    const requests = [
       new Request(`http://localhost/projects/${project.id}/deploy`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: '{}',
       }),
-      env,
-    );
-    expect(res.status).not.toBe(403);
+      new Request(`http://localhost/projects/${project.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+    ];
+    for (const request of requests) {
+      const res = await app.fetch(request, env);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({
+        error: 'invalid or expired token',
+        message: 'This deploy credential is invalid. Ask the project owner to issue a replacement.',
+      });
+    }
+    const [deployment] = await env.db
+      .select({ id: deployments.id })
+      .from(deployments)
+      .where(eq(deployments.project_id, project.id));
+    expect(deployment).toBeUndefined();
   });
 
   // The build-state guard lives in authMiddleware, so it gates EVERY allowlisted

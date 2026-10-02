@@ -4626,26 +4626,24 @@ export async function supersedeAndCreateContainerBuild(
  * the same `run_id` with an incremented `run_attempt`, so the `workflow_run` completion
  * handler must scope to the attempt: a redelivered/late completion for attempt
  * 1 must NOT resolve to attempt 2's active build (which would let it finalize
- * the wrong attempt). When `githubRunAttempt` is null (an old delivery whose
- * payload lacks `run_attempt`), it falls back to `IS NULL` so old null-attempt
- * rows still match. Active builds are ordered first (then `created_at desc`),
+ * the wrong attempt). Active builds are ordered first (then `created_at desc`),
  * so the in-flight attempt wins on a tie.
  */
 export async function getBuildByProjectRunIdAndAttempt(
   db: Db,
   projectId: string,
   githubRunId: string,
-  githubRunAttempt: string | null,
+  githubRunAttempt: string,
 ): Promise<Build | null> {
-  const attemptMatch =
-    githubRunAttempt != null
-      ? eq(builds.github_run_attempt, githubRunAttempt)
-      : isNull(builds.github_run_attempt);
   const [row] = await db
     .select()
     .from(builds)
     .where(
-      and(eq(builds.project_id, projectId), eq(builds.github_run_id, githubRunId), attemptMatch),
+      and(
+        eq(builds.project_id, projectId),
+        eq(builds.github_run_id, githubRunId),
+        eq(builds.github_run_attempt, githubRunAttempt),
+      ),
     )
     .orderBy(sql`(${inArray(builds.status, ACTIVE_BUILD_STATUSES)}) desc`, desc(builds.created_at))
     .limit(1);
@@ -4851,7 +4849,7 @@ export async function createGithubActionsBuildWithinLimit(
     commitSha?: string | null;
     branch?: string | null;
     githubRunId: string;
-    githubRunAttempt?: string | null;
+    githubRunAttempt: string;
     logsUrl?: string | null;
     connectionId: string;
     installationId: string;
@@ -4996,13 +4994,7 @@ export async function createGithubActionsBuildWithinLimit(
     // Idempotent reuse: an already in-flight build for this exact run ATTEMPT
     // does not consume a new slot and must not be double-inserted. Matching on
     // the attempt (not run_id alone) ensures a RERUN — same run_id, incremented
-    // run_attempt — does NOT wrongly reuse the prior attempt's build. Falls back
-    // to IS NULL when the attempt is null (backward-compat for tokens that lack
-    // the claim).
-    const attemptMatch =
-      args.githubRunAttempt != null
-        ? eq(builds.github_run_attempt, args.githubRunAttempt)
-        : isNull(builds.github_run_attempt);
+    // run_attempt — does NOT wrongly reuse the prior attempt's build.
     const [existing] = await tx
       .select()
       .from(builds)
@@ -5010,7 +5002,7 @@ export async function createGithubActionsBuildWithinLimit(
         and(
           eq(builds.project_id, args.projectId),
           eq(builds.github_run_id, args.githubRunId),
-          attemptMatch,
+          eq(builds.github_run_attempt, args.githubRunAttempt),
         ),
       )
       .orderBy(
@@ -5071,7 +5063,7 @@ export async function createGithubActionsBuildWithinLimit(
         commit_sha: args.commitSha ?? null,
         branch: args.branch ?? null,
         github_run_id: args.githubRunId,
-        github_run_attempt: args.githubRunAttempt ?? null,
+        github_run_attempt: args.githubRunAttempt,
         logs_url: args.logsUrl ?? null,
       })
       .returning();
@@ -5739,15 +5731,14 @@ export async function getGitHubInstallationsByAccount(
  * app clock, so a skewed worker cannot mint a longer- or shorter-lived
  * membership than intended. A re-join hits the unique `(installation_id,
  * user_id)` index and refreshes `github_account_id`/`verified_at`/`expires_at`
- * in place (count stays 1). Tolerates a null `githubAccountId` (the
- * backstop/JOIN callers may not carry a caller account id).
+ * in place (count stays 1).
  */
 export async function upsertGitHubInstallationMember(
   db: Db,
   args: {
     installationId: string;
     userId: string;
-    githubAccountId: string | null;
+    githubAccountId: string;
     ttlSeconds: number;
   },
 ): Promise<GitHubInstallationMember> {
@@ -6009,17 +6000,14 @@ export async function getInstallationRevocationAt(
  * Batch revocation tombstones for `(installationIds, githubAccountId)` as a Map
  * installation_id → revoked_at-epoch-ms. Installs with no tombstone are simply
  * absent from the Map. Empty id list → empty Map (never emits `WHERE ... IN ()`).
- * A null/empty `githubAccountId` (a null-github artifact — e.g. a join_code with
- * no proven account id) also yields an empty Map: no tombstone can apply, and such
- * an artifact is deploy-inert anyway.
  */
 export async function getInstallationRevocationsForAccount(
   db: Db,
   installationIds: ReadonlyArray<string>,
-  githubAccountId: string | null,
+  githubAccountId: string,
 ): Promise<Map<string, number>> {
   const result = new Map<string, number>();
-  if (installationIds.length === 0 || !githubAccountId) {
+  if (installationIds.length === 0) {
     return result;
   }
   const rows = await db

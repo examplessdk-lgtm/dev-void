@@ -123,7 +123,7 @@ type JoinState = {
 type JoinCode = {
   purpose: 'join';
   installationIds: Array<string>;
-  githubAccountId: string | null;
+  githubAccountId: string;
   codeChallenge: string;
   codeChallengeMethod: 'S256';
   // The moment GitHub access was PROVEN (the public callback ran). Compared
@@ -812,7 +812,13 @@ export const githubRoutes = new Hono<ApiEnv>()
     }
 
     const joinCode = await verifyLinkPayload<JoinCode>(body.join_code, context.env.JWT_SECRET);
-    if (!joinCode || joinCode.purpose !== 'join' || !Array.isArray(joinCode.installationIds)) {
+    if (
+      !joinCode ||
+      joinCode.purpose !== 'join' ||
+      !Array.isArray(joinCode.installationIds) ||
+      typeof joinCode.githubAccountId !== 'string' ||
+      joinCode.githubAccountId === ''
+    ) {
       return context.json({ error: 'invalid join_code' }, 400);
     }
     if (
@@ -856,9 +862,8 @@ export const githubRoutes = new Hono<ApiEnv>()
       // tombstones from the webhook payload even when no Void user existed yet.
       // A join_code minted AT OR BEFORE a revocation (iat <= revoked_at) is a
       // stale artifact a removed member is replaying — its installs are skipped
-      // below so membership is never resurrected. When `githubAccountId` is null
-      // the helper returns an empty Map (the membership would be deploy-inert
-      // anyway). Under the install-row lock above this is now race-safe, not
+      // below so membership is never resurrected. Under the install-row lock
+      // above this is now race-safe, not
       // merely best-effort; the connect route's in-tx recheck remains the deploy
       // gate.
       const revocations = await getInstallationRevocationsForAccount(
