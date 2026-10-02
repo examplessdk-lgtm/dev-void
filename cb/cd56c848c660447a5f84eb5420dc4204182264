@@ -1,0 +1,23 @@
+docs/guide/websockets.md
+  s_21a2836ee3ab6e::t_5069e985a22b04 203-205
+packages/void/src/runtime/ws-server.ts
+  s_21a2836ee3ab6e::t_6d22d700ec0cee 120-125
+packages/void/test/unit/resource-name-runtime.test.ts
+  s_21a2836ee3ab6e::t_c342b508372f8a 6,76-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cbcd56c848c660447a5f84eb5420dc4204182264",
+  "prompts": {},
+  "sessions": {
+    "s_21a2836ee3ab6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-cda9-7da0-b06a-81b011f3ab2a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
