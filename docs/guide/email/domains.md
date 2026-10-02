@@ -80,6 +80,8 @@ Setup enables the zone's plus addressing so `support+T-42@mail.acme.com` reaches
 
 On Workers Free, `sendEmail()` can send to verified destinations listed under **Email Routing → Destination addresses** in Cloudflare.
 
+Configure your sender domain's SPF, DKIM, and DMARC records using [Cloudflare's email authentication guidance](https://developers.cloudflare.com/email-service/concepts/email-authentication/), then check the authentication results in a received message's original headers. A successful `sendEmail()` result confirms provider acceptance; it does not confirm delivery or authentication readiness.
+
 Sending to arbitrary recipients requires [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) and Email Sending onboarding. After upgrading, run `void email setup --platform cloudflare`. Void doesn't retry onboarding during ordinary deploys.
 
 Existing DMARC or bounce-domain records can block onboarding; the checklist identifies conflicts to resolve. Inbound mail remains available.
