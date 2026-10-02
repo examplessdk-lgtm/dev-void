@@ -1,0 +1,45 @@
+docs/guide/platform/installation/setup.md
+  s_cdab927531343d::t_5cb9adb3c94d49 7-8
+packages/void/src/cli/github-cmd.ts
+  s_cdab927531343d::t_3748444ef616c0 479,481,694,744
+packages/void/src/cli/init.ts
+  s_cdab927531343d::t_a11c0490c8d4c1 607,610-612
+packages/void/src/cli/platform-lifecycle.ts
+  s_bf2339d49378d9::t_60f4969d15cbbc 1169,1172-1176
+packages/void/src/cli/prompt.ts
+  s_cdab927531343d::t_96add195f4f5c4 91-93
+packages/void/test/unit/create-project.test.ts
+  s_cdab927531343d::t_901b85aaafde5c 174-181
+packages/void/test/unit/deploy-project-setup.test.ts
+  s_cdab927531343d::t_89ec47c42221c5 110-111,118-119
+packages/void/test/unit/github-connect-cmd.test.ts
+  s_cdab927531343d::t_13d4d4aa6c3077 11,600-649
+packages/void/test/unit/init.test.ts
+  s_cdab927531343d::t_ece8a34f9cc638 1732-1733,1736-1742
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_bf2339d49378d9::t_6b0f6f49ae3758 70,329-330,335-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b8f091f4068afeba4435c0ad77bf6ab2e1549199",
+  "prompts": {},
+  "sessions": {
+    "s_bf2339d49378d9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc74-0d33-71a3-9177-f6f416869f7b",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
