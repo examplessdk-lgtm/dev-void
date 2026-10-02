@@ -1,0 +1,63 @@
+docs/guide/ai.md
+  s_4cd54230f5823c::t_48f393959dc7b8 13-20,32-36,55-59,68-70,73-75,83-85,118-127,133-137,143-147,149-155,176-185,206-207,225-226,236-238,248-257,271-274
+docs/reference/api/resources.md
+  s_4cd54230f5823c::t_a562c5135f9e52 54-55,57-68
+packages/edge/src/index.ts
+  s_4cd54230f5823c::t_f545ecbcc7dc2d 40
+packages/edge/src/limits.ts
+  s_4cd54230f5823c::t_d27af01409875c 1-45
+packages/void/package.json
+  s_4cd54230f5823c::t_fd6c625e25654b 326-330
+packages/void/src/runtime/ai.ts
+  s_4cd54230f5823c::t_ca32ee79f53b8a 9,466-469,542-545,661-669,675,678,685,688,695,703,706-710,713-775,779-784,789,792-796
+packages/void/src/runtime/fetch-stream.ts
+  s_4cd54230f5823c::t_e8b4f50188950a 76-91,108-116,122,152
+packages/void/src/runtime/limits.ts
+  s_4cd54230f5823c::t_a04e456d21c75e 1-104
+packages/void/test/unit/ai.test.ts
+  s_4cd54230f5823c::t_a87a7bdc75c5c6 38-45,71-80,119-133,182-192,221-231,274-280,320-328,403-415,443-448,463-470,494-504,553-563,594-604,637-643,666-676,701-711,741-751,779-785,812-822,855-863,884-935
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_4cd54230f5823c::t_d7e8f8bbb60bff 6229,6457
+packages/void/test/unit/fetch-stream.test.ts
+  s_4cd54230f5823c::t_91a7f8a22c282f 183-194
+packages/void/test/unit/inference.test.ts
+  s_4cd54230f5823c::t_bdf51e89681be6 256-257
+packages/void/test/unit/limits.test.ts
+  s_4cd54230f5823c::t_f23c4d948ee0be 1-62
+packages/void/test/unit/limits.typecheck.ts
+  s_4cd54230f5823c::t_46501f675d1b6c 1-14
+packages/void/test/unit/plugin-dev-asset-routing.test.ts
+  s_4cd54230f5823c::t_67597c17b610d7 125
+packages/void/test/unit/plugin-framework-ai.test.ts
+  s_4cd54230f5823c::t_49411d18534dc4 31
+packages/void/vite.config.ts
+  s_4cd54230f5823c::t_e1635f25a52995 128
+platform/packages/proxy/package.json
+  s_4cd54230f5823c::t_0b62dce30db608 11
+platform/packages/proxy/src/index.ts
+  s_4cd54230f5823c::t_0349f1d2e93bfd 1,274-279
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_4cd54230f5823c::t_1ac42bb2b02d90 1072-1077,1093-1098,1655-1660
+platform/scripts/fixtures/kitchen-sink-runtime/routes/api/acceptance/runtime.ts
+  s_4cd54230f5823c::t_eb4623936301fd 38-40,42-45
+playground/kitchen-sink/routes/api/ai.ts
+  s_4cd54230f5823c::t_17d086f9d28913 34-40,43-45
+pnpm-lock.yaml
+  s_4cd54230f5823c::t_bf409381f2f0b7 1003-1005
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "42113cf0fb2396cafb0b4311d7f8dc1822146895",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
