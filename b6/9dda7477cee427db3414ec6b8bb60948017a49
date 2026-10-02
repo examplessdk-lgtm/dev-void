@@ -1,0 +1,19 @@
+docs/guide/ai.md
+  s_04e496ba781942::t_4b9183a9f39fcd 51,83-84,87,95,136,230,287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b69dda7477cee427db3414ec6b8bb60948017a49",
+  "prompts": {},
+  "sessions": {
+    "s_04e496ba781942": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9f7-e7e5-7423-b5f5-68eea7153649",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
