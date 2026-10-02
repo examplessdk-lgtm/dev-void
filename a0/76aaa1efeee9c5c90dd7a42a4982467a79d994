@@ -1,0 +1,19 @@
+docs/guide/pages-routing/head.md
+  s_14b3de9dcb5198::t_d9c6efd7043f1e 7,9,40,59,61,80,93,111,126,128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a076aaa1efeee9c5c90dd7a42a4982467a79d994",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
