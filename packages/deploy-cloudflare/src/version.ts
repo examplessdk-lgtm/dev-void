@@ -805,7 +805,7 @@ export type CloudflareVersionActivationOptions = {
   requirePreviewForReadiness?: boolean;
   /** Verify that omitted remote secrets come from the active Worker Version before uploading. */
   verifyInheritedSecrets?: boolean;
-  /** Pin opaque secret bindings to the live version when an unpublished upload is newer. */
+  /** Pin inherited opaque secret bindings to the inspected live version before uploading. */
   pinActiveSecrets?: (
     activeVersionId: string,
     bindings: ReadonlyArray<{ name: string; type: 'secret_text' | 'secret_key' }>,
@@ -1120,6 +1120,71 @@ async function activateCloudflareVersionWithSecretsFile(
       options.atomic === true,
       previousTriggerConfig,
     );
+  }
+  // The ordinary cf uploader refuses a non-interactive revision of an API-origin
+  // Worker. Keep inherited secrets on the same UUID-pinned upload path used by
+  // bootstrap, rather than bypassing cf's general overwrite confirmation. An
+  // explicitly supplied replacement retains its existing upload semantics.
+  if (
+    previous.versionId !== null &&
+    !activeSecretsPinned &&
+    options.pinActiveSecrets &&
+    options.candidateSecretsFilePath === undefined
+  ) {
+    let activeSecrets: Awaited<ReturnType<typeof readCloudflareVersionSecretBindings>>;
+    try {
+      activeSecrets = await readCloudflareVersionSecretBindings(
+        options,
+        configPath,
+        previous.versionId,
+      );
+    } catch {
+      return { ok: false, reason: 'inheritance-source-unavailable' };
+    }
+    if (activeSecrets === null) {
+      return { ok: false, reason: 'inheritance-source-unavailable' };
+    }
+    if (
+      activeSecrets.some((secret) => !secret.name.trim() || secret.name.trim() !== secret.name) ||
+      new Set(activeSecrets.map((secret) => secret.name)).size !== activeSecrets.length
+    ) {
+      return { ok: false, reason: 'inheritance-source-changed' };
+    }
+    if (activeSecrets.length) {
+      let pinned: boolean;
+      try {
+        pinned = await options.pinActiveSecrets(previous.versionId, activeSecrets);
+      } catch {
+        return { ok: false, reason: 'inheritance-source-unavailable' };
+      }
+      if (!pinned) {
+        return { ok: false, reason: 'inheritance-source-changed' };
+      }
+      activeSecretsPinned = true;
+    }
+  }
+  if (activeSecretsPinned) {
+    if (!options.verifyUploader()) {
+      return { ok: false, reason: 'uploader-changed' };
+    }
+    const owner = await readCurrentProductionVersion(options, configPath);
+    if (owner.kind === 'failed') {
+      return { ok: false, reason: 'status-failed', status: owner.status };
+    }
+    if (
+      owner.kind !== 'ok' ||
+      owner.versionId !== previous.versionId ||
+      !productionVersionPercentagesEqual(owner.versions, [
+        { versionId: previous.versionId!, percentage: 100 },
+      ])
+    ) {
+      return {
+        ok: false,
+        reason: 'deployment-changed',
+        activeVersionId: owner.kind === 'ok' ? owner.versionId : null,
+        rollback: 'not-needed',
+      };
+    }
   }
   options.onProgress?.('Uploading the Worker and assets...');
   const upload = await Promise.resolve(

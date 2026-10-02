@@ -295,6 +295,166 @@ function runner(overrides?: {
 }
 
 describe('Cloudflare version activation', () => {
+  it('pins ordinary revision secrets to the inspected active UUID before upload and readiness', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    const result = await activateCloudflareVersion(fixture.options);
+    expect(result).toMatchObject({ ok: true, versionId: NEXT, previousVersionId: CURRENT });
+    expect(fixture.pinActiveSecrets).toHaveBeenCalledExactlyOnceWith(CURRENT, [
+      { name: 'TOKEN', type: 'secret_text' },
+    ]);
+    expect(fixture.events.indexOf('pin')).toBeLessThan(fixture.events.indexOf('upload'));
+    expect(fixture.events.indexOf('upload')).toBeLessThan(fixture.events.indexOf('ready'));
+    expect(fixture.events.indexOf('ready')).toBeLessThan(fixture.events.indexOf('activate'));
+    expect(fixture.operations.filter((op) => op.type === 'versions.upload')).toHaveLength(1);
+    expect(
+      fixture.operations.some(
+        (op) => op.type === 'worker.deploy' || (op.type === 'versions.view' && op.includeSource),
+      ),
+    ).toBe(false);
+  });
+
+  it.each(['refused', 'thrown', 'unreadable', 'wrong-version'] as const)(
+    'does not upload an ordinary revision when active-secret pinning is %s',
+    async (kind) => {
+      const fixture = sdkDraftActivation();
+      fixture.ordinary();
+      if (kind === 'refused') {
+        fixture.pinActiveSecrets.mockResolvedValue(false);
+      }
+      if (kind === 'thrown') {
+        fixture.pinActiveSecrets.mockRejectedValue(new Error('private synthetic pin detail'));
+      }
+      const original = fixture.runWrangler.getMockImplementation()!;
+      if (kind === 'unreadable' || kind === 'wrong-version') {
+        fixture.runWrangler.mockImplementation(async (op) =>
+          op.type === 'versions.view'
+            ? kind === 'unreadable'
+              ? { status: 1, stdout: '', stderr: 'private synthetic inspection detail' }
+              : {
+                  ...ok(),
+                  data: { id: CONCURRENT, resources: { bindings: [] } },
+                }
+            : original(op),
+        );
+      }
+      const result = await activateCloudflareVersion(fixture.options);
+      expect(result).toMatchObject({
+        ok: false,
+        reason:
+          kind === 'refused' ? 'inheritance-source-changed' : 'inheritance-source-unavailable',
+      });
+      expect(JSON.stringify(result)).not.toContain('private synthetic');
+      expect(fixture.events).not.toContain('upload');
+      expect(fixture.events).not.toContain('publish');
+      expect(fixture.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [{ name: '', type: 'secret_text' }],
+    [{ name: ' TOKEN ', type: 'secret_text' }],
+    [
+      { name: 'TOKEN', type: 'secret_text' },
+      { name: 'TOKEN', type: 'secret_key' },
+    ],
+  ])('rejects ambiguous active secret names before ordinary upload: %j', async (...bindings) => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    const original = fixture.runWrangler.getMockImplementation()!;
+    fixture.runWrangler.mockImplementation(async (op) =>
+      op.type === 'versions.view'
+        ? { ...ok(), data: { id: CURRENT, resources: { bindings } } }
+        : original(op),
+    );
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: false,
+      reason: 'inheritance-source-changed',
+    });
+    expect(fixture.pinActiveSecrets).not.toHaveBeenCalled();
+    expect(fixture.events).not.toContain('upload');
+  });
+
+  it.each(['replacement', 'companion'] as const)(
+    'refuses ordinary upload when a %s deployment appears during secret pinning',
+    async (kind) => {
+      const fixture = sdkDraftActivation();
+      fixture.ordinary();
+      const entered = deferred<void>();
+      const release = deferred<boolean>();
+      fixture.pinActiveSecrets.mockImplementation(async () => {
+        entered.resolve();
+        return release.promise;
+      });
+      const activation = activateCloudflareVersion(fixture.options);
+      await entered.promise;
+      fixture.changeOwner(
+        kind === 'replacement'
+          ? [{ version_id: CONCURRENT, percentage: 100 }]
+          : [
+              { version_id: CURRENT, percentage: 100 },
+              { version_id: CONCURRENT, percentage: 0 },
+            ],
+      );
+      release.resolve(true);
+      expect(await activation).toMatchObject({
+        ok: false,
+        reason: 'deployment-changed',
+        rollback: 'not-needed',
+      });
+      expect(fixture.events).not.toContain('upload');
+      expect(fixture.events).not.toContain('publish');
+      expect(fixture.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains ordinary explicit replacement without requiring remote-only secret pinning', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    fixture.pinActiveSecrets.mockResolvedValue(false);
+    const original = fixture.runWrangler.getMockImplementation()!;
+    fixture.runWrangler.mockImplementation(async (op) => {
+      if (op.type === 'versions.upload') {
+        expect(JSON.parse(readFileSync(op.secretsFilePath!, 'utf8'))).toEqual({
+          TOKEN: 'synthetic replacement',
+          NEW_SECRET: 'synthetic new secret',
+        });
+      }
+      return original(op);
+    });
+    expect(
+      await activateCloudflareVersion({
+        ...fixture.options,
+        candidateSecrets: { TOKEN: 'synthetic replacement', NEW_SECRET: 'synthetic new secret' },
+      }),
+    ).toMatchObject({ ok: true, versionId: NEXT });
+    expect(fixture.pinActiveSecrets).not.toHaveBeenCalled();
+    expect(fixture.operations.filter((op) => op.type === 'versions.upload')).toHaveLength(1);
+  });
+
+  it('keeps an ordinary app without remote secrets on the normal uploader', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    fixture.pinActiveSecrets.mockResolvedValue(false);
+    const original = fixture.runWrangler.getMockImplementation()!;
+    fixture.runWrangler.mockImplementation(async (op) =>
+      op.type === 'versions.view'
+        ? { ...ok(), data: { id: CURRENT, resources: { bindings: [] } } }
+        : original(op),
+    );
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: true,
+      versionId: NEXT,
+    });
+    expect(fixture.pinActiveSecrets).not.toHaveBeenCalled();
+    expect(fixture.operations.filter((op) => op.type === 'versions.upload')).toHaveLength(1);
+    expect(
+      fixture.operations.some(
+        (op) => op.type === 'worker.deploy' || (op.type === 'versions.view' && op.includeSource),
+      ),
+    ).toBe(false);
+  });
+
   it('publishes an exact private SDK draft once, proving secrets and callbacks before readiness', async () => {
     const fixture = sdkDraftActivation();
     const validateUploadedVersion = vi.fn(async (id: string) => {
