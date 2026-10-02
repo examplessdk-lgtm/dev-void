@@ -1,0 +1,25 @@
+packages/void/AGENTS.md
+  s_ca3f46e15212e0::t_ff872263447215 109-110
+packages/void/src/runtime/migration-handler.ts
+  s_ca3f46e15212e0::t_5acb435a5f8121 205-210,214,222,253-257,270-280,291,315,385,389-398,405-406,410,437,442,452,468-484,489-490,494,496-505,522-526,539-554,562-564,578-582
+packages/void/test/unit/migration-binding-consistency.test.ts
+  s_ca3f46e15212e0::t_92cfb8891ceb7b 366,370,447-450,657,664,707-711,721-722,725,745-747
+packages/void/test/unit/migration-concurrency.test.ts
+  s_ca3f46e15212e0::t_4d19001d5b37fe 1-275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "08d08258a35178646558bf476fb561d3298ab6aa",
+  "prompts": {},
+  "sessions": {
+    "s_ca3f46e15212e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-0c30-7930-adb7-2882f4a5ef16",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
