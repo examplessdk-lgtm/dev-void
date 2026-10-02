@@ -1,0 +1,23 @@
+docs/guide/platform/installation/prerequisites.md
+  s_cdab927531343d::t_8125205098ea5d 22-25
+packages/void/src/cli/platform-cloudflare.ts
+  s_cdab927531343d::t_f127437ad27dba 268
+packages/void/test/unit/platform-cloudflare.test.ts
+  s_cdab927531343d::t_42b1fea5238ffc 116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ade6b37f0ced0a73b5438baa415697e293c78d20",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
