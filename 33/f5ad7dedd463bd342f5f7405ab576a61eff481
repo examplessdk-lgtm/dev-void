@@ -1,0 +1,25 @@
+platform/packages/api/test/integration/api-github.test.ts
+  s_b4ffbd6851cc36::t_4a5a55ff99c6f2 48,1803,1933,2103-2105,3627-3629,3970
+platform/packages/api/test/integration/api-webhooks.test.ts
+  s_b4ffbd6851cc36::t_4e274e82998e5a 44,4174,4331,4405,4480,4484,4548,4637,4683
+platform/packages/api/test/integration/db-github-members.test.ts
+  s_b4ffbd6851cc36::t_e47052c9d8bd0a 24-31,114,160,185,308,315,320,322
+platform/packages/api/test/integration/helpers.ts
+  s_b4ffbd6851cc36::t_a93d2832d0d831 2,36,613-624
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "33f5ad7dedd463bd342f5f7405ab576a61eff481",
+  "prompts": {},
+  "sessions": {
+    "s_b4ffbd6851cc36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-4a67-7002-a422-282418e7b851",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
