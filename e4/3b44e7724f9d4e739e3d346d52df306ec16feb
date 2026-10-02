@@ -1,0 +1,39 @@
+docs/guide/platform/installation/prerequisites.md
+  s_cdab927531343d::t_36fb709f02a0c0 40
+docs/guide/platform/installation/setup.md
+  s_cdab927531343d::t_abecc88f906548 38-40,175
+docs/reference/cli/platform-installation.md
+  s_cdab927531343d::t_a7ce45b3a6aaae 29,36,48
+packages/platform/README.md
+  s_cdab927531343d::t_36f78bdda6f9c8 9
+packages/void/src/cli/platform-args.ts
+  s_cdab927531343d::t_512ca988278354 40
+packages/void/src/cli/platform-lifecycle.ts
+  s_cdab927531343d::t_4b425f571b1705 9,53-57,69,117-118,120,123,127,133,146,148,152-153,197-226,235-239,249-257,632-663,672-674,682,739
+packages/void/src/cli/platform-saved-plans.ts
+  s_cdab927531343d::t_ae00810d47d9a9 1-117
+packages/void/src/cli/platform-setup.ts
+  s_cdab927531343d::t_7406265a5c624f 247,264-268,272,311-324
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_84ae7f2f8cc7b8 1-3,55,69-70,101
+packages/void/test/unit/platform-saved-plans.test.ts
+  s_cdab927531343d::t_3d5409b06068b8 1-125
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_cdab927531343d::t_e811497c8fca45 22,351-353,546,549,557,1038,1043-1050,1076-1154,1161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e43b44e7724f9d4e739e3d346d52df306ec16feb",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
