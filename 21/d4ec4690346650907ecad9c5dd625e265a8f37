@@ -1,0 +1,35 @@
+.github/workflows/platform-smoke-test.yml
+  s_fe834b00f92102::t_3717d3353afa08 38-39,74,83-91
+packages/deploy-core/src/index.ts
+  s_fe834b00f92102::t_fd2d736b70a259 280-286
+packages/void/src/cli/client.ts
+  s_fe834b00f92102::t_e4cc0a1c1c0c2f 528-532,549-555,1231,1244,1263-1266,1272-1278,1317-1319,1369,1386,1394,1405,1410-1412,1418-1420,1431,1474-1484,1486
+packages/void/src/cli/deploy.ts
+  s_fe834b00f92102::t_c476be4fe0307d 7520-7522,7595-7596,7620-7647
+packages/void/test/unit/deploy-events.test.ts
+  s_fe834b00f92102::t_b1fe5a9c6fd847 78-82,197-246
+packages/void/test/unit/direct-r2-client.test.ts
+  s_fe834b00f92102::t_2c4d465783ee4a 704-827
+platform/packages/api/src/deployment-execution.ts
+  s_fe834b00f92102::t_113311283dc102 1,59-66,197-210,246
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_fe834b00f92102::t_bb6e0c2ca33a15 514-565
+platform/packages/api/test/unit/deployment-observation.test.ts
+  s_fe834b00f92102::t_ff9f1e30806786 1-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "21d4ec4690346650907ecad9c5dd625e265a8f37",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
