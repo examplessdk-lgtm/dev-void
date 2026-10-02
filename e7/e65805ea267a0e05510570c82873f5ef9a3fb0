@@ -1,0 +1,25 @@
+packages/void/src/cli/platform-cloudflare.ts
+  s_cdab927531343d::t_d0f901c9442835 49,52-53,1198,1212,1228-1238,1250
+packages/void/test/unit/platform-auth-database.test.ts
+  s_cdab927531343d::t_37acd68157c4c9 39-40,85-96
+packages/void/test/unit/platform-cloudflare.test.ts
+  s_cdab927531343d::t_f61504e23718a6 337-379,386-387,390-391,393-395,401-412,414-415,417,420-439
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_a22c5b6ac00920 114-115,131
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e7e65805ea267a0e05510570c82873f5ef9a3fb0",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
