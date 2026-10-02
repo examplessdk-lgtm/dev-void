@@ -1,0 +1,71 @@
+README.md
+  s_a29f318fb0264b::t_5b9bee6282baa2 110-111
+docs/.vitepress/config.ts
+  s_a29f318fb0264b::t_b30ec5f6e3b3a2 126
+docs/guide/platform-administration.md
+  s_a29f318fb0264b::t_8711055710699e 15
+docs/guide/platform/administration/projects.md
+  s_a29f318fb0264b::t_85248119989f47 41,48-50
+docs/reference/cli.md
+  s_1ff185a05077f6::t_04c44412a3e7fa 488-509
+packages/void/README.md
+  s_a29f318fb0264b::t_6b1b90fbddab95 13
+packages/void/skills/void/SKILL.md
+  s_a29f318fb0264b::t_8a0be5a64ae4da 46
+packages/void/src/cli/cli.ts
+  s_14b3de9dcb5198::t_4ddd9c1ef0d592 306-308
+packages/void/src/cli/help.ts
+  s_1ff185a05077f6::t_45b7bb78dae5b1 290-293,317,319-375
+packages/void/src/cli/platform-args.ts
+  s_a29f318fb0264b::t_9d12d8c6e1c486 8,14-15,57-58,212-215
+packages/void/src/cli/platform-cmd.ts
+  s_1ff185a05077f6::t_41cb56d235baa6 143-166
+packages/void/src/cli/platform-plans-args.ts
+  s_1ff185a05077f6::t_07f0445955b6da 1-105
+packages/void/src/cli/platform-plans-config.ts
+  s_a29f318fb0264b::t_a546dd2747114b 1-468
+packages/void/test/unit/platform-plans-config.test.ts
+  s_a29f318fb0264b::t_a3e6d6d9e5e020 1-315
+platform/packages/api/test/integration/operator-cli-e2e.test.ts
+  s_fe834b00f92102::t_0f20423b0f070e 3,5-6,9-10,12-21,76,184-307
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8a323f561a5a1d99f41226f55d60455fd41d3765",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_1ff185a05077f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa1a-e66b-7331-bfa2-7d41bbd56f9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_a29f318fb0264b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa1a-c42a-7702-ba4b-3e3b182f4084",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
