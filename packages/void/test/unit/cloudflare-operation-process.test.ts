@@ -9,11 +9,74 @@ import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { expect, it } from 'vite-plus/test';
+import { isVoidSecretOnlyDraft } from '../../../deploy-cloudflare/src/secret-draft.ts';
+import { voidSecretDraftVersion } from '../../../deploy-cloudflare/test/secret-draft-fixture.ts';
 import {
   decodeCloudflareOperationResult,
   encodeCloudflareOperation,
 } from '../../src/cli/cloudflare-process.ts';
 import { resolveCloudflareOperationArgv } from '../../src/cli/preset.ts';
+
+it('requests immutable version source explicitly without loading or provisioning build output', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'void-cf-secret-source-'));
+  const draft = voidSecretDraftVersion();
+  const requests: Array<string> = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? '');
+    request.resume();
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const configPath = join(directory, 'wrangler.json');
+    writeFileSync(configPath, JSON.stringify({ name: 'test-worker', account_id: 'test-account' }));
+    const [command, ...prefix] = resolveCloudflareOperationArgv(directory);
+    const captured = await new Promise<string>((resolve, reject) =>
+      execFile(
+        command!,
+        [
+          ...prefix,
+          ...encodeCloudflareOperation({
+            type: 'versions.view',
+            versionId: draft.id,
+            includeSource: true,
+            configPath,
+            workerName: 'test-worker',
+          }),
+        ],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          timeout: 20_000,
+          env: {
+            PATH: process.env.PATH,
+            SYSTEMROOT: process.env.SYSTEMROOT,
+            WINDIR: process.env.WINDIR,
+            CI: 'true',
+            CLOUDFLARE_API_TOKEN: 'synthetic-token',
+            CLOUDFLARE_ACCOUNT_ID: 'test-account',
+            CLOUDFLARE_API_BASE_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+          },
+        },
+        (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+      ),
+    );
+    const result = decodeCloudflareOperationResult({ status: 0, stdout: captured, stderr: '' });
+    expect(result.status).toBe(0);
+    expect(isVoidSecretOnlyDraft(result.data as Record<string, unknown>)).toBe(true);
+    expect(requests).toEqual([
+      `/client/v4/accounts/test-account/workers/workers/test-worker/versions/${draft.id}?include=modules`,
+    ]);
+    expect(captured).not.toContain('synthetic-token');
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 it.each([200, 503])(
   'reports HTTP %i without loading the build toolchain when domain cleanup returns non-JSON',

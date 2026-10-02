@@ -4011,12 +4011,24 @@ async function runCloudflareEmailStep(
   const without: CloudflareEmailStepResult = { satisfied: false, configWritten: false, map: null };
   const from = input.voidConfig.email?.from;
   if (!from) {
-    log.warn(
-      [
-        'deploy: this app uses email, but void.config.ts names no sender.',
-        'Set email.from to "you@mail.acme.com" in void.config.ts — deploying without email.',
-      ].join('\n'),
-    );
+    const carriesEmailConfig =
+      (Array.isArray(input.rootConfig.send_email) &&
+        (input.rootConfig.send_email as Array<{ name?: unknown } | null>).some(
+          (binding) => binding?.name === SEND_EMAIL_BINDING,
+        )) ||
+      (Array.isArray(input.rootConfig.addresses) && input.rootConfig.addresses.length > 0);
+    if (carriesEmailConfig) {
+      log.info(
+        'deploy: email.from is unset; skipping automatic email setup. Existing Cloudflare email configuration is preserved.',
+      );
+    } else {
+      log.warn(
+        [
+          'deploy: this app uses email, but void.config.ts names no sender.',
+          'Set email.from to "you@mail.acme.com" in void.config.ts — automatic email setup skipped.',
+        ].join('\n'),
+      );
+    }
     return without;
   }
   const { rootConfig } = input;

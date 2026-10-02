@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { parseRootWranglerConfig } from './config.ts';
 import type { CloudflareCommandRunner } from './execute.ts';
 import type { CloudflareOperation } from './operations.ts';
-import { isWranglerSecretOnlyDraft } from './secret-draft.ts';
+import { isVoidSecretOnlyDraft, isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
 export type ExistingCloudflareWorker = {
   versionId: string;
@@ -55,6 +55,7 @@ export async function readExistingCloudflareWorker(options: {
 async function readCloudflareWorker(
   options: ExistingCloudflareWorkerOptions,
   allowMissing: boolean,
+  proveSecretDraft = false,
 ): Promise<CloudflareWorkerInspection | null> {
   const target = { configPath: options.configPath, workerName: options.workerName };
   const read = async (
@@ -124,6 +125,19 @@ async function readCloudflareWorker(
   ) {
     throw new Error('Cloudflare did not return the existing Worker configuration.');
   }
+  let isSecretOnlyDraft = isWranglerSecretOnlyDraft(version);
+  if (
+    proveSecretDraft &&
+    !isSecretOnlyDraft &&
+    record(version.annotations) &&
+    Object.keys(version.annotations).length === 1 &&
+    version.annotations['workers/triggered_by'] === 'secret'
+  ) {
+    const source = await read({ type: 'versions.view', versionId, includeSource: true, ...target });
+    if (source?.id === versionId) {
+      isSecretOnlyDraft = isVoidSecretOnlyDraft(source);
+    }
+  }
   const after = options.versionId
     ? deployment
     : await read({ type: 'deployments.status', ...target });
@@ -139,7 +153,7 @@ async function readCloudflareWorker(
       runtime: resources.script_runtime,
       script: resources.script,
     },
-    isSecretOnlyDraft: isWranglerSecretOnlyDraft(version),
+    isSecretOnlyDraft,
   };
 }
 
@@ -265,7 +279,7 @@ export async function assertCloudflareDurableObjectLifecycleSupported(options: {
   if (!migrations.some((migration) => migration.changesClasses)) {
     return;
   }
-  const existing = await readCloudflareWorker(options, true);
+  const existing = await readCloudflareWorker(options, true, true);
   if (!existing) {
     return;
   }
@@ -277,7 +291,7 @@ export async function assertCloudflareDurableObjectLifecycleSupported(options: {
     workerName: options.workerName,
   };
   const activeTag = await readMigrationTag(migrationOptions);
-  const after = await readCloudflareWorker(options, false);
+  const after = await readCloudflareWorker(options, false, true);
   const afterTag = await readMigrationTag(migrationOptions);
   if (
     !after ||

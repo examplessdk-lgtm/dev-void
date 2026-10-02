@@ -84,7 +84,11 @@ function result(status: number, stdout = '', stderr = '', data?: unknown): Resul
   };
 }
 
-function runCf(command: Array<string>, cwd = process.cwd()): Result {
+function runCf(
+  command: Array<string>,
+  cwd = process.cwd(),
+  bounds?: { timeoutMs: number; maxOutputBytes: number },
+): Result {
   const env = cfEnvironment();
   env.CF_QUIET = '1';
   const child = spawnSync(process.execPath, [cf, ...command], {
@@ -93,7 +97,8 @@ function runCf(command: Array<string>, cwd = process.cwd()): Result {
     encoding: 'utf8',
     shell: false,
     windowsHide: true,
-    maxBuffer: 32 * 1024 * 1024,
+    maxBuffer: bounds?.maxOutputBytes ?? 32 * 1024 * 1024,
+    ...(bounds ? { timeout: bounds.timeoutMs } : {}),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stderr = [
@@ -187,10 +192,8 @@ async function withBuildOutput(
     if (sourceMain) {
       copyFileSync(sourceMain, join(scratch, main));
     } else {
-      writeFileSync(
-        join(scratch, main),
-        'export default { fetch() { return new Response(""); } };\n',
-      );
+      const { VOID_SECRET_DRAFT_SOURCE } = await import('@void/deploy-cloudflare');
+      writeFileSync(join(scratch, main), VOID_SECRET_DRAFT_SOURCE);
     }
     writeFileSync(
       join(scratch, 'wrangler.json'),
@@ -925,13 +928,28 @@ async function workerHistory(): Promise<Result> {
       });
     case 'versions.view': {
       const versionId = operation.versionId;
-      const called = runCf(['workers', 'versions', 'get', versionId, '--worker-id', worker]);
+      const called = runCf(
+        [
+          'workers',
+          'versions',
+          'get',
+          versionId,
+          '--worker-id',
+          worker,
+          ...(operation.includeSource ? ['--include', 'modules'] : []),
+        ],
+        process.cwd(),
+        operation.includeSource ? { timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 } : undefined,
+      );
       if (called.status !== 0) {
         return called;
       }
       const version = object(parsedJson(called.stdout));
       if (version.id !== versionId || !Array.isArray(version.bindings)) {
         throw new Error('Worker version bindings were malformed.');
+      }
+      if (operation.includeSource) {
+        return result(0, '', called.stderr, version);
       }
       const resources = await readVersionResources(worker, versionId);
       return result(0, '', called.stderr, { ...version, resources });

@@ -10554,7 +10554,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
   });
 
-  it('no `email.from`: says what to add to void.config.ts and deploys without email (no wrangler email call)', async () => {
+  it('no `email.from`: explains automatic setup is skipped (no wrangler email call)', async () => {
     const root = emailProject(PROVISIONED_D1, {}, {});
     const { deps, spawns, exitCalls } = emailHarness();
     const output = captureOutput();
@@ -10569,6 +10569,97 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     );
     expect(spawns.some((s) => s.args[0] === 'email' || s.args[0] === 'auth')).toBe(false);
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
+  });
+
+  it('no email.from preserves restricted manual email configuration without claiming email is absent or ready', async () => {
+    const root = emailProject(
+      {
+        ...PROVISIONED_D1,
+        send_email: [
+          {
+            name: 'SEND_EMAIL',
+            allowed_sender_addresses: ['support@mail.acme.com'],
+            allowed_destination_addresses: ['owner@acme.com'],
+          },
+        ],
+        addresses: ['support@mail.acme.com'],
+        vars: { __VOID_EMAIL_FROM: 'support@mail.acme.com' },
+      },
+      {},
+      {},
+    );
+    const before = readRootConfig(root);
+    const { deps, spawns, fetchCalls, confirms, trace, exitCalls } = emailHarness();
+    const output = captureOutput();
+    try {
+      await runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([]);
+    expect(confirms).toEqual([]);
+    expect(fetchCalls).toEqual([]);
+    expect(spawns.some((spawn) => spawn.args[0] === 'email' || spawn.args[0] === 'auth')).toBe(
+      false,
+    );
+    expect(trace).toContain('build');
+    expect(spawns.some((spawn) => spawn.args[0] === 'deploy')).toBe(true);
+    const after = readRootConfig(root);
+    expect(after.send_email).toEqual(before.send_email);
+    expect(after.addresses).toEqual(before.addresses);
+    expect(after.vars).toEqual(before.vars);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('skipping automatic email setup');
+    expect(printed).toContain('Existing Cloudflare email configuration is preserved.');
+    expect(printed).not.toContain('deploying without email');
+    expect(printed).not.toContain('email on mail.acme.com is ready');
+  });
+
+  it('require-email still refuses unverified manual configuration without email.from before build or upload', async () => {
+    const root = emailProject(
+      {
+        ...PROVISIONED_D1,
+        send_email: [
+          {
+            name: 'SEND_EMAIL',
+            allowed_sender_addresses: ['support@mail.acme.com'],
+            allowed_destination_addresses: ['owner@acme.com'],
+          },
+        ],
+        addresses: ['support@mail.acme.com'],
+      },
+      {},
+      {},
+    );
+    const before = readRootConfig(root);
+    const { deps, spawns, fetchCalls, confirms, trace, exitCalls } = emailHarness();
+    const output = captureOutput();
+    try {
+      await expect(
+        runCloudflareDeploy(
+          root,
+          { platform: 'cloudflare', requireEmail: true },
+          silentCliLog,
+          deps,
+        ),
+      ).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      output.restore();
+    }
+    expect(exitCalls).toEqual([1]);
+    expect(confirms).toEqual([]);
+    expect(fetchCalls).toEqual([]);
+    expect(spawns.some((spawn) => spawn.args[0] === 'email' || spawn.args[0] === 'auth')).toBe(
+      false,
+    );
+    expect(trace).not.toContain('build');
+    expect(trace).not.toContain('provision');
+    expect(spawns.some((spawn) => spawn.args[0] === 'deploy')).toBe(false);
+    expect(readRootConfig(root)).toEqual(before);
+    const printed = output.lines.join('\n');
+    expect(printed).toContain('Existing Cloudflare email configuration is preserved.');
+    expect(printed).toContain('--require-email');
+    expect(printed).toContain('Nothing was built or uploaded.');
   });
 
   it('second deploy, everything ready: no prompt, no write, no bearer write, address map printed', async () => {

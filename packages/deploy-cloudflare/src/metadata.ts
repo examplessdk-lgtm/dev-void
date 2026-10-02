@@ -41,7 +41,11 @@ export function createCloudflareMetadataRunner(options: {
     } else if (operation.type === 'versions.list') {
       kind = 'versions';
       resource = '/versions?deployable=true';
-    } else if (operation.type === 'versions.view' && /^[0-9a-f-]{36}$/i.test(operation.versionId)) {
+    } else if (
+      operation.type === 'versions.view' &&
+      !operation.includeSource &&
+      /^[0-9a-f-]{36}$/i.test(operation.versionId)
+    ) {
       kind = 'version';
       resource = '/versions/' + encodeURIComponent(operation.versionId);
     }

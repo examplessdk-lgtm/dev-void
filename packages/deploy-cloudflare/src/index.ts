@@ -52,6 +52,7 @@ export {
   type CloudflareVersionMetadata,
 } from './version.ts';
 export { createCloudflareMetadataRunner } from './metadata.ts';
+export { VOID_SECRET_DRAFT_SOURCE } from './secret-draft.ts';
 
 export type {
   CloudflareOperation,

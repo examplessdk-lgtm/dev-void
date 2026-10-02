@@ -86,6 +86,12 @@ describe('Cloudflare metadata transport', () => {
   });
 
   it.each<CloudflareOperation>([
+    {
+      type: 'versions.view',
+      versionId: '11111111-1111-4111-8111-111111111111',
+      includeSource: true,
+      ...suffix,
+    },
     { type: 'versions.upload', ...suffix },
     { type: 'versions.deploy', versions: [], ...suffix },
     { type: 'deployments.status', configPath: 'another.json', workerName: 'worker' },

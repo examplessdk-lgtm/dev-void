@@ -14,6 +14,7 @@ import {
 } from '@cloudflare/build-output-utils';
 import { OutputContainerSchema } from '@cloudflare/config';
 import { afterEach, expect, it, vi } from 'vite-plus/test';
+import { isVoidSecretOnlyDraft } from '../../../deploy-cloudflare/src/secret-draft.ts';
 import {
   activateCloudflareVersion,
   deployCloudflareVersionTriggers,
@@ -23,6 +24,7 @@ import {
   operationFixture,
   operationFixtureRequest,
 } from '../../../deploy-cloudflare/test/operation-fixture.ts';
+import { voidSecretDraftVersion } from '../../../deploy-cloudflare/test/secret-draft-fixture.ts';
 import { prepareCfBuildOutput } from '../../src/cli/cf-build-output.ts';
 import { uploadPinnedCloudflareVersion } from '../../src/cli/cf-version-api.ts';
 import {
@@ -37,6 +39,66 @@ const roots: Array<string> = [];
 const pinnedCfVersion = JSON.parse(
   readFileSync(fileURLToPath(import.meta.resolve('cf/package.json')), 'utf8'),
 ).version as string;
+
+it('reads the exact immutable SDK draft source through the real pinned cf HTTP transport', async () => {
+  const prepared = await output();
+  const draft = voidSecretDraftVersion();
+  const requests: Array<string> = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url ?? '');
+    request.resume();
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+    const command = createCfCommand({
+      accountId: 'test-account',
+      apiBaseUrl,
+      verifyUploader: () => true,
+      env: () => ({
+        PATH: process.env.PATH,
+        SYSTEMROOT: process.env.SYSTEMROOT,
+        WINDIR: process.env.WINDIR,
+        CI: 'true',
+        CLOUDFLARE_API_TOKEN: 'synthetic-token',
+        CLOUDFLARE_ACCOUNT_ID: 'test-account',
+        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      }),
+    });
+    const commands: Array<{ args: Array<string>; bounds: unknown }> = [];
+    const runner = createCfVersionRunner({
+      output: prepared,
+      workerName: 'void-test',
+      runCf: (args, options) => {
+        commands.push({ args, bounds: options });
+        return command(args, options);
+      },
+      verifyResources: async () => {
+        throw new Error('A read must not provision or probe resources');
+      },
+    });
+    const result = await runner(
+      { type: 'versions.view', versionId: draft.id, workerName: 'void-test', includeSource: true },
+      { capture: true },
+    );
+    expect(result.status).toBe(0);
+    expect(isVoidSecretOnlyDraft(result.data as Record<string, unknown>)).toBe(true);
+    expect(requests).toEqual([
+      `/client/v4/accounts/test-account/workers/workers/void-test/versions/${draft.id}?include=modules`,
+    ]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.bounds).toMatchObject({ timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
+    expect(JSON.stringify(result)).not.toContain('synthetic-token');
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+    await prepared.dispose();
+  }
+});
 afterEach(() => {
   vi.restoreAllMocks();
   syncBuiltinESMExports();

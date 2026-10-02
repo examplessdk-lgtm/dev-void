@@ -50,7 +50,9 @@ Use a mail subdomain to keep existing mail on `acme.com` with its current provid
 
 Sign in with `void cloudflare login`, or use a `CLOUDFLARE_API_TOKEN` with **Email Routing Edit** and **Email Sending Edit** in addition to deploy permissions. If your browser session lacks email permissions, log out and sign in again. Global API Keys aren't supported.
 
-Run `void deploy --platform cloudflare`. Void shows the domain, routing, sending, DNS, and handler addresses it would configure. Accept to set up email and deploy. Later deploys reuse the setup. Without `email.from`, or if you decline the initial setup, the app deploys without email.
+Run `void deploy --platform cloudflare`. Void shows the domain, routing, sending, DNS, and handler addresses it would configure. Accept to set up email and deploy. Later deploys reuse the setup. If you decline the initial setup, the app deploys without email.
+
+Without `email.from`, Void skips automatic setup and preserves authored `cloudflare.send_email` bindings and `cloudflare.addresses`; check their readiness yourself. `--require-email` still refuses deployment when automatic setup cannot be verified.
 
 If subdomain setup needs a dashboard step, follow the checklist under **Email → Settings → Subdomains**, then retry. After DNS changes, check readiness with:
 

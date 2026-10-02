@@ -27,7 +27,7 @@ export type CloudflareOperation =
   | ({ type: 'secret.list' | 'secret.bulk' } & WorkerTarget)
   | ({ type: 'secret.put' | 'secret.delete'; name: string } & WorkerTarget)
   | ({ type: 'deployments.status' | 'deployments.list' | 'versions.list' } & WorkerTarget)
-  | ({ type: 'versions.view'; versionId: string } & WorkerTarget)
+  | ({ type: 'versions.view'; versionId: string; includeSource?: boolean } & WorkerTarget)
   | ({
       type: 'versions.deploy';
       versions: Array<{ versionId: string; percentage: number }>;

@@ -589,10 +589,24 @@ export function createCfVersionRunner(options: {
     }
 
     if (operation.type === 'versions.view') {
-      const result = await run(
-        ['workers', 'versions', 'get', operation.versionId, '--worker-id', workerName],
-        true,
-      );
+      const args = [
+        'workers',
+        'versions',
+        'get',
+        operation.versionId,
+        '--worker-id',
+        workerName,
+        ...(operation.includeSource ? ['--include', 'modules'] : []),
+      ];
+      const called = operation.includeSource
+        ? await runCf(args, {
+            cwd: output.directory,
+            capture: true,
+            timeoutMs: 30_000,
+            maxOutputBytes: 1024 * 1024,
+          })
+        : await run(args, true);
+      const result = { ...called, data: called.data ?? parseJson(called.stdout) };
       if (result.status !== 0 || result.signal || result.error) {
         return result;
       }

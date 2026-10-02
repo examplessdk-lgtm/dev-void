@@ -7,7 +7,7 @@ import { parseRootWranglerConfig } from './config.ts';
 import { cloudflareCommandDiagnostic } from './diagnostics.ts';
 import type { CloudflareCommandResult, CloudflareCommandRunner } from './execute.ts';
 import type { CloudflareUploadResult } from './operations.ts';
-import { isWranglerSecretOnlyDraft } from './secret-draft.ts';
+import { isVoidSecretOnlyDraft, isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
 const DURABLE_MIGRATION_VERSION_ERROR = 10211;
 
@@ -899,6 +899,7 @@ async function activateCloudflareVersionWithSecretsFile(
   let inheritanceBaseline: Array<RecentCloudflareVersion> | undefined;
   let trustedCandidateChain = false;
   let activeSecretsPinned = false;
+  let pinnedActiveSecrets: Array<{ name: string; type: 'secret_key' | 'secret_text' }> | undefined;
   if (options.expectedPreviousVersionId !== undefined || options.verifyInheritedSecrets === true) {
     const recent = await readRecentCloudflareVersionIds(options, configPath);
     if (recent === null) {
@@ -964,6 +965,7 @@ async function activateCloudflareVersionWithSecretsFile(
           };
         }
         activeSecretsPinned = true;
+        pinnedActiveSecrets = activeSecrets;
       }
     }
     inheritanceBaseline = recent;
@@ -1058,24 +1060,64 @@ async function activateCloudflareVersionWithSecretsFile(
   );
 
   const alias = `void-ready-${Date.now().toString(36)}`;
-  if (options.atomic && previous.versionId !== null) {
-    // Pinning the active secrets selects the version-aware uploader for atomic
-    // publication, including when the active version is the latest upload.
-    if (!activeSecretsPinned && options.pinActiveSecrets) {
-      const activeSecrets = await readCloudflareVersionSecretBindings(
-        options,
-        configPath,
-        previous.versionId,
-      );
-      if (activeSecrets?.length) {
-        await options.pinActiveSecrets(previous.versionId, activeSecrets);
+  const bootstrapVoidDraft =
+    !options.preserveTriggers &&
+    !options.requirePreviewForReadiness &&
+    previousVersion?.isVoidSecretOnlyDraft === true;
+  if (previous.versionId !== null && (options.atomic || bootstrapVoidDraft)) {
+    // The exact private cf placeholder has no serving preview. Publish its first
+    // application once through the bootstrap path, pinning its active secrets
+    // just as for an explicitly atomic release.
+    if (bootstrapVoidDraft && !activeSecretsPinned && !options.pinActiveSecrets) {
+      return { ok: false, reason: 'inheritance-source-unavailable' };
+    }
+    if (bootstrapVoidDraft || (!activeSecretsPinned && options.pinActiveSecrets)) {
+      let activeSecrets: Awaited<ReturnType<typeof readCloudflareVersionSecretBindings>>;
+      try {
+        activeSecrets = await readCloudflareVersionSecretBindings(
+          options,
+          configPath,
+          previous.versionId,
+        );
+      } catch {
+        return { ok: false, reason: 'inheritance-source-unavailable' };
+      }
+      if (activeSecrets === null) {
+        return { ok: false, reason: 'inheritance-source-unavailable' };
+      }
+      if (
+        bootstrapVoidDraft &&
+        (activeSecrets.length === 0 ||
+          activeSecrets.some((secret) => secret.type !== 'secret_text') ||
+          !arraysEqual(
+            activeSecrets.map((secret) => secret.name).sort(),
+            [...previousVersion!.voidDraftSecretNames!].sort(),
+          ) ||
+          (activeSecretsPinned &&
+            !isDeepStrictEqual(
+              [...activeSecrets].sort((a, b) => a.name.localeCompare(b.name)),
+              [...pinnedActiveSecrets!].sort((a, b) => a.name.localeCompare(b.name)),
+            )))
+      ) {
+        return { ok: false, reason: 'inheritance-source-changed' };
+      }
+      if (!activeSecretsPinned && activeSecrets.length) {
+        let pinned: boolean;
+        try {
+          pinned = await options.pinActiveSecrets!(previous.versionId, activeSecrets);
+        } catch {
+          return { ok: false, reason: 'inheritance-source-unavailable' };
+        }
+        if (!pinned) {
+          return { ok: false, reason: 'inheritance-source-changed' };
+        }
       }
     }
     return bootstrapFirstDeployment(
       { ...options, message },
       configPath,
       previous.versionId,
-      true,
+      options.atomic === true,
       previousTriggerConfig,
     );
   }
@@ -1707,6 +1749,8 @@ async function readCloudflareVersionMetadata(
 type CloudflareVersionInspection = Readonly<{
   metadata: CloudflareVersionMetadata | null;
   isSecretOnlyDraft: boolean;
+  isVoidSecretOnlyDraft: boolean;
+  voidDraftSecretNames: ReadonlyArray<string> | null;
 }>;
 
 async function readCloudflareVersionInspection(
@@ -1744,11 +1788,17 @@ async function readCloudflareVersionInspection(
       if (
         annotations?.['workers/triggered_by'] === 'secret' &&
         Object.keys(annotations).length === 1 &&
-        !isRecord(entry.resources)
+        !isWranglerSecretOnlyDraft(entry)
       ) {
         const inspection = await Promise.resolve(
           options.runWrangler(
-            { type: 'versions.view', versionId, configPath, workerName: options.workerName },
+            {
+              type: 'versions.view',
+              versionId,
+              configPath,
+              workerName: options.workerName,
+              includeSource: true,
+            },
             { capture: true },
           ),
         );
@@ -1759,9 +1809,14 @@ async function readCloudflareVersionInspection(
           }
         }
       }
+      const isVoidDraft = isVoidSecretOnlyDraft(draft);
       return {
         metadata: typeof message === 'string' ? parseCloudflareVersionMessage(message) : null,
-        isSecretOnlyDraft: isWranglerSecretOnlyDraft(draft),
+        isSecretOnlyDraft: isWranglerSecretOnlyDraft(draft) || isVoidSecretOnlyDraft(draft),
+        isVoidSecretOnlyDraft: isVoidDraft,
+        voidDraftSecretNames: isVoidDraft
+          ? (draft.bindings as Array<{ name: string }>).map((binding) => binding.name)
+          : null,
       };
     }
   } catch {
@@ -1901,12 +1956,19 @@ async function bootstrapFirstDeployment(
   if (!options.verifyUploader()) {
     return { ok: false, reason: 'uploader-changed' };
   }
-  if (atomic) {
+  {
     const current = await readCurrentProductionVersion(options, configPath);
     if (current.kind === 'failed') {
       return { ok: false, reason: 'status-failed', status: current.status };
     }
-    if (current.kind !== 'ok' || current.versionId !== previousVersionId) {
+    if (
+      current.kind !== 'ok' ||
+      current.versionId !== previousVersionId ||
+      !productionVersionPercentagesEqual(
+        current.versions,
+        previousVersionId ? [{ versionId: previousVersionId, percentage: 100 }] : [],
+      )
+    ) {
       return {
         ok: false,
         reason: 'deployment-changed',
@@ -1974,10 +2036,6 @@ async function bootstrapFirstDeployment(
       rollback: 'unsafe',
     };
   }
-  // A version-aware atomic upload activates code without publishing routes.
-  // Publish only the active owner's snapshot before probing a first Custom
-  // Domain; enabling an unrequested workers.dev URL would expose the app.
-  options.onProgress?.('Updating routes and triggers...');
   const triggerOptions = {
     runWrangler: options.runWrangler,
     workerName: options.workerName,
@@ -1993,6 +2051,99 @@ async function bootstrapFirstDeployment(
     publishEmptyCustomDomains: options.publishEmptyCustomDomains,
     publishEmptyCrons: options.publishEmptyCrons,
   };
+  const verifyPublishedOwner = async (): Promise<CloudflareVersionActivation | null> => {
+    const owner = await readCurrentProductionVersion(options, configPath);
+    if (owner.kind === 'failed') {
+      return {
+        ok: false,
+        reason: 'status-failed',
+        status: owner.status,
+        versionId,
+        previousVersionId,
+        rollback: 'unsafe',
+      };
+    }
+    if (
+      owner.kind !== 'ok' ||
+      owner.versionId !== versionId ||
+      !productionVersionPercentagesEqual(owner.versions, [{ versionId, percentage: 100 }])
+    ) {
+      // Another deployment may have published its code while this uploader was
+      // still applying bootstrap settings. Repair only that owner's immutable
+      // snapshot. If our code regains ownership, preserve all triggers until
+      // its upload validation and checkpoint have completed.
+      const repair =
+        owner.kind === 'ok' &&
+        owner.versionId &&
+        owner.versionId !== versionId &&
+        options.verifyUploader()
+          ? await stabilizeCloudflareVersionTriggers({
+              ...triggerOptions,
+              targetTriggerConfig: { ...desiredTriggerConfig, preserve: true },
+            })
+          : null;
+      return {
+        ok: false,
+        reason: 'deployment-changed',
+        versionId,
+        previousVersionId,
+        activeVersionId: repair?.activeVersionId ?? (owner.kind === 'ok' ? owner.versionId : null),
+        rollback: 'not-needed',
+        ...(repair
+          ? {
+              triggerRepair:
+                repair.ok && !repair.targetOwnsTraffic
+                  ? 'succeeded'
+                  : !repair.ok && repair.reason !== 'metadata-unavailable'
+                    ? 'failed'
+                    : 'unavailable',
+            }
+          : {}),
+      };
+    }
+    return null;
+  };
+  const publishedOwnerFailure = await verifyPublishedOwner();
+  if (publishedOwnerFailure) {
+    return publishedOwnerFailure;
+  }
+  if (options.validateUploadedVersion || options.recordVerifiedCandidate) {
+    options.onProgress?.('Verifying the uploaded Worker...');
+    try {
+      await options.validateUploadedVersion?.(versionId);
+      const validatedOwnerFailure = await verifyPublishedOwner();
+      if (validatedOwnerFailure) {
+        return validatedOwnerFailure;
+      }
+      if (options.recordVerifiedCandidate) {
+        if (
+          !options.validateUploadedVersion &&
+          !options.verifyInheritedSecrets &&
+          options.expectedPreviousVersionId === undefined
+        ) {
+          throw new Error('The bootstrap upload has no verified candidate checkpoint.');
+        }
+        await options.recordVerifiedCandidate(versionId, previousVersionId);
+      }
+    } catch {
+      return {
+        ok: false,
+        reason: atomic ? 'atomic-failed' : 'bootstrap-failed',
+        versionId,
+        previousVersionId,
+        rollback: 'unavailable',
+        diagnostic: `Worker version ${versionId} was published, but its upload validation or candidate checkpoint failed. Inspect the current Worker deployment before retrying.`,
+      };
+    }
+    const checkpointOwnerFailure = await verifyPublishedOwner();
+    if (checkpointOwnerFailure) {
+      return checkpointOwnerFailure;
+    }
+  }
+  // A version-aware atomic upload activates code without publishing routes.
+  // Publish only the active owner's snapshot before probing a first Custom
+  // Domain; enabling an unrequested workers.dev URL would expose the app.
+  options.onProgress?.('Updating routes and triggers...');
   const triggers = await stabilizeCloudflareVersionTriggers(triggerOptions);
   if (!triggers.ok || !triggers.targetOwnsTraffic) {
     const superseded =

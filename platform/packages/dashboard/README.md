@@ -61,6 +61,46 @@ See [Platform Development](../../../docs/guide/platform-development.md) for the
 full setup and source-runtime workflow. The core platform installer does not
 install the dashboard; running this app locally does not add it to an installation.
 
+## Standalone Deployment
+
+Use a source checkout to deploy a dashboard for an installed platform. Make a
+separate copy in `playground-local/my-dashboard`, keeping the app’s source,
+assets, package manifest and TypeScript configuration. Exclude local environment
+files, dependencies and generated output. Give the copied package a unique
+private name and keep its `build: vp build` script. In the copied Vite config,
+keep `tailwind()`, `voidPlugin()` and `voidReact()`, and remove the local API
+`persistTo` option.
+
+Replace the copied `cloudflare` configuration with your deployment settings:
+
+| Setting                        | Value                                                                                              |
+| ------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `name`                         | An unused dashboard Worker name in your account                                                    |
+| `account_id`                   | The installed API Worker’s Cloudflare account ID                                                   |
+| `compatibility_date`           | `2026-10-01`                                                                                       |
+| `compatibility_flags`          | `['nodejs_compat']`                                                                                |
+| `assets`                       | `{ directory: 'dist/client' }`                                                                     |
+| `routes`                       | `[{ pattern: 'dash.example.com', custom_domain: true }]`, using a hostname in your Cloudflare zone |
+| `workers_dev` / `preview_urls` | `false` for a dashboard served only at its custom hostname                                         |
+| `services`                     | `[{ binding: 'API', service: '<installed-api-worker-name>' }]`                                     |
+| `vars.API_URL`                 | The installed API’s public HTTPS origin                                                            |
+| `vars.DASHBOARD_URL`           | The dashboard’s HTTPS origin, such as `https://dash.example.com`                                   |
+| `vars.SITE_DOMAIN`             | The installation’s application domain, such as `apps.example.com`                                  |
+
+From the repository root, run `vp install` and `vp run build:core`. Configure the
+API’s accepted dashboard origin using the
+[optional dashboard instructions](../../../docs/guide/platform/installation/domains.md#optional-dashboard).
+Then deploy from the copied app directory with the public Void CLI:
+
+```sh
+vp exec void deploy --platform cloudflare
+```
+
+The `API` binding sends server requests to your installed API, while
+`API_URL` supplies browser login URLs. Open the dashboard’s `/login` page once
+deployment reports readiness. If Access protects the platform, configure its
+coverage for the dashboard origin as described in the installation guide.
+
 ## Source Layout
 
 ```text

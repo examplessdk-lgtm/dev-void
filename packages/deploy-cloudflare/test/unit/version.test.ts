@@ -12,12 +12,148 @@ import {
   parseCloudflareVersionMessage,
   readCloudflareTriggerConfig,
   type CloudflareCommandResult,
+  type CloudflareOperation,
 } from '../../src/index.ts';
 import { operationFixture } from '../operation-fixture.ts';
+import { voidSecretDraftVersion } from '../secret-draft-fixture.ts';
 
 const CURRENT = '11111111-1111-4111-8111-111111111111';
 const NEXT = '22222222-2222-4222-8222-222222222222';
 const CONCURRENT = '33333333-3333-4333-8333-333333333333';
+
+function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVersion()) {
+  const events: Array<string> = [];
+  const operations: Array<CloudflareOperation> = [];
+  const triggerConfig = {
+    workers_dev: true,
+    preview_urls: true,
+    routes: [],
+    crons: [],
+    queueConsumers: [],
+    workflows: [],
+  };
+  const message = encodeCloudflareVersionMessage([], triggerConfig);
+  let traffic = [{ version_id: CURRENT, percentage: 100 }];
+  let uploaded = false;
+  let published = false;
+  let triggers = false;
+  let ordinary = false;
+  let readSource = async () => source;
+  const runWrangler = vi.fn(
+    async (operation: CloudflareOperation): Promise<CloudflareCommandResult> => {
+      operations.push(operation);
+      if (operation.type === 'deployments.status') {
+        return { ...ok(), data: { versions: traffic } };
+      }
+      if (operation.type === 'versions.list') {
+        return {
+          ...ok(),
+          data: [
+            {
+              id: CURRENT,
+              number: 2,
+              annotations: ordinary
+                ? { 'workers/message': message }
+                : { 'workers/triggered_by': 'secret' },
+            },
+            ...(uploaded
+              ? [{ id: NEXT, number: 3, annotations: { 'workers/message': message } }]
+              : []),
+          ],
+        };
+      }
+      if (operation.type === 'versions.view') {
+        if (operation.includeSource) {
+          events.push('source');
+          return { ...ok(), data: await readSource() };
+        }
+        return {
+          ...ok(),
+          data: {
+            id: operation.versionId,
+            resources: { bindings: [{ name: 'TOKEN', type: 'secret_text' }] },
+          },
+        };
+      }
+      if (operation.type === 'versions.upload') {
+        events.push('upload');
+        uploaded = true;
+        return {
+          ...ok(),
+          data: {
+            versionId: NEXT,
+            previewUrl: `https://${NEXT.slice(0, 8)}-app.example.workers.dev`,
+          },
+        };
+      }
+      if (operation.type === 'worker.deploy') {
+        events.push('publish');
+        uploaded = true;
+        published = true;
+        traffic = [{ version_id: NEXT, percentage: 100 }];
+        return {
+          ...ok(),
+          data: { versionId: NEXT, workersDevUrl: 'https://app.example.workers.dev' },
+        };
+      }
+      if (operation.type === 'versions.deploy') {
+        events.push('activate');
+        traffic = operation.versions.map(({ versionId, percentage }) => ({
+          version_id: versionId,
+          percentage,
+        }));
+        return ok();
+      }
+      if (operation.type.startsWith('triggers.')) {
+        events.push('triggers');
+        triggers = true;
+        return ok();
+      }
+      throw new Error(`Unexpected SDK draft operation: ${operation.type}`);
+    },
+  );
+  const pinActiveSecrets = vi.fn(async (id: string, bindings: unknown) => {
+    expect(id).toBe(CURRENT);
+    expect(bindings).toEqual([{ name: 'TOKEN', type: 'secret_text' }]);
+    events.push('pin');
+    return true;
+  });
+  const fetcher = vi.fn(async (url: string | URL | Request) => {
+    if (published) {
+      expect(triggers).toBe(true);
+      expect(String(url)).toBe('https://app.example.workers.dev/__void/ready');
+    }
+    events.push('ready');
+    return Response.json({ ready: true, versionId: NEXT });
+  });
+  return {
+    events,
+    operations,
+    runWrangler,
+    pinActiveSecrets,
+    fetcher,
+    changeOwner: (versions = [{ version_id: CONCURRENT, percentage: 100 }]) => {
+      traffic = versions;
+    },
+    sourceRead: (read: () => Promise<Record<string, unknown>>) => {
+      readSource = read;
+    },
+    ordinary: () => {
+      ordinary = true;
+    },
+    options: {
+      runWrangler,
+      pinActiveSecrets,
+      fetch: fetcher,
+      workerName: 'app',
+      message,
+      verifyUploader: () => true,
+      verifyInheritedSecrets: true,
+      requireVersionMetadata: true,
+      readinessAttempts: 1,
+    },
+  };
+}
 
 // The bundled uploader rejects locally without an API error code; keep its actual diagnostic.
 const LOCAL_DURABLE_MIGRATION_ERROR =
@@ -159,6 +295,251 @@ function runner(overrides?: {
 }
 
 describe('Cloudflare version activation', () => {
+  it('publishes an exact private SDK draft once, proving secrets and callbacks before readiness', async () => {
+    const fixture = sdkDraftActivation();
+    const validateUploadedVersion = vi.fn(async (id: string) => {
+      expect(id).toBe(NEXT);
+      fixture.events.push('validate');
+    });
+    const recordVerifiedCandidate = vi.fn(async (id: string, parent: string | null) => {
+      expect([id, parent]).toEqual([NEXT, CURRENT]);
+      fixture.events.push('checkpoint');
+    });
+    const result = await activateCloudflareVersion({
+      ...fixture.options,
+      validateUploadedVersion,
+      recordVerifiedCandidate,
+    });
+    expect(result).toMatchObject({ ok: true, versionId: NEXT, previousVersionId: CURRENT });
+    expect(fixture.events.slice(0, 5)).toEqual([
+      'source',
+      'pin',
+      'publish',
+      'validate',
+      'checkpoint',
+    ]);
+    expect(fixture.operations.filter((op) => op.type === 'worker.deploy')).toHaveLength(1);
+    expect(
+      fixture.operations.some(
+        (op) => op.type === 'versions.upload' || op.type === 'versions.deploy',
+      ),
+    ).toBe(false);
+    expect(fixture.fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('does not overwrite a deployment that changed during immutable draft source inspection', async () => {
+    const fixture = sdkDraftActivation();
+    const entered = deferred<void>(),
+      release = deferred<Record<string, unknown>>();
+    fixture.sourceRead(() => {
+      entered.resolve();
+      return release.promise;
+    });
+    const activation = activateCloudflareVersion(fixture.options);
+    await entered.promise;
+    fixture.changeOwner();
+    release.resolve(voidSecretDraftVersion());
+    expect(await activation).toMatchObject({
+      ok: false,
+      reason: 'deployment-changed',
+      activeVersionId: CONCURRENT,
+    });
+    expect(
+      fixture.operations.some((op) =>
+        ['worker.deploy', 'versions.upload', 'versions.deploy', 'triggers.deploy'].includes(
+          op.type,
+        ),
+      ),
+    ).toBe(false);
+    expect(fixture.fetcher).not.toHaveBeenCalled();
+  });
+
+  it('refuses extra zero-percent traffic before publishing a draft', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.sourceRead(async () => {
+      fixture.changeOwner([
+        { version_id: CURRENT, percentage: 100 },
+        { version_id: CONCURRENT, percentage: 0 },
+      ]);
+      return voidSecretDraftVersion();
+    });
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: false,
+      reason: 'deployment-changed',
+    });
+    expect(fixture.events).not.toContain('publish');
+  });
+
+  it.each(['missing', 'refused', 'unreadable', 'failed'] as const)(
+    'refuses %s required secret pinning before publishing an SDK draft',
+    async (kind) => {
+      const fixture = sdkDraftActivation();
+      if (kind === 'refused') {
+        fixture.pinActiveSecrets.mockResolvedValue(false);
+      }
+      if (kind === 'failed') {
+        fixture.pinActiveSecrets.mockRejectedValue(new Error('private synthetic pin detail'));
+      }
+      const original = fixture.runWrangler.getMockImplementation()!;
+      if (kind === 'unreadable') {
+        fixture.runWrangler.mockImplementation(async (op) =>
+          op.type === 'versions.view' && !op.includeSource
+            ? { status: 1, stdout: '', stderr: 'synthetic failure' }
+            : original(op),
+        );
+      }
+      const result = await activateCloudflareVersion({
+        ...fixture.options,
+        pinActiveSecrets: kind === 'missing' ? undefined : fixture.pinActiveSecrets,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        reason:
+          kind === 'refused' ? 'inheritance-source-changed' : 'inheritance-source-unavailable',
+      });
+      expect(fixture.events).not.toContain('publish');
+      expect(fixture.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { bindings: [] },
+    { bindings: [{ name: 'OTHER', type: 'secret_text' }] },
+    { bindings: [{ name: 'TOKEN', type: 'secret_key' }] },
+    {
+      bindings: [
+        { name: 'TOKEN', type: 'secret_text' },
+        { name: 'TOKEN', type: 'secret_text' },
+      ],
+    },
+  ])('refuses active secrets that contradict the immutable SDK draft: %j', async ({ bindings }) => {
+    const fixture = sdkDraftActivation();
+    const original = fixture.runWrangler.getMockImplementation()!;
+    fixture.runWrangler.mockImplementation(async (op) =>
+      op.type === 'versions.view' && !op.includeSource
+        ? { ...ok(), data: { id: CURRENT, resources: { bindings } } }
+        : original(op),
+    );
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: false,
+      reason: 'inheritance-source-changed',
+    });
+    expect(fixture.pinActiveSecrets).not.toHaveBeenCalled();
+    expect(fixture.events).not.toContain('publish');
+    expect(fixture.fetcher).not.toHaveBeenCalled();
+  });
+
+  it('honors a refused active-secret pin for an atomic existing app', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    fixture.pinActiveSecrets.mockResolvedValue(false);
+    expect(await activateCloudflareVersion({ ...fixture.options, atomic: true })).toMatchObject({
+      ok: false,
+      reason: 'inheritance-source-changed',
+    });
+    expect(fixture.events).not.toContain('publish');
+  });
+
+  it.each(['validation', 'checkpoint'] as const)(
+    'reports a published UUID and stops triggers/readiness after %s fails',
+    async (stage) => {
+      const fixture = sdkDraftActivation();
+      const validateUploadedVersion = vi.fn(async () => {
+        if (stage === 'validation') {
+          throw new Error('private synthetic detail');
+        }
+      });
+      const recordVerifiedCandidate = vi.fn(async () => {
+        throw new Error('private synthetic detail');
+      });
+      const result = await activateCloudflareVersion({
+        ...fixture.options,
+        validateUploadedVersion,
+        recordVerifiedCandidate,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        reason: 'bootstrap-failed',
+        versionId: NEXT,
+        rollback: 'unavailable',
+      });
+      expect(result.ok ? '' : result.diagnostic).toContain(NEXT);
+      expect(result.ok ? '' : result.diagnostic).not.toContain('private synthetic detail');
+      expect(fixture.events).toContain('publish');
+      expect(fixture.events).not.toContain('triggers');
+      expect(fixture.fetcher).not.toHaveBeenCalled();
+      expect(recordVerifiedCandidate).toHaveBeenCalledTimes(stage === 'validation' ? 0 : 1);
+    },
+  );
+
+  it('does not record a checkpoint or publish triggers after validation observes a newer owner', async () => {
+    const fixture = sdkDraftActivation();
+    const recordVerifiedCandidate = vi.fn();
+    const result = await activateCloudflareVersion({
+      ...fixture.options,
+      validateUploadedVersion: async () => {
+        fixture.changeOwner();
+      },
+      recordVerifiedCandidate,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'deployment-changed',
+      activeVersionId: CONCURRENT,
+    });
+    expect(recordVerifiedCandidate).not.toHaveBeenCalled();
+    expect(fixture.events).not.toContain('triggers');
+    expect(fixture.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      modules: [
+        {
+          ...voidSecretDraftVersion().modules[0],
+          content_base64: Buffer.from(
+            'export default { fetch() { return new Response("real app"); } };',
+          ).toString('base64'),
+        },
+      ],
+    },
+    {
+      bindings: [
+        ...voidSecretDraftVersion().bindings,
+        { name: 'KV', type: 'kv_namespace', namespace_id: 'foreign' },
+      ],
+    },
+    { assets: {} },
+  ])('retains preview-first activation for a secret-triggered real app with %j', async (patch) => {
+    const fixture = sdkDraftActivation({ ...voidSecretDraftVersion(), ...patch });
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: true,
+      versionId: NEXT,
+    });
+    expect(fixture.events).not.toContain('publish');
+    expect(fixture.events).toContain('upload');
+  });
+
+  it('does not inspect source or bootstrap an ordinary version', async () => {
+    const fixture = sdkDraftActivation();
+    fixture.ordinary();
+    expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
+      ok: true,
+      versionId: NEXT,
+    });
+    expect(fixture.events).not.toContain('source');
+    expect(fixture.events).not.toContain('publish');
+  });
+
+  it('never uses the draft bootstrap to bypass an explicit preview requirement', async () => {
+    const fixture = sdkDraftActivation();
+    expect(
+      await activateCloudflareVersion({ ...fixture.options, requirePreviewForReadiness: true }),
+    ).toMatchObject({ ok: true });
+    expect(fixture.events).not.toContain('publish');
+    expect(fixture.events).toContain('upload');
+  });
+
   it('publishes explicitly atomic Durable Object deployments without a candidate stage', async () => {
     const runWrangler = runner({
       bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
@@ -2338,7 +2719,9 @@ describe('Cloudflare version activation', () => {
     expect(runWrangler.mock.calls.map(([args]) => args[0])).toEqual([
       'deployments',
       'versions',
+      'deployments',
       'deploy',
+      'deployments',
       'deployments',
       'triggers',
       'deployments',
@@ -3133,15 +3516,18 @@ describe('Cloudflare version activation', () => {
       expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
         ['deployments', 'status'],
         ['versions', 'upload'],
+        ['deployments', 'status'],
         ['deploy', '-c'],
+        ['deployments', 'status'],
         ['deployments', 'status'],
         ['triggers', 'deploy'],
         ['deployments', 'status'],
         ['deployments', 'status'],
       ]);
-      expect(runWrangler.mock.calls[2]![0]).toContain('--autoconfig=false');
-      expect(runWrangler.mock.calls[2]![0]).toContain('--assets');
-      expect(runWrangler.mock.calls[2]![0]).toContain('/app/.void/deploy/cloudflare/assets');
+      const deployArgs = runWrangler.mock.calls.find(([args]) => args[0] === 'deploy')![0];
+      expect(deployArgs).toContain('--autoconfig=false');
+      expect(deployArgs).toContain('--assets');
+      expect(deployArgs).toContain('/app/.void/deploy/cloudflare/assets');
       expect(secretPayloads).toEqual([
         { API_TOKEN: 'first-secret' },
         { API_TOKEN: 'first-secret' },
@@ -3205,7 +3591,9 @@ describe('Cloudflare version activation', () => {
     expect(runWrangler.mock.calls.map(([args]) => args[0])).toEqual([
       'deployments',
       'versions',
+      'deployments',
       'deploy',
+      'deployments',
       'deployments',
       'triggers',
       'deployments',

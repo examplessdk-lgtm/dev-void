@@ -13,7 +13,9 @@ import {
   assertCloudflareBindingsPreserved,
   type ExistingCloudflareWorker,
 } from '../../src/existing.ts';
+import type { CloudflareOperation } from '../../src/operations.ts';
 import { operationFixture } from '../operation-fixture.ts';
+import { voidSecretDraftVersion } from '../secret-draft-fixture.ts';
 
 const worker: ExistingCloudflareWorker = {
   versionId: 'original',
@@ -501,6 +503,118 @@ describe('existing Worker preservation', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it.each(['placeholder', 'real-code', 'owner-drift'] as const)(
+    'verifies immutable SDK secret-draft proof before its first DO migration: %s',
+    async (scenario) => {
+      const root = mkdtempSync(join(tmpdir(), 'void-sdk-draft-lifecycle-'));
+      const configPath = join(root, 'wrangler.jsonc');
+      writeFileSync(
+        configPath,
+        JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
+      );
+      const source = voidSecretDraftVersion();
+      if (scenario === 'real-code') {
+        source.modules[0]!.content_base64 = Buffer.from(
+          'export default { fetch() { return new Response("app"); } };',
+        ).toString('base64');
+      }
+      let owner = source.id;
+      const runWrangler = vi.fn(
+        async (operation: CloudflareOperation): Promise<CloudflareCommandResult> => {
+          if (operation.type === 'deployments.status') {
+            return {
+              status: 0,
+              stdout: '',
+              stderr: '',
+              data: { versions: [{ version_id: owner, percentage: 100 }] },
+            };
+          }
+          if (operation.type === 'versions.view') {
+            if (operation.includeSource) {
+              if (scenario === 'owner-drift') {
+                owner = '22222222-2222-4222-8222-222222222222';
+              }
+              return { status: 0, stdout: '', stderr: '', data: source };
+            }
+            return {
+              status: 0,
+              stdout: '',
+              stderr: '',
+              data: {
+                id: operation.versionId,
+                annotations: source.annotations,
+                resources: {
+                  bindings: source.bindings,
+                  script: { handlers: ['fetch'] },
+                  script_runtime: {
+                    compatibility_date: source.compatibility_date,
+                    usage_model: 'standard',
+                  },
+                },
+              },
+            };
+          }
+          throw new Error(`Unexpected read-only lifecycle operation: ${operation.type}`);
+        },
+      );
+      try {
+        const inspection = assertCloudflareDurableObjectLifecycleSupported({
+          runWrangler,
+          configPath,
+          workerName: 'app',
+          accountId: 'account',
+          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          readMigrationTag: async () => null,
+        });
+        if (scenario === 'placeholder') {
+          await expect(inspection).resolves.toBeUndefined();
+        } else {
+          await expect(inspection).rejects.toThrow(
+            scenario === 'owner-drift' ? 'production changed' : 'atomic Cloudflare deployment',
+          );
+        }
+        expect(
+          runWrangler.mock.calls.filter(
+            ([operation]) => operation.type === 'versions.view' && operation.includeSource,
+          ),
+        ).toHaveLength(scenario === 'owner-drift' ? 1 : 2);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not request source for an ordinary existing Worker read', async () => {
+    const runWrangler = vi.fn(
+      async (operation: CloudflareOperation): Promise<CloudflareCommandResult> => ({
+        status: 0,
+        stdout: '',
+        stderr: '',
+        data:
+          operation.type === 'deployments.status'
+            ? { versions: [{ version_id: worker.versionId, percentage: 100 }] }
+            : {
+                id: worker.versionId,
+                resources: {
+                  bindings: worker.bindings,
+                  script: worker.script,
+                  script_runtime: worker.runtime,
+                },
+              },
+      }),
+    );
+    await expect(
+      readExistingCloudflareWorker({
+        runWrangler,
+        configPath: '/app/wrangler.jsonc',
+        workerName: 'app',
+      }),
+    ).resolves.toEqual(worker);
+    expect(
+      runWrangler.mock.calls.some(([op]) => op.type === 'versions.view' && op.includeSource),
+    ).toBe(false);
   });
 
   it.each<Partial<CloudflareCommandResult>>([
