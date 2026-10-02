@@ -1,0 +1,31 @@
+packages/void/test/unit/integration-helpers.test.ts
+  s_14b3de9dcb5198::t_727fe3cbebc936 8-9,11,15,106-150
+packages/void/test/unit/playground-snapshots.test.ts
+  s_565d22f42c34d7::t_1f063cdd1b3813 20-21,32-33
+test/integration-helpers.ts
+  s_565d22f42c34d7::t_4d312ede0cbbca 9-10,85,92-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "39ded55bcb1e99d2e7be66d7892b5114967efb76",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
