@@ -1,0 +1,21 @@
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_c5e28cea9608ba::t_5fe32834144dc0 899-901
+packages/void/test/unit/platform-setup.test.ts
+  s_c5e28cea9608ba::t_e7de59e7d81856 1,159-161,164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "170d5deb05446727976f1a302d88b6b08cb3b78d",
+  "prompts": {},
+  "sessions": {
+    "s_c5e28cea9608ba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd1f-4d23-7fd3-a37e-469f099a5555",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
