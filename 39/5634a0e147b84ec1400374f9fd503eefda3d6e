@@ -1,0 +1,49 @@
+packages/create-void/package.json
+  s_313c35144715bb::t_efd80eb9fd0db6 26
+packages/create-void/vite.config.ts
+  s_122e5a5858a175::t_d8aaf03d6f7522 13
+packages/prompts/LICENSE
+  s_122e5a5858a175::t_afdfc775a0c108 1-21
+packages/prompts/README.md
+  s_122e5a5858a175::t_bdde1eaafcb2ff 1-7
+packages/prompts/index.d.mts
+  s_122e5a5858a175::t_0b2f5e9a6a8825 1-543
+packages/prompts/index.mjs
+  s_122e5a5858a175::t_e0f82c756e4b05 1-1951
+packages/prompts/package.json
+  s_122e5a5858a175::t_2d92bc05515a11 1-16
+packages/prompts/upstream.json
+  s_122e5a5858a175::t_4e07dfaf3032de 1-14
+packages/void/package.json
+  s_313c35144715bb::t_39347616ca6e36 385
+packages/void/vite.config.ts
+  s_122e5a5858a175::t_cfdc3db6ee1b82 189
+pnpm-lock.yaml
+  s_122e5a5858a175::t_545bb4c428af4d 301-303,463-474,679-681
+vite.config.ts
+  s_122e5a5858a175::t_bf4fc26f45bafa 92-93,129-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "395634a0e147b84ec1400374f9fd503eefda3d6e",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
