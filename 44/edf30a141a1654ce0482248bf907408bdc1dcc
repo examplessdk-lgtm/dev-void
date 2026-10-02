@@ -1,0 +1,109 @@
+docs/guide/platform/administration/zero-trust.md
+  s_313c35144715bb::t_84929aabc66f0b 11-21,130-136,138-140,149,152
+docs/guide/platform/installation/credentials.md
+  s_313c35144715bb::t_f436c75b369d05 13-18
+docs/guide/platform/installation/setup.md
+  s_313c35144715bb::t_872b42f5650cd5 48-97
+docs/reference/cli/platform-installation.md
+  s_313c35144715bb::t_87bfcbc5b2bac8 11-33,49-57
+docs/reference/cli/platform-zero-trust.md
+  s_313c35144715bb::t_d0f7c5f61b059a 29-42
+packages/platform/README.md
+  s_313c35144715bb::t_f9b70bb93b7f39 7-14
+packages/platform/scripts/build-runtime.mjs
+  s_313c35144715bb::t_ad486a411d23e0 144
+packages/platform/src/app-access.ts
+  s_313c35144715bb::t_eccba22b81c443 1-74
+packages/platform/src/index.ts
+  s_313c35144715bb::t_6908a2a2c81d09 1-5,46
+packages/platform/src/installer.ts
+  s_313c35144715bb::t_1b896a4e672f24 38,95-97,216
+packages/platform/src/manifest.ts
+  s_313c35144715bb::t_7c19ee2ad35bd1 46-47,49-50,66,70,276-281,307,343-350,381-382,397-398,430-433,441,448-459,480
+packages/platform/src/worker-config.ts
+  s_313c35144715bb::t_46e523c92b7392 184
+packages/void/AGENTS.md
+  s_313c35144715bb::t_8b3e7b061232f4 74-75
+packages/void/src/cli/help.ts
+  s_313c35144715bb::t_9fd660305c8ed8 102-114,504-508
+packages/void/src/cli/operator-args.ts
+  s_313c35144715bb::t_bd8a468c7950d4 147,786-798,812-814
+packages/void/src/cli/platform-access-health.ts
+  s_313c35144715bb::t_3ad8da39cb691c 2-6,80-86,89-91,94-96
+packages/void/src/cli/platform-access-setup.ts
+  s_313c35144715bb::t_137b7736b8e3b5 35,195-198
+packages/void/src/cli/platform-app-access.ts
+  s_313c35144715bb::t_9cc180f2b0918a 1-448
+packages/void/src/cli/platform-args.ts
+  s_313c35144715bb::t_a4a8b29ce75b51 5,42,79,369,426-429,456
+packages/void/src/cli/platform-install-auth.ts
+  s_313c35144715bb::t_823e851bcc2e79 32-38,40
+packages/void/src/cli/platform-installer.ts
+  s_313c35144715bb::t_b62f5aeb46980f 81-84,97,139-140,327-331,560-563,764-765,1338-1340,1733-1785,1806-1810,1828-1850,2079-2081,2600-2640,3531
+packages/void/src/cli/platform-lifecycle.ts
+  s_313c35144715bb::t_81df8f5a221559 21-24,227,417,423,680-709,711,750,1193-1212
+packages/void/src/cli/platform-plan.ts
+  s_313c35144715bb::t_3edce54b698083 41,62,204-215,218,741-747,1377-1383
+packages/void/src/cli/platform-setup.ts
+  s_313c35144715bb::t_88d48e722bbe43 100-101,111,113,115-117,142,144,274-276,299,340-342
+packages/void/test/unit/platform-access-health.test.ts
+  s_313c35144715bb::t_02e6002e795c4e 10-13,65-68,71-103
+packages/void/test/unit/platform-app-access.test.ts
+  s_313c35144715bb::t_47cbd790c75028 1-317
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_313c35144715bb::t_fd2cf4acd54450 37-40,386,413
+packages/void/test/unit/platform-installer.test.ts
+  s_313c35144715bb::t_7ffa1e78374ee6 32,4288-4297,4304,4342-4364,4366-4381,4383-4431,4434-4444,4447-4482
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_313c35144715bb::t_4a5733756c61ae 59-63,160
+platform/packages/api/README.md
+  s_313c35144715bb::t_282ecfb438b285 362-370
+platform/packages/api/src/admin/react/views/ZeroTrustPage.tsx
+  s_313c35144715bb::t_df18af350110ed 96-100,208-214,227-232,240,283
+platform/packages/api/src/admin/routes/zero-trust.tsx
+  s_313c35144715bb::t_3b550e23f6993e 5-8,46,48-51
+platform/packages/api/src/env.ts
+  s_313c35144715bb::t_33eb9e0e19f485 109-110
+platform/packages/api/src/index.ts
+  s_313c35144715bb::t_7d7c5df2a36289 74,213,336
+platform/packages/api/src/operator/zero-trust-routes.ts
+  s_313c35144715bb::t_1f1508288681fa 88
+platform/packages/api/src/platform-app-access.ts
+  s_313c35144715bb::t_985529209cb69f 1-256
+platform/packages/api/src/provisioning/activate-domain.ts
+  s_313c35144715bb::t_fcd2bdeea566be 112
+platform/packages/api/src/zero-trust/cloudflare.ts
+  s_313c35144715bb::t_5123cd3b0d806b 656-682
+platform/packages/api/src/zero-trust/configuration.ts
+  s_313c35144715bb::t_211b0ce22733dc 8,34-37,79-81,132-133,283-289,308-325,330-339,355-366,401-409
+platform/packages/api/src/zero-trust/installation.ts
+  s_313c35144715bb::t_e4f8199819d925 4,16,79-81,157-172,220,223-236,240-243,265,287-290
+platform/packages/api/src/zero-trust/operation.ts
+  s_313c35144715bb::t_0363bfe58e5040 30,377-382,497-504
+platform/packages/api/src/zero-trust/project.ts
+  s_313c35144715bb::t_611a261b65f496 54-55,111-122,132-136,154,174-192,197-199,204-206,245,257,416,532,543-546
+platform/packages/api/src/zero-trust/state.ts
+  s_313c35144715bb::t_9a4c7adc0752be 15,185,191-205,209-218,225
+platform/packages/api/src/zero-trust/status.ts
+  s_313c35144715bb::t_3858799620a484 7,71-90
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_313c35144715bb::t_cf6a92688fa80d 597-599
+platform/packages/api/test/integration/platform-app-access.test.ts
+  s_313c35144715bb::t_0e6ca803072877 1-450
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "44edf30a141a1654ce0482248bf907408bdc1dcc",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
