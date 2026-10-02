@@ -1,0 +1,35 @@
+docs/guide/platform/installation/credentials.md
+  s_cdab927531343d::t_34fc7f6346479b 11,19
+docs/guide/platform/installation/setup.md
+  s_cdab927531343d::t_bb2cc091a5cd9b 15-19,29,157,173
+packages/platform/README.md
+  s_cdab927531343d::t_db367e96912695 37
+packages/void/src/cli/platform-auth.ts
+  s_cdab927531343d::t_b98caf8b41fede 18,36-49
+packages/void/src/cli/platform-lifecycle.ts
+  s_cdab927531343d::t_887364223199ec 13,62,573,579-580,586,588-593,621-623,632-669,752,1062,1112-1120,1131
+packages/void/src/cli/platform-setup.ts
+  s_cdab927531343d::t_d54e63a5ae7855 67-68,78-131,204-207,212-217
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_1dc75216184ff4 32-33
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_cdab927531343d::t_59d88172bc8653 35,71-73,76,119,129-130,215,252-276,278-400
+packages/void/test/unit/platform-setup.test.ts
+  s_cdab927531343d::t_36c0a7668e66d4 10,46-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bda11f7b5c44d22283b46116a484bd643a30e42c",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
