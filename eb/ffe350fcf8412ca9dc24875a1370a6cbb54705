@@ -1,0 +1,37 @@
+docs/guide/platform/installation/maintenance.md
+  s_313c35144715bb::t_7538ff8e4e7a18 31-37
+packages/void/src/cli/platform-access-health.ts
+  s_313c35144715bb::t_7660034df96354 1-216
+packages/void/src/cli/platform-installer.ts
+  s_313c35144715bb::t_566ba5a76e519e 74,140,337,556-558,767-769,1732-1751,2506,2884-2888,6455,6464-6494,6552,6555-6560,6579,6582-6587,6593
+packages/void/test/unit/platform-access-health.test.ts
+  s_122e5a5858a175::t_a7cc13dfa842f6 1-251
+packages/void/test/unit/platform-health-message.test.ts
+  s_313c35144715bb::t_41395fc345e39a 63-82
+packages/void/test/unit/platform-installer.test.ts
+  s_122e5a5858a175::t_de1b67ea16ef4e 334,344-365,456,471,473-475,2620-2622
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ebffe350fcf8412ca9dc24875a1370a6cbb54705",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
