@@ -1,0 +1,19 @@
+playground/kitchen-sink/pages/sandbox.vue
+  s_4cd54230f5823c::t_443492e40444a8 35,44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "38226b6ed3c07fa4dbab097e6dcb7143b41ec40f",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
