@@ -1,0 +1,23 @@
+packages/void/test/unit/deploy-email-platform-path.test.ts
+  s_313c35144715bb::t_4980e4a48debd0 37
+packages/void/test/unit/init.test.ts
+  s_313c35144715bb::t_d448d133ed3e6a 186
+packages/void/test/unit/login-command.test.ts
+  s_313c35144715bb::t_5249a8ea632360 28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "05c8a4fa9a637f4201826e8b60beb3a8a5af34a7",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
