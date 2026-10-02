@@ -1,0 +1,25 @@
+docs/guide/ai.md
+  s_4cd54230f5823c::t_a11a7fc9936505 19
+packages/void/src/runtime/ai.ts
+  s_4cd54230f5823c::t_5635a12255732b 9-15,720,732-742,744,749-766,768,780-793,796,814-819,830-832
+packages/void/src/runtime/limits.ts
+  s_4cd54230f5823c::t_be080c0b7f5c02 42,63
+packages/void/test/unit/ai.test.ts
+  s_4cd54230f5823c::t_ffe204d5f14e2a 936-956
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "030108e32ca2b7fcbd1ecf1ae0ecf624e64e3cdd",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
