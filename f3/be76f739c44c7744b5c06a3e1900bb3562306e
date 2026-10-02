@@ -1,0 +1,19 @@
+playground/kitchen-sink/pages/ai.vue
+  s_4cd54230f5823c::t_3944f519f9d704 60-64,80-81,87-98,106-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f3be76f739c44c7744b5c06a3e1900bb3562306e",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
