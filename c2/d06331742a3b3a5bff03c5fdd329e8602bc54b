@@ -1,0 +1,19 @@
+docs/guide/env-migration.md
+  s_565d22f42c34d7::t_2fd0283fb5f39e 5,26,28,48,50,81,85,95,97,99,101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c2d06331742a3b3a5bff03c5fdd329e8602bc54b",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
