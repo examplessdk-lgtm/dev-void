@@ -1,0 +1,21 @@
+docs/guide/platform/installation/setup.md
+  s_857317d1a18ebe::t_ef5e4041097285 97-100,109-112,133-135
+packages/void/src/cli/platform-access-setup.ts
+  s_857317d1a18ebe::t_89b0ec5adf7cb5 7,9,16,26-33,266-280,301-307,325-327,335,341-343,374-375,377-378,386-390,408-412,418,458-460,510
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "687affa4a2adad779443331d864e776750705552",
+  "prompts": {},
+  "sessions": {
+    "s_857317d1a18ebe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fce2-c04a-7d80-92fd-2b136c45faa5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
