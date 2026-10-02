@@ -456,7 +456,12 @@ describe('Cloudflare version activation', () => {
   });
 
   it('publishes an exact private SDK draft once, proving secrets and callbacks before readiness', async () => {
-    const fixture = sdkDraftActivation();
+    const fixture = sdkDraftActivation({
+      ...voidSecretDraftVersion(),
+      number: undefined,
+      compatibility_date: undefined,
+      usage_model: undefined,
+    });
     const validateUploadedVersion = vi.fn(async (id: string) => {
       expect(id).toBe(NEXT);
       fixture.events.push('validate');

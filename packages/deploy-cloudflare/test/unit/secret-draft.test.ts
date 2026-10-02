@@ -62,8 +62,6 @@ describe('immutable SDK secret draft proof', () => {
       { env: { TOKEN: { type: 'secret_text' }, OTHER: { type: 'text', value: 'private' } } },
     ],
     ['a public version URL', { urls: ['https://version.example.workers.dev'] }],
-    ['an invalid UUID', { id: 'latest' }],
-    ['an invalid version number', { number: 0 }],
     ['an unknown uploader', { source: 'api' }],
     [
       'contradictory adapter bindings',

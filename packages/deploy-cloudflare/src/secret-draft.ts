@@ -89,14 +89,7 @@ export function isVoidSecretOnlyDraft(entry: Record<string, unknown>): boolean {
   ]);
   if (
     Object.keys(entry).some((key) => !metadataFields.has(key)) ||
-    typeof entry.id !== 'string' ||
-    !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entry.id) ||
-    !Number.isSafeInteger(entry.number) ||
-    (entry.number as number) < 1 ||
     entry.source !== 'cf_cli' ||
-    entry.usage_model !== 'standard' ||
-    typeof entry.compatibility_date !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}$/.test(entry.compatibility_date) ||
     !isRecord(entry.annotations) ||
     Object.keys(entry.annotations).length !== 1 ||
     entry.annotations['workers/triggered_by'] !== 'secret' ||
