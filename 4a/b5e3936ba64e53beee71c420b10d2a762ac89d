@@ -1,0 +1,43 @@
+docs/guide/sandboxes.md
+  s_4cd54230f5823c::t_901c186547df85 15-21,78-85,90-92,96,98,104-105
+docs/reference/api.md
+  s_4cd54230f5823c::t_fa1fd18d16edf1 36-69
+packages/void/AGENTS.md
+  s_4cd54230f5823c::t_a3f970c324be9d 212-213
+packages/void/src/runtime/sandbox-container.ts
+  s_4cd54230f5823c::t_57aa6ea668f2b5 203-209,405,408
+packages/void/src/runtime/sandbox.ts
+  s_4cd54230f5823c::t_883a2dc0b75df5 4,26-27,31-35,37-40,45,47,49,132,139,143-191,194-206
+packages/void/test/integration/sandbox-managed-rpc.test.ts
+  s_4cd54230f5823c::t_7d395e64a88b28 67-68,71-72,75,77,81,83,93,97,100,102-103
+packages/void/test/unit/limits.typecheck.ts
+  s_4cd54230f5823c::t_886a0d07c63f49 15-20
+packages/void/test/unit/sandbox-runtime.test.ts
+  s_4cd54230f5823c::t_bb95245e9ca062 45-56,79-84,88-101,120-125,131-138,154-165,184-199,224-241,245-291
+platform/packages/api/src/sandbox-controller-runtime.ts
+  s_4cd54230f5823c::t_86c3015682a783 85-94,142-145,148-156,288,332,388
+platform/packages/api/test/unit/sandbox-controller-rpc.test.ts
+  s_4cd54230f5823c::t_8a5d8a82a7c2e3 65-66
+platform/packages/api/test/unit/sandbox-controller-runtime.test.ts
+  s_4cd54230f5823c::t_d5745a42052cab 489-524
+platform/scripts/fixtures/kitchen-sink-sandbox/routes/api/acceptance/sandbox.ts
+  s_4cd54230f5823c::t_e2b4ff6ea081ed 31-68,71-78,82-89,93-100,104-111,115-122,127-132,137-148,154-159,161-168,173-195,197,209-219,222-227,237-246,250-258,262-271,273-281,284-298,303-310,316-321,324-349,357-362,368-382,389-394,396-403
+playground/kitchen-sink/routes/api/sandbox.ts
+  s_4cd54230f5823c::t_3c1d736f4f121d 2-3,49-55,63-76,79-90,93-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4ab5e3936ba64e53beee71c420b10d2a762ac89d",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
