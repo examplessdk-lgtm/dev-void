@@ -1,0 +1,19 @@
+docs/guide/database/d1.md
+  s_14b3de9dcb5198::t_45fa8ff47f69cf 7,11,23,25,27-28,31,49,72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "17f36b3849c31acbb6f4e4993ea1590eece1b056",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
