@@ -1,5 +1,14 @@
 import { and, count, eq, gt, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vite-plus/test';
 import { createGitHubConnection, getBuild, upsertGitHubInstallation } from '../../src/db.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
@@ -34,6 +43,10 @@ afterAll(async () => {
 beforeEach(async () => {
   await clearTables(env.db);
   vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function request(
@@ -630,6 +643,8 @@ describe('project team API', () => {
   });
 
   it('rate-limits create, refresh, and resend delivery while preserving invitations', async () => {
+    // All delivery attempts must stay in the same UTC-minute rate-limit window.
+    vi.setSystemTime(new Date());
     const owner = await createTestUser(env.db, 'owner');
     const target = await createTestUser(env.db, 'target');
     await setEmail(target.id, 'target@example.com');
