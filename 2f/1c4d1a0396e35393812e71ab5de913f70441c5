@@ -1,0 +1,103 @@
+README.md
+  s_7b7a0f047d930f::t_b9c65ab4e5fb10 104
+docs/.vitepress/redirects/reference-api.json
+  s_9cf895b2126865::t_2ecd7ff31c1819 1-79
+docs/.vitepress/redirects/reference-cli.json
+  s_9cf895b2126865::t_350ad4fbab04b5 1-115
+docs/guide/auth.md
+  s_7b7a0f047d930f::t_323de0ad832dfb 122
+docs/guide/database.md
+  s_7b7a0f047d930f::t_b3c643c8e1f170 362,379
+docs/guide/database/d1.md
+  s_7b7a0f047d930f::t_70b0bd0e1ccbd6 31
+docs/guide/deployment.md
+  s_7b7a0f047d930f::t_e061b975af296f 122
+docs/guide/edge/rewrites.md
+  s_7b7a0f047d930f::t_b37740889d8322 59
+docs/guide/email.md
+  s_7b7a0f047d930f::t_81ba10df707899 90
+docs/guide/jobs.md
+  s_7b7a0f047d930f::t_2414ff5aa1df7d 48
+docs/guide/platform/administration/email.md
+  s_7b7a0f047d930f::t_31283c6bb072b5 27
+docs/guide/platform/administration/operations.md
+  s_7b7a0f047d930f::t_d7fba4b15ee7b8 119
+docs/guide/platform/administration/projects.md
+  s_7b7a0f047d930f::t_d7049c7f875fce 24
+docs/guide/platform/installation/maintenance.md
+  s_7b7a0f047d930f::t_c1061ee8556321 85
+docs/guide/queues.md
+  s_7b7a0f047d930f::t_1d8a5223c83695 15
+docs/guide/ssr.md
+  s_7b7a0f047d930f::t_a9c422319cdd71 56
+docs/reference/api/auth.md
+  s_9cf895b2126865::t_35e3c68c96a58b 1-156
+docs/reference/api/client.md
+  s_9cf895b2126865::t_3be6d59f7dbda3 1-87
+docs/reference/api/database.md
+  s_9cf895b2126865::t_22dfb3c64309fa 1-95
+docs/reference/api/durable.md
+  s_9cf895b2126865::t_82f68ce0bce57c 1-46
+docs/reference/api/env.md
+  s_9cf895b2126865::t_1fd26d8b330183 1-50
+docs/reference/api/handlers.md
+  s_9cf895b2126865::t_71dbc45073b41d 1-254
+docs/reference/api/pages.md
+  s_9cf895b2126865::t_6273a2e6cf5e34 1-237
+docs/reference/api/plugin.md
+  s_9cf895b2126865::t_b3229d9e9d0023 1-39
+docs/reference/api/rewrites.md
+  s_9cf895b2126865::t_3f65599ef93b2a 1-76
+docs/reference/api/types.md
+  s_9cf895b2126865::t_e60d48db8f46a7 1-92
+docs/reference/cli/auth.md
+  s_9cf895b2126865::t_c956e7e422116d 1-88
+docs/reference/cli/database.md
+  s_9cf895b2126865::t_67afe593b2328f 1-128
+docs/reference/cli/deploy.md
+  s_9cf895b2126865::t_3cc9d57ded6b79 1-85
+docs/reference/cli/domains.md
+  s_9cf895b2126865::t_8e142ae815c3d8 1-41
+docs/reference/cli/email.md
+  s_9cf895b2126865::t_b27b37670a2604 1-129
+docs/reference/cli/generate.md
+  s_9cf895b2126865::t_769603fb14d1cf 1-116
+docs/reference/cli/github.md
+  s_9cf895b2126865::t_83108ba849394c 1-189
+docs/reference/cli/project.md
+  s_9cf895b2126865::t_aa39c8333abb55 1-214
+docs/reference/cli/secrets.md
+  s_9cf895b2126865::t_9c70104d4baa1a 1-76
+docs/reference/cli/setup.md
+  s_9cf895b2126865::t_8f2bfbf8bd4a4a 1-70
+packages/void/AGENTS.md
+  s_7b7a0f047d930f::t_1060217855277f 168
+packages/void/README.md
+  s_7b7a0f047d930f::t_6c7249a4f6b8f6 9
+platform/README.md
+  s_7b7a0f047d930f::t_e2936470fa822e 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2f1c4d1a0396e35393812e71ab5de913f70441c5",
+  "prompts": {},
+  "sessions": {
+    "s_7b7a0f047d930f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7c3-01fe-76a1-b31f-00de6c3bc084",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
