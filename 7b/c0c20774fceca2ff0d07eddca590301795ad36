@@ -1,0 +1,21 @@
+platform/packages/api/test/unit/kitchen-sink-sandbox.test.ts
+  s_4cd54230f5823c::t_a5b377c6b27806 5,44-49,51-62,66-67,99-106,115-127
+platform/scripts/fixtures/kitchen-sink-sandbox/routes/api/acceptance/sandbox.ts
+  s_4cd54230f5823c::t_903ac5f850f4e9 364-371,390-400
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7bc0c20774fceca2ff0d07eddca590301795ad36",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
