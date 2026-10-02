@@ -1,0 +1,23 @@
+docs/guide/pages-routing/actions-and-forms.md
+  s_ca3f46e15212e0::t_358e5de5e16b39 9-10
+packages/void/src/pages/protocol.ts
+  s_ca3f46e15212e0::t_11c2831dc024dc 512-534,546-548
+packages/void/test/unit/pages-protocol.test.ts
+  s_ca3f46e15212e0::t_f2423471ed59c5 464-524
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "30ba24f8c9c0feb1883723e64eae0327fe3214ce",
+  "prompts": {},
+  "sessions": {
+    "s_ca3f46e15212e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-0c30-7930-adb7-2882f4a5ef16",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
