@@ -1,0 +1,25 @@
+docs/guide/platform/administration/access.md
+  s_9cf895b2126865::t_be5ba0fd210ff1 33
+docs/guide/platform/installation/credentials.md
+  s_9cf895b2126865::t_c606051c54332d 15,19,68
+docs/guide/platform/installation/prerequisites.md
+  s_9cf895b2126865::t_67722bf2f67b70 7-12,16,39,52,54,69,85-93
+docs/guide/platform/installation/setup.md
+  s_9cf895b2126865::t_0d759f00d530e7 32,134-136,145-147,149,169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ed56817505b658d89d1ac66fe18aabab68244d19",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
