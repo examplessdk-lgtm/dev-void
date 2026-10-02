@@ -1,0 +1,19 @@
+docs/guide/deployment.md
+  s_14b3de9dcb5198::t_32ec3a7cb1cb64 9,54,60,126-129,132,134,140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f55b46ae35268b5d8510d2acc2f74b2c8fdd9d25",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
