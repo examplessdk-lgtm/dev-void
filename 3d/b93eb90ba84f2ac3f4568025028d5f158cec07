@@ -1,0 +1,51 @@
+platform/packages/api/test/integration/admin-builds.test.ts
+  s_b4ffbd6851cc36::t_8b25f0427bd15f 2,7,75,142,172,201,220,270,279,331,363,388
+platform/packages/api/test/integration/api-builds.test.ts
+  s_b4ffbd6851cc36::t_172809c9358f14 3,7,56,61,87,129,188,231,257,271,294,307
+platform/packages/api/test/integration/api-delete.test.ts
+  s_b4ffbd6851cc36::t_4d65b3ec72f8ec 28,389,395
+platform/packages/api/test/integration/api-github.test.ts
+  s_b4ffbd6851cc36::t_cd484f26dabd75 49,1128,2634,2641,2694,2700,2755,2761,2817,2881,2888,2995,3002,3008,3014,3021,3090
+platform/packages/api/test/integration/api-oidc.test.ts
+  s_b4ffbd6851cc36::t_4ca7679346252b 42,1246,1273,1284,1296,1307-1316
+platform/packages/api/test/integration/api-project-team.test.ts
+  s_b4ffbd6851cc36::t_c0416560929c82 3,14,141
+platform/packages/api/test/integration/api-projects.test.ts
+  s_b4ffbd6851cc36::t_63abc10a654570 36,819,1049
+platform/packages/api/test/integration/api-webhooks.test.ts
+  s_b4ffbd6851cc36::t_6468ce88136ce2 45,627,675,720,1163,1220,1257,1296,1347,1395,1438,1495,1550,1619,1628,1699,1708,1761,1772,1824,1835,1873,2184,2570,2582,2631,2714,2740,2748,2769,2825,2847,2867,2917,2963,2971,3018,3026,3075,3127,3160,3204,3247,3283,3351,3397,3437,3471,3632,3670,3723,3784,3794,3837,3875,3913,3956,4001,4054,4068,4153,4209,4311,4454,4660,4831,4862,4993,5104,5132,5242,5300,5333,5368
+platform/packages/api/test/integration/db-builds.test.ts
+  s_b4ffbd6851cc36::t_7834db2e4d2804 49,117,121,140,144,167-169,182-183,194,215-216,218,241-243,253-254,270,274,297-299,336,341,347-348,353,360,382,387,391-392,433-434,440,457,463,468,473,480,485,491,534,540,546,805,814,889,903,954,998,1033,1079,1522,1535,1568,1590,1614,1634,1639,1657,1675,1694,1716,1737,1757,1767,1782,1788,1837-1838,1862,1885,1910,1924,1944,1951,2070,2243,2767,2775,2783
+platform/packages/api/test/integration/db-reset.test.ts
+  s_b4ffbd6851cc36::t_25d9da3a92cc02 15,46
+platform/packages/api/test/integration/deploy-token-scope.test.ts
+  s_b4ffbd6851cc36::t_87a2efe95b9235 13,18,394,417,473,503,534,587,639
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_b4ffbd6851cc36::t_ab051680e86b60 16,39,752
+platform/packages/api/test/integration/dynamic-plan-enforcement.test.ts
+  s_b4ffbd6851cc36::t_73c55d32815bef 19,168
+platform/packages/api/test/integration/helpers.ts
+  s_b4ffbd6851cc36::t_be1b252687a7e0 36,659-693
+platform/packages/api/test/integration/operator-operations.test.ts
+  s_b4ffbd6851cc36::t_fbf5ab0510e100 13,27,416,447,479,506,526
+platform/packages/api/test/integration/operator-tenants.test.ts
+  s_b4ffbd6851cc36::t_4bbe0e6d83453c 42,1174
+platform/packages/api/test/integration/project-team-lifecycle.test.ts
+  s_b4ffbd6851cc36::t_f24a0ab510cb2b 24,107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3db93eb90ba84f2ac3f4568025028d5f158cec07",
+  "prompts": {},
+  "sessions": {
+    "s_b4ffbd6851cc36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-4a67-7002-a422-282418e7b851",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
