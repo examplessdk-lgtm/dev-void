@@ -53,7 +53,11 @@ export async function authenticateConnection(
   const token = matchingEnv ? envToken : readPlatformToken(discovery.apiUrl);
   if (token) {
     try {
-      await new PlatformClient(token, { apiUrl: discovery.apiUrl }).whoami();
+      // Login must work on any platform version.
+      await new PlatformClient(token, {
+        apiUrl: discovery.apiUrl,
+        checkPlatformVersion: false,
+      }).whoami();
       log.success(`Authenticated with ${discovery.displayName}.`);
       return;
     } catch (error) {

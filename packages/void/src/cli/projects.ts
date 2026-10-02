@@ -23,7 +23,7 @@ export async function runProjectsCommand(root: string): Promise<void> {
 
   const rows = projects.map((p) => ({
     slug: p.slug,
-    role: p.role ?? 'owner',
+    role: p.role,
     appType: p.type ?? 'worker',
     url: p.custom_domain
       ? `https://${p.custom_domain}`

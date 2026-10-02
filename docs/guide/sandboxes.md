@@ -113,7 +113,7 @@ Files, running processes, and listening servers last only as long as the contain
 
 Sandboxes require [Workers Paid](https://dash.cloudflare.com/?to=/:account/workers/plans) and Containers access. A managed platform's runtime token needs Account / Containers: Edit and Account / Cloudchamber: Edit.
 
-`void deploy --platform cloudflare` builds native images and deploys the Sandbox alongside the application. `void deploy` on a connected Void Platform applies the platform's Sandbox concurrency and runtime limits. Upgrade the platform before deploying an application built with this Sandbox API.
+`void deploy --platform cloudflare` builds native images and deploys the Sandbox alongside the application. `void deploy` on a connected Void Platform applies the platform's Sandbox concurrency and runtime limits. The platform must run version 0.23.0 or newer.
 
 ## Moving from Sandbox SDK 0.x
 

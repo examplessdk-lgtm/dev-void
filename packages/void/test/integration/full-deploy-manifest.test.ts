@@ -18,6 +18,7 @@ import {
 import type { ProjectRole } from '../../src/cli/client.ts';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 import type { DetectedFramework } from '../../src/plugin-inference.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 // @voidzero-dev/vite-plus-prompts + the output-spinner wrapper are TTY-bound; noop them (same as
 // direct-r2-deploy.test.ts) so runDeploy's interactive UI doesn't render here.
@@ -185,7 +186,7 @@ function ndjson(events: Array<unknown>): Response {
   });
   return new Response(stream, {
     status: 200,
-    headers: { 'content-type': 'application/x-ndjson' },
+    headers: { 'content-type': 'application/x-ndjson', 'x-void-deployment-id': 'dep_test' },
   });
 }
 
@@ -245,7 +246,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     mockDetectFramework.mockReset().mockReturnValue(undefined);
 
     originalFetch = globalThis.fetch;
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    globalThis.fetch = withPlatformDiscovery(fetchMock);
     fetchMock.mockReset();
     mockCollectPrerenderPaths.mockClear();
 

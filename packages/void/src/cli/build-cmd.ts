@@ -14,7 +14,8 @@ function isBuildLogComplete(page: BuildLogsResponse): boolean {
   if (!page.terminal) {
     return false;
   }
-  if (page.logsComplete === null || page.logsComplete === undefined) {
+  // `null` means the server cannot prove completion.
+  if (page.logsComplete === null) {
     throw new Error(
       'This platform cannot confirm that the final build logs were captured. Ask its administrator to upgrade the platform runtime, or read the retained logs without --follow.',
     );

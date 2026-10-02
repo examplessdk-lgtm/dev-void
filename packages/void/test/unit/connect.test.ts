@@ -142,7 +142,10 @@ describe('connect workflow', () => {
   it('verifies an existing origin-scoped session without opening a browser', async () => {
     mocks.token.mockReturnValue('saved-token');
     await runConnectCommand(root, parseConnectArgs([discovery.apiUrl]), true);
-    expect(mocks.client).toHaveBeenCalledWith('saved-token', { apiUrl: discovery.apiUrl });
+    expect(mocks.client).toHaveBeenCalledWith('saved-token', {
+      apiUrl: discovery.apiUrl,
+      checkPlatformVersion: false,
+    });
     expect(mocks.whoami).toHaveBeenCalledOnce();
     expect(mocks.login).not.toHaveBeenCalled();
   });
@@ -166,7 +169,10 @@ describe('connect workflow', () => {
     vi.stubEnv('VOID_TOKEN', 'ci-token');
     vi.stubEnv('VOID_API_URL', discovery.apiUrl);
     await runConnectCommand(root, parseConnectArgs([discovery.apiUrl]), false);
-    expect(mocks.client).toHaveBeenCalledWith('ci-token', { apiUrl: discovery.apiUrl });
+    expect(mocks.client).toHaveBeenCalledWith('ci-token', {
+      apiUrl: discovery.apiUrl,
+      checkPlatformVersion: false,
+    });
     expect(mocks.login).not.toHaveBeenCalled();
   });
   it.each(['', 'https://different.example.com'])(

@@ -8,6 +8,8 @@ A Void platform lets your team deploy apps into a shared Cloudflare account. As 
 
 If you're deploying an app for yourself, [deploy directly to Cloudflare](/integrations/cloudflare#deploy-to-your-own-cloudflare-account). You don't need to install a platform first.
 
+The Void CLI works with platforms on version 0.23.0 or newer. On an older platform, commands stop with an error. Ask the platform administrator to run [`void platform upgrade`](/guide/platform/installation/maintenance#upgrade-the-platform). Signing in still works.
+
 The core platform supports GitHub, Google, generic OIDC, and Cloudflare Access login, CLI deploys, D1, KV, R2, Queues, cron jobs, Workers AI, WebSockets, SSE, ISR, routing, logs, and rollback.
 
 The core installation includes managed Sandboxes and an email gateway; email is enabled when you configure a shared mail domain and zone. The user dashboard, GitHub builds and webhooks, build Containers, and custom project domains aren't part of the core installation. Source-built platforms that add the optional GitHub services should follow the [isolated webhook ingress setup](/guide/platform/development/runtime#optional-github-webhook-ingress-for-access-protected-apis) when Access protects the API.

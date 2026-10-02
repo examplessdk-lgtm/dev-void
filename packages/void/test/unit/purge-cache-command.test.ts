@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const tempHomes: Array<string> = [];
 const tempRoots: Array<string> = [];
@@ -107,7 +108,7 @@ describe('runPurgeCacheCommand', () => {
     createLinkedProject(root);
 
     const fetchMock = vi.fn(async () => Response.json({ purged: 5 }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
 
     const capture = captureOutput();
     const runPurgeCacheCommand = await importRunPurgeCacheCommand();
@@ -147,7 +148,7 @@ describe('runPurgeCacheCommand', () => {
       }
       return Response.json({ purged: 3 });
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
 
     const capture = captureOutput();
     const runPurgeCacheCommand = await importRunPurgeCacheCommand();

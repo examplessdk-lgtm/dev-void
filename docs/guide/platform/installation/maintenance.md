@@ -68,7 +68,7 @@ Repair recreates missing infrastructure that the installer owns. It does not res
 
 ### Upgrade the platform
 
-Keep the platform runtime current when updating the Void CLI. If a developer's CLI reports that project lookup requires an upgrade, upgrade the platform before retrying.
+Keep the platform runtime current when updating the Void CLI. The CLI requires platform version 0.23.0 or newer. If a developer's CLI reports that the platform is older than that, upgrade the platform before retrying.
 
 Use the installed CLI's packaged runtime to upgrade:
 

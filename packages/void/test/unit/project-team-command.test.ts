@@ -8,6 +8,7 @@ import {
   savePlatformConnection,
 } from '../../src/cli/platform-registry.ts';
 import { runProjectCommand } from '../../src/cli/project-cmd.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const keyring = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), remove: vi.fn() }));
 vi.mock('../../src/cli/keyring.ts', () => ({
@@ -90,7 +91,7 @@ describe('project team target selection', () => {
         ? Response.json({ invitations: [] })
         : Response.json({});
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -140,7 +141,7 @@ describe('project team target selection', () => {
           ? Response.json({ invitations: [] })
           : Response.json({});
       });
-      vi.stubGlobal('fetch', fetchMock);
+      vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
       vi.spyOn(console, 'log').mockImplementation(() => undefined);
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -194,7 +195,7 @@ describe('project team target selection', () => {
           : null,
       );
       const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
-      vi.stubGlobal('fetch', fetchMock);
+      vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
       vi.spyOn(console, 'log').mockImplementation(() => undefined);
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -213,7 +214,7 @@ describe('project team target selection', () => {
     vi.stubEnv('VOID_API_URL', 'https://platform-c.example.test/');
     vi.stubEnv('VOID_TOKEN', 'platform-c-token');
     const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const output: Array<string> = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -245,7 +246,7 @@ describe('project team target selection', () => {
         : null,
     );
     const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(() => {
@@ -279,7 +280,7 @@ describe('project team target selection', () => {
         members: [{ user: { id: 'user_1', login: 'alex' }, role: 'owner' }],
       }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -319,7 +320,7 @@ describe('project team target selection', () => {
           members: [{ user: { id: 'owner_1', login: 'owner' }, role: 'owner' }],
         }),
       );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 

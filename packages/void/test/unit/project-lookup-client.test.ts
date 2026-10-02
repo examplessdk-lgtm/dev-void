@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformClient } from '../../src/cli/client.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const fetchMock = vi.fn();
 let originalFetch: typeof globalThis.fetch;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
-  globalThis.fetch = fetchMock as typeof globalThis.fetch;
+  globalThis.fetch = withPlatformDiscovery(fetchMock);
   fetchMock.mockReset();
 });
 
@@ -39,22 +40,21 @@ describe('targeted project lookup', () => {
     );
   });
 
-  it('distinguishes a missing project from an older platform', async () => {
+  it('returns null for a missing slug', async () => {
     fetchMock.mockResolvedValueOnce(Response.json({ project: null }));
     await expect(client().findProjectBySlug('missing')).resolves.toBeNull();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it.each(['listProjectChoices', 'findProjectBySlug'] as const)(
-    'requires an upgrade when %s is unsupported',
+    'reports a 404 from %s as an API error',
     async (method) => {
       fetchMock.mockResolvedValueOnce(Response.json({ error: 'not found' }, { status: 404 }));
       const api = client();
       await expect(
         method === 'findProjectBySlug' ? api.findProjectBySlug('my-app') : api.listProjectChoices(),
-      ).rejects.toThrow('Ask its administrator to upgrade the platform runtime.');
+      ).rejects.toMatchObject({ name: 'PlatformApiError', status: 404 });
       expect(fetchMock).toHaveBeenCalledOnce();
-      expect(fetchMock.mock.calls[0][0]).not.toBe('https://api.example.test/projects');
     },
   );
 

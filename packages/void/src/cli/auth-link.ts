@@ -17,9 +17,6 @@ export async function runAuthLink(root: string, connectionId?: string): Promise<
   }
   const target = await selectPlatformLoginMethod(platform, connectionId);
   const existing = await new PlatformClient(token, apiUrl).whoami();
-  if (!existing.id) {
-    throw new Error('auth: This platform does not support account linking.');
-  }
   log.info(`Sign in again to ${existing.login} using an already linked login method.`);
   const source = await selectPlatformLoginMethod(platform);
   const freshToken = await runPlatformLogin(apiUrl, source.id, (url) =>

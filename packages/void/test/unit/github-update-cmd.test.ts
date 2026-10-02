@@ -19,6 +19,7 @@ function makeProject(): ProjectResponse {
     type: 'void',
     created_at: '2024-01-01T00:00:00Z',
     custom_domain: null,
+    role: 'owner',
   };
 }
 
@@ -28,7 +29,6 @@ function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnec
     project_id: projectId,
     installation_id: '123456',
     repo_full_name: 'octocat/hello-world',
-    repository_id: '9876',
     branch: 'main',
     build_executor: 'container',
     workflow_path: '.github/workflows/void-deploy.yml',
@@ -191,30 +191,6 @@ describe('runGithubUpdate (non-TTY)', () => {
 
     expect(updateGithubConnection).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
-  });
-
-  it('fails closed when the server does not apply --workflow (old platform)', async () => {
-    const { client, updateGithubConnection } = makeClient({
-      getGithubConnection: vi.fn(async () => makeConnection()),
-      // An old platform that predates workflow_path ignores the unknown field and
-      // returns the connection still pinned to the default.
-      updateGithubConnection: vi.fn(async () => makeConnection()),
-    });
-
-    await expect(
-      runGithubUpdate('/project', client, {
-        subcommand: 'update',
-        projectName: slug,
-        workflowPath: '.github/workflows/ci.yml',
-      }),
-    ).rejects.toThrow('process.exit(1)');
-
-    expect(updateGithubConnection).toHaveBeenCalledWith(projectId, {
-      workflowPath: '.github/workflows/ci.yml',
-    });
-    expect(errorSpy).toHaveBeenCalled();
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(successSpy).not.toHaveBeenCalled();
   });
 
   it('exits(1) with a connect-first message when the project is not connected', async () => {

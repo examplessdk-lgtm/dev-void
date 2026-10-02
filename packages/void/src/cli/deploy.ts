@@ -7336,7 +7336,7 @@ async function runManagedDeploy(
 }
 
 function assertProjectDeployAccess(project: ProjectResponse | undefined): void {
-  // Older platforms omit roles; the API remains authoritative for every deploy.
+  // The API remains authoritative for every deploy.
   if (project?.role === 'reader') {
     throw new Error(
       `deploy: You have reader access to "${project.slug}" and cannot deploy. ` +

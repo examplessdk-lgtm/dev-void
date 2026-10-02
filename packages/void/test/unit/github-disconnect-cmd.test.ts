@@ -32,7 +32,6 @@ function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnec
     project_id: projectId,
     installation_id: '123456',
     repo_full_name: 'octocat/hello-world',
-    repository_id: '9876',
     branch: 'main',
     build_executor: 'container',
     workflow_path: '.github/workflows/void-deploy.yml',

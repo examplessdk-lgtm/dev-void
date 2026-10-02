@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test';
 import { getApiUrl } from '../../src/cli/auth.ts';
 import { runDeploy } from '../../src/cli/deploy.ts';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const { confirm, select, text, login, oidcAvailable, exchangeOidc } = vi.hoisted(() => ({
   confirm: vi.fn(async () => true),
@@ -91,54 +92,61 @@ beforeEach(() => {
   Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input instanceof Request ? input.url : input);
-      const method = init?.method ?? 'GET';
-      const authorization = new Headers(init?.headers).get('Authorization');
-      requests.push({ origin: url.origin, path: url.pathname, method, authorization });
-      expect([originalOrigin, alternateOrigin]).toContain(url.origin);
-      const id = url.origin === originalOrigin ? 'project-original' : 'project-alternate';
-      const project = { id, slug: 'my-app', role: 'owner' };
-      if (url.pathname === '/projects/choices') {
-        return Response.json([]);
-      }
-      if (url.pathname === '/projects/resolve') {
-        expect(url.searchParams.get('slug')).toBe('my-app');
-        return Response.json({ project: missing ? null : project });
-      }
-      if (method === 'POST' && url.pathname === '/projects') {
-        missing = false;
-        return Response.json(project);
-      }
-      if (method === 'GET' && url.pathname === `/projects/${id}`) {
-        return Response.json(project);
-      }
-      if (url.pathname === `/projects/${id}/deploy/preflight`) {
-        if (expirePreflight) {
-          expirePreflight = false;
-          return Response.json({ error: 'invalid or expired token' }, { status: 401 });
+    withPlatformDiscovery(
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        const method = init?.method ?? 'GET';
+        const authorization = new Headers(init?.headers).get('Authorization');
+        requests.push({ origin: url.origin, path: url.pathname, method, authorization });
+        expect([originalOrigin, alternateOrigin]).toContain(url.origin);
+        const id = url.origin === originalOrigin ? 'project-original' : 'project-alternate';
+        const project = { id, slug: 'my-app', role: 'owner' };
+        if (url.pathname === '/projects/choices') {
+          return Response.json([]);
         }
-        return Response.json({ needed: [], total: 1, skipped: 1 });
-      }
-      if (url.pathname === `/projects/${id}/deploy`) {
-        return new Response(
-          JSON.stringify(
-            failDeploy
-              ? { event: 'error', message: 'deployment refused', step: 'upload' }
-              : {
-                  event: 'done',
-                  deployment: 'deploy-test',
-                  url: 'https://app.example.test',
-                  urls: ['https://app.example.test'],
-                  assets: 1,
-                  workers: 0,
-                },
-          ) + '\n',
-          { headers: { 'Content-Type': 'application/x-ndjson' } },
-        );
-      }
-      throw new Error(`Unexpected request: ${method} ${url}`);
-    }),
+        if (url.pathname === '/projects/resolve') {
+          expect(url.searchParams.get('slug')).toBe('my-app');
+          return Response.json({ project: missing ? null : project });
+        }
+        if (method === 'POST' && url.pathname === '/projects') {
+          missing = false;
+          return Response.json(project);
+        }
+        if (method === 'GET' && url.pathname === `/projects/${id}`) {
+          return Response.json(project);
+        }
+        if (url.pathname === `/projects/${id}/deploy/preflight`) {
+          if (expirePreflight) {
+            expirePreflight = false;
+            return Response.json({ error: 'invalid or expired token' }, { status: 401 });
+          }
+          return Response.json({ needed: [], total: 1, skipped: 1 });
+        }
+        if (url.pathname === `/projects/${id}/deploy`) {
+          return new Response(
+            JSON.stringify(
+              failDeploy
+                ? { event: 'error', message: 'deployment refused', step: 'upload' }
+                : {
+                    event: 'done',
+                    deployment: 'deploy-test',
+                    url: 'https://app.example.test',
+                    urls: ['https://app.example.test'],
+                    assets: 1,
+                    workers: 0,
+                  },
+            ) + '\n',
+            {
+              headers: {
+                'Content-Type': 'application/x-ndjson',
+                'x-void-deployment-id': 'deploy-test',
+              },
+            },
+          );
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    ),
   );
 });
 afterEach(() => {

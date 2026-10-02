@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 import { runProjectTokenCommand } from '../../src/cli/project-token.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const roots: Array<string> = [];
 
@@ -68,7 +69,7 @@ describe('project token command', () => {
         { status: 201 },
       ),
     );
-    vi.stubGlobal('fetch', request);
+    vi.stubGlobal('fetch', withPlatformDiscovery(request));
     const output = vi.spyOn(console, 'log').mockImplementation(() => {});
     await runProjectTokenCommand(root, {
       subcommand: 'token',

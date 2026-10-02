@@ -732,9 +732,7 @@ export async function runConnect(
   //
   //    Only carry a prompted value forward when it DIFFERS from the default, so
   //    accepting the default leaves `workflowPath` undefined → the field is not
-  //    sent → the server applies its own (identical) default. This keeps the
-  //    fail-closed echo check below from firing against an older platform that
-  //    silently drops the field and returns its default.
+  //    sent → the server applies its own (identical) default.
   // -------------------------------------------------------------------------
   let workflowPath = args.workflowPath;
   if (executor === 'github_actions' && args.workflowPath === undefined && isTTY) {
@@ -773,9 +771,8 @@ export async function runConnect(
       ...extra,
     });
 
-  let connection: GithubConnection;
   try {
-    connection = await attemptConnect();
+    await attemptConnect();
   } catch (err) {
     if (!(err instanceof PlatformApiError)) {
       throw err;
@@ -800,7 +797,7 @@ export async function runConnect(
         repoFullName,
       );
       try {
-        connection = await attemptConnect({
+        await attemptConnect({
           connectGrant: grant.connectGrant,
           codeVerifier: grant.codeVerifier,
         });
@@ -828,19 +825,6 @@ export async function runConnect(
       }
       throw err;
     }
-  }
-
-  // Fail closed when a custom workflow path (from --workflow or the prompt) was
-  // not applied. An older platform that predates workflow_path silently drops
-  // the field and returns success while staying pinned to the default, so the
-  // user would wrongly believe their custom workflow is authorized to deploy.
-  // Verify the server echoed it back. (Accepting the default leaves workflowPath
-  // undefined, so this check is skipped — see step 6.)
-  if (workflowPath !== undefined && connection.workflow_path !== workflowPath) {
-    log.error(
-      `connect: server did not apply workflow path ${workflowPath} (got ${connection.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
-    );
-    process.exit(1);
   }
 
   log.success(`Connected ${repoFullName} (${branch}) → project. Push to ${branch} to deploy.`);
@@ -1058,17 +1042,6 @@ export async function runGithubUpdate(
       throw err;
     }
     throw err;
-  }
-
-  // Fail closed when a custom workflow path (from --workflow or the prompt) was
-  // not applied — same old-platform compatibility hazard as connect: the server
-  // could return success while ignoring the unknown field, leaving the workflow
-  // pin unchanged.
-  if (patch.workflowPath !== undefined && updated.workflow_path !== patch.workflowPath) {
-    log.error(
-      `update: server did not apply workflow path ${patch.workflowPath} (got ${updated.workflow_path ?? 'none'}). The platform may be too old to support a custom workflow path.`,
-    );
-    process.exit(1);
   }
 
   log.success(

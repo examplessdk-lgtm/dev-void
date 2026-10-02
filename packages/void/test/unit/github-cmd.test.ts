@@ -111,7 +111,6 @@ function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnec
     project_id: 'proj_1',
     installation_id: '42',
     repo_full_name: 'acme/my-app',
-    repository_id: '99',
     branch: 'main',
     build_executor: 'github_actions',
     workflow_path: '.github/workflows/void-deploy.yml',

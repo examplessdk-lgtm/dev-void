@@ -105,7 +105,8 @@ export async function runLoginCommand(root: string = process.cwd()): Promise<voi
   let expiredEnvToken = false;
   if (existing) {
     const tokenSource = getTokenSource();
-    const client = new PlatformClient(existing, { root });
+    // Login must work on any platform version.
+    const client = new PlatformClient(existing, { root, checkPlatformVersion: false });
     try {
       await client.whoami();
       if (tokenSource === 'ci') {

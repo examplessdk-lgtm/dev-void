@@ -41,6 +41,8 @@ These deployment and smoke-test workflows target Void Cloud, from `prod` for pro
 
 Both deploy workflows serialize deployments without cancelling an active rollout. Advancing `prod` requests a production deployment. A failed or interrupted deployment needs inspection before another rollout, particularly when database migrations already ran.
 
+Hosted API and email gateway deploys report the release version from `packages/platform/package.json` as `PLATFORM_VERSION`. The `void` CLI refuses platforms older than its minimum platform version, so release in this order: advance `prod` and wait for the production deployment to succeed, then push the release tag that publishes the npm packages.
+
 Consult the workflow files for their current inputs. Store credentials in the
 selected GitHub environment and the deployment owner's secret manager. Keep
 secret-manager locations, account access assignments and credential-issuance

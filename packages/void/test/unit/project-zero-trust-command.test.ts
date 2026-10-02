@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 import { runProjectCommand } from '../../src/cli/project-cmd.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const roots: Array<string> = [];
 
@@ -101,7 +102,7 @@ describe('project Zero Trust command', () => {
           project: null,
         }),
       );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const output: Array<string> = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -190,7 +191,7 @@ describe('project Zero Trust command', () => {
         },
       }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 

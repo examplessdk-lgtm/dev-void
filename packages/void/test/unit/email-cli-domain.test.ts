@@ -20,6 +20,7 @@ import {
   resolveEmailDomainTarget,
   type EmailDomainAddDeps,
 } from '../../src/cli/email.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 /**
  * `void email domain …` (design doc 0078, "Custom domains on Cloudflare").
@@ -203,7 +204,7 @@ describe('domain input helpers', () => {
 describe('PlatformClient.getEmailSettings', () => {
   function clientWith(status: number, body: string) {
     const fetchSpy = vi.fn(async () => new Response(body, { status }));
-    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchSpy));
     return new PlatformClient('jwt-dummy', 'https://api.example.test');
   }
 
@@ -704,7 +705,7 @@ describe('PlatformClient.removeEmailDomain', () => {
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     const client = new PlatformClient('tok', { apiUrl: 'https://api.test' });
     await client.removeEmailDomain('prj_1', 'acme.com');
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -778,7 +779,7 @@ describe('PlatformClient.rotateEmailDomainSecret', () => {
           headers: { 'content-type': 'application/json' },
         }),
     );
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
     const client = new PlatformClient('tok', { apiUrl: 'https://api.test' });
     await client.rotateEmailDomainSecret('prj_1', 'acme.com', 'attempt_1');
     const [url, init] = fetchMock.mock.calls[0]!;

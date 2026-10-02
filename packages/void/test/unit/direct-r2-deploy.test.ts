@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 // Capture how many times each asset path is read via `readFileSync`. Mocked
 // before any importer of `node:fs` so the spy is in place when `package.ts`
@@ -84,7 +85,7 @@ beforeEach(() => {
   }
 
   originalFetch = globalThis.fetch;
-  globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+  globalThis.fetch = withPlatformDiscovery(fetchMock);
   fetchMock.mockReset();
   readFileSyncMock.mockClear();
 });
@@ -200,7 +201,7 @@ function ndjsonResponse(events: Array<unknown>): Response {
   });
   return new Response(stream, {
     status: 200,
-    headers: { 'content-type': 'application/x-ndjson' },
+    headers: { 'content-type': 'application/x-ndjson', 'x-void-deployment-id': 'dep_test' },
   });
 }
 

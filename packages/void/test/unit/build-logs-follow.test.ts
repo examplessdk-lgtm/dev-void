@@ -17,7 +17,15 @@ afterEach(() => {
 });
 
 function page(partial: Partial<BuildLogsResponse>): BuildLogsResponse {
-  return { lines: [], lastSeq: 0, status: 'building', terminal: false, external: null, ...partial };
+  return {
+    lines: [],
+    lastSeq: 0,
+    status: 'building',
+    terminal: false,
+    logsComplete: null,
+    external: null,
+    ...partial,
+  };
 }
 
 function apiError(status: number, body = '{}'): PlatformApiError {
@@ -211,31 +219,28 @@ describe('followBuildLogs', () => {
     expect(written).toEqual(['final tail']);
   });
 
-  it.each([undefined, null])(
-    'prints retained logs before rejecting %s completion proof',
-    async (logsComplete) => {
-      const written: Array<string> = [];
-      await expect(
-        followBuildLogs({
-          fetchPage: () =>
-            Promise.resolve(
-              page({
-                status: 'complete',
-                terminal: true,
-                logsComplete,
-                lines: [{ seq: 3, line: 'retained tail', stream: 'stdout', ts: 3 }],
-                lastSeq: 3,
-              }),
-            ),
-          write: (line) => written.push(line),
-          sleep: () => Promise.resolve(),
-          since: 2,
-          status: 'complete',
-        }),
-      ).rejects.toThrow('upgrade the platform runtime');
-      expect(written).toEqual(['retained tail']);
-    },
-  );
+  it('prints retained logs before rejecting null completion proof', async () => {
+    const written: Array<string> = [];
+    await expect(
+      followBuildLogs({
+        fetchPage: () =>
+          Promise.resolve(
+            page({
+              status: 'complete',
+              terminal: true,
+              logsComplete: null,
+              lines: [{ seq: 3, line: 'retained tail', stream: 'stdout', ts: 3 }],
+              lastSeq: 3,
+            }),
+          ),
+        write: (line) => written.push(line),
+        sleep: () => Promise.resolve(),
+        since: 2,
+        status: 'complete',
+      }),
+    ).rejects.toThrow('upgrade the platform runtime');
+    expect(written).toEqual(['retained tail']);
+  });
 
   it('bounds terminal drain waiting at two minutes', async () => {
     let now = 0;

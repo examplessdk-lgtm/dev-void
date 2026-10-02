@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformClient, type ManifestOnlyDeployPayload } from '../../src/cli/client.ts';
 import type { DeployManifest } from '../../src/cli/types.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const spawnSyncMock = vi.hoisted(() => vi.fn());
 const accessKeyring = vi.hoisted(() => ({
@@ -21,7 +22,7 @@ let originalFetch: typeof globalThis.fetch | undefined;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
-  globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+  globalThis.fetch = withPlatformDiscovery(fetchMock);
   fetchMock.mockReset();
 });
 
@@ -47,6 +48,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** The platform names the accepted deployment in a receipt header before streaming. */
+function receiptFor(events: Array<unknown>): string {
+  for (const event of events as Array<{ deploymentId?: unknown; deployment?: unknown }>) {
+    const id = event.deploymentId ?? event.deployment;
+    if (typeof id === 'string') {
+      return id;
+    }
+  }
+  return 'dpl_durable';
+}
+
 function ndjsonStreamResponse(events: Array<unknown>, status = 200): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -57,7 +69,13 @@ function ndjsonStreamResponse(events: Array<unknown>, status = 200): Response {
       controller.close();
     },
   });
-  return new Response(stream, { status, headers: { 'content-type': 'application/x-ndjson' } });
+  return new Response(stream, {
+    status,
+    headers: {
+      'content-type': 'application/x-ndjson',
+      'x-void-deployment-id': receiptFor(events),
+    },
+  });
 }
 
 describe('PlatformClient.requestUploadUrls', () => {
@@ -227,7 +245,10 @@ describe('PlatformClient.finalizeDeploy', () => {
       },
     });
     fetchMock.mockResolvedValueOnce(
-      new Response(stream, { status: 200, headers: { 'content-type': 'application/x-ndjson' } }),
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'application/x-ndjson', 'x-void-deployment-id': 'd1' },
+      }),
     );
 
     const client = makeClient();
@@ -301,6 +322,7 @@ describe('PlatformClient.finalizeDeploy', () => {
       // No client-side dedupe GET — the server's precheck is authoritative.
       expect(deploymentListCalls()).toHaveLength(0);
       expect(events).toEqual([
+        { event: 'start', deploymentId: 'd1' },
         { event: 'done', deployment: 'd1', url: 'https://x', urls: [], assets: 0, workers: 0 },
       ]);
       expect(cliLog.warn).toHaveBeenCalledWith(
@@ -662,11 +684,13 @@ describe('PlatformClient.finalizeDeploy', () => {
     }
   });
 
-  it('keeps EOF behavior on an older platform without a durable receipt', async () => {
-    fetchMock.mockResolvedValueOnce(
-      ndjsonStreamResponse([{ event: 'start', deploymentId: 'dpl_legacy' }]),
-    );
-    expect(await collectDeploy()).toEqual([{ event: 'start', deploymentId: 'dpl_legacy' }]);
+  it('rejects a deployment stream without a receipt and does not observe or retry it', async () => {
+    const response = ndjsonStreamResponse([{ event: 'start', deploymentId: 'dpl_unknown' }]);
+    response.headers.delete('x-void-deployment-id');
+    const cancel = vi.spyOn(response.body!, 'cancel');
+    fetchMock.mockResolvedValueOnce(response);
+    await expect(collectDeploy()).rejects.toThrow('Platform returned no deployment receipt.');
+    expect(cancel).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

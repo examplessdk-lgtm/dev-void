@@ -12,6 +12,8 @@ Full-stack framework for Cloudflare Workers, powered by Vite.
 
 The `void` package on npm has these previous versions: '0.0.1', '0.1.0', '0.1.2', '0.1.3', '0.1.5', '0.1.6', '1.0.0', '1.0.1', '1.0.2', '3.0.0', '3.0.1'. We have unpublished these versions but they cannot be published again. In package release workflows, make sure to avoid / skip these versions for `packages/void`.
 
+Deploy hosted production before publishing the npm packages: the CLI checks the platform version. See [operations](./platform/meta/operations.md#github-actions).
+
 ## Best Practices That Must Be Followed
 
 - **Do not use Python for repository scripts or automation**, including inline CI scripts and ad-hoc maintenance commands. Use Node.js with TypeScript/JavaScript, or shell/PowerShell where appropriate.

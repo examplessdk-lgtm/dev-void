@@ -4,13 +4,14 @@ import {
   type GithubConnection,
   type GithubInstallation,
 } from '../../src/cli/client.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const fetchMock = vi.fn();
 let originalFetch: typeof globalThis.fetch | undefined;
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
-  globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+  globalThis.fetch = withPlatformDiscovery(fetchMock);
   fetchMock.mockReset();
 });
 
@@ -102,7 +103,6 @@ describe('PlatformClient.connectGithub', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: '9876',
       branch: 'main',
       build_executor: 'container',
       workflow_path: '.github/workflows/void-deploy.yml',
@@ -142,7 +142,6 @@ describe('PlatformClient.connectGithub', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: null,
       branch: 'main',
       build_executor: 'container',
       workflow_path: '.github/workflows/void-deploy.yml',
@@ -171,7 +170,6 @@ describe('PlatformClient.connectGithub', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: '9876',
       branch: 'main',
       build_executor: 'container',
       workflow_path: '.github/workflows/void-deploy.yml',
@@ -268,7 +266,6 @@ describe('PlatformClient.getGithubConnection', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: '9876',
       branch: 'main',
       build_executor: 'container',
       workflow_path: '.github/workflows/void-deploy.yml',
@@ -308,7 +305,6 @@ describe('PlatformClient.updateGithubConnection', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: '9876',
       branch: 'release',
       build_executor: 'github_actions',
       workflow_path: '.github/workflows/void-deploy.yml',
@@ -344,7 +340,6 @@ describe('PlatformClient.updateGithubConnection', () => {
       project_id: projectId,
       installation_id: '123456',
       repo_full_name: 'octocat/hello-world',
-      repository_id: null,
       branch: 'main',
       build_executor: 'github_actions',
       workflow_path: '.github/workflows/void-deploy.yml',

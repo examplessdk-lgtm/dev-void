@@ -1,4 +1,4 @@
-import { parsePlatformDiscoveryDocument, type PlatformDiscoveryDocument } from '@void/platform';
+import type { PlatformDiscoveryDocument } from '@void/platform';
 import { isCancel, log, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
@@ -8,6 +8,7 @@ import {
 } from './cf-access.ts';
 import { pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
+import { readPlatformDiscoveryResponse } from './platform-discovery.ts';
 import {
   getActivePlatformConnection,
   listPlatformConnections,
@@ -35,30 +36,7 @@ export async function discoverPlatform(
     ensurePlatformAccessToken(apiUrl, true);
     response = await request();
   }
-  if (!response.ok) {
-    throw new Error(`platform: Discovery failed at ${apiUrl} (HTTP ${response.status}).`);
-  }
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(`platform: ${apiUrl} returned invalid discovery metadata.`);
-  }
-  let discovery: PlatformDiscoveryDocument;
-  try {
-    discovery = parsePlatformDiscoveryDocument(value);
-  } catch (error) {
-    throw new Error(
-      `platform: ${apiUrl} returned invalid discovery metadata: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const finalOrigin = normalizePlatformApiUrl(response.url ? new URL(response.url).origin : apiUrl);
-  if (discovery.apiUrl !== finalOrigin) {
-    throw new Error(
-      `platform: Discovery origin mismatch. The response came from ${finalOrigin}, but identifies ${discovery.apiUrl}.`,
-    );
-  }
-  return discovery;
+  return readPlatformDiscoveryResponse(apiUrl, response);
 }
 
 export async function promptPlatformUrl(): Promise<string> {

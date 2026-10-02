@@ -56,7 +56,7 @@ export async function promptProjectSelection(
     ...projects.map((p) => ({
       value: p.id,
       label: `${p.slug} (${p.url ?? `${p.slug}.${getSiteDomain(root)}`})`,
-      ...(p.role ? { hint: p.role === 'reader' ? 'reader (read-only)' : p.role } : {}),
+      hint: p.role === 'reader' ? 'reader (read-only)' : p.role,
     })),
   ];
 

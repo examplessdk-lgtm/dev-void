@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformClient, type LogEntry } from '../../src/cli/client.ts';
 import { filterLogEntries } from '../../src/cli/logs.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 function entry(partial: Partial<LogEntry>): LogEntry {
   return {
@@ -162,7 +163,7 @@ describe('PlatformClient.getLogs URL', () => {
 
   function setFetchMock() {
     const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = withPlatformDiscovery(fetchMock);
     return fetchMock;
   }
 
@@ -222,7 +223,7 @@ describe('PlatformClient.getRequests URL', () => {
 
   function setFetchMock() {
     const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = withPlatformDiscovery(fetchMock);
     return fetchMock;
   }
 

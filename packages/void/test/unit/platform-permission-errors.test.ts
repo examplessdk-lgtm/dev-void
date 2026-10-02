@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformApiError, PlatformClient, parsePlatformErrorBody } from '../../src/cli/client.ts';
 import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 vi.mock('../../src/cli/cf-access.ts', () => ({
   ensureCloudflaredToken: vi.fn(),
@@ -75,7 +76,7 @@ describe('PlatformClient permission errors', () => {
     async (_name, operation, requirement) => {
       const body = JSON.stringify({ error: 'forbidden' });
       const fetch = vi.fn(async () => new Response(body, { status: 403 }));
-      vi.stubGlobal('fetch', fetch);
+      vi.stubGlobal('fetch', withPlatformDiscovery(fetch));
       const error = await operation(client()).catch((error: unknown) => error);
       expect(error).toBeInstanceOf(PlatformApiError);
       expect(error).toMatchObject({ status: 403, code: 'forbidden', body });
@@ -258,7 +259,7 @@ describe('deploy preflight rejections', () => {
     [426, { error: 'cli_outdated', message: 'Upgrade the CLI.' }],
   ])('stops after an explicit HTTP %s rejection', async (status, body) => {
     const fetch = vi.fn(async () => Response.json(body, { status }));
-    vi.stubGlobal('fetch', fetch);
+    vi.stubGlobal('fetch', withPlatformDiscovery(fetch));
     await expect(client().preflight(project, assets)).rejects.toMatchObject({
       status,
       code: body.error,

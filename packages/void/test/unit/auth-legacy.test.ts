@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const state = vi.hoisted(() => ({
   home: '',
@@ -327,7 +328,9 @@ describe('environment token destinations', () => {
     const { PlatformClient } = await import('../../src/cli/client.ts');
     const fetcher = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(Response.json({ login: 'operator', plan: 'free' }));
+      .mockImplementation(
+        withPlatformDiscovery(async () => Response.json({ login: 'operator', plan: 'free' })),
+      );
     try {
       await new PlatformClient(getToken(root)!, { root }).whoami();
       expect(getApiUrl(root)).toBe(origin);

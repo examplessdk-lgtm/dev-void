@@ -420,31 +420,6 @@ describe('domainStatus rollup', () => {
     expect(allNotes).toContain('foo.example.com → cname.void.app');
   });
 
-  it('issuing_cert omits the CNAME citation when cname_target is absent', async () => {
-    setupDomain();
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      cf_status: 'pending_issuance',
-      ssl_status: 'pending_validation',
-      // no cname_target (e.g. an older API during the deploy window)
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    const statusNote = mockNote.mock.calls[0][0] as string;
-    expect(statusNote).toContain('Status:   issuing_cert —');
-    expect(statusNote).toContain('Cloudflare is issuing the SSL certificate');
-    // No dangling reference to a CNAME block that isn't shown.
-    const allNotes = mockNote.mock.calls.map((c) => c[0] as string).join('\n');
-    expect(allNotes).not.toContain('confirm the traffic CNAME below');
-    expect(allNotes).not.toContain('CNAME (traffic)');
-  });
-
   it('renders deploying_cert state when cf_status=pending_deployment', async () => {
     setupDomain();
     mockGetDomainStatus.mockResolvedValue({
@@ -543,6 +518,7 @@ describe('computeRollup', () => {
     created_at: 'now',
     status: 'pending',
     ssl_status: 'pending',
+    cname_target: 'cname.void.app',
   };
 
   const cases: Array<[name: string, input: Partial<DomainStatusResponse>, expectedState: string]> =
@@ -656,54 +632,6 @@ describe('domainStatus --verbose', () => {
 });
 
 describe('domainStatus pending records block', () => {
-  it('shows the pending ownership record while ownership_verification is present', async () => {
-    mockListDomains.mockResolvedValue([
-      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
-    ]);
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      ssl_status: 'pending_validation',
-      cf_status: 'pending',
-      ownership_verification: { type: 'txt', name: 'own-name', value: 'own-value' },
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    expect(mockNote).toHaveBeenCalledTimes(2);
-    const pendingNote = mockNote.mock.calls[1][0] as string;
-    expect(pendingNote).toContain('TXT (ownership verification)');
-    expect(pendingNote).toContain('own-name → own-value');
-    // HTTP-DCV: no SSL-validation records ever surface to the user.
-    expect(pendingNote).not.toContain('TXT (SSL validation)');
-    expect(mockNote.mock.calls[1][1]).toBe('Add this DNS record to your provider');
-  });
-
-  it('omits the pending block when ownership_verification is absent (SSL is automatic under HTTP-DCV)', async () => {
-    mockListDomains.mockResolvedValue([
-      { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
-    ]);
-    mockGetDomainStatus.mockResolvedValue({
-      id: 'dom_1',
-      project_id: 'proj_default',
-      hostname: 'foo.example.com',
-      cf_hostname_id: 'cf_1',
-      status: 'pending',
-      created_at: 'now',
-      ssl_status: 'pending_validation',
-      cf_status: 'pending_validation',
-    });
-
-    await runDomainCommand(root, args({ subcommand: 'status', hostname: 'foo.example.com' }));
-
-    expect(mockNote).toHaveBeenCalledTimes(1);
-    expect(mockNote.mock.calls[0][1]).toBe('Domain Status');
-  });
-
   it('shows the traffic CNAME while the cert is still pending (ownership already verified)', async () => {
     mockListDomains.mockResolvedValue([
       { id: 'dom_1', hostname: 'foo.example.com', status: 'pending' },
@@ -781,6 +709,8 @@ describe('domainStatus pending records block', () => {
     expect(pendingNote).toContain('foo.example.com → cname.void.app');
     expect(pendingNote).toContain('TXT (ownership verification)');
     expect(pendingNote).toContain('own-name → own-value');
+    // HTTP-DCV: no SSL-validation records ever surface to the user.
+    expect(pendingNote).not.toContain('TXT (SSL validation)');
     // CNAME ordered before ownership, matching `domain add`.
     expect(pendingNote.indexOf('CNAME (traffic)')).toBeLessThan(
       pendingNote.indexOf('TXT (ownership verification)'),

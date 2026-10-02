@@ -43,6 +43,7 @@ function makeProject(): ProjectResponse {
     type: 'void',
     created_at: '2024-01-01T00:00:00Z',
     custom_domain: null,
+    role: 'owner',
   };
 }
 
@@ -67,7 +68,6 @@ function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnec
     project_id: projectId,
     installation_id: installationId,
     repo_full_name: repoFullName,
-    repository_id: '9876',
     branch: 'main',
     build_executor: 'container',
     workflow_path: '.github/workflows/void-deploy.yml',

@@ -431,6 +431,9 @@ export async function followOperatorLogs(
           if (result.logsComplete === true) {
             return;
           }
+          // `null` means the current server cannot prove completion. `undefined`
+          // comes from platforms before 0.20.0 (commit 16a15403). Operator
+          // commands do not run the minimum platform version check, so keep it.
           if (result.logsComplete === null || result.logsComplete === undefined) {
             throw new OperatorClientError(
               'This platform cannot confirm that the final build logs were captured. Upgrade the platform runtime, or read the retained logs without --follow.',

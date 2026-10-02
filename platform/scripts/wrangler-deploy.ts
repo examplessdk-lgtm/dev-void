@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { platformVersionDeployArgs } from './platform-version.ts';
 
 const EMAIL_SIGNING_SECRET = 'EMAIL_SIGNING_SECRET';
 const DASHBOARD_DIRECTORY = fileURLToPath(new URL('../packages/dashboard', import.meta.url));
@@ -135,6 +136,7 @@ try {
     });
     deployArgs.push('--secrets-file', secretsPath);
   }
+  deployArgs.push(...platformVersionDeployArgs(process.cwd(), values.config !== undefined));
 
   const deploy = spawnSync('wrangler', deployArgs, {
     env: subprocessEnv,
