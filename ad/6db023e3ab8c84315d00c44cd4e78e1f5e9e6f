@@ -1,0 +1,19 @@
+platform/packages/api/src/provisioning/containers.ts
+  s_fe834b00f92102::t_d6f735f98d6240 128,136-140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ad6db023e3ab8c84315d00c44cd4e78e1f5e9e6f",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
