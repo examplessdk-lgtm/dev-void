@@ -1,0 +1,61 @@
+docs/guide/platform/administration/plans.md
+  s_fe834b00f92102::t_06bf32293ecfb0 7,18-27
+platform/README.md
+  s_fe834b00f92102::t_8760d09498238b 86-90
+platform/packages/api/README.md
+  s_fe834b00f92102::t_0221053650b999 209
+platform/packages/api/src/admin/fate/client.generated.ts
+  s_fe834b00f92102::t_3ff4f38d4b025f 2,28,51,62,100-102
+platform/packages/api/src/admin/fate/page-data.ts
+  s_fe834b00f92102::t_8083bb0543f844 30,486-506
+platform/packages/api/src/admin/fate/page-server.ts
+  s_fe834b00f92102::t_0165926985a921 13,32-41,280,320-322,381,401-418
+platform/packages/api/src/admin/fate/render.ts
+  s_fe834b00f92102::t_63da543ae3364e 10,64-65,79-80,108-110
+platform/packages/api/src/admin/fate/server.ts
+  s_fe834b00f92102::t_c28b2540028209 29
+platform/packages/api/src/admin/fate/views.ts
+  s_fe834b00f92102::t_6fd005bdc5f432 3,299-307
+platform/packages/api/src/admin/plans.ts
+  s_fe834b00f92102::t_ef1514dc1dd514 1-23
+platform/packages/api/src/admin/react/AdminNavigationFallback.tsx
+  s_fe834b00f92102::t_fa6f87549b0b8f 13-16
+platform/packages/api/src/admin/react/pages.ts
+  s_fe834b00f92102::t_b36f226ba6556c 10-13,112-123
+platform/packages/api/src/admin/react/styles.css
+  s_fe834b00f92102::t_b1c1487e6da8a9 678-699
+platform/packages/api/src/admin/react/views/FormControls.tsx
+  s_fe834b00f92102::t_a415ec9c220066 145-148,153-156,158-159,166-169
+platform/packages/api/src/admin/react/views/Layout.tsx
+  s_fe834b00f92102::t_78db25e58b0000 14,133-138
+platform/packages/api/src/admin/react/views/PlansPage.tsx
+  s_fe834b00f92102::t_88ee9ee663eb51 1-570
+platform/packages/api/src/admin/routes/plans.ts
+  s_fe834b00f92102::t_0308b097723a6c 1-207
+platform/packages/api/src/index.ts
+  s_fe834b00f92102::t_fb792b65b5d446 19,562
+platform/packages/api/src/operator/plans.ts
+  s_fe834b00f92102::t_bb330535a83cec 18-23,283
+platform/packages/api/src/plans.ts
+  s_fe834b00f92102::t_622035c948c40a 9,13-24
+platform/packages/api/test/integration/admin-plans.test.ts
+  s_fe834b00f92102::t_a3795e493d626c 1-390
+platform/packages/api/test/integration/native-form-browser.ts
+  s_fe834b00f92102::t_9cb20ce9987727 80-84,88-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "787b6ece2f2473ff1e946772e337053df47f3cb6",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
