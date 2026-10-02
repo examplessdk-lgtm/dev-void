@@ -1,0 +1,23 @@
+docs/.vitepress/theme/Home.vue
+  s_c2e8aeb2f4eea7::t_300b7151ab7700 28-29,40,43,71-75
+docs/public/void-platform-dark.svg
+  s_c2e8aeb2f4eea7::t_784d1898cf87cc 1-13
+docs/public/void-sdk.svg
+  s_c2e8aeb2f4eea7::t_16beca767fb12c 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f0c49b7b8a57734fa8b67af7ad54533d03693133",
+  "prompts": {},
+  "sessions": {
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "unknown"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
