@@ -1,4 +1,43 @@
-import { vi } from 'vite-plus/test';
+import { afterEach, vi } from 'vite-plus/test';
+
+// A JSON deploy keeps writing to the database after its route returns, until
+// its NDJSON body is read (routes/deploy.ts runs that pipeline detached). A test
+// that checks only the status would leave the deploy running into the next
+// test, where its project-then-deployment row locks deadlock with
+// clearTables' deployment-then-project deletes on PostgreSQL. Finish every
+// unread deploy stream before the next test's setup runs.
+const unreadDeployStreams = new Set<Response>();
+const NativeResponse = globalThis.Response;
+globalThis.Response = class TrackedResponse extends NativeResponse {
+  constructor(body?: BodyInit | null, init?: ResponseInit) {
+    super(body, init);
+    if (
+      body instanceof ReadableStream &&
+      this.headers.get('content-type')?.includes('application/x-ndjson')
+    ) {
+      unreadDeployStreams.add(this);
+    }
+  }
+} as typeof Response;
+
+afterEach(async () => {
+  const pending = [...unreadDeployStreams];
+  unreadDeployStreams.clear();
+  await Promise.all(
+    pending.map(async (response) => {
+      if (response.bodyUsed || !response.body || response.body.locked) {
+        return;
+      }
+      // A receipt stream only polls the database; cancelling stops it.
+      if (response.headers.has('x-void-deployment-id')) {
+        await response.body.cancel().catch(() => {});
+        return;
+      }
+      // The inline pipeline closes its stream after its last database write.
+      await response.text().catch(() => {});
+    }),
+  );
+});
 
 // Polyfill the Cloudflare-Workers-only `FixedLengthStream` global for Node,
 // so code paths that rely on it (e.g. `streamStaticAssetToR2` in assets.ts)
