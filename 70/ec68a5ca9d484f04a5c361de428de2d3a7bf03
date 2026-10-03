@@ -1,0 +1,21 @@
+docs/.vitepress/theme/Home.vue
+  s_c2e8aeb2f4eea7::t_98f5ccc24b1f1f 38,54,76-87
+docs/.vitepress/theme/HomePlatform.vue
+  s_c2e8aeb2f4eea7::t_eb3c12e1cb7914 1-5,8-9,11-25,28-33,36-95,99-440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "70ec68a5ca9d484f04a5c361de428de2d3a7bf03",
+  "prompts": {},
+  "sessions": {
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
