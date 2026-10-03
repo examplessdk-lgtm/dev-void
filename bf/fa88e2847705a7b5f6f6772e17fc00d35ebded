@@ -1,0 +1,19 @@
+vite.config.ts
+  s_d79067d74a5b05::t_1cd4f04303f77a 462-464
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bffa88e2847705a7b5f6f6772e17fc00d35ebded",
+  "prompts": {},
+  "sessions": {
+    "s_d79067d74a5b05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff1d-e78b-7bb3-a697-69fa7f150634",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
