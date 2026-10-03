@@ -1,0 +1,27 @@
+docs/public/void-platform-dark.svg
+  s_c2e8aeb2f4eea7::t_a49fd260ccb589 3,5-6
+docs/public/void-sdk.svg
+  s_c2e8aeb2f4eea7::t_10d7915d888c6d 1-6,9-10
+docs/.vitepress/theme/Home.vue
+  s_c2e8aeb2f4eea7::t_b947e8b9fd4fb3 28-30,45-51,84-101
+docs/.vitepress/theme/HomeFeatureVisual.vue
+  s_c2e8aeb2f4eea7::t_749c0e99df4b23 2-3,25,63-69,200-201,204-206
+docs/.vitepress/theme/HomeFeatures.vue
+  s_c2e8aeb2f4eea7::t_0a41451d888a09 45-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1f9681324c37be3fe91e65dae7f97bc667f54d54",
+  "prompts": {},
+  "sessions": {
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
