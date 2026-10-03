@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-setup.ts
+  s_2873c8a741c020::t_f9b3e12ca3af6d 9-14,131,140,182,184-185,352-355
+packages/void/test/unit/platform-setup.test.ts
+  s_2873c8a741c020::t_2ab97ef8c4c54e 127-129,231,255-256
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "24873afddc0117402f65666bfea672d616dcdfa3",
+  "prompts": {},
+  "sessions": {
+    "s_2873c8a741c020": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff25-351b-7971-b68a-d89ebd309f7d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
