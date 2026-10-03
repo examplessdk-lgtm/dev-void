@@ -1,0 +1,25 @@
+.github/scripts/schema-compat-tests.ts
+  s_d79067d74a5b05::t_e657cac5df7c5b 13-17,27-32,35-38,49,55-60,70-73,81
+TESTING.md
+  s_d79067d74a5b05::t_53099fabd5cf49 177-178
+packages/void/test/unit/schema-compat-tests.test.ts
+  s_d79067d74a5b05::t_b8d6b83f43c0b0 9,12,43-45
+platform/packages/api/test/integration/email-connections.test.ts
+  s_d79067d74a5b05::t_5cb61709715e38 950-954,964-969,1003
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9ef5d5b58b177da3e3b397fac1cdd212ad6d428c",
+  "prompts": {},
+  "sessions": {
+    "s_d79067d74a5b05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff1d-e78b-7bb3-a697-69fa7f150634",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
