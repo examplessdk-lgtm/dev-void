@@ -1,0 +1,23 @@
+.github/scripts/schema-compat-tests.ts
+  s_d79067d74a5b05::t_f1ee7c77bc06ab 24-36,38,41-42,44,48-66,210-223
+packages/void/test/unit/schema-compat-tests.test.ts
+  s_d79067d74a5b05::t_99624d17fcb92e 5,7,9,17-31
+platform/packages/api/test/integration/deploy-direct-r2.test.ts
+  s_d79067d74a5b05::t_562ff2543cb82d 1477-1478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d5ddae4cf95cbd1ba4d003bba74856638edc8ed6",
+  "prompts": {},
+  "sessions": {
+    "s_d79067d74a5b05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff1d-e78b-7bb3-a697-69fa7f150634",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
