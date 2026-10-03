@@ -1,0 +1,35 @@
+docs/.vitepress/theme/terminal/README.md
+  s_122e5a5858a175::t_deefcfe0b55171 1-21
+docs/.vitepress/theme/terminal/timeline.test.ts
+  s_122e5a5858a175::t_7366be8f25bfdd 1-79
+docs/.vitepress/theme/terminal/timeline.ts
+  s_122e5a5858a175::t_e416397fb72c92 1-127
+docs/terminal-demos.md
+  s_122e5a5858a175::t_3147eee9b4b101 1-13
+docs/.vitepress/theme/Home.vue
+  s_122e5a5858a175::t_6217f81ca37c9b 8,24-27
+docs/.vitepress/theme/terminal/TerminalDemos.vue
+  s_122e5a5858a175::t_196a983c20d503 1-631
+docs/.vitepress/theme/terminal/demos.ts
+  s_122e5a5858a175::t_0ee9ef6db8c095 1-261
+docs/index.md
+  s_122e5a5858a175::t_c8d1b24178282f 13-15
+docs/.vitepress/theme/terminal/TerminalPlayer.vue
+  s_122e5a5858a175::t_db421ff15e8ea7 1-360
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7eea677271f5bbabd5123112bbfeb74640d9fd4f",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
