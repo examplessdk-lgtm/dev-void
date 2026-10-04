@@ -337,11 +337,11 @@
   },
   "dependencies": {
     "@cloudflare/build-output-utils": "0.8.4",
-    "@cloudflare/codemods": "0.3.0",
+    "@cloudflare/codemods": "0.4.0",
     "@cloudflare/config": "0.22.0",
     "@cloudflare/sandbox": "1.0.0",
-    "@cloudflare/vite-plugin": "1.62.2",
-    "@cloudflare/workers-auth": "0.9.5",
+    "@cloudflare/vite-plugin": "1.62.4",
+    "@cloudflare/workers-auth": "0.11.1",
     "@cloudflare/workers-types": "catalog:",
     "@napi-rs/keyring": "2.1.0",
     "@void/deploy-cloudflare": "workspace:*",
@@ -369,7 +369,7 @@
     "miniflare": "5.20260926.1-alpha",
     "minimatch": "^10.2.6",
     "mysql2": "3.24.5",
-    "pg": "8.23.0",
+    "pg": "8.23.1",
     "postal-mime": "^4.0.0",
     "proper-lockfile": "^4.1.2",
     "undici": "8.11.2"
