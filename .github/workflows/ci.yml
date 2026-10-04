@@ -26,7 +26,7 @@ jobs:
       matrix:
         os: '${{ ((github.event_name == ''push'' || contains(github.event.pull_request.labels.*.name, ''test: windows'')) && !inputs.skip_windows) && fromJSON(''["ubuntu-latest","windows-latest"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/test-setup
@@ -54,7 +54,7 @@ jobs:
         # fixtures they exercise. No generated playground state crosses runners.
         shard: [unit, '1/2', '2/2']
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/test-setup
@@ -101,10 +101,10 @@ jobs:
       VOID_E2E_CF_ACCOUNT_ID: ${{ secrets.VOID_E2E_CF_ACCOUNT_ID }}
       VOID_E2E_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
         with:
           node-version-file: .node-version
           cache: true

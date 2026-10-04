@@ -42,7 +42,7 @@ jobs:
     outputs:
       suite: ${{ steps.scope.outputs.suite }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - run: node --test .github/scripts/packed-consumer-scope.test.mjs
@@ -69,10 +69,10 @@ jobs:
         os: '${{ inputs.include_macos && fromJSON(''["ubuntu-latest","macos-latest"]'') || fromJSON(''["ubuntu-latest"]'') }}'
         pm: [npm, pnpm]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: voidzero-dev/setup-vp@2dec1e33f4ab2c6d5bce1b0c4607961bb1a3f7a1 # v1.12.0
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
         with:
           node-version-file: .node-version
           cache: true
