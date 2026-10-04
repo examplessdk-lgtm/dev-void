@@ -26,7 +26,7 @@
     "@astryxdesign/theme-neutral": "catalog:",
     "@cloudflare/containers": "0.3.7",
     "@cloudflare/sandbox": "1.0.0",
-    "@nkzw/fate": "1.7.3",
+    "@nkzw/fate": "1.7.5",
     "@stylexjs/stylex": "catalog:",
     "@void/deploy-core": "workspace:*",
     "@void/edge": "workspace:*",
@@ -43,10 +43,10 @@
     "lucide-react": "1.49.0",
     "mime": "^4.1.0",
     "oauth4webapi": "catalog:",
-    "pg": "8.23.0",
+    "pg": "8.23.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-fate": "1.7.3",
+    "react-fate": "1.7.5",
     "void": "workspace:*"
   },
   "devDependencies": {
