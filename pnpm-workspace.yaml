@@ -26,7 +26,7 @@ catalog:
   # every 5.x since 5.20260807.2 declares global `Buffer`/`process` as `any`, which collides
   # with `@types/node` under packages/void's `types: ["node", "@cloudflare/workers-types"]`
   # (Buffer loses its members; ~30 typecheck errors). Revisit when upstream drops those globals.
-  '@cloudflare/workers-types': ^4.20260702.1
+  '@cloudflare/workers-types': ^5.0.0
   '@types/node': ^26.6.3
   typescript: 7.0.2
   '@voidzero-dev/vitepress-theme': ^5.0.7
@@ -43,13 +43,13 @@ catalog:
 
 catalogs:
   angular:
-    typescript: 6.0.3
+    typescript: 7.0.2
   platform:
     '@cloudflare/workers-types': ^5.20260929.1
     hono: 4.13.11
     wrangler: ^4.144.0
   sveltekit:
-    typescript: 6.0.3
+    typescript: 7.0.2
 
 packageExtensions:
   '@analogjs/vite-plugin-angular@2.7.5':
