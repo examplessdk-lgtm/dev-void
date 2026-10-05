@@ -328,7 +328,7 @@ describe('operator deployment operations', () => {
     const deployment = await createTestDeployment(env.db, project.id, 'live');
     const row = {
       ts: Date.now() - 1000,
-      timestamp: new Date(Date.now() - 500).toISOString(),
+      ingestedAt: new Date(Date.now() - 500).toISOString(),
       outcome: 'ok',
       logData: '[]',
       exceptionData: '[]',
@@ -357,7 +357,10 @@ describe('operator deployment operations', () => {
     const last = (await second.json()) as { data: Array<unknown> };
     expect(last).toMatchObject({ nextCursor: null, watermark: page.watermark });
     expect(last.data).toHaveLength(1);
-    expect(fetch.mock.calls[0][1]?.body).toContain('ORDER BY double1 ASC, timestamp ASC');
+    expect(fetch.mock.calls[0][1]?.body).toContain(
+      'GROUP BY blob1, blob2, blob3, blob4, blob5, blob6, blob7, double1',
+    );
+    expect(fetch.mock.calls[0][1]?.body).toContain('ORDER BY ts ASC, ingestedAt ASC');
     expect(fetch.mock.calls[0][1]?.body).toMatch(/double1 >= \d+ AND double1 < \d+/);
     expect(fetch.mock.calls[1][1]?.body).toContain('OFFSET 2');
     expect((await req(`/deployments/${deployment.id}/logs?cursor=garbage`)).status).toBe(400);
@@ -373,7 +376,7 @@ describe('operator deployment operations', () => {
         data: [
           {
             ts: 120_000,
-            timestamp: '1970-01-01 00:09:00',
+            ingestedAt: '1970-01-01 00:09:00',
             outcome: 'ok',
             logData: '[]',
             exceptionData: '[]',
@@ -402,7 +405,8 @@ describe('operator deployment operations', () => {
     expect(query).toContain(
       "timestamp >= toDateTime('1970-01-01 00:03:00') AND timestamp < toDateTime('1970-01-01 00:10:00')",
     );
-    expect(query).toContain('ORDER BY timestamp ASC, double1 ASC');
+    expect(query).toContain('GROUP BY blob1, blob2, blob3, blob4, blob5, blob6, blob7, double1');
+    expect(query).toContain('ORDER BY ingestedAt ASC, ts ASC');
     expect(query).not.toContain('double1 >= 480000');
     expect((await req(`/deployments/${deployment.id}/logs?after=garbage`)).status).toBe(400);
     expect((await req(`/deployments/${deployment.id}/logs?after=600001`)).status).toBe(400);

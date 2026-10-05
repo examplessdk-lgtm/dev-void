@@ -58,6 +58,7 @@ import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
 import { ensureTrackingTable, queryD1, runRemoteMigrations } from '../migrations/remote-runner.ts';
 import { getProjectDeploymentWorkerName, getProjectQueueName } from '../naming.ts';
+import { LOG_ROW_GROUP_BY } from '../observability/log-rows.ts';
 import { resolvePlan, resolvePlanLimits } from '../plans.ts';
 import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import { encryptProjectSecret, decryptProjectSecret } from '../project-secrets.ts';
@@ -2683,11 +2684,12 @@ const app = new Hono<ApiEnv>()
         blob6 as statusCode,
         blob7 as deployId,
         double1 as ts,
-        timestamp
+        min(timestamp) as ingestedAt
       FROM ${dataset}
       WHERE index1 = '${workerName}'
         AND timestamp >= toDateTime('${sinceStr}')${deployFilter}${levelFilter}
-      ORDER BY timestamp DESC
+      ${LOG_ROW_GROUP_BY}
+      ORDER BY ingestedAt DESC
       LIMIT ${limit}
     `;
 

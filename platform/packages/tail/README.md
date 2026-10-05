@@ -9,9 +9,10 @@ Tail consumer for deployed user workers.
   - `projectKey`: `user-{slug}`
   - `deployId`: `dpl_*` when present
 - Writes one Analytics Engine row per trace event.
-- Skips user Worker items in a batch that also holds a dispatch Worker item.
-  That batch comes from the dispatch Worker's consumer; each user Worker's own
-  `tail_consumers` entry already delivers those items.
+- A request routed through the dispatch Worker arrives twice: through the
+  dispatch Worker's consumer and through the user Worker's own consumer.
+  Cloudflare delivers each copy in a separate invocation, so this Worker writes
+  both and the API's log queries collapse identical rows.
 
 Versioned deploys use script names like `user-my-app-dpl_abc123`. Legacy unversioned names like `user-my-app` are still accepted for older deployments.
 
@@ -35,7 +36,6 @@ Versioned deploys use script names like `user-my-app-dpl_abc123`. Legacy unversi
 ```text
 src/index.ts              # tail() handler + parseScriptName()
 test/parse-script-name.test.ts
-test/tail-dedupe.test.ts
 ```
 
 ## Configuration and Deployment

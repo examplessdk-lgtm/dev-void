@@ -2615,7 +2615,10 @@ describe('GET /admin/deployments/:id/logs', () => {
           `timestamp >= toDateTime('${new Date(now - 60_000).toISOString().replace('T', ' ').slice(0, 19)}')`,
         );
         expect(query).not.toMatch(/AND double1 >= \d+/);
-        expect(query).toContain('ORDER BY timestamp DESC, double1 DESC');
+        expect(query).toContain(
+          'GROUP BY blob1, blob2, blob3, blob4, blob5, blob6, blob7, double1',
+        );
+        expect(query).toContain('ORDER BY ingestedAt DESC, ts DESC');
         return Response.json({
           data: [
             {
@@ -2626,7 +2629,7 @@ describe('GET /admin/deployments/:id/logs', () => {
               method: 'GET',
               statusCode: '500',
               ts: oldRequestStart,
-              timestamp: new Date(newlyIngested).toISOString(),
+              ingestedAt: new Date(newlyIngested).toISOString(),
             },
           ],
         });

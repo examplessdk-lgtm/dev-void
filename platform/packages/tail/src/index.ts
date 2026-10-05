@@ -39,26 +39,16 @@ export function parseScriptName(
   return null;
 }
 
-function isDispatchKey(projectKey: string): boolean {
-  return projectKey.startsWith('__platform-');
-}
-
 export default {
   async tail(events: ReadonlyArray<TraceItem>, env: Env) {
-    const items = events.flatMap((event) => {
-      const parsed = event.scriptName
-        ? parseScriptName(event.scriptName, env.PLATFORM_DISPATCH_WORKER_NAME)
-        : null;
-      return parsed ? [{ event, parsed }] : [];
-    });
-    // A batch from the dispatch Worker's consumer holds the dispatcher item
-    // plus the user Worker items it invoked. Each user Worker also has its own
-    // tail consumer, which delivers those same items, so keep only the
-    // dispatcher items here to avoid writing every user log line twice.
-    const fromDispatch = items.some(({ parsed }) => isDispatchKey(parsed.projectKey));
+    for (const event of events) {
+      const scriptName = event.scriptName;
+      if (!scriptName) {
+        continue;
+      }
 
-    for (const { event, parsed } of items) {
-      if (fromDispatch && !isDispatchKey(parsed.projectKey)) {
+      const parsed = parseScriptName(scriptName, env.PLATFORM_DISPATCH_WORKER_NAME);
+      if (!parsed) {
         continue;
       }
 
