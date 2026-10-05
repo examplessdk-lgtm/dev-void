@@ -181,6 +181,7 @@ function formatDeploymentRow(
     static?: string;
     framework?: string;
     revalidate?: number;
+    pathRevalidate?: Record<string, number>;
   } | null = null;
   if (d.manifest) {
     try {
@@ -191,7 +192,13 @@ function formatDeploymentRow(
   }
 
   const appType = manifest?.type ?? (manifest?.framework ? 'framework' : 'void');
-  const isr = manifest?.revalidate && manifest.revalidate > 0 ? `${manifest.revalidate}s` : '-';
+  const pathRuleCount = Object.keys(manifest?.pathRevalidate ?? {}).length;
+  const isr =
+    manifest?.revalidate && manifest.revalidate > 0
+      ? `${manifest.revalidate}s`
+      : pathRuleCount > 0
+        ? formatCount(pathRuleCount, 'rule')
+        : '-';
   const source = d.source ?? '-';
   const commit = d.commit ? d.commit.slice(0, 7) : '-';
 

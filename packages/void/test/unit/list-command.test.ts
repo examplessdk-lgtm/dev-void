@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -9,6 +9,7 @@ const mockGetToken = vi.fn<() => string | null>();
 vi.mock('../../src/cli/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
   getToken: () => mockGetToken(),
+  getApiUrl: () => 'https://api.example.test',
 }));
 
 function setIsolatedHome(): void {
@@ -104,5 +105,62 @@ describe('runListCommand', () => {
 
     expect(out).toContain('No linked project found');
     expect(exitSpy).toHaveBeenCalled();
+  });
+
+  it('summarizes per-path revalidation rules in the isr column', async () => {
+    setIsolatedHome();
+    mockGetToken.mockReturnValue('test-token');
+    const root = mkdtempSync(join(tmpdir(), 'void-list-'));
+    tempHomes.push(root);
+    mkdirSync(join(root, '.void'), { recursive: true });
+    writeFileSync(
+      join(root, '.void', 'project.json'),
+      JSON.stringify({
+        projectId: 'proj-1',
+        slug: 'demo',
+      }),
+    );
+    const deployment = (id: string, manifest: Record<string, unknown>) => ({
+      id,
+      status: 'live',
+      source: 'cli',
+      commit: null,
+      manifest: JSON.stringify(manifest),
+      error_message: null,
+      retained: true,
+      applied_migrations: null,
+      created_at: '2026-01-01T00:00:00Z',
+      deployed_at: '2026-01-01T00:00:00Z',
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          deployments: [
+            deployment('dep-one-rule', { type: 'ssr', pathRevalidate: { '/a': 60 } }),
+            deployment('dep-two-rules', { type: 'ssr', pathRevalidate: { '/a': 60, '/b': 30 } }),
+            deployment('dep-global', {
+              type: 'ssr',
+              revalidate: 120,
+              pathRevalidate: { '/a': 60 },
+            }),
+            deployment('dep-none', { type: 'ssr' }),
+          ],
+          activeDeploymentId: 'dep-one-rule',
+        }),
+      ),
+    );
+
+    const capture = captureOutput();
+    const runListCommand = await importRunListCommand();
+    await runListCommand(root);
+    const out = capture.output();
+    capture.restore();
+
+    const rowFor = (id: string) => out.split('\n').find((line) => line.includes(id)) ?? '';
+    expect(rowFor('dep-one-rule')).toMatch(/\b1 rule\b/);
+    expect(rowFor('dep-two-rules')).toMatch(/\b2 rules\b/);
+    expect(rowFor('dep-global')).toMatch(/\b120s\b/);
+    expect(rowFor('dep-none')).not.toMatch(/rule|\d+s\b/);
   });
 });
