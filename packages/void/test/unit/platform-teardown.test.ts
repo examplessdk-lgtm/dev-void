@@ -986,6 +986,81 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
+  it('refuses before any change when a Worker a stopped uninstall kept no longer carries this installation marker', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const putKvValue = fake.putKvValue;
+    let failed = false;
+    // Stop at the last write, after every resource was recorded as kept.
+    fake.putKvValue = async (account: string, namespace: string, key: string, value: string) => {
+      if (!failed && value.includes('"status":"uninstalled"')) {
+        failed = true;
+        throw new Error('checkpoint write failed');
+      }
+      return putKvValue(account, namespace, key, value);
+    };
+    await expect(
+      uninstallPlatform(
+        fake,
+        manifest,
+        { ...purgeAllArgs, purgeAll: false, purgeData: false },
+        dependencies(),
+      ),
+    ).rejects.toThrow('checkpoint write failed');
+    const stopped = listInstallationManifests()[0]!;
+    expect(stopped.resources.find((resource) => resource.key === 'proxy-worker')?.state).toBe(
+      'retained',
+    );
+    const replacement = { ...manifest, ownershipNonce: 'replacement-owner-nonce-00000000' };
+    fake.live.workers.set(
+      names.proxyWorker,
+      marker(
+        replacement,
+        manifest.resources.find((resource) => resource.key === 'proxy-worker')!,
+      ),
+    );
+    const before = changes(fake).length;
+
+    await expect(uninstallPlatform(fake, stopped, purgeAllArgs, dependencies())).rejects.toThrow(
+      'belongs to another installation',
+    );
+    expect(changes(fake).slice(before)).toEqual([]);
+    const final = listInstallationManifests()[0]!;
+    expect(final.status).toBe('failed');
+    // Kept resources stay recorded as kept.
+    expect(final.resources.find((resource) => resource.key === 'proxy-worker')?.state).toBe(
+      'retained',
+    );
+  });
+
+  it('lists an Access resource an earlier --purge-all kept with the other kept resources, not as connected', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
+    // A later, unrelated stop makes the run resume.
+    fake.live.foreignTailProducer = true;
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      `Cloudflare refused to delete worker ${names.tailWorker}`,
+    );
+    const stopped = listInstallationManifests()[0]!;
+
+    await uninstallPlatform(fake, stopped, { ...purgeAllArgs, plan: true }, dependencies());
+
+    const plan = noteText('Uninstall plan');
+    const kept = `created application: void-${INSTALLATION_ID}-login-0123456789abcdef (access-app, account account), kept because its live name "renamed" is not the name this installation recorded`;
+    expectInOrder(plan, [
+      'Keep for manual cleanup:',
+      kept,
+      'Keep Access resources you connected:',
+      'adopted application: company-app',
+    ]);
+    expect(plan.slice(plan.indexOf('Keep Access resources you connected:'))).not.toContain(
+      'access-app',
+    );
+  });
+
   it('never reopens an uninstall that finished', async () => {
     const manifest = installedManifest();
     persist(manifest);

@@ -995,7 +995,9 @@ export async function uninstallPlatform(
         (resource) =>
           (shouldDeleteResource(resource, retainData) ||
             (purgeAll &&
-              resource.state === 'ready' &&
+              // Includes what an uninstall that stopped before it finished
+              // recorded as retained, so a replaced one stops the run here too.
+              (resource.state === 'ready' || isPurgeAllCandidate(manifest, resource)) &&
               !purgeAllKept.has(resource.key) &&
               isOwnershipVerifiableKind(resource.kind) &&
               // A changed DNS record is kept, not a reason to stop, so it is
@@ -1020,12 +1022,27 @@ export async function uninstallPlatform(
       .map((resource) => resource.key),
     ...resourcesToDelete,
   ]);
+  // Ownership checks only look at ready resources. Prove retained ones that
+  // --purge-all reopens the same way, without recording them as ready again.
+  const proofManifest = {
+    ...manifest,
+    resources: manifest.resources.map((resource) =>
+      resource.state === 'retained' && resourcesToDelete.has(resource.key)
+        ? { ...resource, state: 'ready' as const }
+        : resource,
+    ),
+  };
   let missingResources: ReadonlySet<string>;
   if (hasRoutingCheckpoint) {
-    missingResources = await verifyPlatformMutationOwnership(client, manifest, ownershipTargets, {
-      allowDeletedRoutingCheckpoint: args.purgeData,
-      databaseUrl: dependencies.databaseUrl,
-    });
+    missingResources = await verifyPlatformMutationOwnership(
+      client,
+      proofManifest,
+      ownershipTargets,
+      {
+        allowDeletedRoutingCheckpoint: args.purgeData,
+        databaseUrl: dependencies.databaseUrl,
+      },
+    );
   } else {
     await verifyPlatformInstallationOwnership(client, manifest, {
       databaseUrl: dependencies.databaseUrl,
@@ -1484,17 +1501,22 @@ function describeKeptResources(
             : `  Email Routing: any catch-all rule that sends mail to ${names.emailGatewayWorker}.`,
       ]
     : [];
+  const remainingAccess = (manifest.authenticationResources ?? []).filter(
+    (resource) => !isPurgedAccessResource(manifest, resource),
+  );
+  const accessLine = (resource: (typeof remainingAccess)[number]) =>
+    `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})${why(`access:${resource.key}`)}`;
+  // Access resources --purge-all kept because they changed are listed with the
+  // other kept resources, not as ones the operator connected.
+  const keptAccess = (resource: (typeof remainingAccess)[number]) =>
+    purgeAllKeptReason(manifest, `access:${resource.key}`) !== null;
   const kept = [
     ...sorted.filter(isTraffic).map(line),
+    ...remainingAccess.filter(keptAccess).map(accessLine),
     ...email,
     ...sorted.filter((resource) => !isTraffic(resource)).map(line),
   ];
-  const access = (manifest.authenticationResources ?? [])
-    .filter((resource) => !isPurgedAccessResource(manifest, resource))
-    .map(
-      (resource) =>
-        `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})${why(`access:${resource.key}`)}`,
-    );
+  const access = remainingAccess.filter((resource) => !keptAccess(resource)).map(accessLine);
   return [
     ...(kept.length ? [heading, ...kept] : []),
     ...(access.length ? [accessHeading, ...access] : []),
