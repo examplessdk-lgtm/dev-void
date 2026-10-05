@@ -65,9 +65,9 @@ function publicCredential(row: typeof projectDeployCredentials.$inferSelect) {
   return {
     id: row.id,
     name: row.name,
-    createdAt: row.created_at,
-    expiresAt: row.expires_at,
-    revokedAt: row.revoked_at,
+    createdAt: new Date(row.created_at).toISOString(),
+    expiresAt: new Date(row.expires_at).toISOString(),
+    revokedAt: row.revoked_at === null ? null : new Date(row.revoked_at).toISOString(),
   };
 }
 
