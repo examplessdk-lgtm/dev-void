@@ -1,0 +1,29 @@
+docs/integrations/frameworks/analog.md
+  s_9cf895b2126865::t_fbc5dd637bd290 82,105,107,111
+docs/integrations/frameworks/astro.md
+  s_9cf895b2126865::t_c2b03aec98442a 68,98,100,104
+docs/integrations/frameworks/nuxt.md
+  s_9cf895b2126865::t_f0a42b471703d1 69,91,93,97
+docs/integrations/frameworks/react-router.md
+  s_9cf895b2126865::t_72e94ce52fa820 46,64,66,70,72
+docs/integrations/frameworks/sveltekit.md
+  s_9cf895b2126865::t_d6ac46ffea55d9 69,71,91,109,111,115
+docs/integrations/frameworks/tanstack-start.md
+  s_9cf895b2126865::t_817c75d28f12ae 48,66,68,72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "864492a0632b26adf082a1af828c6725fc4aae46",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

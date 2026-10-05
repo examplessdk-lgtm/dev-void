@@ -1,0 +1,77 @@
+packages/void/src/cli/build-cmd.ts
+  s_122e5a5858a175::t_b9f539b051a589 2,6
+packages/void/src/cli/cache.ts
+  s_122e5a5858a175::t_24829f0b744740 1,4
+packages/void/src/cli/cancel-deploy.ts
+  s_122e5a5858a175::t_9886ca5f578692 1
+packages/void/src/cli/db.ts
+  s_122e5a5858a175::t_50e4eca2ad7f8f 5,47,178-179
+packages/void/src/cli/delete.ts
+  s_122e5a5858a175::t_4ba20cecf20e26 1,4
+packages/void/src/cli/deploy-summary.ts
+  s_122e5a5858a175::t_1faa356b489dfc 1-8
+packages/void/src/cli/deploy.ts
+  s_122e5a5858a175::t_912d939339f625 183,230,241,4933,6675-6676,7084,7215-7221
+packages/void/src/cli/env.ts
+  s_122e5a5858a175::t_694aae190f8fe4 2
+packages/void/src/cli/gen.ts
+  s_122e5a5858a175::t_6e0389adc7879d 11
+packages/void/src/cli/link.ts
+  s_122e5a5858a175::t_0fa75271870f00 1,5
+packages/void/src/cli/list.ts
+  s_122e5a5858a175::t_078ca3ebb4714d 1,4
+packages/void/src/cli/login.ts
+  s_122e5a5858a175::t_0b84b7264b8d18 2,14
+packages/void/src/cli/logs.ts
+  s_122e5a5858a175::t_bb96854b11da68 1,4
+packages/void/src/cli/migrate.ts
+  s_122e5a5858a175::t_6e2fd7cacc2a5c 12
+packages/void/src/cli/platform-lifecycle.ts
+  s_122e5a5858a175::t_81080fd8ca4888 19
+packages/void/src/cli/prepare.ts
+  s_122e5a5858a175::t_5efc8c35a2ee30 1
+packages/void/src/cli/project-team.ts
+  s_122e5a5858a175::t_530ddbd2b0f006 1,9
+packages/void/src/cli/project-token.ts
+  s_122e5a5858a175::t_d3a3f913c17a40 1,4
+packages/void/src/cli/project-zero-trust.ts
+  s_122e5a5858a175::t_fd26eb8bb952b3 1,8
+packages/void/src/cli/projects.ts
+  s_122e5a5858a175::t_f5e6dbad70674c 1,4
+packages/void/src/cli/requests.ts
+  s_122e5a5858a175::t_645887d7864257 1,4
+packages/void/src/cli/rollback.ts
+  s_122e5a5858a175::t_5e8cd1bf2127d7 1,4
+packages/void/src/cli/secret.ts
+  s_122e5a5858a175::t_5e61662246a2f1 14
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_122e5a5858a175::t_a07165e402eabd 2414-2417,3239-3240
+packages/void/test/unit/db-export-stdout.test.ts
+  s_122e5a5858a175::t_b28bd28563151c 82,112
+packages/void/test/unit/deploy-auth.test.ts
+  s_122e5a5858a175::t_7ed1217d371a02 4,83,141,146-147,150,155-156
+packages/void/test/unit/deploy-platform-target.test.ts
+  s_122e5a5858a175::t_3d5cc45a129104 4-5,76,88,185-187,199-201,268-270
+packages/void/test/unit/deploy-summary.test.ts
+  s_122e5a5858a175::t_4cea081e485f4b 1-3,6-19
+packages/void/test/unit/logs-rendering.test.ts
+  s_122e5a5858a175::t_568ebbae730316 3,69
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_122e5a5858a175::t_c62583d654a285 6,149-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "41dd8741ffba344f21e05721d5cd8ba9b1dc5a44",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+packages/platform/scripts/build-runtime.mjs
+  s_da445b56921f5b::t_6a15670895ab74 12,39-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2f322f02998627fc12adc9664d6d37658919e8bb",
+  "prompts": {},
+  "sessions": {
+    "s_da445b56921f5b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09efa-680f-7542-8617-f8711bc167ca",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

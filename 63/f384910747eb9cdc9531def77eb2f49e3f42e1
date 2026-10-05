@@ -1,0 +1,21 @@
+docs/guide/platform/installation/prerequisites.md
+  s_cdab927531343d::t_dcebe13d24a200 91
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_b8be4f2e18f8a2 1,78,102,148,266,270-273,278
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "63f384910747eb9cdc9531def77eb2f49e3f42e1",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

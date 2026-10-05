@@ -1,0 +1,19 @@
+docs/guide/ssg.md
+  s_14b3de9dcb5198::t_1ef71663195046 17,47,51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3191691a226ac49665d117430cc0d7eae9ab9064",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

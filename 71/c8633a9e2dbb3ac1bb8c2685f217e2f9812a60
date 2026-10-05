@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-setup.ts
+  s_f2487af642ecad::t_663d2aa57c94f6 5,40,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "71c8633a9e2dbb3ac1bb8c2685f217e2f9812a60",
+  "prompts": {},
+  "sessions": {
+    "s_f2487af642ecad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd0b-afe7-7103-9ee1-211112b5f1a6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

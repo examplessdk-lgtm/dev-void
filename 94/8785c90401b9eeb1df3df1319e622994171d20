@@ -1,0 +1,27 @@
+test/terminal-demos/README.md
+  s_122e5a5858a175::t_3f5f01ce87dd0c 3-7,25
+test/terminal-demos/index.html
+  s_122e5a5858a175::t_c1f93943179d6d 1-12
+test/terminal-demos/main.ts
+  s_122e5a5858a175::t_1f58df3959ee0f 1-5
+test/terminal-demos/studio.css
+  s_122e5a5858a175::t_2984e5b6aa856e 1-29
+test/terminal-demos/vite.config.ts
+  s_122e5a5858a175::t_f7cab855fa5558 1-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "948785c90401b9eeb1df3df1319e622994171d20",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

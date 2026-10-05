@@ -1,0 +1,149 @@
+packages/platform/package.json
+  s_14b3de9dcb5198::t_362b41bcefba0a 25-28
+packages/platform/src/index.ts
+  s_14b3de9dcb5198::t_4bc218da40d396 103-104
+packages/platform/src/plans.ts
+  s_b58bf241a1764a::t_8e4920b648058c 1-344
+packages/platform/test/unit/plans.test.ts
+  s_b58bf241a1764a::t_20222637161a57 1-118
+packages/platform/vite.config.ts
+  s_14b3de9dcb5198::t_38cad8d9f5ab31 5
+platform/packages/api/README.md
+  s_fe834b00f92102::t_1f6ce41694ea4a 37-38,261
+platform/packages/api/package.json
+  s_fe834b00f92102::t_f62976ecc25e77 34
+platform/packages/api/src/admin/fate/page-data.ts
+  s_1ff185a05077f6::t_fe2b91d1c58001 30,146-147,150-154
+platform/packages/api/src/admin/fate/page-server.ts
+  s_14b3de9dcb5198::t_915f543ff3d054 75-76
+platform/packages/api/src/admin/fate/views.ts
+  s_14b3de9dcb5198::t_939f025a169312 112-113
+platform/packages/api/src/admin/react/views/UserDetailPage.tsx
+  s_1ff185a05077f6::t_f8cc30ac4c7ee6 33,77-80
+platform/packages/api/src/auth/bootstrap.ts
+  s_1ff185a05077f6::t_ee6e67dd3adcb7 9,128,304,346
+platform/packages/api/src/auth/identities.ts
+  s_1ff185a05077f6::t_b775cd96a02636 5,76,167
+platform/packages/api/src/build-scheduler.ts
+  s_1ff185a05077f6::t_afc399943e3697 21,78,84,249
+platform/packages/api/src/db.ts
+  s_1ff185a05077f6::t_b8f09786bb5ab4 29,69,123,125-135,157,177-186,417-421,4187,4510-4512,4922-4923,4967-4968,5089,5134-5138,5154,5166-5167,5196,5209
+platform/packages/api/src/email/ingress-resolution.ts
+  s_1ff185a05077f6::t_46beb78a8eaf49 5,314-317
+platform/packages/api/src/env.ts
+  s_1ff185a05077f6::t_215413967b229a 213-214
+platform/packages/api/src/index.ts
+  s_1ff185a05077f6::t_812a2022cdb626 579-580,583
+platform/packages/api/src/middleware/auth.ts
+  s_1ff185a05077f6::t_07da59ddaf731e 171
+platform/packages/api/src/operator/audit.ts
+  s_b58bf241a1764a::t_372b913a2aea02 1,87-114
+platform/packages/api/src/operator/index.ts
+  s_14b3de9dcb5198::t_3d0bf25aeb6627 12,67
+platform/packages/api/src/operator/plans-routes.ts
+  s_b58bf241a1764a::t_b8f11822cf22a4 1-63
+platform/packages/api/src/operator/plans.ts
+  s_b58bf241a1764a::t_63521b1f440e21 1-598
+platform/packages/api/src/operator/tenant-service.ts
+  s_fe834b00f92102::t_9d6f8a5f82562a 28,40,66-67,673-676,842,852,854,867-915
+platform/packages/api/src/plans.ts
+  s_b58bf241a1764a::t_96b5825c452e43 1-90
+platform/packages/api/src/routes/auth-oidc.ts
+  s_1ff185a05077f6::t_6aa5a22105702f 17,454-456
+platform/packages/api/src/routes/deploy.ts
+  s_b58bf241a1764a::t_43a75e91abd84f 106-107,153-154,169,295-299,387,590-592,690-692,2433,2684,2862,2946-2949,2958,2971,3154-3175,3193-3210,3660,3672,3681,4744-4748,4761,4773
+platform/packages/api/src/routes/me.ts
+  s_14b3de9dcb5198::t_e1d2e6112cdfbb 3,9
+platform/packages/api/src/routes/projects.ts
+  s_1ff185a05077f6::t_b093244a42a502 61,727,729,731,856-872,882-885,888,937-941,1376
+platform/packages/api/src/routing.ts
+  s_b58bf241a1764a::t_c0ff14e247229a 104-106,129-134
+platform/packages/api/src/sandbox-control.ts
+  s_1ff185a05077f6::t_d646b9e7ce5ef2 7,131
+platform/packages/api/src/tiers.ts
+  s_1ff185a05077f6::t_f05cbaee6bc3cf 1-11,18
+platform/packages/api/src/usage-counter.ts
+  s_1ff185a05077f6::t_9108df3d595d39 12,21-26,102-106,111-114,119-123,278-280,391-395,398,416,692-753,867-871,913
+platform/packages/api/src/usage-queue.ts
+  s_14b3de9dcb5198::t_df762bb1c2944b 3,191
+platform/packages/api/src/zero-trust/routing.ts
+  s_1ff185a05077f6::t_bf99c8c9a5a00c 12,299-302
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_fe834b00f92102::t_758bcd029e3bbd 13,44,70-75,88,1165-1178,1192,1204,1215-1228
+platform/packages/api/test/integration/api-deploy.test.ts
+  s_b58bf241a1764a::t_4d1fb2eab48325 2,23,27,49,367-525
+platform/packages/api/test/integration/api-oidc.test.ts
+  s_1ff185a05077f6::t_4061e9c1d2032b 1,33,139,294,314-318,818-853
+platform/packages/api/test/integration/api-projects.test.ts
+  s_1ff185a05077f6::t_846ccd9a622665 850-852,1994
+platform/packages/api/test/integration/db-builds.test.ts
+  s_1ff185a05077f6::t_5d668f18a75591 1874
+platform/packages/api/test/integration/dynamic-plan-enforcement.test.ts
+  s_1ff185a05077f6::t_3c7a23334fb886 1-248
+platform/packages/api/test/integration/operator-plans.test.ts
+  s_b58bf241a1764a::t_e06b4b0c879b68 1-421
+platform/packages/api/test/integration/operator-tenants.test.ts
+  s_fe834b00f92102::t_0c5a9025a132d2 643-644,1061-1109
+platform/packages/api/test/integration/plan-transitions.test.ts
+  s_fe834b00f92102::t_36843f6ff2cffb 1-150
+platform/packages/api/test/integration/scheduled.test.ts
+  s_1ff185a05077f6::t_3f5a8c65d7bb48 291-319
+platform/packages/api/test/integration/usage-counter-fixture.ts
+  s_fe834b00f92102::t_840aec6fe68fb9 1-91
+platform/packages/api/test/unit/build-scheduler.test.ts
+  s_1ff185a05077f6::t_80edac51e455c6 5-14,185-186
+platform/packages/api/test/unit/operator-audit.test.ts
+  s_b58bf241a1764a::t_8a77dea3a1f851 13-41
+platform/packages/api/test/unit/routing.test.ts
+  s_b58bf241a1764a::t_ad6177f0002147 79-116
+platform/packages/api/test/unit/sandbox-control.test.ts
+  s_1ff185a05077f6::t_c98fcb8ea61e3e 8-12
+platform/packages/api/test/unit/tiers.test.ts
+  s_1ff185a05077f6::t_16147a15bd2ee0 113-119
+platform/packages/api/test/unit/usage-counter.test.ts
+  s_1ff185a05077f6::t_7300c409440f48 4-8,60,62-67,538,618,961,1020,1044,2044-2046,2114,2182,2207,2377-2514
+platform/packages/api/test/unit/usage-queue.test.ts
+  s_1ff185a05077f6::t_7ab55d42f6fa1f 145-174
+pnpm-lock.yaml
+  s_fe834b00f92102::t_fcec386cc32d9a 803-805
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e0bc053ead36b866b3f76a034af787d63f923150",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_1ff185a05077f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa1a-e66b-7331-bfa2-7d41bbd56f9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_b58bf241a1764a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa1a-a4b2-7f70-90f3-06d00685604c",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

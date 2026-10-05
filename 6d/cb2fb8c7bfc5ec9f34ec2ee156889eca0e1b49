@@ -1,0 +1,19 @@
+docs/guide/auth.md
+  s_14b3de9dcb5198::t_a082810774dca0 17,85,106,108,122,126,128,151,157,163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6dcb2fb8c7bfc5ec9f34ec2ee156889eca0e1b49",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

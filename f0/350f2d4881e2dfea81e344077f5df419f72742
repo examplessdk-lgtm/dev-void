@@ -1,0 +1,19 @@
+platform/packages/api/test/integration/email-connections.test.ts
+  s_d79067d74a5b05::t_cfed958a84dd5d 950-959
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f0350f2d4881e2dfea81e344077f5df419f72742",
+  "prompts": {},
+  "sessions": {
+    "s_d79067d74a5b05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff1d-e78b-7bb3-a697-69fa7f150634",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

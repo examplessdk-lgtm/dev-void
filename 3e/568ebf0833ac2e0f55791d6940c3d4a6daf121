@@ -1,0 +1,35 @@
+README.md
+  s_3dca312de99340::t_b327984ce6422f 3,5,7,9,12-14,17,20,23,27-32,34,45
+packages/md/README.md
+  s_3dca312de99340::t_58716c38d2a746 3,7-14,26,28
+packages/platform/README.md
+  s_3dca312de99340::t_8c70935ef1c085 3,5,7,9-12,14,16,18,20
+packages/react/README.md
+  s_3dca312de99340::t_5fdbdc14034e98 3,7-13,25,27
+packages/solid/README.md
+  s_3dca312de99340::t_1dccd7ddaa9d3a 3,7-14,25,27
+packages/svelte/README.md
+  s_3dca312de99340::t_587a5e907a34e1 3,7-14,25,27
+packages/void/README.md
+  s_3dca312de99340::t_57f1834b0f1d32 3,5,7,9,11-12,15,17-18,21,23,27-34
+packages/vue/README.md
+  s_3dca312de99340::t_507a4c9e28c07a 3,7-14,25,27
+platform/meta/operations.md
+  s_3dca312de99340::t_57060a8b2b6d90 196-216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3e568ebf0833ac2e0f55791d6940c3d4a6daf121",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

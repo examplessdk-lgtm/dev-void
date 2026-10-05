@@ -1,0 +1,19 @@
+docs/guide/typed-fetch.md
+  s_14b3de9dcb5198::t_3286230616a92d 7,91,109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3443bec3872981b6e26c8d442fae752364f75761",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

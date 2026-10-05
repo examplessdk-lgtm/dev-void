@@ -1,0 +1,21 @@
+docs/guide/kv.md
+  s_ca3f46e15212e0::t_e22ed6acbaff1e 28-30
+packages/void/test/unit/kv.test.ts
+  s_ca3f46e15212e0::t_89c730312579a0 19-50,86,88,93,98,103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f4868928e95bf31db07a7de02a5431787b66711a",
+  "prompts": {},
+  "sessions": {
+    "s_ca3f46e15212e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-0c30-7930-adb7-2882f4a5ef16",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

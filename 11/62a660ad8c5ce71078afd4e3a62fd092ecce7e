@@ -1,0 +1,21 @@
+docs/.vitepress/config.ts
+  s_3dca312de99340::t_c75de5f9db6c3b 197,227
+docs/guide/index.md
+  s_3dca312de99340::t_ae1a08388bd3ad 7,9,11,13-15,17-19,21,23,25,27,29,31,35-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1162a660ad8c5ce71078afd4e3a62fd092ecce7e",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

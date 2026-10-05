@@ -1,0 +1,19 @@
+platform/README.md
+  s_1ff185a05077f6::t_6c8f2c9102fc2b 30,32,34-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "95a3150638c9a49ddc27e15fe5b67abba94e3fd0",
+  "prompts": {},
+  "sessions": {
+    "s_1ff185a05077f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa1a-e66b-7331-bfa2-7d41bbd56f9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

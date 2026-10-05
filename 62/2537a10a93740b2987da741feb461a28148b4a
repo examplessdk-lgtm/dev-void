@@ -1,0 +1,19 @@
+packages/void/test/unit/provision.cases.ts
+  s_10f87c72c29118::t_c22a88d93f958d 7445-7452,7489-7548
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "622537a10a93740b2987da741feb461a28148b4a",
+  "prompts": {},
+  "sessions": {
+    "s_10f87c72c29118": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f86c-7457-7562-ac6f-ae35fd0a6fb1",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

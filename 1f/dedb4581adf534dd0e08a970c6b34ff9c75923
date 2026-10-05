@@ -1,0 +1,19 @@
+docs/guide/pages-routing/islands.md
+  s_14b3de9dcb5198::t_f64c1e85e3783c 72,74,353-355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1fdedb4581adf534dd0e08a970c6b34ff9c75923",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+docs/guide/database/mysql.md
+  s_21a2836ee3ab6e::t_488c13338f0856 7
+docs/guide/durable-state.md
+  s_21a2836ee3ab6e::t_721e6a761fd850 9,11,49,132-168
+docs/guide/env-vars.md
+  s_21a2836ee3ab6e::t_f9837213d002da 3,20,107
+docs/guide/kv.md
+  s_21a2836ee3ab6e::t_3273fcb499087d 7
+docs/guide/pages-routing/actions-and-forms.md
+  s_21a2836ee3ab6e::t_48b3d720fd5318 271-274
+docs/guide/pages-routing/layouts.md
+  s_21a2836ee3ab6e::t_30020ac72ba911 57-58,61
+docs/guide/pages-routing/view-transitions.md
+  s_21a2836ee3ab6e::t_1943a6cb716457 7
+docs/guide/quickstart.md
+  s_21a2836ee3ab6e::t_5d786a32152eb7 88,113,115,118,121,124,127,130-131,135,137
+docs/guide/ssr.md
+  s_21a2836ee3ab6e::t_9a3199c0289aca 7,9,11,22,27,31,34,56-60,63
+docs/guide/type-safety.md
+  s_21a2836ee3ab6e::t_021300c50a5aad 7,117
+docs/guide/websockets.md
+  s_21a2836ee3ab6e::t_f656c867089da0 11,15,118-139,150,152,188,190,192-195,197,199-203,205,207-224,227-229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ec748ca051bf271d856d3c2b85c333d3516c367a",
+  "prompts": {},
+  "sessions": {
+    "s_21a2836ee3ab6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-cda9-7da0-b06a-81b011f3ab2a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

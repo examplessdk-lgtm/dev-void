@@ -1,0 +1,41 @@
+docs/guide/platform/administration/plans.md
+  s_8dc471a469ccc3::t_e39ea1a9379154 113-114
+packages/void/src/cli/platform-plans-config.ts
+  s_fe834b00f92102::t_3baf2a6a6258f1 111-129
+packages/void/test/unit/platform-plans-config.test.ts
+  s_fe834b00f92102::t_96c9b1d02962f9 91-128
+platform/packages/api/src/admin/react/views/PlansPage.tsx
+  s_fe834b00f92102::t_88e387d1a3aca5 398-406
+platform/packages/api/src/admin/routes/plans.ts
+  s_fe834b00f92102::t_f47c50ee9c26f6 111-115
+platform/packages/api/src/operator/plans.ts
+  s_fe834b00f92102::t_3276b2a1386195 359-364,381-386
+platform/packages/api/test/integration/admin-plans.test.ts
+  s_fe834b00f92102::t_187d6467089262 101-119
+platform/packages/api/test/integration/operator-plans.test.ts
+  s_fe834b00f92102::t_10e8e46947d62e 296-297,309-312
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0d3b086a47b958233c44625bf3e7c33b9a958857",
+  "prompts": {},
+  "sessions": {
+    "s_8dc471a469ccc3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0faa2-fb17-7e93-a0af-5e23e7954de0",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

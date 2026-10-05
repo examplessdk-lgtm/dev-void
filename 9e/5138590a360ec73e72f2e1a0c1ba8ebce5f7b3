@@ -1,0 +1,29 @@
+packages/void/src/cli/platform-cloudflare.ts
+  s_891d457675c7a1::t_2ec22820ec140e 678,699,916-919
+packages/void/test/unit/platform-cloudflare.test.ts
+  s_3a9be47f3fe3fd::t_0d5db4dfd4a21d 303,319-326,331-344,349-350
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9e5138590a360ec73e72f2e1a0c1ba8ebce5f7b3",
+  "prompts": {},
+  "sessions": {
+    "s_3a9be47f3fe3fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a29a-e027-7be3-acab-1914415eb281",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_891d457675c7a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a29a-7837-78f2-b2dd-cc9123beba1b",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

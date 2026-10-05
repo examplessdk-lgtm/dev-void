@@ -1,0 +1,35 @@
+docs/guide/platform/installation/maintenance.md
+  s_313c35144715bb::t_25f1b103a03410 45-49
+packages/platform/src/worker-config.ts
+  s_313c35144715bb::t_375e65235b5074 30,95-96,105-107
+packages/platform/test/unit/worker-config.test.ts
+  s_313c35144715bb::t_e1ba6d1abd1eaf 43-94
+packages/void/src/cli/platform-installer.ts
+  s_313c35144715bb::t_90f27ae5d047ca 2003
+packages/void/test/unit/platform-installer.test.ts
+  s_313c35144715bb::t_cf392b5ff2b243 564-577
+platform/packages/api/README.md
+  s_313c35144715bb::t_4ac944e6ab9c14 351-356
+platform/packages/api/src/env.ts
+  s_313c35144715bb::t_342c3f37803a0e 99-100
+platform/packages/api/src/operator/system-operations.ts
+  s_313c35144715bb::t_2912a42e4f04fc 43,47,184-186
+platform/packages/api/test/integration/operator-operations.test.ts
+  s_313c35144715bb::t_97765c28c7373c 539-629,734-738
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "12b086d7848c2410d10a01e24589f1f70f43d5eb",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

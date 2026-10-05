@@ -1,0 +1,19 @@
+docs/guide/email.md
+  s_565d22f42c34d7::t_3cd97998baf7e4 469,471-472,474-476,479,481,483,485,487,489-490,493,495,497-501,503,505,507,509,511,513,515,517,519,521,523,525,527,531,533-535,538,540-541,544
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d926f91492b89ba673e70842e9e33b61c746d0ea",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

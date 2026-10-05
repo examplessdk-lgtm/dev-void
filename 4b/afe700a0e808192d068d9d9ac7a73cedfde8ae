@@ -1,0 +1,57 @@
+docs/guide/app-types.md
+  s_9cf895b2126865::t_d10747ef7a6c3d 23
+docs/guide/auth.md
+  s_9cf895b2126865::t_7e798dbd6fe5ee 8
+docs/guide/durable-state.md
+  s_9cf895b2126865::t_849a36734f360f 118,153,163
+docs/guide/edge/static-assets.md
+  s_9cf895b2126865::t_8e5171a2bd1910 32,48
+docs/guide/email.md
+  s_9cf895b2126865::t_e531af4037109e 62,208,349
+docs/guide/env-vars.md
+  s_9cf895b2126865::t_7e0f7e848bcbad 42,71
+docs/guide/jobs.md
+  s_9cf895b2126865::t_5939a38fc004dd 48,50,62
+docs/guide/pages-routing/islands.md
+  s_9cf895b2126865::t_731c3d2594eff9 58
+docs/guide/pages-routing/loaders.md
+  s_9cf895b2126865::t_e30e9f058cf364 27
+docs/guide/pages-routing/markdown.md
+  s_9cf895b2126865::t_d2f98eed40a7ee 145,321,370
+docs/guide/platform/administration/operations.md
+  s_9cf895b2126865::t_4237da0cd930f2 87
+docs/guide/platform/administration/zero-trust.md
+  s_9cf895b2126865::t_d57bfbcce9f579 72,76,94,108,142,144,175,179
+docs/guide/platform/development/runtime.md
+  s_9cf895b2126865::t_ca69d72e96c465 55,85,91
+docs/guide/platform/installation/domains.md
+  s_9cf895b2126865::t_fdff16d18d46a5 28,30
+docs/guide/queues.md
+  s_9cf895b2126865::t_bb5863245510fa 11,15
+docs/guide/remote-dev.md
+  s_9cf895b2126865::t_40f3d6ba9d0c93 45
+docs/guide/websockets.md
+  s_9cf895b2126865::t_3f4e3db6b4133d 152,223
+docs/reference/api.md
+  s_9cf895b2126865::t_d1ad84284c899c 142,394,896,923
+docs/reference/cli.md
+  s_9cf895b2126865::t_a4d5a034a826e0 78,137,152,371,908,910,912,916,918,983,1083,1347,1699,1735,1737
+docs/reference/config.md
+  s_9cf895b2126865::t_cf225aeb3c1275 200,254,346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4bafe700a0e808192d068d9d9ac7a73cedfde8ae",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

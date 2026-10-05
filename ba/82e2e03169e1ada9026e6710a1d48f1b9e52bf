@@ -1,0 +1,59 @@
+docs/guide/platform/administration/email.md
+  s_c40d3de7efa35e::t_b784050b9b7cfb 13-29
+docs/reference/cli.md
+  s_c40d3de7efa35e::t_492158f18c558b 768-769,796-812
+packages/void/skills/void/SKILL.md
+  s_6a47d9031c1157::t_4325c8c861fed7 178
+packages/void/src/cli/help.ts
+  s_565d22f42c34d7::t_fe5c3b816a20fa 75-77
+packages/void/src/cli/operator-args.ts
+  s_565d22f42c34d7::t_6fce089aeada86 445-464,669-673
+packages/void/src/cli/operator-cmd.ts
+  s_565d22f42c34d7::t_f45506f0dd8021 612,616-629
+packages/void/src/cli/platform-args.ts
+  s_c40d3de7efa35e::t_dfef2225e481be 20
+packages/void/test/unit/operator-cli.test.ts
+  s_565d22f42c34d7::t_f2d5f83f790f7f 378-411,1062-1102
+platform/packages/api/README.md
+  s_6a47d9031c1157::t_f33825103920c8 299-309
+platform/packages/api/src/email/shared-recipient-service.ts
+  s_c40d3de7efa35e::t_4790e5ff8d8f4a 2,15,25-258,695
+platform/packages/api/src/operator/audit.ts
+  s_c40d3de7efa35e::t_16481d624a1683 193-201
+platform/packages/api/src/operator/email-routes.ts
+  s_565d22f42c34d7::t_7d2771e114c919 1,19-23,26-27,59-62,390-487
+platform/packages/api/test/integration/email-shared-recipients.test.ts
+  s_565d22f42c34d7::t_0c2072a97df61a 27,33,103-314
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ba82e2e03169e1ada9026e6710a1d48f1b9e52bf",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_6a47d9031c1157": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99f-31f0-78e3-b5d0-5630084ef63a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_c40d3de7efa35e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99e-feab-7fb3-958e-967ca9aeae29",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

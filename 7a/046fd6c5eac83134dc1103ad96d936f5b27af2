@@ -1,0 +1,19 @@
+packages/void/test/integration/resource-name-migration.test.ts
+  s_367986d6de2663::t_438f0a72bc8cbf 271-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7a046fd6c5eac83134dc1103ad96d936f5b27af2",
+  "prompts": {},
+  "sessions": {
+    "s_367986d6de2663": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc9c-9e41-72b0-91e7-878d77df6394",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

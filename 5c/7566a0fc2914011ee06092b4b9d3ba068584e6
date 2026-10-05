@@ -1,0 +1,23 @@
+platform/packages/api/container/build-agent.mjs
+  s_313c35144715bb::t_2a28a61042db6d 22,1964,2119,2265-2280,2287
+platform/packages/api/src/build-manager.ts
+  s_313c35144715bb::t_d5c5c93a9a63ad 1776
+platform/packages/api/test/unit/build-manager.test.ts
+  s_313c35144715bb::t_304137bb693e38 734,742,6291,6310,6318,6804-6811,6888-6918
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5c7566a0fc2914011ee06092b4b9d3ba068584e6",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

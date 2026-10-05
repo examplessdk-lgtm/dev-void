@@ -1,0 +1,19 @@
+packages/void/test/unit/github-connect-cmd.test.ts
+  s_367986d6de2663::t_61bd1ce63c2057 198-199,219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "606cc98a8cc71f3639089eab91e19759f8d24c3d",
+  "prompts": {},
+  "sessions": {
+    "s_367986d6de2663": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc9c-9e41-72b0-91e7-878d77df6394",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

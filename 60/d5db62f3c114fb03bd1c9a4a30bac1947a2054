@@ -1,0 +1,41 @@
+docs/guide/deployment.md
+  s_f5b8e171002165::t_46aa925544866e 58-74
+docs/reference/cli/deploy.md
+  s_f5b8e171002165::t_0106bb230cb277 62-75
+packages/void/AGENTS.md
+  s_f5b8e171002165::t_259368eb1db3f0 90-91
+packages/void/skills/void/SKILL.md
+  s_f5b8e171002165::t_2cbcf3bffa4dd1 22-24
+packages/void/src/cli/create-project.ts
+  s_f5b8e171002165::t_77a41b2b1b2a24 54,68-70
+packages/void/src/cli/deploy.ts
+  s_f5b8e171002165::t_47994640277ed7 255,7059-7060,7064-7072,7094,7354,7363,7367-7369,7377,7384-7390,9014-9016
+packages/void/src/cli/project.ts
+  s_f5b8e171002165::t_3221d3b136f9a3 167-178
+packages/void/src/cli/prompt.ts
+  s_f5b8e171002165::t_2e3ac6e0c1a58c 20,28-34,50,83-85
+packages/void/test/integration/full-deploy-manifest.test.ts
+  s_f5b8e171002165::t_a3f45c63088113 117-123,358-388
+packages/void/test/unit/deploy-auth.test.ts
+  s_f5b8e171002165::t_107d109442740d 205-210
+packages/void/test/unit/deploy-platform-target.test.ts
+  s_f5b8e171002165::t_9436acad0be24e 1-270
+packages/void/test/unit/deploy-project-setup.test.ts
+  s_f5b8e171002165::t_f6cb6ed9e093b8 1,71,76-116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "60d5db62f3c114fb03bd1c9a4a30bac1947a2054",
+  "prompts": {},
+  "sessions": {
+    "s_f5b8e171002165": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff21-ff8a-77e2-9aaa-af6270b2cdd5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

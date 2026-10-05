@@ -1,0 +1,19 @@
+docs/guide/quickstart.md
+  s_9cf895b2126865::t_095f2c084674ee 112-140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "03f7b69aa0e6c6239fbc02747735c7ee9e3b5815",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

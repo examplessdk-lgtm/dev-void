@@ -1,0 +1,27 @@
+docs/guide/platform/installation/prerequisites.md
+  s_cdab927531343d::t_a390d5646fb446 11
+docs/guide/platform/installation/setup.md
+  s_cdab927531343d::t_9e6ec8218df4e8 38
+docs/reference/cli/platform-installation.md
+  s_cdab927531343d::t_902d7be00e29f6 34
+packages/void/src/cli/platform-install-auth.ts
+  s_cdab927531343d::t_8394d4c2ff7287 126-127
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_3a5c74cfda0325 103,150-156,160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0c815db4afeeb06879d7f28c519697ad6ec4569e",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

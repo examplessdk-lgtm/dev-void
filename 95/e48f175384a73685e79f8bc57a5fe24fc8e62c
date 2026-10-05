@@ -1,0 +1,43 @@
+packages/void/package.json
+  s_21a2836ee3ab6e::t_eae90246a4105c 42
+packages/void/src/pages/client.ts
+  s_21a2836ee3ab6e::t_f4d1ade1d4e630 2-3,372-375
+packages/void/src/router/compile.ts
+  s_21a2836ee3ab6e::t_3d57956e01997d 12,1606,1620,1691,1706
+packages/void/src/runtime/fetch-stream.ts
+  s_21a2836ee3ab6e::t_6e1fcbb23fe314 3,56
+packages/void/src/runtime/fetch.ts
+  s_21a2836ee3ab6e::t_945f6e168a40d8 3,85
+packages/void/src/runtime/route-url.ts
+  s_21a2836ee3ab6e::t_84ba4bbfe2b72c 1-26
+packages/void/src/runtime/ws.ts
+  s_21a2836ee3ab6e::t_959f13300a4a49 6,302
+packages/void/test/unit/fetch-stream.test.ts
+  s_21a2836ee3ab6e::t_fb391d1166399e 26-28,52-56
+packages/void/test/unit/fetch-worker.test.ts
+  s_21a2836ee3ab6e::t_fb9f7dacf25152 3-5,23,52,66-67,72-77,163-165,311-346
+packages/void/test/unit/fetch.test.ts
+  s_21a2836ee3ab6e::t_856df884fa7f44 19-21,81-89
+packages/void/test/unit/route-url.test.ts
+  s_21a2836ee3ab6e::t_f7782206eafc78 1-24
+packages/void/test/unit/ws.test.ts
+  s_21a2836ee3ab6e::t_57a6b2eb638a74 16-20,90-94
+packages/void/vite.config.ts
+  s_21a2836ee3ab6e::t_7f22f08c9d287b 92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "95e48f175384a73685e79f8bc57a5fe24fc8e62c",
+  "prompts": {},
+  "sessions": {
+    "s_21a2836ee3ab6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-cda9-7da0-b06a-81b011f3ab2a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+packages/platform/src/installation.ts
+  s_c98bda2abc43fb::t_645e32a8ffa4dd 87
+packages/platform/src/worker-config.ts
+  s_c98bda2abc43fb::t_97b1e60304254c 21,36,42-43,107,135,155-162
+packages/void/src/cli/platform-installer.ts
+  s_c98bda2abc43fb::t_3071a87a729ecf 149,299,332-339,347,363-377
+packages/void/test/unit/platform-installer.test.ts
+  s_c98bda2abc43fb::t_71df6f6bc9b3b2 326-344,346-348,369-396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9bc2e880afeed790b777b294349ad587bb3aadd1",
+  "prompts": {},
+  "sessions": {
+    "s_c98bda2abc43fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ecd-66db-75a2-aa2b-15752d45cf9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

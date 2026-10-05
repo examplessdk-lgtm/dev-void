@@ -1,0 +1,33 @@
+docs/guide/self-hosted-platform.md
+  s_2a58c614378016::t_2c881e090d6569 186
+docs/reference/cli.md
+  s_2a58c614378016::t_76a7602c2ffc50 316
+packages/void/skills/void/SKILL.md
+  s_2a58c614378016::t_53336e5d106cfc 20
+packages/void/src/cli/platform-management.ts
+  s_e1f3f0236957d1::t_c537e98e41107c 521,860-866
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "375a170a44342d5cd02a173b23641b87741af960",
+  "prompts": {},
+  "sessions": {
+    "s_2a58c614378016": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f9b-9bec-75f3-9f70-c6ed7f9112aa",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_e1f3f0236957d1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f98-6e80-7ba3-a6d0-727187d68bcb",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

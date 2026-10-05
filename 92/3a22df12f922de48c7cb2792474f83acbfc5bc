@@ -1,0 +1,19 @@
+docs/guide/storage.md
+  s_565d22f42c34d7::t_3e50d88d93e4b4 38,45,64,66,68-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "923a22df12f922de48c7cb2792474f83acbfc5bc",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

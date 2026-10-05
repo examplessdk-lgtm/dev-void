@@ -1,0 +1,19 @@
+platform/packages/api/test/unit/kitchen-sink-acceptance-auth.test.ts
+  s_4cd54230f5823c::t_ca01647958f3ff 6,130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1d943bac52a1c830c8062a1a0a8322a9610779de",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

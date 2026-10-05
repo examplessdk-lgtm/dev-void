@@ -1,0 +1,21 @@
+packages/void/src/cli/cf-version-api.ts
+  s_14b3de9dcb5198::t_85db0688086fb4 439-472,518,860-862,865
+packages/void/test/unit/cf-version-runner.test.ts
+  s_14b3de9dcb5198::t_469f04012272a0 999-1002,1007-1016,1027-1037,1041,1057-1066,1068-1074,1080-1081,1118-1121,1160,1200-1261,1285,1333,1386-1389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e95c7d7fdbf7c01a1b29984c456d08f77a091bbf",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

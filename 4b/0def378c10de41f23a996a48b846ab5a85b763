@@ -1,0 +1,23 @@
+platform/meta/design-docs/0085-durable-platform-deployments.md
+  s_fe834b00f92102::t_974167d1303979 29-34
+platform/packages/api/src/routes/deploy.ts
+  s_fe834b00f92102::t_2bc155fc92b7a5 2838-2852
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_fe834b00f92102::t_999da74bc99a67 622-713
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4b0def378c10de41f23a996a48b846ab5a85b763",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

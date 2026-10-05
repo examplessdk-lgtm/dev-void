@@ -1,0 +1,23 @@
+docs/reference/cli/platform-installation.md
+  s_8aec2d2dc6bfe4::t_ce0cc05d9f6582 52-57
+packages/void/src/cli/platform-access-setup.ts
+  s_8aec2d2dc6bfe4::t_b180d7674a467e 35-118,492-495,504
+packages/void/test/unit/platform-access-setup.test.ts
+  s_8aec2d2dc6bfe4::t_42bd2467146964 1,6,17-28,201-470
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e146e2131a52e0256fb020c23dcac9b957e8ed27",
+  "prompts": {},
+  "sessions": {
+    "s_8aec2d2dc6bfe4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd23-d26a-70d1-9540-2d32d9b7a815",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

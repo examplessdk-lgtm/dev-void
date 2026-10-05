@@ -1,0 +1,29 @@
+packages/void/src/pages/navigation-engine.ts
+  s_21a2836ee3ab6e::t_a890a7c0969b86 625-626
+packages/void/test/unit/pages-client.test.ts
+  s_21a2836ee3ab6e::t_ed2c81d892d6ec 192-245
+test/pages-client-contract.ts
+  s_21a2836ee3ab6e::t_6bba86dc2ad6e3 94-129
+packages/void/src/pages/client.ts
+  s_21a2836ee3ab6e::t_20ca52d574c223 2-3
+packages/isr/src/runtime.ts
+  s_21a2836ee3ab6e::t_a436d9fec5a197 526
+packages/void/test/unit/isr-cache.test.ts
+  s_21a2836ee3ab6e::t_e9bc748f2a088f 1201-1238
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8ee7695bff6510821044fb4790d81e87275a397f",
+  "prompts": {},
+  "sessions": {
+    "s_21a2836ee3ab6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-cda9-7da0-b06a-81b011f3ab2a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

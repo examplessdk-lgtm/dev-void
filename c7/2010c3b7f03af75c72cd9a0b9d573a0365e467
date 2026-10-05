@@ -1,0 +1,65 @@
+package.json
+  s_6286e68dc2a5f9::t_b0fca928d8cb76 35
+packages/md/package.json
+  s_6286e68dc2a5f9::t_6255f386d9887b 38-39,48
+packages/prompts/package.json
+  s_6286e68dc2a5f9::t_be4119ddc5dc79 14
+packages/void/package.json
+  s_6286e68dc2a5f9::t_c6ff5bc9d300b6 339-341,343-344,353,364-365,369,372-373,384
+platform/packages/api/package.json
+  s_6286e68dc2a5f9::t_2cb09ca7ef2daf 29,43,46,49
+platform/packages/api/test/smoke-staging-env.test.ts
+  s_6286e68dc2a5f9::t_b219283baae041 222,227-229
+platform/packages/api/test/unit/admin-operation-error.test.ts
+  s_6286e68dc2a5f9::t_d79654bee259a4 30-32
+playground/analog/package.json
+  s_6286e68dc2a5f9::t_d88341696c1355 10-17,22-25
+playground/kitchen-sink/package.json
+  s_6286e68dc2a5f9::t_5322c56fa980c1 13
+playground/named-layouts/package.json
+  s_6286e68dc2a5f9::t_68ab8fa44eb310 11
+playground/node-app/package.json
+  s_6286e68dc2a5f9::t_c79b7656db8695 13
+playground/node-static/package.json
+  s_6286e68dc2a5f9::t_2e05e85e02f322 13
+playground/pg-test/package.json
+  s_6286e68dc2a5f9::t_989c5212e7bcfb 11
+playground/react-pages/package.json
+  s_6286e68dc2a5f9::t_1feaaeacde43dc 12
+playground/solid-pages/package.json
+  s_6286e68dc2a5f9::t_6255e729054580 12
+playground/spa/package.json
+  s_6286e68dc2a5f9::t_7c6f9a51f93551 12
+playground/ssr/package.json
+  s_6286e68dc2a5f9::t_7c5e9f79a5a307 11
+playground/static-pages/package.json
+  s_6286e68dc2a5f9::t_295e3900484910 11
+playground/svelte-pages/package.json
+  s_6286e68dc2a5f9::t_f37b2516fdd645 12
+playground/tanstack-start/package.json
+  s_6286e68dc2a5f9::t_6a2fe0bb96e2c5 10-11
+playground/vinext-app/package.json
+  s_6286e68dc2a5f9::t_c011467235e612 14
+playground/vinext-pages/package.json
+  s_6286e68dc2a5f9::t_187afd7603ca22 12
+playground/vue-pages/package.json
+  s_6286e68dc2a5f9::t_f41308ad353b3f 12
+playground/websockets/package.json
+  s_6286e68dc2a5f9::t_5598834b53c49d 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c72010c3b7f03af75c72cd9a0b9d573a0365e467",
+  "prompts": {},
+  "sessions": {
+    "s_6286e68dc2a5f9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1094b-eb7a-7bb3-a3e3-b1285521fe31",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

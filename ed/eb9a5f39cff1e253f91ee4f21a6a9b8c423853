@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-access-health.ts
+  s_313c35144715bb::t_4ee01132d65e20 80-86
+packages/void/src/cli/platform-installer.ts
+  s_313c35144715bb::t_a112fa40c2e7c5 1725-1728,1801-1803,1824
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "edeb9a5f39cff1e253f91ee4f21a6a9b8c423853",
+  "prompts": {},
+  "sessions": {
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

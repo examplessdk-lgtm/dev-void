@@ -1,0 +1,37 @@
+docs/guide/platform/installation/credentials.md
+  s_4bd85d217cc68a::t_0c5fca31aeabfd 19
+packages/platform/README.md
+  s_4bd85d217cc68a::t_e7b1e70510c910 37,43
+packages/void/src/cli/platform-auth.ts
+  s_122e5a5858a175::t_94f31ec38939c6 6,13-14,166-169
+packages/void/src/cli/platform-management.ts
+  s_122e5a5858a175::t_ab7b2a530d712e 204-206
+packages/void/test/unit/platform-auth.test.ts
+  s_122e5a5858a175::t_708577be1d7729 107-146
+packages/void/test/unit/platform-management-upgrade.test.ts
+  s_4bd85d217cc68a::t_8ae33043653ae9 14-15,42-43,52-54,60-66,208,213-219,288-319
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9aaf32226a86f259487885716b03666d339d16ba",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_4bd85d217cc68a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd96-20e7-7601-8b68-2930c4defd8d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

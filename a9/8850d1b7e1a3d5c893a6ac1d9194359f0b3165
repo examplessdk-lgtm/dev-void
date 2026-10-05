@@ -1,0 +1,19 @@
+pnpm-lock.yaml
+  s_b4ffbd6851cc36::t_80aa44b6dceb5d 14702,14830,14844
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a98850d1b7e1a3d5c893a6ac1d9194359f0b3165",
+  "prompts": {},
+  "sessions": {
+    "s_b4ffbd6851cc36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-4a67-7002-a422-282418e7b851",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

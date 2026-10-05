@@ -1,0 +1,19 @@
+docs/guide/platform/administration/zero-trust.md
+  s_14b3de9dcb5198::t_eef43ccc83c071 134,136,161,165,167,173-174,176,180-184,186,188,190,192,194,196,198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4b1138308c6f28fb88842f8c340a715f8d965ad5",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

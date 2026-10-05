@@ -1,0 +1,19 @@
+package.json
+  s_528adb4caf2cfe::t_1df492eda804ae 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5a6b111f3f6792619b7138bd386f715b922518e7",
+  "prompts": {},
+  "sessions": {
+    "s_528adb4caf2cfe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef4-f8b2-7c43-976b-001af415aac6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

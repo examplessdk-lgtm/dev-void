@@ -1,0 +1,21 @@
+.github/workflows/platform-deploy-staging.yml
+  s_99519f2f391ce2::t_717fae178159eb 38-53,64-85,87-110
+.github/workflows/platform-smoke-test.yml
+  s_99519f2f391ce2::t_6d40d095f6b6a7 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ec46f7f957991a031829ac63c810f39fef739eab",
+  "prompts": {},
+  "sessions": {
+    "s_99519f2f391ce2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a291-e48e-7d43-a70f-9f0339096aa7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

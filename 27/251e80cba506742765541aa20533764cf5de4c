@@ -1,0 +1,21 @@
+platform/packages/api/test/smoke-platform-fixture.test.ts
+  s_04e496ba781942::t_6ef0351ad0deff 1,5-7,10-38,48-85,139-145
+platform/scripts/kitchen-sink-platform-fixture.ts
+  s_04e496ba781942::t_4a4a1ac6019fa3 43-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "27251e80cba506742765541aa20533764cf5de4c",
+  "prompts": {},
+  "sessions": {
+    "s_04e496ba781942": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9f7-e7e5-7423-b5f5-68eea7153649",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

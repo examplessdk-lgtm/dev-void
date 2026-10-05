@@ -1,0 +1,25 @@
+platform/packages/api/test/integration/api-health.test.ts
+  s_bc776b368391d0::t_d4788ee450e29d 3,9-25,44-47,57,63,68,73-84,86,102
+platform/packages/dispatch/src/env.ts
+  s_bc776b368391d0::t_c594d1a9f13b79 14
+platform/packages/dispatch/test/unit/internal-routes.test.ts
+  s_bc776b368391d0::t_887dfc800eb1a3 18,22,28,41,49,61,68-78
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_bc776b368391d0::t_65944e86123a12 133,153,185,196,202-208
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "76245780118c179e0e89988d01ae82b0087ec6a9",
+  "prompts": {},
+  "sessions": {
+    "s_bc776b368391d0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a004-0daa-7ad3-af93-d5cd7b2b854b",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

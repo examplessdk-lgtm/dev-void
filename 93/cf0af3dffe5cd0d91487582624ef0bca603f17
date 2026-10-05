@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-lifecycle.ts
+  s_367986d6de2663::t_cb9569d97f2d91 583
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "93cf0af3dffe5cd0d91487582624ef0bca603f17",
+  "prompts": {},
+  "sessions": {
+    "s_367986d6de2663": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc9c-9e41-72b0-91e7-878d77df6394",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

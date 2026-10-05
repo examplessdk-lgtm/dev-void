@@ -1,0 +1,23 @@
+.github/scripts/schema-compat-tests.ts
+  s_d79067d74a5b05::t_ffbe96dd3eeb7c 1-217
+.github/workflows/platform-ci.yml
+  s_d79067d74a5b05::t_928f31b71b7b58 16,140,189,191
+packages/void/test/unit/schema-compat-tests.test.ts
+  s_d79067d74a5b05::t_b13918693ee022 1-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5ace4cd88a275b6b4b831e670fd40b8087a78720",
+  "prompts": {},
+  "sessions": {
+    "s_d79067d74a5b05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ff1d-e78b-7bb3-a697-69fa7f150634",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

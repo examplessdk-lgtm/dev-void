@@ -1,0 +1,21 @@
+platform/packages/api/src/provisioning/containers.ts
+  s_fe834b00f92102::t_d6f735f98d6240 128,136-140
+platform/packages/api/src/provisioning/sandbox-controller.ts
+  s_fe834b00f92102::t_77cf4d8d02dd70 157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "46059e9ba5bd6c5f37c75b8f3eb733495e2fa3ea",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

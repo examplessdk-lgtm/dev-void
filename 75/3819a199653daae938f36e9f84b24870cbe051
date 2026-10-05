@@ -1,0 +1,35 @@
+docs/guide/deployment.md
+  s_122e5a5858a175::t_f9a5cd74d3e836 9-10
+packages/void/src/cli/deploy-summary.ts
+  s_122e5a5858a175::t_735c5b8bd25783 1-70
+packages/void/src/cli/deploy.ts
+  s_122e5a5858a175::t_9e2df1c455cc5a 185,232,5888-5889,5905,5929,6174-6185,6191,6946-6953,7798,7872,8043,8077-8080,8250,8383,8447-8460,8588,8656,8880,8979-8993
+packages/void/src/cli/logs.ts
+  s_122e5a5858a175::t_4d3bdf82aeba3a 4,84
+packages/void/src/cli/output.ts
+  s_122e5a5858a175::t_98413165449b7d 13-16
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_122e5a5858a175::t_52cdc25219af55 4,106-112,116,118,1956-1958,1966-1967,2403,2413-2416,3222,3230-3233,3245-3246,3248-3249
+packages/void/test/unit/deploy-summary.test.ts
+  s_122e5a5858a175::t_678f283cfc9077 1-49
+packages/void/test/unit/logs-rendering.test.ts
+  s_122e5a5858a175::t_6a52547b680b45 3,45,48-53,70
+test/terminal-demos/demos.ts
+  s_122e5a5858a175::t_4108c6e6b1e6af 92,106-108,225,257
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "753819a199653daae938f36e9f84b24870cbe051",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

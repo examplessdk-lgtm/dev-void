@@ -1,0 +1,19 @@
+docs/guide/server-routing.md
+  s_14b3de9dcb5198::t_6dbaa67281fd01 28,30,62,130,178,206,223-225
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2770f782603d35b1f1f509b6bfc4eda8f4b24238",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

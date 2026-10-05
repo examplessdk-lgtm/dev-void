@@ -1,0 +1,21 @@
+packages/isr/src/runtime.ts
+  s_21a2836ee3ab6e::t_cbb8f5e93dd230 104-105,519,551-554,556-557,737
+packages/void/test/unit/isr-cache.test.ts
+  s_21a2836ee3ab6e::t_2a2c6444bbfa40 1200-1236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e024a047df35a9e4b36cb106a4a5ce37a10b05b7",
+  "prompts": {},
+  "sessions": {
+    "s_21a2836ee3ab6e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-cda9-7da0-b06a-81b011f3ab2a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

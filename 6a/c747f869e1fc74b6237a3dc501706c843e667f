@@ -1,0 +1,19 @@
+docs/reference/resource-inference.md
+  s_3dca312de99340::t_b38fa9168342f7 30,39-40,44,52-54,56,63,78,101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6ac747f869e1fc74b6237a3dc501706c843e667f",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

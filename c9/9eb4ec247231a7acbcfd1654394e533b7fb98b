@@ -1,0 +1,19 @@
+packages/void/test/unit/inference.test.ts
+  s_4cd54230f5823c::t_c0fb4c88ff57e0 330-334
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c99eb4ec247231a7acbcfd1654394e533b7fb98b",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+docs/guide/deployment.md
+  s_4cd54230f5823c::t_4e622397a1f54c 149-161
+docs/guide/ai.md
+  s_4cd54230f5823c::t_a11a7fc9936505 19
+packages/void/src/runtime/ai.ts
+  s_4cd54230f5823c::t_5635a12255732b 9-15,744,756-766,768,773-790,792,804-817,820,838-843,854-856
+packages/void/src/runtime/limits.ts
+  s_4cd54230f5823c::t_be080c0b7f5c02 42,63
+packages/void/test/unit/ai.test.ts
+  s_4cd54230f5823c::t_ffe204d5f14e2a 940-960
+playground/kitchen-sink/pages/ai.vue
+  s_4cd54230f5823c::t_3944f519f9d704 60-64,80-81,87-98,106-111
+playground/kitchen-sink/pages/sandbox.vue
+  s_4cd54230f5823c::t_443492e40444a8 35,44
+platform/packages/api/test/unit/kitchen-sink-acceptance-auth.test.ts
+  s_4cd54230f5823c::t_ca01647958f3ff 6,130
+platform/packages/api/test/unit/kitchen-sink-sandbox.test.ts
+  s_4cd54230f5823c::t_a5b377c6b27806 5,44-49,51-62,66-67,99-106,115-127
+platform/scripts/fixtures/kitchen-sink-sandbox/routes/api/acceptance/sandbox.ts
+  s_4cd54230f5823c::t_903ac5f850f4e9 364-371,390-400
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bada849b6074003250832fe8aee2fe4f75f6f3ce",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+docs/guide/pages-routing/markdown.md
+  s_14b3de9dcb5198::t_3ab78dfb2039d0 36,164,402,451,453,471,473,475,478,481
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ab77a78a1731b69f17c2247b885def1bfdc21af8",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+docs/guide/database.md
+  s_9cf895b2126865::t_c8855569561383 369,374-375
+docs/reference/api.md
+  s_9cf895b2126865::t_f4f17550b34339 735
+docs/reference/cli.md
+  s_9cf895b2126865::t_3f7ee26ad7aba9 1204,1212-1213,1218,1342,1345
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c9a1109c1e0d6426c011dd4aaab456b29cf70df4",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

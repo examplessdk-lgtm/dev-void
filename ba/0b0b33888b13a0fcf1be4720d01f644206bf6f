@@ -1,0 +1,83 @@
+.github/workflows/platform-smoke-test.yml
+  s_313c35144715bb::t_e15df2a60554f9 68
+docs/guide/edge/headers.md
+  s_313c35144715bb::t_2c9898ccce3734 38
+docs/guide/email/sending.md
+  s_313c35144715bb::t_5a8d32be74598c 37
+docs/guide/remote-dev.md
+  s_313c35144715bb::t_17637dc80e1ac1 52
+docs/reference/cli/database.md
+  s_313c35144715bb::t_f8d8da33df056d 55
+packages/void/AGENTS_TEMPLATE.md
+  s_313c35144715bb::t_729db9d44883a7 4
+packages/void/skills/void/SKILL.md
+  s_313c35144715bb::t_1c6662aa193d33 19-21
+packages/void/src/cli/cf-access.ts
+  s_313c35144715bb::t_5ef73bd95987ee 2,138,140
+packages/void/src/cli/deploy-setup.ts
+  s_122e5a5858a175::t_9e8ae850cace03 2,21
+packages/void/src/cli/login.ts
+  s_122e5a5858a175::t_6b297221e51e29 136,139
+packages/void/src/index.ts
+  s_122e5a5858a175::t_0d215185942e6b 26,626,642
+packages/void/src/prerender.ts
+  s_122e5a5858a175::t_39a3c67963102c 12,174-177,179
+packages/void/src/runtime/ai.ts
+  s_313c35144715bb::t_d50707d9535972 338,340
+packages/void/src/runtime/email.ts
+  s_313c35144715bb::t_1a91bb8b78b23f 128
+packages/void/src/runtime/email/inbound.ts
+  s_313c35144715bb::t_626167b7e9c40a 63,220
+packages/void/src/runtime/email/testing.ts
+  s_313c35144715bb::t_686a88bfde5a69 412,426
+packages/void/src/runtime/remote/client.ts
+  s_313c35144715bb::t_20644a3e28ef9c 85
+packages/void/src/shared/cf-access.ts
+  s_313c35144715bb::t_9d32a416921b2e 25,81
+packages/void/test/integration/full-deploy-manifest.test.ts
+  s_313c35144715bb::t_144617acbe708f 19,215-219,250-260,266
+packages/void/test/unit/ai.test.ts
+  s_313c35144715bb::t_fb06c69fd13003 28-46
+packages/void/test/unit/auth-login.test.ts
+  s_313c35144715bb::t_c7493d747f98e4 1-8,88,233-234,254
+packages/void/test/unit/cf-access.test.ts
+  s_313c35144715bb::t_7818637dc56aaf 25,41,349-353,356-359,361,363-364
+packages/void/test/unit/db-execute-remote.test.ts
+  s_313c35144715bb::t_b4421b5aea2a59 162,647-648
+packages/void/test/unit/direct-r2-client.test.ts
+  s_313c35144715bb::t_3fb6eb603bd34f 29,931,1010-1017,1020-1021,1029
+packages/void/test/unit/github-oidc.test.ts
+  s_313c35144715bb::t_5d84e85bf57fe5 1-8,26,119,150,152,164,210
+packages/void/test/unit/platform-connect.test.ts
+  s_313c35144715bb::t_a64e500dd58d2d 29,85
+packages/void/test/unit/platform-installer.test.ts
+  s_313c35144715bb::t_71a0675a6054b2 2641-2653
+packages/void/test/unit/platform-recovery.test.ts
+  s_313c35144715bb::t_ed196b2227acf6 41,279,282
+packages/void/test/unit/prerender.test.ts
+  s_313c35144715bb::t_eb5ddb6fe41458 255,289,295,301,306-315,338,388,455,461
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ba0b0b33888b13a0fcf1be4720d01f644206bf6f",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_313c35144715bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd47-b8f4-75c3-ac9b-92369d063833",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

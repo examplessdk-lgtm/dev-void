@@ -1,0 +1,23 @@
+packages/void/src/cli/platform-management.ts
+  s_22951510778d43::t_ead695e74e7aff 52-67,69,498
+packages/void/src/cli/platform-recovery.ts
+  s_22951510778d43::t_6823309b3c10b3 8,20-21,110-113
+packages/void/test/unit/platform-recovery.test.ts
+  s_22951510778d43::t_157f02055e5499 6,149-158,184-200,235-253
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fff1eb1ba6593f98614a6e54e85156d535a1933a",
+  "prompts": {},
+  "sessions": {
+    "s_22951510778d43": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ede-0a6b-7e51-9029-0670aac615f4",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

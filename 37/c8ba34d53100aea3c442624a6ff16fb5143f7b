@@ -1,0 +1,21 @@
+packages/void/test/unit/affected-tests.test.ts
+  s_122e5a5858a175::t_6b2c9422bda4da 212-213
+platform/packages/api/test/integration/platform-domain-activation.test.ts
+  s_122e5a5858a175::t_b571fc19439015 203-210,299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "37c8ba34d53100aea3c442624a6ff16fb5143f7b",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

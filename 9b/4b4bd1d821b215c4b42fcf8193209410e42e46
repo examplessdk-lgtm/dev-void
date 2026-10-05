@@ -1,0 +1,19 @@
+packages/void/src/cli/logs.ts
+  s_122e5a5858a175::t_3b345ff5d6b8de 1,101-108,113-121,125-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9b4b4bd1d821b215c4b42fcf8193209410e42e46",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

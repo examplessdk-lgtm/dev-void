@@ -1,0 +1,23 @@
+docs/guide/self-hosted-platform.md
+  s_093cc5fc4b48f6::t_b0a58b38ab336d 144,184
+docs/reference/cli.md
+  s_093cc5fc4b48f6::t_7d855e799dcd48 293,316
+packages/void/skills/void/SKILL.md
+  s_093cc5fc4b48f6::t_5fd54c8cd1b45b 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dcd1f5abc55c0003c54455d0c4d8c10993e7e864",
+  "prompts": {},
+  "sessions": {
+    "s_093cc5fc4b48f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f87-02da-7f62-86ba-10461190ebfc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

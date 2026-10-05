@@ -1,0 +1,31 @@
+packages/create-void/package.json
+  s_122e5a5858a175::t_e1a6cf31cef0c8 26
+packages/create-void/vite.config.ts
+  s_122e5a5858a175::t_95550f3d536506 13
+packages/prompts/README.md
+  s_122e5a5858a175::t_916780d97dfc7d 7
+packages/prompts/package.json
+  s_122e5a5858a175::t_d0282aa7503c67 2
+packages/void/package.json
+  s_122e5a5858a175::t_13a34d572c3616 385
+packages/void/vite.config.ts
+  s_122e5a5858a175::t_f57974e09f29b7 189
+pnpm-lock.yaml
+  s_122e5a5858a175::t_c1987b7c887de4 301,679
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "01ba5218779a1089b88f6067de96e649dbb3791b",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

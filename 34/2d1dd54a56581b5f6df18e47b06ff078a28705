@@ -1,0 +1,19 @@
+platform/packages/api/test/integration/auth-dev-login.test.ts
+  s_dfcde9558c4327::t_06769f062bc874 181-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "342d1dd54a56581b5f6df18e47b06ff078a28705",
+  "prompts": {},
+  "sessions": {
+    "s_dfcde9558c4327": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f0a-66c1-7432-8026-06bc37aa9de2",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

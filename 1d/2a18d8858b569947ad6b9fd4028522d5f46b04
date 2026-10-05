@@ -1,0 +1,31 @@
+packages/void/src/cli/deploy-summary.ts
+  s_122e5a5858a175::t_8b8193897174f0 1-8
+packages/void/src/cli/deploy.ts
+  s_122e5a5858a175::t_1fdc8996cef96c 184,6190,6229,6952,7626,8082,8465,8995
+packages/void/test/integration/full-deploy-manifest.test.ts
+  s_122e5a5858a175::t_c1076dafa905e6 29
+packages/void/test/unit/cloudflare-deploy.test.ts
+  s_122e5a5858a175::t_d7f1fca8639444 2416-2420,3237-3241
+packages/void/test/unit/deploy-events.test.ts
+  s_122e5a5858a175::t_e7d7c87878c12a 60,73-75,140,152-153,156,169-170
+packages/void/test/unit/direct-r2-deploy.test.ts
+  s_122e5a5858a175::t_ecfcda46610501 27
+test/terminal-demos/demos.ts
+  s_122e5a5858a175::t_e6d9df7ffc05be 102,112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1d2a18d8858b569947ad6b9fd4028522d5f46b04",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

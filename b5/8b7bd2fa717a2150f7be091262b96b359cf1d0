@@ -1,0 +1,159 @@
+packages/create-void/src/index.ts
+  s_122e5a5858a175::t_564cc4059614ef 4
+packages/void/src/cli/account-cmd.ts
+  s_122e5a5858a175::t_05ded4cfa0ef6c 2
+packages/void/src/cli/auth-link.ts
+  s_122e5a5858a175::t_28fb2a81c4df33 2
+packages/void/src/cli/auth-router.ts
+  s_122e5a5858a175::t_6bc5168f227362 1
+packages/void/src/cli/build-cmd.ts
+  s_122e5a5858a175::t_0b5d042acd819e 2
+packages/void/src/cli/cache.ts
+  s_122e5a5858a175::t_24c503bb71281c 1
+packages/void/src/cli/cancel-deploy.ts
+  s_122e5a5858a175::t_274a4ed44d8541 1
+packages/void/src/cli/cli.ts
+  s_122e5a5858a175::t_962e7a0ad23c4c 4
+packages/void/src/cli/cloudflare-cmd.ts
+  s_122e5a5858a175::t_f45a7d05978c7a 1
+packages/void/src/cli/cloudflare-connect.ts
+  s_122e5a5858a175::t_6ecffd756a0867 2
+packages/void/src/cli/create-project.ts
+  s_122e5a5858a175::t_697862e2989748 1
+packages/void/src/cli/delete.ts
+  s_122e5a5858a175::t_595302132787e9 1
+packages/void/src/cli/domain.ts
+  s_122e5a5858a175::t_ad8cd7062e451c 1
+packages/void/src/cli/env.ts
+  s_122e5a5858a175::t_68578cbdf6ddf2 2
+packages/void/src/cli/gen.ts
+  s_122e5a5858a175::t_08669e0a3170ee 11
+packages/void/src/cli/github-cmd.ts
+  s_122e5a5858a175::t_546456aacab5e2 2
+packages/void/src/cli/help.ts
+  s_122e5a5858a175::t_49f91c1ef68d48 2
+packages/void/src/cli/init-git.ts
+  s_122e5a5858a175::t_94b46839fa2730 3
+packages/void/src/cli/link.ts
+  s_122e5a5858a175::t_002f54c729ce5c 1
+packages/void/src/cli/list.ts
+  s_122e5a5858a175::t_d32fea7e5dd79a 1
+packages/void/src/cli/logs.ts
+  s_122e5a5858a175::t_b12318a76922b0 1
+packages/void/src/cli/migrate.ts
+  s_122e5a5858a175::t_00bf7a991b78fc 12
+packages/void/src/cli/output.ts
+  s_122e5a5858a175::t_996415aad4d7e0 1-8,19,24-26,31,35,52,62-65,68
+packages/void/src/cli/prepare.ts
+  s_122e5a5858a175::t_1c0c7f50de2ec6 1
+packages/void/src/cli/project-team.ts
+  s_122e5a5858a175::t_f06acd7c66715a 1
+packages/void/src/cli/project-token.ts
+  s_122e5a5858a175::t_d7a5c3311e5d00 1
+packages/void/src/cli/project-zero-trust.ts
+  s_122e5a5858a175::t_863e167fd9d4ae 1
+packages/void/src/cli/projects.ts
+  s_122e5a5858a175::t_b553074c5d090a 1
+packages/void/src/cli/prompt.ts
+  s_122e5a5858a175::t_e5614bb6cdc9b8 1
+packages/void/src/cli/requests.ts
+  s_122e5a5858a175::t_5077c310c1df4b 1
+packages/void/src/cli/skills.ts
+  s_122e5a5858a175::t_37d64fa77960e3 9
+packages/void/src/cli/subcommand-prompt.ts
+  s_122e5a5858a175::t_86c454f467ac8b 10
+packages/void/test/unit/auth-link.test.ts
+  s_122e5a5858a175::t_46b76046a0a2f1 35
+packages/void/test/unit/auth-router.test.ts
+  s_122e5a5858a175::t_0c3ae914f6620b 17
+packages/void/test/unit/cli-help.test.ts
+  s_122e5a5858a175::t_d890604b781b6a 1,6
+packages/void/test/unit/cloudflare-connect.test.ts
+  s_122e5a5858a175::t_cb612b2b301286 12
+packages/void/test/unit/cloudflare-session.test.ts
+  s_122e5a5858a175::t_b2b5f09218a208 4
+packages/void/test/unit/connect.test.ts
+  s_122e5a5858a175::t_4ea91dc8e128c8 34
+packages/void/test/unit/create-project.test.ts
+  s_122e5a5858a175::t_afa40c8859c5f7 13
+packages/void/test/unit/db-commands.test.ts
+  s_122e5a5858a175::t_8df1dd79d672fe 101
+packages/void/test/unit/db-execute-remote.test.ts
+  s_122e5a5858a175::t_b2aa1e94cc6436 78,777
+packages/void/test/unit/db-export-roundtrip.test.ts
+  s_122e5a5858a175::t_6a57caee85f64f 30
+packages/void/test/unit/db-migrate.test.ts
+  s_122e5a5858a175::t_1b9141a021b0f3 24
+packages/void/test/unit/db-seed.test.ts
+  s_122e5a5858a175::t_5551cdfcad67ec 15
+packages/void/test/unit/db-studio-remote.test.ts
+  s_122e5a5858a175::t_1a883fb1e3a4c7 62,166,245
+packages/void/test/unit/deploy-auth.test.ts
+  s_122e5a5858a175::t_58d4f555051148 28
+packages/void/test/unit/deploy-email-platform-path.test.ts
+  s_122e5a5858a175::t_4e0e49dd6550c3 36
+packages/void/test/unit/deploy-events.test.ts
+  s_122e5a5858a175::t_2268e7ad6fdd81 3,14,97,199,319,330,346,363,374
+packages/void/test/unit/deploy-project-setup.test.ts
+  s_122e5a5858a175::t_2bb5d385b16a0b 15
+packages/void/test/unit/domain-command.test.ts
+  s_122e5a5858a175::t_02648c2be8ac90 32
+packages/void/test/unit/email-cli-allow.test.ts
+  s_122e5a5858a175::t_8338ed82f7e481 1
+packages/void/test/unit/email-cli-disallow.test.ts
+  s_122e5a5858a175::t_1efad4db0b3822 1
+packages/void/test/unit/email-cli-domain.test.ts
+  s_122e5a5858a175::t_0edf72ede3fb2f 1,30-31
+packages/void/test/unit/email-cli-logs.test.ts
+  s_122e5a5858a175::t_fb5308c34a6246 1,10-11
+packages/void/test/unit/gen.test.ts
+  s_122e5a5858a175::t_34484a297cb368 10,763,808,959,1091,1220,1331
+packages/void/test/unit/generate-headers-redirects.test.ts
+  s_122e5a5858a175::t_1ff8508d9ec481 5,446,457
+packages/void/test/unit/github-connect-cmd.test.ts
+  s_122e5a5858a175::t_c4b3d045e346db 1,22,26-27
+packages/void/test/unit/github-disconnect-cmd.test.ts
+  s_122e5a5858a175::t_4b8a19ae55b7da 1,15-16
+packages/void/test/unit/github-join-cmd.test.ts
+  s_122e5a5858a175::t_d6896d30ee6248 1
+packages/void/test/unit/github-link-cmd.test.ts
+  s_122e5a5858a175::t_cc6e5e3024cd44 1
+packages/void/test/unit/github-update-cmd.test.ts
+  s_122e5a5858a175::t_beca513b9adab6 1
+packages/void/test/unit/init-starter-migrations.test.ts
+  s_122e5a5858a175::t_2498006a22016f 17
+packages/void/test/unit/init.test.ts
+  s_122e5a5858a175::t_cbc514e1ecfeb6 185
+packages/void/test/unit/link.test.ts
+  s_122e5a5858a175::t_2453b602b311db 24
+packages/void/test/unit/login-command.test.ts
+  s_122e5a5858a175::t_72e25d615b9fd4 27
+packages/void/test/unit/output-spinner.test.ts
+  s_122e5a5858a175::t_a277dc575af412 1,6,10-15,18-19,22-23,53-76
+packages/void/test/unit/platform-auth-process.test.ts
+  s_122e5a5858a175::t_b6ee11e6c8c820 4
+packages/void/test/unit/platform-management-upgrade.test.ts
+  s_122e5a5858a175::t_866f54bd2fa6f3 33,201
+packages/void/test/unit/prompt-password.test.ts
+  s_122e5a5858a175::t_7024cc238358c1 3
+packages/void/test/unit/subcommand-prompt.test.ts
+  s_122e5a5858a175::t_3ab0ff78a32ec4 3
+platform/packages/api/scripts/setup-local.ts
+  s_122e5a5858a175::t_1979a272583a8a 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b58b7bd2fa717a2150f7be091262b96b359cf1d0",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

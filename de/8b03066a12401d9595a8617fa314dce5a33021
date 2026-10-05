@@ -1,0 +1,29 @@
+docs/reference/cli/platform-installation.md
+  s_cdab927531343d::t_6a2b4b49e15c5c 48
+packages/void/src/cli/platform-lifecycle.ts
+  s_cdab927531343d::t_93b52df523308a 565
+packages/void/src/cli/platform-plan.ts
+  s_cdab927531343d::t_ce21d88f013dcb 55,1355-1356
+packages/void/test/unit/platform-install-prompts.test.ts
+  s_cdab927531343d::t_00040aa2875d41 172
+packages/void/test/unit/platform-plan.test.ts
+  s_cdab927531343d::t_81a183836c367d 251,262-264,570-579
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_cdab927531343d::t_d315bdd84def01 292-301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "de8b03066a12401d9595a8617fa314dce5a33021",
+  "prompts": {},
+  "sessions": {
+    "s_cdab927531343d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f6c7-3895-7720-802f-f5c1563f11a8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+docs/reference/config.md
+  s_14b3de9dcb5198::t_73658516f38b8d 157,159,210,389,417,465,475,477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e21a1c8696bc3c353647c574aa41e31523a7c186",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+platform/packages/api/test/integration/operator-last-admin.test.ts
+  s_fe834b00f92102::t_26c338a6366339 126-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "181c54c9def867ee4edfeecc21f2fa055246eef9",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

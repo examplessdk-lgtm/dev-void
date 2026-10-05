@@ -1,0 +1,19 @@
+docs/guide/edge/revalidation.md
+  s_565d22f42c34d7::t_75b7b3f14a23ad 77,79,99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6a4ed60e29d0684752b6da01e0ce484e09370b29",
+  "prompts": {},
+  "sessions": {
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

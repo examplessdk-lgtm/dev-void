@@ -1,0 +1,31 @@
+docs/guide/platform/development/schema-ci.md
+  s_3dca312de99340::t_917d4aa0965e1c 17-23
+packages/deploy-cloudflare/README.md
+  s_3dca312de99340::t_3253185c2c8173 3,5
+packages/deploy-core/README.md
+  s_3dca312de99340::t_d7eb0143209d25 3,5,7
+packages/edge/README.md
+  s_3dca312de99340::t_4be88967c164bc 3,5
+packages/isr/README.md
+  s_3dca312de99340::t_53c4642429ab1b 3,5,7-9,11
+platform/README.md
+  s_3dca312de99340::t_843702c36fcb58 59,83
+platform/meta/README.md
+  s_3dca312de99340::t_3c7ef13ad451ab 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "01c798ac23e427a699e62cf24895f09417922e0a",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

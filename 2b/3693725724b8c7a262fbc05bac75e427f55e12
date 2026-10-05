@@ -1,0 +1,19 @@
+packages/void/src/cli/hosted-platform.ts
+  s_b7c6d3ba559d8d::t_b71434106b1281 58,66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b3693725724b8c7a262fbc05bac75e427f55e12",
+  "prompts": {},
+  "sessions": {
+    "s_b7c6d3ba559d8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f37-5216-7d43-a842-93ee663effd6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

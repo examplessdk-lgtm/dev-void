@@ -1,0 +1,47 @@
+docs/.vitepress/config.ts
+  s_9cf895b2126865::t_fb99532ed9a75b 299-308
+docs/.vitepress/redirects/guide-email.json
+  s_9cf895b2126865::t_e442219a97af9a 1-21
+docs/.vitepress/theme/LegacyDocRedirect.vue
+  s_9cf895b2126865::t_faf6809baaf6e8 11-12,15
+docs/guide/email.md
+  s_9cf895b2126865::t_252f3d58e3699a 5-8,10,12,14,16-20,22
+docs/guide/email/domains.md
+  s_9cf895b2126865::t_6bb6277114763c 1-112
+docs/guide/email/receiving.md
+  s_9cf895b2126865::t_1198bffd3a75df 1-139
+docs/guide/email/sending.md
+  s_9cf895b2126865::t_489eda62baa153 1-231
+docs/integrations/cloudflare.md
+  s_9cf895b2126865::t_39d0493b41e37b 129,196
+docs/integrations/nodejs-bun-deno.md
+  s_9cf895b2126865::t_7c38711396b22f 121
+docs/reference/cli/deploy.md
+  s_9cf895b2126865::t_7b253d805d27a0 83
+docs/reference/cli/email.md
+  s_9cf895b2126865::t_1b418b9a177878 59,129
+docs/reference/cli/platform-email.md
+  s_9cf895b2126865::t_29ba502329bc46 77
+docs/reference/config.md
+  s_9cf895b2126865::t_cca5ed3dbd412c 159
+docs/reference/structure.md
+  s_9cf895b2126865::t_6c5f1861cdb961 120
+packages/void/skills/void/SKILL.md
+  s_9cf895b2126865::t_49162a082d3fe6 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7bac3fe73a0b4d543db67a09d7fbd8d817172f74",
+  "prompts": {},
+  "sessions": {
+    "s_9cf895b2126865": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fad3-e7e3-7613-9c3e-68ee7ba47e28",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

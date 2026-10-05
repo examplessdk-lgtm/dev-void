@@ -1,0 +1,25 @@
+docs/guide/self-hosted-platform.md
+  s_27fb511a42b841::t_8a4a4b5b876ed9 185
+docs/reference/cli.md
+  s_27fb511a42b841::t_996b9f72990712 321
+packages/void/src/cli/platform-management.ts
+  s_27fb511a42b841::t_5bc34084e340cf 517,805-811
+packages/void/test/unit/platform-management.test.ts
+  s_27fb511a42b841::t_b7750a84c9fe43 722,796,810,812-818,828,833,866
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c849ea2faac88971b2d11e47db879dc148656043",
+  "prompts": {},
+  "sessions": {
+    "s_27fb511a42b841": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ff9-7685-75b0-a8bb-5a9143c5818f",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

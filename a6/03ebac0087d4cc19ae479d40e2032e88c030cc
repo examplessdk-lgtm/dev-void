@@ -1,0 +1,47 @@
+packages/void/src/cli/client.ts
+  s_c3ea608966c0af::t_29b6c61d469127 8,279,286,288,291
+packages/void/src/cli/create-project.ts
+  s_c35072d131d864::t_3ba19c9cae9bbe 61
+packages/void/src/cli/deploy-setup.ts
+  s_c35072d131d864::t_ca8a433d1b59e3 59
+packages/void/src/cli/deploy.ts
+  s_c35072d131d864::t_214b4a12929899 5905,7485
+packages/void/src/cli/link.ts
+  s_c35072d131d864::t_524b9be1b84a54 39,58-62
+packages/void/src/cli/project.ts
+  s_c35072d131d864::t_04efd78087e6d2 5,9,159,161-163,166-171,174,184
+packages/void/src/index.ts
+  s_c35072d131d864::t_02fb57349236c2 644
+packages/void/test/unit/auth-legacy.test.ts
+  s_c3ea608966c0af::t_28f6fb9eb4bb28 86-88,121-123
+packages/void/test/unit/deploy-project-setup.test.ts
+  s_c35072d131d864::t_a4128815130deb 37
+packages/void/test/unit/link.test.ts
+  s_c35072d131d864::t_2ddb48ba7971ff 42-43
+packages/void/test/unit/project-config.test.ts
+  s_c35072d131d864::t_c05833a6803ea2 245-251,259-265,287-293,301-336
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a603ebac0087d4cc19ae479d40e2032e88c030cc",
+  "prompts": {},
+  "sessions": {
+    "s_c35072d131d864": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f6b-eca9-75b0-8f6e-6855ed4d0777",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_c3ea608966c0af": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f6d-16aa-7512-b26c-e86244285614",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

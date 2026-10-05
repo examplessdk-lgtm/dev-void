@@ -1,0 +1,21 @@
+packages/void/src/cli/platform-cmd.ts
+  s_2b4dac2fa23e9f::t_883a970078891d 3-4,21,23-24
+packages/void/test/unit/platform-connect.test.ts
+  s_2b4dac2fa23e9f::t_6c6519c2f693a1 1,25-30,80-123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "51eebd22e8f1cfc4924a5f80d8cdfea6a1117465",
+  "prompts": {},
+  "sessions": {
+    "s_2b4dac2fa23e9f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a021-aaeb-7f93-83ad-715c95a2a60d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

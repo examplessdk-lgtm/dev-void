@@ -1,0 +1,41 @@
+docs/guide/platform/installation/setup.md
+  s_857317d1a18ebe::t_628ea1a975262b 179-180
+packages/void/src/cli/platform-auth-database.ts
+  s_857317d1a18ebe::t_c14eb7e100d4fc 9-47
+packages/void/src/cli/platform-installer.ts
+  s_857317d1a18ebe::t_f17a59f00a0a0f 133-134,543-545,739-741,1444-1446
+packages/void/src/cli/platform-lifecycle.ts
+  s_857317d1a18ebe::t_4eacc947f39974 12,461-511,530-534,537-547,550-553,562,589,618-632,704,800-803
+packages/void/src/cli/platform-setup-draft.ts
+  s_857317d1a18ebe::t_84f1e229906435 63-68
+packages/void/test/unit/platform-auth-database.test.ts
+  s_857317d1a18ebe::t_66fa68d1ea5459 4,32-46
+packages/void/test/unit/platform-installer.test.ts
+  s_f2487af642ecad::t_53fd37bda81589 4789-4792
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_857317d1a18ebe::t_98dccdd5b5b9f3 6-10,124,258-303,330-464
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dd1a37df1c04d67ea89f54aa7a8260cbe0a7f754",
+  "prompts": {},
+  "sessions": {
+    "s_857317d1a18ebe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fce2-c04a-7d80-92fd-2b136c45faa5",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_f2487af642ecad": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd0b-afe7-7103-9ee1-211112b5f1a6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

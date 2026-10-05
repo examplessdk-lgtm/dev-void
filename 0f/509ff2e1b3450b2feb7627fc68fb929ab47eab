@@ -1,0 +1,25 @@
+docs/guide/platform/installation/setup.md
+  s_d3a659b66468f6::t_3a56b590f23b87 32
+docs/reference/cli.md
+  s_d3a659b66468f6::t_95e9a808a7829c 878
+packages/void/src/cli/platform-lifecycle.ts
+  s_d3a659b66468f6::t_4852e6be9d6f08 583,585-586,605
+packages/void/test/unit/platform-setup-flow.test.ts
+  s_d3a659b66468f6::t_fd0b4f9405df3e 4-5,8,249-251,253-262,282-284,889
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0f509ff2e1b3450b2feb7627fc68fb929ab47eab",
+  "prompts": {},
+  "sessions": {
+    "s_d3a659b66468f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f7cd-1c2d-7d11-a77a-3d3ce37e036d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

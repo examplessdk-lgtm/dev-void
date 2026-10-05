@@ -1,0 +1,31 @@
+packages/void/src/cli/platform-installer.ts
+  s_528adb4caf2cfe::t_6184a2d5b34194 358-371,893-904
+packages/void/src/cli/platform-management.ts
+  s_19c89b6350d7ee::t_1f42a04c679850 301-302,304,308,907-916
+packages/void/test/unit/platform-management.test.ts
+  s_528adb4caf2cfe::t_805ceac80564e4 8,304-337
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3c476dba7898b5e8887b6b1f80ff4f0968fc434e",
+  "prompts": {},
+  "sessions": {
+    "s_19c89b6350d7ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef5-02b4-7302-b8cf-f36a2830eb73",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_528adb4caf2cfe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef4-f8b2-7c43-976b-001af415aac6",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

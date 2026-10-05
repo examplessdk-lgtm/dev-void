@@ -1,0 +1,19 @@
+.github/workflows/publish.yml
+  s_c35072d131d864::t_00cfd51007905f 36-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4ecfece0fd5762fd50da033d9c8aba72e2fc6ea3",
+  "prompts": {},
+  "sessions": {
+    "s_c35072d131d864": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f6b-eca9-75b0-8f6e-6855ed4d0777",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

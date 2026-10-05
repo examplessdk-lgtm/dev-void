@@ -1,0 +1,19 @@
+platform/packages/api/test/integration/db-github-members.test.ts
+  s_b4ffbd6851cc36::t_8e788c5963d464 210-215,219-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "925572c63acff08b5a6b990096ad92fd15fccd21",
+  "prompts": {},
+  "sessions": {
+    "s_b4ffbd6851cc36": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fa9b-4a67-7002-a422-282418e7b851",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

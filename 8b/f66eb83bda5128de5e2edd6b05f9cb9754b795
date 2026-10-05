@@ -1,0 +1,33 @@
+docs/guide/self-hosted-platform.md
+  s_99519f2f391ce2::t_b36b2ab232d108 178-179
+platform/packages/dispatch/README.md
+  s_99519f2f391ce2::t_f815c378a8bd7c 37-42
+platform/packages/dispatch/src/index.ts
+  s_99519f2f391ce2::t_5eafc441e2de24 90,1759-1786
+platform/packages/dispatch/test/unit/index.test.ts
+  s_3a9be47f3fe3fd::t_f0609ae5bfeb9e 6,3756-3759,3765-3774,3777-3778,3781-3782,3784-3785,3790-3888
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8bf66eb83bda5128de5e2edd6b05f9cb9754b795",
+  "prompts": {},
+  "sessions": {
+    "s_3a9be47f3fe3fd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a29a-e027-7be3-acab-1914415eb281",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_99519f2f391ce2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a291-e48e-7d43-a70f-9f0339096aa7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

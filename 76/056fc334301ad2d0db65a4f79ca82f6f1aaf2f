@@ -1,0 +1,21 @@
+packages/void/test/unit/fetch.typecheck.ts
+  s_27b9f31875ecb4::t_d64e73e4017b21 1-28,30-34,36-67
+packages/void/test/unit/validator-real-schemas.typecheck.ts
+  s_27b9f31875ecb4::t_bd76b30b6005f8 1-5,7-11,13-21,24-28,31,33-37,39-47,50-55,57-64,66-74,77-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "76056fc334301ad2d0db65a4f79ca82f6f1aaf2f",
+  "prompts": {},
+  "sessions": {
+    "s_27b9f31875ecb4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10994-58b9-7e32-a14c-3f50bd5578af",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

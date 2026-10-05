@@ -1,0 +1,19 @@
+packages/void/test/integration/native-asset-cache-policy.test.ts
+  s_04e496ba781942::t_9cec7a72bf9920 6,106-117,122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e519f8350ce8cf1a3d374bb6336327d33f18ad89",
+  "prompts": {},
+  "sessions": {
+    "s_04e496ba781942": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9f7-e7e5-7423-b5f5-68eea7153649",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

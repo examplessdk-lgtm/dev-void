@@ -1,0 +1,19 @@
+docs/guide/edge/static-assets.md
+  s_6a47d9031c1157::t_106f666d4ec3db 17,36,63,69,71,73,75-76,78-80,83,85,89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "84f224bb9a4f20b0296ae27b9fcc498a9141b300",
+  "prompts": {},
+  "sessions": {
+    "s_6a47d9031c1157": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99f-31f0-78e3-b5d0-5630084ef63a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

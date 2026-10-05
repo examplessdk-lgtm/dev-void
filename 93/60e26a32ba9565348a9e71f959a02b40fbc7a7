@@ -1,0 +1,53 @@
+README.md
+  s_4cd54230f5823c::t_bde058aa932bac 94
+docs/reference/api/pages.md
+  s_4cd54230f5823c::t_2e58c031c9f65d 238-241
+packages/react/README.md
+  s_4cd54230f5823c::t_b95fe342815fb3 42,113,125,133,219-224
+packages/react/src/runtime/index.ts
+  s_4cd54230f5823c::t_28c0b95ac1a309 1
+packages/solid/README.md
+  s_4cd54230f5823c::t_5c9f059bf33add 40,116-121
+packages/solid/src/runtime/index.ts
+  s_4cd54230f5823c::t_684cbfb6c90ab2 1
+packages/svelte/README.md
+  s_4cd54230f5823c::t_8e2883176a6ee6 40,112-117
+packages/svelte/src/runtime/Form.svelte
+  s_4cd54230f5823c::t_5d17499f5f845e 1-28
+packages/svelte/src/runtime/index.ts
+  s_4cd54230f5823c::t_a439f28c4d451c 1
+packages/void/skills/void/SKILL.md
+  s_4cd54230f5823c::t_52dbf679cb13a9 84-85
+packages/void/src/cli/template.ts
+  s_4cd54230f5823c::t_e591558df13fef 236,244-248,377-378,381,408-411,419,422,446-449,456-457,487-490,494-495,498,525-528
+packages/vue/README.md
+  s_4cd54230f5823c::t_04699841780dcd 39,117-122
+packages/vue/src/runtime/index.ts
+  s_4cd54230f5823c::t_14bb31f59d15c5 1
+playground/react-pages/pages/users/index.tsx
+  s_4cd54230f5823c::t_bd181fe6586166 1,36,56
+playground/solid-pages/pages/users/index.tsx
+  s_4cd54230f5823c::t_22d852a44011eb 1,29,53
+playground/svelte-pages/pages/users/index.svelte
+  s_4cd54230f5823c::t_8400543fb6cab9 2,30,46
+playground/vue-pages/pages/users/index.vue
+  s_4cd54230f5823c::t_888ede2e03c87f 2,25,39
+packages/void/test/unit/inference.test.ts
+  s_4cd54230f5823c::t_c0fb4c88ff57e0 330-334
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9360e26a32ba9565348a9e71f959a02b40fbc7a7",
+  "prompts": {},
+  "sessions": {
+    "s_4cd54230f5823c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fb81-27c4-7c03-8667-fe3aa95ec29e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

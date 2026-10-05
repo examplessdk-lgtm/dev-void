@@ -1,0 +1,51 @@
+docs/guide/edge/static-assets.md
+  s_6a47d9031c1157::t_9e19f207e04b79 34-39
+packages/void/src/client-asset-manifest.ts
+  s_6a47d9031c1157::t_52b22021995a41 1-43
+packages/void/src/plugin-routing.ts
+  s_565d22f42c34d7::t_797d2ea3305488 17,536,542-549,554-567
+packages/void/src/runtime/routing-assets.ts
+  s_14b3de9dcb5198::t_ecbb263bd2220c 12-18
+packages/void/src/runtime/routing-pages.ts
+  s_6a47d9031c1157::t_c42b82ee49902c 5,74,90,125,134,174,181
+packages/void/src/runtime/routing-worker.ts
+  s_6a47d9031c1157::t_de0a11f858af27 2,36,56,70-100,104,117
+packages/void/test/integration/native-asset-cache-policy.test.ts
+  s_6a47d9031c1157::t_b61ab87473ca95 1,8,13-17,23-114,116,124,215,222,224-226,234-243,245
+packages/void/test/integration/typed-routing-runtime.test.ts
+  s_565d22f42c34d7::t_dc5e1db2edae5c 38-47
+packages/void/test/unit/routing-runtime.test.ts
+  s_6a47d9031c1157::t_ff5f7c55b02c70 14,282-283,290,315-317,320-352,354-355,375-385
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e923a584e287252a67d8d7007fbdeb1b083983c9",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_565d22f42c34d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99d-ac7c-7412-9a4c-e169be18bb00",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_6a47d9031c1157": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f99f-31f0-78e3-b5d0-5630084ef63a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

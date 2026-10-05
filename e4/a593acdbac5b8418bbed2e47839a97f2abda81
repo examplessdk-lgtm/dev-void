@@ -1,0 +1,25 @@
+packages/void/test/unit/platform-installer.test.ts
+  s_fe834b00f92102::t_8fac7162df157a 3009-3010,3012,4328,5717
+platform/packages/api/test/integration/api-health.test.ts
+  s_fe834b00f92102::t_7c1a1c121fd3c8 1,114,145
+platform/packages/api/test/integration/operator-auth.test.ts
+  s_fe834b00f92102::t_a4cbb7bb79b763 24,163,251
+platform/packages/api/test/integration/operator-operations.test.ts
+  s_fe834b00f92102::t_edc1d7abac1e7b 1,17,52,931,979,982
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e4a593acdbac5b8418bbed2e47839a97f2abda81",
+  "prompts": {},
+  "sessions": {
+    "s_fe834b00f92102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f81c-d441-7101-9b29-8192255330e8",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

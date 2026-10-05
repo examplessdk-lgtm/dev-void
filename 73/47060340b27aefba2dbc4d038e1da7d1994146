@@ -1,0 +1,19 @@
+packages/void/src/cli/platform-recovery.ts
+  s_da445b56921f5b::t_97cb29a86a9ea4 10,106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7347060340b27aefba2dbc4d038e1da7d1994146",
+  "prompts": {},
+  "sessions": {
+    "s_da445b56921f5b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09efa-680f-7542-8617-f8711bc167ca",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

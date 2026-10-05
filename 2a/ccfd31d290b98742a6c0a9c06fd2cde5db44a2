@@ -1,0 +1,19 @@
+docs/guide/pages-routing/overview.md
+  s_14b3de9dcb5198::t_9374cf32baaf3b 89,107,175,202,228,231,234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2accfd31d290b98742a6c0a9c06fd2cde5db44a2",
+  "prompts": {},
+  "sessions": {
+    "s_14b3de9dcb5198": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f9de-e1da-7780-8080-22dc75662f80",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

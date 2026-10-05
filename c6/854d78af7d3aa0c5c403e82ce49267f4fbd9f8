@@ -1,0 +1,35 @@
+packages/void/src/cli/platform-installer.ts
+  s_c98bda2abc43fb::t_1e5cbf8bda7283 35,78,96-99,129,278,486,494-527
+packages/void/src/cli/platform-lifecycle.ts
+  s_c98bda2abc43fb::t_01669077379fbb 6-10,143-150,152-153
+packages/void/src/cli/platform-management.ts
+  s_c98bda2abc43fb::t_66af10dbcdc0e9 13,92-97,99-100
+packages/void/test/unit/platform-installer.test.ts
+  s_c98bda2abc43fb::t_29aa8abb6ffbc5 8,46-56,86,140,173,243
+platform/packages/api/src/db.ts
+  s_c98bda2abc43fb::t_d14a52b681e8b6 117,128-129
+platform/packages/api/src/env.ts
+  s_c98bda2abc43fb::t_22da80c10a7c75 138
+platform/packages/api/src/routes/auth.ts
+  s_c98bda2abc43fb::t_0d82c71b79e4ff 398
+platform/packages/api/test/integration/db-first-admin.test.ts
+  s_c98bda2abc43fb::t_af68e422993ec8 30,49,61,67-94
+platform/packages/api/test/integration/helpers.ts
+  s_c98bda2abc43fb::t_0f522ec5da51cc 76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c6854d78af7d3aa0c5c403e82ce49267f4fbd9f8",
+  "prompts": {},
+  "sessions": {
+    "s_c98bda2abc43fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ecd-66db-75a2-aa2b-15752d45cf9a",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

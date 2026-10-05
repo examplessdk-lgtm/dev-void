@@ -1,0 +1,29 @@
+packages/void/src/cli/help.ts
+  s_0bff88b5d095fe::t_902bf71181d75d 135-141,699-702,705
+packages/void/test/unit/cli-help.test.ts
+  s_2d485a6fba4912::t_49ce7615c97134 1-8,11-14,82-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "acf6f83ca7fca89fc965d17e1d1c02f86c81cfab",
+  "prompts": {},
+  "sessions": {
+    "s_0bff88b5d095fe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f7c-147a-7980-b506-20c1bd6c3991",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_2d485a6fba4912": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f76-c615-7263-9395-55200a0f9526",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
