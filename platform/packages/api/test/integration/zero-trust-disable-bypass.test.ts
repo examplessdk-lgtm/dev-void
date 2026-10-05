@@ -228,7 +228,9 @@ describe('Zero Trust disable public bypass lifecycle', () => {
         bypass_application_name: null,
       });
     }
-  }, 10_000);
+    // 101 projects take about 1.5s alone but more than 10s while the full
+    // suite shares the machine with other test runs.
+  }, 30_000);
 
   it('keeps the public exception usable when wildcard deletion fails', async () => {
     const owner = await createTestUser(env.db, 'wildcard-failure-owner');
