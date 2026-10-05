@@ -3222,6 +3222,38 @@ describe('ISR JSON edge cache (pages protocol)', () => {
     expect(await navigation.json()).toEqual(JSON.parse(pageData));
   });
 
+  it('serves the edge copies written on a miss as HIT for HTML and pages requests', async () => {
+    const { env, workerFetch } = createEnv({
+      routing: isrRouting,
+      workerResponse: new Response(pageHtml(), {
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    });
+
+    const ctx = createCtx();
+    const first = await app.fetch(new Request('https://my-app.void.app/dashboard'), env, ctx);
+    expect(first.headers.get('x-isr-cache')).toBe('MISS');
+    await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
+
+    // No edge cache reset: both follow-up requests are served from the edge copy.
+    const html = await app.fetch(
+      new Request('https://my-app.void.app/dashboard'),
+      env,
+      createCtx(),
+    );
+    expect(html.headers.get('x-isr-cache')).toBe('HIT');
+    expect(await html.text()).toBe(pageHtml());
+
+    const json = await app.fetch(
+      new Request('https://my-app.void.app/dashboard', { headers: { 'X-VoidPages': 'true' } }),
+      env,
+      createCtx(),
+    );
+    expect(json.headers.get('x-isr-cache')).toBe('HIT');
+    expect(await json.json()).toEqual(JSON.parse(pageData));
+    expect(workerFetch).toHaveBeenCalledOnce();
+  });
+
   it('background revalidation populates JSON edge cache', async () => {
     const { env, workerFetch } = createEnv({
       routing: isrRouting,

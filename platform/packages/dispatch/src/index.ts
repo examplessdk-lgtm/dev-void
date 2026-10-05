@@ -1415,7 +1415,7 @@ export default {
               ),
             );
             ctx.waitUntil(
-              populateJsonEdgeCache(cache, jsonCacheKeyForWrite, workerResponse, ttl, 'MISS'),
+              populateJsonEdgeCache(cache, jsonCacheKeyForWrite, workerResponse, ttl, 'HIT'),
             );
             const cacheHeaders = new Headers(workerResponse.headers);
             cacheHeaders.set(
@@ -1426,9 +1426,13 @@ export default {
             markSharedCachePolicy(cacheHeaders);
             cacheHeaders.delete('x-void-page-data');
             cacheHeaders.delete('set-cookie');
+            // Later requests read this copy from the edge, so it is stored as a HIT;
+            // only this client response reports the MISS.
+            const edgeHeaders = new Headers(cacheHeaders);
+            edgeHeaders.set('x-isr-cache', 'HIT');
             const cacheResponse = new Response(workerResponse.clone().body, {
               status: workerResponse.status,
-              headers: cacheHeaders,
+              headers: edgeHeaders,
             });
             ctx.waitUntil(cache.put(cacheKeyForWrite, cacheResponse.clone()));
 
@@ -1885,7 +1889,7 @@ export default {
             originalUrlVariant,
           );
           ctx.waitUntil(
-            populateJsonEdgeCache(applicationEdgeCache, jsonCacheKey, response, isrTtl, 'MISS'),
+            populateJsonEdgeCache(applicationEdgeCache, jsonCacheKey, response, isrTtl, 'HIT'),
           );
         }
       }
