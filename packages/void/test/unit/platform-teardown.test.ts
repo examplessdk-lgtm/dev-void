@@ -18,7 +18,10 @@ import {
 } from '@void/platform';
 import { log, note } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { PlatformCloudflareApiError } from '../../src/cli/platform-cloudflare.ts';
+import {
+  PlatformCloudflareApiError,
+  PlatformCloudflareClient,
+} from '../../src/cli/platform-cloudflare.ts';
 import { uninstallPlatform } from '../../src/cli/platform-management.ts';
 import {
   listInstallationManifests,
@@ -683,6 +686,36 @@ describe('uninstall --purge-all', () => {
       'The external PostgreSQL database and its data.',
     ]);
     expect(kept).not.toContain('access-app');
+  });
+
+  it('detaches queue consumers that Cloudflare names by script_name before deleting their Workers', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    // Answer with the documented consumer shape, read by the real client.
+    fake.listQueueConsumers = async (account: string, queue: string) => [
+      ...(await new PlatformCloudflareClient('token', {
+        fetcher: async () =>
+          Response.json({
+            success: true,
+            result: (fake.live.consumers.get(queue) ?? []).map((entry) =>
+              entry.script === null
+                ? { consumer_id: entry.id, type: 'http_pull' }
+                : { consumer_id: entry.id, script_name: entry.script, type: 'worker' },
+            ),
+          }),
+      }).listQueueConsumers(account, queue)),
+    ];
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(fake.live.consumers.get('cron-id')).toEqual([]);
+    expect(fake.live.consumers.get('usage-id')).toEqual([
+      { id: 'foreign-consumer', script: 'someone-else' },
+    ]);
+    expect(fake.calls).toContain('DELETE queue-consumer cron-id cron-consumer');
+    expect(fake.calls).toContain('DELETE queue-consumer usage-id usage-consumer');
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
   it('resumes after a failure without repeating finished deletions', async () => {

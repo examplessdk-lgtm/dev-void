@@ -94,7 +94,7 @@ export type CloudflareWorkerServiceRoute = Readonly<{
 }>;
 export type CloudflareQueueConsumer = Readonly<{
   id: string;
-  /** Worker that consumes the Queue; null for an HTTP pull consumer. */
+  /** Worker that consumes the Queue (`script_name`); null for an HTTP pull consumer. */
   script: string | null;
 }>;
 export type PlatformAccessResourceKind = 'application' | 'service-token';
@@ -1132,12 +1132,16 @@ export class PlatformCloudflareClient {
     );
     return result.map((entry) => ({
       id: requiredString(entry.consumer_id, 'Queue consumer id'),
+      // The API documents `script_name`; Wrangler still reads `script` and
+      // `service`. A Worker consumer without a name would keep its Worker
+      // and Queue from being deleted, so refuse it instead of skipping it.
       script:
-        typeof entry.script === 'string'
-          ? entry.script
-          : typeof entry.service === 'string'
-            ? entry.service
-            : null,
+        entry.type === 'http_pull'
+          ? null
+          : requiredString(
+              entry.script_name ?? entry.script ?? entry.service,
+              'Queue consumer Worker name',
+            ),
     }));
   }
 

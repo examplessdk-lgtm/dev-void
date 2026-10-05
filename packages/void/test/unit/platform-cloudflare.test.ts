@@ -934,9 +934,20 @@ describe('platform Cloudflare client', () => {
           return Response.json({
             success: true,
             result: [
-              { consumer_id: 'c1', script: 'void-team-api', type: 'worker' },
-              { consumer_id: 'c2', service: 'other', type: 'worker' },
-              { consumer_id: 'c3', type: 'http_pull' },
+              {
+                consumer_id: 'c1',
+                queue_name: 'void-team-usage',
+                script_name: 'void-team-api',
+                settings: { batch_size: 10 },
+                type: 'worker',
+              },
+              {
+                consumer_id: 'c2',
+                queue_name: 'void-team-usage',
+                script_name: 'other',
+                type: 'worker',
+              },
+              { consumer_id: 'c3', queue_name: 'void-team-usage', type: 'http_pull' },
             ],
           });
         }
@@ -993,6 +1004,27 @@ describe('platform Cloudflare client', () => {
       'DELETE /client/v4/accounts/account/access/service_tokens/token-id',
     ]);
     expect(requests.some((request) => request.includes('force'))).toBe(false);
+  });
+
+  it('reads a queue consumer Worker from script_name and refuses a Worker consumer without one', async () => {
+    const respond = (rows: ReadonlyArray<Record<string, unknown>>) =>
+      new PlatformCloudflareClient('token', {
+        fetcher: async () => Response.json({ success: true, result: rows }),
+      }).listQueueConsumers('account', 'queue-id');
+
+    // Wrangler still reads these older names for the same Worker.
+    await expect(
+      respond([
+        { consumer_id: 'c1', script: 'void-team-api', type: 'worker' },
+        { consumer_id: 'c2', service: 'other', type: 'worker' },
+      ]),
+    ).resolves.toEqual([
+      { id: 'c1', script: 'void-team-api' },
+      { id: 'c2', script: 'other' },
+    ]);
+    await expect(respond([{ consumer_id: 'c1', type: 'worker' }])).rejects.toThrow(
+      'platform: Queue consumer Worker name is missing from the Cloudflare response.',
+    );
   });
 
   it('reads and detaches Email Routing rules through the documented endpoints', async () => {
