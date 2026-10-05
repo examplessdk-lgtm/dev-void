@@ -6358,7 +6358,13 @@ describe('platform installer', () => {
     expect(retryPreviousConfigs.slice(0, 5).every((config) => config.workers_dev === false)).toBe(
       true,
     );
-    expect(retryPreviousConfigs.slice(5).every((config) => config.workers_dev === true)).toBe(true);
+    expect(
+      retryPreviousConfigs
+        .slice(5)
+        .every(
+          (config) => config.workers_dev === (config.name !== deployment.resources.tailWorker),
+        ),
+    ).toBe(true);
     expect(
       retryPreviousConfigs
         .slice(5)
@@ -6402,8 +6408,11 @@ describe('platform installer', () => {
       expect((config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE).not.toBe('enabled');
     }
     for (const config of enabledConfigs.slice(5)) {
-      expect(config.workers_dev).toBe(true);
-      expect(config.preview_urls).toBe(config.name !== deployment.resources.emailGatewayWorker);
+      expect(config.workers_dev).toBe(config.name !== deployment.resources.tailWorker);
+      expect(config.preview_urls).toBe(
+        config.name !== deployment.resources.emailGatewayWorker &&
+          config.name !== deployment.resources.tailWorker,
+      );
       if (!String(config.name).endsWith('-tail')) {
         expect((config.vars as Record<string, unknown>).PLATFORM_TRAFFIC_STATE).toBe('enabled');
       }

@@ -261,6 +261,9 @@ export function createPlatformWorkerConfigs(input: {
     },
     tail: {
       ...common,
+      // The tail worker only receives trace events from the dispatch worker.
+      workers_dev: false,
+      preview_urls: false,
       name: names.tailWorker,
       main: runtimeEntrypoints.tail,
       no_bundle: true,

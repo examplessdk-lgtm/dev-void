@@ -111,6 +111,17 @@ it.each([
   },
 );
 
+it('requires trigger publication to disable a workers.dev subdomain that is still enabled', async () => {
+  expect(
+    await platformWorkerLiveTriggersMatch({
+      accountId: 'account',
+      workerName: 'test-worker',
+      desired: { ...desired, workers_dev: false },
+      readCloudflare: liveProof().readCloudflare,
+    }),
+  ).toBe(false);
+});
+
 it('requires normal trigger publication for unsupported Email Routing and Workflow triggers', async () => {
   const live = liveProof();
   expect(

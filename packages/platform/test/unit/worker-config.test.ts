@@ -285,6 +285,45 @@ describe('platform usage queue bindings', () => {
     expect(configs.tail.queues).toBeUndefined();
   });
 
+  it('keeps the tail worker off workers.dev and preview URLs when endpoints are public', () => {
+    const deployment = createPlatformDeploymentManifest({
+      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+      displayName: 'Example',
+      installationSlug: 'example',
+    });
+    const configs = createPlatformWorkerConfigs({
+      accountId: 'account',
+      apiUrl: 'https://api.account.workers.dev',
+      deployment,
+      healthProbeToken: 'probe',
+      installationId: 'installation',
+      ownershipNonce: 'ownership',
+      platformVersion: '1.0.0',
+      proxyUrl: 'https://proxy.account.workers.dev',
+      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
+      publicEndpoints: true,
+      trafficState: 'enabled',
+      resources: {
+        hyperdrive: 'hyperdrive-id',
+        isrCacheKv: 'isr-id',
+        legacyAssetsKv: 'assets-id',
+        routingKv: 'routing-id',
+        zone: 'zone-id',
+      },
+      runtimeEntrypoints: {
+        api: 'api.mjs',
+        dispatch: 'dispatch.mjs',
+        proxy: 'proxy.mjs',
+        emailGateway: 'email-gateway.mjs',
+        tail: 'tail.mjs',
+      },
+    });
+
+    expect(configs.api.workers_dev).toBe(true);
+    expect(configs.tail.workers_dev).toBe(false);
+    expect(configs.tail.preview_urls).toBe(false);
+  });
+
   it('creates core Durable Objects with SQLite while preserving migration tags', () => {
     const deployment = createPlatformDeploymentManifest({
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
