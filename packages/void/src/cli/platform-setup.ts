@@ -86,6 +86,15 @@ function platformAccountTokenPermissions(includeAiGateway: boolean) {
   ];
 }
 
+/**
+ * Account token links cannot preselect a zone: Cloudflare documents only
+ * `permissionGroupKeys` and `name`, and the form puts zone permissions in an
+ * "All Domains" policy. Tell the user which dashboard choice to change.
+ */
+function specifiedDomainsInstruction(zones: Array<string>): string {
+  return `Change the zone policy from All Domains to Specified Domains → ${zones.join(' and ')}.`;
+}
+
 export function platformManagementSetupPage(
   plan: PlatformInstallPlan,
   options: { access?: PlatformManagementAccess | false } = {},
@@ -101,6 +110,12 @@ export function platformManagementSetupPage(
     plan.deployment.authentication.providers.includes('cloudflare-access')
       ? { protection: !!plan.deployment.authentication.accessProtection, readOnly: false }
       : undefined);
+  const zones = [
+    ...(zoneName ? [zoneName] : []),
+    ...(apiHostname && apiHostname !== zoneName && !apiHostname.endsWith(`.${zoneName}`)
+      ? [`the zone for ${apiHostname}`]
+      : []),
+  ];
   const accessLevel = access && access.readOnly ? 'read' : 'edit';
   const appAccess = !!plan.deployment.appAccess;
   const appAccessLevel = appAccess ? 'edit' : accessLevel;
@@ -138,10 +153,12 @@ export function platformManagementSetupPage(
       }),
     instructions: [
       'This token lets the Void CLI install your platform. Void will now open a pre-configured token creation site. Please review the permissions and then paste the token here.',
-      `Scope it to ${plan.account.name}${createsZone ? '; allow zone creation.' : zoneName ? ` and zone ${zoneName}.` : '.'}`,
-      ...(apiHostname && apiHostname !== zoneName && !apiHostname.endsWith(`.${zoneName}`)
-        ? [`Also include the zone for ${apiHostname}.`]
-        : []),
+      `Scope it to ${plan.account.name}.`,
+      ...(createsZone
+        ? [`Keep the zone policy on All Domains so Void can create ${zoneName}.`]
+        : zones.length
+          ? [specifiedDomainsInstruction(zones)]
+          : []),
     ].join('\n'),
   };
 }
@@ -171,6 +188,7 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
         ]
       : []),
   ];
+  const zoneName = plan.deployment.application.zoneName;
   const query = new URLSearchParams({
     to: '/' + plan.account.id + '/api-tokens',
     name: plan.deployment.displayName + ' Runtime',
@@ -181,8 +199,17 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
       title: 'Cloudflare runtime token',
       linkInTitle: true,
       url: 'https://dash.cloudflare.com/?' + query,
-      instructions:
+      instructions: [
         'Create a Cloudflare runtime token that Void can use to manage the platform. Please review the permissions and then paste the token here.',
+        ...(zoneName
+          ? [
+              specifiedDomainsInstruction([
+                zoneName,
+                ...(plan.deployment.capabilities.email ? ['every zone that will carry mail'] : []),
+              ]),
+            ]
+          : []),
+      ].join('\n'),
     },
     github: {
       title: 'GitHub OAuth App',

@@ -125,7 +125,11 @@ describe('platform credential setup links', () => {
       permissions.some(({ key }: { key: string }) => ['cache', 'account_api_tokens'].includes(key)),
     ).toBe(false);
     expect(page.instructions).toBe(
-      'This token lets the Void CLI install your platform. Void will now open a pre-configured token creation site. Please review the permissions and then paste the token here.\nScope it to Account and zone example.com.',
+      [
+        'This token lets the Void CLI install your platform. Void will now open a pre-configured token creation site. Please review the permissions and then paste the token here.',
+        'Scope it to Account.',
+        'Change the zone policy from All Domains to Specified Domains → example.com.',
+      ].join('\n'),
     );
     const createZone = platformManagementSetupPage({
       ...original,
@@ -143,7 +147,10 @@ describe('platform credential setup links', () => {
     expect(
       JSON.parse(new URL(createZone.url).searchParams.get('permissionGroupKeys')!),
     ).toContainEqual({ key: 'zone', type: 'edit' });
-    expect(createZone.instructions).toContain('allow zone creation');
+    expect(createZone.instructions).toContain(
+      'Keep the zone policy on All Domains so Void can create example.com.',
+    );
+    expect(createZone.instructions).not.toContain('Specified Domains');
     const separateApi = platformManagementSetupPage({
       ...original,
       deployment: {
@@ -151,7 +158,26 @@ describe('platform credential setup links', () => {
         controlPlane: { ...original.deployment.controlPlane, apiHostname: 'api.company.net' },
       },
     });
-    expect(separateApi.instructions).toContain('Also include the zone for api.company.net.');
+    expect(separateApi.instructions).toContain(
+      'Change the zone policy from All Domains to Specified Domains → example.com and the zone for api.company.net.',
+    );
+    const workersDevApi = platformManagementSetupPage({
+      ...plan(),
+      deployment: {
+        ...plan().deployment,
+        controlPlane: { ...plan().deployment.controlPlane, apiHostname: 'api.company.net' },
+      },
+    });
+    expect(workersDevApi.instructions).toContain(
+      'Change the zone policy from All Domains to Specified Domains → the zone for api.company.net.',
+    );
+  });
+  it('cannot preselect a zone in the account token link, so it names the dashboard change', () => {
+    // Account token template links accept only permissionGroupKeys and name.
+    const url = new URL(platformManagementSetupPage(plan('example.com')).url);
+    expect([...url.searchParams.keys()]).toEqual(['to', 'name', 'permissionGroupKeys']);
+    const runtime = new URL(platformSetupPages(plan('example.com')).runtime.url);
+    expect([...runtime.searchParams.keys()]).toEqual(['to', 'name', 'permissionGroupKeys']);
   });
 
   it('round-trips planned defaults, Hyperdrive, dashboard, and login choices into install arguments', () => {
@@ -380,6 +406,23 @@ describe('platform credential setup links', () => {
       key: 'cache',
       type: 'purge',
     });
+    expect(page.instructions).toBe(
+      [
+        'Create a Cloudflare runtime token that Void can use to manage the platform. Please review the permissions and then paste the token here.',
+        'Change the zone policy from All Domains to Specified Domains → example.com.',
+      ].join('\n'),
+    );
+    const original = plan('example.com');
+    const withEmail = platformSetupPages({
+      ...original,
+      deployment: {
+        ...original.deployment,
+        capabilities: { ...original.deployment.capabilities, email: true },
+      },
+    }).runtime;
+    expect(withEmail.instructions).toContain(
+      'Change the zone policy from All Domains to Specified Domains → example.com and every zone that will carry mail.',
+    );
   });
   it('opens only in interactive mode and retains a manual link if opening fails', () => {
     const open = vi.fn(() => {
