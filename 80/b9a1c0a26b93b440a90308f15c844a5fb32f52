@@ -1,0 +1,27 @@
+docs/guide/ai.md
+  s_3dca312de99340::t_42c7f39da89285 7,9,11,13-16,18-21,23-24,45-46,68-69,120,239-241
+docs/guide/database/d1.md
+  s_3dca312de99340::t_a9b82bf292ae96 41-46
+docs/guide/pages-routing/actions-and-forms.md
+  s_3dca312de99340::t_8164b5dd911626 34,174-216,270-273
+docs/guide/sandboxes.md
+  s_3dca312de99340::t_6dc7f4393badbb 9-14,32,79-86,88-110
+docs/reference/api/resources.md
+  s_3dca312de99340::t_e15415230375fb 73-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "80b9a1c0a26b93b440a90308f15c844a5fb32f52",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
