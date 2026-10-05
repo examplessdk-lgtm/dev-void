@@ -115,15 +115,15 @@ dashboard origin before maintenance can proceed. See [Optional Dashboard](../../
 
 After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. An upgrade that preserves every deployed Worker also preserves its secrets. For an email-enabled installation without its encrypted recovery file, restore `VOID_PLATFORM_EMAIL_SIGNING_SECRET`; recreating only the email gateway needs that key and does not need the Cloudflare runtime token or JWT signing key. Recreating the API or proxy also requires the email key when email is enabled, in addition to their normal secrets. Recreating the API requires its original runtime-token, GitHub, R2, JWT, and project-encryption values; recreating the proxy requires the runtime token and JWT signing key.
 
-| Command     | Behavior                                                                                      |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| `discover`  | Verifies remote ownership and restores local installation records without downloading secrets |
-| `repair`    | Recreates missing resources owned by the installer                                            |
-| `upgrade`   | Deploys the selected runtime and supported pending migrations                                 |
-| `rollback`  | Restores a declared-compatible earlier runtime without reversing PostgreSQL migrations        |
-| `disable`   | Blocks platform traffic through routing storage without removing data                         |
-| `enable`    | Restores traffic after checking the platform                                                  |
-| `uninstall` | Blocks traffic and removes eligible resources, retaining data by default                      |
+| Command     | Behavior                                                                                                    |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `discover`  | Verifies remote ownership and restores local installation records without downloading secrets               |
+| `repair`    | Recreates missing resources owned by the installer                                                          |
+| `upgrade`   | Deploys the selected runtime and supported pending migrations                                               |
+| `rollback`  | Restores a declared-compatible earlier runtime without reversing PostgreSQL migrations                      |
+| `disable`   | Blocks app traffic and the platform API without removing data; only admin status and sign-in stay available |
+| `enable`    | Redeploys and verifies the platform Workers, then restores traffic                                          |
+| `uninstall` | Blocks traffic and removes eligible resources, retaining data by default                                    |
 
 Repair and upgrade preserve disabled state. New, resumed, and previously disabled installations block user traffic until all target Workers pass verification; the installer's health probes can still run. Routes and custom domains remain attached.
 

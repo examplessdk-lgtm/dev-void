@@ -11,7 +11,9 @@ void platform disable [id] --plan
 void platform disable [id]
 ```
 
-Disabled platforms reject application traffic while retaining domains and routes. Repair and upgrade preserve that state. Restore traffic with:
+Disabled platforms reject application traffic while retaining domains and routes. The platform API also rejects requests, so CLI commands that use it, including login and deploy, fail until you enable the platform again. Only the administrator status page at `<api-url>/admin/status` and administrator sign-in stay available. Repair and upgrade preserve that state.
+
+Enabling redeploys the platform Workers from the selected runtime, verifies them, and then restores traffic. Pass `--runtime <path>` to enable with a custom platform build:
 
 ```sh
 void platform enable [id] --plan
