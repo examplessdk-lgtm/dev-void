@@ -1104,7 +1104,7 @@ export async function uninstallPlatform(
         await writeLifecycleCheckpoint(client, next);
         continue;
       }
-      await client.deleteResource(next.account.id, resource.kind, resource.id, zone?.id);
+      await client.deleteResource(next.account.id, resource, zone?.id);
       next = updateResourceState(next, resource.key, 'deleted');
       await writeLifecycleCheckpoint(client, next);
     }

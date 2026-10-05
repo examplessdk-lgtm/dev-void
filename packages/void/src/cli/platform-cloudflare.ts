@@ -1023,12 +1023,13 @@ export class PlatformCloudflareClient {
 
   async deleteResource(
     accountId: string,
-    kind: string,
-    id: string,
+    resource: Readonly<{ id: string; kind: string; name: string }>,
     zoneId?: string,
   ): Promise<void> {
+    const { kind } = resource;
     const account = encodeURIComponent(accountId);
-    const encoded = encodeURIComponent(id);
+    // Cloudflare addresses dispatch namespaces by name; every other kind by id.
+    const encoded = encodeURIComponent(kind === 'dispatch-namespace' ? resource.name : resource.id);
     const path =
       kind === 'kv-namespace'
         ? `/accounts/${account}/storage/kv/namespaces/${encoded}`

@@ -164,7 +164,10 @@ function client(manifest: PlatformInstallationManifest) {
     get removedRoutes() {
       return removedRoutes;
     },
-    deleteResource: async (_account: string, kind: string, id: string): Promise<void> => {
+    deleteResource: async (
+      _account: string,
+      { id, kind }: Readonly<{ id: string; kind: string; name: string }>,
+    ): Promise<void> => {
       // Like Cloudflare, refuse to delete a Queue while a platform Worker
       // still binds it.
       const bindingWorker = (await fake.listWorkerNames())[0];
@@ -1509,11 +1512,11 @@ describe('platform lifecycle management', () => {
     persist(manifest);
     const first = client(manifest);
     const originalDelete = first.deleteResource;
-    first.deleteResource = async (account, kind, id) => {
-      if (kind === 'dispatch-namespace') {
+    first.deleteResource = async (account, resource) => {
+      if (resource.kind === 'dispatch-namespace') {
         throw new Error('temporary deletion failure');
       }
-      await originalDelete(account, kind, id);
+      await originalDelete(account, resource);
     };
     await expect(
       uninstallPlatform(
@@ -1620,9 +1623,9 @@ describe('platform lifecycle management', () => {
     persist(manifest);
     const first = client(manifest);
     const originalDelete = first.deleteResource;
-    first.deleteResource = async (account, kind, id) => {
-      await originalDelete(account, kind, id);
-      if (kind === 'kv-namespace' && id === 'routing-kv-id') {
+    first.deleteResource = async (account, resource) => {
+      await originalDelete(account, resource);
+      if (resource.kind === 'kv-namespace' && resource.id === 'routing-kv-id') {
         throw new Error('connection closed after routing deletion');
       }
     };

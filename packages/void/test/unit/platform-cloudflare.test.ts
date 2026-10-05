@@ -881,6 +881,32 @@ describe('platform Cloudflare client', () => {
     expect(deleted).toEqual([['a.txt', 'b.txt'], ['nested/c.txt']]);
   });
 
+  it('deletes a dispatch namespace by its name, not its id', async () => {
+    const requests: Array<{ method: string; pathname: string }> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        requests.push({
+          method: init?.method ?? 'GET',
+          pathname: new URL(String(input)).pathname,
+        });
+        return Response.json({ success: true, result: null });
+      },
+    });
+
+    await client.deleteResource('account', {
+      id: '5f2f1fa4-9a2f-4f4f-9713-9c27b6a1dd7f',
+      kind: 'dispatch-namespace',
+      name: 'void-team-users',
+    });
+
+    expect(requests).toEqual([
+      {
+        method: 'DELETE',
+        pathname: '/client/v4/accounts/account/workers/dispatch/namespaces/void-team-users',
+      },
+    ]);
+  });
+
   it('uses the documented AI Gateway lifecycle endpoints and creation shape', async () => {
     const requests: Array<{ body: unknown; method: string; pathname: string }> = [];
     const client = new PlatformCloudflareClient('token', {
@@ -908,7 +934,11 @@ describe('platform Cloudflare client', () => {
       id: 'void-team',
       name: 'void-team',
     });
-    await client.deleteResource('account', 'ai-gateway', 'void-team');
+    await client.deleteResource('account', {
+      id: 'void-team',
+      kind: 'ai-gateway',
+      name: 'void-team',
+    });
 
     expect(requests).toEqual([
       {
@@ -963,7 +993,11 @@ describe('platform Cloudflare client', () => {
 
     await expect(client.listDnsRecords('zone-id', '*.apps.example.com')).resolves.toEqual([dns]);
     await expect(client.createDnsRecord('zone-id', '*.apps.example.com')).resolves.toEqual(dns);
-    await client.deleteResource('account', 'dns-record', 'dns-id', 'zone-id');
+    await client.deleteResource(
+      'account',
+      { id: 'dns-id', kind: 'dns-record', name: '*.apps.example.com' },
+      'zone-id',
+    );
 
     expect(requests).toEqual([
       { body: null, method: 'GET', pathname: '/client/v4/zones/zone-id/dns_records' },
