@@ -121,6 +121,32 @@ describe('applyDeployEvent', () => {
     expect(calls.message).toHaveLength(0);
   });
 
+  it('logs migration_warning above the spinner so it stays visible after deploy', async () => {
+    const { spinner, calls } = createMockSpinner();
+    const { log } = await import('@voidzero-dev/vite-plus-prompts');
+    const warnSpy = log.warn as ReturnType<typeof vi.fn>;
+    warnSpy.mockClear();
+
+    const result = applyDeployEvent(
+      { event: 'migration_warning', message: 'Migration 0002 was edited after apply' },
+      spinner,
+    );
+
+    expect(result).toEqual({ kind: 'continue' });
+    expect(warnSpy).toHaveBeenCalledExactlyOnceWith('Migration 0002 was edited after apply');
+    expect(calls.message).toHaveLength(0);
+  });
+
+  it('describes migration_start as checking bundled migrations, not running them', () => {
+    const { spinner, calls } = createMockSpinner();
+    applyDeployEvent({ event: 'migration_start', pending: 1 }, spinner);
+    applyDeployEvent({ event: 'migration_start', pending: 3 }, spinner);
+    expect(calls.message).toEqual([
+      'Checking 1 bundled migration...',
+      'Checking 3 bundled migrations...',
+    ]);
+  });
+
   it('returns {kind:"start"} with deploymentId so the caller can capture it', () => {
     const { spinner } = createMockSpinner();
     const result = applyDeployEvent(

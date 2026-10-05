@@ -47,7 +47,14 @@ export function applyDeployEvent(event: DeployEvent, s: SpinnerResult): ApplyDep
       s.message('Waiting for worker to become reachable...');
       return { kind: 'continue' };
     case 'migration_start':
-      s.message(`Running ${event.pending} migration${event.pending > 1 ? 's' : ''}...`);
+      // `pending` counts every migration bundled with the build; the server
+      // only learns which are unapplied while running them.
+      s.message(`Checking ${event.pending} bundled migration${event.pending === 1 ? '' : 's'}...`);
+      return { kind: 'continue' };
+    case 'migration_warning':
+      // log.warn persists above the spinner; a spinner message would be
+      // overwritten by the next event.
+      log.warn(event.message);
       return { kind: 'continue' };
     case 'migration':
       s.message(`Applied migration: ${event.name} (${event.durationMs}ms)`);
