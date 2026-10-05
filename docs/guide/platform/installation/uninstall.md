@@ -31,7 +31,7 @@ void platform uninstall [id] --plan
 void platform uninstall [id]
 ```
 
-Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and records the resources left for you to review. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, zones, DNS records, routes, custom domains, and Cloudflare Access resources are always retained.
+Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and lists the resources left for you to review. `--plan` shows the same list before any change. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, zones, DNS records, routes, custom domains, and Cloudflare Access resources are always retained.
 
 To also remove eligible data resources owned by the installer:
 

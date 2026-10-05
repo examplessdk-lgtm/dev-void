@@ -11,6 +11,7 @@ import {
   setInstallationDesiredState,
   transitionInstallation,
   type InstallationResource,
+  type InstallationResourceKind,
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { confirm, isCancel, log, note, outro, select } from '@voidzero-dev/vite-plus-prompts';
@@ -49,6 +50,7 @@ import {
 } from './platform-plan.ts';
 import {
   acquirePlatformLifecycleLock,
+  installationManifestPath,
   listInstallationManifests,
   readInstallationRecoverySecrets,
   removeInstallationRecoverySecrets,
@@ -894,7 +896,14 @@ export async function uninstallPlatform(
       createdZone
         ? `Keep zone ${createdZone.name} for explicit manual cleanup.`
         : 'Never delete the adopted application zone.'
-    }${(manifest.authenticationResources ?? []).length ? '\nRetain Access resources for deliberate cleanup:\n' + manifest.authenticationResources!.map((resource) => `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`).join('\n') : ''}`,
+    }${describeKeptResources(
+      manifest,
+      plannedKeptResources(manifest, retainData, hasRoutingCheckpoint),
+      'Keep for manual cleanup:',
+      'Retain Access resources for deliberate cleanup:',
+    )
+      .map((line) => `\n${line}`)
+      .join('')}`,
     'Uninstall plan',
   );
   if (args.plan) {
@@ -1077,7 +1086,13 @@ export async function uninstallPlatform(
         continue;
       }
       if (!shouldDeleteResource(resource, retainData)) {
-        next = updateResourceState(next, resource.key, 'retained');
+        // AI Gateway is never deleted, but one already removed in Cloudflare
+        // is not left behind, so record it like other missing resources.
+        const removed =
+          resource.kind === 'ai-gateway' &&
+          resource.ownership === 'created' &&
+          !hasNamedResource(await client.listAiGateways(next.account.id), resource);
+        next = updateResourceState(next, resource.key, removed ? 'deleted' : 'retained');
         await writeLifecycleCheckpoint(client, next);
         continue;
       }
@@ -1116,10 +1131,17 @@ export async function uninstallPlatform(
       removeInstallationRecoverySecrets(next);
     }
     removePlatformConnectionForInstallation(next.id);
+    const kept = describeKeptResources(
+      next,
+      next.resources.filter((resource) => resource.state === 'retained'),
+      'Cloudflare resources:',
+      'Access resources:',
+    );
+    if (kept.length) {
+      note(kept.join('\n'), 'Kept for manual cleanup');
+    }
     log.success(
-      retainData
-        ? `${next.deployment.displayName} was uninstalled; data resources were retained and recorded in ${next.id}.`
-        : `${next.deployment.displayName} was uninstalled.`,
+      `${next.deployment.displayName} was uninstalled. The full record is in ${installationManifestPath(next.account.id, next.id)}.`,
     );
   } catch (error) {
     await stopProjectZeroTrustHold().catch(() => {});
@@ -1210,6 +1232,88 @@ function isOwnershipVerifiableKind(kind: InstallationResource['kind']): boolean 
     kind === 'worker' ||
     kind === 'zone'
   );
+}
+
+// Kinds in the order of the manual cleanup steps in the uninstall guide.
+const KEPT_RESOURCE_ORDER: ReadonlyArray<InstallationResourceKind> = [
+  'dns-record',
+  'worker-route',
+  'worker-custom-domain',
+  'queue',
+  'worker',
+  'dispatch-namespace',
+  'kv-namespace',
+  'hyperdrive',
+  'r2-bucket',
+  'ai-gateway',
+  'analytics-dataset',
+  'zone',
+];
+
+/** Resources an uninstall with these options leaves in the account. */
+function plannedKeptResources(
+  manifest: PlatformInstallationManifest,
+  retainData: boolean,
+  hasRoutingCheckpoint: boolean,
+): Array<InstallationResource> {
+  // Uninstall never deletes Workers, and Queues are deleted only once no
+  // installation Worker remains.
+  const workersRemain = manifest.resources.some(
+    (resource) => resource.kind === 'worker' && resource.state === 'ready',
+  );
+  return manifest.resources.filter(
+    (resource) =>
+      resource.state === 'retained' ||
+      (resource.state === 'ready' &&
+        ((!hasRoutingCheckpoint && resource.kind !== 'zone') ||
+          !shouldDeleteResource(resource, retainData) ||
+          (resource.kind === 'queue' && workersRemain))),
+  );
+}
+
+function describeKeptResources(
+  manifest: PlatformInstallationManifest,
+  resources: ReadonlyArray<InstallationResource>,
+  heading: string,
+  accessHeading: string,
+): Array<string> {
+  const sorted = [...resources].sort(
+    (left, right) =>
+      KEPT_RESOURCE_ORDER.indexOf(left.kind) - KEPT_RESOURCE_ORDER.indexOf(right.kind),
+  );
+  const isTraffic = (resource: InstallationResource) =>
+    KEPT_RESOURCE_ORDER.indexOf(resource.kind) < KEPT_RESOURCE_ORDER.indexOf('queue');
+  const line = (resource: InstallationResource) =>
+    `  ${resource.kind}: ${resource.name} (${resource.id})`;
+  const {
+    capabilities,
+    emailSenderDomain,
+    emailSharedZoneId,
+    resources: names,
+  } = manifest.deployment;
+  // Email Routing is set up through the platform API and is not a manifest
+  // resource. Its rules point at the email gateway Worker, so it comes before
+  // the Workers.
+  const email = capabilities.email
+    ? [
+        emailSenderDomain
+          ? `  Email Routing for ${emailSenderDomain} (zone ${emailSharedZoneId}): its routing DNS records and any catch-all rule that sends mail to ${names.emailGatewayWorker}.`
+          : `  Email Routing: any catch-all rule that sends mail to ${names.emailGatewayWorker}.`,
+      ]
+    : [];
+  const kept = [
+    ...sorted.filter(isTraffic).map(line),
+    ...email,
+    ...sorted.filter((resource) => !isTraffic(resource)).map(line),
+  ];
+  const access = (manifest.authenticationResources ?? []).map(
+    (resource) =>
+      `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`,
+  );
+  return [
+    ...(kept.length ? [heading, ...kept] : []),
+    ...(access.length ? [accessHeading, ...access] : []),
+  ];
 }
 
 function shouldDeleteResource(resource: InstallationResource, retainData: boolean): boolean {
