@@ -1,0 +1,21 @@
+packages/void/src/runtime/email.ts
+  s_f9988f60ed7f0e::t_b4fe9eed62d078 20,430-434,448,470-472,474-476,478-482,484-493,495,721-722,742-743,751-752,754-755,758-759,764
+packages/void/test/unit/email-send.test.ts
+  s_f9988f60ed7f0e::t_ce6c214c2946d7 903-946
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7b0fb70ea5d7899599525463623624ceb0db0296",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
