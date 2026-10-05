@@ -34,6 +34,7 @@ import {
   createPlatformInstallationSecrets,
   installPlatform,
   loadPlatformRuntime,
+  readPlatformProjectSlugs,
   readPlatformProjectZeroTrustState,
   REMOTE_INSTALLATION_MANIFEST_KEY,
   resolveBootstrapGitHubId,
@@ -58,6 +59,21 @@ import {
   resolveInstallationManifest,
   writeInstallationManifest,
 } from './platform-registry.ts';
+import {
+  assertNoPlatformProjects,
+  checkPurgeAllCredentials,
+  describePurgeAllPlan,
+  isPlatformTailWorker,
+  isPurgedAccessResource,
+  purgeAllAlwaysKept,
+  purgeAllKeptResources,
+  purgeAllPermissions,
+  purgeAllResumeCommand,
+  PURGE_ALL_STEP_PREFIX,
+  runPurgeAllTeardown,
+  type PurgeAllClient,
+  type PurgeAllCredential,
+} from './platform-teardown.ts';
 import { trackedPlatformWorkerTraffic } from './platform-traffic.ts';
 import {
   assertProjectZeroTrustAllowsUninstall,
@@ -86,7 +102,8 @@ export type PlatformManagementClient = Pick<
 >;
 
 export type PlatformUninstallClient = PlatformManagementClient &
-  Pick<PlatformCloudflareClient, 'listWorkerDomains' | 'listWorkerServiceRoutes'>;
+  Pick<PlatformCloudflareClient, 'listWorkerDomains' | 'listWorkerServiceRoutes'> &
+  Partial<PurgeAllClient>;
 
 export type PlatformOwnershipClient = Pick<
   PlatformManagementClient,
@@ -159,6 +176,10 @@ export type PlatformManagementDependencies = Readonly<{
   fenceProjectZeroTrust?: () => Promise<void>;
   /** Removes that fence when uninstall stops before it disables traffic. */
   liftProjectZeroTrustFence?: () => Promise<void>;
+  /** Project slugs; --purge-all refuses to start while any remain or when this cannot read them. */
+  readProjects?: () => Promise<ReadonlyArray<string>>;
+  /** Where the operator credential came from; --purge-all checks it before any change. */
+  credential?: PurgeAllCredential;
 }>;
 
 export function selectAuthoritativePlatformManifest(
@@ -280,6 +301,10 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         lockProjectZeroTrust: databaseLock?.lockProjectZeroTrust,
         fenceProjectZeroTrust: databaseLock?.fenceProjectZeroTrust,
         liftProjectZeroTrustFence: databaseLock?.liftProjectZeroTrustFence,
+        readProjects: databaseLock
+          ? databaseLock.readProjects
+          : () => readPlatformProjectSlugs(databaseUrl, manifest.id, manifest.ownershipNonce),
+        credential: { source: operatorCredential.source, aiGatewayToken: !!gatewayToken },
       });
       return;
     }
@@ -872,6 +897,7 @@ export async function uninstallPlatform(
       dependencies.checkpoint,
     );
   const retainData = !args.purgeData;
+  const purgeAll = args.purgeAll;
   const hasRoutingCheckpoint = manifest.resources.some(
     (resource) => resource.key === 'routing-kv' && resource.state === 'ready',
   );
@@ -886,26 +912,46 @@ export async function uninstallPlatform(
     );
   }
   await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust);
+  if (purgeAll) {
+    await assertNoPlatformProjects(dependencies.readProjects);
+  }
   const dataMessage = retainData
     ? 'Retain installer-owned Workers, storage, dispatch, AI logs, and Hyperdrive by default.'
     : args.purgeData
       ? 'Delete safely identifiable installer-owned data (--purge-data); retain Workers, R2, AI Gateway, and external PostgreSQL for manual cleanup.'
       : 'Retain installer-owned data; external PostgreSQL is never deleted.';
+  const purgeClient = purgeAll ? requirePurgeAllClient(client) : null;
   note(
-    `Disable all platform traffic through installation-owned routing storage.\nRetain DNS records, routes, and custom domains for explicit dashboard cleanup.\nDelete installer-owned Queues unless a retained Worker still uses them.\n${dataMessage}\n${
-      createdZone
-        ? `Keep zone ${createdZone.name} for explicit manual cleanup.`
-        : 'Never delete the adopted application zone.'
-    }${describeKeptResources(
-      manifest,
-      plannedKeptResources(manifest, retainData, hasRoutingCheckpoint),
-      'Keep for manual cleanup:',
-      'Retain Access resources for deliberate cleanup:',
-    )
-      .map((line) => `\n${line}`)
-      .join('')}`,
+    purgeAll
+      ? purgeAllPlanText(manifest)
+      : `Disable all platform traffic through installation-owned routing storage.\nRetain DNS records, routes, and custom domains for explicit dashboard cleanup.\nDelete installer-owned Queues unless a retained Worker still uses them.\n${dataMessage}\n${
+          createdZone
+            ? `Keep zone ${createdZone.name} for explicit manual cleanup.`
+            : 'Never delete the adopted application zone.'
+        }${describeKeptResources(
+          manifest,
+          plannedKeptResources(manifest, retainData, hasRoutingCheckpoint),
+          'Keep for manual cleanup:',
+          'Retain Access resources for deliberate cleanup:',
+        )
+          .map((line) => `\n${line}`)
+          .join('')}`,
     'Uninstall plan',
   );
+  if (purgeClient) {
+    const credentialCheck = checkPurgeAllCredentials(
+      purgeClient,
+      manifest,
+      dependencies.credential ?? { source: 'environment', aiGatewayToken: false },
+    );
+    if (args.plan) {
+      await credentialCheck.catch((error: unknown) => {
+        log.warn(error instanceof Error ? error.message : String(error));
+      });
+    } else {
+      await credentialCheck;
+    }
+  }
   if (args.plan) {
     outro('No Cloudflare or local installation state was changed.');
     return;
@@ -920,9 +966,11 @@ export async function uninstallPlatform(
   }
   if (interactive && !args.yes) {
     const proceed = await confirmAction(
-      args.purgeData
-        ? 'Permanently purge installer-owned platform data?'
-        : 'Uninstall this platform?',
+      purgeAll
+        ? 'Permanently delete every Cloudflare resource this installation created?'
+        : args.purgeData
+          ? 'Permanently purge installer-owned platform data?'
+          : 'Uninstall this platform?',
       false,
     );
     if (!proceed) {
@@ -931,11 +979,21 @@ export async function uninstallPlatform(
     }
   }
 
+  const purgeAllKept = new Set(
+    purgeAll ? purgeAllKeptResources(manifest).map((resource) => resource.key) : [],
+  );
   const resourcesToDelete = new Set(
     manifest.resources
       .filter(
         (resource) =>
-          shouldDeleteResource(resource, retainData) &&
+          (shouldDeleteResource(resource, retainData) ||
+            (purgeAll &&
+              resource.state === 'ready' &&
+              !purgeAllKept.has(resource.key) &&
+              isOwnershipVerifiableKind(resource.kind) &&
+              // After its ownership marker was removed, the bucket is proven
+              // by its creation fingerprint instead.
+              !hasLifecycleStep(manifest, `${PURGE_ALL_STEP_PREFIX}r2-marker:${resource.key}`))) &&
           (hasRoutingCheckpoint || resource.kind === 'zone') &&
           !(
             resource.kind === 'dns-record' &&
@@ -993,6 +1051,9 @@ export async function uninstallPlatform(
   let next = manifest;
   try {
     await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust);
+    if (purgeAll) {
+      await assertNoPlatformProjects(dependencies.readProjects);
+    }
     fenced = true;
     await fenceProjectZeroTrust();
     next = transitionInstallation(manifest, 'uninstalling', new Date().toISOString());
@@ -1050,6 +1111,36 @@ export async function uninstallPlatform(
           await writeLifecycleCheckpoint(client, next);
         }
       }
+    }
+    if (purgeClient && hasRoutingCheckpoint) {
+      next = await runPurgeAllTeardown(
+        {
+          client: purgeClient,
+          checkpoint: async (checkpointManifest) => {
+            // Keep `next` current so a failure records the progress made.
+            next = checkpointManifest;
+            await writeLifecycleCheckpoint(client, checkpointManifest);
+          },
+          verify: (checkpointManifest, keys) =>
+            verifyPlatformMutationOwnership(client, checkpointManifest, keys, {
+              allowDeletedRoutingCheckpoint: true,
+              databaseUrl: dependencies.databaseUrl,
+            }),
+          bucketGenerationMatches: async (checkpointManifest, bucket) => {
+            const live = (await client.listR2Buckets(checkpointManifest.account.id)).find(
+              (entry) => entry.name === bucket.name,
+            );
+            if (!live) {
+              return null;
+            }
+            return (
+              live.fingerprint !== undefined &&
+              bucket.configHash === r2BucketConfigHash(bucket.name, live.fingerprint)
+            );
+          },
+        },
+        next,
+      );
     }
     const deletionPriority: Record<string, number> = {
       worker: 0,
@@ -1137,6 +1228,9 @@ export async function uninstallPlatform(
       'Cloudflare resources:',
       'Access resources:',
     );
+    if (purgeAll) {
+      kept.push('Always kept:', ...purgeAllAlwaysKept());
+    }
     if (kept.length) {
       note(kept.join('\n'), 'Kept for manual cleanup');
     }
@@ -1234,7 +1328,9 @@ function isOwnershipVerifiableKind(kind: InstallationResource['kind']): boolean 
   );
 }
 
-// Kinds in the order of the manual cleanup steps in the uninstall guide.
+// Kinds in the order of the manual cleanup steps in the uninstall guide. The
+// tail Worker is listed after the dispatch namespace (see keptResourceRank),
+// because Cloudflare refuses to delete it while other Workers send it logs.
 const KEPT_RESOURCE_ORDER: ReadonlyArray<InstallationResourceKind> = [
   'dns-record',
   'worker-route',
@@ -1271,6 +1367,64 @@ function plannedKeptResources(
   );
 }
 
+function keptResourceRank(
+  manifest: PlatformInstallationManifest,
+  resource: InstallationResource,
+): number {
+  return isPlatformTailWorker(manifest, resource)
+    ? KEPT_RESOURCE_ORDER.indexOf('dispatch-namespace') + 0.5
+    : KEPT_RESOURCE_ORDER.indexOf(resource.kind);
+}
+
+function purgeAllPlanText(manifest: PlatformInstallationManifest): string {
+  const permissions = purgeAllPermissions(manifest);
+  // Created Access resources are deleted; only adopted ones stay.
+  const keepManifest = {
+    ...manifest,
+    authenticationResources: (manifest.authenticationResources ?? []).filter(
+      (resource) => resource.ownership !== 'created',
+    ),
+  };
+  return [
+    'Disable all platform traffic through installation-owned routing storage.',
+    ...describePurgeAllPlan(manifest),
+    ...describeKeptResources(
+      keepManifest,
+      purgeAllKeptResources(manifest),
+      'Keep for manual cleanup:',
+      'Keep Access resources you connected:',
+    ),
+    'Always kept:',
+    ...purgeAllAlwaysKept(),
+    ...(permissions.length
+      ? [
+          `API token needs: ${permissions.join(', ')}. Browser login cannot delete DNS records or Access resources.`,
+        ]
+      : []),
+    `If it stops, fix the reported problem and rerun: ${purgeAllResumeCommand(manifest)}`,
+  ].join('\n');
+}
+
+function requirePurgeAllClient(client: PlatformUninstallClient): PurgeAllClient {
+  const required: ReadonlyArray<keyof PurgeAllClient> = [
+    'deleteAccessResource',
+    'deleteDispatchNamespaceScript',
+    'deleteQueueConsumer',
+    'deleteR2Object',
+    'deleteWorkerDomain',
+    'deleteWorkerRoute',
+    'emptyR2Bucket',
+    'getAccessResource',
+    'listDispatchNamespaceScripts',
+    'listQueueConsumers',
+    'listWorkerRoutes',
+  ];
+  if (required.some((method) => typeof client[method] !== 'function')) {
+    throw new Error('platform: This Cloudflare client cannot run --purge-all.');
+  }
+  return client as PurgeAllClient;
+}
+
 function describeKeptResources(
   manifest: PlatformInstallationManifest,
   resources: ReadonlyArray<InstallationResource>,
@@ -1278,8 +1432,7 @@ function describeKeptResources(
   accessHeading: string,
 ): Array<string> {
   const sorted = [...resources].sort(
-    (left, right) =>
-      KEPT_RESOURCE_ORDER.indexOf(left.kind) - KEPT_RESOURCE_ORDER.indexOf(right.kind),
+    (left, right) => keptResourceRank(manifest, left) - keptResourceRank(manifest, right),
   );
   const isTraffic = (resource: InstallationResource) =>
     KEPT_RESOURCE_ORDER.indexOf(resource.kind) < KEPT_RESOURCE_ORDER.indexOf('queue');
@@ -1306,10 +1459,12 @@ function describeKeptResources(
     ...email,
     ...sorted.filter((resource) => !isTraffic(resource)).map(line),
   ];
-  const access = (manifest.authenticationResources ?? []).map(
-    (resource) =>
-      `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`,
-  );
+  const access = (manifest.authenticationResources ?? [])
+    .filter((resource) => !isPurgedAccessResource(manifest, resource))
+    .map(
+      (resource) =>
+        `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`,
+    );
   return [
     ...(kept.length ? [heading, ...kept] : []),
     ...(access.length ? [accessHeading, ...access] : []),
@@ -1496,7 +1651,11 @@ async function verifyPlatformMutationOwnership(
   const zone = manifest.resources.find((resource) => resource.key === 'zone');
   const inventory = await Promise.all([
     client.listAiGateways(accountId),
-    client.listDispatchNamespaces(accountId),
+    // Workers for Platforms is a paid product; list namespaces only when one
+    // is being checked.
+    targetResources.some((resource) => resource.kind === 'dispatch-namespace')
+      ? client.listDispatchNamespaces(accountId)
+      : Promise.resolve([]),
     client.listHyperdriveConfigs(accountId),
     client.listKvNamespaces(accountId),
     client.listR2Buckets(accountId),
@@ -1705,7 +1864,9 @@ export function isPlatformManifestMonotonicExtension(
       next.name === resource.name &&
       next.ownership === resource.ownership &&
       (next.state === resource.state ||
-        (resource.state === 'ready' && (next.state === 'deleted' || next.state === 'retained')))
+        (resource.state === 'ready' && (next.state === 'deleted' || next.state === 'retained')) ||
+        // --purge-all deletes routes and custom domains recorded as retained.
+        (resource.state === 'retained' && next.state === 'deleted'))
     );
   });
   const stepsAdvance = earlier.steps.every((step) =>

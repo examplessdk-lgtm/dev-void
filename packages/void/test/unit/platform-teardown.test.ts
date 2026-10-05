@@ -1,0 +1,860 @@
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  createPlatformDeploymentManifest,
+  createPlatformInstallationManifest,
+  createPlatformResourceOwnershipMarker,
+  PLATFORM_DISABLED_KEY,
+  PLATFORM_R2_OWNERSHIP_MARKER_KEY,
+  recordInstallationResource,
+  transitionInstallation,
+  type InstallationResource,
+  type InstallationResourceKind,
+  type PlatformInstallationManifest,
+  type ResourceOwnership,
+} from '@void/platform';
+import { log, note } from '@voidzero-dev/vite-plus-prompts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { PlatformCloudflareApiError } from '../../src/cli/platform-cloudflare.ts';
+import { uninstallPlatform } from '../../src/cli/platform-management.ts';
+import {
+  listInstallationManifests,
+  promoteInstallationSecrets,
+  readInstallationRecoverySecrets,
+  writeInstallationManifest,
+  writePendingInstallationSecrets,
+} from '../../src/cli/platform-registry.ts';
+import { readPlatformProjectSlugsConnection } from '../../src/cli/platform-teardown.ts';
+import { recordPlatformWorkerTraffic } from '../../src/cli/platform-traffic.ts';
+import { projectZeroTrustUninstallState } from '../../src/cli/platform-zero-trust-uninstall.ts';
+
+vi.mock('@voidzero-dev/vite-plus-prompts', async (original) => {
+  const actual = await original<typeof import('@voidzero-dev/vite-plus-prompts')>();
+  return {
+    ...actual,
+    log: { ...actual.log, success: vi.fn(), warn: vi.fn() },
+    note: vi.fn(),
+    outro: vi.fn(),
+  };
+});
+
+const directories: Array<string> = [];
+
+beforeEach(() => {
+  vi.mocked(note).mockClear();
+  vi.mocked(log.warn).mockClear();
+  process.env.VOID_PLATFORM_RECOVERY_KEY = Buffer.alloc(32, 7).toString('base64');
+});
+
+afterEach(() => {
+  delete process.env.VOID_PLATFORM_RECOVERY_KEY;
+  delete process.env.VOID_PLATFORM_REGISTRY_DIR;
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+const deployment = createPlatformDeploymentManifest({
+  application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+  controlPlane: { apiHostname: 'api.example.com' },
+  displayName: 'Example',
+  installationSlug: 'example',
+});
+const names = deployment.resources;
+const INSTALLATION_ID = 'example-a1b2c3d4';
+const FINGERPRINT = '2026-09-14T00:00:00.000Z';
+const RESUME = `void platform uninstall ${INSTALLATION_ID} --purge-all`;
+
+function hash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function installedManifest(
+  options: { dispatchNamespace?: boolean } = {},
+): PlatformInstallationManifest {
+  let manifest = createPlatformInstallationManifest({
+    account: { id: 'account', name: 'Account' },
+    createdAt: '2026-09-14T00:00:00.000Z',
+    deployment,
+    id: INSTALLATION_ID,
+    ownershipNonce: '0123456789abcdef0123456789abcdef',
+    platformVersion: '1.0.0',
+  });
+  const resources: Array<[string, InstallationResourceKind, ResourceOwnership, string, string]> = [
+    ['zone', 'zone', 'adopted', 'zone-id', 'example.com'],
+    ['application-dns', 'dns-record', 'created', 'dns-id', '*.apps.example.com'],
+    ['routing-kv', 'kv-namespace', 'created', 'routing-id', names.routingKv],
+    ['isr-cache-kv', 'kv-namespace', 'created', 'isr-id', names.isrCacheKv],
+    ['customer-kv', 'kv-namespace', 'adopted', 'customer-kv-id', 'customer-kv'],
+    ['assets-bucket', 'r2-bucket', 'created', names.assetsBucket, names.assetsBucket],
+    ['cron-queue', 'queue', 'created', 'cron-id', names.cronQueue],
+    ['usage-queue', 'queue', 'created', 'usage-id', names.usageQueue],
+    ['hyperdrive', 'hyperdrive', 'created', 'hyperdrive-id', names.hyperdrive],
+    ['ai-gateway', 'ai-gateway', 'created', names.aiGateway, names.aiGateway],
+    ['api-worker', 'worker', 'created', names.apiWorker, names.apiWorker],
+    ['proxy-worker', 'worker', 'created', names.proxyWorker, names.proxyWorker],
+    [
+      'email-gateway-worker',
+      'worker',
+      'created',
+      names.emailGatewayWorker,
+      names.emailGatewayWorker,
+    ],
+    ['dispatch-worker', 'worker', 'created', names.dispatchWorker, names.dispatchWorker],
+    ['tail-worker', 'worker', 'created', names.tailWorker, names.tailWorker],
+    ...(options.dispatchNamespace === false
+      ? []
+      : [
+          [
+            'dispatch-namespace',
+            'dispatch-namespace',
+            'created',
+            'namespace-uuid',
+            names.dispatchNamespace,
+          ] as [string, InstallationResourceKind, ResourceOwnership, string, string],
+        ]),
+  ];
+  for (const [key, kind, ownership, id, name] of resources) {
+    manifest = recordInstallationResource(
+      manifest,
+      {
+        configHash:
+          kind === 'dns-record'
+            ? hash({ content: '100::', kind, name, proxied: true, type: 'AAAA' })
+            : kind === 'r2-bucket'
+              ? hash({ fingerprint: FINGERPRINT, kind, name })
+              : 'hash',
+        id,
+        key,
+        kind,
+        name,
+        ownership,
+        state: 'ready',
+      },
+      '2026-09-14T00:00:01.000Z',
+    );
+  }
+  manifest = recordPlatformWorkerTraffic(
+    manifest,
+    names.dispatchWorker,
+    {
+      customDomains: [],
+      routes: [
+        { id: 'route-1', pattern: '*.apps.example.com/*', script: names.dispatchWorker },
+        { id: 'route-2', pattern: '*.apps.example.com', script: names.dispatchWorker },
+      ],
+    },
+    '2026-09-14T00:00:01.000Z',
+  );
+  manifest = recordPlatformWorkerTraffic(
+    manifest,
+    names.apiWorker,
+    {
+      customDomains: [{ hostname: 'api.example.com', id: 'domain-1', service: names.apiWorker }],
+      routes: [],
+    },
+    '2026-09-14T00:00:01.000Z',
+  );
+  manifest = {
+    ...manifest,
+    authenticationResources: [
+      {
+        key: 'login',
+        kind: 'application',
+        accountId: 'account',
+        id: 'access-app',
+        name: `void-${INSTALLATION_ID}-login-0123456789abcdef`,
+        ownership: 'created',
+      },
+      {
+        key: 'service-token',
+        kind: 'service-token',
+        accountId: 'account',
+        id: 'access-token',
+        name: `void-${INSTALLATION_ID}-access-probes-0123456789abcdef`,
+        ownership: 'created',
+      },
+      {
+        key: 'company',
+        kind: 'application',
+        accountId: 'account',
+        id: 'company-app',
+        name: 'company-app',
+        ownership: 'adopted',
+      },
+    ],
+  };
+  for (const status of [
+    'planned',
+    'provisioning',
+    'deploying',
+    'verifying',
+    'installed',
+  ] as const) {
+    manifest = transitionInstallation(manifest, status, '2026-09-14T00:00:02.000Z');
+  }
+  return manifest;
+}
+
+function persist(manifest: PlatformInstallationManifest): void {
+  const directory = mkdtempSync(join(tmpdir(), 'void-platform-teardown-test-'));
+  directories.push(directory);
+  process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+  writeInstallationManifest(manifest);
+  writePendingInstallationSecrets(manifest, { databaseUrl: 'postgres://recovery' });
+  promoteInstallationSecrets(manifest);
+}
+
+function marker(manifest: PlatformInstallationManifest, resource: InstallationResource): string {
+  return JSON.stringify(
+    createPlatformResourceOwnershipMarker({
+      accountId: manifest.account.id,
+      installationId: manifest.id,
+      ownershipNonce: manifest.ownershipNonce,
+      resourceId: resource.id,
+      resourceKey: resource.key,
+      resourceKind: resource.kind,
+      resourceName: resource.name,
+    }),
+  );
+}
+
+/** A Cloudflare account that enforces the delete rules seen live. */
+function cloudflare(manifest: PlatformInstallationManifest) {
+  const calls: Array<string> = [];
+  const ready = (kind: InstallationResourceKind) =>
+    manifest.resources
+      .filter((resource) => resource.kind === kind && resource.state === 'ready')
+      .map((resource) => ({ id: resource.id, name: resource.name }));
+  const workerMarkers = new Map(
+    manifest.resources
+      .filter((resource) => resource.kind === 'worker')
+      .map((resource) => [resource.name, marker(manifest, resource)]),
+  );
+  const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
+  const live = {
+    aiGateways: ready('ai-gateway'),
+    dispatchNamespaces: ready('dispatch-namespace'),
+    namespaceScripts: new Set(
+      manifest.resources.some((resource) => resource.kind === 'dispatch-namespace')
+        ? ['leftover-app']
+        : [],
+    ),
+    dns: ready('dns-record'),
+    hyperdrives: ready('hyperdrive'),
+    kv: ready('kv-namespace'),
+    queues: ready('queue'),
+    consumers: new Map<string, Array<{ id: string; script: string | null }>>([
+      ['cron-id', [{ id: 'cron-consumer', script: names.apiWorker }]],
+      [
+        'usage-id',
+        [
+          { id: 'usage-consumer', script: names.apiWorker },
+          { id: 'foreign-consumer', script: 'someone-else' },
+        ],
+      ],
+    ]),
+    buckets: new Map([
+      [
+        bucket.name,
+        {
+          fingerprint: FINGERPRINT,
+          objects: new Map([
+            [PLATFORM_R2_OWNERSHIP_MARKER_KEY, marker(manifest, bucket)],
+            ['assets/a.txt', 'a'],
+          ]),
+        },
+      ],
+    ]),
+    workers: workerMarkers,
+    routes: [
+      { id: 'route-1', pattern: '*.apps.example.com/*', script: names.dispatchWorker as string },
+      { id: 'route-2', pattern: '*.apps.example.com', script: names.dispatchWorker as string },
+    ],
+    domains: [{ hostname: 'api.example.com', id: 'domain-1', service: names.apiWorker as string }],
+    access: new Map(
+      (manifest.authenticationResources ?? []).map((resource) => [resource.id, resource.name]),
+    ),
+    // A Worker the installation did not create that sends logs to the tail Worker.
+    foreignTailProducer: false,
+  };
+  let remote: string | null = JSON.stringify(manifest);
+  const failures = new Map<string, Error>();
+  const fail = (call: string) => {
+    const error = failures.get(call);
+    if (error) {
+      failures.delete(call);
+      throw error;
+    }
+  };
+  const routingLive = () => live.kv.some((entry) => entry.id === 'routing-id');
+  const remove = <T extends { id: string }>(list: Array<T>, id: string) => {
+    const index = list.findIndex((entry) => entry.id === id);
+    if (index >= 0) {
+      list.splice(index, 1);
+    }
+  };
+  const fake = {
+    calls,
+    live,
+    failures,
+    deleteKvValue: async () => {},
+    deleteResource: async (
+      _account: string,
+      resource: Readonly<{ id: string; kind: string; name: string }>,
+      zoneId?: string,
+    ): Promise<void> => {
+      const call = `DELETE ${resource.kind} ${resource.name}`;
+      calls.push(call);
+      fail(call);
+      if (resource.kind === 'worker') {
+        if (
+          resource.name === names.tailWorker &&
+          (live.foreignTailProducer ||
+            live.workers.has(names.dispatchWorker) ||
+            live.namespaceScripts.size > 0)
+        ) {
+          throw new PlatformCloudflareApiError(
+            'Cloudflare API error: Cannot delete this Worker as it is a Tail Worker consumer for other Workers. (code 100109) (HTTP 422; DELETE /workers/scripts).',
+            422,
+          );
+        }
+        if ([...live.consumers.values()].flat().some((entry) => entry.script === resource.name)) {
+          throw new PlatformCloudflareApiError('Worker is a queue consumer.', 400);
+        }
+        live.workers.delete(resource.name);
+      } else if (resource.kind === 'queue') {
+        // The API and dispatch Workers produce to the platform Queues.
+        const bound = [names.apiWorker, names.dispatchWorker].find((name) =>
+          live.workers.has(name),
+        );
+        if (bound) {
+          throw new PlatformCloudflareApiError(`Queue is bound by ${bound}.`, 400);
+        }
+        remove(live.queues, resource.id);
+      } else if (resource.kind === 'dispatch-namespace') {
+        expect(resource.name).toBe(names.dispatchNamespace);
+        if (live.namespaceScripts.size > 0) {
+          throw new PlatformCloudflareApiError('Namespace has scripts.', 400);
+        }
+        remove(live.dispatchNamespaces, resource.id);
+      } else if (resource.kind === 'r2-bucket') {
+        if ((live.buckets.get(resource.name)?.objects.size ?? 0) > 0) {
+          throw new PlatformCloudflareApiError('The bucket you tried to delete is not empty.', 409);
+        }
+        live.buckets.delete(resource.name);
+      } else if (resource.kind === 'dns-record') {
+        expect(zoneId).toBe('zone-id');
+        remove(live.dns, resource.id);
+      } else if (resource.kind === 'kv-namespace') {
+        remove(live.kv, resource.id);
+      } else if (resource.kind === 'hyperdrive') {
+        remove(live.hyperdrives, resource.id);
+      } else if (resource.kind === 'ai-gateway') {
+        remove(live.aiGateways, resource.id);
+      } else {
+        throw new Error(`unexpected delete ${resource.kind}`);
+      }
+    },
+    deleteR2Object: async (_account: string, name: string, key: string) => {
+      calls.push(`DELETE r2-object ${key}`);
+      live.buckets.get(name)?.objects.delete(key);
+    },
+    emptyR2Bucket: async (
+      _account: string,
+      name: string,
+      preserved: ReadonlySet<string> = new Set(),
+      beforeDelete?: () => Promise<void>,
+    ) => {
+      calls.push(`EMPTY r2-bucket ${name}`);
+      const objects = live.buckets.get(name)?.objects;
+      const keys = [...(objects?.keys() ?? [])].filter((key) => !preserved.has(key));
+      if (keys.length) {
+        await beforeDelete?.();
+        for (const key of keys) {
+          objects!.delete(key);
+        }
+      }
+    },
+    deleteWorkerRoute: async (_zone: string, id: string) => {
+      calls.push(`DELETE worker-route ${id}`);
+      remove(live.routes, id);
+    },
+    deleteWorkerDomain: async (_account: string, id: string) => {
+      calls.push(`DELETE worker-custom-domain ${id}`);
+      remove(live.domains, id);
+    },
+    deleteQueueConsumer: async (_account: string, queue: string, id: string) => {
+      calls.push(`DELETE queue-consumer ${queue} ${id}`);
+      remove(live.consumers.get(queue) ?? [], id);
+    },
+    deleteDispatchNamespaceScript: async (_account: string, namespace: string, script: string) => {
+      calls.push(`DELETE dispatch-script ${namespace} ${script}`);
+      live.namespaceScripts.delete(script);
+    },
+    deleteAccessResource: async (_account: string, kind: string, id: string) => {
+      calls.push(`DELETE access ${kind} ${id}`);
+      live.access.delete(id);
+    },
+    getAccessResource: async (_account: string, kind: string, id: string) => {
+      calls.push(`GET access ${kind} ${id}`);
+      const name = live.access.get(id);
+      return name ? { id, name } : null;
+    },
+    findZone: async (_account: string, name: string) =>
+      name === 'example.com' ? { id: 'zone-id', name, nameServers: [], status: 'active' } : null,
+    getHyperdriveConfig: async (_account: string, id: string) => {
+      const entry = live.hyperdrives.find((candidate) => candidate.id === id);
+      if (!entry) {
+        throw new PlatformCloudflareApiError('missing', 404);
+      }
+      return {
+        ...entry,
+        origin: {
+          database: 'void',
+          host: 'db.example.com',
+          port: 5432,
+          scheme: 'postgresql' as const,
+          user: 'user',
+        },
+      };
+    },
+    getKvValue: async () => (routingLive() ? remote : null),
+    getR2Object: async (_account: string, name: string, key: string) =>
+      live.buckets.get(name)?.objects.get(key) ?? null,
+    getWorkerPlainTextBindings: async (
+      _account: string,
+      name: string,
+    ): Promise<Record<string, string>> => {
+      const value = live.workers.get(name);
+      return value ? { PLATFORM_OWNERSHIP_MARKER: value } : {};
+    },
+    listAiGateways: async () => [...live.aiGateways],
+    listDispatchNamespaces: async () => {
+      calls.push('GET dispatch-namespaces');
+      return [...live.dispatchNamespaces];
+    },
+    listDispatchNamespaceScripts: async (_account: string, namespace: string) => {
+      calls.push(`GET dispatch-scripts ${namespace}`);
+      return [...live.namespaceScripts];
+    },
+    listDnsRecords: async (_zone: string, name: string) =>
+      live.dns
+        .filter((entry) => entry.name === name)
+        .map((entry) => ({ ...entry, content: '100::', proxied: true, type: 'AAAA' })),
+    listHyperdriveConfigs: async () => [...live.hyperdrives],
+    listKvNamespaces: async () => [...live.kv],
+    listQueues: async (_account: string, name: string) =>
+      live.queues.filter((entry) => entry.name === name),
+    listQueueConsumers: async (_account: string, queue: string) => [
+      ...(live.consumers.get(queue) ?? []),
+    ],
+    listR2Buckets: async () =>
+      [...live.buckets].map(([name, value]) => ({
+        fingerprint: value.fingerprint,
+        id: name,
+        name,
+      })),
+    listWorkerDomains: async () => [...live.domains],
+    listWorkerNames: async () => [...live.workers.keys()],
+    listWorkerRoutes: async () => [...live.routes],
+    listWorkerServiceRoutes: async (): Promise<Array<{ pattern: string; zoneName: string }>> => [],
+    putKvValue: async (_account: string, _namespace: string, key: string, value: string) => {
+      calls.push(key === PLATFORM_DISABLED_KEY ? 'PUT disabled' : 'PUT checkpoint');
+      if (key !== PLATFORM_DISABLED_KEY) {
+        remote = value;
+      }
+    },
+    removeRoutes: async () => {},
+  };
+  return fake;
+}
+
+const purgeAllArgs = {
+  subcommand: 'uninstall' as const,
+  selector: '',
+  plan: false,
+  purgeData: true,
+  purgeAll: true,
+  deleteZone: null,
+  yes: true,
+};
+
+function dependencies(overrides: Record<string, unknown> = {}) {
+  return {
+    interactive: false,
+    lockProjectZeroTrust: async () => async () => {},
+    fenceProjectZeroTrust: async () => {},
+    liftProjectZeroTrustFence: async () => {},
+    readProjectZeroTrust: async () => projectZeroTrustUninstallState(undefined, []),
+    readProjects: async (): Promise<ReadonlyArray<string>> => [],
+    credential: { source: 'environment' as const, aiGatewayToken: false },
+    ...overrides,
+  };
+}
+
+function noteText(title: string): string {
+  return String(
+    vi
+      .mocked(note)
+      .mock.calls.filter(([, noteTitle]) => noteTitle === title)
+      .at(-1)?.[0] ?? '',
+  );
+}
+
+function expectInOrder(text: string, lines: ReadonlyArray<string>): void {
+  const positions = lines.map((line) => text.indexOf(line));
+  expect(
+    positions.map((position, index) => [lines[index], position >= 0]),
+    text,
+  ).toEqual(lines.map((line) => [line, true]));
+  expect(positions, text).toEqual([...positions].sort((left, right) => left - right));
+}
+
+function deletes(fake: ReturnType<typeof cloudflare>): Array<string> {
+  return fake.calls.filter((call) => call.startsWith('DELETE') || call.startsWith('EMPTY'));
+}
+
+function changes(fake: ReturnType<typeof cloudflare>): Array<string> {
+  return fake.calls.filter((call) => !call.startsWith('GET'));
+}
+
+const FULL_ORDER = [
+  'DELETE worker-custom-domain domain-1',
+  'DELETE worker-route route-1',
+  'DELETE worker-route route-2',
+  'DELETE dns-record *.apps.example.com',
+  'DELETE access application access-app',
+  'DELETE access service-token access-token',
+  'DELETE queue-consumer cron-id cron-consumer',
+  'DELETE queue-consumer usage-id usage-consumer',
+  `DELETE worker ${names.emailGatewayWorker}`,
+  `DELETE worker ${names.proxyWorker}`,
+  `DELETE worker ${names.dispatchWorker}`,
+  `DELETE worker ${names.apiWorker}`,
+  `DELETE queue ${names.cronQueue}`,
+  `DELETE queue ${names.usageQueue}`,
+  `DELETE dispatch-script ${names.dispatchNamespace} leftover-app`,
+  `DELETE dispatch-namespace ${names.dispatchNamespace}`,
+  `DELETE worker ${names.tailWorker}`,
+  `DELETE hyperdrive ${names.hyperdrive}`,
+  `DELETE kv-namespace ${names.isrCacheKv}`,
+  `EMPTY r2-bucket ${names.assetsBucket}`,
+  `DELETE r2-object ${PLATFORM_R2_OWNERSHIP_MARKER_KEY}`,
+  `DELETE r2-bucket ${names.assetsBucket}`,
+  `DELETE ai-gateway ${names.aiGateway}`,
+  `DELETE kv-namespace ${names.routingKv}`,
+];
+
+describe('uninstall --purge-all', () => {
+  it('plans every deletion in order and every kept resource, using only reads', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+
+    const plan = noteText('Uninstall plan');
+    expectInOrder(plan, [
+      'Delete every resource this installation created (--purge-all), in this order:',
+      `1. worker-custom-domain: api.example.com (domain-1) -> ${names.apiWorker}`,
+      `1. worker-route: *.apps.example.com/* (route-1) -> ${names.dispatchWorker}`,
+      `1. worker-route: *.apps.example.com (route-2) -> ${names.dispatchWorker}`,
+      '2. dns-record: *.apps.example.com (dns-id)',
+      `3. Access application: void-${INSTALLATION_ID}-login-0123456789abcdef (access-app)`,
+      `3. Access service-token: void-${INSTALLATION_ID}-access-probes-0123456789abcdef (access-token)`,
+      "4. queue consumers run by this installation's Workers on:",
+      names.cronQueue,
+      names.usageQueue,
+      `5. worker: ${names.emailGatewayWorker}`,
+      `5. worker: ${names.proxyWorker}`,
+      `5. worker: ${names.dispatchWorker}`,
+      `5. worker: ${names.apiWorker} (${names.apiWorker}), with its Durable Object data`,
+      `6. queue: ${names.cronQueue} (cron-id)`,
+      `6. queue: ${names.usageQueue} (usage-id)`,
+      `7. dispatch-namespace: ${names.dispatchNamespace} (namespace-uuid), with any application Workers still in it`,
+      `8. worker: ${names.tailWorker} (${names.tailWorker}), the tail Worker, after the others`,
+      `9. hyperdrive: ${names.hyperdrive} (hyperdrive-id)`,
+      `9. kv-namespace: ${names.isrCacheKv} (isr-id)`,
+      `10. r2-bucket: ${names.assetsBucket} (${names.assetsBucket}), emptied first`,
+      `11. ai-gateway: ${names.aiGateway} (${names.aiGateway})`,
+      `12. kv-namespace: ${names.routingKv} (routing-id), last; it holds uninstall progress`,
+      'Keep for manual cleanup:',
+      'kv-namespace: customer-kv (customer-kv-id)',
+      'zone: example.com (zone-id)',
+      'Keep Access resources you connected:',
+      'adopted application: company-app (company-app, account account)',
+      'Always kept:',
+      'The external PostgreSQL database and its data.',
+      'Analytics Engine datasets',
+      'API tokens you created for this platform.',
+      'API token needs: Account → Access: Apps and Policies → Edit',
+      'Zone → DNS → Edit',
+      `rerun: ${RESUME}`,
+    ]);
+    expect(plan).not.toContain(`Access application: company-app`);
+    expect(changes(fake)).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('installed');
+  });
+
+  it('deletes in an order Cloudflare accepts, with the tail Worker after its producers and routing KV last', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).toEqual(FULL_ORDER);
+    expect(fake.calls.indexOf('PUT disabled')).toBeLessThan(fake.calls.indexOf(FULL_ORDER[0]!));
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    // Never touched: the adopted zone and KV, the adopted Access application,
+    // and a Queue consumer run by a Worker the installation did not create.
+    expect(fake.live.kv).toEqual([{ id: 'customer-kv-id', name: 'customer-kv' }]);
+    expect(fake.live.access.has('company-app')).toBe(true);
+    expect(fake.live.consumers.get('usage-id')).toEqual([
+      { id: 'foreign-consumer', script: 'someone-else' },
+    ]);
+    const final = listInstallationManifests()[0]!;
+    expect(final.status).toBe('uninstalled');
+    expect(
+      final.resources
+        .filter((resource) => resource.state !== 'deleted')
+        .map((resource) => `${resource.key}:${resource.state}`),
+    ).toEqual(['customer-kv:retained', 'zone:retained']);
+    expect(readInstallationRecoverySecrets(final)).toBeNull();
+    const kept = noteText('Kept for manual cleanup');
+    expectInOrder(kept, [
+      'kv-namespace: customer-kv (customer-kv-id)',
+      'zone: example.com (zone-id)',
+      'adopted application: company-app',
+      'Always kept:',
+      'The external PostgreSQL database and its data.',
+    ]);
+    expect(kept).not.toContain('access-app');
+  });
+
+  it('resumes after a failure without repeating finished deletions', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.failures.set(`DELETE queue ${names.usageQueue}`, new Error('temporary failure'));
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'temporary failure',
+    );
+    const stopped = listInstallationManifests()[0]!;
+    expect(stopped.status).toBe('failed');
+    expect(fake.live.workers.has(names.apiWorker)).toBe(false);
+    expect(fake.live.workers.has(names.tailWorker)).toBe(true);
+
+    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+
+    // The failed DELETE is retried once; nothing else is sent twice.
+    const sent = deletes(fake);
+    const retried = `DELETE queue ${names.usageQueue}`;
+    expect(sent.filter((call) => call === retried)).toHaveLength(2);
+    expect(sent.filter((call, index) => call !== retried && sent.indexOf(call) !== index)).toEqual(
+      [],
+    );
+    expect(new Set(sent)).toEqual(new Set(FULL_ORDER));
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('resumes an R2 deletion after its ownership marker was removed', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'temporary failure',
+    );
+    expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
+
+    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('refuses an R2 bucket replaced after its ownership marker was removed', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'temporary failure',
+    );
+    fake.live.buckets.set(names.assetsBucket, {
+      fingerprint: '2026-10-01T00:00:00.000Z',
+      objects: new Map([['someone-else.txt', 'x']]),
+    });
+
+    await expect(
+      uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies()),
+    ).rejects.toThrow(`Refusing to delete R2 bucket ${names.assetsBucket}`);
+    expect(fake.live.buckets.get(names.assetsBucket)?.objects.has('someone-else.txt')).toBe(true);
+  });
+
+  it('refuses before any change when a Worker no longer carries this installation marker', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const replacement = { ...manifest, ownershipNonce: 'replacement-owner-nonce-00000000' };
+    fake.live.workers.set(
+      names.proxyWorker,
+      marker(
+        replacement,
+        manifest.resources.find((resource) => resource.key === 'proxy-worker')!,
+      ),
+    );
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'belongs to another installation',
+    );
+    expect(changes(fake)).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('installed');
+  });
+
+  it('stops at a route that now serves another Worker, and continues once it is gone', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.routes[1]!.script = 'someone-else';
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      `Refusing to delete Worker route *.apps.example.com (route-2) because it now sends "*.apps.example.com" to "someone-else". It may no longer belong to this installation. Delete or fix it in the Cloudflare dashboard if it is yours, then rerun: ${RESUME}`,
+    );
+    expect(deletes(fake)).toEqual([
+      'DELETE worker-custom-domain domain-1',
+      'DELETE worker-route route-1',
+    ]);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
+
+    fake.live.routes.splice(0);
+    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    expect(deletes(fake)).not.toContain('DELETE worker-route route-2');
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('stops with a clear message when Cloudflare refuses the tail Worker, and never forces it', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.foreignTailProducer = true;
+
+    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain(
+      `Cloudflare refused to delete worker ${names.tailWorker}: Cloudflare API error: Cannot delete this Worker as it is a Tail Worker consumer for other Workers. (code 100109)`,
+    );
+    expect(error?.message).toContain('for example by sending it logs as a tail Worker');
+    expect(error?.message).toContain(`Progress is saved. Rerun: ${RESUME}`);
+    expect(
+      deletes(fake).filter((call) => call === `DELETE worker ${names.tailWorker}`),
+    ).toHaveLength(1);
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
+
+    fake.live.foreignTailProducer = false;
+    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('refuses before any change while projects remain, in the plan too', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const withProjects = dependencies({ readProjects: async () => ['blog', 'shop'] });
+    const message = [
+      'platform: Refusing --purge-all while the platform still has 2 projects.',
+      "--purge-all deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
+      'Delete each project first with `void project delete <name>`, then retry:',
+      '  blog',
+      '  shop',
+    ].join('\n');
+
+    await expect(
+      uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, withProjects),
+    ).rejects.toThrow(message);
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, withProjects)).rejects.toThrow(
+      message,
+    );
+    await expect(
+      uninstallPlatform(
+        fake,
+        manifest,
+        purgeAllArgs,
+        dependencies({
+          readProjects: async () => {
+            throw new Error('connection refused');
+          },
+        }),
+      ),
+    ).rejects.toThrow(
+      'project list could not be read from the platform database: connection refused',
+    );
+    expect(fake.calls).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('installed');
+  });
+
+  it('reads project slugs, including a database without projects', async () => {
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes('to_regclass') ? [{ present: true }] : [{ slug: 'blog' }],
+    }));
+    await expect(readPlatformProjectSlugsConnection({ query } as never)).resolves.toEqual(['blog']);
+    await expect(
+      readPlatformProjectSlugsConnection({
+        query: async () => ({ rows: [{ present: false }] }),
+      } as never),
+    ).resolves.toEqual([]);
+  });
+
+  it('refuses browser login before any change and names the token permissions', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const oauth = dependencies({ credential: { source: 'oauth', aiGatewayToken: true } });
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, oauth)).rejects.toThrow(
+      'Browser login is missing: Zone → DNS → Edit, Account → Access: Apps and Policies → Edit, Account → Access: Service Tokens → Edit. No Cloudflare resource was changed.',
+    );
+    expect(changes(fake)).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('installed');
+
+    // The plan still prints and warns instead of failing.
+    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, oauth);
+    expect(noteText('Uninstall plan')).toContain('Delete every resource');
+    expect(String(vi.mocked(log.warn).mock.calls.at(-1)?.[0])).toContain(
+      'Set CLOUDFLARE_API_TOKEN',
+    );
+  });
+
+  it('names a token permission that a read probe shows is missing', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.listDnsRecords = async () => {
+      throw new PlatformCloudflareApiError('Authentication error', 403);
+    };
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'cannot read every resource --purge-all would delete. Add Zone → DNS → Edit for account account and zone example.com, then rerun. No Cloudflare resource was changed.',
+    );
+    expect(changes(fake)).toEqual([]);
+  });
+
+  it('makes no Workers for Platforms call when the installation has no dispatch namespace', async () => {
+    const manifest = installedManifest({ dispatchNamespace: false });
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(fake.calls.filter((call) => /dispatch-(namespace|script)/.test(call))).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+});

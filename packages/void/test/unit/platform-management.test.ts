@@ -331,6 +331,7 @@ const uninstallArgs = {
   selector: '',
   plan: false,
   purgeData: false,
+  purgeAll: false,
   deleteZone: null,
   yes: true,
 };
@@ -1448,6 +1449,8 @@ describe('platform lifecycle management', () => {
       'worker: api-worker (void-example-api)',
       'worker: dispatch-worker (void-example-dispatch)',
       'dispatch-namespace: dispatch-namespace (dispatch-namespace-id)',
+      // Cloudflare refuses the tail Worker while other Workers send it logs.
+      'worker: tail-worker (void-example-tail)',
       'kv-namespace: routing-kv (routing-kv-id)',
       'hyperdrive: hyperdrive (hyperdrive-id)',
       'r2-bucket: assets-bucket (assets-bucket-id)',

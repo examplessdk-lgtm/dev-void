@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   createApplicationRoutes,
   recordInstallationResource,
+  type InstallationResource,
   type PlatformDeploymentManifest,
   type PlatformInstallationManifest,
 } from '@void/platform';
@@ -44,6 +45,30 @@ export function platformManagedWorkerTraffic(
 
 function trafficConfigHash(kind: 'worker-custom-domain' | 'worker-route', value: unknown): string {
   return createHash('sha256').update(JSON.stringify({ kind, value })).digest('hex');
+}
+
+/**
+ * The installer Worker that a recorded route or custom domain serves, when the
+ * record matches exactly what the installer publishes for this deployment.
+ */
+export function platformTrafficAttachmentWorker(
+  deployment: PlatformDeploymentManifest,
+  resource: Pick<InstallationResource, 'configHash' | 'kind' | 'name'>,
+): string | null {
+  const managed = platformManagedWorkerTraffic(deployment);
+  if (resource.kind === 'worker-route') {
+    const target = managed.routes.find((route) => route.pattern === resource.name);
+    return target && trafficConfigHash('worker-route', target) === resource.configHash
+      ? target.script
+      : null;
+  }
+  if (resource.kind === 'worker-custom-domain') {
+    const target = managed.customDomains.find((domain) => domain.hostname === resource.name);
+    return target && trafficConfigHash('worker-custom-domain', target) === resource.configHash
+      ? target.service
+      : null;
+  }
+  return null;
 }
 
 export function trackedPlatformWorkerTraffic(

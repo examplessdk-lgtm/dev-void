@@ -101,7 +101,7 @@ void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-pa
 void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
 void platform disable [id] [--plan] [--yes]
 void platform enable [id] [--runtime <path>] [--plan] [--yes]
-void platform uninstall [id] [--plan] [--purge-data] [--keep-zone] [--yes]
+void platform uninstall [id] [--plan] [--purge-data | --purge-all] [--keep-zone] [--yes]
 ```
 
 `discover --installation` limits recovery and endpoint verification to one installation in a shared Cloudflare account.
@@ -137,6 +137,8 @@ An upgrade completes after the new Workers pass health checks. If rollout fails,
 
 `platform rollback` restores a compatible earlier runtime without reversing database migrations. Pass its files with `--runtime`; if the installed version is custom, also supply that version with `--from-runtime`. Void refuses incompatible targets.
 
-Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are always retained for manual review.
+Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are retained for manual review.
+
+`--purge-all` includes `--purge-data` and also deletes every other resource the installation created, including Workers, Queues, R2, AI Gateway, the platform DNS record, routes, custom domains, and installer-created Access resources. It still keeps zones, adopted resources, external PostgreSQL, Email Routing settings, and API tokens. It refuses before any change while projects remain or when the credential cannot make the planned deletions. Rerun the same command to continue after an interruption.
 
 See [Disable and Uninstall](../../guide/platform/installation/uninstall.md#remove-retained-resources) for the full removal policy and the cleanup order.

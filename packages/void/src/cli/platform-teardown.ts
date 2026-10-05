@@ -1,0 +1,787 @@
+import {
+  PLATFORM_R2_OWNERSHIP_MARKER_KEY,
+  recordInstallationResource,
+  recordInstallationStep,
+  type InstallationResource,
+  type PlatformInstallationManifest,
+} from '@void/platform';
+import {
+  PlatformCloudflareApiError,
+  type PlatformCloudflareClient,
+} from './platform-cloudflare.ts';
+import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
+
+/**
+ * `void platform uninstall --purge-all` deletes every Cloudflare resource the
+ * installation created, in an order Cloudflare accepts:
+ *
+ *   traffic (routes, custom domains, DNS) -> Access -> queue consumers
+ *   -> Workers except tail -> Queues -> dispatch namespace -> tail Worker
+ *   -> Hyperdrive and KV -> R2 -> AI Gateway -> routing KV (last)
+ *
+ * Each resource is proven to belong to this installation right before its
+ * DELETE, and no DELETE sends `force`, so Cloudflare refuses a resource that
+ * something outside the installation still uses. Every finished deletion is
+ * checkpointed, so rerunning the command continues where it stopped. The
+ * routing KV namespace holds that checkpoint, so uninstall deletes it last.
+ */
+
+export const PURGE_ALL_STEP_PREFIX = 'uninstall:purge-all:';
+
+export type PurgeAllClient = Pick<
+  PlatformCloudflareClient,
+  | 'deleteAccessResource'
+  | 'deleteDispatchNamespaceScript'
+  | 'deleteQueueConsumer'
+  | 'deleteR2Object'
+  | 'deleteResource'
+  | 'deleteWorkerDomain'
+  | 'deleteWorkerRoute'
+  | 'emptyR2Bucket'
+  | 'getAccessResource'
+  | 'listAiGateways'
+  | 'listDispatchNamespaceScripts'
+  | 'listDispatchNamespaces'
+  | 'listDnsRecords'
+  | 'listHyperdriveConfigs'
+  | 'listKvNamespaces'
+  | 'listQueueConsumers'
+  | 'listR2Buckets'
+  | 'listWorkerDomains'
+  | 'listWorkerNames'
+  | 'listWorkerRoutes'
+>;
+
+export type PurgeAllCredential = Readonly<{
+  source: 'environment' | 'saved' | 'oauth';
+  /** The runtime token is available for AI Gateway calls. */
+  aiGatewayToken: boolean;
+}>;
+
+type AccessResource = NonNullable<PlatformInstallationManifest['authenticationResources']>[number];
+
+type Target =
+  | Readonly<{ phase: 'traffic'; resource: InstallationResource; worker: InstallationResource }>
+  | Readonly<{
+      phase:
+        | 'dns'
+        | 'queue-consumers'
+        | 'workers'
+        | 'queues'
+        | 'dispatch'
+        | 'tail'
+        | 'data'
+        | 'r2'
+        | 'ai-gateway'
+        | 'routing';
+      resource: InstallationResource;
+    }>
+  | Readonly<{ phase: 'access'; access: AccessResource }>;
+
+// Workers deleted in this order before the tail Worker. Cloudflare accepted it
+// without force; anything else that sends logs to the tail Worker goes first.
+const WORKER_ORDER = ['email-gateway-worker', 'proxy-worker', 'dispatch-worker', 'api-worker'];
+
+const PERMISSIONS = {
+  access: 'Account → Access: Apps and Policies → Edit',
+  aiGateway: 'Account → AI Gateway → Edit',
+  dns: 'Zone → DNS → Edit',
+  hyperdrive: 'Account → Hyperdrive → Edit',
+  kv: 'Account → Workers KV Storage → Edit',
+  queues: 'Account → Queues → Edit',
+  r2: 'Account → Workers R2 Storage → Edit',
+  routes: 'Zone → Workers Routes → Edit',
+  serviceTokens: 'Account → Access: Service Tokens → Edit',
+  workers: 'Account → Workers Scripts → Edit',
+} as const;
+
+export function isPlatformTailWorker(
+  manifest: PlatformInstallationManifest,
+  resource: InstallationResource,
+): boolean {
+  return (
+    resource.kind === 'worker' &&
+    (resource.key === 'tail-worker' || resource.name === manifest.deployment.resources.tailWorker)
+  );
+}
+
+export function purgeAllResumeCommand(manifest: PlatformInstallationManifest): string {
+  return `void platform uninstall ${manifest.id} --purge-all`;
+}
+
+function accessStepKey(access: AccessResource): string {
+  return `${PURGE_ALL_STEP_PREFIX}access:${access.key}`;
+}
+
+/** Access resources that --purge-all already deleted. */
+export function isPurgedAccessResource(
+  manifest: PlatformInstallationManifest,
+  access: AccessResource,
+): boolean {
+  return manifest.steps.some((step) => step.key === accessStepKey(access));
+}
+
+function hasStep(manifest: PlatformInstallationManifest, key: string): boolean {
+  return manifest.steps.some((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${key}`);
+}
+
+function created(resource: InstallationResource): boolean {
+  return resource.ownership === 'created' && resource.state === 'ready';
+}
+
+/** Everything --purge-all will delete, in deletion order. */
+function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> {
+  const resources = manifest.resources;
+  const routing = resources.find((resource) => resource.key === 'routing-kv');
+  // Without the remote checkpoint nothing can be proven, so nothing is deleted.
+  if (routing?.state !== 'ready') {
+    return [];
+  }
+  const zone = resources.find((resource) => resource.key === 'zone' && resource.state === 'ready');
+  const workers = resources.filter((resource) => resource.kind === 'worker' && created(resource));
+  const targets: Array<Target> = [];
+  for (const resource of resources) {
+    if (
+      (resource.kind !== 'worker-route' && resource.kind !== 'worker-custom-domain') ||
+      (resource.state !== 'ready' && resource.state !== 'retained') ||
+      (resource.kind === 'worker-route' && !zone)
+    ) {
+      continue;
+    }
+    const name = platformTrafficAttachmentWorker(manifest.deployment, resource);
+    const worker = workers.find((entry) => entry.name === name);
+    if (worker) {
+      targets.push({ phase: 'traffic', resource, worker });
+    }
+  }
+  for (const resource of resources) {
+    if (resource.kind === 'dns-record' && created(resource) && zone) {
+      targets.push({ phase: 'dns', resource });
+    }
+  }
+  const access = (manifest.authenticationResources ?? []).filter(
+    (entry) => entry.ownership === 'created' && !isPurgedAccessResource(manifest, entry),
+  );
+  // An application can admit the service token, so delete applications first.
+  for (const kind of ['application', 'service-token'] as const) {
+    for (const entry of access.filter((candidate) => candidate.kind === kind)) {
+      targets.push({ phase: 'access', access: entry });
+    }
+  }
+  const queues = resources.filter((resource) => resource.kind === 'queue' && created(resource));
+  for (const resource of queues) {
+    if (!hasStep(manifest, `consumers:${resource.key}`)) {
+      targets.push({ phase: 'queue-consumers', resource });
+    }
+  }
+  const rank = (resource: InstallationResource) => {
+    const index = WORKER_ORDER.indexOf(resource.key);
+    return index < 0 ? WORKER_ORDER.length : index;
+  };
+  for (const resource of workers
+    .filter((worker) => !isPlatformTailWorker(manifest, worker))
+    .sort((left, right) => rank(left) - rank(right) || left.key.localeCompare(right.key))) {
+    targets.push({ phase: 'workers', resource });
+  }
+  for (const resource of queues) {
+    targets.push({ phase: 'queues', resource });
+  }
+  for (const resource of resources) {
+    if (resource.kind === 'dispatch-namespace' && created(resource)) {
+      targets.push({ phase: 'dispatch', resource });
+    }
+  }
+  for (const resource of workers.filter((worker) => isPlatformTailWorker(manifest, worker))) {
+    targets.push({ phase: 'tail', resource });
+  }
+  for (const kind of ['hyperdrive', 'kv-namespace'] as const) {
+    for (const resource of resources) {
+      if (resource.kind === kind && resource.key !== 'routing-kv' && created(resource)) {
+        targets.push({ phase: 'data', resource });
+      }
+    }
+  }
+  for (const kind of ['r2-bucket', 'ai-gateway'] as const) {
+    for (const resource of resources) {
+      if (resource.kind === kind && created(resource)) {
+        targets.push({ phase: kind === 'r2-bucket' ? 'r2' : 'ai-gateway', resource });
+      }
+    }
+  }
+  if (created(routing)) {
+    targets.push({ phase: 'routing', resource: routing });
+  }
+  return targets;
+}
+
+/** Manifest resources that --purge-all leaves in the account. */
+export function purgeAllKeptResources(
+  manifest: PlatformInstallationManifest,
+): Array<InstallationResource> {
+  const targets = new Set(
+    purgeAllTargets(manifest).flatMap((target) =>
+      'resource' in target ? [target.resource.key] : [],
+    ),
+  );
+  return manifest.resources.filter(
+    (resource) =>
+      (resource.state === 'ready' || resource.state === 'retained') && !targets.has(resource.key),
+  );
+}
+
+function resourceLabel(resource: InstallationResource): string {
+  return `${resource.kind}: ${resource.name} (${resource.id})`;
+}
+
+/** Plan lines for --purge-all: what is deleted, in order, then what is kept. */
+export function describePurgeAllPlan(manifest: PlatformInstallationManifest): Array<string> {
+  const targets = purgeAllTargets(manifest);
+  const lines: Array<string> = [];
+  let step = 0;
+  let previous: Target['phase'] | null = null;
+  const consumerQueues: Array<string> = [];
+  for (const target of targets) {
+    if (target.phase !== previous) {
+      step++;
+      previous = target.phase;
+    }
+    const prefix = `  ${step}. `;
+    if (target.phase === 'traffic') {
+      lines.push(`${prefix}${resourceLabel(target.resource)} -> ${target.worker.name}`);
+    } else if (target.phase === 'access') {
+      lines.push(
+        `${prefix}Access ${target.access.kind}: ${target.access.name} (${target.access.id})`,
+      );
+    } else if (target.phase === 'queue-consumers') {
+      consumerQueues.push(target.resource.name);
+      if (consumerQueues.length === 1) {
+        lines.push(`${prefix}queue consumers run by this installation's Workers on:`);
+      }
+      lines.push(`       ${target.resource.name}`);
+    } else if (target.phase === 'dispatch') {
+      lines.push(
+        `${prefix}${resourceLabel(target.resource)}, with any application Workers still in it`,
+      );
+    } else if (target.phase === 'tail') {
+      lines.push(`${prefix}${resourceLabel(target.resource)}, the tail Worker, after the others`);
+    } else if (target.phase === 'workers' && target.resource.key === 'api-worker') {
+      lines.push(`${prefix}${resourceLabel(target.resource)}, with its Durable Object data`);
+    } else if (target.phase === 'r2') {
+      lines.push(`${prefix}${resourceLabel(target.resource)}, emptied first`);
+    } else if (target.phase === 'routing') {
+      lines.push(`${prefix}${resourceLabel(target.resource)}, last; it holds uninstall progress`);
+    } else {
+      lines.push(`${prefix}${resourceLabel(target.resource)}`);
+    }
+  }
+  return lines.length
+    ? ['Delete every resource this installation created (--purge-all), in this order:', ...lines]
+    : ['--purge-all finds no resource it can prove this installation created.'];
+}
+
+/** Lines naming what --purge-all never removes. */
+export function purgeAllAlwaysKept(): Array<string> {
+  return [
+    '  The external PostgreSQL database and its data.',
+    '  Analytics Engine datasets; Cloudflare has no API to delete them.',
+    '  Access policies and identity providers you chose.',
+    '  API tokens you created for this platform. Revoke them in the Cloudflare dashboard.',
+  ];
+}
+
+/** Token permissions --purge-all needs for this manifest. */
+export function purgeAllPermissions(manifest: PlatformInstallationManifest): Array<string> {
+  const targets = purgeAllTargets(manifest);
+  const needed = new Set<string>();
+  for (const target of targets) {
+    if (target.phase === 'access') {
+      needed.add(
+        target.access.kind === 'application' ? PERMISSIONS.access : PERMISSIONS.serviceTokens,
+      );
+      continue;
+    }
+    const { kind } = target.resource;
+    if (kind === 'worker-route') {
+      needed.add(PERMISSIONS.routes);
+    } else if (
+      kind === 'worker' ||
+      kind === 'worker-custom-domain' ||
+      kind === 'dispatch-namespace'
+    ) {
+      needed.add(PERMISSIONS.workers);
+    } else if (kind === 'dns-record') {
+      needed.add(PERMISSIONS.dns);
+    } else if (kind === 'queue') {
+      needed.add(PERMISSIONS.queues);
+    } else if (kind === 'kv-namespace') {
+      needed.add(PERMISSIONS.kv);
+    } else if (kind === 'hyperdrive') {
+      needed.add(PERMISSIONS.hyperdrive);
+    } else if (kind === 'r2-bucket') {
+      needed.add(PERMISSIONS.r2);
+    } else if (kind === 'ai-gateway') {
+      needed.add(PERMISSIONS.aiGateway);
+    }
+  }
+  return Object.values(PERMISSIONS).filter((permission) => needed.has(permission));
+}
+
+function deniedStatus(error: unknown): boolean {
+  return (
+    error instanceof PlatformCloudflareApiError && (error.status === 401 || error.status === 403)
+  );
+}
+
+/**
+ * Check before the first change that the credential can make every planned
+ * deletion. Browser login cannot change DNS or Access, so those need an API
+ * token. For a token, read probes catch a missing account or zone grant; a
+ * read cannot prove Edit, so the plan names the full permission list too.
+ */
+export async function checkPurgeAllCredentials(
+  client: PurgeAllClient,
+  manifest: PlatformInstallationManifest,
+  credential: PurgeAllCredential,
+): Promise<void> {
+  const targets = purgeAllTargets(manifest);
+  const resources = targets.flatMap((target) => ('resource' in target ? [target.resource] : []));
+  const access = targets.flatMap((target) => ('access' in target ? [target.access] : []));
+  const has = (kind: InstallationResource['kind']) =>
+    resources.some((resource) => resource.kind === kind);
+  const zone = manifest.resources.find((resource) => resource.key === 'zone');
+  const scope = `account ${manifest.account.id}${has('dns-record') || has('worker-route') ? ` and zone ${zone?.name ?? ''}` : ''}`;
+  if (credential.source === 'oauth') {
+    const browserMissing = [
+      ...(has('dns-record') ? [PERMISSIONS.dns] : []),
+      ...(access.some((entry) => entry.kind === 'application') ? [PERMISSIONS.access] : []),
+      ...(access.some((entry) => entry.kind === 'service-token')
+        ? [PERMISSIONS.serviceTokens]
+        : []),
+      ...(has('ai-gateway') && !credential.aiGatewayToken ? [PERMISSIONS.aiGateway] : []),
+    ];
+    if (browserMissing.length) {
+      throw new Error(
+        `platform: Cloudflare browser login cannot delete every resource --purge-all plans. Set CLOUDFLARE_API_TOKEN to a token with ${purgeAllPermissions(manifest).join(', ')}, scoped to ${scope}, then rerun. Browser login is missing: ${browserMissing.join(', ')}. No Cloudflare resource was changed.`,
+      );
+    }
+  }
+  const probes: Array<[string, () => Promise<unknown>]> = [];
+  if (has('worker') || has('worker-custom-domain')) {
+    probes.push([PERMISSIONS.workers, () => client.listWorkerNames(manifest.account.id)]);
+  }
+  if (has('worker-custom-domain')) {
+    probes.push([PERMISSIONS.workers, () => client.listWorkerDomains(manifest.account.id)]);
+  }
+  if (has('worker-route') && zone) {
+    probes.push([PERMISSIONS.routes, () => client.listWorkerRoutes(zone.id)]);
+  }
+  for (const resource of resources) {
+    if (resource.kind === 'dns-record' && zone) {
+      probes.push([PERMISSIONS.dns, () => client.listDnsRecords(zone.id, resource.name)]);
+    } else if (resource.kind === 'queue') {
+      probes.push([
+        PERMISSIONS.queues,
+        () => client.listQueueConsumers(manifest.account.id, resource.id),
+      ]);
+    }
+  }
+  for (const entry of access) {
+    probes.push([
+      entry.kind === 'application' ? PERMISSIONS.access : PERMISSIONS.serviceTokens,
+      () => client.getAccessResource(manifest.account.id, entry.kind, entry.id),
+    ]);
+  }
+  if (has('dispatch-namespace')) {
+    probes.push([PERMISSIONS.workers, () => client.listDispatchNamespaces(manifest.account.id)]);
+  }
+  if (has('kv-namespace')) {
+    probes.push([PERMISSIONS.kv, () => client.listKvNamespaces(manifest.account.id)]);
+  }
+  if (has('hyperdrive')) {
+    probes.push([PERMISSIONS.hyperdrive, () => client.listHyperdriveConfigs(manifest.account.id)]);
+  }
+  if (has('r2-bucket')) {
+    probes.push([PERMISSIONS.r2, () => client.listR2Buckets(manifest.account.id)]);
+  }
+  if (has('ai-gateway')) {
+    probes.push([PERMISSIONS.aiGateway, () => client.listAiGateways(manifest.account.id)]);
+  }
+  const missing = new Set<string>();
+  for (const [permission, probe] of probes) {
+    try {
+      await probe();
+    } catch (error) {
+      if (!deniedStatus(error)) {
+        throw error;
+      }
+      missing.add(permission);
+    }
+  }
+  if (missing.size) {
+    throw new Error(
+      `platform: The Cloudflare credential cannot read every resource --purge-all would delete. Add ${[...missing].join(', ')} for ${scope}, then rerun. No Cloudflare resource was changed.`,
+    );
+  }
+}
+
+type QueryConnection = Readonly<{
+  query: <Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    values?: ReadonlyArray<unknown>,
+  ) => Promise<{ rows: ReadonlyArray<Row> }>;
+}>;
+
+const LISTED_PROJECTS = 20;
+
+/** Slugs of every project row, including projects whose deletion stopped partway. */
+export async function readPlatformProjectSlugsConnection(
+  client: QueryConnection,
+): Promise<ReadonlyArray<string>> {
+  const table = await client.query<{ present: boolean }>(
+    `SELECT to_regclass('public.projects') IS NOT NULL AS "present"`,
+  );
+  if (table.rows[0]?.present !== true) {
+    return [];
+  }
+  const rows = await client.query<{ slug: string }>(
+    'SELECT "slug" FROM "projects" ORDER BY "slug"',
+  );
+  return rows.rows.map((row) => row.slug);
+}
+
+/**
+ * Projects own Workers, storage, and domains that only the running platform
+ * can delete. --purge-all deletes the platform, so it refuses before any
+ * change while a project remains.
+ */
+export async function assertNoPlatformProjects(
+  read: (() => Promise<ReadonlyArray<string>>) | undefined,
+): Promise<void> {
+  let slugs: ReadonlyArray<string>;
+  try {
+    if (!read) {
+      throw new Error('no platform database connection is available');
+    }
+    slugs = await read();
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(
+      /^platform: /,
+      '',
+    );
+    throw new Error(
+      `platform: Refusing --purge-all because the project list could not be read from the platform database: ${reason}\nMake the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry.`,
+    );
+  }
+  if (slugs.length) {
+    throw new Error(
+      [
+        `platform: Refusing --purge-all while the platform still has ${slugs.length === 1 ? '1 project' : `${slugs.length} projects`}.`,
+        "--purge-all deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
+        'Delete each project first with `void project delete <name>`, then retry:',
+        ...slugs.slice(0, LISTED_PROJECTS).map((slug) => `  ${slug}`),
+        ...(slugs.length > LISTED_PROJECTS
+          ? [`  …and ${slugs.length - LISTED_PROJECTS} more`]
+          : []),
+      ].join('\n'),
+    );
+  }
+}
+
+export type PurgeAllContext = Readonly<{
+  client: PurgeAllClient;
+  /** Save progress locally, in PostgreSQL, and in routing KV. */
+  checkpoint: (manifest: PlatformInstallationManifest) => Promise<void>;
+  /** Live ownership proof for these keys; returns the keys that no longer exist. */
+  verify: (
+    manifest: PlatformInstallationManifest,
+    keys: ReadonlySet<string>,
+  ) => Promise<ReadonlySet<string>>;
+  /** True when the live bucket keeps its recorded creation fingerprint; null when it is gone. */
+  bucketGenerationMatches: (
+    manifest: PlatformInstallationManifest,
+    bucket: InstallationResource,
+  ) => Promise<boolean | null>;
+}>;
+
+function ownershipRefusal(
+  manifest: PlatformInstallationManifest,
+  description: string,
+  reason: string,
+): Error {
+  return new Error(
+    `platform: Refusing to delete ${description} because ${reason}. It may no longer belong to this installation. Delete or fix it in the Cloudflare dashboard if it is yours, then rerun: ${purgeAllResumeCommand(manifest)}`,
+  );
+}
+
+function cloudflareRefusal(
+  manifest: PlatformInstallationManifest,
+  description: string,
+  error: unknown,
+  hint: string,
+): unknown {
+  if (!(error instanceof PlatformCloudflareApiError)) {
+    return error;
+  }
+  return new Error(
+    `platform: Cloudflare refused to delete ${description}: ${error.message}\n${hint}\nProgress is saved. Rerun: ${purgeAllResumeCommand(manifest)}`,
+    { cause: error },
+  );
+}
+
+/**
+ * Delete every target in order. Returns the manifest with each deleted
+ * resource recorded; routing KV is left for the caller to delete last.
+ */
+export async function runPurgeAllTeardown(
+  context: PurgeAllContext,
+  initial: PlatformInstallationManifest,
+): Promise<PlatformInstallationManifest> {
+  const { client } = context;
+  let next = initial;
+  const accountId = next.account.id;
+  const save = async (manifest: PlatformInstallationManifest) => {
+    next = manifest;
+    await context.checkpoint(next);
+  };
+  const markDeleted = async (key: string) => {
+    const resource = next.resources.find((entry) => entry.key === key)!;
+    await save(
+      recordInstallationResource(next, { ...resource, state: 'deleted' }, new Date().toISOString()),
+    );
+  };
+  const recordStep = async (key: string) => {
+    const now = new Date().toISOString();
+    await save(
+      recordInstallationStep(
+        next,
+        { completedAt: now, key: `${PURGE_ALL_STEP_PREFIX}${key}`, resultHash: 'completed' },
+        now,
+      ),
+    );
+  };
+  /** Prove the resource; false when it is already gone (and recorded). */
+  const prove = async (resource: InstallationResource): Promise<boolean> => {
+    const missing = await context.verify(next, new Set(['routing-kv', resource.key]));
+    if (missing.has(resource.key)) {
+      await markDeleted(resource.key);
+      return false;
+    }
+    return true;
+  };
+  const remove = async (resource: InstallationResource, hint: string, zoneId?: string) => {
+    if (!(await prove(resource))) {
+      return;
+    }
+    try {
+      await client.deleteResource(accountId, resource, zoneId);
+    } catch (error) {
+      throw cloudflareRefusal(next, `${resource.kind} ${resource.name}`, error, hint);
+    }
+    await markDeleted(resource.key);
+  };
+  const zone = next.resources.find(
+    (resource) => resource.key === 'zone' && resource.state === 'ready',
+  );
+  const createdWorkerNames = new Set(
+    next.resources
+      .filter((resource) => resource.kind === 'worker' && resource.ownership === 'created')
+      .map((resource) => resource.name),
+  );
+  const workerHint =
+    'A Worker this installation did not create may still use it, for example by sending it logs as a tail Worker or through a service binding. Remove that link in the Cloudflare dashboard.';
+
+  for (const target of purgeAllTargets(initial)) {
+    if (target.phase === 'access') {
+      const { access } = target;
+      const live = await client.getAccessResource(accountId, access.kind, access.id);
+      if (live) {
+        if (live.name !== access.name || !access.name.startsWith(`void-${next.id}-`)) {
+          throw ownershipRefusal(
+            next,
+            `Access ${access.kind} ${access.id}`,
+            `its live name ${JSON.stringify(live.name)} is not the name this installation recorded`,
+          );
+        }
+        try {
+          await client.deleteAccessResource(accountId, access.kind, access.id);
+        } catch (error) {
+          throw cloudflareRefusal(
+            next,
+            `Access ${access.kind} ${access.name}`,
+            error,
+            'Check that nothing outside this installation still uses it.',
+          );
+        }
+      }
+      await recordStep(`access:${access.key}`);
+      continue;
+    }
+    const current = next.resources.find((resource) => resource.key === target.resource.key);
+    // Already handled on an earlier run, or by an earlier step of this one.
+    if (
+      !current ||
+      current.state === 'deleted' ||
+      (target.phase !== 'traffic' && current.state !== 'ready')
+    ) {
+      continue;
+    }
+    switch (target.phase) {
+      case 'traffic': {
+        const worker = next.resources.find((resource) => resource.key === target.worker.key);
+        if (worker?.state !== 'ready' || !(await prove(worker))) {
+          // The Worker it served is gone, so the attachment cannot be proven.
+          break;
+        }
+        if (current.kind === 'worker-route') {
+          const live = (await client.listWorkerRoutes(zone!.id)).find(
+            (route) => route.id === current.id,
+          );
+          if (live && (live.pattern !== current.name || live.script !== worker.name)) {
+            throw ownershipRefusal(
+              next,
+              `Worker route ${current.name} (${current.id})`,
+              `it now sends ${JSON.stringify(live.pattern)} to ${JSON.stringify(live.script)}`,
+            );
+          }
+          if (live) {
+            await client.deleteWorkerRoute(zone!.id, current.id);
+          }
+        } else {
+          const live = (await client.listWorkerDomains(accountId)).find(
+            (domain) => domain.id === current.id,
+          );
+          if (live && (live.hostname !== current.name || live.service !== worker.name)) {
+            throw ownershipRefusal(
+              next,
+              `custom domain ${current.name} (${current.id})`,
+              `it now sends ${JSON.stringify(live.hostname)} to ${JSON.stringify(live.service)}`,
+            );
+          }
+          if (live) {
+            await client.deleteWorkerDomain(accountId, current.id);
+          }
+        }
+        await markDeleted(current.key);
+        break;
+      }
+      case 'dns':
+        await remove(current, 'Check the record in the Cloudflare dashboard.', zone!.id);
+        break;
+      case 'queue-consumers': {
+        if (!(await prove(current))) {
+          break;
+        }
+        for (const consumer of await client.listQueueConsumers(accountId, current.id)) {
+          if (consumer.script && createdWorkerNames.has(consumer.script)) {
+            await client.deleteQueueConsumer(accountId, current.id, consumer.id);
+          }
+        }
+        await recordStep(`consumers:${current.key}`);
+        break;
+      }
+      case 'workers':
+      case 'tail':
+        await remove(current, workerHint);
+        break;
+      case 'queues':
+        await remove(
+          current,
+          'A Worker this installation did not create may still use the Queue as a producer or consumer. Remove it from that Worker in the Cloudflare dashboard.',
+        );
+        break;
+      case 'dispatch': {
+        if (!(await prove(current))) {
+          break;
+        }
+        for (const script of await client.listDispatchNamespaceScripts(accountId, current.name)) {
+          try {
+            await client.deleteDispatchNamespaceScript(accountId, current.name, script);
+          } catch (error) {
+            throw cloudflareRefusal(next, `application Worker ${script}`, error, workerHint);
+          }
+        }
+        try {
+          await client.deleteResource(accountId, current);
+        } catch (error) {
+          throw cloudflareRefusal(
+            next,
+            `dispatch-namespace ${current.name}`,
+            error,
+            'Check the namespace in the Cloudflare dashboard.',
+          );
+        }
+        await markDeleted(current.key);
+        break;
+      }
+      case 'data':
+      case 'ai-gateway':
+        await remove(current, 'Check that nothing outside this installation still uses it.');
+        break;
+      case 'r2':
+        await purgeBucket(current);
+        break;
+      case 'routing':
+        // The caller deletes routing KV after recording completion.
+        break;
+    }
+  }
+  return next;
+
+  async function purgeBucket(bucket: InstallationResource): Promise<void> {
+    const markerStep = `r2-marker:${bucket.key}`;
+    if (!hasStep(next, markerStep)) {
+      if (!(await prove(bucket))) {
+        return;
+      }
+      // Keep the ownership marker until last, and prove the bucket again
+      // before every page of deletes.
+      await client.emptyR2Bucket(
+        accountId,
+        bucket.name,
+        new Set([PLATFORM_R2_OWNERSHIP_MARKER_KEY]),
+        async () => {
+          const missing = await context.verify(next, new Set(['routing-kv', bucket.key]));
+          if (missing.has(bucket.key)) {
+            throw ownershipRefusal(
+              next,
+              `R2 bucket ${bucket.name}`,
+              'it disappeared while it was being emptied',
+            );
+          }
+        },
+      );
+      if (!(await prove(bucket))) {
+        return;
+      }
+      await recordStep(markerStep);
+      await client.deleteR2Object(accountId, bucket.name, PLATFORM_R2_OWNERSHIP_MARKER_KEY);
+    } else {
+      // The marker may already be gone; the creation fingerprint still proves
+      // this is the same bucket.
+      const matches = await context.bucketGenerationMatches(next, bucket);
+      if (matches === null) {
+        await markDeleted(bucket.key);
+        return;
+      }
+      if (!matches) {
+        throw ownershipRefusal(
+          next,
+          `R2 bucket ${bucket.name}`,
+          'its creation fingerprint changed',
+        );
+      }
+      await client.deleteR2Object(accountId, bucket.name, PLATFORM_R2_OWNERSHIP_MARKER_KEY);
+    }
+    try {
+      await client.deleteResource(accountId, bucket);
+    } catch (error) {
+      throw cloudflareRefusal(
+        next,
+        `r2-bucket ${bucket.name}`,
+        error,
+        'Cloudflare deletes only empty buckets. If objects were added after it was emptied, delete them in the Cloudflare dashboard.',
+      );
+    }
+    await markDeleted(bucket.key);
+  }
+}

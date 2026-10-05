@@ -25,6 +25,7 @@ import {
 } from './platform-installer-types.ts';
 import { type PlatformInstallPlan } from './platform-plan.ts';
 import { writeInstallationManifest } from './platform-registry.ts';
+import { readPlatformProjectSlugsConnection } from './platform-teardown.ts';
 import {
   fencePlatformProjectZeroTrustConnection,
   liftPlatformProjectZeroTrustFenceConnection,
@@ -269,6 +270,26 @@ export async function readPlatformProjectZeroTrustState(
     // Throws unless the database is claimed by this installation.
     await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
     return await readPlatformProjectZeroTrustStateConnection(pool);
+  } finally {
+    await pool.end();
+  }
+}
+
+/** Read project slugs for a --purge-all plan, which holds no lifecycle lock. */
+export async function readPlatformProjectSlugs(
+  databaseUrl: string,
+  installationId: string,
+  ownershipNonce: string,
+): Promise<ReadonlyArray<string>> {
+  if (!databaseUrl) {
+    throw new Error('the installation database URL is not recorded on this machine');
+  }
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
+  try {
+    // Throws unless the database is claimed by this installation.
+    await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
+    return await readPlatformProjectSlugsConnection(pool);
   } finally {
     await pool.end();
   }
@@ -564,6 +585,7 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
       : null;
   };
   release.readProjectZeroTrust = () => readPlatformProjectZeroTrustStateConnection(client);
+  release.readProjects = () => readPlatformProjectSlugsConnection(client);
   release.lockProjectZeroTrust = () => lockPlatformProjectZeroTrustConnection(client);
   release.fenceProjectZeroTrust = () => fencePlatformProjectZeroTrustConnection(client);
   release.liftProjectZeroTrustFence = () => liftPlatformProjectZeroTrustFenceConnection(client);

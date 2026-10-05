@@ -115,6 +115,8 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   ) => Promise<PlatformSandboxDrainPreparation>;
   /** Project Zero Trust state that decides whether uninstall may start. */
   readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
+  /** Project slugs, which --purge-all requires to be empty. */
+  readProjects?: () => Promise<ReadonlyArray<string>>;
   /** Block Zero Trust writers in the API until the returned release runs. */
   lockProjectZeroTrust?: () => Promise<() => Promise<void>>;
   /** Make API Zero Trust writers refuse until the fence is lifted. */
