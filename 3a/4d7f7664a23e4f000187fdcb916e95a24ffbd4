@@ -1,0 +1,29 @@
+README.md
+  s_3dca312de99340::t_14be99fc7cde0c 95
+docs/guide/ai.md
+  s_3dca312de99340::t_a8871102b273db 32,36,174
+docs/guide/database/d1.md
+  s_3dca312de99340::t_6ed06bc37478fb 72
+docs/integrations/frameworks/overview.md
+  s_3dca312de99340::t_0a62083827dc8e 39
+docs/integrations/nodejs-bun-deno.md
+  s_3dca312de99340::t_4e79fc16ec7d58 97-102,114
+docs/reference/api.md
+  s_3dca312de99340::t_630106a35e62c6 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3a4d7f7664a23e4f000187fdcb916e95a24ffbd4",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
