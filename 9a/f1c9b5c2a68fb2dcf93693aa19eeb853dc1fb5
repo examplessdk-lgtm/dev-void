@@ -1,0 +1,19 @@
+vite.config.ts
+  s_f9988f60ed7f0e::t_9859b2b47382f7 127,362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9af1c9b5c2a68fb2dcf93693aa19eeb853dc1fb5",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
