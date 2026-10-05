@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'pathslash';
@@ -174,8 +175,12 @@ export function openDeployLog(opts?: { mirrorToStderr?: boolean }): CliLogger {
     const dir = join(homedir(), '.void', 'logs');
     mkdirSync(dir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const filePath = join(dir, `deploy-${ts}.jsonl`);
-    stream = createWriteStream(filePath, { flags: 'a', autoClose: true });
+    // Deploys started in the same millisecond (parallel deploys from one
+    // machine) must not share a file, so add the pid and a random suffix and
+    // refuse to open a file that already exists.
+    const suffix = randomBytes(3).toString('hex');
+    const filePath = join(dir, `deploy-${ts}-${process.pid}-${suffix}.jsonl`);
+    stream = createWriteStream(filePath, { flags: 'wx', autoClose: true });
     stream.on('error', () => {
       // Disable subsequent writes silently. Stream errors should never
       // bubble up into the deploy pipeline.
