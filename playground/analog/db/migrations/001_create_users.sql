@@ -3,7 +3,9 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE
 );
-
+--> statement-breakpoint
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+--> statement-breakpoint
 INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com');
+--> statement-breakpoint
 INSERT INTO users (name, email) VALUES ('Charlie', 'charlie@example.com');

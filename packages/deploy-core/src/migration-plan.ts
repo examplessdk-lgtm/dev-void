@@ -74,10 +74,20 @@ function hasStatementBreakpointOutsideLiterals(sql: string): boolean {
   return false;
 }
 
-export function isSingleStatement(sql: string): boolean {
+type StatementScan = {
+  normalized: string;
+  /** Statement ranges in `normalized`, each ending after its `;` when present. */
+  ranges: Array<{ start: number; end: number }>;
+  /** Whether bare SQL (outside literals and comments) contains BEGIN or TRIGGER. */
+  hasCompoundBody: boolean;
+};
+
+function scanStatements(sql: string): StatementScan {
   const normalized = canonicalSql(sql);
-  let statements = 0;
+  const ranges: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
   let inStatement = false;
+  let hasCompoundBody = false;
 
   for (const segment of tokenizeSql(normalized)) {
     if (segment.kind === 'line-comment' || segment.kind === 'block-comment') {
@@ -87,13 +97,17 @@ export function isSingleStatement(sql: string): boolean {
       inStatement = true;
       continue;
     }
+    if (/\b(?:BEGIN|TRIGGER)\b/i.test(normalized.slice(segment.start, segment.end))) {
+      hasCompoundBody = true;
+    }
     for (let index = segment.start; index < segment.end; index++) {
       const character = normalized[index];
       if (character === ';') {
         if (inStatement) {
-          statements++;
+          ranges.push({ start: cursor, end: index + 1 });
           inStatement = false;
         }
+        cursor = index + 1;
         continue;
       }
       if (character !== ' ' && character !== '\t' && character !== '\n' && character !== '\r') {
@@ -103,9 +117,26 @@ export function isSingleStatement(sql: string): boolean {
   }
 
   if (inStatement) {
-    statements++;
+    ranges.push({ start: cursor, end: normalized.length });
   }
-  return statements === 1;
+  return { normalized, ranges, hasCompoundBody };
+}
+
+export function isSingleStatement(sql: string): boolean {
+  return scanStatements(sql).ranges.length === 1;
+}
+
+/**
+ * Split SQL on top-level semicolons, ignoring literals and comments. Returns
+ * null when a statement may contain a compound `BEGIN ... END` body (such as
+ * CREATE TRIGGER), whose inner semicolons cannot be told apart lexically.
+ */
+export function splitSqlStatements(sql: string): Array<string> | null {
+  const { normalized, ranges, hasCompoundBody } = scanStatements(sql);
+  if (hasCompoundBody) {
+    return null;
+  }
+  return ranges.map((range) => normalized.slice(range.start, range.end).trim());
 }
 
 /** Classify SQL without imposing the caller's execution policy or hashing implementation. */

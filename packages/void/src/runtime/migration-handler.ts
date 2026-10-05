@@ -1,4 +1,4 @@
-import { canonicalJson } from '@void/deploy-core';
+import { canonicalJson, splitSqlStatements } from '@void/deploy-core';
 
 export type MigrationEntry = {
   name: string;
@@ -458,11 +458,34 @@ async function executeMigrationPlan(
     return;
   }
 
-  await db.exec(migration.sql);
-  await db
+  await runUnsplitMigration(db, migration, appliedAt, fencedAttemptId);
+}
+
+/**
+ * D1 `exec()` treats each line as its own statement, so multi-line statements
+ * fail there. Run each top-level statement through one batch instead, and keep
+ * `exec()` only for SQL the splitter cannot divide safely (trigger bodies).
+ */
+async function runUnsplitMigration(
+  db: D1Database,
+  migration: MigrationEntry,
+  appliedAt: string,
+  fencedAttemptId?: string,
+): Promise<void> {
+  const record = db
     .prepare('INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)')
-    .bind(migration.name, appliedAt)
-    .run();
+    .bind(migration.name, appliedAt);
+  const statements = splitSqlStatements(migration.sql);
+  if (statements) {
+    await db.batch([
+      ...ownershipFence(db, fencedAttemptId),
+      ...statements.map((statement) => db.prepare(statement)),
+      record,
+    ]);
+    return;
+  }
+  await db.exec(migration.sql);
+  await record.run();
 }
 
 /** Fail the whole D1 batch if recovery has revoked this executor's ownership. */
@@ -676,18 +699,16 @@ async function runD1LegacyMigrations(
       if (statements.length === 1) {
         if (isSingleSqlStatement(statements[0])) {
           await db.prepare(statements[0]).run();
+          await recordLegacyMigration(db, migration.name);
         } else {
-          await db.exec(migration.sql);
+          await runUnsplitMigration(db, migration, new Date().toISOString());
         }
       } else {
         for (const statement of statements) {
           await db.prepare(statement).run();
         }
+        await recordLegacyMigration(db, migration.name);
       }
-      await db
-        .prepare('INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)')
-        .bind(migration.name, new Date().toISOString())
-        .run();
       migrationResults.push({
         name: migration.name,
         applied: true,
@@ -709,6 +730,13 @@ async function runD1LegacyMigrations(
   }
 
   return { ok: true, migrations: migrationResults };
+}
+
+async function recordLegacyMigration(db: D1Database, name: string): Promise<void> {
+  await db
+    .prepare('INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)')
+    .bind(name, new Date().toISOString())
+    .run();
 }
 
 function splitMigrationSql(sql: string): Array<string> {

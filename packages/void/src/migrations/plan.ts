@@ -110,7 +110,7 @@ export function classifyMigration(migration: {
     ...(classification.kind === 'legacy-unsplit-multi-statement'
       ? {
           warnings: [
-            `Migration ${migration.name} contains multiple statements without Drizzle statement breakpoints; it will run through the legacy D1 path.`,
+            `Migration ${migration.name} contains multiple statements without Drizzle statement breakpoints. Add a \`--> statement-breakpoint\` line between statements so each one runs separately.`,
           ],
         }
       : {}),

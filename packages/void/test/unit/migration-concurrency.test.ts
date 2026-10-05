@@ -26,7 +26,6 @@ function createDatabase(
   hooks: {
     beforeBatch?: (sql: Array<string>) => Promise<void>;
     afterLockWrite?: () => Promise<void>;
-    beforeExec?: () => Promise<void>;
   } = {},
 ) {
   const sqlite = new DatabaseSync(':memory:');
@@ -61,7 +60,6 @@ function createDatabase(
   const db = {
     prepare,
     async exec(sql: string) {
-      await hooks.beforeExec?.();
       sqlite.exec(sql);
     },
     async batch(statements: Array<ReturnType<typeof prepare>>) {
@@ -148,13 +146,15 @@ describe('D1 migration ownership', () => {
     ).toBe('unknown');
   });
 
-  it('keeps the lock while a legacy raw execution is in flight', async () => {
+  it('keeps the lock while an unfenced legacy migration is in flight', async () => {
     const paused = deferred();
     const resume = deferred();
     const { sqlite, handler } = createDatabase({
-      beforeExec: async () => {
-        paused.resolve();
-        await resume.promise;
+      beforeBatch: async (sql) => {
+        if (sql.includes('UPDATE balance SET amount = amount - 10;')) {
+          paused.resolve();
+          await resume.promise;
+        }
       },
     });
     const owner = handler([

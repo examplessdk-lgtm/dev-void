@@ -466,9 +466,15 @@ describe('createMigrationHandler D1 execution', () => {
     };
   }
 
-  it('passes the full migration SQL to D1 instead of splitting on semicolons', async () => {
-    const sql = `CREATE TABLE notes (message TEXT DEFAULT 'a;b');\nINSERT INTO notes DEFAULT VALUES;`;
-    const { calls, db } = createMockD1();
+  it('runs unsplit multi-statement migrations statement by statement in one D1 batch', async () => {
+    const createTable = ['CREATE TABLE notes (', "  message TEXT DEFAULT 'a;b'", ');'].join('\n');
+    const sql = `${createTable}\nINSERT INTO notes DEFAULT VALUES;`;
+    const { calls, db } = createMockD1({
+      failExec: (executedSql) =>
+        executedSql.includes('\n')
+          ? new Error('D1_EXEC_ERROR: Error in line 1: CREATE TABLE notes (: incomplete input')
+          : undefined,
+    });
     const handler = createMigrationHandler(
       { __VOID_PROXY_TOKEN: proxyToken, DB: db },
       [{ name: '0001_semicolon.sql', sql }],
@@ -488,15 +494,80 @@ describe('createMigrationHandler D1 execution', () => {
     expect(body.migrations).toEqual([
       { name: '0001_semicolon.sql', applied: true, durationMs: expect.any(Number) },
     ]);
+    expect(calls.exec).toEqual([]);
+    expect(calls.batchSql).toEqual([
+      [
+        createTable,
+        'INSERT INTO notes DEFAULT VALUES;',
+        'INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)',
+      ],
+    ]);
+  });
+
+  it('keeps raw exec for legacy trigger migrations that cannot be split safely', async () => {
+    const sql = [
+      'CREATE TABLE notes (id INTEGER PRIMARY KEY, updated_at TEXT);',
+      'CREATE TRIGGER notes_touch AFTER UPDATE ON notes BEGIN',
+      "  UPDATE notes SET updated_at = datetime('now') WHERE id = NEW.id;",
+      'END;',
+    ].join('\n');
+    const { calls, db } = createMockD1();
+    const handler = createMigrationHandler(
+      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
+      [{ name: '0001_trigger.sql', sql }],
+      'sqlite',
+    );
+
+    const response = await handler(
+      new Request('https://example.com/__void/migrate', {
+        method: 'POST',
+        headers: { 'x-void-internal': proxyToken },
+      }),
+    );
+    const body = (await response.json()) as MigrationResponse;
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
     expect(calls.exec).toEqual([sql]);
-    expect(calls.run).toEqual([
-      `CREATE TABLE IF NOT EXISTS _void_migrations (
-      name TEXT PRIMARY KEY,
-      applied_at TEXT NOT NULL
-    )`,
+    expect(calls.batch).toBe(0);
+  });
+
+  it('runs protocol v2 legacy multi-statement migrations through one D1 batch', async () => {
+    const createTable = ['CREATE TABLE notes (', '  id INTEGER PRIMARY KEY', ');'].join('\n');
+    const sql = `-- void:allow-unsplit-multi-statement\n${createTable}\nINSERT INTO notes DEFAULT VALUES;`;
+    const migrations = [{ name: '0001_legacy.sql', sql }];
+    const { calls, db } = createMockD1({
+      failExec: (executedSql) =>
+        executedSql.includes('\n')
+          ? new Error('D1_EXEC_ERROR: Error in line 1: CREATE TABLE notes (: incomplete input')
+          : undefined,
+    });
+    const handler = createMigrationHandler(
+      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
+      migrations,
+      'sqlite',
+      undefined,
+      buildMigrationPlanBundle(migrations),
+    );
+
+    const response = await handler(
+      new Request('https://example.com/__void/migrate/app', {
+        body: JSON.stringify({ attemptId: 'attempt_legacy', deploymentId: 'dpl_1' }),
+        headers: { 'content-type': 'application/json', 'x-void-internal': proxyToken },
+        method: 'POST',
+      }),
+    );
+    const body = (await response.json()) as MigrationResponse;
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.confirmedApplied).toEqual(['0001_legacy.sql']);
+    expect(calls.exec).toEqual([]);
+    expect(calls.batchSql).toContainEqual([
+      `-- void:allow-unsplit-multi-statement\n${createTable}`,
+      'INSERT INTO notes DEFAULT VALUES;',
       'INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)',
     ]);
-    expect(calls.batch).toBe(0);
   });
 
   it('applies scaffolded multiline single-statement D1 migrations without raw exec', async () => {
@@ -613,13 +684,13 @@ describe('createMigrationHandler D1 execution', () => {
 
     expect(response.status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(calls.exec).toEqual([sql]);
-    expect(calls.run).toEqual([
-      `CREATE TABLE IF NOT EXISTS _void_migrations (
-      name TEXT PRIMARY KEY,
-      applied_at TEXT NOT NULL
-    )`,
-      'INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)',
+    expect(calls.exec).toEqual([]);
+    expect(calls.batchSql).toEqual([
+      [
+        "CREATE TABLE notes (message TEXT DEFAULT '--> statement-breakpoint');",
+        "INSERT INTO notes VALUES ('literal --> statement-breakpoint value');",
+        'INSERT OR IGNORE INTO _void_migrations (name, applied_at) VALUES (?, ?)',
+      ],
     ]);
   });
 

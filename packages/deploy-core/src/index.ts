@@ -352,6 +352,7 @@ export {
   hasStandalonePragma,
   isSingleStatement,
   MIGRATION_CLASSIFIER_VERSION,
+  splitSqlStatements,
   UNSPLIT_MULTI_STATEMENT_PRAGMA,
   type MigrationPlanHashInput,
   type SqlMigrationClassification,
