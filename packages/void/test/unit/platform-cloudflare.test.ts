@@ -1176,6 +1176,25 @@ describe('platform Cloudflare client', () => {
     );
   });
 
+  it('reads an AI Gateway creation time without a zone as UTC, whatever the local zone', async () => {
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json({
+          success: true,
+          // The live API answers in this form.
+          result: [
+            { id: 'void-team', created_at: '2026-10-05 18:29:14' },
+            { id: 'odd', created_at: 'not a time' },
+          ],
+        }),
+    });
+
+    await expect(client.listAiGateways('account')).resolves.toEqual([
+      { createdAt: '2026-10-05T18:29:14.000Z', id: 'void-team', name: 'void-team' },
+      { id: 'odd', name: 'odd' },
+    ]);
+  });
+
   it('deletes an AI Gateway with the runtime credential when one is set', async () => {
     const authorizations: Array<string | null> = [];
     const client = new PlatformCloudflareClient('operator-token', {

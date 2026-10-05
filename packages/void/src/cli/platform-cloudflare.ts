@@ -315,7 +315,7 @@ export class PlatformCloudflareClient {
       }
     }
     return entries.map((entry) => ({
-      ...(typeof entry.created_at === 'string' ? { createdAt: entry.created_at } : {}),
+      ...withCreatedAt(entry.created_at),
       id: requiredString(entry.id, 'AI Gateway id'),
       name: requiredString(entry.id, 'AI Gateway id'),
     }));
@@ -1379,6 +1379,19 @@ function cloudflareErrorDetails(envelope: CloudflareEnvelope<unknown>, status: n
 
 function encodeR2ObjectKey(key: string): string {
   return key.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * An AI Gateway creation time as ISO 8601 UTC. Cloudflare reports it without a
+ * zone ("2026-10-05 18:29:14"), which JavaScript would read as local time.
+ */
+function withCreatedAt(value: unknown): { createdAt?: string } {
+  if (typeof value !== 'string') {
+    return {};
+  }
+  const zoneless = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value);
+  const time = Date.parse(zoneless ? `${value.replace(' ', 'T')}Z` : value);
+  return Number.isNaN(time) ? {} : { createdAt: new Date(time).toISOString() };
 }
 
 function requiredString(value: unknown, label: string): string {
