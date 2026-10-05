@@ -74,6 +74,23 @@ describe('repeated wrapper generation', () => {
     expect((await worker.fetch(new Request('https://app/__void/ready'), {}, {})).status).toBe(200);
   });
 
+  it('fails readiness when the wrapped entry has no fetch handler', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-wrapper-no-fetch-'));
+    roots.push(root);
+    writeFileSync(
+      join(root, 'index.mjs'),
+      'export default function handler() { return new Response("bare"); }',
+    );
+    await generateWrapper(root, 'index.mjs', root, { ...base, readiness: true });
+    const worker = (await import(pathToFileURL(join(root, 'index.mjs')).href)).default;
+    const response = await worker.fetch(new Request('https://app/__void/ready'), {}, {});
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      ready: false,
+      error: 'worker entry has no fetch handler',
+    });
+  });
+
   it('serves cached framework HTML while leaving client data requests live', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-framework-isr-'));
     roots.push(root);

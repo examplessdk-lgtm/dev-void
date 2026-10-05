@@ -787,6 +787,32 @@ export function voidPlugin(options?: {
           }
         : undefined;
 
+    // vinext's `config` hook sets the worker environment's build input to its
+    // own RSC entry. Vite merges `config` results in plugin order, so with
+    // `[voidPlugin(), vinext()]` that input replaced the Cloudflare plugin's
+    // worker entry, and the build shipped vinext's bare handler instead of
+    // `workerConfig.main` (Void's trigger wrapper). Restore the Cloudflare
+    // entry after every plugin's config is applied so plugin order does not
+    // matter. The entry id is the Cloudflare plugin's own virtual module, which
+    // re-exports `main` and injects its nodejs_compat globals.
+    const vinextWorkerEntry: import('vite').Plugin | undefined =
+      framework === 'vinext-app' || framework === 'vinext-pages'
+        ? {
+            name: 'void:vinext-worker-entry',
+            enforce: 'post',
+            configEnvironment(name, environmentConfig) {
+              if (name !== viteEnvironment.name) {
+                return;
+              }
+              environmentConfig.build ??= {};
+              environmentConfig.build.rolldownOptions = {
+                ...environmentConfig.build.rolldownOptions,
+                input: { index: 'virtual:cloudflare/worker-entry' },
+              };
+            },
+          }
+        : undefined;
+
     return [
       createCloudflareBuiltinsExternalPlugin(),
       createWorkerEnvironmentSanitizerPlugin([
@@ -813,6 +839,7 @@ export function voidPlugin(options?: {
       }),
       migrationPlugin(root, dialect, localD1.databaseId, localD1.persistRoot),
       ...(vinextCompat ? [vinextCompat] : []),
+      ...(vinextWorkerEntry ? [vinextWorkerEntry] : []),
       frameworkBuildWrapperPlugin,
       frameworkTriggersPlugin(root, { devTriggerToken }),
       devTriggersHintPlugin(root, { framework: true, devTriggerToken }),

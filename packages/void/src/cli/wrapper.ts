@@ -493,6 +493,14 @@ function generateWrapperSource(
       features.hasMigrations
     ) {
       lines.push('  if (request.method === "GET" && url.pathname === "/__void/ready") {');
+      // An entry without a `fetch` handler (e.g. a framework build whose
+      // entry is a bare function) would fail every app request, so it must
+      // not pass the probe and get promoted.
+      lines.push('    if (typeof original?.fetch !== "function") {');
+      lines.push(
+        '      return Response.json({ ready: false, error: "worker entry has no fetch handler" }, { status: 503, headers: { "cache-control": "no-store" } });',
+      );
+      lines.push('    }');
       lines.push(
         `    return Response.json({ ready: true${features.versionMetadataBinding ? `, versionId: env[${JSON.stringify(features.versionMetadataBinding)}]?.id` : ''} }${features.versionMetadataBinding ? ', { headers: { "cache-control": "no-store" } }' : ''});`,
       );
