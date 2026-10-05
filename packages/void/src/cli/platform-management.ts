@@ -64,8 +64,12 @@ import {
   checkPurgeAllCredentials,
   describePurgeAllPlan,
   isPlatformTailWorker,
+  isPurgeAllCandidate,
   isPurgedAccessResource,
+  PlatformResourceChangedError,
   purgeAllAlwaysKept,
+  purgeAllHandlesEmailRouting,
+  purgeAllKeptReason,
   purgeAllKeptResources,
   purgeAllPermissions,
   purgeAllResumeCommand,
@@ -898,9 +902,12 @@ export async function uninstallPlatform(
     );
   const retainData = !args.purgeData;
   const purgeAll = args.purgeAll;
-  const hasRoutingCheckpoint = manifest.resources.some(
-    (resource) => resource.key === 'routing-kv' && resource.state === 'ready',
-  );
+  const routingKv = manifest.resources.find((resource) => resource.key === 'routing-kv');
+  // --purge-all also uses routing KV that an uninstall which stopped before it
+  // finished recorded as retained.
+  const reopenedRouting =
+    purgeAll && routingKv?.state === 'retained' && isPurgeAllCandidate(manifest, routingKv);
+  const hasRoutingCheckpoint = routingKv?.state === 'ready' || reopenedRouting;
   const createdZone = manifest.resources.find(
     (resource) => resource.key === 'zone' && resource.ownership === 'created',
   );
@@ -991,6 +998,9 @@ export async function uninstallPlatform(
               resource.state === 'ready' &&
               !purgeAllKept.has(resource.key) &&
               isOwnershipVerifiableKind(resource.kind) &&
+              // A changed DNS record is kept, not a reason to stop, so it is
+              // proven only right before its DELETE.
+              resource.kind !== 'dns-record' &&
               // After its ownership marker was removed, the bucket is proven
               // by its creation fingerprint instead.
               !hasLifecycleStep(manifest, `${PURGE_ALL_STEP_PREFIX}r2-marker:${resource.key}`))) &&
@@ -1064,9 +1074,7 @@ export async function uninstallPlatform(
   }
   try {
     await writeRemoteManifestIfPresent(client, next);
-    const routing = next.resources.find(
-      (resource) => resource.key === 'routing-kv' && resource.state === 'ready',
-    );
+    const routing = hasRoutingCheckpoint ? requireResource(next, 'routing-kv') : undefined;
     disablingTraffic = true;
     if (routing) {
       await client.putKvValue(
@@ -1168,7 +1176,12 @@ export async function uninstallPlatform(
         (resource) => resource.kind === 'queue' && shouldDeleteResource(resource, retainData),
       ) &&
       (await hasLiveInstallationWorker(client, next));
-    for (const resource of resources) {
+    for (const listed of resources) {
+      // Routing KV that a stopped uninstall retained is deleted last, like a ready one.
+      const resource =
+        reopenedRouting && listed.key === 'routing-kv'
+          ? { ...listed, state: 'ready' as const }
+          : listed;
       if (resource.state !== 'ready') {
         continue;
       }
@@ -1228,6 +1241,7 @@ export async function uninstallPlatform(
       next.resources.filter((resource) => resource.state === 'retained'),
       'Cloudflare resources:',
       'Access resources:',
+      purgeAll && purgeAllHandlesEmailRouting(next),
     );
     if (purgeAll) {
       kept.push('Always kept:', ...purgeAllAlwaysKept());
@@ -1379,11 +1393,13 @@ function keptResourceRank(
 
 function purgeAllPlanText(manifest: PlatformInstallationManifest): string {
   const permissions = purgeAllPermissions(manifest);
-  // Created Access resources are deleted; only adopted ones stay.
+  // Created Access resources are deleted unless an earlier run kept them.
   const keepManifest = {
     ...manifest,
     authenticationResources: (manifest.authenticationResources ?? []).filter(
-      (resource) => resource.ownership !== 'created',
+      (resource) =>
+        resource.ownership !== 'created' ||
+        purgeAllKeptReason(manifest, `access:${resource.key}`) !== null,
     ),
   };
   return [
@@ -1394,6 +1410,7 @@ function purgeAllPlanText(manifest: PlatformInstallationManifest): string {
       purgeAllKeptResources(manifest),
       'Keep for manual cleanup:',
       'Keep Access resources you connected:',
+      purgeAllHandlesEmailRouting(manifest),
     ),
     'Always kept:',
     ...purgeAllAlwaysKept(),
@@ -1410,15 +1427,19 @@ function requirePurgeAllClient(client: PlatformUninstallClient): PurgeAllClient 
   const required: ReadonlyArray<keyof PurgeAllClient> = [
     'deleteAccessResource',
     'deleteDispatchNamespaceScript',
+    'deleteEmailRoutingRule',
     'deleteQueueConsumer',
     'deleteR2Object',
     'deleteWorkerDomain',
     'deleteWorkerRoute',
     'emptyR2Bucket',
     'getAccessResource',
+    'getEmailRoutingCatchAll',
     'listDispatchNamespaceScripts',
+    'listEmailRoutingRules',
     'listQueueConsumers',
     'listWorkerRoutes',
+    'resetEmailRoutingCatchAll',
   ];
   if (required.some((method) => typeof client[method] !== 'function')) {
     throw new Error('platform: This Cloudflare client cannot run --purge-all.');
@@ -1431,14 +1452,20 @@ function describeKeptResources(
   resources: ReadonlyArray<InstallationResource>,
   heading: string,
   accessHeading: string,
+  /** --purge-all removes the Email Routing rules that send mail to the gateway Worker. */
+  emailRulesRemoved = false,
 ): Array<string> {
   const sorted = [...resources].sort(
     (left, right) => keptResourceRank(manifest, left) - keptResourceRank(manifest, right),
   );
   const isTraffic = (resource: InstallationResource) =>
     KEPT_RESOURCE_ORDER.indexOf(resource.kind) < KEPT_RESOURCE_ORDER.indexOf('queue');
+  const why = (key: string) => {
+    const reason = purgeAllKeptReason(manifest, key);
+    return reason === null ? '' : `, kept because ${reason}`;
+  };
   const line = (resource: InstallationResource) =>
-    `  ${resource.kind}: ${resource.name} (${resource.id})`;
+    `  ${resource.kind}: ${resource.name} (${resource.id})${why(resource.key)}`;
   const {
     capabilities,
     emailSenderDomain,
@@ -1450,9 +1477,11 @@ function describeKeptResources(
   // the Workers.
   const email = capabilities.email
     ? [
-        emailSenderDomain
-          ? `  Email Routing for ${emailSenderDomain} (zone ${emailSharedZoneId}): its routing DNS records and any catch-all rule that sends mail to ${names.emailGatewayWorker}.`
-          : `  Email Routing: any catch-all rule that sends mail to ${names.emailGatewayWorker}.`,
+        emailRulesRemoved && emailSenderDomain
+          ? `  Email Routing for ${emailSenderDomain} (zone ${emailSharedZoneId}): its settings and the sender domain's MX, SPF, and DKIM records.`
+          : emailSenderDomain
+            ? `  Email Routing for ${emailSenderDomain} (zone ${emailSharedZoneId}): its routing DNS records and any catch-all rule that sends mail to ${names.emailGatewayWorker}.`
+            : `  Email Routing: any catch-all rule that sends mail to ${names.emailGatewayWorker}.`,
       ]
     : [];
   const kept = [
@@ -1464,7 +1493,7 @@ function describeKeptResources(
     .filter((resource) => !isPurgedAccessResource(manifest, resource))
     .map(
       (resource) =>
-        `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})`,
+        `  ${resource.ownership} ${resource.kind}: ${resource.name} (${resource.id}, account ${resource.accountId})${why(`access:${resource.key}`)}`,
     );
   return [
     ...(kept.length ? [heading, ...kept] : []),
@@ -1745,8 +1774,11 @@ async function verifyPlatformMutationOwnership(
             liveHash !== resource.configHash &&
             !(resource.configHash === legacyHash && liveHash === expectedHash)
           ) {
-            throw ownershipError(
-              `dns-record ${resource.name} changed configuration after installation`,
+            throw new PlatformResourceChangedError(
+              resource.key,
+              'its configuration changed after installation',
+              ownershipError(`dns-record ${resource.name} changed configuration after installation`)
+                .message,
             );
           }
         }

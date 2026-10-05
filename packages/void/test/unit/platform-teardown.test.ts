@@ -64,6 +64,15 @@ const deployment = createPlatformDeploymentManifest({
   installationSlug: 'example',
 });
 const names = deployment.resources;
+const emailDeployment = createPlatformDeploymentManifest({
+  application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+  capabilities: { email: true },
+  controlPlane: { apiHostname: 'api.example.com' },
+  displayName: 'Example',
+  emailSenderDomain: 'mail.example.com',
+  emailSharedZoneId: 'mail-zone',
+  installationSlug: 'example',
+});
 const INSTALLATION_ID = 'example-a1b2c3d4';
 const FINGERPRINT = '2026-09-14T00:00:00.000Z';
 const RESUME = `void platform uninstall ${INSTALLATION_ID} --purge-all`;
@@ -75,12 +84,12 @@ function hash(value: unknown): string {
 }
 
 function installedManifest(
-  options: { dispatchNamespace?: boolean } = {},
+  options: { dispatchNamespace?: boolean; email?: boolean } = {},
 ): PlatformInstallationManifest {
   let manifest = createPlatformInstallationManifest({
     account: { id: 'account', name: 'Account' },
     createdAt: '2026-09-14T00:00:00.000Z',
-    deployment,
+    deployment: options.email ? emailDeployment : deployment,
     id: INSTALLATION_ID,
     ownershipNonce: '0123456789abcdef0123456789abcdef',
     platformVersion: '1.0.0',
@@ -299,6 +308,8 @@ function cloudflare(manifest: PlatformInstallationManifest) {
     ),
     // A Worker the installation did not create that sends logs to the tail Worker.
     foreignTailProducer: false,
+    emailRules: [] as Array<{ id: string; enabled: boolean; workerName: string | null }>,
+    catchAll: null as { enabled: boolean; workerName: string | null } | null,
   };
   let remote: string | null = JSON.stringify(manifest);
   const failures = new Map<string, Error>();
@@ -491,6 +502,22 @@ function cloudflare(manifest: PlatformInstallationManifest) {
       }
     },
     removeRoutes: async () => {},
+    listEmailRoutingRules: async (zone: string) => {
+      calls.push(`GET email-rules ${zone}`);
+      return [...live.emailRules];
+    },
+    deleteEmailRoutingRule: async (zone: string, id: string) => {
+      calls.push(`DELETE email-rule ${zone} ${id}`);
+      remove(live.emailRules, id);
+    },
+    getEmailRoutingCatchAll: async (zone: string) => {
+      calls.push(`GET email-catch-all ${zone}`);
+      return live.catchAll;
+    },
+    resetEmailRoutingCatchAll: async (zone: string) => {
+      calls.push(`RESET email-catch-all ${zone}`);
+      live.catchAll = { enabled: false, workerName: null };
+    },
   };
   return fake;
 }
@@ -740,24 +767,246 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('installed');
   });
 
-  it('stops at a route that now serves another Worker, and continues once it is gone', async () => {
+  it('keeps a route that now serves another Worker, lists why, and does not let it block a rerun', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = cloudflare(manifest);
     fake.live.routes[1]!.script = 'someone-else';
+    // A later, unrelated stop makes the run resume.
+    fake.live.foreignTailProducer = true;
 
     await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      `Refusing to delete Worker route *.apps.example.com (route-2) because it now sends "*.apps.example.com" to "someone-else". It may no longer belong to this installation. Delete or fix it in the Cloudflare dashboard if it is yours, then rerun: ${RESUME}`,
+      `Cloudflare refused to delete worker ${names.tailWorker}`,
     );
-    expect(deletes(fake)).toEqual([
-      'DELETE worker-custom-domain domain-1',
-      'DELETE worker-route route-1',
-    ]);
-    expect(listInstallationManifests()[0]?.status).toBe('failed');
+    const stopped = listInstallationManifests()[0]!;
+    expect(
+      stopped.resources.find((resource) => resource.key === 'worker-route:route-2')?.state,
+    ).toBe('retained');
+    expect(deletes(fake)).toContain(`DELETE worker ${names.apiWorker}`);
 
-    fake.live.routes.splice(0);
-    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    fake.live.foreignTailProducer = false;
+    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+
     expect(deletes(fake)).not.toContain('DELETE worker-route route-2');
+    expect(fake.live.routes).toEqual([
+      { id: 'route-2', pattern: '*.apps.example.com', script: 'someone-else' },
+    ]);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    expect(noteText('Kept for manual cleanup')).toContain(
+      'worker-route: *.apps.example.com (route-2), kept because it now sends "*.apps.example.com" to "someone-else"',
+    );
+  });
+
+  it('keeps a custom domain that now serves another Worker and continues', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.domains[0]!.service = 'someone-else';
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).not.toContain('DELETE worker-custom-domain domain-1');
+    expect(fake.live.domains).toHaveLength(1);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    expect(noteText('Kept for manual cleanup')).toContain(
+      'worker-custom-domain: api.example.com (domain-1), kept because it now sends "api.example.com" to "someone-else"',
+    );
+  });
+
+  it('keeps a DNS record whose configuration changed and continues', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.listDnsRecords = async (_zone: string, name: string) =>
+      fake.live.dns
+        .filter((entry) => entry.name === name)
+        .map((entry) => ({ ...entry, content: '192.0.2.1', proxied: false, type: 'A' }));
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).not.toContain('DELETE dns-record *.apps.example.com');
+    expect(fake.live.dns).toHaveLength(1);
+    const final = listInstallationManifests()[0]!;
+    expect(final.status).toBe('uninstalled');
+    expect(final.resources.find((resource) => resource.key === 'application-dns')?.state).toBe(
+      'retained',
+    );
+    expect(noteText('Kept for manual cleanup')).toContain(
+      'dns-record: *.apps.example.com (dns-id), kept because its configuration changed after installation',
+    );
+  });
+
+  it('keeps an Access application whose name changed and continues', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).not.toContain('DELETE access application access-app');
+    expect(deletes(fake)).toContain('DELETE access service-token access-token');
+    expect(fake.live.access.get('access-app')?.name).toBe('renamed');
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    expect(noteText('Kept for manual cleanup')).toContain(
+      `created application: void-${INSTALLATION_ID}-login-0123456789abcdef (access-app, account account), kept because its live name "renamed" is not the name this installation recorded`,
+    );
+  });
+
+  it('detaches Email Routing rules that send mail to the gateway Worker before deleting it', async () => {
+    const manifest = installedManifest({ email: true });
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const gateway = names.emailGatewayWorker;
+    fake.live.emailRules.push(
+      { id: 'ours', enabled: true, workerName: gateway },
+      { id: 'ours-disabled', enabled: false, workerName: gateway },
+      { id: 'theirs', enabled: true, workerName: 'someone-else' },
+      { id: 'forward', enabled: true, workerName: null },
+    );
+    fake.live.catchAll = { enabled: true, workerName: gateway };
+
+    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+    expect(noteText('Uninstall plan')).toContain(
+      `4. Email Routing rules in zone mail-zone that send mail to ${gateway}, and its catch-all rule if it does (reset to drop mail, disabled)`,
+    );
+    expect(changes(fake)).toEqual([]);
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expectInOrder(changes(fake).join('\n'), [
+      'DELETE access service-token access-token',
+      'DELETE email-rule mail-zone ours',
+      'DELETE email-rule mail-zone ours-disabled',
+      'RESET email-catch-all mail-zone',
+      `DELETE worker ${gateway}`,
+    ]);
+    expect(fake.live.emailRules.map((rule) => rule.id)).toEqual(['theirs', 'forward']);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    expect(noteText('Kept for manual cleanup')).toContain(
+      "Email Routing for mail.example.com (zone mail-zone): its settings and the sender domain's MX, SPF, and DKIM records.",
+    );
+  });
+
+  it('leaves an Email Routing catch-all that sends mail to another Worker', async () => {
+    const manifest = installedManifest({ email: true });
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.catchAll = { enabled: true, workerName: 'someone-else' };
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(fake.calls).not.toContain('RESET email-catch-all mail-zone');
+    expect(fake.live.catchAll).toEqual({ enabled: true, workerName: 'someone-else' });
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('names the Email Routing permission when the credential cannot read the rules', async () => {
+    const manifest = installedManifest({ email: true });
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.listEmailRoutingRules = async () => {
+      throw new PlatformCloudflareApiError('Authentication error', 403);
+    };
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'Add Zone → Email Routing Rules → Edit for account account and zone example.com and Email Routing zone mail-zone, then rerun. No Cloudflare resource was changed.',
+    );
+    expect(changes(fake)).toEqual([]);
+  });
+
+  it('makes no Email Routing call when the platform does not send email', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(fake.calls.filter((call) => /email-(rule|catch-all)/.test(call))).toEqual([]);
+    expect(noteText('Uninstall plan')).not.toContain('Email Routing Rules');
+  });
+
+  it('finishes with --purge-all what a stopped --purge-data uninstall kept', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    // The namespace still holds an application Worker, so --purge-data stops.
+    await expect(
+      uninstallPlatform(fake, manifest, { ...purgeAllArgs, purgeAll: false }, dependencies()),
+    ).rejects.toThrow('Namespace has scripts.');
+    const stopped = listInstallationManifests()[0]!;
+    expect(stopped.status).toBe('failed');
+    expect(stopped.resources.find((resource) => resource.key === 'api-worker')?.state).toBe(
+      'retained',
+    );
+
+    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+
+    expect(new Set(deletes(fake))).toEqual(new Set(FULL_ORDER));
+    const final = listInstallationManifests()[0]!;
+    expect(final.status).toBe('uninstalled');
+    expect(
+      final.resources
+        .filter((resource) => resource.state !== 'deleted')
+        .map((resource) => `${resource.key}:${resource.state}`),
+    ).toEqual(['customer-kv:retained', 'zone:retained']);
+  });
+
+  it('finishes with --purge-all what a stopped plain uninstall kept, including routing KV', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const putKvValue = fake.putKvValue;
+    let failed = false;
+    // Stop at the last write, after every resource was recorded as kept.
+    fake.putKvValue = async (account: string, namespace: string, key: string, value: string) => {
+      if (!failed && value.includes('"status":"uninstalled"')) {
+        failed = true;
+        throw new Error('checkpoint write failed');
+      }
+      return putKvValue(account, namespace, key, value);
+    };
+    const plain = { ...purgeAllArgs, purgeAll: false, purgeData: false };
+
+    await expect(uninstallPlatform(fake, manifest, plain, dependencies())).rejects.toThrow(
+      'checkpoint write failed',
+    );
+    const stopped = listInstallationManifests()[0]!;
+    expect(stopped.status).toBe('failed');
+    expect(stopped.resources.find((resource) => resource.key === 'routing-kv')?.state).toBe(
+      'retained',
+    );
+    expect(deletes(fake)).toEqual([]);
+
+    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).toEqual(FULL_ORDER);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('never reopens an uninstall that finished', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    await uninstallPlatform(
+      fake,
+      manifest,
+      { ...purgeAllArgs, purgeAll: false, purgeData: false },
+      dependencies(),
+    );
+    const finished = listInstallationManifests()[0]!;
+    expect(finished.status).toBe('uninstalled');
+    const before = changes(fake).length;
+
+    await uninstallPlatform(fake, finished, { ...purgeAllArgs, plan: true }, dependencies());
+    expect(noteText('Uninstall plan')).toContain('--purge-all finds no resource');
+    await expect(uninstallPlatform(fake, finished, purgeAllArgs, dependencies())).rejects.toThrow(
+      'Invalid installation transition: uninstalled -> uninstalling.',
+    );
+
+    expect(changes(fake).slice(before)).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 

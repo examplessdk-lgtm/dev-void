@@ -15,15 +15,21 @@ import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
  * `void platform uninstall --purge-all` deletes every Cloudflare resource the
  * installation created, in an order Cloudflare accepts:
  *
- *   traffic (routes, custom domains, DNS) -> Access -> queue consumers
- *   -> Workers except tail -> Queues -> dispatch namespace -> tail Worker
- *   -> Hyperdrive and KV -> R2 -> AI Gateway -> routing KV (last)
+ *   traffic (routes, custom domains, DNS) -> Access -> Email Routing rules
+ *   -> queue consumers -> Workers except tail -> Queues -> dispatch namespace
+ *   -> tail Worker -> Hyperdrive and KV -> R2 -> AI Gateway -> routing KV (last)
  *
  * Each resource is proven to belong to this installation right before its
  * DELETE, and no DELETE sends `force`, so Cloudflare refuses a resource that
- * something outside the installation still uses. Every finished deletion is
- * checkpointed, so rerunning the command continues where it stopped. The
- * routing KV namespace holds that checkpoint, so uninstall deletes it last.
+ * something outside the installation still uses. A route, custom domain, DNS
+ * record, or Access resource that no longer matches what was recorded is kept
+ * and listed with the reason instead of stopping the run. Every finished
+ * deletion is checkpointed, so rerunning the command continues where it
+ * stopped. The routing KV namespace holds that checkpoint, so uninstall
+ * deletes it last.
+ *
+ * An uninstall without --purge-all records what it leaves as retained. If it
+ * stopped before it finished, --purge-all considers those resources again.
  */
 
 export const PURGE_ALL_STEP_PREFIX = 'uninstall:purge-all:';
@@ -32,6 +38,7 @@ export type PurgeAllClient = Pick<
   PlatformCloudflareClient,
   | 'deleteAccessResource'
   | 'deleteDispatchNamespaceScript'
+  | 'deleteEmailRoutingRule'
   | 'deleteQueueConsumer'
   | 'deleteR2Object'
   | 'deleteResource'
@@ -39,10 +46,12 @@ export type PurgeAllClient = Pick<
   | 'deleteWorkerRoute'
   | 'emptyR2Bucket'
   | 'getAccessResource'
+  | 'getEmailRoutingCatchAll'
   | 'listAiGateways'
   | 'listDispatchNamespaceScripts'
   | 'listDispatchNamespaces'
   | 'listDnsRecords'
+  | 'listEmailRoutingRules'
   | 'listHyperdriveConfigs'
   | 'listKvNamespaces'
   | 'listQueueConsumers'
@@ -50,6 +59,7 @@ export type PurgeAllClient = Pick<
   | 'listWorkerDomains'
   | 'listWorkerNames'
   | 'listWorkerRoutes'
+  | 'resetEmailRoutingCatchAll'
 >;
 
 export type PurgeAllCredential = Readonly<{
@@ -65,6 +75,8 @@ type Target =
   | Readonly<{
       phase:
         | 'dns'
+        // The resource is the email gateway Worker the rules send mail to.
+        | 'email'
         | 'queue-consumers'
         | 'workers'
         | 'queues'
@@ -86,6 +98,7 @@ const PERMISSIONS = {
   access: 'Account → Access: Apps and Policies → Edit',
   aiGateway: 'Account → AI Gateway → Edit',
   dns: 'Zone → DNS → Edit',
+  emailRouting: 'Zone → Email Routing Rules → Edit',
   hyperdrive: 'Account → Hyperdrive → Edit',
   kv: 'Account → Workers KV Storage → Edit',
   queues: 'Account → Queues → Edit',
@@ -125,26 +138,99 @@ function hasStep(manifest: PlatformInstallationManifest, key: string): boolean {
   return manifest.steps.some((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${key}`);
 }
 
-function created(resource: InstallationResource): boolean {
-  return resource.ownership === 'created' && resource.state === 'ready';
+function keptStepKey(key: string): string {
+  return `kept:${key}`;
+}
+
+/**
+ * Why --purge-all kept a resource it was going to delete, for example because
+ * a route now serves another Worker; null when it did not keep it. Access
+ * resources use the key `access:<key>`.
+ */
+export function purgeAllKeptReason(
+  manifest: PlatformInstallationManifest,
+  key: string,
+): string | null {
+  return (
+    manifest.steps.find((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${keptStepKey(key)}`)
+      ?.resultHash ?? null
+  );
+}
+
+/** An uninstall that started has not finished, so what it kept can be reconsidered. */
+function isReopenable(manifest: PlatformInstallationManifest): boolean {
+  return manifest.status !== 'uninstalled';
+}
+
+/**
+ * A resource the installation created that --purge-all may still delete: one
+ * that is ready, or one that an uninstall which stopped before it finished
+ * recorded as retained. Resources --purge-all itself kept, and earlier
+ * versions of a resource kept when it was replaced, are never reconsidered.
+ */
+export function isPurgeAllCandidate(
+  manifest: PlatformInstallationManifest,
+  resource: InstallationResource,
+): boolean {
+  return (
+    resource.ownership === 'created' &&
+    (resource.state === 'ready' ||
+      (resource.state === 'retained' &&
+        isReopenable(manifest) &&
+        !resource.key.startsWith('retained:') &&
+        purgeAllKeptReason(manifest, resource.key) === null))
+  );
+}
+
+/** The zone that routes and DNS records live in, if it can still be used. */
+function usableZone(manifest: PlatformInstallationManifest): InstallationResource | undefined {
+  return manifest.resources.find(
+    (resource) =>
+      resource.key === 'zone' &&
+      (resource.state === 'ready' || (resource.state === 'retained' && isReopenable(manifest))),
+  );
+}
+
+/**
+ * A recorded resource whose live configuration no longer matches the
+ * installation's record. --purge-all keeps such a DNS record and continues.
+ */
+export class PlatformResourceChangedError extends Error {
+  constructor(
+    readonly resourceKey: string,
+    readonly reason: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PlatformResourceChangedError';
+  }
+}
+
+/** The zone whose Email Routing rules may send mail to the gateway Worker. */
+function emailRoutingZone(manifest: PlatformInstallationManifest): string | null {
+  return manifest.deployment.capabilities.email
+    ? (manifest.deployment.emailSharedZoneId ?? null)
+    : null;
 }
 
 /** Everything --purge-all will delete, in deletion order. */
 function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> {
   const resources = manifest.resources;
   const routing = resources.find((resource) => resource.key === 'routing-kv');
+  const candidate = (resource: InstallationResource) => isPurgeAllCandidate(manifest, resource);
   // Without the remote checkpoint nothing can be proven, so nothing is deleted.
-  if (routing?.state !== 'ready') {
+  if (!routing || (routing.state !== 'ready' && !candidate(routing))) {
     return [];
   }
-  const zone = resources.find((resource) => resource.key === 'zone' && resource.state === 'ready');
-  const workers = resources.filter((resource) => resource.kind === 'worker' && created(resource));
+  const zone = usableZone(manifest);
+  const workers = resources.filter((resource) => resource.kind === 'worker' && candidate(resource));
   const targets: Array<Target> = [];
   for (const resource of resources) {
     if (
       (resource.kind !== 'worker-route' && resource.kind !== 'worker-custom-domain') ||
       (resource.state !== 'ready' && resource.state !== 'retained') ||
-      (resource.kind === 'worker-route' && !zone)
+      (resource.kind === 'worker-route' && !zone) ||
+      purgeAllKeptReason(manifest, resource.key) !== null
     ) {
       continue;
     }
@@ -155,12 +241,15 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
     }
   }
   for (const resource of resources) {
-    if (resource.kind === 'dns-record' && created(resource) && zone) {
+    if (resource.kind === 'dns-record' && candidate(resource) && zone) {
       targets.push({ phase: 'dns', resource });
     }
   }
   const access = (manifest.authenticationResources ?? []).filter(
-    (entry) => entry.ownership === 'created' && !isPurgedAccessResource(manifest, entry),
+    (entry) =>
+      entry.ownership === 'created' &&
+      !isPurgedAccessResource(manifest, entry) &&
+      purgeAllKeptReason(manifest, `access:${entry.key}`) === null,
   );
   // An application can admit the service token, so delete applications first.
   for (const kind of ['application', 'service-token'] as const) {
@@ -168,7 +257,12 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
       targets.push({ phase: 'access', access: entry });
     }
   }
-  const queues = resources.filter((resource) => resource.kind === 'queue' && created(resource));
+  // Rules that send mail to the gateway Worker go before the Worker.
+  const gateway = workers.find((worker) => worker.key === 'email-gateway-worker');
+  if (gateway && emailRoutingZone(manifest) && !hasStep(manifest, 'email-routing')) {
+    targets.push({ phase: 'email', resource: gateway });
+  }
+  const queues = resources.filter((resource) => resource.kind === 'queue' && candidate(resource));
   for (const resource of queues) {
     if (!hasStep(manifest, `consumers:${resource.key}`)) {
       targets.push({ phase: 'queue-consumers', resource });
@@ -187,7 +281,7 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
     targets.push({ phase: 'queues', resource });
   }
   for (const resource of resources) {
-    if (resource.kind === 'dispatch-namespace' && created(resource)) {
+    if (resource.kind === 'dispatch-namespace' && candidate(resource)) {
       targets.push({ phase: 'dispatch', resource });
     }
   }
@@ -196,22 +290,30 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
   }
   for (const kind of ['hyperdrive', 'kv-namespace'] as const) {
     for (const resource of resources) {
-      if (resource.kind === kind && resource.key !== 'routing-kv' && created(resource)) {
+      if (resource.kind === kind && resource.key !== 'routing-kv' && candidate(resource)) {
         targets.push({ phase: 'data', resource });
       }
     }
   }
   for (const kind of ['r2-bucket', 'ai-gateway'] as const) {
     for (const resource of resources) {
-      if (resource.kind === kind && created(resource)) {
+      if (resource.kind === kind && candidate(resource)) {
         targets.push({ phase: kind === 'r2-bucket' ? 'r2' : 'ai-gateway', resource });
       }
     }
   }
-  if (created(routing)) {
+  if (candidate(routing)) {
     targets.push({ phase: 'routing', resource: routing });
   }
   return targets;
+}
+
+/** Whether --purge-all removes, or has removed, the rules that send mail to the gateway Worker. */
+export function purgeAllHandlesEmailRouting(manifest: PlatformInstallationManifest): boolean {
+  return (
+    hasStep(manifest, 'email-routing') ||
+    purgeAllTargets(manifest).some((target) => target.phase === 'email')
+  );
 }
 
 /** Manifest resources that --purge-all leaves in the account. */
@@ -241,6 +343,14 @@ export function describePurgeAllPlan(manifest: PlatformInstallationManifest): Ar
   let previous: Target['phase'] | null = null;
   const consumerQueues: Array<string> = [];
   for (const target of targets) {
+    if (target.phase === 'email') {
+      step++;
+      previous = target.phase;
+      lines.push(
+        `  ${step}. Email Routing rules in zone ${emailRoutingZone(manifest)} that send mail to ${target.resource.name}, and its catch-all rule if it does (reset to drop mail, disabled)`,
+      );
+      continue;
+    }
     if (target.phase !== previous) {
       step++;
       previous = target.phase;
@@ -304,6 +414,10 @@ export function purgeAllPermissions(manifest: PlatformInstallationManifest): Arr
       );
       continue;
     }
+    if (target.phase === 'email') {
+      needed.add(PERMISSIONS.emailRouting);
+      continue;
+    }
     const { kind } = target.resource;
     if (kind === 'worker-route') {
       needed.add(PERMISSIONS.routes);
@@ -353,9 +467,12 @@ export async function checkPurgeAllCredentials(
   const has = (kind: InstallationResource['kind']) =>
     resources.some((resource) => resource.kind === kind);
   const zone = manifest.resources.find((resource) => resource.key === 'zone');
+  const emailZone = targets.some((target) => target.phase === 'email')
+    ? emailRoutingZone(manifest)
+    : null;
   // Access can live in a separate identity account.
   const accounts = [...new Set([manifest.account.id, ...access.map((entry) => entry.accountId)])];
-  const scope = `${accounts.length === 1 ? 'account' : 'accounts'} ${accounts.join(' and ')}${has('dns-record') || has('worker-route') ? ` and zone ${zone?.name ?? ''}` : ''}`;
+  const scope = `${accounts.length === 1 ? 'account' : 'accounts'} ${accounts.join(' and ')}${has('dns-record') || has('worker-route') ? ` and zone ${zone?.name ?? ''}` : ''}${emailZone ? ` and Email Routing zone ${emailZone}` : ''}`;
   if (credential.source === 'oauth') {
     const browserMissing = [
       ...(has('dns-record') ? [PERMISSIONS.dns] : []),
@@ -396,6 +513,9 @@ export async function checkPurgeAllCredentials(
       entry.kind === 'application' ? PERMISSIONS.access : PERMISSIONS.serviceTokens,
       () => client.getAccessResource(entry.accountId, entry.kind, entry.id),
     ]);
+  }
+  if (emailZone) {
+    probes.push([PERMISSIONS.emailRouting, () => client.listEmailRoutingRules(emailZone)]);
   }
   if (has('dispatch-namespace')) {
     probes.push([PERMISSIONS.workers, () => client.listDispatchNamespaces(manifest.account.id)]);
@@ -596,14 +716,44 @@ export async function runPurgeAllTeardown(
       ),
     );
   };
+  /**
+   * Live proof for these keys. A resource an earlier uninstall recorded as
+   * retained is proven like a ready one; only its recorded state differs.
+   */
+  const verify = (keys: ReadonlySet<string>) =>
+    context.verify(
+      {
+        ...next,
+        resources: next.resources.map((resource) =>
+          keys.has(resource.key) && resource.state === 'retained'
+            ? { ...resource, state: 'ready' as const }
+            : resource,
+        ),
+      },
+      keys,
+    );
   /** Prove the resource; false when it is already gone (and recorded). */
   const prove = async (resource: InstallationResource): Promise<boolean> => {
-    const missing = await context.verify(next, new Set(['routing-kv', resource.key]));
+    const missing = await verify(new Set(['routing-kv', resource.key]));
     if (missing.has(resource.key)) {
       await markDeleted(resource.key);
       return false;
     }
     return true;
+  };
+  /** Keep a resource that no longer matches the record, and save why. */
+  const keep = async (key: string, reason: string) => {
+    const resource = next.resources.find((entry) => entry.key === key);
+    if (resource?.state === 'ready') {
+      await save(
+        recordInstallationResource(
+          next,
+          { ...resource, state: 'retained' },
+          new Date().toISOString(),
+        ),
+      );
+    }
+    await recordStep(keptStepKey(key), reason);
   };
   const remove = async (resource: InstallationResource, hint: string, zoneId?: string) => {
     if (!(await prove(resource))) {
@@ -616,9 +766,7 @@ export async function runPurgeAllTeardown(
     }
     await markDeleted(resource.key);
   };
-  const zone = next.resources.find(
-    (resource) => resource.key === 'zone' && resource.state === 'ready',
-  );
+  const zone = usableZone(next);
   const createdWorkerNames = new Set(
     next.resources
       .filter((resource) => resource.kind === 'worker' && resource.ownership === 'created')
@@ -633,11 +781,11 @@ export async function runPurgeAllTeardown(
       const live = await client.getAccessResource(access.accountId, access.kind, access.id);
       if (live) {
         if (live.name !== access.name || !access.name.startsWith(`void-${next.id}-`)) {
-          throw ownershipRefusal(
-            next,
-            `Access ${access.kind} ${access.id}`,
+          await keep(
+            `access:${access.key}`,
             `its live name ${JSON.stringify(live.name)} is not the name this installation recorded`,
           );
+          continue;
         }
         try {
           await client.deleteAccessResource(access.accountId, access.kind, access.id);
@@ -658,14 +806,15 @@ export async function runPurgeAllTeardown(
     if (
       !current ||
       current.state === 'deleted' ||
-      (target.phase !== 'traffic' && current.state !== 'ready')
+      purgeAllKeptReason(next, current.key) !== null ||
+      (target.phase !== 'traffic' && !isPurgeAllCandidate(next, current))
     ) {
       continue;
     }
     switch (target.phase) {
       case 'traffic': {
         const worker = next.resources.find((resource) => resource.key === target.worker.key);
-        if (worker?.state !== 'ready' || !(await prove(worker))) {
+        if (!worker || !isPurgeAllCandidate(next, worker) || !(await prove(worker))) {
           // The Worker it served is gone, so the attachment cannot be proven.
           break;
         }
@@ -674,11 +823,11 @@ export async function runPurgeAllTeardown(
             (route) => route.id === current.id,
           );
           if (live && (live.pattern !== current.name || live.script !== worker.name)) {
-            throw ownershipRefusal(
-              next,
-              `Worker route ${current.name} (${current.id})`,
+            await keep(
+              current.key,
               `it now sends ${JSON.stringify(live.pattern)} to ${JSON.stringify(live.script)}`,
             );
+            break;
           }
           if (live) {
             await client.deleteWorkerRoute(zone!.id, current.id);
@@ -688,11 +837,11 @@ export async function runPurgeAllTeardown(
             (domain) => domain.id === current.id,
           );
           if (live && (live.hostname !== current.name || live.service !== worker.name)) {
-            throw ownershipRefusal(
-              next,
-              `custom domain ${current.name} (${current.id})`,
+            await keep(
+              current.key,
               `it now sends ${JSON.stringify(live.hostname)} to ${JSON.stringify(live.service)}`,
             );
+            break;
           }
           if (live) {
             await client.deleteWorkerDomain(accountId, current.id);
@@ -702,8 +851,47 @@ export async function runPurgeAllTeardown(
         break;
       }
       case 'dns':
-        await remove(current, 'Check the record in the Cloudflare dashboard.', zone!.id);
+        try {
+          await remove(current, 'Check the record in the Cloudflare dashboard.', zone!.id);
+        } catch (error) {
+          if (
+            !(error instanceof PlatformResourceChangedError && error.resourceKey === current.key)
+          ) {
+            throw error;
+          }
+          await keep(current.key, error.reason);
+        }
         break;
+      case 'email': {
+        // Prove the gateway Worker is still this installation's before
+        // touching rules that send mail to it.
+        if (!(await prove(current))) {
+          break;
+        }
+        const zoneId = emailRoutingZone(next)!;
+        const hint =
+          'Check the Email Routing rules for this zone in the Cloudflare dashboard. Never disable Email Routing for the zone.';
+        try {
+          for (const rule of await client.listEmailRoutingRules(zoneId)) {
+            if (rule.workerName === current.name) {
+              await client.deleteEmailRoutingRule(zoneId, rule.id);
+            }
+          }
+          const catchAll = await client.getEmailRoutingCatchAll(zoneId);
+          if (catchAll?.workerName === current.name) {
+            await client.resetEmailRoutingCatchAll(zoneId);
+          }
+        } catch (error) {
+          throw cloudflareRefusal(
+            next,
+            `Email Routing rules that send mail to ${current.name}`,
+            error,
+            hint,
+          );
+        }
+        await recordStep('email-routing');
+        break;
+      }
       case 'queue-consumers': {
         if (!(await prove(current))) {
           break;
@@ -764,13 +952,7 @@ export async function runPurgeAllTeardown(
         );
         if (live && !createdDuringInstallation(next, current, live.createdAt)) {
           // It may be a replacement with the same id, so keep and list it.
-          await save(
-            recordInstallationResource(
-              next,
-              { ...current, state: 'retained' },
-              new Date().toISOString(),
-            ),
-          );
+          await keep(current.key, 'Cloudflare does not show it was created during installation');
           break;
         }
         await remove(current, 'Check that nothing outside this installation still uses it.');
@@ -802,7 +984,7 @@ export async function runPurgeAllTeardown(
         bucket.name,
         new Set([PLATFORM_R2_OWNERSHIP_MARKER_KEY]),
         async () => {
-          const missing = await context.verify(next, new Set(['routing-kv', bucket.key]));
+          const missing = await verify(new Set(['routing-kv', bucket.key]));
           if (missing.has(bucket.key)) {
             throw ownershipRefusal(
               next,

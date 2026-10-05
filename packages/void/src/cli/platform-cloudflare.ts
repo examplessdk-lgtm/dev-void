@@ -98,6 +98,12 @@ export type CloudflareQueueConsumer = Readonly<{
   script: string | null;
 }>;
 export type PlatformAccessResourceKind = 'application' | 'service-token';
+export type CloudflareEmailRoutingCatchAll = Readonly<{
+  enabled: boolean;
+  /** The Worker that receives mail; null unless its only action is one Worker. */
+  workerName: string | null;
+}>;
+export type CloudflareEmailRoutingRule = CloudflareEmailRoutingCatchAll & Readonly<{ id: string }>;
 export type PlatformManagedWorkerTraffic = Readonly<{
   customDomains: ReadonlyArray<Readonly<{ hostname: string; service: string }>>;
   routes: ReadonlyArray<Readonly<{ pattern: string; script: string }>>;
@@ -1191,6 +1197,67 @@ export class PlatformCloudflareClient {
     await this.#deleteIfPresent(accessResourcePath(accountId, kind, id));
   }
 
+  /** Email Routing rules in a zone, without the catch-all, which has its own endpoint. */
+  async listEmailRoutingRules(zoneId: string): Promise<ReadonlyArray<CloudflareEmailRoutingRule>> {
+    const entries: Array<Record<string, unknown>> = [];
+    for (let page = 1; ; page++) {
+      const query = new URLSearchParams({ page: String(page), per_page: '50' });
+      const result = await this.request<ReadonlyArray<Record<string, unknown>>>(
+        `/zones/${encodeURIComponent(zoneId)}/email/routing/rules?${query}`,
+      );
+      entries.push(...result);
+      if (result.length < 50) {
+        break;
+      }
+    }
+    return entries
+      .filter(
+        (entry) =>
+          !(Array.isArray(entry.matchers) ? entry.matchers : []).some(
+            (matcher: unknown) => (matcher as { type?: unknown } | null)?.type === 'all',
+          ),
+      )
+      .map((entry) => ({
+        // `tag` is the deprecated name of `id`.
+        id: requiredString(entry.id ?? entry.tag, 'Email Routing rule id'),
+        ...parseEmailRoutingTarget(entry),
+      }));
+  }
+
+  async deleteEmailRoutingRule(zoneId: string, ruleId: string): Promise<void> {
+    await this.#deleteIfPresent(
+      `/zones/${encodeURIComponent(zoneId)}/email/routing/rules/${encodeURIComponent(ruleId)}`,
+    );
+  }
+
+  /** The zone's Email Routing catch-all rule; null when the zone has none. */
+  async getEmailRoutingCatchAll(zoneId: string): Promise<CloudflareEmailRoutingCatchAll | null> {
+    try {
+      return parseEmailRoutingTarget(
+        await this.request<Record<string, unknown>>(
+          `/zones/${encodeURIComponent(zoneId)}/email/routing/rules/catch_all`,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof PlatformCloudflareApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /** Point the catch-all back at its disabled default, which drops mail. */
+  async resetEmailRoutingCatchAll(zoneId: string): Promise<void> {
+    await this.request(`/zones/${encodeURIComponent(zoneId)}/email/routing/rules/catch_all`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        matchers: [{ type: 'all' }],
+        actions: [{ type: 'drop' }],
+        enabled: false,
+      }),
+    });
+  }
+
   async removeRoutes(
     _accountId: string,
     _zoneId: string | null,
@@ -1228,6 +1295,20 @@ function accessResourcePath(
   id: string,
 ): string {
   return `/accounts/${encodeURIComponent(accountId)}/access/${kind === 'application' ? 'apps' : 'service_tokens'}/${encodeURIComponent(id)}`;
+}
+
+function parseEmailRoutingTarget(rule: Record<string, unknown>): CloudflareEmailRoutingCatchAll {
+  const actions = Array.isArray(rule.actions) ? (rule.actions as Array<unknown>) : [];
+  const action =
+    actions.length === 1 ? (actions[0] as { type?: unknown; value?: unknown } | null) : null;
+  const value = Array.isArray(action?.value) ? (action.value as Array<unknown>) : [];
+  return {
+    enabled: rule.enabled === true,
+    workerName:
+      action?.type === 'worker' && value.length === 1 && typeof value[0] === 'string'
+        ? value[0]
+        : null,
+  };
 }
 
 function cloudflareErrorDetails(envelope: CloudflareEnvelope<unknown>, status: number): string {

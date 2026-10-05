@@ -995,6 +995,83 @@ describe('platform Cloudflare client', () => {
     expect(requests.some((request) => request.includes('force'))).toBe(false);
   });
 
+  it('reads and detaches Email Routing rules through the documented endpoints', async () => {
+    const requests: Array<string> = [];
+    const bodies: Array<unknown> = [];
+    const worker = (name: string) => [{ type: 'worker', value: [name] }];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        const method = init?.method ?? 'GET';
+        requests.push(`${method} ${url.pathname}${url.search}`);
+        if (init?.body) {
+          bodies.push(JSON.parse(String(init.body)));
+        }
+        if (url.pathname.endsWith('/catch_all') && method === 'GET') {
+          return url.pathname.includes('/empty-zone/')
+            ? Response.json(
+                { success: false, errors: [{ code: 1000, message: 'not found' }] },
+                { status: 404 },
+              )
+            : Response.json({
+                success: true,
+                result: { enabled: true, actions: worker('void-team-email-gateway') },
+              });
+        }
+        if (method === 'GET') {
+          const page = url.searchParams.get('page');
+          return Response.json({
+            success: true,
+            result:
+              page === '1'
+                ? [
+                    { id: 'r1', enabled: true, actions: worker('void-team-email-gateway') },
+                    ...Array.from({ length: 48 }, (_, index) => ({
+                      id: `other-${index}`,
+                      enabled: true,
+                      actions: [{ type: 'forward', value: ['a@example.com'] }],
+                    })),
+                    // The catch-all has its own endpoint.
+                    { id: 'all', enabled: true, matchers: [{ type: 'all' }], actions: [] },
+                  ]
+                : [
+                    {
+                      tag: 'r2',
+                      enabled: false,
+                      actions: [...worker('void-team-email-gateway'), { type: 'drop' }],
+                    },
+                  ],
+          });
+        }
+        return Response.json({ success: true, result: {} });
+      },
+    });
+
+    const rules = await client.listEmailRoutingRules('zone');
+    expect(rules[0]).toEqual({ id: 'r1', enabled: true, workerName: 'void-team-email-gateway' });
+    expect(rules.at(-1)).toEqual({ id: 'r2', enabled: false, workerName: null });
+    expect(rules.some((rule) => rule.id === 'all')).toBe(false);
+    await expect(client.getEmailRoutingCatchAll('zone')).resolves.toEqual({
+      enabled: true,
+      workerName: 'void-team-email-gateway',
+    });
+    await expect(client.getEmailRoutingCatchAll('empty-zone')).resolves.toBeNull();
+    await client.deleteEmailRoutingRule('zone', 'r1');
+    await client.resetEmailRoutingCatchAll('zone');
+
+    expect(requests).toEqual([
+      'GET /client/v4/zones/zone/email/routing/rules?page=1&per_page=50',
+      'GET /client/v4/zones/zone/email/routing/rules?page=2&per_page=50',
+      'GET /client/v4/zones/zone/email/routing/rules/catch_all',
+      'GET /client/v4/zones/empty-zone/email/routing/rules/catch_all',
+      'DELETE /client/v4/zones/zone/email/routing/rules/r1',
+      'PUT /client/v4/zones/zone/email/routing/rules/catch_all',
+    ]);
+    expect(bodies).toEqual([
+      { matchers: [{ type: 'all' }], actions: [{ type: 'drop' }], enabled: false },
+    ]);
+  });
+
   it('reports a refused Worker deletion with Cloudflare error codes', async () => {
     const client = new PlatformCloudflareClient('token', {
       fetcher: async () =>
