@@ -74,7 +74,7 @@ export async function runDeleteCommand(
 
   const result = await client.deleteProject(projectId);
 
-  s.stop('Project deleted.');
+  s.clear();
 
   if (result.warnings && result.warnings.length > 0) {
     for (const warning of result.warnings) {
