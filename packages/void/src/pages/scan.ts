@@ -405,15 +405,24 @@ export async function scanPages(root: string, options?: PageScanOptions): Promis
   return { pages, layouts, namedLayouts };
 }
 
+// Same leading-script rule as @void/md's extractScript: a markdown page may open
+// with a <script> block, and its frontmatter starts right after that block.
+const LEADING_SCRIPT_RE = /^<script\b[^>]*>[\s\S]*?<\/script>\s*\n?/;
+
+/** Return the raw YAML frontmatter of markdown source, after any leading <script> block. */
+function markdownFrontmatter(source: string): string | undefined {
+  const body = source.replace(LEADING_SCRIPT_RE, '');
+  return body.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
+}
+
 /** Extract title and description from YAML frontmatter in markdown source. */
 function extractFrontmatterMeta(
   source: string,
 ): { title?: string; description?: string } | undefined {
-  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) {
+  const yaml = markdownFrontmatter(source);
+  if (yaml === undefined) {
     return undefined;
   }
-  const yaml = match[1];
   const title = yaml
     .match(/^title:\s*(.+)$/m)?.[1]
     ?.trim()
@@ -430,11 +439,11 @@ function extractFrontmatterMeta(
 
 /** Extract layout field from YAML frontmatter in markdown source. */
 function extractFrontmatterLayout(source: string): string | false | undefined {
-  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) {
+  const yaml = markdownFrontmatter(source);
+  if (yaml === undefined) {
     return undefined;
   }
-  const value = match[1]
+  const value = yaml
     .match(/^layout:\s*(.+)$/m)?.[1]
     ?.trim()
     .replace(/^["']|["']$/g, '');

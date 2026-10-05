@@ -554,6 +554,30 @@ export { handler as action, type actions };`,
     expect(page!.island).toBe(true);
   });
 
+  it('extracts title and description from .md frontmatter', async () => {
+    writeFile('post.md', '---\ntitle: Hello\ndescription: "A post"\n---\n# Hello');
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'post');
+    expect(page!.metadata).toEqual({ title: 'Hello', description: 'A post' });
+  });
+
+  it('extracts .md frontmatter that follows a leading <script> block', async () => {
+    writeFile(
+      'post.md',
+      '<script>\ndocument.title = "x"\n</script>\n\n---\n\ntitle: Hello\ndescription: A post\n\n---\n\n# Hello',
+    );
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'post');
+    expect(page!.metadata).toEqual({ title: 'Hello', description: 'A post' });
+  });
+
+  it('ignores a --- block that is not at the start of the .md body', async () => {
+    writeFile('post.md', '# Hello\n\n---\ntitle: Not frontmatter\n---\n');
+    const result = await scanPages(TMP);
+    const page = result.pages.find((p) => p.componentId === 'post');
+    expect(page!.metadata).toBeUndefined();
+  });
+
   it('auto-prerenders island page but preserves user revalidate from server file', async () => {
     writeFile('pricing.island.vue', '<template><div>Pricing</div></template>');
     writeFile('pricing.server.ts', 'export const revalidate = 60;');
@@ -705,6 +729,17 @@ const example = 'export const layout = "home"';
       const result = await scanPages(TMP);
       const page = result.pages.find((p) => p.componentId === 'bare');
       expect(page!.layout).toBe(false);
+    });
+
+    it('extracts layout from markdown frontmatter after a leading <script> block', async () => {
+      writeFile('_layouts/post.vue', '<template><slot /></template>');
+      writeFile(
+        'blog/hello.md',
+        '<script>\nconsole.log(1)\n</script>\n---\nlayout: post\n---\n# Hello',
+      );
+      const result = await scanPages(TMP);
+      const page = result.pages.find((p) => p.componentId === 'blog/hello');
+      expect(page!.layout).toBe('post');
     });
 
     it('throws when named layout reference is not found', async () => {
