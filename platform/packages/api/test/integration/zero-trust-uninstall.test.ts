@@ -260,8 +260,8 @@ describe('platform uninstall check against the API database', () => {
       platform,
     );
     expect(response.status).toBe(409);
-    expect(((await response.json()) as { error: string }).error).toContain(
-      'The platform is being uninstalled',
+    expect(((await response.json()) as { error: string }).error).toBe(
+      'The platform is being uninstalled, so new projects cannot be created.',
     );
     expect(await readPlatformProjectSlugsConnection(connection)).toEqual([]);
   });

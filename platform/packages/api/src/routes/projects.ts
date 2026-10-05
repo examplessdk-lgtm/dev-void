@@ -820,8 +820,13 @@ const app = new Hono<ApiEnv>()
         201,
       );
     } catch (err) {
+      // Only the configuration lock above throws this here: the uninstall
+      // record exists.
       if (err instanceof ZeroTrustUnavailableError) {
-        return context.json({ error: err.message }, err.status);
+        return context.json(
+          { error: 'The platform is being uninstalled, so new projects cannot be created.' },
+          err.status,
+        );
       }
       // Unique constraint violation — slug was taken between check and insert
       if (
