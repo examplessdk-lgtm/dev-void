@@ -1450,11 +1450,13 @@ function requirePurgeAllClient(client: PlatformUninstallClient): PurgeAllClient 
     'deleteWorkerDomain',
     'deleteWorkerRoute',
     'emptyR2Bucket',
+    'forceDeleteWorker',
     'getAccessResource',
     'getEmailRoutingCatchAll',
     'listDispatchNamespaceScripts',
     'listEmailRoutingRules',
     'listQueueConsumers',
+    'listWorkerDependents',
     'listWorkerRoutes',
     'resetEmailRoutingCatchAll',
   ];

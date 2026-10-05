@@ -20,8 +20,11 @@ import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
  *   -> tail Worker -> Hyperdrive and KV -> R2 -> AI Gateway -> routing KV (last)
  *
  * Each resource is proven to belong to this installation right before its
- * DELETE, and no DELETE sends `force`, so Cloudflare refuses a resource that
- * something outside the installation still uses. A route, custom domain, DNS
+ * DELETE, and Cloudflare refuses a resource that something outside the
+ * installation still uses. The only forced DELETE is for a platform Worker
+ * that Cloudflare refused while every Worker it names as a dependent is one
+ * this installation created: the API and proxy Workers bind to each other, so
+ * neither can go first without it. A route, custom domain, DNS
  * record, or Access resource that no longer matches what was recorded is kept
  * and listed with the reason instead of stopping the run. Every finished
  * deletion is checkpointed, so rerunning the command continues where it
@@ -45,6 +48,7 @@ export type PurgeAllClient = Pick<
   | 'deleteWorkerDomain'
   | 'deleteWorkerRoute'
   | 'emptyR2Bucket'
+  | 'forceDeleteWorker'
   | 'getAccessResource'
   | 'getEmailRoutingCatchAll'
   | 'listAiGateways'
@@ -56,6 +60,7 @@ export type PurgeAllClient = Pick<
   | 'listKvNamespaces'
   | 'listQueueConsumers'
   | 'listR2Buckets'
+  | 'listWorkerDependents'
   | 'listWorkerDomains'
   | 'listWorkerNames'
   | 'listWorkerRoutes'
@@ -738,8 +743,9 @@ export async function runPurgeAllTeardown(
    * Cloudflare has no conditional DELETE: Workers and dispatch namespaces are
    * addressed by name, and a route or custom domain can be changed in place.
    * Something replaced between this proof and the DELETE can still be removed.
-   * That one-request window is accepted because --purge-all is opt-in, never
-   * sends `force`, and its plan lists every resource first.
+   * That one-request window is accepted because --purge-all is opt-in and its
+   * plan lists every resource first. A forced Worker DELETE has the same
+   * window between reading its dependents and the DELETE.
    */
   const prove = async (resource: InstallationResource): Promise<boolean> => {
     const missing = await verify(new Set(['routing-kv', resource.key]));
@@ -782,6 +788,48 @@ export async function runPurgeAllTeardown(
   );
   const workerHint =
     'A Worker this installation did not create may still use it, for example by sending it logs as a tail Worker or through a service binding. Remove that link in the Cloudflare dashboard.';
+  /**
+   * Delete a platform Worker. When Cloudflare refuses because other Workers
+   * still bind to it, force the DELETE only if each of them is a Worker this
+   * installation created, which this run deletes too.
+   */
+  const removeWorker = async (resource: InstallationResource) => {
+    if (!(await prove(resource))) {
+      return;
+    }
+    try {
+      await client.deleteResource(accountId, resource);
+    } catch (error) {
+      if (!(error instanceof PlatformCloudflareApiError)) {
+        throw error;
+      }
+      const dependents = await client
+        .listWorkerDependents(accountId, resource.name)
+        .catch(() => null);
+      const outside = dependents?.workers.filter((name) => !createdWorkerNames.has(name)) ?? [];
+      if (
+        !dependents ||
+        dependents.pagesFunction ||
+        dependents.workers.length === 0 ||
+        outside.length > 0
+      ) {
+        throw cloudflareRefusal(
+          next,
+          `${resource.kind} ${resource.name}`,
+          error,
+          outside.length
+            ? `Workers outside this installation still use it: ${outside.join(', ')}. Remove that link in the Cloudflare dashboard.`
+            : workerHint,
+        );
+      }
+      try {
+        await client.forceDeleteWorker(accountId, resource.name);
+      } catch (forced) {
+        throw cloudflareRefusal(next, `${resource.kind} ${resource.name}`, forced, workerHint);
+      }
+    }
+    await markDeleted(resource.key);
+  };
 
   for (const target of purgeAllTargets(initial)) {
     if (target.phase === 'access') {
@@ -913,6 +961,8 @@ export async function runPurgeAllTeardown(
         break;
       }
       case 'workers':
+        await removeWorker(current);
+        break;
       case 'tail':
         await remove(current, workerHint);
         break;

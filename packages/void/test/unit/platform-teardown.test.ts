@@ -311,6 +311,15 @@ function cloudflare(manifest: PlatformInstallationManifest) {
     ),
     // A Worker the installation did not create that sends logs to the tail Worker.
     foreignTailProducer: false,
+    // Service bindings as the installer deploys them: the API Worker checks
+    // the proxy through one, and the proxy and email gateway call the API.
+    serviceBindings: [
+      { from: names.apiWorker as string, to: names.proxyWorker as string },
+      { from: names.proxyWorker as string, to: names.apiWorker as string },
+      { from: names.emailGatewayWorker as string, to: names.apiWorker as string },
+    ],
+    // Workers outside the installation, which bind like any other Worker.
+    foreignWorkers: new Set<string>(),
     emailRules: [] as Array<{ id: string; enabled: boolean; workerName: string | null }>,
     catchAll: null as { enabled: boolean; workerName: string | null } | null,
   };
@@ -324,6 +333,15 @@ function cloudflare(manifest: PlatformInstallationManifest) {
     }
   };
   const routingLive = () => live.kv.some((entry) => entry.id === 'routing-id');
+  const bindersOf = (name: string) =>
+    live.serviceBindings
+      .filter(
+        (binding) =>
+          binding.to === name &&
+          binding.from !== name &&
+          (live.workers.has(binding.from) || live.foreignWorkers.has(binding.from)),
+      )
+      .map((binding) => binding.from);
   const remove = <T extends { id: string }>(list: Array<T>, id: string) => {
     const index = list.findIndex((entry) => entry.id === id);
     if (index >= 0) {
@@ -358,6 +376,13 @@ function cloudflare(manifest: PlatformInstallationManifest) {
         if ([...live.consumers.values()].flat().some((entry) => entry.script === resource.name)) {
           throw new PlatformCloudflareApiError('Worker is a queue consumer.', 400);
         }
+        const binders = bindersOf(resource.name);
+        if (binders.length) {
+          throw new PlatformCloudflareApiError(
+            `Cloudflare API error: Cannot delete service '${resource.name}' because it is still referenced by service bindings in Workers '${binders.join("', '")}'. Please remove bindings pointing to it and try again. (code 10142) (HTTP 400; DELETE /workers/scripts).`,
+            400,
+          );
+        }
         live.workers.delete(resource.name);
       } else if (resource.kind === 'queue') {
         // The API and dispatch Workers produce to the platform Queues.
@@ -391,6 +416,16 @@ function cloudflare(manifest: PlatformInstallationManifest) {
       } else {
         throw new Error(`unexpected delete ${resource.kind}`);
       }
+    },
+    forceDeleteWorker: async (_account: string, name: string) => {
+      const call = `DELETE worker ${name} force`;
+      calls.push(call);
+      fail(call);
+      live.workers.delete(name);
+    },
+    listWorkerDependents: async (_account: string, name: string) => {
+      calls.push(`GET worker-dependents ${name}`);
+      return { pagesFunction: false, workers: bindersOf(name) };
     },
     deleteR2Object: async (_account: string, name: string, key: string) => {
       calls.push(`DELETE r2-object ${key}`);
@@ -585,6 +620,7 @@ const FULL_ORDER = [
   'DELETE queue-consumer usage-id usage-consumer',
   `DELETE worker ${names.emailGatewayWorker}`,
   `DELETE worker ${names.proxyWorker}`,
+  `DELETE worker ${names.proxyWorker} force`,
   `DELETE worker ${names.dispatchWorker}`,
   `DELETE worker ${names.apiWorker}`,
   `DELETE queue ${names.cronQueue}`,
@@ -661,7 +697,15 @@ describe('uninstall --purge-all', () => {
 
     expect(deletes(fake)).toEqual(FULL_ORDER);
     expect(fake.calls.indexOf('PUT disabled')).toBeLessThan(fake.calls.indexOf(FULL_ORDER[0]!));
-    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    // Only the proxy Worker, which the API Worker binds to, is forced, and
+    // only after Cloudflare refused it and named no Worker outside the
+    // installation.
+    expect(fake.calls.filter((call) => call.includes('force'))).toEqual([
+      `DELETE worker ${names.proxyWorker} force`,
+    ]);
+    expect(fake.calls.indexOf(`GET worker-dependents ${names.proxyWorker}`)).toBeGreaterThan(
+      fake.calls.indexOf(`DELETE worker ${names.proxyWorker}`),
+    );
     // Never touched: the adopted zone and KV, the adopted Access application,
     // and a Queue consumer run by a Worker the installation did not create.
     expect(fake.live.kv).toEqual([{ id: 'customer-kv-id', name: 'customer-kv' }]);
@@ -1118,6 +1162,49 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
+  it('never forces a Worker that a Worker outside the installation binds to, and names it', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.live.foreignWorkers.add('customer-worker');
+    fake.live.serviceBindings.push({ from: 'customer-worker', to: names.proxyWorker as string });
+
+    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain(
+      `Cloudflare refused to delete worker ${names.proxyWorker}: Cloudflare API error: Cannot delete service`,
+    );
+    expect(error?.message).toContain(
+      'Workers outside this installation still use it: customer-worker.',
+    );
+    expect(error?.message).toContain(`Progress is saved. Rerun: ${RESUME}`);
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
+    expect(fake.live.workers.has(names.apiWorker)).toBe(true);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
+
+    fake.live.serviceBindings.pop();
+    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('never forces a Worker when Cloudflare cannot list what depends on it', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.listWorkerDependents = async () => {
+      throw new PlatformCloudflareApiError('Authentication error (code 10000)', 403);
+    };
+
+    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain(`Cloudflare refused to delete worker ${names.proxyWorker}`);
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
+  });
+
   it('stops with a clear message when Cloudflare refuses the tail Worker, and never forces it', async () => {
     const manifest = installedManifest();
     persist(manifest);
@@ -1135,7 +1222,7 @@ describe('uninstall --purge-all', () => {
     expect(
       deletes(fake).filter((call) => call === `DELETE worker ${names.tailWorker}`),
     ).toHaveLength(1);
-    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(fake.calls).not.toContain(`DELETE worker ${names.tailWorker} force`);
     expect(listInstallationManifests()[0]?.status).toBe('failed');
 
     fake.live.foreignTailProducer = false;

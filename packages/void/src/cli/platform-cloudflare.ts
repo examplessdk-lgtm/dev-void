@@ -92,6 +92,16 @@ export type CloudflareWorkerServiceRoute = Readonly<{
   pattern: string;
   zoneName: string;
 }>;
+/** What still depends on a Worker, as `wrangler delete` reads it before forcing. */
+export type CloudflareWorkerDependents = Readonly<{
+  /**
+   * Workers that use it through a service binding, a Durable Object namespace
+   * it implements, a dispatch namespace outbound, or as their tail Worker.
+   */
+  workers: ReadonlyArray<string>;
+  /** A Pages project binds to it; Cloudflare does not name the project. */
+  pagesFunction: boolean;
+}>;
 export type CloudflareQueueConsumer = Readonly<{
   id: string;
   /** Worker that consumes the Queue (`script_name`); null for an HTTP pull consumer. */
@@ -1081,9 +1091,9 @@ export class PlatformCloudflareClient {
   }
 
   /**
-   * DELETE one resource by the key Cloudflare addresses it with. Never sends
-   * `force`, so Cloudflare refuses a resource another Worker still uses. A
-   * 404 means it is already gone.
+   * DELETE one resource by the key Cloudflare addresses it with. Only
+   * `forceDeleteWorker` sends `force`; otherwise Cloudflare refuses a
+   * resource another Worker still uses. A 404 means it is already gone.
    */
   async #deleteIfPresent(path: string): Promise<void> {
     const response = await this.#fetcher(`${this.apiBaseUrl}${path}`, {
@@ -1143,6 +1153,47 @@ export class PlatformCloudflareClient {
               'Queue consumer Worker name',
             ),
     }));
+  }
+
+  async listWorkerDependents(
+    accountId: string,
+    workerName: string,
+  ): Promise<CloudflareWorkerDependents> {
+    const account = encodeURIComponent(accountId);
+    const script = encodeURIComponent(workerName);
+    type Reference = Readonly<{ script?: unknown; service?: unknown }>;
+    const references = await this.request<{
+      dispatch_outbounds?: ReadonlyArray<Reference>;
+      durable_objects?: ReadonlyArray<Reference>;
+      services?: { incoming?: ReadonlyArray<Reference>; pages_function?: unknown };
+    }>(`/accounts/${account}/workers/scripts/${script}/references`);
+    const tails = await this.request<ReadonlyArray<{ producer?: Reference }>>(
+      `/accounts/${account}/workers/tails/by-consumer/${script}`,
+    );
+    const name = (reference: Reference | undefined) =>
+      requiredString(reference?.script ?? reference?.service, 'Dependent Worker name');
+    const workers = [
+      ...(references.services?.incoming ?? []).map(name),
+      // A Worker lists the Durable Object namespaces it implements itself.
+      ...(references.durable_objects ?? []).map(name).filter((entry) => entry !== workerName),
+      ...(references.dispatch_outbounds ?? []).map(name),
+      ...tails.map((tail) => name(tail.producer)),
+    ];
+    return {
+      pagesFunction: references.services?.pages_function === true,
+      workers: [...new Set(workers)],
+    };
+  }
+
+  /**
+   * DELETE a Worker even though other Workers still bind to it. Cloudflare
+   * leaves those bindings pointing at nothing, so callers first check that
+   * every dependent is going away too.
+   */
+  async forceDeleteWorker(accountId: string, workerName: string): Promise<void> {
+    await this.#deleteIfPresent(
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}?force=true`,
+    );
   }
 
   async deleteQueueConsumer(accountId: string, queueId: string, consumerId: string): Promise<void> {

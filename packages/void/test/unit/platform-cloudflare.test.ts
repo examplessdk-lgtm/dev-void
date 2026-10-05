@@ -1006,6 +1006,53 @@ describe('platform Cloudflare client', () => {
     expect(requests.some((request) => request.includes('force'))).toBe(false);
   });
 
+  it('reads what depends on a Worker like wrangler delete, and forces only on request', async () => {
+    const requests: Array<string> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+        if (url.pathname.endsWith('/references')) {
+          // The shape Cloudflare returned for a platform API Worker.
+          return Response.json({
+            success: true,
+            result: {
+              services: {
+                outgoing: [{ name: 'PLATFORM_PROXY', service: 'void-team-proxy' }],
+                incoming: [{ name: 'API', service: 'void-team-proxy', environment: 'production' }],
+              },
+              domains: [],
+              durable_objects: [
+                { name: 'USAGE_COUNTER', service: 'void-team-api', environment: 'production' },
+                { name: 'SHARED', service: 'customer-worker', environment: 'production' },
+              ],
+              dispatch_outbounds: [{ script: 'outbound-user', namespace: 'ns' }],
+            },
+          });
+        }
+        if (url.pathname.includes('/workers/tails/by-consumer/')) {
+          return Response.json({
+            success: true,
+            result: [{ producer: { script: 'void-team-proxy' }, consumer: { script: 'x' } }],
+          });
+        }
+        return Response.json({ success: true, result: null });
+      },
+    });
+
+    await expect(client.listWorkerDependents('account', 'void-team-api')).resolves.toEqual({
+      pagesFunction: false,
+      workers: ['void-team-proxy', 'customer-worker', 'outbound-user'],
+    });
+    await client.forceDeleteWorker('account', 'void-team-api');
+
+    expect(requests).toEqual([
+      'GET /client/v4/accounts/account/workers/scripts/void-team-api/references',
+      'GET /client/v4/accounts/account/workers/tails/by-consumer/void-team-api',
+      'DELETE /client/v4/accounts/account/workers/scripts/void-team-api?force=true',
+    ]);
+  });
+
   it('reads a queue consumer Worker from script_name and refuses a Worker consumer without one', async () => {
     const respond = (rows: ReadonlyArray<Record<string, unknown>>) =>
       new PlatformCloudflareClient('token', {
