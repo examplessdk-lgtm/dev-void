@@ -424,6 +424,28 @@ describe('platform credential setup links', () => {
       'Change the zone policy from All Domains to Specified Domains → example.com and every zone that will carry mail.',
     );
   });
+  it('keeps the runtime token on All Domains when Void creates the zone', () => {
+    // The zone does not exist yet, so Specified Domains cannot select it.
+    const page = platformSetupPages({
+      ...plan('example.com'),
+      actions: [
+        {
+          kind: 'zone',
+          key: 'zone',
+          action: 'create',
+          id: null,
+          name: 'example.com',
+          reason: 'test',
+        },
+      ],
+    }).runtime;
+    expect(page.instructions).toBe(
+      [
+        'Create a Cloudflare runtime token that Void can use to manage the platform. Please review the permissions and then paste the token here.',
+        'Keep the zone policy on All Domains so the token can purge cache on example.com after Void creates it.',
+      ].join('\n'),
+    );
+  });
   it('opens only in interactive mode and retains a manual link if opening fails', () => {
     const open = vi.fn(() => {
       throw new Error('no browser');

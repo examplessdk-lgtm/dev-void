@@ -95,13 +95,15 @@ function specifiedDomainsInstruction(zones: Array<string>): string {
   return `Change the zone policy from All Domains to Specified Domains → ${zones.join(' and ')}.`;
 }
 
+function plansZoneCreation(plan: PlatformInstallPlan): boolean {
+  return plan.actions.some((action) => action.kind === 'zone' && action.action === 'create');
+}
+
 export function platformManagementSetupPage(
   plan: PlatformInstallPlan,
   options: { access?: PlatformManagementAccess | false } = {},
 ): PlatformSetupPage {
-  const createsZone = plan.actions.some(
-    (action) => action.kind === 'zone' && action.action === 'create',
-  );
+  const createsZone = plansZoneCreation(plan);
   const zoneName = plan.deployment.application.zoneName;
   const apiHostname = plan.deployment.controlPlane.apiHostname;
   const access =
@@ -201,14 +203,22 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
       url: 'https://dash.cloudflare.com/?' + query,
       instructions: [
         'Create a Cloudflare runtime token that Void can use to manage the platform. Please review the permissions and then paste the token here.',
-        ...(zoneName
+        // A zone that Void creates later cannot be selected yet; All Domains
+        // lets Cache Purge reach it once it exists.
+        ...(zoneName && plansZoneCreation(plan)
           ? [
-              specifiedDomainsInstruction([
-                zoneName,
-                ...(plan.deployment.capabilities.email ? ['every zone that will carry mail'] : []),
-              ]),
+              `Keep the zone policy on All Domains so the token can purge cache on ${zoneName} after Void creates it.`,
             ]
-          : []),
+          : zoneName
+            ? [
+                specifiedDomainsInstruction([
+                  zoneName,
+                  ...(plan.deployment.capabilities.email
+                    ? ['every zone that will carry mail']
+                    : []),
+                ]),
+              ]
+            : []),
       ].join('\n'),
     },
     github: {

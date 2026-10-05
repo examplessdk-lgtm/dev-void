@@ -8,7 +8,7 @@ Keep one password-manager entry for this platform. Paste the saved values into t
 
 ## Cloudflare API Tokens {#runtime-token-permissions}
 
-For a domain installation or Cloudflare Access setup, the installer guides you through creating separate management and runtime tokens using Cloudflare's [API token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/). Its links preselect the permissions and suggest names based on your platform's display name, but Cloudflare's form cannot preselect a zone: for a domain installation, change the zone policy from **All Domains** to **Specified Domains** and select your zone. If Void will create the zone, keep **All Domains** on the management token. Save the tokens in your password manager and paste them into the masked CLI prompts.
+For a domain installation or Cloudflare Access setup, the installer guides you through creating separate management and runtime tokens using Cloudflare's [API token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/). Its links preselect the permissions and suggest names based on your platform's display name, but Cloudflare's form cannot preselect a zone: for a domain installation, change the zone policy from **All Domains** to **Specified Domains** and select your zone. If Void will create the zone, keep **All Domains** on both tokens: the zone does not exist yet, and the runtime token needs it to purge cache. Save the tokens in your password manager and paste them into the masked CLI prompts.
 
 For workers.dev testing with the default API hostname, browser login can authorize
 infrastructure setup. Void also checks account-wide Access requirements; if the
