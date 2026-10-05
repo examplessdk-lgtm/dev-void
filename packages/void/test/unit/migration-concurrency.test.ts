@@ -179,6 +179,22 @@ describe('D1 migration ownership', () => {
     expect((await handler([])(apply('successor'))).status).toBe(200);
   });
 
+  it('warns about a migration without statement breakpoints only while it is pending', async () => {
+    const { handler } = createDatabase();
+    const owner = handler([
+      {
+        name: 'legacy.sql',
+        sql: 'UPDATE balance SET amount = amount - 10; UPDATE balance SET amount = amount - 10;',
+      },
+    ]);
+    const first = (await (await owner(apply('first'))).json()) as MigrationResponse;
+    expect(first.confirmedApplied).toEqual(['legacy.sql']);
+    expect(first.warnings).toEqual([expect.stringContaining('Migration legacy.sql')]);
+    const later = (await (await owner(apply('later'))).json()) as MigrationResponse;
+    expect(later.confirmedSkipped).toEqual(['legacy.sql']);
+    expect(later.warnings ?? []).toEqual([]);
+  });
+
   it('keeps completed attempts idempotent and rolls back failing migration batches', async () => {
     const { sqlite, handler } = createDatabase();
     const owner = handler(migrations);

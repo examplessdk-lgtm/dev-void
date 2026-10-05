@@ -283,13 +283,17 @@ async function runD1AppMigrations(
   const migrationResults: Array<MigrationResult> = [];
   const confirmedApplied: Array<string> = [];
   const confirmedSkipped: Array<string> = [];
-  const warnings = verified.plans.flatMap((plan) => plan.warnings ?? []);
+  let warnings = verified.plans.flatMap((plan) => plan.warnings ?? []);
   let stability: 'stable' | 'legacy' = 'stable';
 
   try {
     await createTrackingTable(db);
     await upgradeTrackingTable(db, fenced ? attempt.attemptId : undefined);
     const applied = await readAppliedSet(db);
+    // A migration applied earlier never runs again, so its warning cannot be acted on.
+    warnings = verified.plans.flatMap((plan, index) =>
+      applied.has(migrations[index]!.name) ? [] : (plan.warnings ?? []),
+    );
 
     for (let index = 0; index < migrations.length; index++) {
       const migration = migrations[index]!;
