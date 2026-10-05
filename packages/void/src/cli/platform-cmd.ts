@@ -8,7 +8,7 @@ import {
 } from './cf-access.ts';
 import { pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
-import { readPlatformDiscoveryResponse } from './platform-discovery.ts';
+import { PlatformDisabledError, readPlatformDiscoveryResponse } from './platform-discovery.ts';
 import {
   getActivePlatformConnection,
   listPlatformConnections,
@@ -195,6 +195,13 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
     try {
       discovery = await discoverPlatform(apiUrl);
     } catch (error) {
+      if (error instanceof PlatformDisabledError) {
+        console.log('Platform: disabled (API and application traffic are paused).');
+        if (!saved?.operation) {
+          console.log(`Enable it: void platform enable${saved ? ` ${saved.id}` : ''}`);
+        }
+        return;
+      }
       if (saved) {
         log.info(
           'Live availability could not be confirmed. The saved checkpoint above may be out of date.',

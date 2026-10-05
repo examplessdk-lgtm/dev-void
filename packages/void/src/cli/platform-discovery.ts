@@ -1,14 +1,34 @@
 import { parsePlatformDiscoveryDocument, type PlatformDiscoveryDocument } from '@void/platform';
 import { normalizePlatformApiUrl } from './platform-registry.ts';
 
+/** Discovery was refused because the platform traffic gate is closed. */
+export class PlatformDisabledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlatformDisabledError';
+  }
+}
+
 /** Validates a `GET /.well-known/void-platform` response from `apiUrl`. */
 export async function readPlatformDiscoveryResponse(
   apiUrl: string,
   response: Response,
 ): Promise<PlatformDiscoveryDocument> {
   if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`platform: Discovery failed at ${apiUrl} (HTTP ${response.status}).`);
+    const message = `platform: Discovery failed at ${apiUrl} (HTTP ${response.status}).`;
+    if (response.status === 503) {
+      const body: unknown = await response.json().catch(() => null);
+      if (
+        body &&
+        typeof body === 'object' &&
+        (body as Record<string, unknown>).error === 'Platform disabled'
+      ) {
+        throw new PlatformDisabledError(message);
+      }
+    } else {
+      await response.body?.cancel();
+    }
+    throw new Error(message);
   }
   let value: unknown;
   try {

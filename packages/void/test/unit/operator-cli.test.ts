@@ -799,6 +799,26 @@ describe('operator transport and execution', () => {
     ).rejects.toMatchObject({ code: 'partial_failure', details });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('names a disabled platform and how to restore it', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ error: 'Platform disabled' }, { status: 503 }));
+    await expect(
+      new OperatorClient('https://one.example', 'operator', fetcher).request('/users'),
+    ).rejects.toMatchObject({
+      code: 'Platform disabled',
+      status: 503,
+      message: 'Operator request failed (HTTP 503): Platform disabled. Run `void platform enable`.',
+    });
+  });
+  it('includes the error code when the API sends no message', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ error: 'not_found' }, { status: 404 }));
+    await expect(
+      new OperatorClient('https://one.example', 'operator', fetcher).request('/users/x'),
+    ).rejects.toMatchObject({ message: 'Operator request failed (HTTP 404): not_found.' });
+  });
   it('uses short read deadlines, longer mutation deadlines, and bounded overrides', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {

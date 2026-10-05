@@ -87,6 +87,49 @@ describe('platform discovery', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+  it('reports a disabled platform and how to enable it', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-status-'));
+    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', directory);
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const fetcher = vi.fn(async () =>
+      Response.json({ error: 'Platform disabled' }, { status: 503 }),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const timestamp = '2026-10-05T00:00:00.000Z';
+      const manifest = createPlatformInstallationManifest({
+        account: { id: 'account', name: 'Account' },
+        createdAt: timestamp,
+        deployment: createPlatformDeploymentManifest({
+          application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+          displayName: 'Example',
+          installationSlug: 'example',
+        }),
+        id: 'disabled-installation',
+        ownershipNonce: '0123456789abcdef0123456789abcdef',
+        platformVersion: '1.0.0',
+      });
+      writeInstallationManifest({
+        ...manifest,
+        status: 'disabled',
+        endpoints: { apiUrl: 'https://api.example.com', dashboardUrl: null, proxyUrl: null },
+      });
+      await expect(
+        runPlatformCommand('.', { subcommand: 'status', selector: manifest.id }),
+      ).resolves.toBeUndefined();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(output).toHaveBeenCalledWith(
+        'Platform: disabled (API and application traffic are paused).',
+      );
+      expect(output).toHaveBeenCalledWith('Enable it: void platform enable disabled-installation');
+      expect(output).not.toHaveBeenCalledWith(expect.stringContaining('is reachable'));
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it('accepts a valid document from its declared origin', async () => {
     const response = new Response(JSON.stringify(document));
     Object.defineProperty(response, 'url', {
