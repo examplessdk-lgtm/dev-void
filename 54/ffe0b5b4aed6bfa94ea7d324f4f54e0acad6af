@@ -1,0 +1,31 @@
+docs/guide/env-vars.md
+  s_3dca312de99340::t_430546803af4df 42
+docs/guide/platform/administration/plans.md
+  s_3dca312de99340::t_e14e00f3d922e6 14
+docs/guide/platform/administration/zero-trust.md
+  s_3dca312de99340::t_734d74e2039f45 11
+docs/guide/platform/installation/maintenance.md
+  s_3dca312de99340::t_2098e049300861 66
+docs/guide/sandboxes.md
+  s_3dca312de99340::t_66084862003e7a 116
+docs/reference/cli/deploy.md
+  s_3dca312de99340::t_9e624fb0d46629 21
+docs/reference/cli/platform-operations.md
+  s_3dca312de99340::t_93863452e027ad 20,43,61,65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "54ffe0b5b4aed6bfa94ea7d324f4f54e0acad6af",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
