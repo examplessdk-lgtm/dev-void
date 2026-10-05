@@ -3,13 +3,13 @@ import { normalizePlatformApiUrl } from './platform-registry.ts';
 
 /** Discovery was refused because the platform traffic gate is closed. */
 export class PlatformDisabledError extends Error {
-  constructor(
-    message: string,
-    /** True when an upgrade or repair paused traffic, not `void platform disable`. */
-    readonly maintenance = false,
-  ) {
+  /** True when an upgrade or repair paused traffic, not `void platform disable`. */
+  readonly maintenance: boolean;
+
+  constructor(message: string, maintenance = false) {
     super(message);
     this.name = 'PlatformDisabledError';
+    this.maintenance = maintenance;
   }
 }
 
