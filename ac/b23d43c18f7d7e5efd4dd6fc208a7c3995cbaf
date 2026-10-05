@@ -1,0 +1,25 @@
+packages/void/src/cli/env-validation.ts
+  s_f9988f60ed7f0e::t_20f725309ebed4 30-33,74
+packages/void/src/plugin-env-client-fold.ts
+  s_f9988f60ed7f0e::t_f9372b4db6332f 16-19,27
+packages/void/src/plugin-env-client-guard.ts
+  s_f9988f60ed7f0e::t_35ccb10e23c032 15-18,26
+packages/void/src/plugin-env-schema.ts
+  s_f9988f60ed7f0e::t_7884bef0e49ea5 10-13,36,80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "acb23d43c18f7d7e5efd4dd6fc208a7c3995cbaf",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
