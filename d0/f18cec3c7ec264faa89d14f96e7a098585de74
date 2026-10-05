@@ -1,0 +1,19 @@
+docs/.vitepress/theme/Hero.vue
+  s_c2e8aeb2f4eea7::t_87dcf533cd9d54 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d0f18cec3c7ec264faa89d14f96e7a098585de74",
+  "prompts": {},
+  "sessions": {
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "unknown"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
