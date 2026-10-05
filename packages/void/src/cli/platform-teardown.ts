@@ -786,12 +786,18 @@ export async function runPurgeAllTeardown(
       .filter((resource) => resource.kind === 'worker' && resource.ownership === 'created')
       .map((resource) => resource.name),
   );
+  /** The recorded Worker under this name that this run still deletes, if any. */
+  const workerTarget = (name: string) =>
+    next.resources.find(
+      (resource) =>
+        resource.kind === 'worker' && resource.name === name && isPurgeAllCandidate(next, resource),
+    );
   const workerHint =
     'A Worker this installation did not create may still use it, for example by sending it logs as a tail Worker or through a service binding. Remove that link in the Cloudflare dashboard.';
   /**
    * Delete a platform Worker. When Cloudflare refuses because other Workers
    * still bind to it, force the DELETE only if each of them is a Worker this
-   * installation created, which this run deletes too.
+   * run deletes too and still carries this installation's ownership marker.
    */
   const removeWorker = async (resource: InstallationResource) => {
     if (!(await prove(resource))) {
@@ -806,12 +812,23 @@ export async function runPurgeAllTeardown(
       const dependents = await client
         .listWorkerDependents(accountId, resource.name)
         .catch(() => null);
-      const outside = dependents?.workers.filter((name) => !createdWorkerNames.has(name)) ?? [];
+      const outside = dependents?.workers.filter((name) => !workerTarget(name)) ?? [];
+      // Prove each dependent live, like the Worker itself: a name match alone
+      // could be another Worker that took a recorded name.
+      const keys = outside.length
+        ? []
+        : (dependents?.workers.map((name) => workerTarget(name)!.key) ?? []);
+      const missing =
+        dependents && !dependents.pagesFunction && keys.length
+          ? await verify(new Set(['routing-kv', ...keys]))
+          : null;
       if (
         !dependents ||
         dependents.pagesFunction ||
         dependents.workers.length === 0 ||
-        outside.length > 0
+        outside.length > 0 ||
+        !missing ||
+        keys.some((key) => missing.has(key))
       ) {
         throw cloudflareRefusal(
           next,

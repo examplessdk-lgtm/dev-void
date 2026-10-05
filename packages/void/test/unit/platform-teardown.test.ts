@@ -1189,6 +1189,55 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
+  it('never forces a Worker whose dependent has a recorded name but is not proven to be the installation’s', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    // While the run is going, another Worker takes the API Worker's name and
+    // still binds to the proxy.
+    const replacement = { ...manifest, ownershipNonce: 'replacement-owner-nonce-00000000' };
+    const deleteResource = fake.deleteResource;
+    fake.deleteResource = async (...args: Parameters<typeof deleteResource>) => {
+      if (args[1].name === names.proxyWorker) {
+        fake.live.workers.set(
+          names.apiWorker as string,
+          marker(
+            replacement,
+            manifest.resources.find((resource) => resource.key === 'api-worker')!,
+          ),
+        );
+      }
+      return deleteResource(...args);
+    };
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      `worker ${names.apiWorker} belongs to another installation`,
+    );
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
+  });
+
+  it('never forces a Worker whose dependent was recorded as deleted', async () => {
+    const recorded = installedManifest();
+    const manifest = {
+      ...recorded,
+      resources: recorded.resources.map((resource) =>
+        resource.key === 'api-worker' ? { ...resource, state: 'deleted' as const } : resource,
+      ),
+    };
+    persist(manifest);
+    const fake = cloudflare(recorded);
+
+    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
+      (caught: unknown) => caught as Error,
+    );
+    expect(error?.message).toContain(
+      `Workers outside this installation still use it: ${names.apiWorker}.`,
+    );
+    expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
+    expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
+  });
+
   it('never forces a Worker when Cloudflare cannot list what depends on it', async () => {
     const manifest = installedManifest();
     persist(manifest);
