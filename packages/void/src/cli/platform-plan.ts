@@ -357,7 +357,7 @@ export async function createPlatformInstallPlan(
     client.listHyperdriveConfigs(account.id),
     client.listWorkerNames(account.id),
   ]);
-  const dnsRecords = zone ? await client.listDnsRecords(zone.id, wildcardHostname) : [];
+  const dnsRecords = zone ? await listZoneDnsRecords(client, zone, wildcardHostname) : [];
   const remoteOwnership = existing
     ? await readRemoteOwnership(client, account.id, routingKv, existing)
     : null;
@@ -469,7 +469,7 @@ export async function createPlatformInstallPlan(
       );
     }
     const records = controlPlaneZone
-      ? await client.listDnsRecords(controlPlaneZone.id, apiHostname)
+      ? await listZoneDnsRecords(client, controlPlaneZone, apiHostname)
       : [];
     const ownedApiWorker =
       intentProofs.has('api-worker') ||
@@ -1320,6 +1320,27 @@ export function platformAdoptionIntentHash(
   return createHash('sha256')
     .update(JSON.stringify({ id, key, kind, name, ownershipNonce: manifest.ownershipNonce }))
     .digest('hex');
+}
+
+async function listZoneDnsRecords(
+  client: PlanningClient,
+  zone: CloudflareZone,
+  hostname: string,
+): ReturnType<PlanningClient['listDnsRecords']> {
+  try {
+    return await client.listDnsRecords(zone.id, hostname);
+  } catch (error) {
+    if (
+      error instanceof PlatformCloudflareApiError &&
+      (error.status === 401 || error.status === 403)
+    ) {
+      throw new Error(
+        `platform: Cloudflare denied reading DNS records for ${zone.name} (HTTP ${error.status}). Add Zone → DNS → Edit for this zone to the management token, then rerun.`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 async function readRemoteOwnership(

@@ -642,6 +642,42 @@ describe('platform installation planning', () => {
       ),
     ).rejects.toThrow('KV access denied');
   });
+  it('names the DNS permission when the token cannot read DNS records', async () => {
+    const zone = { id: 'zone', name: 'example.app', nameServers: [], status: 'active' };
+    const deniedDns = async () => {
+      throw new PlatformCloudflareApiError('Authentication error', 403, '/zones/zone/dns_records');
+    };
+    const wildcard = createPlatformInstallPlan(
+      client({ findZone: async () => zone, listDnsRecords: deniedDns }),
+      input,
+      null,
+    );
+    await expect(wildcard).rejects.toThrow(
+      'platform: Cloudflare denied reading DNS records for example.app (HTTP 403). Add Zone → DNS → Edit for this zone to the management token, then rerun.',
+    );
+    await expect(wildcard).rejects.not.toThrow('Authentication error');
+
+    const apiHostname = createPlatformInstallPlan(
+      client({ findZoneForHostname: async () => zone, listDnsRecords: deniedDns }),
+      { ...input, controlPlaneDomain: 'api.example.app' },
+      null,
+    );
+    await expect(apiHostname).rejects.toThrow('Zone → DNS → Edit');
+    await expect(apiHostname).rejects.not.toThrow('Authentication error');
+
+    await expect(
+      createPlatformInstallPlan(
+        client({
+          findZone: async () => zone,
+          listDnsRecords: async () => {
+            throw new PlatformCloudflareApiError('service unavailable', 503);
+          },
+        }),
+        input,
+        null,
+      ),
+    ).rejects.toThrow('service unavailable');
+  });
   it('plans workers.dev without any zone, DNS, or certificate access', async () => {
     const forbidden = async () => {
       throw new Error('zone access must not occur');
