@@ -1169,6 +1169,19 @@ describe('platform lifecycle management', () => {
     expect(databaseCheckpoints.at(-1)?.status).toBe('disabled');
   });
 
+  it('describes the disable plan in user terms', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = client(manifest);
+
+    await disablePlatform(fake, manifest, true);
+
+    expect(noteText('Disable plan')).toBe(
+      'Block all platform traffic and the platform API. Routes, custom domains, Workers, and data stay installed.',
+    );
+    expect(fake.disabledWrites).toEqual([]);
+  });
+
   it('selects cross-host disabled and uninstalled state over a stale local manifest', () => {
     const local = installedManifest();
     const disabled = { ...local, desiredState: 'disabled' as const, status: 'disabled' as const };

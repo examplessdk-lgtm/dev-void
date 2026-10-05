@@ -811,7 +811,7 @@ export async function disablePlatform(
       dependencies.checkpoint,
     );
   note(
-    'Block platform traffic through installation-owned routing storage. Retain routes and custom domains for explicit dashboard cleanup because Cloudflare cannot condition their deletion on an immutable generation. Workers and all data remain installed.',
+    'Block all platform traffic and the platform API. Routes, custom domains, Workers, and data stay installed.',
     'Disable plan',
   );
   if (planOnly) {
