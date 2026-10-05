@@ -1,0 +1,35 @@
+packages/void/src/cli/cache.ts
+  s_122e5a5858a175::t_750c388f1c43c3 4,46
+packages/void/src/cli/db.ts
+  s_122e5a5858a175::t_a631896a9a6ae1 47,544,641,655,1129,1190,1260,1296,1330,1354,1915
+packages/void/src/cli/list.ts
+  s_122e5a5858a175::t_71b9b4a238db97 4,86,128
+packages/void/src/cli/project-team.ts
+  s_122e5a5858a175::t_3ac103a0b2a9e0 9,133,159,169
+packages/void/src/cli/projects.ts
+  s_122e5a5858a175::t_e835bafca62da8 4,48
+packages/void/src/cli/rollback.ts
+  s_122e5a5858a175::t_79c2198e22b64f 12,94,177,215
+packages/void/src/cli/secret.ts
+  s_122e5a5858a175::t_c5e492e2bd349a 15,65,87,93,104,134,152,157,164
+packages/void/test/unit/db-migrate.test.ts
+  s_122e5a5858a175::t_5d63a2e02a0058 190,239,257
+packages/void/test/unit/purge-cache-command.test.ts
+  s_122e5a5858a175::t_69a62262ad425d 132,164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7e649aac1d9cc24739e09f00dcf7098ed5c8b575",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

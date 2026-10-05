@@ -1,0 +1,19 @@
+test/terminal-demos/TerminalPlayer.vue
+  s_122e5a5858a175::t_e37a9f09f58047 24-43,218,221-222,225-231,316-317,320-345
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ee113fda9a7c178d1ef3eaa1e544c609756d21df",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
