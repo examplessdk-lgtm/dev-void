@@ -66,3 +66,29 @@ it('preserves every database lifecycle capability through the pool wrapper on in
   expect(await lock.prepareSandboxDrain!(2)).toEqual(checkpoint);
   await expect(lock.verifyDatabase!(directory, runtime.database)).resolves.toBeUndefined();
 }, 30_000);
+
+it('refuses leftover migration history before claiming and still resumes its own claim', async () => {
+  const url = 'postgresql://owner:pw@db.example.com/platform?sslmode=require';
+  await database.exec(`
+    CREATE SCHEMA "drizzle";
+    CREATE TABLE "drizzle"."__drizzle_migrations" ("id" serial PRIMARY KEY, "hash" text NOT NULL);
+  `);
+  await expect(claimPlatformDatabase(url, 'test-install', 'test-owner')).rejects.toThrow(
+    'non-empty PostgreSQL database (found drizzle.__drizzle_migrations)',
+  );
+  const claim = await database.query(
+    `SELECT to_regclass('"__void_platform_installation"')::text AS "relation"`,
+  );
+  expect(claim.rows).toEqual([{ relation: null }]);
+
+  // A resumed installation has already claimed the database and written its
+  // own migration history; the matching claim must still be accepted.
+  await database.exec(`DROP SCHEMA "drizzle" CASCADE`);
+  await claimPlatformDatabase(url, 'test-install', 'test-owner');
+  lock = await acquirePlatformDatabaseLifecycleLock(url, 'test-install', 'test-owner');
+  const runtime = readPlatformRuntimeManifest();
+  await lock.prepareDatabase!(getPlatformRuntimeDirectory(), runtime.database, null, false);
+  await lock();
+  lock = undefined;
+  await expect(claimPlatformDatabase(url, 'test-install', 'test-owner')).resolves.toBeUndefined();
+}, 30_000);

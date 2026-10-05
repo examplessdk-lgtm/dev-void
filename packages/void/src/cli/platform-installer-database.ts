@@ -918,10 +918,13 @@ export async function claimPlatformDatabaseConnection(
     );
     const claim = result.rows[0];
     if (!claim) {
+      // Migration history lives outside search_path. Leftover history would be
+      // read as already-applied migrations only after the claim, so check it
+      // here. Other provider-owned schemas stay out of scope.
       const contents = await client.query<{ schemaname: string; tablename: string }>(
         `SELECT "schemaname", "tablename"
          FROM "pg_catalog"."pg_tables"
-         WHERE "schemaname" = ANY (current_schemas(false))
+         WHERE ("schemaname" = ANY (current_schemas(false)) OR "schemaname" = 'drizzle')
            AND "tablename" <> '__void_platform_installation'
          ORDER BY "schemaname", "tablename"
          LIMIT 1`,
