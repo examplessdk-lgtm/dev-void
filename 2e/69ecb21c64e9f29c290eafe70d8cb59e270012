@@ -1,0 +1,29 @@
+packages/platform/scripts/build-runtime.mjs
+  s_122e5a5858a175::t_bbd4354ae175af 85,111-117
+packages/void/test/unit/platform-runtime.test.ts
+  s_13e62acd2fbbaf::t_ae86867d9616c0 49-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2e69ecb21c64e9f29c290eafe70d8cb59e270012",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_13e62acd2fbbaf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a39-0bb6-7b50-bef0-b71829d1a0e3",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
