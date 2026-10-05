@@ -73,7 +73,7 @@ describe('GET /health', () => {
       PLATFORM_TRAFFIC_STATE: 'staging',
     });
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: 'Platform disabled' });
+    expect(await res.json()).toEqual({ error: 'Platform disabled', reason: 'maintenance' });
   });
 
   it('keeps public API traffic closed during a Sandbox drain', async () => {
@@ -82,7 +82,7 @@ describe('GET /health', () => {
       PLATFORM_TRAFFIC_STATE: 'sandbox-drain',
     });
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: 'Platform disabled' });
+    expect(await res.json()).toEqual({ error: 'Platform disabled', reason: 'maintenance' });
   });
 
   it('admits the authenticated installer Sandbox drain preflight during maintenance', async () => {

@@ -3,7 +3,11 @@ import { normalizePlatformApiUrl } from './platform-registry.ts';
 
 /** Discovery was refused because the platform traffic gate is closed. */
 export class PlatformDisabledError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** True when an upgrade or repair paused traffic, not `void platform disable`. */
+    readonly maintenance = false,
+  ) {
     super(message);
     this.name = 'PlatformDisabledError';
   }
@@ -23,7 +27,10 @@ export async function readPlatformDiscoveryResponse(
         typeof body === 'object' &&
         (body as Record<string, unknown>).error === 'Platform disabled'
       ) {
-        throw new PlatformDisabledError(message);
+        throw new PlatformDisabledError(
+          message,
+          (body as Record<string, unknown>).reason === 'maintenance',
+        );
       }
     } else {
       await response.body?.cancel();

@@ -130,6 +130,46 @@ describe('platform discovery', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+  it('reports an upgrade or repair, not a disabled platform, while maintenance pauses traffic', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-status-'));
+    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', directory);
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ error: 'Platform disabled', reason: 'maintenance' }, { status: 503 }),
+      ),
+    );
+    try {
+      const manifest = createPlatformInstallationManifest({
+        account: { id: 'account', name: 'Account' },
+        createdAt: '2026-10-05T00:00:00.000Z',
+        deployment: createPlatformDeploymentManifest({
+          application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+          displayName: 'Example',
+          installationSlug: 'example',
+        }),
+        id: 'maintenance-installation',
+        ownershipNonce: '0123456789abcdef0123456789abcdef',
+        platformVersion: '1.0.0',
+      });
+      writeInstallationManifest({
+        ...manifest,
+        status: 'verifying',
+        endpoints: { apiUrl: 'https://api.example.com', dashboardUrl: null, proxyUrl: null },
+      });
+      await expect(
+        runPlatformCommand('.', { subcommand: 'status', selector: manifest.id }),
+      ).rejects.toThrow('upgrade or repair');
+      expect(output).not.toHaveBeenCalledWith(expect.stringContaining('disabled'));
+      expect(output).not.toHaveBeenCalledWith(expect.stringContaining('void platform enable'));
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it('accepts a valid document from its declared origin', async () => {
     const response = new Response(JSON.stringify(document));
     Object.defineProperty(response, 'url', {

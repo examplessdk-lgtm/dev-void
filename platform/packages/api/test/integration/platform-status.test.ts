@@ -151,7 +151,7 @@ it('keeps writes and other API routes gated while redirecting admin navigation t
       headers: { Origin: 'http://localhost' },
     });
     expect(write.status).toBe(503);
-    expect(await write.json()).toEqual({ error: 'Platform disabled' });
+    expect(await write.json()).toEqual({ error: 'Platform disabled', reason: 'maintenance' });
   }
   expect((await request('/admin/health')).status).toBe(503);
   expect((await request('/auth/callback?state=not-admin&code=fixture')).status).toBe(503);

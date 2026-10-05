@@ -812,6 +812,21 @@ describe('operator transport and execution', () => {
       message: 'Operator request failed (HTTP 503): Platform disabled. Run `void platform enable`.',
     });
   });
+  it('does not suggest enabling a platform paused for an upgrade or repair', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json({ error: 'Platform disabled', reason: 'maintenance' }, { status: 503 }),
+      );
+    await expect(
+      new OperatorClient('https://one.example', 'operator', fetcher).request('/users'),
+    ).rejects.toMatchObject({
+      code: 'Platform disabled',
+      status: 503,
+      message:
+        'Operator request failed (HTTP 503): the platform is paused for an upgrade or repair. Retry when it finishes.',
+    });
+  });
   it('includes the error code when the API sends no message', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

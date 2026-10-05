@@ -208,7 +208,7 @@ describe('POST /internal/platform/email-bootstrap', () => {
   it('does not let an invalid probe token bypass the lifecycle gate', async () => {
     const response = await app.fetch(request('wrong-token'), bindings());
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: 'Platform disabled' });
+    expect(await response.json()).toEqual({ error: 'Platform disabled', reason: 'maintenance' });
   });
 
   it('fails readiness when the durable setup operation is blocked', async () => {

@@ -195,7 +195,7 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
     try {
       discovery = await discoverPlatform(apiUrl);
     } catch (error) {
-      if (error instanceof PlatformDisabledError) {
+      if (error instanceof PlatformDisabledError && !error.maintenance) {
         console.log('Platform: disabled (API and application traffic are paused).');
         if (!saved?.operation) {
           console.log(`Enable it: void platform enable${saved ? ` ${saved.id}` : ''}`);
@@ -205,6 +205,12 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
       if (saved) {
         log.info(
           'Live availability could not be confirmed. The saved checkpoint above may be out of date.',
+        );
+      }
+      if (error instanceof PlatformDisabledError) {
+        throw new Error(
+          `platform: Traffic at ${apiUrl} is paused for an upgrade or repair. Check again when it finishes.`,
+          { cause: error },
         );
       }
       throw error;

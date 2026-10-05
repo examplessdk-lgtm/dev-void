@@ -228,9 +228,12 @@ const app = new Hono<ApiEnv>()
       context.req.header('X-Void-Auth-Setup') &&
       context.req.method === 'POST' &&
       context.req.path === '/internal/platform/auth-initialize';
-    const trafficPaused =
+    // An upgrade or repair pauses traffic until it commits.
+    const maintenance =
       context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
-      context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
+      context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain';
+    const trafficPaused =
+      maintenance ||
       !!(
         !authenticationSetup &&
         !installerProbe &&
@@ -261,7 +264,12 @@ const app = new Hono<ApiEnv>()
       }
       context.header('Cache-Control', 'no-store');
       context.header('Retry-After', '30');
-      return context.json({ error: 'Platform disabled' }, 503);
+      return context.json(
+        maintenance
+          ? { error: 'Platform disabled', reason: 'maintenance' }
+          : { error: 'Platform disabled' },
+        503,
+      );
     }
     await next();
   })
