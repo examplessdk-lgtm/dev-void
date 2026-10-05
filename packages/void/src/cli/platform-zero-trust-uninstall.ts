@@ -189,8 +189,9 @@ export async function readPlatformProjectZeroTrustStateConnection(
 
 /**
  * Take the Zero Trust configuration lock exclusively on this session. Every
- * API path that records or creates a Void-managed Access application holds
- * the same lock, so none can commit until the returned release runs.
+ * API path that records or creates a Void-managed Access application or
+ * creates a project holds the same lock, so none can commit until the
+ * returned release runs.
  */
 export async function lockPlatformProjectZeroTrustConnection(
   client: QueryConnection,

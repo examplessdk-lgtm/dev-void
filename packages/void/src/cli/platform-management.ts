@@ -1050,9 +1050,10 @@ export async function uninstallPlatform(
     missingResources = new Set();
   }
 
-  // Zero Trust writers in the API take this lock and never the lifecycle lock.
-  // Holding it from the final check until traffic is disabled keeps them from
-  // creating Access applications the check did not see. A request admitted
+  // Zero Trust writers and project creation in the API take this lock and
+  // never the lifecycle lock. Holding it from the final check until traffic is
+  // disabled keeps them from creating Access applications or projects the
+  // check did not see. A request admitted
   // before the disable may already be waiting on the lock, so the fence makes
   // every later holder refuse. Only enabling the platform again lifts it once
   // the disable write has started.

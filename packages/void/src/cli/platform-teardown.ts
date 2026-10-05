@@ -918,8 +918,9 @@ export async function runPurgeAllTeardown(
         if (!(await prove(current))) {
           break;
         }
-        // A project created after the check before the first change, while
-        // the platform API still answered, owns an application Worker here.
+        // A platform API that creates projects without the configuration
+        // lock can add one after the final check, and it owns an application
+        // Worker here.
         const projects = await context.readProjects();
         if (projects.length) {
           throw new Error(

@@ -11,8 +11,8 @@ import { markProjectError } from './state.ts';
 export const PLATFORM_UNINSTALL_SETTING = 'platform.uninstall';
 
 /**
- * The installation configuration lock. Project mutations, deployments and
- * route publication hold it shared; installation operations take it exclusive
+ * The installation configuration lock. Project creation and mutations,
+ * deployments and route publication hold it shared; installation operations take it exclusive
  * to claim, checkpoint and finish, so they never overtake project work.
  * Platform uninstall holds the same key from its final check until it disables
  * traffic (packages/void/src/cli/platform-zero-trust-uninstall.ts), and records

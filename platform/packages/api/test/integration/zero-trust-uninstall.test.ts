@@ -10,6 +10,10 @@ import {
   vi,
 } from 'vite-plus/test';
 import {
+  assertNoPlatformProjects,
+  readPlatformProjectSlugsConnection,
+} from '../../../../../packages/void/src/cli/platform-teardown.ts';
+import {
   assertProjectZeroTrustAllowsUninstall,
   fencePlatformProjectZeroTrustConnection,
   liftPlatformProjectZeroTrustFenceConnection,
@@ -239,6 +243,70 @@ describe('platform uninstall check against the API database', () => {
     await configurePlatformZeroTrust(platform, env.db, configureInput);
     expect(cloudflare.applications.size).toBeGreaterThan(0);
   });
+
+  it('refuses project creation while the uninstall fence is in place', async () => {
+    const owner = await createTestUser(env.db, 'fenced-creator');
+    const platform = bindings();
+    const connection = (env.db as unknown as { $client: QueryConnection }).$client;
+
+    // The request was admitted before traffic was disabled.
+    await fencePlatformProjectZeroTrustConnection(connection);
+    const response = await app.fetch(
+      new Request('http://localhost/projects', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: 'after-final-check' }),
+      }),
+      platform,
+    );
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      'The platform is being uninstalled',
+    );
+    expect(await readPlatformProjectSlugsConnection(connection)).toEqual([]);
+  });
+
+  it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
+    'keeps a project created during the purge-all final check from committing after it',
+    async () => {
+      const owner = await createTestUser(env.db, 'racing-creator');
+      const platform = bindings();
+      const session = new pg.Client({ connectionString: process.env.VOID_TEST_DATABASE_URL });
+      await session.connect();
+      try {
+        const unlock = await lockPlatformProjectZeroTrustConnection(session);
+        const readProjects = () => readPlatformProjectSlugsConnection(session);
+        await assertNoPlatformProjects(readProjects);
+
+        // Admitted before traffic was disabled, it reaches the insert after
+        // the final check passed.
+        const created = Promise.resolve(
+          app.fetch(
+            new Request('http://localhost/projects', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${owner.jwt}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ slug: 'racing-project' }),
+            }),
+            platform,
+          ),
+        ).then((response) => response.status);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await readProjects()).toEqual([]);
+
+        await fencePlatformProjectZeroTrustConnection(session);
+        await unlock();
+        expect(await created).toBe(409);
+        // Teardown deletes the platform only while this stays empty.
+        await expect(assertNoPlatformProjects(readProjects)).resolves.toBeUndefined();
+      } finally {
+        await liftPlatformProjectZeroTrustFenceConnection(session);
+        await session.end();
+      }
+    },
+  );
 
   it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
     'refuses Zero Trust writers that waited on the uninstall lock once it is released',
