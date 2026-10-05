@@ -1,0 +1,23 @@
+docs/.vitepress/theme/Hero.vue
+  s_c2e8aeb2f4eea7::t_b44bbaac25aced 2,4,6-13,54-56,58-66
+docs/.vitepress/theme/HomeFeatures.vue
+  s_c2e8aeb2f4eea7::t_4f0da855683e85 45
+docs/.vitepress/theme/Home.vue
+  s_c2e8aeb2f4eea7::t_e3054ffa96158a 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "99fc3e1ce377788a86c5b271d5b3f702b46080b5",
+  "prompts": {},
+  "sessions": {
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
