@@ -91,9 +91,10 @@ export type ApiEnv = Env & {
      * Name of the tail-consumer Worker that receives runtime logs (Tail Worker).
      * Wired into per-user-script `tail_consumers` metadata on each WfP upload.
      * This is the only log path for invocations that skip the dispatch Worker
-     * (crons, `/__void/migrate`, Durable Object alarms, queues). The dispatch
-     * Worker's own consumer also receives the user items it invoked; the tail
-     * Worker keeps only the dispatcher items from those batches.
+     * (crons, `/__void/migrate`, Durable Object alarms). Queue deliveries go
+     * through the dispatch Worker. The dispatch Worker's own consumer also
+     * receives the user items it invoked; the tail Worker keeps only the
+     * dispatcher items from those batches.
      * Falls back to `void-tail` when unset.
      */
     TAIL_SERVICE_NAME?: string;
