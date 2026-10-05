@@ -1,0 +1,21 @@
+platform/packages/api/src/observability/logger.ts
+  s_f9988f60ed7f0e::t_2d0b3ea2e07a30 50,53,61-62,64-65,67-68
+platform/packages/api/src/pg-errors.ts
+  s_f9988f60ed7f0e::t_28c6cac3318348 20,23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "27366d39ff6fa15349fa0825614ef8ccf117ca5e",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
