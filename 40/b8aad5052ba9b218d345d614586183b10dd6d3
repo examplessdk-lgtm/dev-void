@@ -1,0 +1,19 @@
+packages/void/src/runtime/email/dev-inbox.ts
+  s_f9988f60ed7f0e::t_b62872549be073 287-292,294,297,332,335
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "40b8aad5052ba9b218d345d614586183b10dd6d3",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
