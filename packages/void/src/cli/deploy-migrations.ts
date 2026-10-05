@@ -530,7 +530,7 @@ export function assertRemoteMigrationsDeployable(
   migrations: Array<{ name: string; sql: string }>,
 ): void {
   if (hasDeploySchemaDrift(root, dialect)) {
-    throw new Error(getDeploySchemaDriftMessage());
+    throw new Error(getDeploySchemaDriftMessage(root));
   }
   assertJournalCoherence(migrationsDir, migrations);
   if (migrations.length > 0) {

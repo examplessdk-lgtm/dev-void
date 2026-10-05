@@ -13,6 +13,8 @@ import { dirname, join, relative } from 'pathslash';
 import { type DatabaseDialect } from '../config.ts';
 import { writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
+import { collectMigrations } from '../migrations/collect.ts';
+import { listDrizzleArtifacts } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { log, getErrorMessage } from './deploy-helpers.ts';
@@ -32,7 +34,7 @@ export function assertDeploySchemaDriftFree(root: string, dialect: DatabaseDiale
     process.exit(1);
   }
 
-  log.error(getDeploySchemaDriftMessage());
+  log.error(getDeploySchemaDriftMessage(root));
   process.exit(1);
 }
 
@@ -107,7 +109,29 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
   return output;
 }
 
-export function getDeploySchemaDriftMessage(): string {
+export function getDeploySchemaDriftMessage(root: string): string {
+  const migrationsDir = readProjectPaths(root).migrationsDir;
+  // Hand-written SQL with no Drizzle journal or snapshot: Drizzle diffs the schema
+  // against nothing, so `void db generate` would emit a migration that recreates
+  // tables the existing SQL already creates (and fails the fresh-database replay).
+  if (
+    collectMigrations(migrationsDir).length > 0 &&
+    !existsSync(join(migrationsDir, 'meta', '_journal.json')) &&
+    listDrizzleArtifacts(migrationsDir).length === 0
+  ) {
+    const dir = `${relative(root, migrationsDir)}/`;
+    return [
+      `Schema drift detected: ${dir} has SQL migrations without Drizzle metadata (${dir}meta/_journal.json and a schema snapshot).`,
+      '`void db generate` cannot fix this: it would add a migration that creates your existing tables again.',
+      'To add the metadata:',
+      `  1. Make your Drizzle schema match the tables your migrations in ${dir} create.`,
+      `  2. In a scratch copy of the project, delete ${dir} and run \`void db generate\`.`,
+      `  3. Copy its meta/ folder into ${dir}. In meta/_journal.json, list each existing migration file in order (tag = file name without .sql). Rename the snapshot to <prefix>_snapshot.json, where <prefix> is the last tag up to its first "_".`,
+      `If no database has applied these migrations yet, you can instead delete them and run \`void db generate\`.`,
+      'Then commit the changes and rerun `void deploy`.',
+    ].join('\n');
+  }
+
   return [
     'Schema drift detected between your Drizzle schema and db/migrations/.',
     'Run `void db generate`, review the generated migration, commit it yourself, then rerun `void deploy`.',
