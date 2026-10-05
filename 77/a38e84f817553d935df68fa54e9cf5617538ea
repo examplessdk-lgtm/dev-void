@@ -1,0 +1,23 @@
+docs/.vitepress/theme/HomeFeatureVisual.vue
+  s_316d9314e13e4c::t_8c639d16705c4d 7,23
+docs/.vitepress/theme/HomeFeatures.vue
+  s_316d9314e13e4c::t_cdc7e52ccb05e9 5,46-47,49-50,55-60
+docs/.vitepress/theme/HomeResourceCode.vue
+  s_316d9314e13e4c::t_5fe70666c1771a 1-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "77a38e84f817553d935df68fa54e9cf5617538ea",
+  "prompts": {},
+  "sessions": {
+    "s_316d9314e13e4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10ad5-8944-72e3-b6d3-336861cf7d12",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
