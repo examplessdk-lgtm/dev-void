@@ -63,7 +63,7 @@ Before it changes anything, `--purge-all` stops if:
 - projects remain. Delete each one with `void project delete <name>` first.
 - the credential cannot make every planned deletion. Browser login cannot delete DNS records or Access resources, so set `CLOUDFLARE_API_TOKEN` to a token with the permissions the plan lists. If you connected Access from a separate identity account, the token also needs the Access permissions in that account. If the platform sends email, it also needs **Zone → Email Routing Rules → Edit** for the sender domain's zone.
 
-If a route, custom domain, DNS record, or Access resource no longer matches what the installation recorded, for example a route that now sends traffic to another Worker, it is kept and listed with the reason, and uninstall continues.
+If a route, custom domain, DNS record, or Access resource no longer matches what the installation recorded, for example a route that now sends traffic to another Worker, it is kept and listed with the reason, and uninstall continues. Do not run `--purge-all` while someone else is changing the platform's Workers, routes, or custom domains: a change made after Void checks a resource and before it deletes it is not detected.
 
 If Cloudflare refuses a deletion, for example because a Worker you created yourself still sends logs to the platform tail Worker, uninstall stops and names the resource. Fix it, then rerun the same command to continue.
 

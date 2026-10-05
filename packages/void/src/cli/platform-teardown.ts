@@ -732,7 +732,15 @@ export async function runPurgeAllTeardown(
       },
       keys,
     );
-  /** Prove the resource; false when it is already gone (and recorded). */
+  /**
+   * Prove the resource; false when it is already gone (and recorded).
+   *
+   * Cloudflare has no conditional DELETE: Workers and dispatch namespaces are
+   * addressed by name, and a route or custom domain can be changed in place.
+   * Something replaced between this proof and the DELETE can still be removed.
+   * That one-request window is accepted because --purge-all is opt-in, never
+   * sends `force`, and its plan lists every resource first.
+   */
   const prove = async (resource: InstallationResource): Promise<boolean> => {
     const missing = await verify(new Set(['routing-kv', resource.key]));
     if (missing.has(resource.key)) {
