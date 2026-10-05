@@ -89,7 +89,32 @@ function eventLines(events: Array<unknown>, indent: string): Array<string> {
   ]);
 }
 
-function humanLines(value: unknown, indent = ''): Array<string> {
+const LABEL_WORDS: Record<string, string> = {
+  api: 'API',
+  dns: 'DNS',
+  github: 'GitHub',
+  http: 'HTTP',
+  id: 'ID',
+  ids: 'IDs',
+  oauth: 'OAuth',
+  oidc: 'OIDC',
+  url: 'URL',
+  urls: 'URLs',
+};
+
+function fieldLabel(key: string): string {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => LABEL_WORDS[word.toLowerCase()] ?? word.toLowerCase());
+  if (words[0]) {
+    words[0] = words[0][0]!.toUpperCase() + words[0].slice(1);
+  }
+  return words.join(' ');
+}
+
+export function humanLines(value: unknown, indent = ''): Array<string> {
   if (Array.isArray(value)) {
     return table(value, indent);
   }
@@ -97,7 +122,7 @@ function humanLines(value: unknown, indent = ''): Array<string> {
     return [`${indent}${printable(value)}`];
   }
   return Object.entries(value).flatMap(([key, item]) => {
-    const label = key.replaceAll('_', ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    const label = fieldLabel(key);
     if (Array.isArray(item)) {
       return [
         `${indent}${label}:`,
@@ -663,7 +688,7 @@ export async function runOperatorCommand(args: OperatorArgs): Promise<void> {
       console.log(
         [
           ...humanLines({ pagination: result.pagination }),
-          'deployments:',
+          'Deployments:',
           ...eventLines(result.deployments, '  '),
         ].join('\n'),
       );

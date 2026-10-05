@@ -583,10 +583,11 @@ describe('deployment asset migration', () => {
           .mocked(console.log)
           .mock.calls.map(([line]) => String(line))
           .join('\n');
-        expect(printed).toContain('needs Migration: 2');
-        expect(printed).toContain('invalid: false');
-        expect(printed).toContain('bundle Stored: true');
-        expect(printed).toContain('total Pages: 2');
+        expect(printed).toContain('Needs migration: 2');
+        expect(printed).toContain('Invalid: false');
+        expect(printed).toContain('Bundle stored: true');
+        expect(printed).toContain('Total pages: 2');
+        expect(printed).toContain('Deployments:');
       }
     },
   );
@@ -1298,11 +1299,46 @@ describe('operator transport and execution', () => {
     await runOperatorCommand(parseOperatorArgs(['system', 'events']));
 
     const rendered = write.mock.calls.map(([line]) => String(line)).join('\n');
-    expect(rendered).toContain('version id: version-failed');
-    expect(rendered).toContain('error message: Version no longer exists.');
-    expect(rendered).toContain('audit Error: Could not persist the outcome.');
-    expect(rendered).toContain('action: workers/api/rollback');
-    expect(rendered).toContain('target: {"worker":"api","versionId":"version-failed"}');
+    expect(rendered).toContain('Version ID: version-failed');
+    expect(rendered).toContain('Error message: Version no longer exists.');
+    expect(rendered).toContain('Audit error: Could not persist the outcome.');
+    expect(rendered).toContain('Action: workers/api/rollback');
+    expect(rendered).toContain('Target: {"worker":"api","versionId":"version-failed"}');
+  });
+
+  it('renders sentence-case field labels that keep known acronyms', async () => {
+    vi.stubEnv('VOID_API_URL', 'https://one.example');
+    vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+    const write = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          apiVersion: 3,
+          githubOAuth: true,
+          customDomains: false,
+          callbackUrl: 'https://one.example/auth/callback',
+          installation_id: 'install-1',
+          http_status: 200,
+          capabilities: { workerIds: 2 },
+        }),
+      ),
+    );
+
+    await runOperatorCommand(parseOperatorArgs(['system', 'health']));
+
+    expect(write.mock.calls.map(([line]) => String(line)).join('\n')).toBe(
+      [
+        'API version: 3',
+        'GitHub OAuth: true',
+        'Custom domains: false',
+        'Callback URL: https://one.example/auth/callback',
+        'Installation ID: install-1',
+        'HTTP status: 200',
+        'Capabilities:',
+        '  Worker IDs: 2',
+      ].join('\n'),
+    );
   });
 
   it('follows build log sequence and stops when terminal', async () => {

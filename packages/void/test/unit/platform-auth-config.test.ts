@@ -199,6 +199,21 @@ describe('platform config auth execution', () => {
     ).rejects.toThrow('match');
     expect(calls.every((call) => !call.body)).toBe(true);
   });
+  it('lists login methods as readable text, and as JSON only with --json', async () => {
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runPlatformAuthConfig(parsePlatformConfigArgs(['auth', 'list']));
+    const human = output.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(human.trimStart().startsWith('{')).toBe(false);
+    expect(human).toContain('Initialized: true');
+    expect(human).toContain('Company SSO');
+
+    output.mockClear();
+    await runPlatformAuthConfig(parsePlatformConfigArgs(['auth', 'list', '--json']));
+    expect(JSON.parse(String(output.mock.calls[0]?.[0]))).toMatchObject({
+      initialized: true,
+      methods: [{ id: 'company' }],
+    });
+  });
   it('does not open or poll a browser test sent by another origin', async () => {
     const client = new OperatorClient('https://api.example.com', 'fixture');
     await expect(
