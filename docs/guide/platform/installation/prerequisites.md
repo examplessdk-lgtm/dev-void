@@ -80,6 +80,81 @@ Use any PostgreSQL provider that accepts connections from your computer and Clou
 
 Once installation claims the database, continue using that same database for resume and maintenance commands. Uninstall never deletes external PostgreSQL.
 
+### Use a provider CLI
+
+You can create the database and retrieve its connection URL from either provider's CLI instead of its dashboard.
+
+::: details PlanetScale Postgres
+
+Install the latest [PlanetScale CLI](https://planetscale.com/docs/cli/planetscale-environment-setup). On macOS, use `brew install pscale`; the installation guide also covers Linux and Windows.
+
+Sign in and list your organizations and regions:
+
+```sh
+pscale auth login
+pscale org list
+pscale region list --org <organization>
+```
+
+Replace `<organization>` with your organization slug and choose a region. List the available Postgres cluster sizes and their prices for that region:
+
+```sh
+pscale size cluster list --org <organization> --engine postgresql --region <region>
+```
+
+Create a dedicated Postgres database with your chosen cluster size, then create a role with permission to create and migrate Void's tables:
+
+```sh
+pscale database create void-platform \
+  --org <organization> \
+  --engine postgresql \
+  --region <region> \
+  --cluster-size <cluster-size> \
+  --wait
+
+pscale role create void-platform main void_owner \
+  --org <organization> \
+  --inherited-roles postgres
+```
+
+Save the **DATABASE URL** printed by the role-creation command in your password manager and paste it into Void's `PostgreSQL DATABASE_URL` prompt. Use the direct primary connection on port `5432` with `sslmode=verify-full`. The role's password is shown when it is created, so save it before closing the terminal.
+
+See PlanetScale's [database commands](https://planetscale.com/docs/cli/database) and [role commands](https://planetscale.com/docs/cli/role) for more options.
+
+:::
+
+::: details Neon
+
+Install the latest [Neon CLI](https://neon.com/docs/cli/install) and sign in:
+
+```sh
+pnpm add --global neon@latest
+neon login
+```
+
+Create a dedicated project, database, and owner role. Replace `<region-id>` with one of Neon's [supported regions](https://neon.com/docs/cli/projects#create), such as `aws-us-east-2`:
+
+```sh
+neon projects create --name void-platform \
+  --database void_platform \
+  --role void_owner \
+  --region-id <region-id>
+```
+
+Use the project ID from the output to retrieve a direct primary connection URL with TLS certificate verification:
+
+```sh
+neon connection-string --project-id <project-id> \
+  --database-name void_platform \
+  --role-name void_owner \
+  --endpoint-type read_write \
+  --ssl verify-full
+```
+
+Save the printed URL in your password manager and paste it into Void's `PostgreSQL DATABASE_URL` prompt. Keep this connection unpooled. See Neon's [connection-string command](https://neon.com/docs/cli/connection-string) for more options.
+
+:::
+
 ### Use an existing Hyperdrive
 
 The installer can create Hyperdrive for you or use one you manage separately. For an existing configuration:
