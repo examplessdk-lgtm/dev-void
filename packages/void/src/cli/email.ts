@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { parseRootWranglerConfig, readWranglerTopLevelString } from '@void/deploy-cloudflare';
-import { confirm, isCancel, log, note, password } from '@voidzero-dev/vite-plus-prompts';
+import { confirm, isCancel, log, password } from '@voidzero-dev/vite-plus-prompts';
 import { join } from 'pathslash';
 import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
@@ -32,7 +32,7 @@ import {
   type EmailPreflight,
   type EmailWranglerRun,
 } from './email-cloudflare.ts';
-import { createSpinner, pc } from './output.ts';
+import { createSpinner, note, pc } from './output.ts';
 import { readProjectConfig } from './project.ts';
 import { writeProvisionedWranglerConfig } from './wrangler.ts';
 

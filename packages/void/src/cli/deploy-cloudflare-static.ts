@@ -14,7 +14,6 @@ import {
   assertExistingCloudflareConfig,
   assertCloudflareBindingsPreserved,
 } from '@void/deploy-cloudflare';
-import { note } from '@voidzero-dev/vite-plus-prompts';
 import { dirname, join, relative } from 'pathslash';
 import { analyzeApplicationSync } from '../application-analysis.ts';
 import { analyzeApplication } from '../application-routing.ts';
@@ -98,6 +97,7 @@ import {
 import { type RunDeployOptions, type CloudflareDeployDeps } from './deploy-types.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
+import { note } from './output.ts';
 import { buildStaticManifest } from './package.ts';
 import { detectPreset, type StaticPreset, type FrameworkPreset } from './preset.ts';
 import {

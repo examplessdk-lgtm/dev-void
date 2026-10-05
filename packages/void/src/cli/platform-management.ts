@@ -14,8 +14,8 @@ import {
   type InstallationResourceKind,
   type PlatformInstallationManifest,
 } from '@void/platform';
-import { confirm, isCancel, log, note, outro, select } from '@voidzero-dev/vite-plus-prompts';
-import { createSpinner } from './output.ts';
+import { confirm, isCancel, log, outro, select } from '@voidzero-dev/vite-plus-prompts';
+import { createSpinner, note } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { platformDatabaseNameFromOwnerUrl } from './platform-auth-database.ts';
 import {

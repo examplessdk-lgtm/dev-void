@@ -1,6 +1,8 @@
+import type { Writable } from 'node:stream';
 import {
   isCI,
   log,
+  note as promptsNote,
   settings,
   spinner,
   type SpinnerOptions,
@@ -72,6 +74,30 @@ export function createSpinner(
       return cancelled;
     },
   };
+}
+
+/** Narrowest terminal the shared box renderer can draw a note in, guide bar included. */
+const MIN_NOTE_COLUMNS = 6;
+
+/**
+ * The shared box renderer throws when the terminal is narrower than its smallest box (a 0x0 pty
+ * reports 0 columns). Treat a non-positive width as unknown, like `stdout.columns || 80` elsewhere
+ * in the CLI, and draw tiny terminals at the narrowest width the box supports.
+ */
+export function note(...args: Parameters<typeof promptsNote>): void {
+  const [message, title, opts] = args;
+  const output = opts?.output ?? process.stdout;
+  const columns = (output as { columns?: unknown }).columns;
+  if (typeof columns !== 'number' || columns >= MIN_NOTE_COLUMNS) {
+    promptsNote(...args);
+    return;
+  }
+  // The box renderer only reads `columns` and calls `write()`.
+  const sized = {
+    columns: columns > 0 ? MIN_NOTE_COLUMNS : 80,
+    write: (chunk: string) => output.write(chunk),
+  } as unknown as Writable;
+  promptsNote(message, title, { ...opts, output: sized });
 }
 
 export function sectionTitle(title: string): string {

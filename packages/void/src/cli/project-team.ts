@@ -1,4 +1,4 @@
-import { log, note, outro } from '@voidzero-dev/vite-plus-prompts';
+import { log, outro } from '@voidzero-dev/vite-plus-prompts';
 import { getAccountCredential, getToken } from './auth.ts';
 import {
   PlatformApiError,
@@ -6,7 +6,7 @@ import {
   type ProjectInvitationResponse,
   type ProjectMemberResponse,
 } from './client.ts';
-import { formatCount } from './output.ts';
+import { formatCount, note } from './output.ts';
 import { parsePlatformErrorBody, platformErrorMessage } from './platform-errors.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';

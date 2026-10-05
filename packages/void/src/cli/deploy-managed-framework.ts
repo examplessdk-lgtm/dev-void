@@ -1,6 +1,5 @@
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { note } from '@voidzero-dev/vite-plus-prompts';
 import { join } from 'pathslash';
 import { analyzeApplicationSync } from '../application-analysis.ts';
 import { type VoidConfig } from '../config.ts';
@@ -30,7 +29,7 @@ import { type ResourceSummary } from './deploy-types.ts';
 import { type GitDeployMetadata } from './git-metadata.ts';
 import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
-import { createSpinner, formatCount } from './output.ts';
+import { createSpinner, formatCount, note } from './output.ts';
 import { collectAndHashAssets, buildFrameworkManifest, collectWorkerFiles } from './package.ts';
 import { formatProjectCommand, resolveProjectCommand, type FrameworkPreset } from './preset.ts';
 import { type ProjectConfig } from './project.ts';

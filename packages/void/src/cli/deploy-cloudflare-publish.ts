@@ -8,7 +8,6 @@ import {
   type ExistingCloudflareWorker,
   type ApprovedCloudflareKvBinding,
 } from '@void/deploy-cloudflare';
-import { note } from '@voidzero-dev/vite-plus-prompts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { detectFramework } from '../plugin-inference.ts';
 import { readVersionMetadataBinding } from '../shared/version-metadata.ts';
@@ -51,6 +50,7 @@ import { deployChildEnv } from './deploy-transport.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
 import { type SelfHostSchemaFacts } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
+import { note } from './output.ts';
 import {
   acknowledgeWranglerManagedQueueRemovals,
   readWranglerManagedQueueCleanupCandidates,

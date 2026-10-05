@@ -1,11 +1,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { outro, log, note } from '@voidzero-dev/vite-plus-prompts';
+import { outro, log } from '@voidzero-dev/vite-plus-prompts';
 import { join } from 'pathslash';
 import { findEnvFile, generateEnvTypes } from '../codegen/env-types.ts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import type { EnvArgs } from './env-args.ts';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
+import { note } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runEnvCommand(root: string, args: EnvArgs): Promise<void> {

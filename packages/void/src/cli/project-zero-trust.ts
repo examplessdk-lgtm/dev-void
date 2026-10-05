@@ -1,11 +1,11 @@
-import { log, note, outro } from '@voidzero-dev/vite-plus-prompts';
+import { log, outro } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import {
   PlatformClient,
   type ProjectZeroTrustResponse,
   type ProjectZeroTrustUpdateResponse,
 } from './client.ts';
-import { sanitizeTerminalText } from './output.ts';
+import { note, sanitizeTerminalText } from './output.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';

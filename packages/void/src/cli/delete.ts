@@ -1,7 +1,7 @@
-import { outro, note, log, text, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
+import { outro, log, text, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
-import { createSpinner } from './output.ts';
+import { createSpinner, note } from './output.ts';
 import { readProjectConfig, removeProjectConfig } from './project.ts';
 import { resolveProjectBySlug } from './resolve-project.ts';
 

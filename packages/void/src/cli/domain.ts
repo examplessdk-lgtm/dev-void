@@ -1,8 +1,8 @@
-import { log, note } from '@voidzero-dev/vite-plus-prompts';
+import { log } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import { type DomainStatusResponse, PlatformClient } from './client.ts';
 import type { DomainArgs } from './domain-args.ts';
-import { pc } from './output.ts';
+import { note, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runDomainCommand(root: string, args: DomainArgs): Promise<void> {
