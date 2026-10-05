@@ -6,6 +6,7 @@ import { TopNav, TopNavHeading } from '@astryxdesign/core/TopNav';
 import { useNavigation, useRouter } from '@void/react';
 import {
   FolderKanban,
+  Activity,
   LayoutDashboard,
   LockKeyhole,
   LogOut,
@@ -130,6 +131,12 @@ export function Layout({
             />
           </SideNavSection>
           <SideNavSection title="Platform">
+            <SideNavItem
+              label="Platform status"
+              icon={Activity}
+              href="/admin/status"
+              isSelected={path === '/admin/status'}
+            />
             <SideNavItem
               label="Plans"
               icon={SlidersHorizontal}

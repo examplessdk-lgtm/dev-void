@@ -18,7 +18,7 @@ import { createHumanSession } from '../../src/auth/sessions.ts';
 import { emailReceipts } from '../../src/email/admission-schema.ts';
 import { createGitHubWebhookIngressProof } from '../../src/github/webhook-ingress-auth.ts';
 import { app } from '../../src/index.ts';
-import { platformAuthSettings, users } from '../../src/schema.ts';
+import { platformAuthSettings, platformHumanSessions, users } from '../../src/schema.ts';
 import {
   clearTables,
   createTestBuild,
@@ -150,6 +150,36 @@ async function githubSignature(body: string): Promise<string> {
 }
 
 describe('Access-protected platform requests', () => {
+  it('keeps maintenance status behind human Access and a matching, revocable administrator session', async () => {
+    const session = await createHumanSession(env.db, env.JWT_SECRET, {
+      userId: user.id,
+      connectionId: 'github',
+      revision: 1,
+      generation: 1,
+      audience: 'admin',
+      companyIdentity,
+    });
+    const call = (access?: string) =>
+      app.fetch(
+        new Request(`${origin}/admin/status.json`, {
+          headers: {
+            Cookie: `admin_token=${session.token}`,
+            ...(access ? { 'Cf-Access-Jwt-Assertion': access } : {}),
+          },
+        }),
+        { ...env, PLATFORM_TRAFFIC_STATE: 'staging' },
+      );
+    expect((await call()).status).toBe(403);
+    expect((await call(await assertion({ service: true }))).status).toBe(403);
+    expect((await call(await assertion({ subject: 'employee-2' }))).status).toBe(302);
+    const access = await assertion();
+    expect((await call(access)).status).toBe(200);
+    await env.db
+      .update(platformHumanSessions)
+      .set({ revoked_at: new Date().toISOString() })
+      .where(eq(platformHumanSessions.id, session.session.id));
+    expect((await call(access)).status).toBe(302);
+  });
   it('admits only the token-authenticated confirmation route without an Access assertion', async () => {
     const confirmation = await request('/email/destinations/confirm?token=invalid.signature');
     expect(confirmation.status).toBe(400);

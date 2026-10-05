@@ -176,6 +176,33 @@ export function selectAuthoritativePlatformManifest(
   return authoritative;
 }
 
+function commandArgument(value: string): string {
+  return /^[a-zA-Z0-9_./:@-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function platformLifecycleResumeCommand(
+  args: Extract<
+    PlatformArgs,
+    { subcommand: 'upgrade' | 'rollback' | 'repair' | 'disable' | 'enable' }
+  >,
+  installationId: string,
+): string {
+  const command = ['void', 'platform', args.subcommand, commandArgument(installationId)];
+  if (args.runtime) {
+    command.push('--runtime', commandArgument(args.runtime));
+  }
+  if (args.subcommand === 'rollback' && args.fromRuntime) {
+    command.push('--from-runtime', commandArgument(args.fromRuntime));
+  }
+  if ('dashboardUrl' in args && args.dashboardUrl) {
+    command.push('--dashboard-url', commandArgument(args.dashboardUrl));
+  }
+  if (args.yes) {
+    command.push('--yes');
+  }
+  return command.join(' ');
+}
+
 export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<void> {
   if (
     args.subcommand !== 'upgrade' &&
@@ -303,12 +330,22 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     );
     note(
       [
-        `Version: ${runtime!.manifest.platformVersion}`,
+        `Version: ${manifest.platformVersion} → ${runtime!.manifest.platformVersion}`,
         `Source: ${runtime!.source}`,
         `Revision: ${runtime!.manifest.sourceRevision ?? 'not recorded'}`,
         `Manifest SHA-256: ${runtime!.manifestSha256}`,
       ].join('\n'),
       'Platform runtime',
+    );
+    note(
+      [
+        manifest.desiredState === 'disabled' && args.subcommand !== 'enable'
+          ? 'Application traffic will stay paused because this installation is disabled.'
+          : 'Application traffic may pause during a safe cutover. Traffic resumes after verification.',
+        'Saved progress survives an interruption. Resume with the same runtime files.',
+        `Administrator status: ${plan.apiUrl}/admin/status`,
+      ].join('\n'),
+      'Availability and progress',
     );
     if (args.plan) {
       outro('No Cloudflare or local installation state was changed.');
@@ -434,6 +471,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         progress?.message(message);
       },
       runtime: runtime!,
+      operation: args.subcommand,
       replanWorkers: async (recoveryManifest) =>
         (
           await createPlatformInstallPlan(client, planInput, recoveryManifest, {
@@ -462,23 +500,35 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       progress = undefined;
       if (result.waitingForDns) {
         note(
-          `Wait for ${deployment.application.zoneName} to become active, then rerun this command.`,
+          `Wait for ${deployment.application.zoneName} to become active, then resume:\n${platformLifecycleResumeCommand(args, manifest.id)}`,
           'Waiting for nameservers',
         );
         return;
       }
       if (result.waitingForSandboxDrain) {
         note(
-          "The compatible candidate runtime is live in sandbox-drain maintenance mode and application traffic remains disabled. Preview bounded work with `void platform system sandbox-drain --plan`; follow any returned `nextCursor` with `--cursor '<value>'`. Then apply with `void platform system sandbox-drain --yes` and rerun until it reports DB-backed `complete: true`. Rerun this lifecycle command afterward to enable traffic.",
+          [
+            'Application traffic is paused. Saved progress is ready to resume.',
+            '1. Review remaining Sandbox work: void platform system sandbox-drain --plan',
+            "2. Apply: void platform system sandbox-drain --yes (follow nextCursor with --cursor '<value>' until complete: true).",
+            `3. Resume: ${platformLifecycleResumeCommand(args, manifest.id)}`,
+            `Administrator status: ${plan.apiUrl}/admin/status`,
+          ].join('\n'),
           'Waiting for managed Sandbox drain',
         );
         return;
       }
       log.success(
-        args.subcommand === 'rollback'
-          ? `${deployment.displayName} is running compatible runtime ${runtime!.manifest.platformVersion}; PostgreSQL remains at schema ${rollbackSourceRuntime!.manifest.database.schemaDigest}.`
-          : `${deployment.displayName} is healthy at ${plan.apiUrl}.`,
+        `${deployment.displayName}: runtime ${runtime!.manifest.platformVersion} ${args.subcommand === 'rollback' ? 'restored' : 'ready'}.`,
       );
+      log.info(
+        result.manifest.desiredState === 'disabled'
+          ? 'Application traffic remains paused. Enable the installation when you are ready.'
+          : `Platform verification passed. Traffic is enabled at ${plan.apiUrl}.`,
+      );
+      if (args.subcommand === 'rollback') {
+        log.info('PostgreSQL migrations were retained; rollback changes the runtime only.');
+      }
       if (result.emailOperationId) {
         log.info(`Shared email routing ready (operation ${result.emailOperationId}).`);
       }
@@ -532,8 +582,20 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     reportResult?.();
     markPhase('complete');
   } catch (error) {
+    const operationStarted = progress !== undefined;
     progress?.error(`Platform ${args.subcommand} failed.`);
     progress = undefined;
+    if (operationStarted && args.subcommand !== 'uninstall' && args.subcommand !== 'disable') {
+      note(
+        [
+          'Traffic may remain paused. Inspect the saved state before continuing:',
+          `void platform status ${commandArgument(manifest.id)}`,
+          'After resolving the error, resume with the same runtime:',
+          platformLifecycleResumeCommand(args, manifest.id),
+        ].join('\n'),
+        'Recovery',
+      );
+    }
     throw error;
   } finally {
     try {

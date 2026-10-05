@@ -69,6 +69,11 @@ import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
 import { platformAccessProtection } from './middleware/platform-access.ts';
+import {
+  isMaintenanceReadRequest,
+  isMaintenanceLoginCallback,
+  isAdministratorCallback,
+} from './middleware/platform-maintenance.ts';
 import { operatorApi } from './operator/index.ts';
 import { sandboxDrainStatus } from './operator/sandbox-operations.ts';
 import { platformAppAccess } from './platform-app-access.ts';
@@ -223,15 +228,39 @@ const app = new Hono<ApiEnv>()
       context.req.header('X-Void-Auth-Setup') &&
       context.req.method === 'POST' &&
       context.req.path === '/internal/platform/auth-initialize';
+    const trafficPaused =
+      context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
+      context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
+      !!(
+        !authenticationSetup &&
+        !installerProbe &&
+        !maintenanceSandboxDrain &&
+        context.env.PLATFORM_INSTALLATION_ID &&
+        (await context.env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE
+      );
+    context.set('platformTrafficPaused', trafficPaused);
+    if (context.req.path === '/admin/status' || context.req.path === '/admin/status.json') {
+      context.header('Cache-Control', 'private, no-store');
+    }
     if (
       !authenticationSetup &&
       !installerProbe &&
       !maintenanceSandboxDrain &&
-      (context.env.PLATFORM_TRAFFIC_STATE === 'staging' ||
-        context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' ||
-        (context.env.PLATFORM_INSTALLATION_ID &&
-          (await context.env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE))
+      !isMaintenanceReadRequest(context) &&
+      !isMaintenanceLoginCallback(context) &&
+      trafficPaused
     ) {
+      if (
+        context.req.method === 'GET' &&
+        (context.req.path === '/admin' || context.req.path.startsWith('/admin/')) &&
+        (context.req.header('Accept')?.includes('text/html') ||
+          context.req.header('X-VoidPages') === 'true')
+      ) {
+        context.header('Cache-Control', 'private, no-store');
+        return context.redirect('/admin/status', 302);
+      }
+      context.header('Cache-Control', 'no-store');
+      context.header('Retry-After', '30');
       return context.json({ error: 'Platform disabled' }, 503);
     }
     await next();
@@ -244,6 +273,22 @@ const app = new Hono<ApiEnv>()
   })
 
   .use('*', platformAccessProtection)
+
+  .use('*', async (context, next) => {
+    if (
+      context.get('platformTrafficPaused') &&
+      isMaintenanceLoginCallback(context) &&
+      !(
+        context.env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain' &&
+        isSandboxDrainMaintenanceRequest(context.req.raw)
+      ) &&
+      !(await isAdministratorCallback(context))
+    ) {
+      context.header('Cache-Control', 'no-store');
+      return context.json({ error: 'Platform disabled' }, 503);
+    }
+    await next();
+  })
 
   .get('/health', async (context) => {
     try {

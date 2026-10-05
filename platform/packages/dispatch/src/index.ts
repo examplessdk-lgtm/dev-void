@@ -7,7 +7,7 @@ import {
 } from '@void/platform';
 import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
-import { createErrorResponse } from './error-page.ts';
+import { createErrorResponse, createMaintenanceResponse } from './error-page.ts';
 import { applyHeaderRules, type HeaderRule } from './headers.ts';
 import {
   readIsrCache,
@@ -686,9 +686,7 @@ export default {
       (env.PLATFORM_INSTALLATION_ID &&
         (await env.ROUTING.get(PLATFORM_DISABLED_KEY)) === PLATFORM_DISABLED_VALUE)
     ) {
-      return createErrorResponse(request, 503, 'Platform disabled', {
-        'Cache-Control': 'no-store',
-      });
+      return createMaintenanceResponse(request);
     }
     const startTime = Date.now();
     // Budget for the bounded hot paths (static-asset reads, primary dispatch).

@@ -1,5 +1,13 @@
-import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { discoverPlatform } from '../../src/cli/platform-cmd.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  createPlatformDeploymentManifest,
+  createPlatformInstallationManifest,
+} from '@void/platform';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { discoverPlatform, runPlatformCommand } from '../../src/cli/platform-cmd.ts';
+import { writeInstallationManifest } from '../../src/cli/platform-registry.ts';
 
 const document = {
   apiUrl: 'https://api.example.com',
@@ -30,6 +38,55 @@ afterEach(() => {
 });
 
 describe('platform discovery', () => {
+  it('shows saved lifecycle progress when live discovery is blocked by maintenance', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-status-'));
+    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', directory);
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Platform disabled', { status: 503 })),
+    );
+    try {
+      const timestamp = '2026-10-05T00:00:00.000Z';
+      const manifest = createPlatformInstallationManifest({
+        account: { id: 'account', name: 'Account' },
+        createdAt: timestamp,
+        deployment: createPlatformDeploymentManifest({
+          application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+          displayName: 'Example',
+          installationSlug: 'example',
+        }),
+        id: 'status-installation',
+        ownershipNonce: '0123456789abcdef0123456789abcdef',
+        platformVersion: '1.0.0',
+      });
+      writeInstallationManifest({
+        ...manifest,
+        status: 'verifying',
+        endpoints: { apiUrl: 'https://api.example.com', dashboardUrl: null, proxyUrl: null },
+        operation: {
+          id: 'upgrade',
+          action: 'upgrade',
+          fromVersion: '1.0.0',
+          toVersion: '2.0.0',
+          phase: 'verifying',
+          startedAt: timestamp,
+          updatedAt: timestamp,
+        },
+      });
+      await expect(
+        runPlatformCommand('.', { subcommand: 'status', selector: manifest.id }),
+      ).rejects.toThrow('503');
+      expect(output).toHaveBeenCalledWith('Saved operation: upgrade — verifying');
+      expect(output).toHaveBeenCalledWith('Runtime: 1.0.0 → 2.0.0');
+      expect(output).not.toHaveBeenCalledWith(expect.stringContaining('is reachable'));
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it('accepts a valid document from its declared origin', async () => {
     const response = new Response(JSON.stringify(document));
     Object.defineProperty(response, 'url', {

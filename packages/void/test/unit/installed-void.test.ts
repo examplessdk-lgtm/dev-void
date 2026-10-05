@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,6 +54,24 @@ describe('assertInstalledVoidMatchesCli', () => {
 
   it('reports a declared but uninstalled project package', () => {
     project();
-    expect(() => assertInstalledVoidMatchesCli(root)).toThrow('installed Vite plugin is missing');
+    // Vitest resolves missing bare imports through the workspace. Check the
+    // missing-package case with Node's actual project-relative resolver.
+    const source = new URL('../../src/cli/installed-void.ts', import.meta.url).href;
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `import { assertInstalledVoidMatchesCli } from ${JSON.stringify(source)}; assertInstalledVoidMatchesCli(process.argv[1]);`,
+        root,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
+        timeout: 10000,
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('installed Vite plugin is missing');
   });
 });

@@ -9,7 +9,7 @@ function escapeHtml(value: string): string {
     .replaceAll('"', '&quot;');
 }
 
-function renderDefaultErrorPage(status: number, title: string): string {
+function renderDefaultErrorPage(status: number, title: string, maintenance = false): string {
   const heading = `${status}: ${title}`;
   const prefix = `${status}: `;
 
@@ -63,14 +63,43 @@ function renderDefaultErrorPage(status: number, title: string): string {
       strong {
         font-weight: 600;
       }
+      p { color: #52525b; margin: 20px 0; }
+      a { display: inline-block; padding: 10px 20px; border-radius: 12px; background: #171717; color: #fff; text-decoration: none; }
+      a:focus-visible { outline: 3px solid #52525b; outline-offset: 4px; }
+      small { display: block; margin-top: 24px; color: #71717a; }
     </style>
   </head>
   <body>
     <main>
-      <h1><strong>${escapeHtml(prefix)}</strong>${escapeHtml(title)}</h1>
+      ${
+        maintenance
+          ? `<h1>Temporarily unavailable</h1>
+      <p>This service is undergoing maintenance. Please try again in a moment.</p>
+      <a href="">Try again</a>
+      <small>If you submitted a form, check whether it succeeded before submitting it again.</small>`
+          : `<h1><strong>${escapeHtml(prefix)}</strong>${escapeHtml(title)}</h1>`
+      }
     </main>
   </body>
 </html>`;
+}
+
+export function createMaintenanceResponse(request: Request): Response {
+  const headers = new Headers({ 'Cache-Control': 'no-store', 'Retry-After': '30' });
+  if (!shouldServeHtmlErrorPage(request)) {
+    return new Response(request.method === 'HEAD' ? null : 'Platform disabled', {
+      status: 503,
+      headers,
+    });
+  }
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  return new Response(
+    request.method === 'HEAD' ? null : renderDefaultErrorPage(503, 'Temporarily unavailable', true),
+    {
+      status: 503,
+      headers,
+    },
+  );
 }
 
 export function shouldServeHtmlErrorPage(request: Request): boolean {

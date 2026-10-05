@@ -1,4 +1,7 @@
 export const adminComponents = {
+  platformStatus: async () => ({
+    default: (await import('./views/PlatformStatusPage.tsx')).PlatformStatusPage,
+  }),
   adminLayout: async () => ({ default: (await import('./AdminProviders.tsx')).AdminProviders }),
   dashboard: async () => ({ default: (await import('./views/DashboardPage.tsx')).DashboardPage }),
   adminLogin: async () => ({
@@ -75,6 +78,9 @@ export function matchAdminRoute(url: string): AdminPageId | null {
   const path = new URL(url, 'https://void.invalid').pathname;
   if (path === '/admin/') {
     return 'dashboard';
+  }
+  if (path === '/admin/status') {
+    return 'platformStatus';
   }
   if (path === '/admin/login') {
     return 'adminLogin';

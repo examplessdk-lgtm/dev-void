@@ -10,6 +10,7 @@ It owns platform auth, projects, deployments, domains, secrets, provisioning, ro
 - **Public API**: CLI and dashboard-facing JSON routes
 - **Internal API**: resource resolution and revalidation used by other platform workers
 - **Admin UI**: React pages under `/admin/*`, server-rendered for first load and backed by a private Fate endpoint
+- **Lifecycle status**: `/admin/status` and its GET JSON endpoint project display fields from the installer-owned PostgreSQL checkpoint. Maintenance admits these routes and administrator sign-in through normal Access and admin authentication. Keep the exception narrow, retain existing Sandbox drain operator access, and keep the Fate POST endpoint and administrator writes gated.
 - **Self-hosted owner setup**: dashboard OAuth and normal signup share the first-user transaction and configured GitHub identity check. Dashboard login can create the first owner without a CLI login; it never promotes existing users. Void Cloud keeps its existing admin-only login behavior.
 - **Background work**:
   - `scheduled()` for periodic usage enforcement and rollover checks

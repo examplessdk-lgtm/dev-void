@@ -9,6 +9,7 @@ import { matchAdminRoute, type AdminPageId } from './pages.ts';
 import { Layout } from './views/Layout.tsx';
 
 const TITLES: Partial<Record<AdminPageId, string>> = {
+  platformStatus: 'Platform status',
   dashboard: 'Dashboard',
   plans: 'Plans',
   planEdit: 'Edit plan',

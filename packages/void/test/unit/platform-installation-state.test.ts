@@ -1,6 +1,7 @@
 import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
+  parsePlatformInstallationManifest,
   transitionInstallation,
 } from '@void/platform';
 import { describe, expect, it } from 'vite-plus/test';
@@ -28,6 +29,35 @@ function manifestAt(status: 'deploying' | 'verifying') {
 }
 
 describe('platform installation resume states', () => {
+  it('preserves validated lifecycle progress across recovery and accepts older checkpoints', () => {
+    const manifest = manifestAt('verifying');
+    expect(parsePlatformInstallationManifest(manifest).operation).toBeUndefined();
+    const operation = {
+      id: 'operation-1',
+      action: 'rollback' as const,
+      fromVersion: '2.0.0',
+      toVersion: '1.0.0',
+      phase: 'waiting-for-sandbox-drain' as const,
+      startedAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+    };
+    const recovered = parsePlatformInstallationManifest(
+      JSON.parse(JSON.stringify({ ...manifest, operation })),
+    );
+    expect(recovered.operation).toEqual(operation);
+    expect(() =>
+      parsePlatformInstallationManifest({
+        ...manifest,
+        operation: { ...operation, phase: 'online' },
+      }),
+    ).toThrow('operation');
+    expect(() =>
+      parsePlatformInstallationManifest({
+        ...manifest,
+        operation: { ...operation, updatedAt: 'invalid' },
+      }),
+    ).toThrow('timestamp');
+  });
   it.each(['deploying', 'verifying'] as const)(
     're-enters provisioning from an interrupted %s checkpoint',
     (status) => {

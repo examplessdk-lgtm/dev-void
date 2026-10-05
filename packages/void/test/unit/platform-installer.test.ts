@@ -5750,6 +5750,7 @@ describe('platform installer', () => {
     );
     expect(waitingForSandboxDrain.waitingForSandboxDrain).toBe(true);
     expect(waitingForSandboxDrain.manifest).toMatchObject({
+      operation: { action: 'upgrade', phase: 'waiting-for-sandbox-drain' },
       platformVersion: '0.10.13',
       safetyProtocols: { sandboxDrain: 3 },
       status: 'verifying',
@@ -5813,6 +5814,11 @@ describe('platform installer', () => {
         },
       },
     );
+    expect(resumedAfterSandboxDrain.manifest.operation).toMatchObject({
+      id: waitingForSandboxDrain.manifest.operation!.id,
+      startedAt: waitingForSandboxDrain.manifest.operation!.startedAt,
+      phase: 'complete',
+    });
     expect(resumedAfterSandboxDrain.waitingForSandboxDrain).toBe(false);
     expect(resumedAfterSandboxDrain.manifest).toMatchObject({
       safetyProtocols: { sandboxDrain: 3 },
@@ -5860,6 +5866,10 @@ describe('platform installer', () => {
     ).rejects.toThrow('upgrade health failed');
     expect(verifiedTargetVersion).toBe(readPlatformRuntimeManifest().platformVersion);
     expect(listInstallationManifests(directory)[0]?.platformVersion).toBe('0.10.13');
+    expect(listInstallationManifests(directory)[0]?.operation).toMatchObject({
+      action: 'upgrade',
+      phase: 'failed',
+    });
 
     const upgraded = await installPlatform(upgradedPlan, secrets, sourceManifest, {
       acquireDatabaseLifecycleLock,

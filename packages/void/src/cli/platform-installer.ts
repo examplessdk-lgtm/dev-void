@@ -52,6 +52,7 @@ import {
   transitionInstallation,
   type InstallationResource,
   type PlatformInstallationManifest,
+  type PlatformLifecycleOperation,
   parsePlatformAuthenticationSetup,
   parsePlatformAccessProtection,
   type PlatformAccessProtection,
@@ -367,6 +368,7 @@ export type PlatformInstallerDependencies = Readonly<{
   migrateDatabase?: (databaseUrl: string, migrationsFolder: string) => Promise<void>;
   now?: () => string;
   onProgress?: (message: string) => void;
+  operation?: PlatformLifecycleOperation['action'];
   prepareDatabase?: (
     runtimeDirectory: string,
     database: PlatformRuntimeDatabaseManifest,
@@ -1232,6 +1234,7 @@ async function recoverFailedPlatformInstallation(
   authenticationProtocolTransition: boolean,
   workerCutoverGeneration: number,
   previousPublicEndpoints: boolean,
+  operationStarted: boolean,
   now: () => string,
   writeRemoteInstallationCheckpoint: InstallationCheckpointWriter,
 ): Promise<unknown> {
@@ -1295,9 +1298,16 @@ async function recoverFailedPlatformInstallation(
     // Traffic remains closed and retry resumes toward a fully compatible Worker set.
     workerRollbacks = [];
   }
-  if (manifest.status !== 'failed' && manifest.status !== 'uninstalled') {
+  if (manifest.status !== 'uninstalled' && (manifest.status !== 'failed' || operationStarted)) {
     try {
-      manifest = transitionInstallation(manifest, 'failed', now());
+      const updatedAt = now();
+      manifest = transitionInstallation(manifest, 'failed', updatedAt);
+      if (operationStarted && manifest.operation) {
+        manifest = {
+          ...manifest,
+          operation: { ...manifest.operation, phase: 'failed', updatedAt },
+        };
+      }
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     } catch {
@@ -1546,6 +1556,18 @@ export async function installPlatform(
   ) {
     workerSecretUpdateIntent = null;
   }
+  // Progress is checkpointed under the same lifecycle lock as mutations. Do not
+  // update it from parallel Worker upload callbacks.
+  const checkpointOperation = async (phase: PlatformLifecycleOperation['phase']) => {
+    if (!manifest?.operation) {
+      return;
+    }
+    const updatedAt = now();
+    manifest = { ...manifest, operation: { ...manifest.operation, phase, updatedAt }, updatedAt };
+    writeInstallationManifest(manifest);
+    await releaseDatabaseLock.checkpoint?.(manifest);
+  };
+  let operationStarted = false;
   try {
     assertPlatformRuntimeSafety(
       runtime,
@@ -1558,7 +1580,30 @@ export async function installPlatform(
         authoritative !== null && authoritative !== undefined,
       );
     }
-
+    const action = dependencies.operation ?? (existing ? 'upgrade' : 'install');
+    const previousOperation = manifest.operation;
+    const resuming =
+      previousOperation?.action === action &&
+      previousOperation.toVersion === version &&
+      previousOperation.runtimeManifestSha256 === resolvedRuntime.manifestSha256 &&
+      previousOperation.phase !== 'complete';
+    const startedAt = now();
+    operationStarted = true;
+    manifest = {
+      ...manifest,
+      operation: {
+        id: resuming ? previousOperation.id : randomUUID(),
+        action,
+        fromVersion: resuming ? previousOperation.fromVersion : sourcePlatformVersion,
+        toVersion: version,
+        runtimeManifestSha256: resolvedRuntime.manifestSha256,
+        phase: 'preparing',
+        startedAt: resuming ? previousOperation.startedAt : startedAt,
+        updatedAt: startedAt,
+      },
+      updatedAt: startedAt,
+    };
+    await checkpointOperation('preparing');
     const liveAuthentication = await releaseDatabaseLock.readAuthenticationState?.();
     if (liveAuthentication) {
       authenticationEnforcementActive = liveAuthentication.sessionsRequired;
@@ -1910,6 +1955,7 @@ export async function installPlatform(
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
       if (zone.status !== 'active') {
         manifest = transitionInstallation(manifest, 'waiting-for-dns', now());
+        await checkpointOperation('waiting-for-dns');
         writeInstallationManifest(manifest);
         await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
         return {
@@ -2004,6 +2050,7 @@ export async function installPlatform(
     }
 
     manifest = transitionInstallation(manifest, 'deploying', now());
+    await checkpointOperation('deploying');
     writeInstallationManifest(manifest);
     const ids = Object.fromEntries(
       manifest.resources.map((resource) => [resource.key, resource.id]),
@@ -2082,6 +2129,7 @@ export async function installPlatform(
         PLATFORM_DISABLED_VALUE,
       );
       workerTrafficGuarded = true;
+      dependencies.onProgress?.('Application traffic paused for a safe platform cutover');
     }
     if (!preserveDisabled) {
       const trafficGeneration = nextTrafficGeneration(manifest);
@@ -2523,6 +2571,7 @@ export async function installPlatform(
         usageProtocolVersion: targetUsageProtocolVersion,
       };
       manifest = transitionInstallation(manifest, 'disabled', now());
+      await checkpointOperation('complete');
       writeInstallationManifest(manifest);
       await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
       writePendingInstallationSecrets(manifest, secretCheckpoint(secrets));
@@ -2556,6 +2605,7 @@ export async function installPlatform(
       : '';
     let setupPending = false;
     manifest = transitionInstallation(manifest, 'verifying', now());
+    await checkpointOperation('verifying');
     writeInstallationManifest(manifest);
     if (plan.deployment.authentication.configurable && authenticationStep) {
       if (!secrets.authenticationSetupJson || !secrets.authSetupToken) {
@@ -2696,6 +2746,7 @@ export async function installPlatform(
           },
           now(),
         );
+        await checkpointOperation('waiting-for-sandbox-drain');
         writeInstallationManifest(manifest);
         await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
         workerRollbacks = [];
@@ -2715,6 +2766,7 @@ export async function installPlatform(
         );
       }
     }
+    await checkpointOperation('enabling');
     if (requiresStagedCommit) {
       if (!authenticationCutoverCommitted) {
         manifest = recordWorkerCutoverResolution(
@@ -2988,6 +3040,7 @@ export async function installPlatform(
       usageProtocolVersion: targetUsageProtocolVersion,
     };
     manifest = transitionInstallation(manifest, 'installed', now());
+    await checkpointOperation('complete');
     writeInstallationManifest(manifest);
     await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
     workerTrafficGuarded = false;
@@ -3015,6 +3068,7 @@ export async function installPlatform(
       authenticationProtocolTransition,
       workerCutoverGeneration,
       previousPublicEndpoints,
+      operationStarted,
       now,
       writeRemoteInstallationCheckpoint,
     );

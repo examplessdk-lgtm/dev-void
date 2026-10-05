@@ -66,6 +66,14 @@ The dashboard’s **System Status** page refreshes health checks every 30 second
 
 Use `void platform upgrade`, `repair`, `disable`, and `enable` to maintain your platform. See [platform maintenance](/guide/platform/installation/maintenance#resume-repair-recover-and-upgrade).
 
+For upgrade and rollback progress, open `/admin/status` on the API origin.
+Administrators can follow saved progress and the API's traffic state during
+maintenance while the API and authentication database remain reachable. If a
+status refresh fails, the last confirmed snapshot is marked as stale. Normal
+administrator changes stay paused during maintenance.
+Follow the CLI's recovery instructions to resume an operation. See
+[Follow upgrade and rollback progress](/guide/platform/installation/maintenance#follow-upgrade-and-rollback-progress).
+
 For disaster recovery, keep a matching PostgreSQL backup, provider data backups, installation identity and complete project-encryption keyring, and immutable runtime artifacts. Keep traffic disabled while restoring data, run `discover` to reconstruct verified local metadata, and review `repair --plan` before recreating missing installer-owned infrastructure. Neither command restores backed-up data. See [Prepare for disaster recovery](/guide/platform/installation/maintenance#prepare-for-disaster-recovery) for the full sequence.
 
 ## Using Scripts

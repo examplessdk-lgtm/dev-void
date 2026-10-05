@@ -203,11 +203,31 @@ import {
   acquirePlatformDatabaseLifecycleLock,
   installPlatform,
 } from '../../src/cli/platform-installer.ts';
-import { runInstalledPlatformCommand } from '../../src/cli/platform-management.ts';
+import {
+  platformLifecycleResumeCommand,
+  runInstalledPlatformCommand,
+} from '../../src/cli/platform-management.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { readInstallationRecoverySecrets } from '../../src/cli/platform-registry.ts';
 
 describe('installed platform upgrade', () => {
+  it('prints an exact rollback resume command with quoted custom runtime paths', () => {
+    expect(
+      platformLifecycleResumeCommand(
+        {
+          subcommand: 'rollback',
+          selector: '',
+          plan: false,
+          yes: true,
+          runtime: '/tmp/earlier runtime',
+          fromRuntime: "/tmp/current's runtime",
+        },
+        'installation',
+      ),
+    ).toBe(
+      "void platform rollback installation --runtime '/tmp/earlier runtime' --from-runtime '/tmp/current'\\''s runtime' --yes",
+    );
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'token');
@@ -468,6 +488,10 @@ describe('installed platform upgrade', () => {
       'local-release',
     ]);
     expect(state.progress.error).toHaveBeenCalledExactlyOnceWith('Platform upgrade failed.');
+    expect(note).toHaveBeenCalledWith(
+      expect.stringContaining(`void platform upgrade ${state.manifest!.id} --yes`),
+      'Recovery',
+    );
     expect(state.progress.stop).not.toHaveBeenCalled();
   });
 
@@ -582,6 +606,46 @@ describe('installed platform upgrade', () => {
     emit.mockReturnValueOnce(false);
     expect(onCancel).toThrow('test exit');
     expect(exit).toHaveBeenCalledWith(130);
+  });
+
+  it('reports a completed operation on a disabled installation without claiming enabled traffic', async () => {
+    vi.mocked(installPlatform).mockResolvedValueOnce({
+      manifest: { ...state.manifest!, desiredState: 'disabled', status: 'disabled' },
+      waitingForDns: false,
+      waitingForSandboxDrain: false,
+      zoneNameServers: [],
+    });
+    await runInstalledPlatformCommand({
+      subcommand: 'upgrade',
+      selector: state.manifest!.id,
+      plan: false,
+      runtime: '',
+      yes: true,
+    });
+    expect(log.info).toHaveBeenCalledWith(
+      'Application traffic remains paused. Enable the installation when you are ready.',
+    );
+    expect(log.info).not.toHaveBeenCalledWith(expect.stringContaining('Traffic is enabled'));
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining('healthy'));
+  });
+
+  it('previews enabling a disabled installation without promising it will stay paused', async () => {
+    state.manifest = { ...state.manifest!, desiredState: 'disabled', status: 'disabled' };
+    await runInstalledPlatformCommand({
+      subcommand: 'enable',
+      selector: state.manifest.id,
+      plan: true,
+      runtime: '',
+      yes: true,
+    });
+    expect(note).toHaveBeenCalledWith(
+      expect.stringContaining('Traffic resumes after verification.'),
+      'Availability and progress',
+    );
+    expect(note).not.toHaveBeenCalledWith(
+      expect.stringContaining('Application traffic will stay paused'),
+      'Availability and progress',
+    );
   });
 
   describe('uninstall with project Zero Trust', () => {

@@ -1,4 +1,4 @@
-import type { PlatformDiscoveryDocument } from '@void/platform';
+import type { PlatformDiscoveryDocument, PlatformInstallationManifest } from '@void/platform';
 import { isCancel, log, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
@@ -15,6 +15,7 @@ import {
   normalizePlatformApiUrl,
   savePlatformConnection,
   selectPlatformConnection,
+  listInstallationManifests,
   type PlatformConnection,
 } from './platform-registry.ts';
 
@@ -171,8 +172,36 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
   }
 
   if (args.subcommand === 'status') {
-    const connection = await resolveConnection(args.selector);
-    const discovery = await discoverPlatform(connection.apiUrl);
+    const local = args.selector
+      ? listInstallationManifests().find(
+          (manifest) => manifest.id === args.selector && manifest.status !== 'uninstalled',
+        )
+      : undefined;
+    const connection = local ? null : await resolveConnection(args.selector);
+    const saved =
+      local ??
+      (connection?.installationId
+        ? listInstallationManifests().find((manifest) => manifest.id === connection.installationId)
+        : undefined);
+    if (saved) {
+      showSavedInstallationStatus(saved);
+    }
+    const apiUrl = local?.endpoints.apiUrl ?? connection?.apiUrl;
+    if (!apiUrl) {
+      log.info('No verified API endpoint is saved yet. Live traffic availability is unknown.');
+      return;
+    }
+    let discovery: PlatformDiscoveryDocument;
+    try {
+      discovery = await discoverPlatform(apiUrl);
+    } catch (error) {
+      if (saved) {
+        log.info(
+          'Live availability could not be confirmed. The saved checkpoint above may be out of date.',
+        );
+      }
+      throw error;
+    }
     log.success(`${discovery.displayName} is reachable.`);
     console.log(`API: ${discovery.apiUrl}`);
     console.log(`Proxy: ${discovery.proxyUrl}`);
@@ -194,4 +223,17 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
 
   const { runPlatformLifecycleCommand } = await import('./platform-lifecycle.ts');
   await runPlatformLifecycleCommand(args);
+}
+
+function showSavedInstallationStatus(manifest: PlatformInstallationManifest): void {
+  console.log(`Saved installation: ${manifest.id} (${manifest.status})`);
+  console.log(`Checkpoint: ${manifest.updatedAt}`);
+  if (manifest.operation) {
+    const operation = manifest.operation;
+    console.log(`Saved operation: ${operation.action} — ${operation.phase}`);
+    console.log(`Runtime: ${operation.fromVersion ?? 'new installation'} → ${operation.toVersion}`);
+  }
+  if (manifest.endpoints.apiUrl) {
+    console.log(`Administrator status: ${manifest.endpoints.apiUrl}/admin/status`);
+  }
 }

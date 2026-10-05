@@ -194,6 +194,7 @@ export type ApiEnv = Env & {
     DEPLOY_HEARTBEAT_INTERVAL_MS?: number;
   };
   Variables: {
+    platformTrafficPaused: boolean;
     user: User;
     db: Db;
     operatorSession: { id: string; expiresAt: string };

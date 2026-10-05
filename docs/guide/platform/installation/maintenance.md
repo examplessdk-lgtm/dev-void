@@ -98,6 +98,31 @@ Keep the earlier runtime files if you need rollback. If the installed version is
 
 :::
 
+### Follow upgrade and rollback progress
+
+Open `/admin/status` on your platform API origin and sign in as an administrator.
+The page shows the saved operation, source and target versions, and the traffic
+state reported by the API. It refreshes every five seconds while visible. If
+updates fail, it keeps the last confirmed snapshot and marks it as out of date.
+
+During maintenance, administrator navigation leads to this read-only page;
+normal administrator changes remain paused. Sign-in and status remain available
+while the API and authentication database are reachable. An operation completing
+does not confirm every project's health. A disabled installation keeps traffic
+paused after an upgrade or rollback.
+
+The CLI reports when an operation completes, fails, or waits for DNS or Sandbox
+drain work, and prints the command needed to resume. Resolve the reported problem,
+then resume with the same runtime files. For a custom rollback, retain the source
+runtime files too. `void platform status <id>` also prints locally saved progress
+before checking the live API; this local checkpoint can be out of date if another
+administrator changed the installation.
+
+When application traffic is paused, visitors receive a temporary-unavailability
+page with a **Try again** link. API requests and form submissions still receive
+HTTP 503 responses. Void does not automatically replay requests; visitors who
+submitted a form should check its result before submitting it again.
+
 ### Manage an installation from another machine
 
 Use `discover` to restore the administrator's local installation records:

@@ -52,6 +52,89 @@ body {
   width: 100%;
 }
 
+.void-platform-status {
+  display: grid;
+  gap: var(--spacing-6);
+  max-width: 1120px;
+}
+.void-platform-status-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+  flex-wrap: wrap;
+}
+.void-platform-status-heading h1 {
+  margin: 0;
+}
+.void-platform-status p {
+  line-height: 1.6;
+}
+.void-platform-status-refresh {
+  font: inherit;
+  color: var(--color-text-primary);
+  background: var(--color-background-body);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.void-platform-status-refresh:focus-visible {
+  outline: 2px solid var(--color-text-accent);
+  outline-offset: 3px;
+}
+.void-platform-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-6);
+}
+.void-platform-status-card {
+  padding: var(--spacing-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background: var(--color-background-body);
+  min-width: 0;
+}
+.void-platform-status-card h2 {
+  margin-block: var(--spacing-3);
+}
+.void-platform-status-eyebrow {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+.void-platform-status-version {
+  font-size: 1.5rem;
+  overflow-wrap: anywhere;
+}
+.void-platform-status-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--spacing-3) var(--spacing-4);
+  font-size: 0.875rem;
+}
+.void-platform-status-card dt,
+.void-platform-status-timestamp {
+  color: var(--color-text-secondary);
+}
+.void-platform-status-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.void-platform-status-notice {
+  border-inline-start: 3px solid var(--color-text-accent);
+  padding-inline-start: var(--spacing-4);
+}
+.void-platform-status-notice p {
+  margin: 0;
+}
+@media (max-width: 700px) {
+  .void-platform-status-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .void-admin-owner-transfer {
   display: grid;
   gap: var(--spacing-4);
