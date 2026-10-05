@@ -1,0 +1,21 @@
+test/terminal-demos/README.md
+  s_122e5a5858a175::t_4e80a89f31d459 13
+test/terminal-demos/demos.ts
+  s_122e5a5858a175::t_e963d22f1796a8 28-41,133,138-139,141,145,148-158,160,164,167-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "51252df64e836e79ec962d1e28f0f228a49ace37",
+  "prompts": {},
+  "sessions": {
+    "s_122e5a5858a175": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fd59-8d7d-71e3-8c44-7b1f59a98817",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
