@@ -1,0 +1,87 @@
+platform/packages/api/src/auth/bootstrap.ts
+  s_f9988f60ed7f0e::t_48bce95c6d7989 127-128,138-141,166-170,172,185-188,193,200,249-256,280,307-310,312-315,345,351,353,361,364,366,370,374,383
+platform/packages/api/src/auth/configuration.ts
+  s_f9988f60ed7f0e::t_1acb784348e71c 157-158,163,171,216,219,222,227,259-260,265,273,307,312,316,319
+platform/packages/api/src/auth/identities.ts
+  s_f9988f60ed7f0e::t_3567a43e88d4ad 75-77,90,112,131-135,164,170,172,180,192,194,203
+platform/packages/api/src/auth/login.ts
+  s_f9988f60ed7f0e::t_856525056189ca 560-561,574,582,594-597,599
+platform/packages/api/src/auth/management.ts
+  s_f9988f60ed7f0e::t_c1fd190af2c842 50-52,64,75,212-215,227-228,238,259-260,279,285,307-310,320-327,331,339-340,366-367,371,374,388-391,401,410,424,428-429,432
+platform/packages/api/src/auth/profile.ts
+  s_f9988f60ed7f0e::t_88aea7a08794c3 25-26
+platform/packages/api/src/auth/protection-management.ts
+  s_f9988f60ed7f0e::t_33c4999a3eaa5a 88,91,104,120,135,179,193,197-199
+platform/packages/api/src/auth/sessions.ts
+  s_f9988f60ed7f0e::t_9a7ba5c3cccbd0 36-37,50-51,84
+platform/packages/api/src/db.ts
+  s_f9988f60ed7f0e::t_7a293a7397c743 21,98-99,213,223,225,376,387,396,693-694,698,707,713,726,730,740,749,771-772,776,783,793,805,819,823,828,830,832,844,853,969-970,986,994,997,1010,1014,1025,1038,1057-1059,1076,1085,1087,1092,1109-1111,1128,1136,1157-1158,1181,1196,1207,1210-1211,1221,1229,3011,3026,3139,3141,3171,4491,4512,4955
+platform/packages/api/src/deployment-recovery.ts
+  s_f9988f60ed7f0e::t_448308b2868694 80,86,92,99,105,128,151,162
+platform/packages/api/src/email/connection-service.ts
+  s_f9988f60ed7f0e::t_85c51c0acae7c8 447
+platform/packages/api/src/index.ts
+  s_f9988f60ed7f0e::t_182a4099037a86 959,965-966,1102,1109
+platform/packages/api/src/operator/access-service.ts
+  s_f9988f60ed7f0e::t_c6433b3fe71372 127,130
+platform/packages/api/src/operator/asset-migration.ts
+  s_f9988f60ed7f0e::t_9cb75afaf81c15 314
+platform/packages/api/src/operator/project-normalization.ts
+  s_f9988f60ed7f0e::t_6cd507e2fc08fa 95,99,106,108
+platform/packages/api/src/operator/tenant-service.ts
+  s_f9988f60ed7f0e::t_c37c51ef5de745 421,431,454,469,474,490,505,522,531,536,544,555,564,569,644,654,656,663,670
+platform/packages/api/src/provisioning/activate-domain.ts
+  s_f9988f60ed7f0e::t_f0770918390355 116-117,135,146
+platform/packages/api/src/provisioning/cleanup.ts
+  s_f9988f60ed7f0e::t_3d31fb5dfb1c2d 542,554,556,560,565,569,585,599,610,618,661
+platform/packages/api/src/routes/auth.ts
+  s_f9988f60ed7f0e::t_b7218f966541f5 420,431
+platform/packages/api/src/routes/deploy.ts
+  s_f9988f60ed7f0e::t_e774ee75a6cdb6 507,517,544,554,561,567,578,582,586,590,600,608,614,618,629,651,662,678,682,686,693,702,1776,1783-1784,2371,2375,2381,2383-2385,2398,2405,2416,2430,2432,2462,2480,2503,2507,2511-2512,2526,2560,2570,2577,2589,2605,2616,2628,2639,2643,2647-2648,2690,2699-2700,2710,2904,2908,2910,2912,2921,2936,2944,2959,2963,2972,2985,2998,3007,3414,3419,3651,3655,3668,3674,3679,3682-3684,3737,3745,4321,4334-4335,4365,4377,4431-4432,4743,4747,4760,4766,4770,4774,4778-4779,4837,4845,5171,5214,5220,5225,5232,5240,5247,5520,5523,5525,5531,5645,5650
+platform/packages/api/src/routes/domains.ts
+  s_f9988f60ed7f0e::t_0ec5a30b94a4e4 210,221,225,237,341,362-363
+platform/packages/api/src/routes/email.ts
+  s_f9988f60ed7f0e::t_dd7fcaa4bbfda8 724
+platform/packages/api/src/routes/github.ts
+  s_f9988f60ed7f0e::t_022dc4a6f4acf2 869,877,896,1265,1276,1283,1293,1313,1320,1631,1655,1669,1705,1709,1798,1816,1829,1837,1853,1860,1865,1909,1925,1928
+platform/packages/api/src/routes/projects.ts
+  s_f9988f60ed7f0e::t_3ae1e956102a7d 901,905,975,980,985,1095,1110,1117,1121,1150,1162,1181,1212,1228,1280,1284,1305,1307,1374,1443-1444,1533,1557-1558,1585,1694,1760,1773,1801,2103,2112,2176,2183,2299,2311,2379,2382,2543-2544,2546,2548,3029,3040,3100,3106,3170,3182,3246,3254
+platform/packages/api/src/routes/revalidate.ts
+  s_f9988f60ed7f0e::t_b885b8c594111f 24,31
+platform/packages/api/src/routes/secrets.ts
+  s_f9988f60ed7f0e::t_d80173fb9370db 40,48,58
+platform/packages/api/src/routes/webhooks.ts
+  s_f9988f60ed7f0e::t_25682a03794285 663,878,880,889,1001,1058,1076,1416,1426,1445-1446,1450,1462
+platform/packages/api/src/routing.ts
+  s_f9988f60ed7f0e::t_c5d9283b0eb9c0 25,233,243
+platform/packages/api/src/zero-trust/lock.ts
+  s_f9988f60ed7f0e::t_5d3ae4f527e86e 68,73
+platform/packages/api/src/zero-trust/operation.ts
+  s_f9988f60ed7f0e::t_b1731bf5cbe593 311,334,343,345-346,355
+platform/packages/api/test/integration/db-first-admin.test.ts
+  s_f9988f60ed7f0e::t_1c320e82876aae 25-28,39-42,46-49,57-60,65,79
+platform/packages/api/test/integration/dynamic-plan-enforcement.test.ts
+  s_f9988f60ed7f0e::t_fffcca65e75a68 67-70
+platform/packages/api/test/integration/helpers.ts
+  s_f9988f60ed7f0e::t_91015c113cc5f3 53,468,471,477-478
+platform/packages/api/test/integration/platform-auth-management.test.ts
+  s_f9988f60ed7f0e::t_22401eeca844d7 71
+platform/packages/api/test/integration/platform-human-sessions.test.ts
+  s_f9988f60ed7f0e::t_c56d9930126b63 86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6032a9394fb754b4778dacd1c1c0272068391259",
+  "prompts": {},
+  "sessions": {
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
