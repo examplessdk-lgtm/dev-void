@@ -1,0 +1,53 @@
+packages/deploy-cloudflare/src/secret-draft.ts
+  s_f9988f60ed7f0e::t_9901b088566020 2
+packages/deploy-cloudflare/src/version.ts
+  s_f9988f60ed7f0e::t_a9304e845c043c 5
+packages/deploy-core/src/index.ts
+  s_f9988f60ed7f0e::t_eda27bf8b67451 346
+packages/deploy-core/src/is-record.ts
+  s_f9988f60ed7f0e::t_17a14c91323de6 1-4
+packages/deploy-core/test/unit/is-record.test.ts
+  s_f9988f60ed7f0e::t_4f6b6ed9204856 1-18
+packages/void/src/cli/email-cloudflare.ts
+  s_f9988f60ed7f0e::t_f906589994dae2 1,52
+packages/void/src/cli/info.ts
+  s_f9988f60ed7f0e::t_5bf97483a99da2 2
+packages/void/src/cli/platform-zero-trust-uninstall.ts
+  s_f9988f60ed7f0e::t_5d941f84bcb148 1
+packages/void/src/cli/provision.ts
+  s_f9988f60ed7f0e::t_0555b667f8e57b 21
+packages/void/src/cli/wrangler.ts
+  s_f9988f60ed7f0e::t_a1978f4f14e687 3-7
+platform/packages/proxy/package.json
+  s_f9988f60ed7f0e::t_192bf96a633bf6 11
+platform/packages/proxy/src/ai.ts
+  s_f9988f60ed7f0e::t_b89e80af9352da 1
+platform/packages/proxy/src/body.ts
+  s_f9988f60ed7f0e::t_dacecaa35b5ec4 1,3,10
+pnpm-lock.yaml
+  s_d488299d7cfaa5::t_f5b06187dfc084 1008-1010
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a089d01eed4fbfa1515d0fd73822662b8f82ff02",
+  "prompts": {},
+  "sessions": {
+    "s_d488299d7cfaa5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a71-72a9-7b43-9491-4739dc4cf484",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_f9988f60ed7f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10a66-e161-7141-8251-0b4a5946d987",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
