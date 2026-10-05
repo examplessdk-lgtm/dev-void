@@ -1,5 +1,5 @@
 import { defineHandler, defineHead } from 'void';
-import { LIVE_PLAYGROUND_TOPIC } from '../lib/live.ts';
+import { LIVE_PLAYGROUND_TOPIC } from '../src/live.ts';
 
 export type Props = Readonly<{
   topic: string;

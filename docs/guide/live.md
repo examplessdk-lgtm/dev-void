@@ -22,6 +22,8 @@ export const live = defineLiveStream({
 });
 ```
 
+Void enables live streams when a [scanned file](../reference/resource-inference.md#scanned-directories) imports `void/live`, so keep this module in `src/` or another scanned directory. A module in an unscanned directory such as `lib/` needs that directory in [`inference.scanDirs`](../reference/resource-inference.md#custom-scan-directories).
+
 Expose it from a normal route:
 
 ```ts

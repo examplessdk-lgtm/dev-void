@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { LIVE_PLAYGROUND_TOPIC, live } from '../../../lib/live.ts';
+import { LIVE_PLAYGROUND_TOPIC, live } from '../../../src/live.ts';
 
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json<{ message?: unknown }>().catch(() => null);

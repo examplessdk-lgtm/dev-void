@@ -155,6 +155,36 @@ describe('inferProjectBindings', () => {
     expect(result.needsLive).toBe(true);
   });
 
+  it('detects live from a stream module outside the default directories only when scanned', () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'routes'), { recursive: true });
+    mkdirSync(join(root, 'lib'), { recursive: true });
+    writeFileSync(
+      join(root, 'lib', 'live.ts'),
+      `
+      import { defineLiveStream } from "void/live";
+      export const live = defineLiveStream({ id: "app" });
+      `,
+    );
+    writeFileSync(
+      join(root, 'routes', 'live.ts'),
+      `
+      import { defineHandler } from "void";
+      import { live } from "../lib/live";
+      export const GET = defineHandler((c) => live.connect(c));
+      `,
+    );
+
+    expect(inferProjectBindings(root).needsLive).toBe(false);
+    expect(inferProjectBindings(root, undefined, ['routes', 'lib']).needsLive).toBe(true);
+  });
+
+  it('detects live in the react-pages playground', () => {
+    const playground = join(import.meta.dirname, '../../../../playground/react-pages');
+
+    expect(inferProjectBindings(playground).needsLive).toBe(true);
+  });
+
   it('detects auth from void/auth import in routes/', () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'routes', 'api'), { recursive: true });

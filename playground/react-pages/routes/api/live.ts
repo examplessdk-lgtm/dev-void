@@ -1,5 +1,5 @@
 import { defineHandler } from 'void';
-import { live } from '../../lib/live.ts';
+import { live } from '../../src/live.ts';
 
 export const GET = defineHandler((c) => live.connect(c));
 
