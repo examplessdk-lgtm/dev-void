@@ -1,0 +1,19 @@
+docs/guide/quickstart.md
+  s_3dca312de99340::t_05e67f3fdb5573 7,9,11,17,22,27,32,37,39,41,43-44,47,49,51,61,63-64,66-67,69,71,73,75,78,81,84,87,89,91,93,95,97-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fe1ef00d0c9b34366bd864c3f7973952fb019b21",
+  "prompts": {},
+  "sessions": {
+    "s_3dca312de99340": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10990-aa6c-76f3-83a8-2b9b17645bc7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
