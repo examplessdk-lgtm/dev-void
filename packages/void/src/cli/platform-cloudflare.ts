@@ -90,6 +90,12 @@ export type CloudflareWorkerServiceRoute = Readonly<{
   pattern: string;
   zoneName: string;
 }>;
+export type CloudflareQueueConsumer = Readonly<{
+  id: string;
+  /** Worker that consumes the Queue; null for an HTTP pull consumer. */
+  script: string | null;
+}>;
+export type PlatformAccessResourceKind = 'application' | 'service-token';
 export type PlatformManagedWorkerTraffic = Readonly<{
   customDomains: ReadonlyArray<Readonly<{ hostname: string; service: string }>>;
   routes: ReadonlyArray<Readonly<{ pattern: string; script: string }>>;
@@ -220,11 +226,7 @@ export class PlatformCloudflareClient {
       );
     }
     if (!response.ok || envelope.success !== true || envelope.result === undefined) {
-      const details =
-        envelope.errors
-          ?.map((error) => error.message)
-          .filter(Boolean)
-          .join(', ') || `HTTP ${response.status}`;
+      const details = cloudflareErrorDetails(envelope, response.status);
       throw new PlatformCloudflareApiError(
         `Cloudflare API error: ${details} (HTTP ${response.status}; ${init?.method ?? 'GET'} ${path.split('?')[0]}).`,
         response.status,
@@ -947,6 +949,8 @@ export class PlatformCloudflareClient {
     accountId: string,
     bucketName: string,
     preservedKeys: ReadonlySet<string> = new Set(),
+    /** Runs before each page of deletes; throw to stop emptying the bucket. */
+    beforeDelete?: () => Promise<void>,
   ): Promise<void> {
     let cursor = '';
     const observedCursors = new Set<string>();
@@ -985,6 +989,9 @@ export class PlatformCloudflareClient {
       const keys = envelope.result
         .map((object) => requiredString(object.key, 'R2 object key'))
         .filter((key) => !preservedKeys.has(key));
+      if (keys.length > 0) {
+        await beforeDelete?.();
+      }
       for (let offset = 0; offset < keys.length; offset += 1000) {
         await this.deleteR2Objects(accountId, bucketName, keys.slice(offset, offset + 1000));
       }
@@ -1027,9 +1034,15 @@ export class PlatformCloudflareClient {
     zoneId?: string,
   ): Promise<void> {
     const { kind } = resource;
+    if (kind === 'ai-gateway' && this.#aiGatewayClient) {
+      return this.#aiGatewayClient.deleteResource(accountId, resource, zoneId);
+    }
     const account = encodeURIComponent(accountId);
-    // Cloudflare addresses dispatch namespaces by name; every other kind by id.
-    const encoded = encodeURIComponent(kind === 'dispatch-namespace' ? resource.name : resource.id);
+    // Cloudflare addresses dispatch namespaces and Workers by name; every
+    // other kind by id.
+    const encoded = encodeURIComponent(
+      kind === 'dispatch-namespace' || kind === 'worker' ? resource.name : resource.id,
+    );
     const path =
       kind === 'kv-namespace'
         ? `/accounts/${account}/storage/kv/namespaces/${encoded}`
@@ -1055,14 +1068,124 @@ export class PlatformCloudflareClient {
     if (!path) {
       throw new Error(`platform: Unsupported Cloudflare deletion kind ${kind}.`);
     }
+    await this.#deleteIfPresent(path);
+  }
+
+  /**
+   * DELETE one resource by the key Cloudflare addresses it with. Never sends
+   * `force`, so Cloudflare refuses a resource another Worker still uses. A
+   * 404 means it is already gone.
+   */
+  async #deleteIfPresent(path: string): Promise<void> {
+    const response = await this.#fetcher(`${this.apiBaseUrl}${path}`, {
+      headers: { Accept: 'application/json', Authorization: `Bearer ${this.#token}` },
+      method: 'DELETE',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (response.status === 404) {
+      return;
+    }
+    let envelope: CloudflareEnvelope<unknown> = {};
     try {
-      await this.request(path, { method: 'DELETE' });
+      envelope = (await response.json()) as CloudflareEnvelope<unknown>;
+    } catch {
+      // Judge an empty body by its status alone.
+      envelope = { success: response.ok };
+    }
+    if (!response.ok || envelope.success !== true) {
+      throw new PlatformCloudflareApiError(
+        `Cloudflare API error: ${cloudflareErrorDetails(envelope, response.status)} (HTTP ${response.status}; DELETE ${path}).`,
+        response.status,
+        path,
+      );
+    }
+  }
+
+  async deleteWorkerRoute(zoneId: string, routeId: string): Promise<void> {
+    await this.#deleteIfPresent(
+      `/zones/${encodeURIComponent(zoneId)}/workers/routes/${encodeURIComponent(routeId)}`,
+    );
+  }
+
+  async deleteWorkerDomain(accountId: string, domainId: string): Promise<void> {
+    await this.#deleteIfPresent(
+      `/accounts/${encodeURIComponent(accountId)}/workers/domains/${encodeURIComponent(domainId)}`,
+    );
+  }
+
+  async listQueueConsumers(
+    accountId: string,
+    queueId: string,
+  ): Promise<ReadonlyArray<CloudflareQueueConsumer>> {
+    const result = await this.request<ReadonlyArray<Record<string, unknown>>>(
+      `/accounts/${encodeURIComponent(accountId)}/queues/${encodeURIComponent(queueId)}/consumers`,
+    );
+    return result.map((entry) => ({
+      id: requiredString(entry.consumer_id, 'Queue consumer id'),
+      script:
+        typeof entry.script === 'string'
+          ? entry.script
+          : typeof entry.service === 'string'
+            ? entry.service
+            : null,
+    }));
+  }
+
+  async deleteQueueConsumer(accountId: string, queueId: string, consumerId: string): Promise<void> {
+    await this.#deleteIfPresent(
+      `/accounts/${encodeURIComponent(accountId)}/queues/${encodeURIComponent(queueId)}/consumers/${encodeURIComponent(consumerId)}`,
+    );
+  }
+
+  async listDispatchNamespaceScripts(
+    accountId: string,
+    namespace: string,
+  ): Promise<ReadonlyArray<string>> {
+    const result = await this.request<ReadonlyArray<{ id?: unknown }>>(
+      `/accounts/${encodeURIComponent(accountId)}/workers/dispatch/namespaces/${encodeURIComponent(namespace)}/scripts`,
+    );
+    return result.map((entry) => requiredString(entry.id, 'Dispatch namespace script name'));
+  }
+
+  async deleteDispatchNamespaceScript(
+    accountId: string,
+    namespace: string,
+    scriptName: string,
+  ): Promise<void> {
+    await this.#deleteIfPresent(
+      `/accounts/${encodeURIComponent(accountId)}/workers/dispatch/namespaces/${encodeURIComponent(namespace)}/scripts/${encodeURIComponent(scriptName)}`,
+    );
+  }
+
+  /** Read one Access application or service token; null when it is gone. */
+  async getAccessResource(
+    accountId: string,
+    kind: PlatformAccessResourceKind,
+    id: string,
+  ): Promise<CloudflareNamedResource | null> {
+    try {
+      const result = await this.request<{ id?: unknown; name?: unknown }>(
+        accessResourcePath(accountId, kind, id),
+      );
+      return {
+        id: requiredString(result.id, 'Access resource id'),
+        name: requiredString(result.name, 'Access resource name'),
+      };
     } catch (error) {
       if (error instanceof PlatformCloudflareApiError && error.status === 404) {
-        return;
+        return null;
       }
       throw error;
     }
+  }
+
+  async deleteAccessResource(
+    accountId: string,
+    kind: PlatformAccessResourceKind,
+    id: string,
+  ): Promise<void> {
+    await this.#deleteIfPresent(accessResourcePath(accountId, kind, id));
   }
 
   async removeRoutes(
@@ -1094,6 +1217,25 @@ export class PlatformCloudflareClient {
       throw error;
     }
   }
+}
+
+function accessResourcePath(
+  accountId: string,
+  kind: PlatformAccessResourceKind,
+  id: string,
+): string {
+  return `/accounts/${encodeURIComponent(accountId)}/access/${kind === 'application' ? 'apps' : 'service_tokens'}/${encodeURIComponent(id)}`;
+}
+
+function cloudflareErrorDetails(envelope: CloudflareEnvelope<unknown>, status: number): string {
+  return (
+    envelope.errors
+      ?.filter((error) => error.message)
+      .map((error) =>
+        error.code === undefined ? error.message : `${error.message} (code ${error.code})`,
+      )
+      .join(', ') || `HTTP ${status}`
+  );
 }
 
 function encodeR2ObjectKey(key: string): string {

@@ -881,6 +881,162 @@ describe('platform Cloudflare client', () => {
     expect(deleted).toEqual([['a.txt', 'b.txt'], ['nested/c.txt']]);
   });
 
+  it('checks ownership again before each page of R2 object deletes', async () => {
+    const events: Array<string> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        if (init?.method === 'DELETE') {
+          const keys = JSON.parse(String(init.body)) as Array<string>;
+          events.push(`delete ${keys.join(',')}`);
+          return Response.json({ success: true, result: keys.map((key) => ({ key })) });
+        }
+        const cursor = url.searchParams.get('cursor') ?? '';
+        return Response.json(
+          cursor
+            ? { success: true, result: [{ key: 'b.txt' }] }
+            : { success: true, result: [{ key: 'a.txt' }], result_info: { cursor: 'next' } },
+        );
+      },
+    });
+
+    await client.emptyR2Bucket('account', 'void-assets', new Set(), async () => {
+      events.push('check');
+    });
+    expect(events).toEqual(['check', 'delete a.txt', 'check', 'delete b.txt']);
+
+    await expect(
+      client.emptyR2Bucket('account', 'void-assets', new Set(), async () => {
+        throw new Error('replaced');
+      }),
+    ).rejects.toThrow('replaced');
+    expect(events).toEqual(['check', 'delete a.txt', 'check', 'delete b.txt']);
+  });
+
+  it('uses the documented teardown endpoints, never sends force, and treats 404 as gone', async () => {
+    const requests: Array<string> = [];
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        const method = init?.method ?? 'GET';
+        requests.push(`${method} ${url.pathname}${url.search}`);
+        if (url.pathname.endsWith('/gone')) {
+          return Response.json(
+            { success: false, errors: [{ code: 10007, message: 'not found' }] },
+            { status: 404 },
+          );
+        }
+        if (method === 'DELETE') {
+          // Some Cloudflare DELETE endpoints answer without a result field.
+          return Response.json({ success: true, errors: [], messages: [] });
+        }
+        if (url.pathname.endsWith('/consumers')) {
+          return Response.json({
+            success: true,
+            result: [
+              { consumer_id: 'c1', script: 'void-team-api', type: 'worker' },
+              { consumer_id: 'c2', service: 'other', type: 'worker' },
+              { consumer_id: 'c3', type: 'http_pull' },
+            ],
+          });
+        }
+        if (url.pathname.endsWith('/scripts')) {
+          return Response.json({ success: true, result: [{ id: 'app-one' }] });
+        }
+        if (url.pathname.includes('/access/')) {
+          return Response.json({ success: true, result: { id: 'app-id', name: 'void-app' } });
+        }
+        return Response.json({ success: true, result: [] });
+      },
+    });
+
+    await client.deleteResource('account', {
+      id: 'worker-id',
+      kind: 'worker',
+      name: 'void-team-api',
+    });
+    await client.deleteResource('account', { id: 'gone', kind: 'worker', name: 'gone' });
+    await client.deleteWorkerRoute('zone', 'route-id');
+    await client.deleteWorkerRoute('zone', 'gone');
+    await client.deleteWorkerDomain('account', 'domain-id');
+    await expect(client.listQueueConsumers('account', 'queue-id')).resolves.toEqual([
+      { id: 'c1', script: 'void-team-api' },
+      { id: 'c2', script: 'other' },
+      { id: 'c3', script: null },
+    ]);
+    await client.deleteQueueConsumer('account', 'queue-id', 'c1');
+    await expect(client.listDispatchNamespaceScripts('account', 'void-users')).resolves.toEqual([
+      'app-one',
+    ]);
+    await client.deleteDispatchNamespaceScript('account', 'void-users', 'app-one');
+    await expect(client.getAccessResource('account', 'application', 'app-id')).resolves.toEqual({
+      id: 'app-id',
+      name: 'void-app',
+    });
+    await expect(client.getAccessResource('account', 'service-token', 'gone')).resolves.toBeNull();
+    await client.deleteAccessResource('account', 'application', 'app-id');
+    await client.deleteAccessResource('account', 'service-token', 'token-id');
+
+    expect(requests).toEqual([
+      'DELETE /client/v4/accounts/account/workers/scripts/void-team-api',
+      'DELETE /client/v4/accounts/account/workers/scripts/gone',
+      'DELETE /client/v4/zones/zone/workers/routes/route-id',
+      'DELETE /client/v4/zones/zone/workers/routes/gone',
+      'DELETE /client/v4/accounts/account/workers/domains/domain-id',
+      'GET /client/v4/accounts/account/queues/queue-id/consumers',
+      'DELETE /client/v4/accounts/account/queues/queue-id/consumers/c1',
+      'GET /client/v4/accounts/account/workers/dispatch/namespaces/void-users/scripts',
+      'DELETE /client/v4/accounts/account/workers/dispatch/namespaces/void-users/scripts/app-one',
+      'GET /client/v4/accounts/account/access/apps/app-id',
+      'GET /client/v4/accounts/account/access/service_tokens/gone',
+      'DELETE /client/v4/accounts/account/access/apps/app-id',
+      'DELETE /client/v4/accounts/account/access/service_tokens/token-id',
+    ]);
+    expect(requests.some((request) => request.includes('force'))).toBe(false);
+  });
+
+  it('reports a refused Worker deletion with Cloudflare error codes', async () => {
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json(
+          {
+            success: false,
+            errors: [
+              {
+                code: 100109,
+                message:
+                  'Cannot delete this Worker as it is a Tail Worker consumer for other Workers.',
+              },
+            ],
+          },
+          { status: 422 },
+        ),
+    });
+
+    await expect(
+      client.deleteResource('account', { id: 'tail', kind: 'worker', name: 'void-team-tail' }),
+    ).rejects.toThrow(
+      'Cannot delete this Worker as it is a Tail Worker consumer for other Workers. (code 100109)',
+    );
+  });
+
+  it('deletes an AI Gateway with the runtime credential when one is set', async () => {
+    const authorizations: Array<string | null> = [];
+    const client = new PlatformCloudflareClient('operator-token', {
+      fetcher: async (_input, init) => {
+        authorizations.push(new Headers(init?.headers).get('Authorization'));
+        return Response.json({ success: true, result: null });
+      },
+    }).withAiGatewayToken('runtime-token');
+
+    await client.deleteResource('account', {
+      id: 'void-team',
+      kind: 'ai-gateway',
+      name: 'void-team',
+    });
+    expect(authorizations).toEqual(['Bearer runtime-token']);
+  });
+
   it('deletes a dispatch namespace by its name, not its id', async () => {
     const requests: Array<{ method: string; pathname: string }> = [];
     const client = new PlatformCloudflareClient('token', {
