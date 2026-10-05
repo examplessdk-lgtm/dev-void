@@ -52,14 +52,14 @@ void platform uninstall [id] --purge-all --plan
 void platform uninstall [id] --purge-all
 ```
 
-`--purge-all` includes `--purge-data`. It also deletes the platform Workers, Queues, the application Workers left in the dispatch namespace, the R2 bucket and its objects, the AI Gateway, the platform DNS record, Worker routes and custom domains, and the Access applications and service tokens the installer created. The plan lists each resource in deletion order, and everything that stays.
+`--purge-all` includes `--purge-data`. It also deletes the platform Workers, Queues, the application Workers left in the dispatch namespace, the R2 bucket and its objects, the AI Gateway, the platform DNS record, Worker routes and custom domains, and the Access applications and service tokens the installer created. The plan lists each resource in deletion order, and everything that stays. If Cloudflare shows that the AI Gateway was created after installation, for example because it was deleted and created again under the same name, it is kept and listed.
 
 It never removes zones, adopted resources, external PostgreSQL, Email Routing settings, Analytics Engine datasets, Access policies or identity providers you chose, or API tokens. Revoke the API tokens you created for the platform afterward.
 
 Before it changes anything, `--purge-all` stops if:
 
 - projects remain. Delete each one with `void project delete <name>` first.
-- the credential cannot make every planned deletion. Browser login cannot delete DNS records or Access resources, so set `CLOUDFLARE_API_TOKEN` to a token with the permissions the plan lists.
+- the credential cannot make every planned deletion. Browser login cannot delete DNS records or Access resources, so set `CLOUDFLARE_API_TOKEN` to a token with the permissions the plan lists. If you connected Access from a separate identity account, the token also needs the Access permissions in that account.
 
 If Cloudflare refuses a deletion, for example because a Worker you created yourself still sends logs to the platform tail Worker, uninstall stops and names the resource. Fix it, then rerun the same command to continue.
 

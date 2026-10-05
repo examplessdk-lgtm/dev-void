@@ -268,6 +268,10 @@ export function describePurgeAllPlan(manifest: PlatformInstallationManifest): Ar
       lines.push(`${prefix}${resourceLabel(target.resource)}, with its Durable Object data`);
     } else if (target.phase === 'r2') {
       lines.push(`${prefix}${resourceLabel(target.resource)}, emptied first`);
+    } else if (target.phase === 'ai-gateway') {
+      lines.push(
+        `${prefix}${resourceLabel(target.resource)}, if Cloudflare shows it was created during installation; otherwise kept`,
+      );
     } else if (target.phase === 'routing') {
       lines.push(`${prefix}${resourceLabel(target.resource)}, last; it holds uninstall progress`);
     } else {
@@ -349,7 +353,9 @@ export async function checkPurgeAllCredentials(
   const has = (kind: InstallationResource['kind']) =>
     resources.some((resource) => resource.kind === kind);
   const zone = manifest.resources.find((resource) => resource.key === 'zone');
-  const scope = `account ${manifest.account.id}${has('dns-record') || has('worker-route') ? ` and zone ${zone?.name ?? ''}` : ''}`;
+  // Access can live in a separate identity account.
+  const accounts = [...new Set([manifest.account.id, ...access.map((entry) => entry.accountId)])];
+  const scope = `${accounts.length === 1 ? 'account' : 'accounts'} ${accounts.join(' and ')}${has('dns-record') || has('worker-route') ? ` and zone ${zone?.name ?? ''}` : ''}`;
   if (credential.source === 'oauth') {
     const browserMissing = [
       ...(has('dns-record') ? [PERMISSIONS.dns] : []),
@@ -388,7 +394,7 @@ export async function checkPurgeAllCredentials(
   for (const entry of access) {
     probes.push([
       entry.kind === 'application' ? PERMISSIONS.access : PERMISSIONS.serviceTokens,
-      () => client.getAccessResource(manifest.account.id, entry.kind, entry.id),
+      () => client.getAccessResource(entry.accountId, entry.kind, entry.id),
     ]);
   }
   if (has('dispatch-namespace')) {
@@ -496,12 +502,43 @@ export type PurgeAllContext = Readonly<{
     manifest: PlatformInstallationManifest,
     keys: ReadonlySet<string>,
   ) => Promise<ReadonlySet<string>>;
-  /** True when the live bucket keeps its recorded creation fingerprint; null when it is gone. */
-  bucketGenerationMatches: (
+  /**
+   * A value that changes when the bucket is deleted and created again under
+   * the same name; null when the bucket is gone.
+   */
+  bucketGeneration: (
     manifest: PlatformInstallationManifest,
     bucket: InstallationResource,
-  ) => Promise<boolean | null>;
+  ) => Promise<string | null>;
+  /** Project slugs in the platform database. */
+  readProjects: () => Promise<ReadonlyArray<string>>;
 }>;
+
+// The installer records a provision intent right before it creates the AI
+// Gateway. Allow for clock differences between this machine and Cloudflare.
+const AI_GATEWAY_CREATION_WINDOW_MS = 10 * 60_000;
+
+/**
+ * AI Gateway ids are chosen by the caller and can be reused after a delete,
+ * and gateways carry no ownership marker. Only a creation time next to the
+ * installer's provision intent shows that this is the gateway it created.
+ */
+function createdDuringInstallation(
+  manifest: PlatformInstallationManifest,
+  resource: InstallationResource,
+  createdAt: string | undefined,
+): boolean {
+  const created = createdAt === undefined ? Number.NaN : Date.parse(createdAt);
+  if (Number.isNaN(created)) {
+    return false;
+  }
+  return manifest.steps.some(
+    (step) =>
+      (step.key === `provision-intent:${resource.key}` ||
+        step.key.startsWith(`provision-intent:${resource.key}:`)) &&
+      Math.abs(created - Date.parse(step.completedAt)) <= AI_GATEWAY_CREATION_WINDOW_MS,
+  );
+}
 
 function ownershipRefusal(
   manifest: PlatformInstallationManifest,
@@ -549,12 +586,12 @@ export async function runPurgeAllTeardown(
       recordInstallationResource(next, { ...resource, state: 'deleted' }, new Date().toISOString()),
     );
   };
-  const recordStep = async (key: string) => {
+  const recordStep = async (key: string, resultHash = 'completed') => {
     const now = new Date().toISOString();
     await save(
       recordInstallationStep(
         next,
-        { completedAt: now, key: `${PURGE_ALL_STEP_PREFIX}${key}`, resultHash: 'completed' },
+        { completedAt: now, key: `${PURGE_ALL_STEP_PREFIX}${key}`, resultHash },
         now,
       ),
     );
@@ -593,7 +630,7 @@ export async function runPurgeAllTeardown(
   for (const target of purgeAllTargets(initial)) {
     if (target.phase === 'access') {
       const { access } = target;
-      const live = await client.getAccessResource(accountId, access.kind, access.id);
+      const live = await client.getAccessResource(access.accountId, access.kind, access.id);
       if (live) {
         if (live.name !== access.name || !access.name.startsWith(`void-${next.id}-`)) {
           throw ownershipRefusal(
@@ -603,7 +640,7 @@ export async function runPurgeAllTeardown(
           );
         }
         try {
-          await client.deleteAccessResource(accountId, access.kind, access.id);
+          await client.deleteAccessResource(access.accountId, access.kind, access.id);
         } catch (error) {
           throw cloudflareRefusal(
             next,
@@ -693,6 +730,14 @@ export async function runPurgeAllTeardown(
         if (!(await prove(current))) {
           break;
         }
+        // A project created after the check before the first change, while
+        // the platform API still answered, owns an application Worker here.
+        const projects = await context.readProjects();
+        if (projects.length) {
+          throw new Error(
+            `platform: Stopped before deleting the application Workers in dispatch namespace ${current.name} because ${projects.length === 1 ? 'a project was' : 'projects were'} created while this uninstall ran: ${projects.join(', ')}. Nothing in the namespace was deleted. --purge-all refuses while the platform database lists a project. Remove each one from the "projects" table once you have dealt with its Cloudflare resources, then rerun: ${purgeAllResumeCommand(next)}`,
+          );
+        }
         for (const script of await client.listDispatchNamespaceScripts(accountId, current.name)) {
           try {
             await client.deleteDispatchNamespaceScript(accountId, current.name, script);
@@ -713,8 +758,25 @@ export async function runPurgeAllTeardown(
         await markDeleted(current.key);
         break;
       }
+      case 'ai-gateway': {
+        const live = (await client.listAiGateways(accountId)).find(
+          (gateway) => gateway.id === current.id && gateway.name === current.name,
+        );
+        if (live && !createdDuringInstallation(next, current, live.createdAt)) {
+          // It may be a replacement with the same id, so keep and list it.
+          await save(
+            recordInstallationResource(
+              next,
+              { ...current, state: 'retained' },
+              new Date().toISOString(),
+            ),
+          );
+          break;
+        }
+        await remove(current, 'Check that nothing outside this installation still uses it.');
+        break;
+      }
       case 'data':
-      case 'ai-gateway':
         await remove(current, 'Check that nothing outside this installation still uses it.');
         break;
       case 'r2':
@@ -753,17 +815,23 @@ export async function runPurgeAllTeardown(
       if (!(await prove(bucket))) {
         return;
       }
-      await recordStep(markerStep);
-      await client.deleteR2Object(accountId, bucket.name, PLATFORM_R2_OWNERSHIP_MARKER_KEY);
-    } else {
-      // The marker may already be gone; the creation fingerprint still proves
-      // this is the same bucket.
-      const matches = await context.bucketGenerationMatches(next, bucket);
-      if (matches === null) {
+      // Once the marker is gone, the generation saved with this step is the
+      // proof that a rerun still sees the same bucket.
+      const generation = await context.bucketGeneration(next, bucket);
+      if (generation === null) {
         await markDeleted(bucket.key);
         return;
       }
-      if (!matches) {
+      await recordStep(markerStep, generation);
+      await client.deleteR2Object(accountId, bucket.name, PLATFORM_R2_OWNERSHIP_MARKER_KEY);
+    } else {
+      const saved = next.steps.find((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${markerStep}`);
+      const generation = await context.bucketGeneration(next, bucket);
+      if (generation === null) {
+        await markDeleted(bucket.key);
+        return;
+      }
+      if (generation !== saved?.resultHash) {
         throw ownershipRefusal(
           next,
           `R2 bucket ${bucket.name}`,

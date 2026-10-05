@@ -1126,18 +1126,19 @@ export async function uninstallPlatform(
               allowDeletedRoutingCheckpoint: true,
               databaseUrl: dependencies.databaseUrl,
             }),
-          bucketGenerationMatches: async (checkpointManifest, bucket) => {
+          bucketGeneration: async (checkpointManifest, bucket) => {
             const live = (await client.listR2Buckets(checkpointManifest.account.id)).find(
-              (entry) => entry.name === bucket.name,
+              (entry) => entry.id === bucket.id && entry.name === bucket.name,
             );
             if (!live) {
               return null;
             }
-            return (
-              live.fingerprint !== undefined &&
-              bucket.configHash === r2BucketConfigHash(bucket.name, live.fingerprint)
-            );
+            return live.fingerprint === undefined
+              ? 'unknown'
+              : r2BucketConfigHash(bucket.name, live.fingerprint);
           },
+          // --purge-all already refused unless the project list could be read.
+          readProjects: () => dependencies.readProjects!(),
         },
         next,
       );

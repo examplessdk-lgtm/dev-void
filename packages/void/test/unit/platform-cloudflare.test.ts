@@ -1122,6 +1122,21 @@ describe('platform Cloudflare client', () => {
     ]);
   });
 
+  it('reports when Cloudflare created each AI Gateway', async () => {
+    const client = new PlatformCloudflareClient('token', {
+      fetcher: async () =>
+        Response.json({
+          success: true,
+          result: [{ id: 'void-team', created_at: '2026-09-14T00:00:01.400Z' }, { id: 'other' }],
+        }),
+    });
+
+    await expect(client.listAiGateways('account')).resolves.toEqual([
+      { createdAt: '2026-09-14T00:00:01.400Z', id: 'void-team', name: 'void-team' },
+      { id: 'other', name: 'other' },
+    ]);
+  });
+
   it('creates and deletes the proxied wildcard application DNS record in its zone', async () => {
     const requests: Array<{ body: unknown; method: string; pathname: string }> = [];
     const dns = {

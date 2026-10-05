@@ -41,6 +41,8 @@ export class PlatformWorkerRoutesChangedError extends Error {
 
 export type CloudflareAccount = Readonly<{ id: string; name: string }>;
 export type CloudflareNamedResource = Readonly<{
+  /** When Cloudflare created it, where the API reports that. */
+  createdAt?: string;
   fingerprint?: string;
   id: string;
   name: string;
@@ -286,9 +288,9 @@ export class PlatformCloudflareClient {
     if (this.#aiGatewayClient) {
       return this.#aiGatewayClient.listAiGateways(accountId);
     }
-    const entries: Array<{ id?: unknown }> = [];
+    const entries: Array<{ created_at?: unknown; id?: unknown }> = [];
     for (let page = 1; ; page++) {
-      const result = await this.request<ReadonlyArray<{ id?: unknown }>>(
+      const result = await this.request<ReadonlyArray<{ created_at?: unknown; id?: unknown }>>(
         `/accounts/${encodeURIComponent(accountId)}/ai-gateway/gateways?page=${page}&per_page=50`,
       );
       entries.push(...result);
@@ -297,6 +299,7 @@ export class PlatformCloudflareClient {
       }
     }
     return entries.map((entry) => ({
+      ...(typeof entry.created_at === 'string' ? { createdAt: entry.created_at } : {}),
       id: requiredString(entry.id, 'AI Gateway id'),
       name: requiredString(entry.id, 'AI Gateway id'),
     }));

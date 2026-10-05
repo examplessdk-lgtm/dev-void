@@ -9,6 +9,7 @@ import {
   PLATFORM_DISABLED_KEY,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
   recordInstallationResource,
+  recordInstallationStep,
   transitionInstallation,
   type InstallationResource,
   type InstallationResourceKind,
@@ -66,6 +67,8 @@ const names = deployment.resources;
 const INSTALLATION_ID = 'example-a1b2c3d4';
 const FINGERPRINT = '2026-09-14T00:00:00.000Z';
 const RESUME = `void platform uninstall ${INSTALLATION_ID} --purge-all`;
+// The installer records its intent right before it creates the AI Gateway.
+const AI_GATEWAY_INTENT_AT = '2026-09-14T00:00:01.000Z';
 
 function hash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -186,6 +189,15 @@ function installedManifest(
       },
     ],
   };
+  manifest = recordInstallationStep(
+    manifest,
+    {
+      completedAt: AI_GATEWAY_INTENT_AT,
+      key: 'provision-intent:ai-gateway:0123456789abcdef',
+      resultHash: 'intent',
+    },
+    AI_GATEWAY_INTENT_AT,
+  );
   for (const status of [
     'planned',
     'provisioning',
@@ -235,7 +247,12 @@ function cloudflare(manifest: PlatformInstallationManifest) {
   );
   const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
   const live = {
-    aiGateways: ready('ai-gateway'),
+    aiGateways: ready('ai-gateway').map(
+      (entry): { id: string; name: string; createdAt?: string } => ({
+        ...entry,
+        createdAt: '2026-09-14T00:00:01.400Z',
+      }),
+    ),
     dispatchNamespaces: ready('dispatch-namespace'),
     namespaceScripts: new Set(
       manifest.resources.some((resource) => resource.kind === 'dispatch-namespace')
@@ -275,7 +292,10 @@ function cloudflare(manifest: PlatformInstallationManifest) {
     ],
     domains: [{ hostname: 'api.example.com', id: 'domain-1', service: names.apiWorker as string }],
     access: new Map(
-      (manifest.authenticationResources ?? []).map((resource) => [resource.id, resource.name]),
+      (manifest.authenticationResources ?? []).map((resource) => [
+        resource.id,
+        { accountId: resource.accountId, name: resource.name },
+      ]),
     ),
     // A Worker the installation did not create that sends logs to the tail Worker.
     foreignTailProducer: false,
@@ -394,14 +414,17 @@ function cloudflare(manifest: PlatformInstallationManifest) {
       calls.push(`DELETE dispatch-script ${namespace} ${script}`);
       live.namespaceScripts.delete(script);
     },
-    deleteAccessResource: async (_account: string, kind: string, id: string) => {
+    deleteAccessResource: async (account: string, kind: string, id: string) => {
       calls.push(`DELETE access ${kind} ${id}`);
-      live.access.delete(id);
+      if (live.access.get(id)?.accountId === account) {
+        live.access.delete(id);
+      }
     },
-    getAccessResource: async (_account: string, kind: string, id: string) => {
+    // Access ids are scoped to their account, like Cloudflare's API.
+    getAccessResource: async (account: string, kind: string, id: string) => {
       calls.push(`GET access ${kind} ${id}`);
-      const name = live.access.get(id);
-      return name ? { id, name } : null;
+      const entry = live.access.get(id);
+      return entry?.accountId === account ? { id, name: entry.name } : null;
     },
     findZone: async (_account: string, name: string) =>
       name === 'example.com' ? { id: 'zone-id', name, nameServers: [], status: 'active' } : null,
@@ -855,6 +878,120 @@ describe('uninstall --purge-all', () => {
     await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
 
     expect(fake.calls.filter((call) => /dispatch-(namespace|script)/.test(call))).toEqual([]);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('deletes an Access service token in the identity account that holds it', async () => {
+    const base = installedManifest();
+    const manifest = {
+      ...base,
+      authenticationResources: base.authenticationResources!.map((resource) =>
+        resource.key === 'service-token' ? { ...resource, accountId: 'identity' } : resource,
+      ),
+    };
+    persist(manifest);
+    const fake = cloudflare(manifest);
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(fake.live.access.has('access-token')).toBe(false);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('names the identity account when the credential cannot read its Access resources', async () => {
+    const base = installedManifest();
+    const manifest = {
+      ...base,
+      authenticationResources: base.authenticationResources!.map((resource) =>
+        resource.key === 'service-token' ? { ...resource, accountId: 'identity' } : resource,
+      ),
+    };
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    const getAccessResource = fake.getAccessResource;
+    fake.getAccessResource = async (account: string, kind: string, id: string) => {
+      if (account === 'identity') {
+        throw new PlatformCloudflareApiError('Authentication error', 403);
+      }
+      return getAccessResource(account, kind, id);
+    };
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'Add Account → Access: Service Tokens → Edit for accounts account and identity and zone example.com, then rerun.',
+    );
+    expect(changes(fake)).toEqual([]);
+  });
+
+  it('keeps an AI Gateway that Cloudflare shows was not created during installation', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    // Someone deleted the original gateway and made a new one with the same id.
+    fake.live.aiGateways[0]!.createdAt = '2026-10-01T00:00:00.000Z';
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).not.toContain(`DELETE ai-gateway ${names.aiGateway}`);
+    expect(fake.live.aiGateways.map((gateway) => gateway.id)).toEqual([names.aiGateway]);
+    const final = listInstallationManifests()[0]!;
+    expect(final.status).toBe('uninstalled');
+    expect(final.resources.find((resource) => resource.key === 'ai-gateway')?.state).toBe(
+      'retained',
+    );
+    expect(noteText('Kept for manual cleanup')).toContain(
+      `ai-gateway: ${names.aiGateway} (${names.aiGateway})`,
+    );
+  });
+
+  it('keeps an AI Gateway whose creation time Cloudflare does not report', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    delete fake.live.aiGateways[0]!.createdAt;
+
+    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+
+    expect(deletes(fake)).not.toContain(`DELETE ai-gateway ${names.aiGateway}`);
+    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+  });
+
+  it('stops before deleting application Workers when a project appears during the run', async () => {
+    const manifest = installedManifest();
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    let reads = 0;
+    // Both checks before the first change see no project; one is created after.
+    const readProjects = async () => (++reads > 2 ? ['late-project'] : []);
+
+    await expect(
+      uninstallPlatform(fake, manifest, purgeAllArgs, dependencies({ readProjects })),
+    ).rejects.toThrow(
+      `platform: Stopped before deleting the application Workers in dispatch namespace ${names.dispatchNamespace} because a project was created while this uninstall ran: late-project.`,
+    );
+    expect(deletes(fake).some((call) => call.startsWith('DELETE dispatch-'))).toBe(false);
+    expect(fake.live.namespaceScripts.has('leftover-app')).toBe(true);
+    expect(listInstallationManifests()[0]?.status).toBe('failed');
+  });
+
+  it('resumes an R2 deletion for a bucket recorded before creation fingerprints', async () => {
+    let manifest = installedManifest();
+    const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
+    manifest = recordInstallationResource(
+      manifest,
+      { ...bucket, configHash: hash({ kind: 'r2-bucket', name: bucket.name }) },
+      manifest.updatedAt,
+    );
+    persist(manifest);
+    const fake = cloudflare(manifest);
+    fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
+
+    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+      'temporary failure',
+    );
+    expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
+
+    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 });
