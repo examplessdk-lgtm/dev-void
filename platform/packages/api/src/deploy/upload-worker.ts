@@ -48,6 +48,7 @@ export async function uploadDeploymentWorker(input: {
   readonly project: Project;
   readonly deployment: Deployment;
   readonly assetCount: number;
+  readonly deployedAssetCount: number;
   readonly dispatchNamespace: string;
   readonly workerName: string;
   readonly assetManifest: Record<string, AssetManifestEntry>;
@@ -70,6 +71,7 @@ export async function uploadDeploymentWorker(input: {
     project,
     deployment,
     assetCount,
+    deployedAssetCount,
     dispatchNamespace,
     workerName,
     assetManifest,
@@ -204,9 +206,9 @@ export async function uploadDeploymentWorker(input: {
     const newAssets = 0;
     emit({
       event: 'asset_upload',
-      total: assetCount,
+      total: deployedAssetCount,
       new: newAssets,
-      cached: assetCount - newAssets,
+      cached: deployedAssetCount - newAssets,
     });
 
     completionJwt = await uploadAssetBuckets(

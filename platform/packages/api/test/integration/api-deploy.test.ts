@@ -2198,6 +2198,27 @@ describe('POST /projects/:id/deploy', () => {
     expect(eventNames).toContain('worker_upload_done');
   });
 
+  it('reports the deployed asset count without the internal cache-buster', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'asset-count-test');
+    mockCfApi();
+
+    const res = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        assets: {
+          'index.html': '<h1>hi</h1>',
+          'assets/app.js': "console.log('hi')",
+        },
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    const events = await readAllEvents(res);
+    expect(requireEvent(events, 'asset_upload')).toMatchObject({ total: 2 });
+    expect(requireEvent<DoneEvent>(events, 'done').assets).toBe(2);
+  });
+
   it('retries plain-text asset upload response and succeeds on next attempt', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'asset-text-test');

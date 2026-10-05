@@ -832,7 +832,10 @@ export async function runDeploymentPipeline(input: {
           });
         }
 
+        // `assetCount` includes the cache-buster and gates Cloudflare asset
+        // work; `deployedAssetCount` is what the user deployed and is reported.
         const assetCount = Object.keys(assetManifest).length;
+        const deployedAssetCount = Object.keys(incomingAssetManifest).length;
 
         projectDomains ??= await getDomainsByProjectId(context.get('db'), projectId);
 
@@ -851,7 +854,7 @@ export async function runDeploymentPipeline(input: {
             },
             manifest,
             emit,
-            assetCount,
+            assetCount: deployedAssetCount,
             context,
             deployment,
             projectId,
@@ -940,6 +943,7 @@ export async function runDeploymentPipeline(input: {
           project,
           deployment,
           assetCount,
+          deployedAssetCount,
           dispatchNamespace,
           workerName,
           assetManifest,
@@ -1050,6 +1054,7 @@ export async function runDeploymentPipeline(input: {
           project,
           snapshotCronState,
           assetCount,
+          deployedAssetCount,
           assetConfig,
           get routingSwitched() {
             return routingSwitched!;

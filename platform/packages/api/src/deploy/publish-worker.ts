@@ -92,6 +92,7 @@ export async function publishWorkerDeployment(input: {
   readonly project: Project;
   readonly snapshotCronState: () => Promise<void>;
   readonly assetCount: number;
+  readonly deployedAssetCount: number;
   readonly assetConfig: DeployManifest['assetConfig'];
   routingSwitched: boolean;
   cronSchedulerWriteAttempted: boolean;
@@ -148,6 +149,7 @@ export async function publishWorkerDeployment(input: {
     project,
     snapshotCronState,
     assetCount,
+    deployedAssetCount,
     assetConfig,
     actor,
     planLimits,
@@ -706,7 +708,7 @@ export async function publishWorkerDeployment(input: {
       ...activeDomains.map((d) => `https://${d.hostname}`),
       `https://${platformProjectHostname(project, application)}`,
     ],
-    assets: assetCount,
+    assets: deployedAssetCount,
     workers: workerFiles.length,
     ...(migrationsApplied > 0 && { migrations: migrationsApplied }),
   });
