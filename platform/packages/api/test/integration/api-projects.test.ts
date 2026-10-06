@@ -7,7 +7,6 @@ import {
   verifyDeployToken,
   verifyPrerenderToken,
 } from '../../src/auth/deploy-token.ts';
-import { hmacSignState } from '../../src/auth/hmac.ts';
 import { revokeConnectionSessions } from '../../src/auth/sessions.ts';
 import {
   createDeployment,
@@ -19,6 +18,7 @@ import {
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
+import { deriveProxyInternalAuth } from '../../src/proxy-token.ts';
 import { users } from '../../src/schema.ts';
 import {
   deployments,
@@ -728,7 +728,11 @@ describe('project CI credential ownership', () => {
 });
 
 describe('POST /projects/:id/prerender-token', () => {
-  async function proxyRequest(token: string, projectId: string) {
+  async function proxyRequest(
+    token: string,
+    projectId: string,
+    options: { dropLegacyInternalHeader?: boolean } = {},
+  ) {
     const proxyModuleUrl = new URL('../../../proxy/src/index.ts', import.meta.url).href;
     const proxyWorker = (
       (await import(/* @vite-ignore */ proxyModuleUrl)) as {
@@ -737,7 +741,11 @@ describe('POST /projects/:id/prerender-token', () => {
     ).default;
     const apiBinding = {
       fetch(input: string | Request, init?: RequestInit) {
-        return app.fetch(input instanceof Request ? input : new Request(input, init), env);
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (options.dropLegacyInternalHeader) {
+          request.headers.delete('x-void-internal');
+        }
+        return app.fetch(request, env);
       },
     };
     return proxyWorker.fetch(
@@ -818,6 +826,23 @@ describe('POST /projects/:id/prerender-token', () => {
       project: project.id,
     });
     expect(payload!.exp - payload!.iat).toBe(65 * 60);
+  });
+
+  it('checks prerender authority with the proxy credential alone', async () => {
+    const user = await createTestUser(env.db, 'prerender-proxy-auth');
+    const project = await createTestProject(env.db, user.id, 'prerender-proxy-auth-app');
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/prerender-token`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const { token } = await res.json<{ token: string }>();
+    const proxied = await proxyRequest(token, project.id, { dropLegacyInternalHeader: true });
+    expect(proxied.status).toBe(200);
   });
 
   it('revokes a collaborator manual prerender token when the member is removed', async () => {
@@ -915,14 +940,18 @@ describe('POST /projects/:id/prerender-token', () => {
     expect(payload!.exp).toBeLessThanOrEqual(parent!.exp);
     expect(payload!.exp).toBeGreaterThanOrEqual(parent!.exp - 1);
 
-    const internalAuth = await hmacSignState(project.id, env.JWT_SECRET);
+    const internalAuth = await deriveProxyInternalAuth(
+      env.JWT_SECRET,
+      'verify-prerender-build',
+      project.id,
+    );
     const verifyBuild = () =>
       app.fetch(
         new Request(`http://localhost/internal/verify-prerender-build/${project.id}`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            'x-void-internal': internalAuth,
+            'x-void-proxy-internal': internalAuth,
           },
           body: JSON.stringify({ userId: user.id, buildId: build.id }),
         }),

@@ -1,4 +1,8 @@
-import { ProxyTokenStateError } from '@voidcloud/api/proxy-token';
+import {
+  deriveProxyInternalAuth,
+  PROXY_INTERNAL_AUTH_HEADER,
+  ProxyTokenStateError,
+} from '@voidcloud/api/proxy-token';
 import { hmacSign } from './hmac.ts';
 import { tenantSendTokens } from './proxy-token.ts';
 import type { Env } from './types.ts';
@@ -26,12 +30,17 @@ async function resolveWorker(
   jwtSecret: string,
   projectId: string,
 ): Promise<WorkerResolution | null> {
-  const token = await hmacSign(projectId, jwtSecret);
   const res = await api.fetch(`https://api/internal/resolve-worker/${projectId}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-void-internal': token,
+      // Legacy header for an API that predates the proxy credential.
+      'x-void-internal': await hmacSign(projectId, jwtSecret),
+      [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
+        jwtSecret,
+        'resolve-worker',
+        projectId,
+      ),
     },
   });
 

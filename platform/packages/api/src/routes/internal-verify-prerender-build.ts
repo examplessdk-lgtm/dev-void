@@ -1,9 +1,8 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { hmacVerifyState } from '../auth/hmac.ts';
 import { ACTIVE_BUILD_STATUSES, getBuild, getUser } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
-import { isProjectId } from '../id.ts';
+import { requireProxyInternalAuth } from '../internal-proxy-auth.ts';
 import {
   ProjectAccessDeniedError,
   ProjectNotFoundError,
@@ -20,15 +19,9 @@ const app = new Hono<ApiEnv>();
  */
 app.post('/:projectId', async (context) => {
   const projectId = context.req.param('projectId');
-  const token = context.req.header('x-void-internal');
-  if (!token) {
-    return context.json({ error: 'missing internal auth' }, 401);
-  }
-  if (
-    !isProjectId(projectId) ||
-    !(await hmacVerifyState(projectId, token, context.env.JWT_SECRET))
-  ) {
-    return context.json({ error: 'invalid internal auth' }, 403);
+  const denied = await requireProxyInternalAuth(context, 'verify-prerender-build', projectId);
+  if (denied) {
+    return denied;
   }
 
   const { userId, buildId, credentialId } = await context.req.json<{

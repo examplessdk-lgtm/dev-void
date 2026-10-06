@@ -1,3 +1,4 @@
+import { deriveProxyInternalAuth, PROXY_INTERNAL_AUTH_HEADER } from '@voidcloud/api/proxy-token';
 import { hmacSign } from './hmac.ts';
 
 // In-memory cache: resource mappings are stable (only change on deploy).
@@ -27,12 +28,17 @@ export async function resolveResource(
     return cached;
   }
 
-  const token = await hmacSign(projectId, jwtSecret);
   const res = await api.fetch(`https://api/internal/resolve-resource/${projectId}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-void-internal': token,
+      // Legacy header for an API that predates the proxy credential.
+      'x-void-internal': await hmacSign(projectId, jwtSecret),
+      [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
+        jwtSecret,
+        'resolve-resource',
+        projectId,
+      ),
     },
     body: JSON.stringify({ type, binding: bindingName }),
   });
@@ -97,12 +103,17 @@ export async function verifyPrerenderAuthority(
   provenance: { buildId?: string; credentialId?: string },
 ): Promise<boolean> {
   try {
-    const token = await hmacSign(projectId, jwtSecret);
     const res = await api.fetch(`https://api/internal/verify-prerender-build/${projectId}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-void-internal': token,
+        // Legacy header for an API that predates the proxy credential.
+        'x-void-internal': await hmacSign(projectId, jwtSecret),
+        [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
+          jwtSecret,
+          'verify-prerender-build',
+          projectId,
+        ),
       },
       body: JSON.stringify({ userId, ...provenance }),
     });

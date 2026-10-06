@@ -12,7 +12,11 @@ import { hmacSignState } from '../../src/auth/hmac.ts';
 import { signJwt } from '../../src/auth/jwt.ts';
 import { createResource } from '../../src/db.ts';
 import app from '../../src/index.ts';
-import { deriveProxyToken } from '../../src/proxy-token.ts';
+import {
+  deriveProxyInternalAuth,
+  deriveProxyToken,
+  type ProxyInternalRoute,
+} from '../../src/proxy-token.ts';
 import {
   clearTables,
   createTestDeployment,
@@ -58,13 +62,14 @@ async function loginJwtAsProjectToken(): Promise<{ projectId: string; token: str
 async function internalRequest(
   route: string,
   projectId: string,
-  token: string,
+  token: string | Record<string, string>,
   body: unknown = {},
 ): Promise<Response> {
+  const auth = typeof token === 'string' ? { 'x-void-internal': token } : token;
   return app.fetch(
     new Request(`http://localhost/internal/${route}/${projectId}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-void-internal': token },
+      headers: { 'content-type': 'application/json', ...auth },
       body: JSON.stringify(body),
     }),
     env,
@@ -257,5 +262,135 @@ describe('project token generations', () => {
     );
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: 'project token state unavailable' });
+  });
+});
+
+describe('proxy credential on the metadata routes', () => {
+  const routes: ReadonlyArray<ProxyInternalRoute> = [
+    'resolve-worker',
+    'resolve-resource',
+    'verify-prerender-build',
+  ];
+
+  async function liveProject() {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const deployment = await createTestDeployment(env.db, project.id, 'live');
+    await createResource(env.db, project.id, 'kv', 'cf-kv-id', 'CACHE');
+    const bodies: Record<ProxyInternalRoute, unknown> = {
+      'resolve-worker': {},
+      'resolve-resource': { type: 'kv', binding: 'CACHE' },
+      'verify-prerender-build': { userId: user.id },
+    };
+    const expected: Record<ProxyInternalRoute, unknown> = {
+      'resolve-worker': {
+        workerName: `user-${project.slug}-${deployment.id}`,
+        deploymentId: deployment.id,
+      },
+      'resolve-resource': { cf_id: 'cf-kv-id' },
+      'verify-prerender-build': { ok: true },
+    };
+    return { project, bodies, expected };
+  }
+
+  function floorReads(get: { mock: { calls: Array<Array<unknown>> } }) {
+    return get.mock.calls.filter(([key]) => String(key).startsWith('proxy-token:'));
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  it.each(routes)(
+    'accepts the proxy credential at /internal/%s without a floor read',
+    async (route) => {
+      const { project, bodies, expected } = await liveProject();
+      const get = vi.spyOn(env.ROUTING, 'get');
+      const response = await internalRequest(
+        route,
+        project.id,
+        { 'x-void-proxy-internal': await deriveProxyInternalAuth(JWT_SECRET, route, project.id) },
+        bodies[route],
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(expected[route]);
+      expect(floorReads(get)).toEqual([]);
+    },
+  );
+
+  it.each(routes)(
+    'rejects a proxy credential made for another route at /internal/%s',
+    async (route) => {
+      const { project, bodies } = await liveProject();
+      const other = routes.find((candidate) => candidate !== route)!;
+      const response = await internalRequest(
+        route,
+        project.id,
+        { 'x-void-proxy-internal': await deriveProxyInternalAuth(JWT_SECRET, other, project.id) },
+        bodies[route],
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'invalid internal auth' });
+    },
+  );
+
+  it.each(routes)(
+    'does not fall back to a valid project token after a bad proxy credential at /internal/%s',
+    async (route) => {
+      const { project, bodies } = await liveProject();
+      const response = await internalRequest(
+        route,
+        project.id,
+        {
+          'x-void-proxy-internal': await deriveProxyInternalAuth(
+            JWT_SECRET,
+            route,
+            'proj_000000000999',
+          ),
+          'x-void-internal': await hmacSignState(project.id, JWT_SECRET),
+        },
+        bodies[route],
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'invalid internal auth' });
+    },
+  );
+
+  it.each(routes)('applies the floor to a project token at /internal/%s', async (route) => {
+    const { project, bodies, expected } = await liveProject();
+    const legacy = await hmacSignState(project.id, JWT_SECRET);
+
+    const accepted = await internalRequest(route, project.id, legacy, bodies[route]);
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual(expected[route]);
+
+    await env.ROUTING.put(`proxy-token:${project.id}`, '{"gen":1}');
+    const rejected = await internalRequest(route, project.id, legacy, bodies[route]);
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: 'invalid internal auth' });
+
+    await env.ROUTING.put(`proxy-token:${project.id}`, 'not json');
+    const unavailable = await internalRequest(route, project.id, legacy, bodies[route]);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ error: 'project token state unavailable' });
+  });
+
+  it.each(routes)('requires internal auth at /internal/%s', async (route) => {
+    const { project, bodies } = await liveProject();
+    const missing = await internalRequest(route, project.id, {}, bodies[route]);
+    expect(missing.status).toBe(401);
+    expect(await missing.json()).toEqual({ error: 'missing internal auth' });
+
+    const get = vi.spyOn(env.ROUTING, 'get');
+    const forged = await internalRequest(
+      route,
+      project.id,
+      await hmacSignState('proj_000000000999', JWT_SECRET),
+      bodies[route],
+    );
+    expect(forged.status).toBe(403);
+    expect(await forged.json()).toEqual({ error: 'invalid internal auth' });
+    expect(floorReads(get)).toEqual([]);
   });
 });
