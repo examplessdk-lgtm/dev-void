@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { log } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformApiError } from '../../src/cli/client.ts';
 import {
@@ -296,6 +297,46 @@ describe('project team target selection', () => {
         headers: expect.objectContaining({ Authorization: 'Bearer platform-a-token' }),
       }),
     );
+  });
+
+  it('prints platform warnings before the member list', async () => {
+    const root = rootWithPlatform('void');
+    vi.stubEnv('VOID_TOKEN', 'test-token');
+    vi.stubEnv('VOID_API_URL', 'https://api.example.test');
+    let warnings: Array<string> | undefined = ['stuck \u001b[31mred'];
+    vi.stubGlobal(
+      'fetch',
+      withPlatformDiscovery(
+        vi.fn(async () =>
+          Response.json({
+            members: [{ user: { id: 'user_1', login: 'alex' }, role: 'owner' }],
+            ...(warnings ? { warnings } : {}),
+          }),
+        ),
+      ),
+    );
+    let written = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      written += String(chunk);
+      return true;
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warnedAt: Array<number> = [];
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {
+      warnedAt.push(written.length);
+    });
+    const list = () =>
+      runProjectCommand(root, { subcommand: 'team', action: 'list', projectSlug: '' });
+
+    await list();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('stuck  [31mred');
+    expect(written.indexOf('alex')).toBeGreaterThan(warnedAt[0]!);
+
+    warn.mockClear();
+    warnings = undefined;
+    await list();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('resolves an explicit project override before acting', async () => {

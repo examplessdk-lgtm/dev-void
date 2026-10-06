@@ -22,8 +22,11 @@ import { getProjectDeploymentWorkerName, getProjectQueueName } from '../../src/n
 import { reconcileProjectCleanupJobs } from '../../src/provisioning/cleanup.ts';
 import {
   advanceProxyTokenRotation,
+  PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS,
   PROXY_TOKEN_ROTATION_WAIT_MS,
+  proxyTokenRotationStuckWarning,
   proxyTokenRotationTarget,
+  proxyTokenRotationWarnings,
   reconcileProxyTokenRotations,
   requestBulkProxyTokenRotations,
   requestProxyTokenRotation,
@@ -1439,5 +1442,71 @@ describe('rotation after code from a user who lost deploy access is replaced', (
       .where(eq(projects.id, team.projectId));
     expect(project!.active).toBe(untrusted);
     expect(await job(team.projectId)).toBeUndefined();
+  });
+});
+
+describe('owner warning for a stuck rotation', () => {
+  async function setAttempts(projectId: string, attempts: number): Promise<void> {
+    await env.db
+      .update(projectCleanupJobs)
+      .set({ attempts })
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(projectId)));
+  }
+
+  const warnings = (
+    projectId: string,
+    role: 'reader' | 'collaborator' | 'admin' | 'owner' = 'owner',
+    deployScoped = false,
+  ) => proxyTokenRotationWarnings(env.db, projectId, role, deployScoped);
+
+  it('warns owners and admins once a rotation has failed four times in a row', async () => {
+    const owner = await createTestUser(env.db);
+    const { id: projectId } = await createTestProject(env.db, owner.id);
+    expect(await warnings(projectId)).toEqual([]);
+
+    await request(projectId);
+    await setAttempts(projectId, PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS - 1);
+    expect(await warnings(projectId)).toEqual([]);
+
+    await setAttempts(projectId, PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS);
+    expect(await warnings(projectId)).toEqual([proxyTokenRotationStuckWarning(projectId)]);
+    expect(await warnings(projectId, 'admin')).toEqual([proxyTokenRotationStuckWarning(projectId)]);
+    expect(proxyTokenRotationStuckWarning(projectId)).toContain(projectId);
+  });
+
+  it('never warns readers, collaborators or deploy tokens', async () => {
+    const owner = await createTestUser(env.db);
+    const { id: projectId } = await createTestProject(env.db, owner.id);
+    await request(projectId);
+    await setAttempts(projectId, 10);
+    expect(await warnings(projectId, 'reader')).toEqual([]);
+    expect(await warnings(projectId, 'collaborator')).toEqual([]);
+    expect(await warnings(projectId, 'owner', true)).toEqual([]);
+  });
+
+  it('shows while steps keep failing and clears after a good step', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf, { retained: 0 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    hooks.fetch = (method) => (method === 'PATCH' ? cfError('internal error', 500) : undefined);
+
+    await request(fx.projectId);
+    for (let run = 1; run <= PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS; run++) {
+      expect(await warnings(fx.projectId)).toEqual([]);
+      await kick(fx.projectId);
+      expect(await advance(fx.projectId)).toMatchObject({ status: 'failed', phase: 'patch' });
+    }
+    expect((await job(fx.projectId))!.attempts).toBe(PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS);
+    expect(await warnings(fx.projectId)).toEqual([proxyTokenRotationStuckWarning(fx.projectId)]);
+
+    hooks.fetch = undefined;
+    await kick(fx.projectId);
+    expect(await advance(fx.projectId, { waitMs: 60_000 })).toMatchObject({
+      status: 'pending',
+      phase: 'revoke',
+      reason: 'waiting',
+    });
+    expect((await job(fx.projectId))!.attempts).toBe(0);
+    expect(await warnings(fx.projectId)).toEqual([]);
   });
 });
