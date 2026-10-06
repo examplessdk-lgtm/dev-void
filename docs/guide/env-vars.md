@@ -39,6 +39,8 @@ STRIPE_KEY=sk_test_example
 VITE_API_ORIGIN=http://localhost:5173
 ```
 
+An unquoted value ends at `#`, which starts a comment. Quote a value that contains `#`, such as `DATABASE_URL="postgres://user:p#ss@localhost/my-app"`.
+
 Keep `.env` out of Git. Other dotenv files, including `.env.local`, `.env.production`, `.env.example`, and Wrangler’s `.dev.vars*`, are not supported.
 
 Names starting with `__VOID_` are reserved for Void. Void stops with an error if `.env` or `env.ts` defines one.
