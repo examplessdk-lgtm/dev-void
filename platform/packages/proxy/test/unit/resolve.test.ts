@@ -1,4 +1,4 @@
-import { deriveProxyInternalAuth, deriveProxyToken } from '@voidcloud/api/proxy-token';
+import { deriveProxyInternalAuth } from '@voidcloud/api/proxy-token';
 import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
 import { hmacSign } from '../../src/hmac.ts';
 import {
@@ -65,7 +65,7 @@ describe('resolveResource', () => {
     expect((api.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
-  it('authenticates with the proxy credential and the legacy header', async () => {
+  it('authenticates with the proxy credential only', async () => {
     const api = createMockApi({ 'proj_000000000001:d1:DB': 'd1-uuid-123' });
     await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
 
@@ -74,14 +74,12 @@ describe('resolveResource', () => {
     expect(headers['x-void-proxy-internal']).toBe(
       await deriveProxyInternalAuth(JWT_SECRET, 'resolve-resource', 'proj_000000000001'),
     );
-    expect(headers['x-void-internal']).toBe(
-      await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 0),
-    );
+    expect(headers['x-void-internal']).toBeUndefined();
   });
 });
 
 describe('verifyPrerenderAuthority', () => {
-  it('authenticates with the proxy credential and the legacy header', async () => {
+  it('authenticates with the proxy credential only', async () => {
     const api = { fetch: vi.fn(async () => Response.json({ ok: true })) } as unknown as Fetcher;
     await expect(
       verifyPrerenderAuthority(api, JWT_SECRET, 'proj_000000000001', 'user_1', {
@@ -95,9 +93,7 @@ describe('verifyPrerenderAuthority', () => {
     expect(headers['x-void-proxy-internal']).toBe(
       await deriveProxyInternalAuth(JWT_SECRET, 'verify-prerender-build', 'proj_000000000001'),
     );
-    expect(headers['x-void-internal']).toBe(
-      await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 0),
-    );
+    expect(headers['x-void-internal']).toBeUndefined();
   });
 });
 

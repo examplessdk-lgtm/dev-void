@@ -76,8 +76,7 @@ never sends a generation above the issued one.
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a
 separate HKDF key (salt `void-proxy-internal`, info `v1`) bound to the route and
-project. That value never leaves the platform. The proxy also sends the legacy
-`x-void-internal` header so an older API keeps working.
+project. That value never leaves the platform.
 
 ## Endpoints
 

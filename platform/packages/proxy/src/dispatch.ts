@@ -3,7 +3,6 @@ import {
   PROXY_INTERNAL_AUTH_HEADER,
   ProxyTokenStateError,
 } from '@voidcloud/api/proxy-token';
-import { hmacSign } from './hmac.ts';
 import { tenantSendTokens } from './proxy-token.ts';
 import type { Env } from './types.ts';
 
@@ -34,8 +33,6 @@ async function resolveWorker(
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      // Legacy header for an API that predates the proxy credential.
-      'x-void-internal': await hmacSign(projectId, jwtSecret),
       [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
         jwtSecret,
         'resolve-worker',

@@ -619,7 +619,7 @@ describe('WfP dispatch path', () => {
       expect(capturedHeaders['x-void-proxy-internal']).toBeUndefined();
     });
 
-    it('authenticates worker resolution with the proxy credential and the legacy header', async () => {
+    it('authenticates worker resolution with the proxy credential only', async () => {
       const env = createEnv({ proj_000000000001: 'user-my-app' }, async () =>
         Response.json({ results: [], success: true, meta: {} }),
       );
@@ -632,7 +632,7 @@ describe('WfP dispatch path', () => {
       expect(headers['x-void-proxy-internal']).toBe(
         await deriveProxyInternalAuth(JWT_SECRET, 'resolve-worker', 'proj_000000000001'),
       );
-      expect(headers['x-void-internal']).toBe(token);
+      expect(headers['x-void-internal']).toBeUndefined();
     });
   });
 });
