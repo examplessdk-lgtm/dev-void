@@ -1,15 +1,12 @@
 /**
  * Shared dotenv parser + variable expander used by local `.env` consumers.
  *
- * Grammar: Void reads a line only when both runtimes that consume `.env`
- * read it — Vite (`node:util` `parseEnv`, client `VITE_` keys) and
- * Wrangler (dotenv 16, the dev Worker). That is `KEY=VALUE` with an optional
- * `export ` prefix (`export` plus one or more spaces). The key and value are
- * trimmed, and one pair of matching single or double quotes around the value
- * is removed; the value is otherwise kept as written (no inline `#` comment
- * stripping, escape decoding, or multi-line values), so such a value can differ
- * from what Vite or Wrangler read. `KEY: value` is not read:
- * Wrangler accepts it but Vite does not, so the two would disagree.
+ * Grammar: lines and values follow Vite's parser (`node:util` `parseEnv`).
+ * Wrangler's dotenv (the dev Worker) agrees with it on inline `#` comments,
+ * single, double and backtick quotes, `\n` in double quotes, multi-line
+ * quoted values and the `export ` prefix. Keys that are not plain
+ * identifiers (`A.B`, `A-B`, `export\tA`) are skipped, and `KEY: value`
+ * is not read: Wrangler accepts it but Vite does not.
  *
  * Expansion supports `${VAR}` and `$VAR`, a `\$VAR` literal-escape, and
  * transitive references across earlier entries in the same record. Cycles
@@ -26,6 +23,7 @@
  * `onWarn` callback and left for the caller to route.
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
 
 /** Valid dotenv key — ASCII letter/underscore followed by letters/digits/underscore. */
 const VALID_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -42,39 +40,6 @@ export type ParseDotenvOptions = {
   onWarn?: (message: string) => void;
 };
 
-export type ParseDotenvLineResult = {
-  key: string;
-  value: string;
-};
-
-/** `export` + spaces before a key. Tab is left out: Vite then reads `export\tKEY` as the key. */
-const EXPORT_PREFIX = /^export +/;
-
-/**
- * Parse a single `KEY=VALUE` or `export KEY=VALUE` line into
- * `{ key, value }`, stripping matching single/double quotes around the
- * value. Returns `null` for blanks, comments, and non-assignment lines.
- */
-export function parseDotenvLine(line: string): ParseDotenvLineResult | null {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith('#')) {
-    return null;
-  }
-  const equalsIndex = trimmed.indexOf('=');
-  if (equalsIndex === -1) {
-    return null;
-  }
-  const key = trimmed.slice(0, equalsIndex).trim().replace(EXPORT_PREFIX, '').trim();
-  let value = trimmed.slice(equalsIndex + 1).trim();
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    value = value.slice(1, -1);
-  }
-  return { key, value };
-}
-
 /**
  * Parse the raw contents of a dotenv file into a record, optionally
  * expanding `${VAR}` / `$VAR` references against earlier entries.
@@ -85,18 +50,17 @@ export function parseDotenv(
 ): Record<string, string> {
   const { expand: shouldExpand = true, skipInvalidKeys = true, onWarn } = options;
   const env: Record<string, string> = {};
-  for (const line of content.split('\n')) {
-    const parsed = parseDotenvLine(line);
-    if (!parsed) {
+  for (const [key, value] of Object.entries(parseEnv(content))) {
+    if (value === undefined) {
       continue;
     }
-    if (!VALID_KEY.test(parsed.key)) {
+    if (!VALID_KEY.test(key)) {
       if (skipInvalidKeys) {
         continue;
       }
-      throw new Error(`dotenv: Invalid key '${parsed.key}'.`);
+      throw new Error(`dotenv: Invalid key '${key}'.`);
     }
-    env[parsed.key] = parsed.value;
+    env[key] = value;
   }
   return shouldExpand ? expandDotenv(env, { onWarn }) : env;
 }

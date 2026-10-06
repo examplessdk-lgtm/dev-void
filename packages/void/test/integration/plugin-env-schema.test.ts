@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { build, resolveConfig } from 'vite';
+import { build, createBuilder, resolveConfig, type InlineConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
 import { envSchemaPlugin } from '../../src/plugin-env-schema.ts';
@@ -52,9 +52,13 @@ async function runConfigResolved(
   }
 }
 
-async function buildEntry(root: string, config: { envDir?: string } = {}): Promise<string> {
-  const output = await build({
-    ...config,
+async function buildEntry(
+  root: string,
+  config: Pick<InlineConfig, 'envDir' | 'envPrefix'> & { app?: boolean } = {},
+): Promise<string> {
+  const { app, ...rest } = config;
+  const inline: InlineConfig = {
+    ...rest,
     root,
     configFile: false,
     logLevel: 'silent',
@@ -64,7 +68,14 @@ async function buildEntry(root: string, config: { envDir?: string } = {}): Promi
       minify: false,
       rollupOptions: { input: join(root, 'entry.js'), preserveEntrySignatures: 'strict' },
     },
-  });
+  };
+  // The app builder resolves the config again for each environment, in the
+  // same process, as `vite build` does with the Cloudflare plugin.
+  const output = app
+    ? await createBuilder({ ...inline, builder: {} }).then((builder) =>
+        builder.build(builder.environments.client!),
+      )
+    : await build(inline);
   return [output]
     .flat()
     .flatMap((result) => ('output' in result ? result.output : []))
@@ -204,7 +215,7 @@ describe('envSchemaPlugin auto-discovery', () => {
       join(root, '.env'),
       [
         'export VITE_B=local-export',
-        // Vite drops the inline comment, so its value differs from Void's.
+        // Vite drops the inline comment.
         'VITE_C=local-comment # note',
         'VITE_D=local-plain',
         // Vite reads this key; Void's own parser skips it.
@@ -234,6 +245,56 @@ describe('envSchemaPlugin auto-discovery', () => {
 
     expect(code).toContain('"shell-api"');
     expect(code).not.toContain('local-api');
+  });
+
+  it('keeps a .env NODE_ENV out of a production client build', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'NODE_ENV=local-node-env\n');
+    writeFileSync(join(root, 'entry.js'), 'export const env = import.meta.env;\n');
+    vi.stubEnv('VITE_USER_NODE_ENV', undefined);
+
+    const code = await buildEntry(root);
+
+    expect(code).not.toContain('local-node-env');
+    expect(code).not.toContain('VITE_USER_NODE_ENV');
+  });
+
+  it('keeps .env BROWSER values out when envPrefix matches them', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'BROWSER=local-browser\nBROWSER_ARGS=local-args\n');
+    writeFileSync(join(root, 'entry.js'), 'export const env = import.meta.env;\n');
+    vi.stubEnv('BROWSER', undefined);
+    vi.stubEnv('BROWSER_ARGS', undefined);
+
+    const code = await buildEntry(root, { envPrefix: ['VITE_', 'BROWSER'] });
+
+    expect(code).not.toContain('local-');
+    expect(code).toContain('"production"');
+  });
+
+  it('keeps a shell BROWSER value when envPrefix matches it', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'BROWSER=local-browser\n');
+    writeFileSync(join(root, 'entry.js'), 'export const browser = import.meta.env.BROWSER;\n');
+    vi.stubEnv('BROWSER', 'shell-browser');
+
+    const code = await buildEntry(root, { envPrefix: ['VITE_', 'BROWSER'] });
+
+    expect(code).toContain('"shell-browser"');
+    expect(code).not.toContain('local-browser');
+  });
+
+  it('keeps .env values Vite copies to process.env out of every app build environment', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'NODE_ENV=local-node-env\nBROWSER=local-browser\n');
+    writeFileSync(join(root, 'entry.js'), 'export const env = import.meta.env;\n');
+    vi.stubEnv('VITE_USER_NODE_ENV', undefined);
+    vi.stubEnv('BROWSER', undefined);
+
+    const code = await buildEntry(root, { envPrefix: ['VITE_', 'BROWSER'], app: true });
+
+    expect(code).not.toContain('local-');
+    expect(code).toContain('"production"');
   });
 
   it('keeps values Vite loads from another envDir', async () => {

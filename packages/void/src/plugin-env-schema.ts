@@ -34,14 +34,44 @@ export type EnvSchemaFacts = {
 };
 
 /**
+ * Variables Vite's `loadEnv` copies from env files into `process.env` when
+ * they are unset, as `[file key, process.env key]`.
+ */
+const VITE_PROCESS_ENV_COPIES = [
+  ['NODE_ENV', 'VITE_USER_NODE_ENV'],
+  ['BROWSER', 'BROWSER'],
+  ['BROWSER_ARGS', 'BROWSER_ARGS'],
+] as const;
+
+type ProcessEnvCopies = Partial<Record<(typeof VITE_PROCESS_ENV_COPIES)[number][1], string>>;
+
+/** The `process.env` values Vite may overwrite, read before it loads env files. */
+function readProcessEnvCopies(): ProcessEnvCopies {
+  return Object.fromEntries(
+    VITE_PROCESS_ENV_COPIES.map(([, target]) => [target, process.env[target]]),
+  );
+}
+
+/**
  * Delete the client values Vite took from `<root>/.env` during a build.
  * Keys come from Vite's own parser (`node:util` `parseEnv`), so every key
  * Vite read is covered. A key stays when the shell or the `vp run` task
  * runner supplies it: `loadEnv` with `envDir: false` returns exactly those
  * values. Nothing is stripped when Vite loads env files from another
  * `envDir` (or none), since `<root>/.env` was not the source.
+ *
+ * Vite also copies a few `.env` values into `process.env` (see
+ * {@link VITE_PROCESS_ENV_COPIES}), where they would pass as shell values.
+ * `before` holds those variables as they were before Vite loaded the file;
+ * a copy Vite made is removed from `process.env` again, so this check and
+ * the next config resolution in the same build (the app builder resolves
+ * once per environment) see only the shell.
  */
-function stripLocalClientEnv(root: string, config: ResolvedConfig): void {
+function stripLocalClientEnv(
+  root: string,
+  config: ResolvedConfig,
+  before: ProcessEnvCopies | undefined,
+): void {
   if (config.envDir === false || realDir(config.envDir) !== realDir(root)) {
     return;
   }
@@ -49,11 +79,29 @@ function stripLocalClientEnv(root: string, config: ResolvedConfig): void {
   if (!existsSync(file)) {
     return;
   }
+  const parsed = parseEnv(readFileSync(file, 'utf8'));
+  const keys = new Set(Object.keys(parsed));
+  for (const [source, target] of VITE_PROCESS_ENV_COPIES) {
+    const value = parsed[source];
+    if (value === undefined) {
+      continue;
+    }
+    keys.add(target);
+    if (before && before[target] === undefined && process.env[target] === value) {
+      delete process.env[target];
+    }
+  }
   const prefixes = resolveEnvPrefix({ envPrefix: config.envPrefix });
   const shell = loadEnv(config.mode, false, prefixes);
-  for (const key of Object.keys(parseEnv(readFileSync(file, 'utf8')))) {
-    if (shell[key] === undefined && prefixes.some((prefix) => key.startsWith(prefix))) {
+  for (const key of keys) {
+    if (!prefixes.some((prefix) => key.startsWith(prefix))) {
+      continue;
+    }
+    const value = shell[key];
+    if (value === undefined) {
       delete config.env[key];
+    } else {
+      config.env[key] = value;
     }
   }
 }
@@ -86,6 +134,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let command: 'serve' | 'build' = 'serve';
+  let processEnvCopiesBefore: ProcessEnvCopies | undefined;
   const appliedClientDefaults = new Map<string, string>();
 
   async function emitSchemaFacts() {
@@ -247,6 +296,9 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     name: 'void:env-schema',
     enforce: 'pre',
     async config(_config, environment) {
+      // Plugin `config` hooks run before Vite loads env files, and `pre` puts
+      // this one ahead of the Cloudflare plugin, whose `config` hook calls `loadEnv`.
+      processEnvCopiesBefore = environment.command === 'build' ? readProcessEnvCopies() : undefined;
       const legacyFiles = findLegacyEnvFiles(root);
       if (legacyFiles.length > 0) {
         throw new Error(
@@ -284,7 +336,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // pass. CI/shell values remain available, and schema defaults are added
       // immediately below.
       if (command === 'build') {
-        stripLocalClientEnv(root, config);
+        stripLocalClientEnv(root, config, processEnvCopiesBefore);
       }
       await applyClientValuesToViteEnv(config);
 
