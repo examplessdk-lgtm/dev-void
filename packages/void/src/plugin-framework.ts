@@ -4,6 +4,7 @@ import {
   ensureWranglerCompat,
   ensureWranglerCompatibilityDate,
   ensureWranglerNodejsAlsFlag,
+  readRootWranglerConfig,
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
@@ -12,7 +13,7 @@ import { readConfig } from './config.ts';
 import { resolveLocalD1Target } from './local-d1.ts';
 import { voidLog } from './log.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
-import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
+import { devTriggersHintPlugin, workerConfigDeclaresSecrets } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
 import { envClientGuardPlugin } from './plugin-env-client-guard.ts';
@@ -225,7 +226,13 @@ export function createFrameworkPlugins(input: {
     migrationPlugin(root, dialect, localD1.databaseId, frameworkPersistRoot, {
       enabled: false,
     }),
-    devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
+    devTriggersHintPlugin(root, {
+      framework: true,
+      devTriggerToken,
+      // Adapters load this same Cloudflare config into their dev Worker.
+      workerDeclaresSecrets: () =>
+        workerConfigDeclaresSecrets(readRootWranglerConfig(root)?.config),
+    }),
     frameworkTriggersPlugin(root, { devTriggerToken }),
     ...(detected.name === 'nuxt'
       ? [nitroDevTriggerInjectPlugin(root, { serverDir: 'server' })]

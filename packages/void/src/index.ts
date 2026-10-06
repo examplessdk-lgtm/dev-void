@@ -40,7 +40,7 @@ import {
   isViteBuildOrPreview,
   getOrCreateDevTriggerToken,
 } from './plugin-dev-config.ts';
-import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
+import { devTriggersHintPlugin, workerConfigDeclaresSecrets } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { emailDevInboxPlugin } from './plugin-email-dev-inbox.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
@@ -421,7 +421,7 @@ export function voidPlugin(options?: {
         versionMetadataBinding = value;
       },
     });
-    devWorkerDeclaresSecrets = Boolean(result.secrets ?? resolved.secrets);
+    devWorkerDeclaresSecrets = workerConfigDeclaresSecrets(result, resolved);
     return result;
   }
 

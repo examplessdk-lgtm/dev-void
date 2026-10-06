@@ -8,6 +8,16 @@ import { scanQueuesSync } from './queues/scan.ts';
 import { parseDotenvFile } from './shared/dotenv.ts';
 
 /**
+ * True when a dev Worker config declares `secrets`. Wrangler then loads only
+ * declared `.env` keys into the Worker, so `__VOID_PROXY_TOKEN` stays out.
+ */
+export function workerConfigDeclaresSecrets(
+  ...configs: Array<{ readonly secrets?: unknown } | undefined>
+): boolean {
+  return configs.some((config) => Boolean(config?.secrets));
+}
+
+/**
  * Prints a one-shot hint on dev server start when the project has crons
  * or queues, explaining how to trigger them locally. Both default Void mode
  * and framework mode (SvelteKit, Nuxt, Analog, Astro, TanStack Start, React
@@ -18,8 +28,8 @@ export function devTriggersHintPlugin(
   options: {
     framework: boolean;
     devTriggerToken: string;
-    /** True when the dev Worker config declares `secrets`, so Wrangler skips undeclared `.env` keys. */
-    workerDeclaresSecrets?: () => boolean;
+    /** See `workerConfigDeclaresSecrets`. Read after the dev server starts. */
+    workerDeclaresSecrets: () => boolean;
   },
 ): Plugin {
   const { devTriggerToken } = options;
@@ -56,7 +66,7 @@ export function devTriggersHintPlugin(
         // (the platform's prod handshake) requires `x-void-internal`;
         // otherwise the dev-trigger token is accepted. The Worker only sees
         // the `.env` value when Wrangler loads undeclared keys.
-        const configuredProxyToken = options.workerDeclaresSecrets?.()
+        const configuredProxyToken = options.workerDeclaresSecrets()
           ? undefined
           : parseDotenvFile(join(root, '.env'), { expand: false }).__VOID_PROXY_TOKEN;
         const authHeader = configuredProxyToken
