@@ -1,4 +1,5 @@
 import { and, count, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
+import { constantTimeEqual } from '../auth/hmac.ts';
 import type { Db, DbOrTx, Tx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
@@ -280,16 +281,6 @@ export async function digest(value: unknown): Promise<string> {
 function randomSecret(): string {
   return toHex(crypto.getRandomValues(new Uint8Array(32)));
 }
-function constantTimeHexEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
 async function relayProof(
   secret: string,
   connection: typeof emailZoneConnections.$inferSelect,
@@ -404,7 +395,7 @@ async function probeDeployedRelay(
     body.generation !== generation ||
     body.challenge !== challenge ||
     typeof body.proof !== 'string' ||
-    !constantTimeHexEqual(body.proof, await relayProof(secret, connection, generation, challenge))
+    !constantTimeEqual(body.proof, await relayProof(secret, connection, generation, challenge))
   ) {
     throw new EmailOperationError('deployed ingress proof did not match staged identity', 503);
   }

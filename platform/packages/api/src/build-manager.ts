@@ -6,6 +6,7 @@ import {
   deployTokenTtlSecondsForBuildMinutes,
   signDeployToken,
 } from './auth/deploy-token.ts';
+import { constantTimeEqual } from './auth/hmac.ts';
 import { TERMINAL_STATUSES, isTerminalBuildStatus } from './build-status.ts';
 import { type BuildConfig, type BuildLogLine, isContainerCapacityError } from './build-types.ts';
 import { SITE_DOMAIN } from './constants.ts';
@@ -281,23 +282,6 @@ const FRESHNESS_VERIFY_MAX_AGE_MS = 30 * 60 * 1000;
 // above the longest a build can legitimately run. The +15m margin matches the
 // STALE reaper margin.
 const SLEEP_AFTER_MINUTES = DEPLOY_TOKEN_HARD_MAX_MINUTES + 15;
-
-/**
- * Constant-time string compare to avoid leaking the agent secret via response
- * timing. Length is compared up front (lengths aren't secret here), then every
- * byte is XORed so the loop runs the full length regardless of mismatch
- * position.
- */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
-}
 
 // GitHub's output.text caps are UTF-8 bytesize caps — measure with one shared
 // encoder (available in both Workers and the Node/Miniflare test env).
@@ -3100,7 +3084,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       header && header.startsWith('Bearer ')
         ? header.slice('Bearer '.length)
         : (request.headers.get('X-Agent-Token') ?? '');
-    return timingSafeEqual(presented, expected);
+    return constantTimeEqual(presented, expected);
   }
 
   // --- log storage + fan-out ---

@@ -1,5 +1,18 @@
 const encoder = new TextEncoder();
 
+/** Constant-time compare so secret checks don't leak a match prefix via timing.
+ * Lengths are not secret, so they are compared first. */
+export function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 // Cache CryptoKeys per secret — importKey is expensive and the secret never changes per isolate
 const signKeyCache = new Map<string, CryptoKey>();
 const verifyKeyCache = new Map<string, CryptoKey>();

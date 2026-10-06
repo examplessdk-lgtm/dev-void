@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
-import { hmacVerifyState } from '../auth/hmac.ts';
+import { constantTimeEqual, hmacVerifyState } from '../auth/hmac.ts';
 import type { ApiEnv } from '../env.ts';
 import { getProjectDeploymentWorkerName } from '../naming.ts';
 import { resolvePlanLimits } from '../plans.ts';
@@ -26,19 +26,6 @@ app.use('*', async (context, next) => {
   }
   await next();
 });
-const encoder = new TextEncoder();
-function sameSecret(a: string, b: string): boolean {
-  const aa = encoder.encode(a),
-    bb = encoder.encode(b);
-  if (aa.byteLength !== bb.byteLength) {
-    return false;
-  }
-  let difference = 0;
-  for (let i = 0; i < aa.byteLength; i++) {
-    difference |= aa[i] ^ bb[i];
-  }
-  return difference === 0;
-}
 
 async function verifyInternalSignature(context: Context<ApiEnv>, signed: string): Promise<boolean> {
   const auth = context.req.header('x-void-internal');
@@ -93,9 +80,12 @@ app.post('/probe-ingress', async (context) => {
   }
   let accepted = false;
   try {
-    accepted = sameSecret(await readConnectionSecret(context.env, connection), secret as string);
+    accepted = constantTimeEqual(
+      await readConnectionSecret(context.env, connection),
+      secret as string,
+    );
     if (!accepted && connection.staged_secret_generation !== null) {
-      accepted = sameSecret(
+      accepted = constantTimeEqual(
         await readStagedConnectionSecret(context.env, connection),
         secret as string,
       );
@@ -184,10 +174,10 @@ app.post('/resolve-ingress', async (context) => {
     } catch {
       return context.json({ error: 'ingress identity unavailable' }, 503);
     }
-    let authorized = sameSecret(expected, secret as string);
+    let authorized = constantTimeEqual(expected, secret as string);
     if (!authorized && resolved.connection.staged_secret_generation !== null) {
       try {
-        authorized = sameSecret(
+        authorized = constantTimeEqual(
           await readStagedConnectionSecret(context.env, resolved.connection),
           secret as string,
         );
@@ -201,7 +191,10 @@ app.post('/resolve-ingress', async (context) => {
       resolved.connection.previous_secret_until &&
       Date.parse(resolved.connection.previous_secret_until) > Date.now()
     ) {
-      authorized = sameSecret(resolved.connection.previous_secret_hash, await digest(secret));
+      authorized = constantTimeEqual(
+        resolved.connection.previous_secret_hash,
+        await digest(secret),
+      );
     }
     if (!authorized) {
       return context.json({ error: 'forbidden' }, 403);
