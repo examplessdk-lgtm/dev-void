@@ -1,6 +1,7 @@
 import { getContext } from 'svelte';
 import {
   VoidActionError,
+  getValidationErrors,
   isAbortError,
   isEqualFormValue,
   submitAction,
@@ -28,21 +29,6 @@ type UntypedForm = {
   clearErrors(...fields: ReadonlyArray<string>): void;
   clearError(): void;
 };
-
-function getValidationErrors(error: VoidActionError): Record<string, string> | null {
-  const body = error.body;
-  if (
-    body &&
-    typeof body === 'object' &&
-    'errors' in body &&
-    body.errors &&
-    typeof body.errors === 'object' &&
-    !Array.isArray(body.errors)
-  ) {
-    return body.errors as Record<string, string>;
-  }
-  return null;
-}
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -147,7 +133,7 @@ export function useForm(
       });
 
       if (!result.ok) {
-        const validationErrors = getValidationErrors(result.error);
+        const validationErrors = getValidationErrors(result.error.body);
         if (validationErrors) {
           Object.assign(errors, validationErrors);
         } else {

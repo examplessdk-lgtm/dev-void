@@ -7,7 +7,13 @@ import {
   useRef,
   useState,
 } from 'react';
-import { VoidActionError, isAbortError, isEqualFormValue, submitAction } from 'void/pages-client';
+import {
+  VoidActionError,
+  getValidationErrors,
+  isAbortError,
+  isEqualFormValue,
+  submitAction,
+} from 'void/pages-client';
 import type { ActionUrl, ResolveActionBody, ActionFormOptions } from 'void/routes';
 import { RouterContext } from './context.ts';
 
@@ -29,21 +35,6 @@ type UntypedForm = {
   clearErrors(...fields: ReadonlyArray<string>): void;
   clearError(): void;
 };
-
-function getValidationErrors(error: VoidActionError): Record<string, string> | null {
-  const body = error.body;
-  if (
-    body &&
-    typeof body === 'object' &&
-    'errors' in body &&
-    body.errors &&
-    typeof body.errors === 'object' &&
-    !Array.isArray(body.errors)
-  ) {
-    return body.errors as Record<string, string>;
-  }
-  return null;
-}
 
 // Typed overload — full inference from PageActionMap (requires codegen)
 export function useForm<U extends ActionUrl & string>(
@@ -182,7 +173,7 @@ export function useForm(
       }
 
       if (!result.ok) {
-        const validationErrors = getValidationErrors(result.error);
+        const validationErrors = getValidationErrors(result.error.body);
         if (validationErrors) {
           setErrors(validationErrors);
         } else {

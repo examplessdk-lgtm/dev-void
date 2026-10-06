@@ -17,6 +17,7 @@ import {
   type PrefetchOptions,
 } from './navigation-engine.ts';
 
+export { getValidationErrors, isModifiedEvent, mergeDataIntoHref } from './adapter-helpers.ts';
 export {
   VoidActionError,
   categorizeActionError,
