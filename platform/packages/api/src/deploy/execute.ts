@@ -39,6 +39,7 @@ import { resolvePlanLimits } from '../plans.ts';
 import { ProjectAccessDeniedError, projectAccessErrorBody } from '../project-access.ts';
 import { ProjectRequiresNormalizationError, requireNormalizedProject } from '../project-state.ts';
 import { assertManagedSandboxEntitlement } from '../provisioning/sandbox-controller.ts';
+import { requestRotationIfReplacingUntrustedCode } from '../proxy-token-rotation.ts';
 import { requireProjectRouteCapability } from '../routes/project-access.ts';
 import { deploymentOperations } from '../schema.ts';
 import {
@@ -696,6 +697,7 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
             projectId,
             resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
           );
+          await requestRotationIfReplacingUntrustedCode(tx, projectId, protectedDeployment.id);
           await setActiveDeployment(tx, projectId, protectedDeployment.id);
           await markDeploymentRetained(tx, protectedDeployment.id, true);
           recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };

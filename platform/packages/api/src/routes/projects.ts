@@ -87,7 +87,10 @@ import {
   isAlreadyExistsError as isDestinationAlreadyExistsError,
 } from '../provisioning/email-routing.ts';
 import { isManagedSandbox, verifySandboxController } from '../provisioning/sandbox-controller.ts';
-import { proxyTokenCopies } from '../proxy-token-rotation.ts';
+import {
+  proxyTokenCopies,
+  requestRotationIfReplacingUntrustedCode,
+} from '../proxy-token-rotation.ts';
 import { EMAIL_RESERVED_SLUGS } from '../reserved-slugs.ts';
 import {
   buildRoutingJson,
@@ -1456,6 +1459,7 @@ const app = new Hono<ApiEnv>()
           // PG flip FIRST. If this throws, no external state is mutated
           // yet — the tx rolls back cleanly and the caller can retry.
           await updateProjectType(tx, projectId, targetType);
+          await requestRotationIfReplacingUntrustedCode(tx, projectId, target.id);
           await setActiveDeployment(tx, projectId, target.id);
 
           const snapshottedRoutingKeys = new Set<string>();

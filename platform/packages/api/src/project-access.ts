@@ -43,8 +43,18 @@ export const PROJECT_PERMISSION_MESSAGES = {
   string
 >;
 
-function hasProjectCapability(role: ProjectRole, capability: ProjectCapability): boolean {
+export function hasProjectCapability(role: ProjectRole, capability: ProjectCapability): boolean {
   return (PROJECT_ROLE_CAPABILITIES[role] as ReadonlyArray<ProjectCapability>).includes(capability);
+}
+
+/** Whether a member change from `previous` to `next` (null = removed) takes away deploy. */
+export function roleLosesDeployCapability(
+  previous: ProjectRole,
+  next: ProjectRole | null,
+): boolean {
+  return (
+    hasProjectCapability(previous, 'deploy') && !(next && hasProjectCapability(next, 'deploy'))
+  );
 }
 
 const projectOwner = alias(users, 'project_owner');
@@ -77,6 +87,15 @@ async function selectProjectAccess(
     owner: row.owner,
     memberRole: row.project.user_id === actorUserId ? 'owner' : row.memberRole,
   };
+}
+
+/** The user's current role on the project, null without one. Owner suspension is not checked. */
+export async function projectRoleForUser(
+  db: Db,
+  projectId: string,
+  userId: string,
+): Promise<ProjectRole | null> {
+  return (await selectProjectAccess(db, projectId, userId))?.memberRole ?? null;
 }
 
 export class ProjectNotFoundError extends Error {

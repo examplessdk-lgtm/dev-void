@@ -16,6 +16,7 @@ import {
 import { alias } from 'drizzle-orm/pg-core';
 import { lockAuthSettings } from '../auth/configuration.ts';
 import { generateId } from '../id.ts';
+import { requestProxyTokenRotation } from '../proxy-token-rotation-request.ts';
 import {
   users,
   projects,
@@ -289,6 +290,21 @@ export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<Term
             'github connection authorizer account deleted',
           )),
         );
+      }
+
+      const deployMemberships = await tx
+        .select({ projectId: projectMembers.project_id })
+        .from(projectMembers)
+        .where(
+          and(
+            eq(projectMembers.user_id, id),
+            inArray(projectMembers.role, ['collaborator', 'admin']),
+            inArray(projectMembers.project_id, projectIds),
+          ),
+        )
+        .orderBy(asc(projectMembers.project_id));
+      for (const { projectId } of deployMemberships) {
+        await requestProxyTokenRotation(tx, projectId, 'user-deleted', 'member');
       }
     }
     await tx.delete(users).where(eq(users.id, id));

@@ -22,6 +22,7 @@ import {
   platformLoginRevisions,
   operatorEvents,
   projectAccessEvents,
+  projectCleanupJobs,
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
@@ -1871,6 +1872,7 @@ describe('GET /admin/projects/:id', () => {
     );
     expect(roleChange.status).toBe(302);
     expect((await env.db.select().from(projectMembers))[0]?.role).toBe('collaborator');
+    expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
 
     const ownerRemoval = await req(
       `/admin/projects/${project.id}/team/${owner.id}/remove`,
@@ -1895,6 +1897,14 @@ describe('GET /admin/projects/:id', () => {
     );
     expect(removal.status).toBe(302);
     expect(await env.db.select().from(projectMembers)).toEqual([]);
+    // The removed collaborator could deploy: the project's proxy token rotates.
+    expect(await env.db.select().from(projectCleanupJobs)).toMatchObject([
+      {
+        target: `proxy-token-rotation:${project.id}`,
+        kind: 'proxy-token-rotation',
+        payload: { phase: 'requested', reason: 'member-removed' },
+      },
+    ]);
     expect(
       (await env.db.select().from(projects).where(eq(projects.id, project.id)))[0]?.user_id,
     ).toBe(owner.id);

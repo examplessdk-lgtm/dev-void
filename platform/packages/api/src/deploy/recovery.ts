@@ -29,7 +29,10 @@ import {
   removeQueueConsumer,
   getDispatchWorkerProxyToken,
 } from '../provisioning/cloudflare-api.ts';
-import { proxyTokenCopies } from '../proxy-token-rotation.ts';
+import {
+  proxyTokenCopies,
+  requestRotationIfReplacingUntrustedCode,
+} from '../proxy-token-rotation.ts';
 import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { type DeployManifest, type Deployment, type Project } from '../types.ts';
 import {
@@ -103,6 +106,7 @@ export async function commitCutoverLive(
     // began, so no final object-store scan is needed.
     await updateDeploymentStatus(tx, deploymentId, 'live', undefined, { force: true });
     await updateProjectType(tx, projectId, input.projectType);
+    await requestRotationIfReplacingUntrustedCode(tx, projectId, deploymentId);
     await setActiveDeployment(tx, projectId, deploymentId);
     await markDeploymentRetained(tx, deploymentId, true);
   });

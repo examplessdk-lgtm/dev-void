@@ -4,6 +4,7 @@ import { snapshotCronScheduler, syncCronScheduler } from './cron-scheduler-clien
 import { getActiveDeployment, type Db, type DbOrTx } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { getProjectDeploymentWorkerName, getProjectQueueName } from './naming.ts';
+import { hasProjectCapability, projectRoleForUser } from './project-access.ts';
 import { requireNormalizedProject } from './project-state.ts';
 import {
   buildProxyTokenBindingsPatch,
@@ -13,9 +14,23 @@ import {
   type RotationCloudflareClient,
   type ScriptBinding,
 } from './proxy-token-rotation-cloudflare.ts';
+import {
+  PROXY_TOKEN_ROTATION_JOB_KIND,
+  proxyTokenRotationTarget,
+  requestProxyTokenRotation,
+  rotationLog,
+  type ProxyTokenRotationReason,
+} from './proxy-token-rotation-request.ts';
 import { deriveProxyToken, proxyTokenStateKey, serializeProxyTokenState } from './proxy-token.ts';
 import { deployments, projectCleanupJobs, projects } from './schema.ts';
 import type { DeployManifest, Project } from './types.ts';
+
+export {
+  PROXY_TOKEN_ROTATION_JOB_KIND,
+  proxyTokenRotationTarget,
+  requestProxyTokenRotation,
+  type ProxyTokenRotationReason,
+};
 
 /**
  * Proxy token generations per project.
@@ -26,17 +41,11 @@ import type { DeployManifest, Project } from './types.ts';
  * it; the KV accept floor (`proxy-token:<projectId>`) never exceeds it.
  */
 
-export const PROXY_TOKEN_ROTATION_JOB_KIND = 'proxy-token-rotation';
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
 export const PROXY_TOKEN_ROTATION_WAIT_MS = 120_000;
 
 /** Cloudflare API calls and wall-clock time one rotation run may still spend. */
 export type RotationBudget = { cfCallsRemaining: number; readonly deadline: number };
-
-/** Primary key of a project's rotation row in `project_cleanup_jobs`. */
-export function proxyTokenRotationTarget(projectId: string): string {
-  return `${PROXY_TOKEN_ROTATION_JOB_KIND}:${projectId}`;
-}
 
 /** The token for the project's issued generation. Generation 0 is the legacy token. */
 export async function issueProjectProxyToken(
@@ -97,15 +106,6 @@ export async function proxyTokenCopies(
 // `next_attempt_at` never cuts it short. Until the floor rises both tokens are
 // accepted, so a failed or unfinished rotation never breaks a tenant.
 
-export type ProxyTokenRotationReason =
-  | 'member-removed'
-  | 'member-role-changed'
-  | 'user-deleted'
-  | 'untrusted-deploy-replaced'
-  | 'operator'
-  | 'operator-bulk'
-  | 'legacy-init';
-
 export type ProxyTokenRotationPhase = 'requested' | 'copies' | 'patch' | 'revoke' | 'settle';
 
 export type ProxyTokenRotationEnv = Pick<
@@ -155,51 +155,7 @@ function waitInterval(waitMs: number): SQL {
 const jobTarget = (projectId: string) =>
   eq(projectCleanupJobs.target, proxyTokenRotationTarget(projectId));
 
-function rotationLog(event: string, projectId: string, detail = ''): void {
-  console.log(`[proxy-token-rotation] ${event} ${projectId}${detail ? ` ${detail}` : ''}`);
-}
-
 // --- Requests ---
-
-/**
- * Asks for a new token generation. A job that has not started yet already
- * covers the request; one past START may have handed out tok(T), so it
- * finishes and then runs once more (`again`). Operator requests also make the
- * job due now. Call inside the caller's transaction.
- */
-export async function requestProxyTokenRotation(
-  tx: DbOrTx,
-  projectId: string,
-  reason: ProxyTokenRotationReason,
-  mode: 'member' | 'operator',
-): Promise<void> {
-  const flagAgain = sql`CASE WHEN ${projectCleanupJobs.payload}->>'phase' <> 'requested'
-    THEN ${projectCleanupJobs.payload} || '{"again":"1"}'::jsonb
-    ELSE ${projectCleanupJobs.payload} END`;
-  const rows = await tx
-    .insert(projectCleanupJobs)
-    .values({
-      target: proxyTokenRotationTarget(projectId),
-      project_id: projectId,
-      kind: PROXY_TOKEN_ROTATION_JOB_KIND,
-      payload: { phase: 'requested', reason },
-      next_attempt_at: sql`now()`,
-    })
-    .onConflictDoUpdate({
-      target: projectCleanupJobs.target,
-      set:
-        mode === 'operator'
-          ? { payload: flagAgain, next_attempt_at: sql`now()` }
-          : { payload: flagAgain },
-      ...(mode === 'member'
-        ? { setWhere: sql`${projectCleanupJobs.payload}->>'phase' <> 'requested'` }
-        : {}),
-    })
-    .returning({ phase: sql<string>`${projectCleanupJobs.payload}->>'phase'` });
-  if (rows.length > 0) {
-    rotationLog('requested', projectId, `reason=${reason}`);
-  }
-}
 
 /**
  * Bulk requests. `legacy` queues every project still on generation 0 that has
@@ -231,6 +187,38 @@ export async function requestBulkProxyTokenRotations(
     console.log(`[proxy-token-rotation] requested ${count} project(s) scope=${scope}`);
   }
   return count;
+}
+
+/**
+ * While code from a user who can no longer deploy is active, it receives every
+ * new token, so a rotation protects only once that code stops running. Call in
+ * the cutover transaction (project lock held) right before the active
+ * deployment changes: when the code being replaced was deployed by such a user,
+ * this requests one more generation. Owner suspension does not count.
+ */
+export async function requestRotationIfReplacingUntrustedCode(
+  tx: DbOrTx,
+  projectId: string,
+  nextDeploymentId: string,
+): Promise<boolean> {
+  const [current] = await tx
+    .select({
+      deploymentId: projects.active_deployment_id,
+      initiatedBy: deployments.initiated_by_user_id,
+    })
+    .from(projects)
+    .innerJoin(deployments, eq(deployments.id, projects.active_deployment_id))
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  if (!current?.initiatedBy || current.deploymentId === nextDeploymentId) {
+    return false;
+  }
+  const role = await projectRoleForUser(tx, projectId, current.initiatedBy);
+  if (role && hasProjectCapability(role, 'deploy')) {
+    return false;
+  }
+  await requestProxyTokenRotation(tx, projectId, 'untrusted-deploy-replaced', 'member');
+  return true;
 }
 
 // --- Inventory ---

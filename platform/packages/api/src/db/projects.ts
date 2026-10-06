@@ -14,6 +14,8 @@ import {
 } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { generateId } from '../id.ts';
+import { roleLosesDeployCapability } from '../project-access.ts';
+import { requestProxyTokenRotation } from '../proxy-token-rotation-request.ts';
 import {
   users,
   projects,
@@ -394,6 +396,9 @@ export async function setProjectMemberRole(
       previousRole: current.role,
       newRole: args.role,
     });
+    if (roleLosesDeployCapability(current.role, args.role)) {
+      await requestProxyTokenRotation(tx, args.projectId, 'member-role-changed', 'member');
+    }
     const cancelledBuilds =
       args.role === 'admin'
         ? []
@@ -445,6 +450,9 @@ export async function removeProjectMember(
         !args.platformAdmin && args.actorUserId === args.subjectUserId ? 'left' : 'member_removed',
       previousRole: member.role,
     });
+    if (roleLosesDeployCapability(member.role, null)) {
+      await requestProxyTokenRotation(tx, args.projectId, 'member-removed', 'member');
+    }
     const cancelledBuilds = await invalidateGitHubConnectionAuthorizedBy(
       tx,
       args.projectId,
