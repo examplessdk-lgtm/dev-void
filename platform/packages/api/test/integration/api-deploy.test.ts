@@ -12,6 +12,7 @@ import {
   vi,
 } from 'vite-plus/test';
 import { computeAssetHash } from '../../src/assets.ts';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import {
   beginDeploymentCutover,
   cancelDeployment,
@@ -27,6 +28,7 @@ import app from '../../src/index.ts';
 import { writePlanCatalog } from '../../src/plans.ts';
 import * as projectAccess from '../../src/project-access.ts';
 import * as projectIngress from '../../src/project-ingress.ts';
+import { deriveProxyToken, proxyTokenStateKey } from '../../src/proxy-token.ts';
 import { validateManifestShape } from '../../src/routes/deploy.ts';
 import {
   builds,
@@ -54,6 +56,7 @@ import {
   cfSuccess,
   readAllEvents,
   CF_ACCOUNT_ID,
+  JWT_SECRET,
   type TestEnv,
 } from './helpers.ts';
 import { setTestDb } from './setup.ts';
@@ -1999,9 +2002,50 @@ describe('POST /projects/:id/deploy', () => {
       workerName: expect.stringMatching(/^user-queue-kv-app-dpl_/),
       projectId: project.id,
       queueName: 'emails',
-      proxyToken: expect.any(String),
+      proxyToken: await hmacSignState(project.id, JWT_SECRET),
     });
-    expect(queueRouting?.proxyToken.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('issues the proxy token for the project accept floor', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'queue-kv-floor-app');
+    await env.ROUTING.put(proxyTokenStateKey(project.id), JSON.stringify({ gen: 1 }));
+    const fetchMock = mockCfApi();
+
+    const res = await app.fetch(
+      await buildDeployRequest(env, project.id, user.jwt, {
+        manifest: {
+          version: 3,
+          bindings: {},
+          queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+        },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const expected = await deriveProxyToken(JWT_SECRET, project.id, 1);
+    const uploadCall = fetchMock.mock.calls.find((call: Array<unknown>) => {
+      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
+      return url.includes('/workers/dispatch/') && (call[1] as RequestInit)?.method === 'PUT';
+    });
+    expect(uploadCall).toBeDefined();
+    const metadataBlob = ((uploadCall![1] as RequestInit).body as FormData).get('metadata');
+    const metadata = JSON.parse(await (metadataBlob as Blob).text()) as {
+      bindings?: Array<{ type: string; name: string; text?: string }>;
+    };
+    expect(metadata.bindings).toContainEqual({
+      type: 'plain_text',
+      name: '__VOID_PROXY_TOKEN',
+      text: expected,
+    });
+
+    const expectedQueueName = `${project.id}-emails`.toLowerCase().replaceAll('_', '-');
+    const queueRouting = (await env.ROUTING.get(`queue:${expectedQueueName}`, 'json')) as {
+      proxyToken: string;
+    } | null;
+    expect(queueRouting?.proxyToken).toBe(expected);
   });
 
   it('removes queue routing entries omitted by the next deployment', async () => {

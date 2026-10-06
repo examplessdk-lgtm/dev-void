@@ -30,9 +30,12 @@ async function platformBindingNames(): Promise<ReadonlyArray<string>> {
     'test-token',
     'proj_abc123',
     EMPTY_MANIFEST,
-    'test-jwt-secret',
     'void-proxy',
-    { projectSlug: 'my-app', emailSenderDomain: 'mail.voidcloud.dev' },
+    {
+      projectSlug: 'my-app',
+      proxyToken: 'test-proxy-token',
+      emailSenderDomain: 'mail.voidcloud.dev',
+    },
   );
   return provisioned.map((binding) => binding.name);
 }
@@ -45,9 +48,12 @@ describe('reserved binding names cover every platform-injected binding', () => {
       'test-token',
       'proj_abc123',
       EMPTY_MANIFEST,
-      'test-jwt-secret',
       'void-proxy',
-      { projectSlug: 'my-app', emailSenderDomain: 'mail.voidcloud.dev' },
+      {
+        projectSlug: 'my-app',
+        proxyToken: 'test-proxy-token',
+        emailSenderDomain: 'mail.voidcloud.dev',
+      },
     );
     expect(provisioned.length).toBeGreaterThan(0);
     for (const binding of provisioned) {
@@ -115,9 +121,8 @@ it('pins managed email to its deployment identity and reserves that binding', as
     'test-token',
     'proj_abc123',
     { ...EMPTY_MANIFEST, emailProtocolVersion: 1 },
-    'test-jwt-secret',
     'void-proxy',
-    { projectSlug: 'my-app', deploymentId: 'deploy_a' },
+    { projectSlug: 'my-app', proxyToken: 'test-proxy-token', deploymentId: 'deploy_a' },
   ] as const;
   const bindings = await provisionBindings(...args);
   expect(bindings).toContainEqual({
@@ -128,16 +133,8 @@ it('pins managed email to its deployment identity and reserves that binding', as
   expect(isReservedBindingName('__VOID_EMAIL_DEPLOYMENT_ID')).toBe(true);
   await expect(
     provisionBindings(
-      ...(args.slice(0, 7) as [
-        (typeof args)[0],
-        string,
-        string,
-        string,
-        (typeof args)[4],
-        string,
-        string,
-      ]),
-      { projectSlug: 'my-app' },
+      ...(args.slice(0, 6) as [(typeof args)[0], string, string, string, (typeof args)[4], string]),
+      { projectSlug: 'my-app', proxyToken: 'test-proxy-token' },
     ),
   ).rejects.toThrow('deployment identity');
 });
