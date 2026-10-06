@@ -11,7 +11,7 @@ import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
 const RENDERER_ID = 'virtual:void-pages-renderer';
 const CLIENT_ENTRY_ID = 'virtual:void-pages-client';
 
-type PrefetchConfig = {
+export type PrefetchConfig = {
   hoverDelay?: number;
   cacheFor?: number | string | [string, string];
 };

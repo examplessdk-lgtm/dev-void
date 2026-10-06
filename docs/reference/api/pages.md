@@ -32,6 +32,10 @@ function voidVue(options?: VoidVueOptions): Plugin[];
 interface VoidVueOptions {
   vue?: VuePluginOptions; // passed through to @vitejs/plugin-vue
   viewTransitions?: boolean; // enable View Transitions API for navigations
+  prefetch?: {
+    hoverDelay?: number;
+    cacheFor?: number | string | [string, string];
+  };
 }
 ```
 
