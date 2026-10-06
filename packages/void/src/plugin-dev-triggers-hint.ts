@@ -15,7 +15,12 @@ import { parseDotenvFile } from './shared/dotenv.ts';
  */
 export function devTriggersHintPlugin(
   root: string,
-  options: { framework: boolean; devTriggerToken: string },
+  options: {
+    framework: boolean;
+    devTriggerToken: string;
+    /** True when the dev Worker config declares `secrets`, so Wrangler skips undeclared `.env` keys. */
+    workerDeclaresSecrets?: () => boolean;
+  },
 ): Plugin {
   const { devTriggerToken } = options;
   return {
@@ -49,10 +54,11 @@ export function devTriggersHintPlugin(
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
         // Mirror the dispatcher's auth: a configured `__VOID_PROXY_TOKEN`
         // (the platform's prod handshake) requires `x-void-internal`;
-        // otherwise the dev-trigger token is accepted.
-        const configuredProxyToken = parseDotenvFile(join(root, '.env'), {
-          expand: false,
-        }).__VOID_PROXY_TOKEN;
+        // otherwise the dev-trigger token is accepted. The Worker only sees
+        // the `.env` value when Wrangler loads undeclared keys.
+        const configuredProxyToken = options.workerDeclaresSecrets?.()
+          ? undefined
+          : parseDotenvFile(join(root, '.env'), { expand: false }).__VOID_PROXY_TOKEN;
         const authHeader = configuredProxyToken
           ? `x-void-internal: ${configuredProxyToken}`
           : `x-void-dev-trigger: ${devTriggerToken}`;

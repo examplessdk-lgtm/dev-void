@@ -119,6 +119,29 @@ describe('devTriggersHintPlugin', () => {
     expect(output).not.toContain('x-void-dev-trigger: dev-token-test');
   });
 
+  it('prints the dev-trigger token when the Worker declares secrets and skips the .env proxy token', async () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'crons'), { recursive: true });
+    writeFileSync(
+      join(root, 'crons', 'heartbeat.ts'),
+      'export const cron = "0 * * * *";\nexport default async () => {};\n',
+    );
+    writeFileSync(join(root, '.env'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runConfigureServer(
+      devTriggersHintPlugin(root, {
+        framework: false,
+        devTriggerToken: 'dev-token-test',
+        workerDeclaresSecrets: () => true,
+      }),
+    );
+
+    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
+    expect(output).toContain('x-void-dev-trigger: dev-token-test');
+    expect(output).not.toContain('x-void-internal');
+  });
+
   it('prints curl examples in framework mode (same as default mode)', async () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'crons'), { recursive: true });

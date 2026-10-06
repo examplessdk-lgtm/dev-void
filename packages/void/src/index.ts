@@ -383,11 +383,17 @@ export function voidPlugin(options?: {
   const outDir = join(root, '.void');
   mkdirSync(outDir, { recursive: true });
 
+  // Wrangler loads `.env` into the dev Worker itself; once the final config
+  // declares `secrets`, it loads only declared keys, so the stripped
+  // `__VOID_PROXY_TOKEN` never reaches the Worker. The dev-triggers hint
+  // reads this to print the header the dispatcher will accept.
+  let devWorkerDeclaresSecrets = false;
+
   // Config function that merges inferred bindings with the resolved Cloudflare
   // config. Bindings already declared there (with real IDs) take precedence;
   // placeholders are added only for inferred bindings that are missing.
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
-    return mergeWorkerBindings(resolved, {
+    const result = mergeWorkerBindings(resolved, {
       websocketRoutes,
       routeEnvironment,
       workerConfig,
@@ -415,6 +421,8 @@ export function voidPlugin(options?: {
         versionMetadataBinding = value;
       },
     });
+    devWorkerDeclaresSecrets = Boolean(result.secrets ?? resolved.secrets);
+    return result;
   }
 
   function applyEnvSchema(facts: EnvSchemaFacts): void {
@@ -828,7 +836,11 @@ export function voidPlugin(options?: {
       ...(vinextWorkerEntry ? [vinextWorkerEntry] : []),
       frameworkBuildWrapperPlugin,
       frameworkTriggersPlugin(root, { devTriggerToken }),
-      devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
+      devTriggersHintPlugin(root, {
+        framework: true,
+        devTriggerToken,
+        workerDeclaresSecrets: () => devWorkerDeclaresSecrets,
+      }),
       ...cloudflare({
         configPath: cloudflareConfigPath,
         ...inspectorPortOption,
@@ -1070,7 +1082,11 @@ export function voidPlugin(options?: {
       configPath: authConfigPath,
     }),
     prerenderPlugin(root, config),
-    devTriggersHintPlugin(root, { framework: false, devTriggerToken }),
+    devTriggersHintPlugin(root, {
+      framework: false,
+      devTriggerToken,
+      workerDeclaresSecrets: () => devWorkerDeclaresSecrets,
+    }),
     ...cloudflare({
       configPath: cloudflareConfigPath,
       ...inspectorPortOption,
