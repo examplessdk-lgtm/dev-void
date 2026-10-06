@@ -22,6 +22,7 @@ import { getProjectDeploymentWorkerName, getProjectQueueName } from '../../src/n
 import { reconcileProjectCleanupJobs } from '../../src/provisioning/cleanup.ts';
 import {
   advanceProxyTokenRotation,
+  issueProjectProxyToken,
   PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS,
   PROXY_TOKEN_ROTATION_WAIT_MS,
   proxyTokenRotationStuckWarning,
@@ -352,6 +353,34 @@ function scriptToken(cf: MockCfApiHandle, script: string): unknown {
 
 const patchedScripts = () =>
   events.filter((event) => event.startsWith('PATCH ')).map((event) => event.slice(6));
+
+let deployCount = 0;
+
+/** A Worker deploy through the API; returns the deployment id from the `done` event. */
+async function deploy(projectId: string, jwt: string): Promise<string> {
+  const code = `export default { fetch() { return new Response('${++deployCount}'); } }`;
+  const response = await app.fetch(
+    new Request(`http://localhost/projects/${projectId}/deploy`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        manifest: { version: 3, assetManifestVersion: 2, bindings: {} },
+        assetManifest: {},
+        workerFiles: { 'index.js': btoa(code) },
+      }),
+    }),
+    testEnv,
+  );
+  expect(response.status).toBe(200);
+  const events = (await readAllEvents(response)) as Array<{
+    event: string;
+    deployment?: string;
+    message?: string;
+  }>;
+  const done = events.find((event) => event.event === 'done');
+  expect(done, JSON.stringify(events.at(-1))).toBeDefined();
+  return done!.deployment!;
+}
 
 describe('proxy token rotation', () => {
   it('moves every Worker to the next generation before raising the floor', async () => {
@@ -1140,6 +1169,76 @@ describe('proxy token rotation', () => {
   );
 });
 
+describe('issuing the proxy token for a deploy', () => {
+  const issue = (projectId: string) => issueProjectProxyToken(env.db, JWT_SECRET, projectId);
+
+  it('moves a project without Workers to generation 1 without a rotation', async () => {
+    cfApi();
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id);
+
+    expect(await issue(project.id)).toBe(await tok(project.id, 1));
+    expect(await issued(project.id)).toBe(1);
+    expect(await job(project.id)).toBeUndefined();
+    expect(events).toEqual([]);
+  });
+
+  it('queues a rotation for Workers that still hold the legacy token', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf);
+    await env.db.update(users).set({ plan: 'pro' }).where(eq(users.id, fx.ownerId));
+
+    const deployed = await deploy(fx.projectId, fx.ownerJwt);
+    expect(await issued(fx.projectId)).toBe(1);
+    expect(scriptToken(cf, fx.worker(deployed))).toBe(await tok(fx.projectId, 1));
+    expect((await job(fx.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'legacy-init',
+    });
+    expect(await floor(fx.projectId)).toBeNull();
+
+    await shiftBack(fx.projectId);
+    expect(await advance(fx.projectId)).toEqual({ status: 'done', gen: 2 });
+    expect(await job(fx.projectId)).toBeUndefined();
+    const token = await tok(fx.projectId, 2);
+    for (const id of [...fx.retained, fx.active, deployed]) {
+      expect(scriptToken(cf, fx.worker(id))).toBe(token);
+    }
+    expect(await floor(fx.projectId)).toEqual({ gen: 2 });
+  });
+
+  it('issues the current generation of a project past generation 0', async () => {
+    cfApi();
+    const owner = await createTestUser(env.db);
+    const project = await createTestProject(env.db, owner.id);
+    await addDeployment(project.id, { active: true });
+    await env.db.update(projects).set({ proxy_token_gen: 3 }).where(eq(projects.id, project.id));
+
+    expect(await issue(project.id)).toBe(await tok(project.id, 3));
+    expect(await issued(project.id)).toBe(3);
+    expect(await job(project.id)).toBeUndefined();
+    expect(events).toEqual([]);
+  });
+
+  it('keeps generation 0 when the rotation cannot be queued', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf);
+    await env.db.execute(sql`CREATE FUNCTION fail_rotation_request() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'injected request failure'; END $$ LANGUAGE plpgsql`);
+    await env.db
+      .execute(sql`CREATE TRIGGER fail_rotation_request BEFORE INSERT ON project_cleanup_jobs
+      FOR EACH ROW EXECUTE FUNCTION fail_rotation_request()`);
+    try {
+      await expect(issue(fx.projectId)).rejects.toThrow();
+    } finally {
+      await env.db.execute(sql`DROP TRIGGER fail_rotation_request ON project_cleanup_jobs`);
+      await env.db.execute(sql`DROP FUNCTION fail_rotation_request()`);
+    }
+    expect(await issued(fx.projectId)).toBe(0);
+    expect(await job(fx.projectId)).toBeUndefined();
+  });
+});
+
 describe('rotation after code from a user who lost deploy access is replaced', () => {
   type Team = Readonly<{
     projectId: string;
@@ -1147,8 +1246,6 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     collaborator: Awaited<ReturnType<typeof createTestUser>>;
     worker: (deploymentId: string) => string;
   }>;
-
-  let deployCount = 0;
 
   async function setupTeam(): Promise<Team> {
     const owner = await createTestUser(env.db);
@@ -1168,32 +1265,6 @@ describe('rotation after code from a user who lost deploy access is replaced', (
       collaborator,
       worker: (deploymentId) => getProjectDeploymentWorkerName(slug, deploymentId),
     };
-  }
-
-  /** A Worker deploy through the API; returns the deployment id from the `done` event. */
-  async function deploy(projectId: string, jwt: string): Promise<string> {
-    const code = `export default { fetch() { return new Response('${++deployCount}'); } }`;
-    const response = await app.fetch(
-      new Request(`http://localhost/projects/${projectId}/deploy`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          manifest: { version: 3, assetManifestVersion: 2, bindings: {} },
-          assetManifest: {},
-          workerFiles: { 'index.js': btoa(code) },
-        }),
-      }),
-      testEnv,
-    );
-    expect(response.status).toBe(200);
-    const events = (await readAllEvents(response)) as Array<{
-      event: string;
-      deployment?: string;
-      message?: string;
-    }>;
-    const done = events.find((event) => event.event === 'done');
-    expect(done, JSON.stringify(events.at(-1))).toBeDefined();
-    return done!.deployment!;
   }
 
   async function rollback(projectId: string, jwt: string, deploymentId: string): Promise<void> {
@@ -1245,20 +1316,32 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     const untrusted = await deploy(team.projectId, team.collaborator.jwt);
     await removeCollaborator(team);
     expect((await job(team.projectId))!.payload.reason).toBe('member-removed');
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
 
     const trusted = await deploy(team.projectId, team.owner.jwt);
     expect((await job(team.projectId))!.payload).toEqual({
       phase: 'requested',
       reason: 'untrusted-deploy-replaced',
     });
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
-    expect(await issued(team.projectId)).toBe(2);
-    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
+    expect(await issued(team.projectId)).toBe(3);
+    await expectWorkersOn(cf, team, [untrusted, trusted], 3);
 
     // The code being replaced now is the owner's: nothing more to rotate.
     await deploy(team.projectId, team.owner.jwt);
     expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('moves past the generation the first deploy issued when a member is removed', async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    const deployed = await deploy(team.projectId, team.owner.jwt);
+    expect(await issued(team.projectId)).toBe(1);
+    expect(await job(team.projectId)).toBeUndefined();
+
+    await removeCollaborator(team);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    await expectWorkersOn(cf, team, [deployed], 2);
   });
 
   it('runs one more generation when the replacement lands after START', async () => {
@@ -1271,8 +1354,8 @@ describe('rotation after code from a user who lost deploy access is replaced', (
 
     const trusted = await deploy(team.projectId, team.owner.jwt);
     expect((await job(team.projectId))!.payload.again).toBe('1');
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
-    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
+    await expectWorkersOn(cf, team, [untrusted, trusted], 3);
   });
 
   it('needs no extra generation when the replacement lands before START', async () => {
@@ -1286,8 +1369,8 @@ describe('rotation after code from a user who lost deploy access is replaced', (
       phase: 'requested',
       reason: 'member-removed',
     });
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
-    await expectWorkersOn(cf, team, [untrusted, trusted], 1);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
   });
 
   it('rotates when the next deploy finishes an interrupted cutover over the code', async () => {
@@ -1295,7 +1378,7 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     const team = await setupTeam();
     await deploy(team.projectId, team.collaborator.jwt);
     await removeCollaborator(team);
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
 
     // The owner's deploy stopped after the cutover became ready.
     const interrupted = await createTestDeployment(env.db, team.projectId, 'pending');
@@ -1339,7 +1422,7 @@ describe('rotation after code from a user who lost deploy access is replaced', (
       phase: 'requested',
       reason: 'untrusted-deploy-replaced',
     });
-    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
 
     await rollback(team.projectId, team.owner.jwt, untrusted);
     expect(await job(team.projectId)).toBeUndefined();

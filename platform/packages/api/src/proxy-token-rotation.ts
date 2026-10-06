@@ -51,21 +51,52 @@ export const PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS = 4;
 /** Cloudflare API calls and wall-clock time one rotation run may still spend. */
 export type RotationBudget = { cfCallsRemaining: number; readonly deadline: number };
 
-/** The token for the project's issued generation. Generation 0 is the legacy token. */
+/**
+ * The token a deploy bakes into its Worker: the one for the project's issued
+ * generation. A project still on generation 0 moves to generation 1 here, so
+ * new code never receives the legacy token.
+ *
+ * When the project already has Workers, they hold the legacy token and the
+ * same transaction queues a rotation for them. Committing generation 1
+ * without that job would hide those Workers from the bulk request for
+ * legacy projects, which picks only generation 0. The deployment being
+ * uploaded is neither active nor retained yet, so it is not in the
+ * inventory; the rotation cannot start until this deploy ends, and then
+ * moves every Worker, this one included, to generation 2.
+ */
 export async function issueProjectProxyToken(
   db: Db,
   jwtSecret: string,
   projectId: string,
 ): Promise<string> {
-  const [row] = await db
-    .select({ gen: projects.proxy_token_gen })
-    .from(projects)
-    .where(eq(projects.id, projectId))
-    .limit(1);
-  if (!row) {
-    throw new Error(`project ${projectId} not found`);
-  }
-  return deriveProxyToken(jwtSecret, projectId, row.gen);
+  const gen = await db.transaction(async (tx) => {
+    const [initialized] = await tx
+      .update(projects)
+      .set({ proxy_token_gen: 1 })
+      .where(and(eq(projects.id, projectId), eq(projects.proxy_token_gen, 0)))
+      .returning({
+        id: projects.id,
+        slug: projects.slug,
+        active_deployment_id: projects.active_deployment_id,
+      });
+    if (initialized) {
+      const queuedRotation = (await listProxyTokenInventory(tx, initialized)).length > 0;
+      if (queuedRotation) {
+        await requestProxyTokenRotation(tx, projectId, 'legacy-init', 'operator');
+      }
+      console.info('[proxy-token] initialized', { projectId, queuedRotation });
+    }
+    const [row] = await tx
+      .select({ gen: projects.proxy_token_gen })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    if (!row) {
+      throw new Error(`project ${projectId} not found`);
+    }
+    return row.gen;
+  });
+  return deriveProxyToken(jwtSecret, projectId, gen);
 }
 
 /**
