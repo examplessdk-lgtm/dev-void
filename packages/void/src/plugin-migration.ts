@@ -3,6 +3,7 @@ import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import type { DatabaseDialect } from './config.ts';
 import { voidLog, voidWarn, voidError } from './log.ts';
+import { afterServerReady } from './plugin-dev-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import { loadLocalEnv } from './shared/env.ts';
 
@@ -38,18 +39,12 @@ export function migrationPlugin(
         if (hasSqlMigrations && dialect !== 'sqlite') {
           const url = readDatabaseUrl(root);
           if (!url) {
-            // Defer warning until after Vite prints "ready" so it's visible.
-            const warn = () => {
+            afterServerReady(server, () => {
               console.log();
               voidError(
                 `DATABASE_URL not found in .env — skipping ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} migrations.`,
               );
-            };
-            if (server.httpServer) {
-              server.httpServer.once('listening', () => setTimeout(warn, 100));
-            } else {
-              warn();
-            }
+            });
             return;
           }
           const { collectMigrations } = await import('./migrations/collect.ts');

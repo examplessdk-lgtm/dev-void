@@ -96,6 +96,18 @@ type PageResult = {
   truncated: boolean;
 };
 
+function emptyPage(processed: number, truncated: boolean): PageResult {
+  return {
+    processed,
+    applications: [],
+    blockers: [],
+    cancelRequested: [],
+    deletedApplications: [],
+    nextCursor: null,
+    truncated,
+  };
+}
+
 function pass(cursor: SandboxDrainCursor | null): '1' | '2' {
   return cursor?.pass === '2' ? '2' : '1';
 }
@@ -248,15 +260,7 @@ async function deploymentPage(
 ): Promise<PageResult> {
   const rows = await loadSandboxDeploymentPageProjection(db, cursor);
   const pageRows = rows.slice(0, PAGE_SIZE);
-  const result: PageResult = {
-    processed: pageRows.length,
-    applications: [],
-    blockers: [],
-    cancelRequested: [],
-    deletedApplications: [],
-    nextCursor: null,
-    truncated: rows.length > PAGE_SIZE,
-  };
+  const result = emptyPage(pageRows.length, rows.length > PAGE_SIZE);
   for (const row of pageRows) {
     if (row.rollbackLease || !row.manifestPresent) {
       if (row.active) {
@@ -302,21 +306,13 @@ async function deploymentPage(
       continue;
     }
     if (row.active) {
-      if (!dryRun) {
-        const settlement = await settleDeploymentForSandboxDrain(env, db, row.deploymentId);
-        if (settlement.state === 'cancel_requested') {
-          result.cancelRequested.push(row.deploymentId);
-        }
-        if (settlement.state !== 'terminal') {
-          result.blockers.push({
-            kind: 'active_deployment',
-            deploymentId: row.deploymentId,
-            projectId: row.projectId,
-            message: `Sandbox deployment ${row.deploymentId} must settle before the drain can advance.`,
-          });
-          continue;
-        }
-      } else {
+      const settlement = dryRun
+        ? undefined
+        : await settleDeploymentForSandboxDrain(env, db, row.deploymentId);
+      if (settlement?.state === 'cancel_requested') {
+        result.cancelRequested.push(row.deploymentId);
+      }
+      if (settlement?.state !== 'terminal') {
         result.blockers.push({
           kind: 'active_deployment',
           deploymentId: row.deploymentId,
@@ -403,15 +399,7 @@ async function resourcePage(
     .orderBy(asc(resources.id))
     .limit(PAGE_SIZE + 1);
   const pageRows = rows.slice(0, PAGE_SIZE);
-  const result: PageResult = {
-    processed: pageRows.length,
-    applications: [],
-    blockers: [],
-    cancelRequested: [],
-    deletedApplications: [],
-    nextCursor: null,
-    truncated: rows.length > PAGE_SIZE,
-  };
+  const result = emptyPage(pageRows.length, rows.length > PAGE_SIZE);
   for (const resource of pageRows) {
     try {
       const application = await getContainerApplication(

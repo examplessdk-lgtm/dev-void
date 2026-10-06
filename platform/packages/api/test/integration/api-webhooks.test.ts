@@ -57,14 +57,14 @@ const WEBHOOK_SECRET = 'test-webhook-secret';
 const INGRESS_SECRET = 'test-purpose-separated-ingress-secret';
 const DELIVERY_ID = '72d3162e-cc78-11e3-81ab-4c9367dc0958';
 
-// The push handler now makes a live GitHub compare call to detect a stale
+// The push handler makes a live GitHub compare call to detect a stale
 // out-of-order push (`getBranchHeadComparisonStatus`). Stub the helper so tests
 // never hit the network. `compareStatus` controls its return for the next push.
 // The handler is fail-CLOSED: it builds ONLY when the push IS the current branch
 // head ('identical') and skips every other verdict — 'ahead' (stale), 'behind'
 // (branch moved backward off the sha — abandoned commit), 'diverged' (off-branch),
 // and null (compare API unreachable). The default is 'identical' (the push IS the
-// head) so every pre-existing push test still creates its build. Tests exercising
+// head) so push tests that don't exercise the gate create their build. Tests exercising
 // the freshness gate set it to 'ahead'/'behind'/'diverged'/null (all skip).
 let compareStatus: string | null = 'identical';
 function setCompareStatus(status: string | null): void {
@@ -102,11 +102,11 @@ function setCompareSideEffect(fn: (() => Promise<void>) | null): void {
   compareSideEffect = fn;
 }
 
-// The branch-delete handler now re-verifies current git state via
+// The branch-delete handler re-verifies current git state via
 // `getBranchExistence` before cancelling (a stale/out-of-order delete must not
 // clobber a valid recreated-branch build). Stub it so tests never hit the
-// network. The default is 'absent' (the branch is confirmed gone) so the
-// pre-existing branch-delete tests, which expect cancellation, keep passing.
+// network. The default is 'absent' (the branch is confirmed gone), so
+// branch-delete tests cancel unless they override it.
 // Tests exercising the staleness gate set 'present' (recreated) or 'unknown'
 // (unconfirmed) — both must fail closed and skip cancellation.
 let branchExistence: 'present' | 'absent' | 'unknown' = 'absent';
@@ -176,9 +176,8 @@ vi.mock('../../src/github/installation-repos.ts', () => ({
 let env: TestEnv;
 
 // Build a standalone app that mounts the webhook router under /webhooks with
-// the same per-request `db` middleware index.ts installs. The parent
-// integrator wires these routes into index.ts in a later step; the router is
-// tested here in isolation against the shared test env.
+// the same per-request `db` middleware index.ts installs, so the router is
+// tested in isolation against the shared test env.
 function makeApp(overrideEnv: TestEnv): { app: Hono<ApiEnv>; appEnv: TestEnv } {
   const app = new Hono<ApiEnv>();
   app.use('*', async (context, next) => {
@@ -226,7 +225,7 @@ async function createGitHubConnection(
 }
 
 // Seed an ACTIVE github_installations row. The push resolver
-// (`getGitHubConnectionsByRepo`) now INNER JOINs github_installations and
+// (`getGitHubConnectionsByRepo`) INNER JOINs github_installations and
 // requires status='active' plus repo membership, so every push test that
 // expects a build must seed one. Mirrors the OIDC test's `seedActiveInstallation`:
 // pass `repositories` for a `selected` install (membership enforced) or leave it
@@ -350,12 +349,12 @@ afterAll(async () => {
 beforeEach(async () => {
   await clearBuildTables(env.db);
   await clearTables(env.db);
-  // Default to the head verdict so pre-existing push tests build as before.
+  // Default to the head verdict so push tests build.
   setCompareStatus('identical');
   setCompareStatusByBranch(null);
   armCompareConcurrencyProbe(0);
   setCompareSideEffect(null);
-  // Default to 'absent' so pre-existing branch-delete tests still cancel.
+  // Default to 'absent' so branch-delete tests cancel.
   setBranchExistence('absent');
   // Default the refetch to an empty 'selected' result; tests that exercise the
   // all→selected refetch set their own.
@@ -1101,9 +1100,8 @@ describe('POST /webhooks/github', () => {
     expect(installation!.repository_selection).toBe('all');
   });
 
-  // Regression (fallout of the all-install empty-cache fix): when an `all`
-  // install is narrowed to `selected`, the cached `repositories` array is empty
-  // by design, so applying the event's removed/added delta to it would persist
+  // When an `all` install is narrowed to `selected`, the cached `repositories`
+  // array is empty by design, so applying the event's removed/added delta to it would persist
   // `selected` with NO kept repos — silently breaking builds for repos the user
   // kept. The handler must instead REFETCH the authoritative accessible set.
   it('refetches the repo list when an all install narrows to selected', async () => {
@@ -1143,8 +1141,8 @@ describe('POST /webhooks/github', () => {
     expect(ids).toEqual([11, 22]);
   });
 
-  // Regression: a STALE all→selected delivery arriving after the user already
-  // switched the App back to `all`. The refetch authoritatively reports `all`, so
+  // A STALE all→selected delivery arriving after the user already switched the
+  // App back to `all`. The refetch authoritatively reports `all`, so
   // every repo is still covered — the stale `repositories_removed` must NOT cancel
   // the in-flight build for a still-covered repo (that would revoke a valid token
   // + tear down a valid container).
@@ -1625,8 +1623,7 @@ describe('POST /webhooks/github', () => {
 
     // A transient Hyperdrive/Postgres failure on the deployment lookup must NOT
     // skip the terminal write — else the build stays ACTIVE, keeps honoring its
-    // deploy token, and pins the user's slot until the hourly reaper. Pre-fix the
-    // throw rejected the handler before markBuildTerminalIfActive ran.
+    // deploy token, and pins the user's slot until the hourly reaper.
     const dbModule = await import('../../src/db.ts');
     const spy = vi
       .spyOn(dbModule, 'getDeploymentByProjectAndCommit')
@@ -1652,7 +1649,7 @@ describe('POST /webhooks/github', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // a GitHub `run_id` is unique only WITHIN a repository, so a workflow_run
+  // A GitHub `run_id` is unique only WITHIN a repository, so a workflow_run
   // webhook for repo X must NEVER finalize repo Y's build that happens to share
   // the numeric run_id. The handler resolves the build scoped to the connected
   // project of the payload's repository.
@@ -1720,7 +1717,7 @@ describe('POST /webhooks/github', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // one repo can back MULTIPLE github_actions projects (matrix / multiple
+  // One repo can back MULTIPLE github_actions projects (matrix / multiple
   // --project jobs sharing one run_id+attempt, distinct project_ids). GitHub
   // fires workflow_run:completed ONCE, so the handler must finalize EVERY
   // matching build — not stop at the first connection — or the other projects'
@@ -1808,7 +1805,7 @@ describe('POST /webhooks/github', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // a RERUN of a completed run produces a NEW active build alongside the
+  // A RERUN of a completed run produces a NEW active build alongside the
   // prior terminal row (same project + run_id, incremented run_attempt). The
   // workflow_run webhook for the rerun (run_attempt 2) must finalize the ACTIVE
   // rerun build, not re-touch the old terminal row.
@@ -1966,7 +1963,7 @@ describe('POST /webhooks/github', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // connection resolution keys on the IMMUTABLE repository id. A push or
+  // Connection resolution keys on the IMMUTABLE repository id. A push or
   // workflow_run whose full_name now matches but whose repository.id differs
   // from the connected id (a deleted-and-recreated repo reusing the name) must
   // NOT deploy; a renamed repo (same id, new full_name) must still resolve.
@@ -2280,7 +2277,7 @@ describe('POST /webhooks/github', () => {
     expect((await getBuild(env.db, build.id))!.status).toBe('building');
   });
 
-  // The push resolver is now revocation-aware. A delayed/redelivered
+  // The push resolver is revocation-aware. A delayed/redelivered
   // signed push that arrives AFTER the App is suspended/uninstalled (or the repo
   // dropped from a `selected` install) must resolve no connection and build
   // nothing, even within the installation-token cache window.
@@ -2419,7 +2416,7 @@ describe('POST /webhooks/github', () => {
 //   * a newer push supersedes older STILL-QUEUED builds for the same
 //     project+branch (so the newest commit deploys, not whichever finishes last)
 //   * a webhook redelivery for a commit already in flight must NOT double-build
-//   * an already-RUNNING build for an OLDER commit IS now superseded too:
+//   * an already-RUNNING build for an OLDER commit IS superseded too:
 //     leaving it active would keep a live deploy token (it could publish a stale
 //     commit) and pin a concurrency slot
 // ---------------------------------------------------------------------------
@@ -2508,7 +2505,7 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
     const afterCount = (await env.db.select().from(builds)).length;
     expect(afterCount).toBe(beforeCount);
 
-    // A running build for an OLDER commit IS now cancelled. Flip bbb to
+    // A running build for an OLDER commit IS cancelled. Flip bbb to
     // building, then push a new commit ccc. The building bbb build is superseded
     // (cancelled) — revoking its deploy token + freeing its slot — and its DO is
     // torn down via the cancelBuild RPC; a new ccc build is queued.
@@ -2723,12 +2720,11 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
     expect(afterCount).toBe(beforeCount);
   });
 
-  // The supersede helper now returns `{ build: null, skipped: 'config-changed' }`
+  // The supersede helper returns `{ build: null, skipped: 'config-changed' }`
   // when a concurrent PATCH /projects/:id/github changed the connection's
   // branch/executor first. That null is db-layer-authoritative (see db-builds
-  // tests); here we confirm the HTTP handler tolerates the normal (non-skip) path
-  // unchanged — a matching push still enqueues a build and returns its id, so the
-  // added `if (build)` guard didn't regress the happy path.
+  // tests); here we confirm that on the normal (non-skip) path a matching push
+  // still enqueues a build and returns its id.
   it('push still returns a build id on the normal (non-skipped) path (caller)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'wh-f23-2-caller');
@@ -2750,7 +2746,7 @@ describe('POST /webhooks/github — push idempotency + latest-wins', () => {
   });
 });
 
-// Regression for the orphaned-queued-build path: the webhook push handler pokes
+// Orphaned-queued-build path: the webhook push handler pokes
 // BUILD_SCHEDULER best-effort after inserting the row, and the DO lets its alarm
 // lapse on an empty queue. If that poke fails the row would sit `queued` with no
 // alarm to drain it. The hourly cron tier must re-arm the scheduler whenever a
@@ -2861,7 +2857,7 @@ describe('scheduled() re-arms BUILD_SCHEDULER for orphaned queued builds', () =>
 });
 
 // ---------------------------------------------------------------------------
-// the hourly tier must reap GitHub Actions builds stuck ACTIVE far past
+// The hourly tier must reap GitHub Actions builds stuck ACTIVE far past
 // any plan's build timeout. A missed workflow_run completion (or a disconnect
 // mid-run) would otherwise pin a concurrency slot forever. Container builds are
 // handled by their own DO timeout and must NOT be reaped here.
@@ -3128,7 +3124,7 @@ describe('POST /webhooks/github — revoke builds on App removal', () => {
   });
 
   it('does NOT downgrade an all install or revoke builds on a stale selected removal that missed a concurrent widen', async () => {
-    // Case A regression: a stale `installation_repositories:removed` delivery that
+    // A stale `installation_repositories:removed` delivery that
     // says `selected` arrives AFTER the install was widened to `all`. Its pre-tx
     // snapshot still read `selected`, so the `all`→`selected` refetch gate never
     // fired (refetched === null). The handler must decide the persisted selection
@@ -3826,7 +3822,7 @@ describe('POST /webhooks/github — CAS workflow_run completion', () => {
 // in-flight build for the DELETED branch still holds a live deploy token (the
 // guard revokes a token only once its bound build is no longer active), so
 // it could keep publishing the deleted branch's SHA until its token TTL / the
-// reaper. The push handler now terminalizes those builds (scoped to the deleted
+// reaper. The push handler terminalizes those builds (scoped to the deleted
 // branch + this repo) and tears down their container DOs, mirroring the App
 // removal / repo-removal revocation paths. Other branches and terminal builds
 // are left untouched.
@@ -4009,12 +4005,10 @@ describe('POST /webhooks/github — revoke builds on branch delete', () => {
     expect(cancelledIds).not.toContain(done.id);
   });
 
-  // regression — GitHub does NOT guarantee webhook ordering. If the
-  // branch was deleted, recreated, and a NEW valid build enqueued, a LATE delete
+  // GitHub does NOT guarantee webhook ordering. If the branch was deleted, recreated, and a NEW valid build enqueued, a LATE delete
   // event must NOT cancel that build. The handler re-verifies current git state
   // (`getBranchExistence`) and skips cancellation unless the branch is confirmed
   // absent. Here the branch is currently PRESENT (recreated) — the build stays.
-  // Without the existence gate this build would be wrongly cancelled.
   it('does NOT cancel a build when the branch currently exists (recreated; stale delete)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'f18-4-recreated');
@@ -4056,7 +4050,7 @@ describe('POST /webhooks/github — revoke builds on branch delete', () => {
     expect(cancelledIds).not.toContain(inflight.id);
   });
 
-  // fail-closed — when current git state cannot be confirmed
+  // Fail-closed — when current git state cannot be confirmed
   // ('unknown': transient failure / no-access), the handler does NOT cancel. The
   // original in-flight build's exposure is already bounded by the deploy-token
   // TTL + the hourly reaper, so it is safer to leave it than risk clobbering a
@@ -4303,14 +4297,12 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     expect(cancelledIds).toContain(build.id);
   });
 
-  // EXACT-HOLE regression (Task 19): a member_removed(X) whose affected-user set
-  // is EMPTY (X has no oauth link and no membership proof-id row) must STILL write
+  // A member_removed(X) whose affected-user set is EMPTY (X has no oauth link and no membership proof-id row) must STILL write
   // a tombstone for (each org install, github_account_id=X). This is the pre-mint
   // hole: a soon-to-be-removed member pre-mints a join_code + connect_grant
   // carrying X while still in the org, WITHOUT any Void user/membership/oauth-link,
   // so there is nobody to sever — but the durable tombstone must be recorded or the
   // post-removal replay of those artifacts creates an auto-deploying connection.
-  // The old code early-returned here and wrote ZERO tombstones.
   it('EXACT HOLE: writes a tombstone for (each org install, X) even when NO Void user is affected', async () => {
     const X = '99999'; // removed GitHub id: NO oauth link, NO membership proof-id
     // Two installs under ORG so we can assert the tombstone lands on EACH.
@@ -4341,9 +4333,8 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     });
 
     expect(res.status).toBe(200);
-    // No early-return: the tx ran and stamped the tombstone.
     expect(await res.json()).toEqual({ ok: true });
-    // The hole is closed: a tombstone for (each ORG install, X) now exists.
+    // A tombstone for (each ORG install, X) exists.
     expect(await getInstallationRevocationAt(env.db, '8110', X)).not.toBeNull();
     expect(await getInstallationRevocationAt(env.db, '8111', X)).not.toBeNull();
     // Scope: the other org's install is NOT tombstoned.
@@ -4352,12 +4343,11 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     expect(await getGitHubConnection(env.db, project.id)).not.toBeNull();
   });
 
-  // R8-1 corrected model (was "F1: severs a deferred-bind member resolved by
-  // membership PROOF-ID"). A browser-proof-X membership does NOT back a connection,
-  // so X's removal must NOT sever a connection reached only via that membership —
-  // it only voids the listing membership. The old union code severed it; that was
-  // an over-reach on an UNREACHABLE state (the connect gate can never mint a
-  // connection for a user whose OWN linked GitHub id is not the grant id).
+  // A browser-proof-X membership does NOT back a connection, so X's removal must
+  // NOT sever a connection reached only via that membership — it only voids the
+  // listing membership. Such a connection is an UNREACHABLE state anyway (the
+  // connect gate can never mint a connection for a user whose OWN linked GitHub
+  // id is not the grant id).
   it('does NOT sever a connection for a member pulled in ONLY by a browser-proof-X membership; voids only the X membership + writes the tombstone', async () => {
     // X is the removed GitHub id with NO oauth link — getUserByOAuthAccount('github',
     // X) resolves nobody. V is a google-only Void account (NOT oauth-linked to X)
@@ -4418,10 +4408,9 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     expect(cancelledIds).not.toContain(build.id);
   });
 
-  // Corrected model (was "F1 UNION: severs BOTH ..."). Only the OAUTH-X user's
-  // connection is severed; a distinct browser-proof-X membership only gets its
-  // listing row voided — its owner's connection (oauth-backed, not by the
-  // membership) is spared. The old union code severed both; V's connection is
+  // Only the OAUTH-X user's connection is severed; a distinct browser-proof-X
+  // membership only gets its listing row voided — its owner's connection
+  // (oauth-backed, not by the membership) is spared. V's connection is
   // unreachable via the connect gate anyway (Threat-L1).
   it('severs the oauth-X user AND voids a distinct browser-proof-X membership, but spares that member’s oauth-backed connection', async () => {
     // X is the removed GitHub id. U is oauth-linked to X (arm a) AND holds an
@@ -4484,13 +4473,11 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     expect(await getInstallationRevocationAt(env.db, '8200', X)).not.toBeNull();
   });
 
-  // R8-1 regression: the same Void user holds an X-keyed membership on one org
-  // install AND a legit Z-backed connection on a DIFFERENT org install (X != its
-  // oauth id Z). member_removed(X) must void only the X membership and leave the
-  // Z-backed connection + its in-flight build fully intact. The old union code
-  // pulled the user in via the browser-proof membership and cut its valid Z-backed
-  // connection.
-  it('R8-1: spares a Z-backed connection when the SAME user’s X-keyed membership is voided (browser-proof ≠ oauth id)', async () => {
+  // The same Void user holds an X-keyed membership on one org install AND a
+  // legit Z-backed connection on a DIFFERENT org install (X != its oauth id Z).
+  // member_removed(X) must void only the X membership and leave the Z-backed
+  // connection + its in-flight build fully intact.
+  it('spares a Z-backed connection when the SAME user’s X-keyed membership is voided (browser-proof ≠ oauth id)', async () => {
     const X = '3330001';
     const Z = '3330002';
     const v = await createTestUser(env.db, 'org-r8-v', 'github', Z);
@@ -4761,7 +4748,7 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
   });
 
   it('ignores payloads missing organization.id or membership.user.id', async () => {
-    const user = await createTestUser(env.db, 'org-missing', 'github', G);
+    await createTestUser(env.db, 'org-missing', 'github', G);
     await seedOrgInstall('8180', ORG);
 
     const { app, appEnv } = recordingApp();
@@ -4782,11 +4769,11 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     expect(await resNoUser.json()).toEqual({ ok: true, ignored: 'organization: missing ids' });
   });
 
-  // Monotonic revocation (Task 14): member_removed writes a durable tombstone for
+  // Monotonic revocation: member_removed writes a durable tombstone for
   // (each org install, removed user), so a later replay of a pre-removal
   // join_code/connect_grant (iat <= revoked_at) is rejected forever after.
   it('records a revocation tombstone for every org install of the removed user', async () => {
-    const user = await createTestUser(env.db, 'org-tomb', 'github', G);
+    await createTestUser(env.db, 'org-tomb', 'github', G);
     // Two installs under ORG (both should get a tombstone); one under ORG2 (must NOT).
     await seedOrgInstall('8190', ORG);
     await seedOrgInstall('8191', ORG);
@@ -4801,8 +4788,8 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
     });
     expect(res.status).toBe(200);
 
-    // Both ORG installs carry a tombstone (keyed by the removed GitHub id G,
-    // Task 19) stamped at (≈) the removal moment.
+    // Both ORG installs carry a tombstone (keyed by the removed GitHub id G)
+    // stamped at (≈) the removal moment.
     const t8190 = await getInstallationRevocationAt(env.db, '8190', G);
     const t8191 = await getInstallationRevocationAt(env.db, '8191', G);
     expect(t8190).not.toBeNull();
@@ -4813,7 +4800,7 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
   });
 
   it('redelivery keeps a single tombstone and never regresses revoked_at (monotonic)', async () => {
-    const user = await createTestUser(env.db, 'org-tomb-idem', 'github', G);
+    await createTestUser(env.db, 'org-tomb-idem', 'github', G);
     await seedOrgInstall('8195', ORG);
 
     const { app, appEnv } = recordingApp();
@@ -4838,12 +4825,6 @@ describe('POST /webhooks/github — organization member_removed revocation', () 
 // ---------------------------------------------------------------------------
 // GitHub's "Re-run" button on the Void Build check run (`check_run:rerequested`)
 // and "Re-run all checks" (`check_suite:rerequested`).
-//
-// Before this, the webhook had no `check_run` case at all: the button rendered,
-// the click delivered an event, and the API answered "unhandled" — so the only
-// way to retry a failed build was to push a new commit. Build bld_33gs31a2x6qj
-// failed on a stalled source download and its repo's `main` sat on the failing
-// commit with no way to retry it.
 //
 // The rerun reuses the PUSH pipeline, so it inherits the freshness gate: a rerun
 // can never deploy a commit a push could not.
@@ -5449,7 +5430,7 @@ describe('POST /webhooks/github — rerun from the check run', () => {
       branch: 'main',
     });
     // The project is LIVE on exactly this commit, so the supersede tx REUSES the
-    // completed row and returns it non-null — which used to read as an enqueue.
+    // completed row and returns it non-null — which must not read as an enqueue.
     await createTestDeployment(env.db, project.id, 'live', undefined, undefined, {
       commit: 'cafe1234',
     });

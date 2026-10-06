@@ -23,16 +23,11 @@ export class VoidAssetRewriteError extends Error {
   }
 }
 
-/**
- * Hono environment type for Void workers.
- *
- * Includes standard Cloudflare bindings plus request-scoped auth
- * variables populated by Better Auth middleware.
- */
+/** Hono `Variables` for Void workers, including auth values populated by Better Auth middleware. */
 export interface CloudContextVariables {
   user: AuthUser | null;
   session: AuthSession | null;
-  headDefaults?: import('../pages/head.ts').HeadDescriptor;
+  headDefaults?: HeadDescriptor;
   [key: string]: unknown;
 }
 
@@ -154,12 +149,10 @@ export type RenderAssetTags = {
   body: string;
 };
 type RenderFn = (c: CloudContext, assetTags: RenderAssetTags) => Response | Promise<Response>;
-type JobController = ScheduledController;
-type JobExecutionContext = ExecutionContext;
 type ScheduledFn = (
-  controller: JobController,
+  controller: ScheduledController,
   env: CloudEnv['Bindings'],
-  ctx: JobExecutionContext,
+  ctx: ExecutionContext,
 ) => unknown | Promise<unknown>;
 
 export type QueueRetryOptions = { delaySeconds?: number };
@@ -211,7 +204,7 @@ export type TypedHandler<V extends ValidatorSlots = {}, R = unknown> = {
 /**
  * Define a route handler, optionally composed with per-route middleware.
  *
- * Single argument: identity wrapper (backwards compatible).
+ * Single argument: identity wrapper.
  * Multiple arguments: middleware chain + final handler, composed at runtime.
  */
 export function defineHandler<R>(

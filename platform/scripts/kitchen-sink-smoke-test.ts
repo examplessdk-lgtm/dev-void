@@ -154,9 +154,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     return { ctx, page };
   }
 
-  // -----------------------------------------------------------------------
-  // 1. Home SSR + asset caching
-  // -----------------------------------------------------------------------
   void it('1 — home SSR + asset caching', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -212,9 +209,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 2. SPA navigation (no full reload)
-  // -----------------------------------------------------------------------
   void it('2 — SPA navigation', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -225,7 +219,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         (window as MarkerWindow).__SPA_MARKER = true;
       });
 
-      // Click "DB" link
       await page.click('a[href="/db"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('DB'), {
         timeout: TIMEOUT,
@@ -236,7 +229,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       const marker = await page.evaluate(() => (window as MarkerWindow).__SPA_MARKER);
       assert.strictEqual(marker, true, 'SPA marker survived navigation');
 
-      // Click "KV" link
       await page.click('a[href="/kv"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('KV'), {
         timeout: TIMEOUT,
@@ -247,15 +239,11 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 3. Layout persistence across navigation
-  // -----------------------------------------------------------------------
   void it('3 — layout persistence', async () => {
     const { ctx, page } = await freshPage();
     try {
       await goto(page, '/');
 
-      // Stamp the nav element
       await page.evaluate(() => {
         const nav = document.querySelector('nav') as StampedNav | null;
         if (nav) {
@@ -263,7 +251,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         }
       });
 
-      // Navigate to /env
       await page.click('a[href="/env"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Env'), {
         timeout: TIMEOUT,
@@ -280,9 +267,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 4. DB — create and delete a note
-  // -----------------------------------------------------------------------
   void it('4 — DB CRUD', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -290,17 +274,14 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
 
       await goto(page, '/db');
 
-      // Fill form
       await page.fill('input[placeholder="Note title"]', title);
       await page.fill('input[placeholder="Note body"]', 'test body');
       await page.click('button:has-text("Add Note")');
 
-      // Wait for the note to appear
       await waitForText(page, title);
       const body = await page.textContent('body');
       assert.ok(body?.includes('test body'), 'page contains note body');
 
-      // Delete it
       try {
         await deleteRowContaining(page, title);
         await waitForTextGone(page, title);
@@ -312,9 +293,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 5. KV — set and delete a key
-  // -----------------------------------------------------------------------
   void it('5 — KV set/lookup/delete', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -353,15 +331,11 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 6. Storage — upload and delete a file
-  // -----------------------------------------------------------------------
   void it('6 — Storage upload/delete', async () => {
     const { ctx, page } = await freshPage();
     try {
       await goto(page, '/storage');
 
-      // Use fileChooser API to upload a file
       const [fileChooser] = await Promise.all([
         page.waitForEvent('filechooser'),
         page.click('input[type="file"]'),
@@ -375,7 +349,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       await page.click('button:has-text("Upload")');
       await waitForText(page, 'smoke-test.txt');
 
-      // Delete
       try {
         await deleteRowContaining(page, 'smoke-test.txt');
         await waitForTextGone(page, 'smoke-test.txt');
@@ -387,9 +360,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 7. Env — displays bindings
-  // -----------------------------------------------------------------------
   void it('7 — Env bindings', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -403,9 +373,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 8. Queues — send message and see consumer result
-  // -----------------------------------------------------------------------
   void it('8 — Queues', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -437,9 +404,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 9. Auth — register, login, protected route, logout
-  // -----------------------------------------------------------------------
   void it('9 — Auth flow', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -451,23 +415,18 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       const body = await page.textContent('body');
       assert.ok(body?.includes('Not logged in'), "shows 'Not logged in'");
 
-      // Switch to Register tab
       await page.click('button:has-text("Register")');
       await page.waitForSelector('input[placeholder="Name"]', { timeout: TIMEOUT });
 
-      // Fill registration form
       await page.fill('input[placeholder="Email"]', email);
       await page.fill('input[placeholder="Password"]', password);
       await page.fill('input[placeholder="Name"]', 'Smoke User');
-      // Click the Register submit button (inside the register section)
       await page.click('section:has(h2:has-text("Email Register")) button[type="submit"]');
 
-      // Wait for logged-in state
       await waitForTextGone(page, 'Not logged in');
       const afterReg = await page.textContent('body');
       assert.ok(afterReg?.includes(email), 'shows email after registration');
 
-      // Test protected route
       await page.click('button:has-text("GET /api/profile")');
       await page.waitForFunction(
         () => document.querySelector('pre')?.textContent?.includes('user'),
@@ -479,11 +438,9 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
       assert.ok(pre?.includes('user'), "profile response contains 'user'");
       assert.ok(pre?.includes(email), 'profile response contains email');
 
-      // Logout
       await page.click('button:has-text("Logout")');
       await waitForText(page, 'Not logged in');
 
-      // Re-login
       await page.click('button:has-text("Login")');
       await page.waitForSelector(
         'section:has(h2:has-text("Email Login")) input[placeholder="Email"]',
@@ -503,9 +460,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 10. Cron — heartbeat is running
-  // -----------------------------------------------------------------------
   void it('10 — Cron heartbeat', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -521,9 +475,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
     }
   });
 
-  // -----------------------------------------------------------------------
-  // 11. ISR Revalidation
-  // -----------------------------------------------------------------------
   void it('11 — ISR revalidation', async () => {
     const { ctx, page } = await freshPage();
     try {
@@ -544,7 +495,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         'initial rendered timestamp is valid',
       );
 
-      // Click "Revalidate /revalidate"
       const completed = page.waitForResponse(
         (response) =>
           new URL(response.url()).pathname === '/revalidate' &&
@@ -558,7 +508,6 @@ void describe(`kitchen-sink smoke (${BASE})`, { concurrency: true }, () => {
         `Revalidation action failed (HTTP ${actionResponse.status()}); inspect the app and provider purge logs.`,
       );
 
-      // Wait for button to return to non-disabled state
       await page.waitForFunction(
         () => {
           const button = Array.from(document.querySelectorAll('button')).find((candidateButton) =>

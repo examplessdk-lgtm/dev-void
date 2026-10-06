@@ -26,10 +26,6 @@ export async function readPgAppliedMigrations(client: PgClient): Promise<Array<s
   }
 }
 
-/**
- * Apply unapplied SQL migrations via a connected PostgreSQL client.
- * Each migration runs in its own transaction (BEGIN/COMMIT).
- */
 export async function getPgAppliedMigrations(url: string): Promise<Array<string>> {
   const { Client } = await import('pg');
   const client = new Client({ connectionString: url });
@@ -41,6 +37,10 @@ export async function getPgAppliedMigrations(url: string): Promise<Array<string>
   }
 }
 
+/**
+ * Apply unapplied SQL migrations via a connected PostgreSQL client.
+ * Each migration runs in its own transaction (BEGIN/COMMIT).
+ */
 export async function applyPgMigrations(
   client: PgClient,
   migrations: Array<{ name: string; sql: string }>,

@@ -56,6 +56,20 @@ function serializeValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function toPutOptions(options: PutOptions | undefined): KVNamespacePutOptions {
+  const opts: KVNamespacePutOptions = {};
+  if (options?.ttl) {
+    opts.expirationTtl = options.ttl;
+  }
+  if (options?.expiration) {
+    opts.expiration = options.expiration;
+  }
+  if (options?.metadata) {
+    opts.metadata = options.metadata;
+  }
+  return opts;
+}
+
 function getListCursor<M>(
   result: KVNamespaceListResult<M> & Partial<{ cursor: string }>,
 ): string | undefined {
@@ -72,17 +86,7 @@ function createKVMap<T>(getNS: () => KVNamespace, prefix: string): KVMap<T> {
     },
 
     async put(key, value, options) {
-      const opts: KVNamespacePutOptions = {};
-      if (options?.ttl) {
-        opts.expirationTtl = options.ttl;
-      }
-      if (options?.expiration) {
-        opts.expiration = options.expiration;
-      }
-      if (options?.metadata) {
-        opts.metadata = options.metadata;
-      }
-      await getNS().put(prefixed(key), serializeValue(value), opts);
+      await getNS().put(prefixed(key), serializeValue(value), toPutOptions(options));
     },
 
     async delete(key) {
@@ -125,17 +129,7 @@ function createKVClient(getNS: () => KVNamespace): KVClient {
     },
 
     async put(key, value, options) {
-      const opts: KVNamespacePutOptions = {};
-      if (options?.ttl) {
-        opts.expirationTtl = options.ttl;
-      }
-      if (options?.expiration) {
-        opts.expiration = options.expiration;
-      }
-      if (options?.metadata) {
-        opts.metadata = options.metadata;
-      }
-      await getNS().put(key, serializeValue(value), opts);
+      await getNS().put(key, serializeValue(value), toPutOptions(options));
     },
 
     async delete(key) {

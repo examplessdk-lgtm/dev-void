@@ -1,8 +1,4 @@
-import {
-  platformProjectHostname,
-  platformProjectHostnames,
-  readPlatformApplication,
-} from '@void/platform';
+import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
 import { and, eq, or, sql as drizzleSql } from 'drizzle-orm';
 import { type Context } from 'hono';
 import { findR2Assets, persistedR2AssetSizes } from '../asset-inventory.ts';
@@ -14,6 +10,7 @@ import {
   type AssetEntry,
   type AssetManifestEntry,
 } from '../assets.ts';
+import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import {
   restoreCronScheduler,
   snapshotCronScheduler,
@@ -31,7 +28,6 @@ import {
   countUserDeploymentsToday,
   getActiveDeployment,
   getInFlightDeploymentsExcluding,
-  TERMINAL_DEPLOYMENT_STATUSES,
   type Db,
 } from '../db.ts';
 import {
@@ -70,7 +66,7 @@ import {
   PROJECT_DELETING_ERROR_MESSAGE,
   SUPERSEDED_BUILD_ERROR_MESSAGE,
   assertDeploymentNotCanceled,
-  assertProjectNotDeleting,
+  assertDeploymentCanProceed,
 } from './guards.ts';
 import { migrateDeploymentWorker } from './migrate-worker.ts';
 import { publishStaticDeployment } from './publish-static.ts';
@@ -80,7 +76,7 @@ import { parseManifest, equalAssetManifests, parseAssetManifest } from './servin
 import {
   ASSET_GC_MAX_HASHES_PER_DEPLOY,
   ASSET_GC_LOCK_BATCH,
-  DEFAULT_DISPATCH_NAMESPACE,
+  projectPublicUrls,
 } from './shared.ts';
 import { uploadDeploymentWorker } from './upload-worker.ts';
 
@@ -134,8 +130,7 @@ export async function runDeploymentPipeline(input: {
   } = input;
   const planLimits = await resolvePlanLimits(context.get('db'), owner.plan);
 
-  // Construct the response stream — same NDJSON wire contract as the
-  // multipart path (heartbeats, progress events, `done`/`error`).
+  // NDJSON response stream: heartbeats, progress events, `done`/`error`.
   const encoder = new TextEncoder();
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -273,11 +268,7 @@ export async function runDeploymentPipeline(input: {
         }
         if (cutoverProtected) {
           const ownedDeployment = await getDeployment(tx, currentDeploymentId);
-          if (
-            !ownedDeployment ||
-            ownedDeployment.status !== 'compensating' ||
-            TERMINAL_DEPLOYMENT_STATUSES.includes(ownedDeployment.status)
-          ) {
+          if (ownedDeployment?.status !== 'compensating') {
             return;
           }
           const intent = parseCutoverMarker(
@@ -664,7 +655,7 @@ export async function runDeploymentPipeline(input: {
       }
       const finalManifestRaw = JSON.stringify(manifest);
 
-      // Host-scoped routing rules — same logic as multipart path.
+      // Host-scoped routing rules.
       const hostScopedRedirects = manifest.redirectRules?.some((r) => r.host) ?? false;
       const hostScopedFallbacks = manifest.fallbackRules?.some((r) => r.host) ?? false;
       if (hostScopedRedirects || hostScopedFallbacks) {
@@ -698,23 +689,14 @@ export async function runDeploymentPipeline(input: {
           (hash) => activeR2Sizes.get(hash) === declaredSizeByHash.get(hash),
         );
         if (sameManifest && sameAssets && sameScopedAssets) {
-          const application = readPlatformApplication(context.env);
           projectDomains ??= await getDomainsByProjectId(context.get('db'), projectId);
-          const activeDomains = projectDomains.filter((d) => d.status === 'active');
-          const fullUrl =
-            activeDomains.length > 0
-              ? `https://${activeDomains[0].hostname}`
-              : `https://${platformProjectHostname(project, application)}`;
-
+          const urls = projectPublicUrls(context.env, project, projectDomains);
           emit({ event: 'start', deploymentId: currentLiveDeployment.id });
           emit({
             event: 'done',
             deployment: currentLiveDeployment.id,
-            url: fullUrl,
-            urls: [
-              ...activeDomains.map((d) => `https://${d.hostname}`),
-              `https://${platformProjectHostname(project, application)}`,
-            ],
+            url: urls[0]!,
+            urls,
             assets: 0,
             workers: 0,
           });
@@ -726,8 +708,7 @@ export async function runDeploymentPipeline(input: {
 
       // Daily deploy-count limit. JSON-mode deploys don't write any KV/R2
       // bytes during this request (assets pre-existed direct-to-R2), so
-      // we can defer the cap check until AFTER the dedupe short-circuit
-      // — same as the multipart path's worker-backed branch.
+      // we can defer the cap check until AFTER the dedupe short-circuit.
       if (planLimits.deploysPerDay > 0) {
         const todayCount = await countUserDeploymentsToday(context.get('db'), owner.id);
         if (!isWithinLimit(planLimits.deploysPerDay, todayCount)) {
@@ -736,10 +717,10 @@ export async function runDeploymentPipeline(input: {
         }
       }
 
-      // Fill in the deployment record (same FOR UPDATE pattern as
-      // multipart). Once this completes the deployment row is no longer
-      // a precheck placeholder — every subsequent failure must transition
-      // it to a terminal status via the catch path.
+      // Fill in the deployment record under the project lock. Once this
+      // completes the deployment row is no longer a precheck placeholder —
+      // every subsequent failure must transition it to a terminal status via
+      // the catch path.
       deployment = await context.get('db').transaction(async (tx) => {
         await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
         const lockedProject = await getProject(tx, projectId);
@@ -796,24 +777,20 @@ export async function runDeploymentPipeline(input: {
           await updateDeploymentStatus(context.get('db'), deployment.id, 'uploading');
           currentStatus = 'uploading';
         }
-        await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-        await assertProjectNotDeleting(context.get('db'), projectId);
+        await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
         // JSON-mode CLI always sends the full assetManifest including
         // preflight-skipped paths; no server-side fill-in needed. Clone so
         // the cache-buster injection below mutates a fresh object rather
         // than the validated incoming map.
         const assetManifest: Record<string, AssetManifestEntry> = { ...incomingAssetManifest };
-        await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-        await assertProjectNotDeleting(context.get('db'), projectId);
 
         const isStaticOnly = !hasWorkerFiles;
         logger = logger.with({ branch: isStaticOnly ? 'static' : 'wfp' });
 
-        // CF dedupe-poisoning workaround: same as multipart path. WfP
-        // deploys with non-empty asset manifests inject a unique cache
-        // buster so CF's asset session always sees at least one novel
-        // hash. The buster's bytes still need to reach CF, so we put
+        // CF dedupe-poisoning workaround: WfP deploys with non-empty asset
+        // manifests inject a unique cache buster so CF's asset session always
+        // sees at least one novel hash. The buster's bytes still need to reach CF, so we put
         // them directly into `assetsByHash` (not into our R2 — they're
         // a deploy-local artifact, not a CLI-uploaded asset).
         if (!isStaticOnly && Object.keys(assetManifest).length > 0) {
@@ -1141,9 +1118,8 @@ export async function runDeploymentPipeline(input: {
     } finally {
       clearInterval(heartbeat);
       // Reap the placeholder deployment row if it never advanced past the
-      // initial 'pending' + null-manifest state. Same invariant as
-      // multipart: a row stuck at 'pending' with a manifest set is the
-      // bug class we want surfaced.
+      // initial 'pending' + null-manifest state. A row stuck at 'pending'
+      // with a manifest set is the bug class we want surfaced.
       //
       // A `canceling` placeholder means a `cancelDeployment` API call
       // raced an early-return path (asset-verify failure, quota check,

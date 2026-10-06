@@ -5,8 +5,7 @@ import {
 } from '@void/deploy-core';
 import { and, eq, sql as drizzleSql } from 'drizzle-orm';
 import { type Context } from 'hono';
-import { type AssetManifestEntry } from '../assets.ts';
-import { paginatedR2Delete } from '../assets.ts';
+import { paginatedR2Delete, type AssetManifestEntry } from '../assets.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
 import {
   getProject,
@@ -87,18 +86,17 @@ import {
  * JSON-mode (manifest-only) deploy handler — direct-to-R2 asset upload flow.
  *
  * Operates on a JSON request body. The CLI uploads asset bytes directly
- * to R2 via presigned PUTs (issued by the `/deploy/upload-urls` endpoint
- * above) BEFORE calling this handler, so the request body carries only:
+ * to R2 via presigned PUTs (issued by the `/deploy/upload-urls` endpoint)
+ * BEFORE calling this handler, so the request body carries only:
  *   - `manifest` (DeployManifest, must declare `assetManifestVersion: 2`)
  *   - `assetManifest` (path → { blake3, md5, size })
  *   - `source`, `commit`, `repositoryUrl`, `commitUrl`, `gitRef`, `preflight`
- *   - `vars` (optional plain-text bindings — same as `manifest.vars`)
  *   - `workerFiles` (base64-encoded module bytes for WfP deploys; absent for
  *     static-only deploys)
  *
  * The bytes for declared assets MUST already be in `STATIC_ASSETS_R2` under
- * `assets/${projectId}/${blake3}` — the handler does parallel `R2.head` to
- * verify before the deploy proceeds. A missing hash is a hard 400.
+ * `assets/${projectId}/${blake3}`; the deploy verifies them before it
+ * proceeds and fails on a missing hash.
  *
  * For static deploys, every asset's serving-manifest entry is `!{hash}` —
  * direct-to-R2 always lands in R2. For WfP deploys, asset bytes are fetched
@@ -190,12 +188,9 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
   // inserting a placeholder row.
   //
   // Stream the body through a counting TransformStream and let
-  // `Response.json()` handle the parse natively. The previous implementation
-  // collected chunks into an Array, copied them into a Uint8Array, decoded
-  // to a UTF-16 string, and ran JSON.parse — peaking at ~4× the body size
-  // in residency for a body that can legitimately reach 64 MiB. Native
-  // Response.json() consumes the stream incrementally and reuses internal
-  // buffers; the only retained allocation at the end is the parsed object.
+  // `Response.json()` parse it incrementally. Buffering, decoding, and
+  // JSON.parse-ing a body that can reach 64 MiB would hold several copies of
+  // it at once; native parsing retains only the parsed object.
   if (!context.req.raw.body) {
     return context.json({ error: 'request body is required' }, 400);
   }
@@ -448,12 +443,7 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
         400,
       );
     }
-    if (
-      typeof entry.size !== 'number' ||
-      !Number.isInteger(entry.size) ||
-      entry.size < 0 ||
-      !Number.isFinite(entry.size)
-    ) {
+    if (typeof entry.size !== 'number' || !Number.isInteger(entry.size) || entry.size < 0) {
       return context.json(
         {
           event: 'error',
@@ -489,21 +479,12 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
         400,
       );
     }
-    // Decode each base64 module to bytes and drop the source string from the
-    // parsed body before moving to the next entry. The previous implementation
-    // walked `for…of Object.entries(...)` over a captured snapshot, holding
-    // the entire `workerFiles` map (and thus every base64 string) live for
-    // the full loop. For a near-cap module that source string alone is ~43
-    // MiB UTF-16 (≈86 MiB), and the explicit `atob` + per-byte loop added a
-    // second 64 MiB latin1 string before the `Uint8Array` allocation —
-    // enough peak residency to push the isolate past 128 MiB on a single
-    // 32 MiB module. Iterating through `body.workerFiles` directly and
-    // `delete`-ing each property after decode lets V8 reclaim the source
-    // string before peak. We also prefer the (now-stage-4) `fromBase64`
-    // helper — single-allocation, no intermediate string — falling back to
-    // the previous loop for runtimes that don't expose it (e.g. Node-based
-    // tests; the production CF Workers compat date is 2026-02-12 and ships
-    // the helper natively).
+    // Decode each base64 module and `delete` its source string from the
+    // parsed body before the next entry so V8 can reclaim it. A near-cap
+    // module's base64 string is ~86 MiB as UTF-16; holding every source string
+    // for the whole loop can push the isolate past 128 MiB on a single 32 MiB
+    // module. `decodeBase64ToBytes` avoids a second intermediate string where
+    // the runtime supports it.
     const workerFilesMap = body.workerFiles as Record<string, unknown>;
     for (const filePath of Object.keys(workerFilesMap)) {
       const raw = workerFilesMap[filePath];
@@ -567,10 +548,6 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
       400,
     );
   }
-
-  // (env vars travel inside `manifest.vars`; the JSON-mode wire contract
-  // never accepted a top-level `body.vars` — every CLI version that ever
-  // hit this endpoint populated `manifest.vars` instead.)
 
   // Pre-validation done — now run the atomic precheck-and-claim
   // transaction. FOR UPDATE on the project row, 10-minute stale-deploy
@@ -687,6 +664,31 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
         (activeDeploy.status === 'cutover' || activeDeploy.status === 'compensating')
       ) {
         const protectedDeployment = activeDeploy;
+        const boundBuildIsActive = async (buildId: string): Promise<boolean> => {
+          try {
+            await assertBoundBuildStillActive(tx, buildId, projectId);
+            return true;
+          } catch (error) {
+            if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
+              return false;
+            }
+            throw error;
+          }
+        };
+        const promoteProtectedDeployment = async (): Promise<void> => {
+          const cutoverManifest = JSON.parse(protectedDeployment.manifest!) as DeployManifest;
+          await updateDeploymentStatus(tx, protectedDeployment.id, 'live', undefined, {
+            force: true,
+          });
+          await updateProjectType(
+            tx,
+            projectId,
+            resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
+          );
+          await setActiveDeployment(tx, projectId, protectedDeployment.id);
+          await markDeploymentRetained(tx, protectedDeployment.id, true);
+          recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };
+        };
         const [intentRaw, readyRaw, compensated] = await Promise.all([
           context.env.ROUTING.get(cutoverIntentKey(protectedDeployment.id)),
           context.env.ROUTING.get(cutoverReadyKey(protectedDeployment.id)),
@@ -720,17 +722,9 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
 
         if (activeDeploy && readyMatchesIntent) {
           let buildIsActive = true;
-          if (ready.buildId) {
-            try {
-              await assertBoundBuildStillActive(tx, ready.buildId, projectId);
-            } catch (error) {
-              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
-                buildIsActive = false;
-                protectedBuildInactive = true;
-              } else {
-                throw error;
-              }
-            }
+          if (ready.buildId && !(await boundBuildIsActive(ready.buildId))) {
+            buildIsActive = false;
+            protectedBuildInactive = true;
           }
           if (buildIsActive) {
             try {
@@ -744,18 +738,7 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
               }
             }
             if (buildIsActive) {
-              const cutoverManifest = JSON.parse(protectedDeployment.manifest!) as DeployManifest;
-              await updateDeploymentStatus(tx, protectedDeployment.id, 'live', undefined, {
-                force: true,
-              });
-              await updateProjectType(
-                tx,
-                projectId,
-                resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
-              );
-              await setActiveDeployment(tx, projectId, protectedDeployment.id);
-              await markDeploymentRetained(tx, protectedDeployment.id, true);
-              recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };
+              await promoteProtectedDeployment();
               reconciledMarkerKeys.push(
                 cutoverIntentKey(protectedDeployment.id),
                 cutoverReadyKey(protectedDeployment.id),
@@ -766,16 +749,12 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
         }
 
         if (activeDeploy) {
-          if (!protectedBuildInactive && intent?.buildId) {
-            try {
-              await assertBoundBuildStillActive(tx, intent.buildId, projectId);
-            } catch (error) {
-              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
-                protectedBuildInactive = true;
-              } else {
-                throw error;
-              }
-            }
+          if (
+            !protectedBuildInactive &&
+            intent?.buildId &&
+            !(await boundBuildIsActive(intent.buildId))
+          ) {
+            protectedBuildInactive = true;
           }
           const protectedUpdatedAtMs = databaseTimestampMs(protectedDeployment.updated_at);
           if (
@@ -856,16 +835,12 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
             protectedDeployment.status === 'cutover' &&
             !protectedBuildInactive &&
             !protectedAssetsMissing;
-          if (replayProtectedDeployment && recoveryMarker.buildId) {
-            try {
-              await assertBoundBuildStillActive(tx, recoveryMarker.buildId, projectId);
-            } catch (error) {
-              if (error instanceof Error && error.message === SUPERSEDED_BUILD_ERROR_MESSAGE) {
-                replayProtectedDeployment = false;
-              } else {
-                throw error;
-              }
-            }
+          if (
+            replayProtectedDeployment &&
+            recoveryMarker.buildId &&
+            !(await boundBuildIsActive(recoveryMarker.buildId))
+          ) {
+            replayProtectedDeployment = false;
           }
           if (replayProtectedDeployment) {
             let replayError: unknown;
@@ -880,18 +855,7 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
               replayError = error;
             }
             if (replayError === undefined) {
-              const cutoverManifest = JSON.parse(protectedDeployment.manifest!) as DeployManifest;
-              await updateDeploymentStatus(tx, protectedDeployment.id, 'live', undefined, {
-                force: true,
-              });
-              await updateProjectType(
-                tx,
-                projectId,
-                resolvePersistedDeploymentType(cutoverManifest, protectedDeployment),
-              );
-              await setActiveDeployment(tx, projectId, protectedDeployment.id);
-              await markDeploymentRetained(tx, protectedDeployment.id, true);
-              recoveredCutover = { ...protectedDeployment, status: 'live', retained: true };
+              await promoteProtectedDeployment();
             } else {
               await compensateRecovery('cutover replay failed and was compensated', replayError);
             }

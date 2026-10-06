@@ -391,8 +391,8 @@ describe('POST /projects/:id/email/destinations', () => {
   });
 
   it('rejects an over-long address before the rate limiter, CF, or the database see it', async () => {
-    // The loose regex accepts any length, so without a cap this reached CF
-    // and inserted a 100 KB `address` row. RFC 5321 bounds a deliverable
+    // The loose regex accepts any length, so only the cap keeps a 100 KB
+    // address away from CF and the database. RFC 5321 bounds a deliverable
     // address at 256 octets; the cap is the proxy's 320.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
@@ -490,7 +490,7 @@ describe('POST /projects/:id/email/destinations', () => {
     // the row lands platform-pending.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail(cfAlreadyVerified('recovered-tag', 'shared@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('recovered-tag', 'shared@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(res.status).toBe(201);
@@ -716,7 +716,7 @@ describe('GET /projects/:id/email/destinations', () => {
 
 describe('GET refresh against a recreated Cloudflare destination', () => {
   /**
-   * The state the reviewer's sequence ends in, built through the routes:
+   * The state this sequence ends in, built through the routes:
    *
    *   1. project A registers `alice` first on the account — a fresh CF
    *      create, so A waits on CLOUDFLARE's link (`pending` / `cf`, tag T1).
@@ -1229,7 +1229,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('cf-tag-owner', 'owner@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'owner@example.com', emailEnv());
 
@@ -1265,7 +1265,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(res.status).toBe(201);
@@ -1317,7 +1317,7 @@ describe('per-project verification (Option C + Option B)', () => {
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
     let cfVerifiedAt: string | null = null;
-    const fetchMock = mockCfWithEmail({
+    mockCfWithEmail({
       addEmailDestination: () => cfError('address already exists'),
       listEmailDestinations: () =>
         cfSuccess([cfRow('cf-tag-shared', 'shared@example.com', cfVerifiedAt)]),
@@ -1363,7 +1363,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail({
+    mockCfWithEmail({
       addEmailDestination: () => cfError('address already exists'),
       listEmailDestinations: () => cfSuccess([cfRow('cf-tag-owner', 'owner@example.com', null)]),
     });
@@ -1470,7 +1470,7 @@ describe('per-project verification (Option C + Option B)', () => {
       release = resolve;
     });
     const cfMocks = cfAlreadyVerified('cf-tag-shared', 'shared@example.com');
-    const fetchMock = mockCfWithEmail({
+    mockCfWithEmail({
       ...cfMocks,
       addEmailDestination: async () => {
         if (++arrived === 2) {
@@ -1549,7 +1549,7 @@ describe('per-project verification (Option C + Option B)', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     // `env` as-is — EMAIL_SENDER_DOMAIN unset.
     const res = await addDestination(project.id, user.jwt, 'shared@example.com', env);
@@ -1781,8 +1781,8 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
     // refreshes every row that is `pending` and NOT 'platform'-sourced against
     // exactly that list — so demoting `status` alone leaves the row sitting in
     // the refresh filter, and the owner's very next `void email destinations`
-    // silently re-promotes it, undoing the revoke. Re-sourcing the row to 'platform' is the half that
-    // makes it stick; this test fails without it.
+    // silently re-promotes it, undoing the revoke. Re-sourcing the row to
+    // 'platform' is what makes the revoke stick.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'rev-sticky');
     await env.db.insert(emailDestinations).values({
@@ -2060,7 +2060,7 @@ describe('GET /email/destinations/confirm', () => {
     const user = await createTestUser(env.db);
     await setUserEmail(user.id, 'owner@example.com');
     const project = await createTestProject(env.db, user.id);
-    const fetchMock = mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
+    mockCfWithEmail(cfAlreadyVerified('cf-tag-shared', 'shared@example.com'));
 
     const added = await addDestination(project.id, user.jwt, 'shared@example.com', emailEnv());
     expect(added.status).toBe(201);

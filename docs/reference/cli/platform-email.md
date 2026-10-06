@@ -42,9 +42,8 @@ has ended and the operation is at least 24 hours old, inspect the exact resource
 named by the preview and attest whether its write was `applied` or `not-applied`.
 Applied writes continue at the next step; not-applied writes retry the same
 persisted intent. The running platform version must match that intent, so restore
-the matching version before recovering an operation created by older code. The
-preview pins the step, attempt, connection and route generations, resource
-identity, and digest used by the apply request. Time alone never retries a write.
+the matching version before recovering an operation created by older code. Time
+alone never retries a write.
 
 `shared-recipients` discovers shared inbound addresses, provider rule names and
 IDs, and interrupted creation intents, including projects awaiting deletion.

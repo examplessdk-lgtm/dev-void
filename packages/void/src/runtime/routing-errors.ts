@@ -299,12 +299,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return chain;
   }
 
-  function __voidRenderDevErrorOverlay(
-    request: Request,
-    status: number,
-    title: string,
-    error: unknown,
-  ): string {
+  function __voidRenderDevErrorOverlay(status: number, title: string, error: unknown): string {
     const chain = __voidCollectErrorChain(error);
     const errorCountLabel = chain.length + (chain.length === 1 ? ' Error' : ' Errors');
     const sections = chain
@@ -574,17 +569,12 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return /<\/head\s*>/i.test(html) ? html.replace(/<\/head\s*>/i, css + '</head>') : css + html;
   }
 
-  function __voidRenderErrorPage(
-    request: Request,
-    status: number,
-    title: string,
-    error?: unknown,
-  ): string {
+  function __voidRenderErrorPage(status: number, title: string, error?: unknown): string {
     const heading = status + ': ' + title;
     const prefix = status + ': ';
     const overlay =
       __VOID_DEV && status === 500 && error
-        ? __voidRenderDevErrorOverlay(request, status, title, error)
+        ? __voidRenderDevErrorOverlay(status, title, error)
         : '';
     return `<!doctype html>
 <html lang="en">
@@ -662,7 +652,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       return new Response(title, { status });
     }
     return new Response(
-      request.method === 'HEAD' ? null : __voidRenderErrorPage(request, status, title, error),
+      request.method === 'HEAD' ? null : __voidRenderErrorPage(status, title, error),
       {
         status,
         headers: { 'content-type': 'text/html; charset=utf-8' },
@@ -683,27 +673,20 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
         const response: Response = await assets.fetch(request);
         if (response.ok) {
           const assetCss = __voidGetErrorAssetCss(error);
-          if (assetCss) {
+          const showOverlay =
+            __VOID_DEV && status === 500 && !!error && __voidShouldServeHtmlErrorPage(c.req.raw);
+          if (assetCss || showOverlay) {
             const html = __voidInjectErrorAssetCss(await response.text(), assetCss);
-            const body =
-              __VOID_DEV && status === 500 && error && __voidShouldServeHtmlErrorPage(c.req.raw)
-                ? __voidInjectDevErrorOverlay(
-                    html,
-                    __voidRenderDevErrorOverlay(c.req.raw, status, fallbackText, error),
-                  )
-                : html;
+            const body = showOverlay
+              ? __voidInjectDevErrorOverlay(
+                  html,
+                  __voidRenderDevErrorOverlay(status, fallbackText, error),
+                )
+              : html;
             return new Response(c.req.method === 'HEAD' ? null : body, {
               status,
               headers: { 'content-type': 'text/html; charset=utf-8' },
             });
-          }
-          if (__VOID_DEV && status === 500 && error && __voidShouldServeHtmlErrorPage(c.req.raw)) {
-            const overlay = __voidRenderDevErrorOverlay(c.req.raw, status, fallbackText, error);
-            const html = await response.text();
-            return new Response(
-              c.req.method === 'HEAD' ? null : __voidInjectDevErrorOverlay(html, overlay),
-              { status, headers: { 'content-type': 'text/html; charset=utf-8' } },
-            );
           }
           return new Response(response.body, {
             status,

@@ -1,7 +1,5 @@
 import { isRecord } from '@void/deploy-core';
 
-export { isRecord as isProxyBody };
-
 export function asString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }

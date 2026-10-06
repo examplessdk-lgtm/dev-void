@@ -286,8 +286,8 @@ export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefi
  *   - `routing.redirects` + `routing.rewrites`    → `redirectRules`
  *   - `routing.fallbacks`                         → `fallbackRules`
  *
- * Returns `fallbackRules === undefined` when empty so callers that default to
- * "no post-asset phase" behave identically to the old deploy code.
+ * Returns `fallbackRules === undefined` when empty, meaning "no post-asset
+ * phase".
  *
  * Duplicate linting is NOT called here (callers decide which warning surface
  * to use — CLI vs. Vite logger). `redundantForceOn3xx` is returned raw for

@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
-// Run after build:all. These assertions previously caused the integration
-// shards to rebuild the same playgrounds that the required build job builds.
+// Run after build:all, so integration shards do not rebuild these playgrounds.
 const artifacts = {
   analog: ['dist/analog/server/index.mjs', 'dist/analog/public'],
   astro: ['dist/server/entry.mjs'],

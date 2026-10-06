@@ -23,9 +23,9 @@
     },
   ],
   // Account-level send_email binding. No allowed_destination_addresses or
-  // destination_address — the proxy enforces per-project allowlists itself by
-  // reading email-allowlist:<projectId> from ROUTING KV. CF accepts sends to
-  // any verified destination on the platform CF account.
+  // destination_address — API admission decides which recipients each project
+  // may reach. CF accepts sends to any verified destination on the platform CF
+  // account.
   //
   // Wrangler does NOT inherit send_email (or vars) into a named env, and
   // `deploy` runs `--env production`, so every scope below repeats both.

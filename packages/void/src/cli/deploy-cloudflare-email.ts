@@ -18,6 +18,16 @@ import {
 } from './email-cloudflare.ts';
 import { writeProvisionedWranglerConfig, type ProvisionedWranglerPatch } from './wrangler.ts';
 
+/** Whether the root config carries the `send_email` binding Void writes. */
+export function hasVoidSendEmailBinding(rootConfig: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(rootConfig.send_email) &&
+    (rootConfig.send_email as Array<{ name?: unknown } | null>).some(
+      (binding) => binding?.name === SEND_EMAIL_BINDING,
+    )
+  );
+}
+
 /**
  * Immediately after setup, the local resolver can retain ENODATA while Cloudflare's public DNS
  * already serves the new subdomain MX. When the committed config is exactly setup's plan and
@@ -72,10 +82,7 @@ export async function runCloudflareEmailStep(
   const from = input.voidConfig.email?.from;
   if (!from) {
     const carriesEmailConfig =
-      (Array.isArray(input.rootConfig.send_email) &&
-        (input.rootConfig.send_email as Array<{ name?: unknown } | null>).some(
-          (binding) => binding?.name === SEND_EMAIL_BINDING,
-        )) ||
+      hasVoidSendEmailBinding(input.rootConfig) ||
       (Array.isArray(input.rootConfig.addresses) && input.rootConfig.addresses.length > 0);
     if (carriesEmailConfig) {
       log.info(

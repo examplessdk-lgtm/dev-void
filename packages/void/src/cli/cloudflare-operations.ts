@@ -85,7 +85,7 @@ export function resolveCloudflareOperationContext(
   root: string,
   runner?: CloudflareOperationRunner,
 ): CloudflareOperationContext {
-  const configPath = discoverRootWranglerConfig(root);
+  const configPath = materializeCloudflareConfig(root);
   if (!existsSync(configPath)) {
     throw new Error(`No Cloudflare config found at "${configPath}". Run \`void init\` first.`);
   }
@@ -453,18 +453,14 @@ export async function activateCloudflareExistingVersion(
   }
   const targetTriggerConfig = target.metadata.triggerConfig;
   const publishedTraffic = readWranglerPublishedTrafficSnapshot(context.configPath);
-  const currentTriggerConfig =
-    current?.metadata?.schema === 2
-      ? publishedTraffic
-        ? { ...current.metadata.triggerConfig, ...publishedTraffic }
-        : current.metadata.triggerConfig
-      : undefined;
+  const currentTriggerConfig = publishedTraffic
+    ? { ...current.metadata.triggerConfig, ...publishedTraffic }
+    : current.metadata.triggerConfig;
   const message = encodeCloudflareVersionMessage(target.metadata.migrations, targetTriggerConfig);
-  const expectedVersionId = current?.id ?? (await readActiveCloudflareVersionId(context));
   const ownerBeforeActivation = await readActiveCloudflareVersionId(context);
-  if (ownerBeforeActivation !== expectedVersionId) {
+  if (ownerBeforeActivation !== current.id) {
     throw new Error(
-      `Cloudflare production changed from ${expectedVersionId ?? 'no active version'} to ${ownerBeforeActivation ?? 'no active version'} before rollback activation. Retry from fresh deployment status.`,
+      `Cloudflare production changed from ${current.id} to ${ownerBeforeActivation ?? 'no active version'} before rollback activation. Retry from fresh deployment status.`,
     );
   }
   await run(
@@ -480,27 +476,27 @@ export async function activateCloudflareExistingVersion(
   );
   const knownTriggerConfigs: Record<string, typeof targetTriggerConfig> = {
     [target.id]: targetTriggerConfig,
+    [current.id]: currentTriggerConfig,
   };
-  if (currentTriggerConfig && current) {
-    knownTriggerConfigs[current.id] = currentTriggerConfig;
-  }
-  const triggers = await stabilizeCloudflareVersionTriggers({
-    runWrangler: context.runWrangler,
-    workerName: context.workerName,
-    configPath: context.configPath,
-    targetVersionId: target.id,
-    targetTriggerConfig,
-    previousTriggerConfig: currentTriggerConfig,
-    knownTriggerConfigs,
-    publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher(context),
-    publishEmptyCrons: createCloudflareEmptyCronPublisher(context),
-  });
-  if (triggers.ok && triggers.targetOwnsTraffic) {
-    writeWranglerPublishedTrafficSnapshot(context.configPath, {
-      workers_dev: targetTriggerConfig.workers_dev,
-      preview_urls: targetTriggerConfig.preview_urls,
-      routes: [...targetTriggerConfig.routes],
+  const stabilizeTriggers = (
+    targetVersionId: string,
+    targetConfig: typeof targetTriggerConfig,
+    previousConfig: typeof targetTriggerConfig,
+  ) =>
+    stabilizeCloudflareVersionTriggers({
+      runWrangler: context.runWrangler,
+      workerName: context.workerName,
+      configPath: context.configPath,
+      targetVersionId,
+      targetTriggerConfig: targetConfig,
+      previousTriggerConfig: previousConfig,
+      knownTriggerConfigs,
+      publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher(context),
+      publishEmptyCrons: createCloudflareEmptyCronPublisher(context),
     });
+  const triggers = await stabilizeTriggers(target.id, targetTriggerConfig, currentTriggerConfig);
+  if (triggers.ok && triggers.targetOwnsTraffic) {
+    recordPublishedTraffic(context.configPath, targetTriggerConfig);
     return;
   }
 
@@ -520,24 +516,9 @@ export async function activateCloudflareExistingVersion(
     );
   }
 
-  if (!currentTriggerConfig || !current) {
-    throw new Error(
-      `Cloudflare activated version ${target.id}, but trigger synchronization failed and no prior trigger snapshot was available. Inspect the Worker immediately.`,
-    );
-  }
   const ownerBeforeCompensation = await readActiveCloudflareVersionId(context);
   if (ownerBeforeCompensation !== target.id) {
-    const repair = await stabilizeCloudflareVersionTriggers({
-      runWrangler: context.runWrangler,
-      workerName: context.workerName,
-      configPath: context.configPath,
-      targetVersionId: target.id,
-      targetTriggerConfig,
-      previousTriggerConfig: currentTriggerConfig,
-      knownTriggerConfigs,
-      publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher(context),
-      publishEmptyCrons: createCloudflareEmptyCronPublisher(context),
-    });
+    const repair = await stabilizeTriggers(target.id, targetTriggerConfig, currentTriggerConfig);
     throw new Error(
       repair.ok
         ? `Cloudflare rollback to ${target.id} was superseded by ${repair.activeVersionId}; Void restored the active version's triggers. Refresh deployment status before retrying.`
@@ -557,27 +538,17 @@ export async function activateCloudflareExistingVersion(
       },
       { capture: false },
     );
-    const restoredTriggers = await stabilizeCloudflareVersionTriggers({
-      runWrangler: context.runWrangler,
-      workerName: context.workerName,
-      configPath: context.configPath,
-      targetVersionId: current.id,
-      targetTriggerConfig: currentTriggerConfig,
-      previousTriggerConfig: targetTriggerConfig,
-      knownTriggerConfigs,
-      publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher(context),
-      publishEmptyCrons: createCloudflareEmptyCronPublisher(context),
-    });
+    const restoredTriggers = await stabilizeTriggers(
+      current.id,
+      currentTriggerConfig,
+      targetTriggerConfig,
+    );
     if (!restoredTriggers.ok) {
       recoveryFailure = 'previous trigger synchronization failed';
     } else if (!restoredTriggers.targetOwnsTraffic) {
       recoveryFailure = `recovery was superseded by ${restoredTriggers.activeVersionId}`;
     } else {
-      writeWranglerPublishedTrafficSnapshot(context.configPath, {
-        workers_dev: currentTriggerConfig.workers_dev,
-        preview_urls: currentTriggerConfig.preview_urls,
-        routes: [...currentTriggerConfig.routes],
-      });
+      recordPublishedTraffic(context.configPath, currentTriggerConfig);
     }
   } catch (error) {
     recoveryFailure = errorMessage(error);
@@ -670,13 +641,20 @@ export async function changeCloudflareDomain(
   } finally {
     rmSync(triggerConfigDir, { recursive: true, force: true });
   }
-  const publishedTraffic = readCloudflareTriggerConfig(before.configPath);
-  writeWranglerPublishedTrafficSnapshot(before.configPath, {
-    workers_dev: publishedTraffic.workers_dev,
-    preview_urls: publishedTraffic.preview_urls,
-    routes: [...publishedTraffic.routes],
-  });
+  recordPublishedTraffic(before.configPath, readCloudflareTriggerConfig(before.configPath));
   return update;
+}
+
+/** Remember the traffic attachment Void just published for later rollback diffs. */
+function recordPublishedTraffic(
+  configPath: string,
+  config: Readonly<{ workers_dev: boolean; preview_urls: boolean; routes: ReadonlyArray<unknown> }>,
+): void {
+  writeWranglerPublishedTrafficSnapshot(configPath, {
+    workers_dev: config.workers_dev,
+    preview_urls: config.preview_urls,
+    routes: [...config.routes],
+  });
 }
 
 /**
@@ -703,7 +681,7 @@ export function createCloudflareEmptyDomainPublisher(
       await publishEmptyCloudflareCustomDomainSet(context);
       return { status: 0, stdout: '', stderr: '' };
     } catch (error) {
-      return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
+      return failedOperationResult(error);
     }
   };
 }
@@ -720,7 +698,7 @@ export function createCloudflareEmptyCronPublisher(
         workerName: context.workerName,
       });
     } catch (error) {
-      return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
+      return failedOperationResult(error);
     }
   };
 }
@@ -795,10 +773,6 @@ function createCloudflareOperationRunner(
   });
 }
 
-function discoverRootWranglerConfig(root: string): string {
-  return materializeCloudflareConfig(root);
-}
-
 function assertNoOperationConfigOverride(root: string): void {
   if (process.env.CLOUDFLARE_ENV?.trim()) {
     throw new Error(
@@ -829,6 +803,10 @@ function parseJson(value: unknown, label: string): unknown {
     throw new Error(label + ' did not return structured data.');
   }
   return value;
+}
+
+function failedOperationResult(error: unknown): CloudflareOperationResult {
+  return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
 }
 
 function errorMessage(error: unknown): string {

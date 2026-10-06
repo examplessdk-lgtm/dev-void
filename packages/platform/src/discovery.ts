@@ -4,6 +4,7 @@ import {
   parsePlatformLoginId,
   type PlatformLoginDescriptor,
 } from './authentication.ts';
+import { parseUsageProtocolVersion } from './installation.ts';
 import {
   normalizeApplicationDomain,
   normalizePlatformDashboardUrl,
@@ -78,14 +79,7 @@ export function createPlatformDiscoveryDocument(
       );
     }
   }
-  if (
-    input.usageProtocolVersion !== undefined &&
-    input.usageProtocolVersion !== 0 &&
-    input.usageProtocolVersion !== 1 &&
-    input.usageProtocolVersion !== 2
-  ) {
-    throw new Error('usageProtocolVersion must be 0, 1, or 2.');
-  }
+  const usageProtocolVersion = parseUsageProtocolVersion(input.usageProtocolVersion);
   const authentication = input.authentication
     ? parseAuthentication(input.authentication)
     : undefined;
@@ -134,7 +128,7 @@ export function createPlatformDiscoveryDocument(
       : input.applicationRouting?.workersDev
         ? 2
         : PLATFORM_DISCOVERY_SCHEMA_VERSION,
-    usageProtocolVersion: input.usageProtocolVersion ?? 0,
+    usageProtocolVersion,
   };
 }
 
@@ -214,7 +208,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
     ...(document.applicationRouting !== undefined
       ? {
           applicationRouting: readPlatformApplication({
-            PLATFORM_APPLICATION: JSON.stringify(document.applicationRouting ?? null),
+            PLATFORM_APPLICATION: JSON.stringify(document.applicationRouting),
           }),
         }
       : {}),
@@ -252,17 +246,4 @@ function parseAuthentication(value: unknown): PlatformAuthenticationDiscovery {
     protectedByAccess: authentication.protectedByAccess,
     ...(authentication.setupPending === true ? { setupPending: true } : {}),
   };
-}
-
-function parseUsageProtocolVersion(value: unknown): 0 | 1 | 2 {
-  if (value === undefined || value === 0) {
-    return 0;
-  }
-  if (value === 1) {
-    return 1;
-  }
-  if (value === 2) {
-    return 2;
-  }
-  throw new Error('usageProtocolVersion must be 0, 1, or 2.');
 }

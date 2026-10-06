@@ -153,6 +153,17 @@ export async function setOperatorEmailSettings(
   return { action, target, domains: { management: domains } };
 }
 
+function emailOperationError(error: unknown): never {
+  if (error instanceof EmailOperationError) {
+    throw new OperatorError(
+      error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
+      error.message,
+      error.status === 404 ? 'not_found' : 'invalid_state',
+    );
+  }
+  throw error;
+}
+
 async function resolveProject(db: Db, selector: string) {
   const project = (await getProject(db, selector)) ?? (await getProjectBySlug(db, selector));
   if (!project) {
@@ -255,7 +266,7 @@ emailOperatorRoutes.post('/email/projects/:project/limit', async (context) => {
     },
     dryRun(body),
   );
-  return context.json(result, 'ok' in result && result.ok === false ? 207 : 200);
+  return context.json(result);
 });
 
 emailOperatorRoutes.get('/email/projects/:project/logs', async (context) => {
@@ -438,11 +449,7 @@ emailOperatorRoutes.post('/email/shared-recipients/:id/resolve', async (context)
   const id = context.req.param('id');
   const outcome = stringField(body, 'outcome', { maxLength: 32 });
   const reason = stringField(body, 'reason', { maxLength: 500 });
-  if (
-    (outcome !== 'applied' && outcome !== 'not-applied') ||
-    body.ended !== true ||
-    !reason.trim()
-  ) {
+  if ((outcome !== 'applied' && outcome !== 'not-applied') || body.ended !== true) {
     throw new OperatorError(
       400,
       'Supply --ended, --outcome applied|not-applied, and a provider audit --reason.',
@@ -474,14 +481,7 @@ emailOperatorRoutes.post('/email/shared-recipients/:id/resolve', async (context)
     });
     return context.json({ action, target: { id, outcome }, ...result });
   } catch (error) {
-    if (error instanceof EmailOperationError) {
-      throw new OperatorError(
-        error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
-        error.message,
-        error.status === 404 ? 'not_found' : 'invalid_state',
-      );
-    }
-    throw error;
+    emailOperationError(error);
   }
 });
 
@@ -505,14 +505,7 @@ emailOperatorRoutes.post('/email/operations/:id/resolve', async (context) => {
   try {
     fence = await inspectUnknownEmailOperationRecovery(db, context.env, id);
   } catch (error) {
-    if (error instanceof EmailOperationError) {
-      throw new OperatorError(
-        error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
-        error.message,
-        error.status === 404 ? 'not_found' : 'invalid_state',
-      );
-    }
-    throw error;
+    emailOperationError(error);
   }
   if (new Date(fence.eligibleAt).getTime() > Date.now()) {
     throw new OperatorError(
@@ -585,14 +578,7 @@ emailOperatorRoutes.post('/email/operations/:id/resolve', async (context) => {
     });
     return context.json({ action, target, ...result });
   } catch (error) {
-    if (error instanceof EmailOperationError) {
-      throw new OperatorError(
-        error.status === 404 ? 404 : error.status === 400 ? 400 : 409,
-        error.message,
-        error.status === 404 ? 'not_found' : 'invalid_state',
-      );
-    }
-    throw error;
+    emailOperationError(error);
   }
 });
 
@@ -634,22 +620,6 @@ function requireDomain(raw: string): string {
   return domain;
 }
 
-async function requireDomainRow(db: Db, raw: string) {
-  const domain = requireDomain(raw);
-  const row = await getEmailDomainRowByDomain(db, domain);
-  if (!row) {
-    throw new OperatorError(404, 'Email domain not found.');
-  }
-  if (!row.project_id) {
-    throw new OperatorError(404, 'Project not found.');
-  }
-  const project = await getProject(db, row.project_id);
-  if (!project) {
-    throw new OperatorError(404, 'Project not found.');
-  }
-  return { domain, row, project };
-}
-
 async function requireRemovableDomainRow(db: Db, raw: string) {
   const domain = requireDomain(raw);
   const row = await getEmailDomainRowByDomain(db, domain);
@@ -661,6 +631,14 @@ async function requireRemovableDomainRow(db: Db, raw: string) {
   }
   const projectId = row.project_id;
   return { domain, row, projectId, project: await getProject(db, projectId) };
+}
+
+async function requireDomainRow(db: Db, raw: string) {
+  const { domain, row, project } = await requireRemovableDomainRow(db, raw);
+  if (!project) {
+    throw new OperatorError(404, 'Project not found.');
+  }
+  return { domain, row, project };
 }
 
 export async function listOperatorEmailDomains(context: Context<ApiEnv>, selector?: string) {
@@ -722,7 +700,7 @@ export async function addOperatorEmailDomain(
     try {
       mx = (await lookupMxOverDns(domain)).length > 0 ? 'subdomain' : 'apex';
     } catch {
-      mx = 'unknown';
+      // A failed lookup leaves the placement unknown.
     }
     return preview(action, target, {
       existing: existing

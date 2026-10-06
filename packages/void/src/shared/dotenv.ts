@@ -1,7 +1,5 @@
 /**
- * Shared dotenv parser + variable expander used by local `.env` consumers and
- * explicit `void secret sync <file>` input. A single source of truth avoids drift when two
- * hand-rolled parsers diverged on quoting / expansion semantics.
+ * Shared dotenv parser + variable expander used by local `.env` consumers.
  *
  * Expansion supports `${VAR}` and `$VAR`, a `\$VAR` literal-escape, and
  * transitive references across earlier entries in the same record. Cycles
@@ -27,8 +25,7 @@ export type ParseDotenvOptions = {
   expand?: boolean;
   /**
    * When true (default), silently skip lines whose key doesn't match the
-   * standard dotenv key regex. Set to false to throw instead — used by
-   * `void secret sync` where a malformed key should be a hard error.
+   * standard dotenv key regex. Set to false to throw instead.
    */
   skipInvalidKeys?: boolean;
   /** Callback for expansion warnings (cycles). Caller routes to `voidWarn`. */

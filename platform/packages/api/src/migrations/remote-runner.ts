@@ -65,8 +65,6 @@ async function upgradeTrackingTable(
     if (!/no such table/i.test(msg)) {
       throw err;
     }
-    // Concurrent upgrade winner already copied the rows and dropped the
-    // legacy table between our probe and our INSERT — nothing to do.
   }
   // DROP can fail if a concurrent caller already dropped the table — safe to ignore.
   try {
@@ -172,10 +170,7 @@ type D1Query = Readonly<{
 }>;
 
 /**
- * D1 REST query response shape. `meta` is optional because older callers
- * (and the minimal test mock) only ever produced `{ results }`, and the
- * real CF response always includes `meta` on successful queries. When
- * present, callers can inspect `meta.changes` to see how many rows were
+ * D1 REST query response shape. When present, `meta.changes` reports rows
  * affected by an UPDATE / DELETE / INSERT — the rename endpoint uses this
  * to detect concurrent-rename conflicts where the winner already renamed
  * the row out from under us and our own UPDATE was a no-op.
@@ -201,9 +196,6 @@ export const D1_REQUEST_TIMEOUT_MS = 30_000;
  * RST — and every other migration request on the same project would pile up
  * on the same lock, burning pg pool connections. Aborting fast with a clear
  * error lets the transaction unwind and releases the lock.
- *
- * The timeout is an optional parameter so unit tests can pass a short override
- * without global monkey-patching.
  *
  * The timer MUST remain active until `response.json()` completes.
  * `fetch()` resolves on HEADERS, not full body, so clearing the timeout at
@@ -238,11 +230,6 @@ export async function queryD1(
       body: JSON.stringify(query),
       signal: controller.signal,
     });
-    // Keep the timer armed across the body parse — `fetch()` resolves on
-    // headers, and a stalled / truncated body would otherwise hang the
-    // `response.json()` await indefinitely. `controller.abort()` fires when
-    // the timer elapses and propagates into the body stream, rejecting
-    // `json()` with an AbortError that we translate to a timeout below.
     json = (await response.json()) as typeof json;
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -264,10 +251,7 @@ export async function queryD1(
     throw new Error('D1 migration failed: ' + (failed.error ?? 'statement failed'));
   }
 
-  // D1 query API returns an array of results (one per statement). Forward
-  // `meta` through so callers that need to inspect rows-affected (e.g. the
-  // rename handler's concurrent-conflict detection) can read it without
-  // issuing a follow-up SELECT.
+  // D1 query API returns an array of results (one per statement).
   const first = json.result[0];
   if (!first) {
     return { results: [] };

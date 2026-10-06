@@ -4,28 +4,23 @@ import { hc, type InferResponseType } from 'hono/client';
 import { getCookie } from 'hono/cookie';
 import { dashboardRequestOrigin, isLocalDashboardHost } from './origin.ts';
 
-export type Client = ReturnType<typeof hc<ApiRoutes>>;
+type Client = ReturnType<typeof hc<ApiRoutes>>;
 export type ApiResponse = Pick<
   Response,
   'headers' | 'json' | 'ok' | 'status' | 'statusText' | 'text'
 >;
 
 /** Extract the 200 JSON response type from an hc client route key. */
-export type API<K extends keyof B, B = Client> = InferResponseType<
-  B[K] extends { $get: infer G } ? G : B[K],
+export type API<K extends keyof Client> = InferResponseType<
+  Client[K] extends { $get: infer G } ? G : Client[K],
   200
 >;
 
 const API_URL = 'https://api.void.cloud';
 const DEFAULT_API_TIMEOUT_MS = 10_000;
 
-function getApiUrl(context: Context): string {
+export function getPublicApiUrl(context: Context): string {
   return (context.env as Record<string, string | undefined>).API_URL ?? API_URL;
-}
-
-function isLocalHost(context: Context): boolean {
-  const host = context.req.header('host') ?? '';
-  return isLocalDashboardHost(host);
 }
 
 /**
@@ -35,7 +30,7 @@ function isLocalHost(context: Context): boolean {
  */
 function getApiFetch(context: Context): typeof fetch {
   const binding = (context.env as { API?: Fetcher }).API;
-  if (binding && !isLocalHost(context)) {
+  if (binding && !isLocalDashboardHost(context.req.header('host') ?? '')) {
     return ((input: RequestInfo | URL, init?: RequestInit) => {
       // The service binding is internal. Preserve the browser's actual protected origin so
       // the API verifies the dashboard application's audience, not the API application's.
@@ -76,10 +71,6 @@ function getTimedApiFetch(context: Context): typeof fetch {
     apiFetch(input, withTimeout({ ...init, redirect: 'manual' }, timeoutMs))) as typeof fetch;
 }
 
-function getToken(context: Context): string | undefined {
-  return context.get('token') as string | undefined;
-}
-
 function getCfAccessHeaders(context: Context): Record<string, string> {
   const env = context.env as Record<string, string | undefined>;
   // The API independently checks the application audience and bound company subject.
@@ -104,7 +95,7 @@ function getCfAccessHeaders(context: Context): Record<string, string> {
   return {};
 }
 
-export function getHeaders(context: Context, headers?: HeadersInit): Headers {
+function getHeaders(context: Context, headers?: HeadersInit): Headers {
   const out = new Headers(headers);
   if (!out.has('Accept')) {
     out.set('Accept', 'application/json');
@@ -113,15 +104,11 @@ export function getHeaders(context: Context, headers?: HeadersInit): Headers {
     out.set(key, value);
   }
 
-  const token = getToken(context);
+  const token = context.get('token') as string | undefined;
   if (token) {
     out.set('Authorization', `Bearer ${token}`);
   }
   return out;
-}
-
-export function getPublicApiUrl(context: Context): string {
-  return getApiUrl(context);
 }
 
 export async function fetchApi(
@@ -134,7 +121,7 @@ export async function fetchApi(
     headers.set('Content-Type', 'application/json');
   }
 
-  return getTimedApiFetch(context)(`${getApiUrl(context)}${path}`, {
+  return getTimedApiFetch(context)(`${getPublicApiUrl(context)}${path}`, {
     ...options,
     headers,
   });

@@ -46,6 +46,35 @@ type Expression = {
 };
 type Edit = { start: number; end: number; text: string };
 
+function adapterPathError(file: string): Error {
+  return new Error(
+    `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
+  );
+}
+
+function nitroPathError(file: string): Error {
+  return new Error(
+    `migrate: Set nitro.cloudflareDev.configPath to ${GENERATED_PATH} in ${file} before removing the root Wrangler config.`,
+  );
+}
+
+function mentionsCloudflareAdapter(source: string): boolean {
+  return (
+    source.includes('@sveltejs/adapter-cloudflare') ||
+    source.includes('@astrojs/cloudflare') ||
+    source.includes('nitro-cloudflare-dev')
+  );
+}
+
+function applyEdits(source: string, edits: Array<Edit>): string {
+  return edits
+    .sort((a, b) => b.start - a.start)
+    .reduce(
+      (result, edit) => `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`,
+      source,
+    );
+}
+
 function parseSource(source: string, file: string): Expression {
   return parseSync(file, source).program as unknown as Expression;
 }
@@ -95,9 +124,7 @@ function adapterImport(program: Expression, packageName: string, file: string): 
         node.arguments?.[0]?.value === packageName,
     );
     if (loaded) {
-      throw new Error(
-        `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-      );
+      throw adapterPathError(file);
     }
     return undefined;
   }
@@ -105,9 +132,7 @@ function adapterImport(program: Expression, packageName: string, file: string): 
     (specifier) => specifier.type === 'ImportDefaultSpecifier',
   );
   if (imports.length !== 1 || imports[0]?.specifiers?.length !== 1 || !defaultImport?.local?.name) {
-    throw new Error(
-      `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-    );
+    throw adapterPathError(file);
   }
   return defaultImport.local.name;
 }
@@ -121,11 +146,7 @@ export function discoverFrameworkWranglerFiles(root: string): Array<string> {
       continue;
     }
     const source = readFileSync(path, 'utf8');
-    if (
-      !source.includes('@sveltejs/adapter-cloudflare') &&
-      !source.includes('@astrojs/cloudflare') &&
-      !source.includes('nitro-cloudflare-dev')
-    ) {
+    if (!mentionsCloudflareAdapter(source)) {
       continue;
     }
     const program = parseSource(source, file);
@@ -191,9 +212,7 @@ function setPath(
   ) {
     edits.push({ start: value.start, end: value.end, text: `'${GENERATED_PATH}'` });
   } else {
-    throw new Error(
-      `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-    );
+    throw adapterPathError(file);
   }
 }
 
@@ -208,16 +227,12 @@ function patchAdapterCall(
     (node) => node.type === 'CallExpression' && node.callee?.name === identifier,
   );
   if (calls.length !== 1) {
-    throw new Error(
-      `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-    );
+    throw adapterPathError(file);
   }
   const call = calls[0]!;
   const args = call.arguments ?? [];
   if (args.length > 1 || (args.length === 1 && args[0]?.type !== 'ObjectExpression')) {
-    throw new Error(
-      `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-    );
+    throw adapterPathError(file);
   }
   if (args.length === 0) {
     const options =
@@ -242,17 +257,10 @@ function patchAdapterCall(
     } else if (proxy.type === 'ObjectExpression') {
       setPath(proxy, 'configPath', file, edits, legacyName);
     } else {
-      throw new Error(
-        `migrate: Update ${file} to pass ${GENERATED_PATH} to its Cloudflare adapter before removing the root Wrangler config.`,
-      );
+      throw adapterPathError(file);
     }
   }
-  return edits
-    .sort((a, b) => b.start - a.start)
-    .reduce(
-      (result, edit) => `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`,
-      source,
-    );
+  return applyEdits(source, edits);
 }
 
 /** Plan only edits whose adapter call can be identified without changing authored options. */
@@ -269,24 +277,18 @@ export function planFrameworkConfigMigration(
     const original = readFileSync(path, 'utf8');
     let updated = original;
 
-    if (
-      !original.includes('@sveltejs/adapter-cloudflare') &&
-      !original.includes('@astrojs/cloudflare') &&
-      !original.includes('nitro-cloudflare-dev')
-    ) {
+    if (!mentionsCloudflareAdapter(original)) {
       continue;
     }
     const program = parseSource(original, file);
     const svelteIdentifier = adapterImport(program, '@sveltejs/adapter-cloudflare', file);
     if (svelteIdentifier) {
-      const identifier = svelteIdentifier;
-      updated = patchAdapterCall(updated, identifier, file, 'svelte', legacyName);
+      updated = patchAdapterCall(updated, svelteIdentifier, file, 'svelte', legacyName);
     }
 
     const astroIdentifier = adapterImport(program, '@astrojs/cloudflare', file);
     if (astroIdentifier) {
-      const identifier = astroIdentifier;
-      updated = patchAdapterCall(updated, identifier, file, 'astro', legacyName);
+      updated = patchAdapterCall(updated, astroIdentifier, file, 'astro', legacyName);
     }
 
     const nitroConfigurations = walk(parseSource(updated, file)).filter((node) => {
@@ -306,15 +308,11 @@ export function planFrameworkConfigMigration(
     });
     if (nitroConfigurations.length > 0) {
       if (nitroConfigurations.length !== 1) {
-        throw new Error(
-          `migrate: Set nitro.cloudflareDev.configPath to ${GENERATED_PATH} in ${file} before removing the root Wrangler config.`,
-        );
+        throw nitroPathError(file);
       }
       const nitro = asNode(nitroConfigurations[0]!.value)!;
       if (property(nitro, 'preset')?.value !== 'cloudflare-module') {
-        throw new Error(
-          `migrate: Set nitro.cloudflareDev.configPath to ${GENERATED_PATH} in ${file} before removing the root Wrangler config.`,
-        );
+        throw nitroPathError(file);
       }
       const dev = property(nitro, 'cloudflareDev');
       const edits: Array<Edit> = [];
@@ -327,16 +325,9 @@ export function planFrameworkConfigMigration(
       } else if (dev.type === 'ObjectExpression') {
         setPath(dev, 'configPath', file, edits, legacyName);
       } else {
-        throw new Error(
-          `migrate: Set nitro.cloudflareDev.configPath to ${GENERATED_PATH} in ${file} before removing the root Wrangler config.`,
-        );
+        throw nitroPathError(file);
       }
-      updated = edits
-        .sort((a, b) => b.start - a.start)
-        .reduce(
-          (result, edit) => result.slice(0, edit.start) + edit.text + result.slice(edit.end),
-          updated,
-        );
+      updated = applyEdits(updated, edits);
     }
 
     if (updated !== original) {

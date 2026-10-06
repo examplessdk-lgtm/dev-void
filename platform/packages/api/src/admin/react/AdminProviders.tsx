@@ -3,8 +3,7 @@
 import { LinkProvider } from '@astryxdesign/core/Link';
 import { Theme } from '@astryxdesign/core/theme';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
-import { Link } from '@void/react';
-import { useShared } from '@void/react';
+import { Link, useShared } from '@void/react';
 import { useMemo, type ReactNode } from 'react';
 import { FateClient } from 'react-fate';
 import { createFateClient } from '../fate/client.generated.ts';

@@ -8,7 +8,7 @@ import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
   inspectPlatformAccess,
   PlatformAccessClient,
-  platformAccessOverlapsOrigin,
+  platformAccessOverlapsOrigins,
   platformAccessPublicDestinations,
   verifyPlatformAccessApplication,
   type PlatformAccessCheckpoint,
@@ -133,14 +133,7 @@ export async function verifyInstalledPlatformAccessProtection(input: {
     if (other.id === app.id) {
       continue;
     }
-    if (
-      platformAccessPublicDestinations(other).some(
-        (destination) =>
-          origins.some((origin) => platformAccessOverlapsOrigin(destination, origin)) &&
-          (destination.includes('/') ||
-            origins.some((origin) => destination === new URL(origin).hostname)),
-      )
-    ) {
+    if (platformAccessOverlapsOrigins(other, origins)) {
       throw new Error(
         'platform: Another Access application overlaps a protected platform origin. Reconcile it before maintenance.',
       );

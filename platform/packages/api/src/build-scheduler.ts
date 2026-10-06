@@ -109,7 +109,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
       ]),
     );
 
-    // Container namespaces (fleets) found AT capacity THIS tick. There are now
+    // Container namespaces (fleets) found AT capacity THIS tick. There are
     // two independent container apps — base `BUILD_MANAGER` (free) and
     // `BUILD_MANAGER_LARGE` (paid `standard-4`) — each with its own
     // `max_instances`. `getQueuedBuilds` returns a mixed free+paid list ordered
@@ -263,7 +263,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
           // status is preserved — a superseded/cancelled commit can't be
           // resurrected here.
           // Mark only THIS fleet saturated and KEEP scanning (do NOT break).
-          // There are two independent container fleets now; a free build hitting
+          // There are two independent container fleets; a free build hitting
           // capacity on base must not stall a paid build that targets the (non-
           // saturated) LARGE fleet, and vice versa. Further builds targeting this
           // same saturated fleet are skipped up front (the pre-claim check above),
@@ -327,7 +327,7 @@ export class BuildScheduler extends DurableObject<ApiEnv['Bindings']> {
     }
 
     // Reschedule while ANY queued container build remains — not just startable
-    // ones. `getQueuedBuilds` now surfaces only builds whose project is idle, so
+    // ones. `getQueuedBuilds` surfaces only builds whose project is idle, so
     // a queue that is fully blocked (every project has an active build) returns
     // []; if we keyed the heartbeat off that, blocked builds would resume only
     // on a completion poke and a missed poke would strand them. `hasQueued*`

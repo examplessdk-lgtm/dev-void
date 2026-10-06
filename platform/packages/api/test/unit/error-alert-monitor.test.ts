@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
-// DurableObject base class isn't available in unit tests — stub it.
-vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
-
 // Capture what the alert email would be sent with, without touching the binding.
 const emailCalls: Array<{
   slug: string;

@@ -572,7 +572,7 @@ describe('managed shared subdomain recipients', () => {
       binding_name: 'CACHE',
       cf_id: 'owned-kv',
     });
-    // This is the existing cascade used by old Workers, without the new
+    // This is the cascade a previous Worker version runs, without the
     // provider cleanup hook. Its transaction must not release the slug.
     await expect(deleteProjectCascade(env.db, project.id)).rejects.toThrow();
     await expect(

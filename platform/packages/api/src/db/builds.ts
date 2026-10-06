@@ -83,8 +83,8 @@ export async function updateBuildStatus(
  * updated. Prevents a delayed onStart from resurrecting a row that a fast-exit
  * onStop already drove terminal.
  *
- * `instanceType` is the container's resolved size. The scheduler now persists it
- * in the same claim tx (`queued -> starting`), so this is an idempotent safety-net
+ * `instanceType` is the container's resolved size. The scheduler persists it in
+ * the same claim tx (`queued -> starting`), so this is an idempotent safety-net
  * re-write — folded into the same guarded CAS so it can never resurrect a terminal
  * row (matches `updateBuildStatus`'s "keep current unless provided" merge: omit →
  * keep, value/null → write).
@@ -208,30 +208,15 @@ function updatedRowCount(result: { rowCount?: number | null; affectedRows?: numb
  * by the platform — `github_actions` builds run on GitHub's runners and never
  * sit in this queue.
  *
- * Fixes starvation: per-project serialization is enforced at claim time
- * (`claimBuildForStartWithinLimit` refuses to start a build if its project
- * already has an active build), so surfacing rows for an already-active project
- * just wastes the scan window and HIDES other projects' startable builds. The
- * correlated `NOT EXISTS` excludes any project with an active build, and one
- * row per idle project (its oldest queued build) is returned — so a genuinely
- * startable build is never starved behind a blocked one.
+ * Rows the claim step (`claimBuildForStartWithinLimit`) would only reject are
+ * filtered out so they cannot fill the scan window and starve startable builds:
+ * projects that already have an active build (per-project serialization), and
+ * owners in `excludeUserIds`, whom the scheduler computed to be at their
+ * plan-derived concurrency cap (the cap is not a DB column, so it is not
+ * enforced in SQL here).
  *
- * Fixes per-user-cap starvation: the per-user concurrency cap is
- * plan-derived (TypeScript, not a DB column), so it is NOT enforced in SQL
- * here. Instead the scheduler computes which users are AT their cap and passes
- * those ids in `excludeUserIds`, so this scan never wastes its window on rows
- * the claim step would only reject. Without it, the lowest-`project_id` rows of
- * a capped tenant would fill the scan limit every tick and indefinitely delay
- * an unrelated under-cap tenant's builds.
- *
- * Ordering is AGE-FAIR: the outer query sorts by `created_at asc` (oldest
- * waiting work first) and applies `limit`, instead of the old
- * lowest-`project_id`-first order which let a low-id project monopolize the
- * scan window. Because `DISTINCT ON (project_id)` requires `project_id` to lead
- * its ORDER BY, the per-project "oldest queued build" pick is computed in an
- * inner subquery (`DISTINCT ON (project_id) ... ORDER BY project_id,
- * created_at asc`), then the OUTER query re-sorts those rows by `created_at asc`
- * and limits — surfacing the globally oldest-waiting startable builds.
+ * Ordering is age-fair: the per-project picks are re-sorted by `created_at asc`
+ * before `limit`, so a low-`project_id` project cannot monopolize the window.
  *
  * NOTE: this can return `[]` while queued builds still exist (all their
  * projects are active, or all their owners are capped). The scheduler's
@@ -255,19 +240,12 @@ export async function getQueuedBuilds(
       and(
         eq(builds.status, 'queued'),
         eq(builds.executor, 'container'),
-        // Exclude projects that already have an active build (per-project
-        // serialization is enforced at claim time; surfacing blocked rows just
-        // wastes the scan window and hides other projects' startable builds).
         sql`not exists (
           select 1 from ${builds} as active_builds
           where active_builds.project_id = ${builds.project_id}
             and active_builds.status in ('starting', 'building', 'deploying')
         )`,
-        // Skip rows owned by users the scheduler has computed to be AT their
-        // plan's concurrency cap — the claim step would only reject them, and
-        // surfacing them wastes the scan window (cap is plan-derived, so the
-        // exclude set is computed in TS, never as a tier number in SQL). Omit
-        // the clause entirely when empty: `NOT IN ()` is invalid SQL.
+        // Omit the clause entirely when empty: `NOT IN ()` is invalid SQL.
         excludeUserIds.length > 0 ? notInArray(builds.user_id, [...excludeUserIds]) : undefined,
       ),
     )
@@ -409,12 +387,7 @@ export async function supersedeAndCreateContainerBuild(
 ): Promise<{
   build: Build | null;
   reused: boolean;
-  cancelled: ReadonlyArray<{
-    id: string;
-    executor: Build['executor'];
-    status: Build['status'];
-    instance_type: string | null;
-  }>;
+  cancelled: ReadonlyArray<TerminatedBuild>;
   skipped?:
     | 'config-changed'
     | 'install-revoked'
@@ -432,8 +405,8 @@ export async function supersedeAndCreateContainerBuild(
     // a scarce build slot (the scheduler + JIT recheck don't reject deleting
     // projects; only the cascade's terminate eventually cancels it). Mirror the
     // GitHub Actions path (createGithubActionsBuildWithinLimit) and skip instead.
-    // Lock order is unchanged (projects-first), so the round-4 40P01 class stays
-    // closed.
+    // Lock order stays projects-first, matching the other build paths, so this
+    // cannot deadlock (40P01) against them.
     const [proj] = await tx
       .select({ status: projects.status, user_id: projects.user_id })
       .from(projects)
@@ -654,15 +627,6 @@ export async function getBuildByProjectRunIdAndAttempt(
   return row ?? null;
 }
 
-/**
- * Terminalize (cancel) a project's QUEUED + ACTIVE builds, optionally filtered
- * by branch and/or executor. Used when a connection is disconnected or its
- * branch/executor changes, so in-flight builds for the old config can't keep a
- * live deploy token (the middleware guard rejects a token whose bound
- * build is no longer active). Returns the cancelled builds (id + executor +
- * prior status) so the caller can best-effort stop active container BuildManager
- * DOs.
- */
 export type TerminatedBuild = Readonly<{
   id: string;
   executor: Build['executor'];
@@ -670,6 +634,14 @@ export type TerminatedBuild = Readonly<{
   instance_type: string | null;
 }>;
 
+/**
+ * Terminalize (cancel) a project's QUEUED + ACTIVE builds, optionally filtered
+ * by branch and/or executor. Used when a connection is disconnected or its
+ * branch/executor changes, so in-flight builds for the old config can't keep a
+ * live deploy token (the middleware guard rejects a token whose bound
+ * build is no longer active). Returns the cancelled builds so the caller can
+ * best-effort stop active container BuildManager DOs.
+ */
 export async function terminateBuildsForProject(
   db: Db,
   projectId: string,
@@ -780,20 +752,12 @@ export async function failStaleActiveGithubActionsBuilds(
  * risk reaping a build that hasn't started yet. A null `started_at` never
  * matches the `<` comparison, so queued/unstarted rows are implicitly guarded.
  *
- * The DB terminalize is the AUTHORITATIVE slot-freeing + token-revoking action:
- * it frees all three concurrency gates and (within TTL) revokes the bound deploy
- * token even if the DO is unreachable — that is the whole point of this backstop.
- * The motivating case (timeout path stopped the container before its failed DB
- * write threw) leaves no live container, so the DB write alone suffices. But the
- * `started_at > maxAge` predicate does NOT prove the container is gone: if the DO
- * was evicted or its timeout alarm was lost, the container may still be RUNNING.
- * So the caller best-effort issues a BuildManager `cancelBuild` for each returned
- * build AFTER this commits — stopping any still-alive orphan and converging
- * DO-local status. Returning the reaped builds (not just a count) is what enables
- * that, and each carries its `instance_type` so the cancel addresses the SAME
- * container-size namespace the scheduler started it on (`buildManagerNamespace`):
- * a paid (standard-4) build cancelled against the base namespace would miss its
- * live container. Executor is implicitly `container` (this reaper is scoped to it).
+ * The DB terminalize is the authoritative slot-freeing + token-revoking action,
+ * even if the DO is unreachable. Because the age predicate does not prove the
+ * container is gone, the reaped builds are returned so the caller can
+ * best-effort `cancelBuild` each one after commit; each carries its
+ * `instance_type` so the cancel addresses the same container-size namespace the
+ * scheduler started it on (`buildManagerNamespace`).
  *
  * Marks them `failed` and stamps `completed_at`. Returns the reaped builds.
  */
@@ -824,15 +788,12 @@ export async function failStaleActiveContainerBuilds(
  * create the `building` row, all under a single transaction that holds a
  * `SELECT … FOR UPDATE` lock on the owner's `users` row.
  *
- * The previous count-then-insert flow (count active builds, then insert in a
- * SEPARATE op) was race-prone: two parallel OIDC exchanges for DIFFERENT
- * `run_id`s could each read capacity below the cap before either inserted, then
- * both insert — bypassing `concurrentBuilds`. The composite partial-unique
- * index only guards the SAME `run_id`, not the cross-run capacity check.
- *
- * Serializing slot acquisition per user (FOR UPDATE on the user row, mirroring
- * the deploy/migration FOR UPDATE pattern) closes that window: the second
- * exchange blocks until the first commits, then observes the updated count.
+ * A count-then-insert in separate operations would let two parallel OIDC
+ * exchanges for DIFFERENT `run_id`s both read capacity below the cap and both
+ * insert, bypassing `concurrentBuilds`; the composite partial-unique index only
+ * guards the SAME `run_id`. Serializing slot acquisition per user (FOR UPDATE on
+ * the user row) makes the second exchange block until the first commits, then
+ * observe the updated count.
  *
  * Idempotent reuse of an already-ACTIVE build for the same `(project, run_id)`
  * neither counts against the cap nor double-inserts. `limit <= 0` means
@@ -999,21 +960,12 @@ export async function createGithubActionsBuildWithinLimit(
     // does not consume a new slot and must not be double-inserted. Matching on
     // the attempt (not run_id alone) ensures a RERUN — same run_id, incremented
     // run_attempt — does NOT wrongly reuse the prior attempt's build.
-    const [existing] = await tx
-      .select()
-      .from(builds)
-      .where(
-        and(
-          eq(builds.project_id, args.projectId),
-          eq(builds.github_run_id, args.githubRunId),
-          eq(builds.github_run_attempt, args.githubRunAttempt),
-        ),
-      )
-      .orderBy(
-        sql`(${inArray(builds.status, ACTIVE_BUILD_STATUSES)}) desc`,
-        desc(builds.created_at),
-      )
-      .limit(1);
+    const existing = await getBuildByProjectRunIdAndAttempt(
+      tx,
+      args.projectId,
+      args.githubRunId,
+      args.githubRunAttempt,
+    );
     if (existing && ACTIVE_BUILD_STATUSES.includes(existing.status)) {
       return { outcome: 'reused', build: existing };
     }

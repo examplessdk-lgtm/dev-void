@@ -10,7 +10,7 @@ const app = new Hono<ApiEnv>();
  * Authenticated via HMAC token in X-Void-Internal header (no JWT/userId).
  *
  * POST /internal/resolve-resource/:projectId
- * Body: { "type": "d1" | "kv" | "r2", "binding": "DB" }
+ * Body: { "type": "d1" | "kv" | "r2" | "queue", "binding": "DB" }
  * Returns: { "cf_id": "..." } or 404
  */
 app.post('/:projectId', async (context) => {

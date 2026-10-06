@@ -19,6 +19,7 @@
 
 import { isRecord } from '@void/deploy-core';
 import {
+  bytesToBase64,
   captureMessage,
   DEV_INBOX_ACK_HEADER,
   DEV_INBOX_ACK_VALUE,
@@ -31,6 +32,7 @@ import {
   serializeCapturedMessage,
   type CapturedMessage,
 } from './email/dev-inbox.ts';
+import { bytesToReadableStream } from './email/inbound.ts';
 import { buildMime, MimeError, normalizeEmail } from './email/mime.ts';
 import type {
   EmailDeliveryState,
@@ -137,7 +139,7 @@ function readEmailDomain(): string | undefined {
 }
 
 // The project's own default sender, written into the worker's `vars` by
-// `void deploy --platform cloudflare` from `email.from` in void.json. It is a
+// `void deploy --platform cloudflare` from `email.from` in void.config.ts. It is a
 // full address on a zone the developer owns, so there is no slug to
 // substitute; `normalizeEmail` validates it like any explicit `from`.
 function readEmailFrom(): string | undefined {
@@ -219,7 +221,6 @@ function resolveSendEmailBinding(
  * `OUTCOME_UNKNOWN` with the original error as `cause`: once `send()` has
  * started, an undocumented rejection does not prove the provider declined
  * the message before accepting it.
- *
  */
 function classifyBindingError(e: unknown): SendEmailError {
   const message = e instanceof Error ? e.message : String(e);
@@ -248,15 +249,6 @@ function classifyBindingError(e: unknown): SendEmailError {
 // cannot drag an unrelated mention of the address into a false positive.
 const UNVERIFIED_DESTINATION_RE =
   /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
-
-function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-}
 
 /**
  * Deliver through the worker's own `SEND_EMAIL` binding. One `EmailMessage`
@@ -381,7 +373,7 @@ function resolveDefaultFrom(opts: SendEmailOptions): SendEmailOptions {
   }
   // `__VOID_EMAIL_FROM` (own-account deploys) wins over the platform's
   // `<slug>+noreply@<domain>`: a project that carries both is one whose
-  // void.json names a sender on purpose.
+  // void.config.ts names a sender on purpose.
   const configured = readEmailFrom();
   if (configured) {
     return { ...opts, from: configured };
@@ -403,17 +395,6 @@ function resolveDefaultFrom(opts: SendEmailOptions): SendEmailOptions {
 
 function err(code: SendEmailErrorCode, message: string, cause?: unknown): SendEmailResult {
   return { ok: false, error: makeError(code, message, cause) };
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  // 8KB chunks keep us well under the typical V8 fromCharCode arg limit.
-  const CHUNK = 0x2000;
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += CHUNK) {
-    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.byteLength));
-    binary += String.fromCharCode(...slice);
-  }
-  return btoa(binary);
 }
 
 interface ProxySendBody {
@@ -591,13 +572,14 @@ function readFailureDeliveries(
           : undefined;
       }
       if (entry.ok === false) {
+        const state = readDeliveryState(entry.state);
         const error = entry.error as { code?: unknown; message?: unknown } | null | undefined;
         return typeof error === 'object' && error !== null && typeof error.message === 'string'
           ? {
               recipient,
               ok: false,
               error: makeError(coerceErrorCode(error.code), error.message),
-              ...(readDeliveryState(entry.state) ? { state: readDeliveryState(entry.state) } : {}),
+              ...(state ? { state } : {}),
             }
           : undefined;
       }
@@ -931,11 +913,9 @@ async function postToDevInbox(
  * `ids` is built from the same deduplicated, lowercased list the two
  * production transports send to, so code written against a captured result
  * sees exactly what a deploy returns: one entry per unique address, keyed the
- * way `sendViaBinding` and the proxy report it. Mapping every `to`/`cc`/`bcc`
- * occurrence instead handed a test or `void dev` handler one success per
- * occurrence in its original case — deliveries that never happen once
- * deployed. The captured message itself keeps the original fields; the
- * inbox displays what was asked for, the result reports what would be sent.
+ * way `sendViaBinding` and the proxy report it. The captured message itself
+ * keeps the original fields; the inbox displays what was asked for, the
+ * result reports what would be sent.
  */
 function capturedResult(normalized: NormalizedEmail, captureId: string): SendEmailResult {
   const recipients = uniqueRecipients(normalized);
@@ -949,7 +929,8 @@ function capturedResult(normalized: NormalizedEmail, captureId: string): SendEma
 }
 
 /**
- * Send an email via the Void platform proxy.
+ * Send an email via the worker's own `SEND_EMAIL` binding or the Void
+ * platform proxy.
  *
  * During `void dev` the message is captured by the local inbox
  * (`/__void/inbox`) and never reaches the proxy; an in-process sink

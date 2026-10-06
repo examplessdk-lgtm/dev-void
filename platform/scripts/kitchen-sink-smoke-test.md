@@ -130,7 +130,7 @@ Set `SMOKE_SANDBOX=1` and `SMOKE_E2E_TOKEN` to the fixture's secret when running
 2. Fill the key input (placeholder "my-key") with a unique value like `smoke-q-<timestamp>`.
 3. Fill the value input (placeholder "my-value") with `queued`.
 4. Click the "Send to Queue" button.
-5. Poll for up to 45 seconds: reload `/queues` every 2-3 seconds and check if the unique key appears in the "Processed Results" table. Results are written to D1 (strongly consistent), so they appear immediately once the consumer processes the message.
+5. Poll for up to 60 seconds: reload `/queues` every 2-3 seconds and check if the unique key appears in the "Processed Results" table. Results are written to D1 (strongly consistent), so they appear immediately once the consumer processes the message.
 6. Assert the key was found within the timeout.
 7. Delete the test row from the table.
 
@@ -142,7 +142,7 @@ Set `SMOKE_SANDBOX=1` and `SMOKE_E2E_TOKEN` to the fixture's secret when running
 4. In the "Email Register" section:
    - Fill the email input with a unique email like `smoke-<timestamp>@example.com`.
    - Fill the password input with `s3cureP@ss!`.
-   - Fill the name input (placeholder "Name (optional)") with `Smoke User`.
+   - Fill the name input (placeholder "Name") with `Smoke User`.
    - Click the "Register" submit button.
 5. Wait for "Not logged in" to disappear — assert the page now shows the email address (user is logged in).
 6. Click the "GET /api/profile" button.

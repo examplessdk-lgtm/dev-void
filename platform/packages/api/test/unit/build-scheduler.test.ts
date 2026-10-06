@@ -275,8 +275,8 @@ function makeStubCtx() {
 // assert WHICH namespace the scheduler routed a build's container start to.
 //
 // Single-arg form `makeEnv(startBuild)`: BOTH namespaces invoke the SAME
-// `startBuild`, so every pre-existing assertion on `startBuild` keeps working
-// regardless of which namespace handled the build.
+// `startBuild`, so assertions on `startBuild` hold regardless of which namespace
+// handled the build.
 //
 // Per-namespace form `makeEnv({ base, large })`: each fleet gets its OWN
 // startBuild spy, so a test can make ONE fleet throw the container-capacity error
@@ -675,7 +675,7 @@ describe('BuildScheduler.alarm', () => {
   });
 
   it('leaves a build queued (never claimed or failed) when a pre-claim lookup throws transiently', async () => {
-    // Regression: getGitHubConnection / getProject run BEFORE the atomic
+    // getGitHubConnection / getProject run BEFORE the atomic
     // claim, so a transient DB/Hyperdrive throw must NOT claim the build. A claim
     // would flip it queued->starting (active) with no BuildManager yet created to
     // own the wall-clock timeout, and the stale reaper only covers github_actions
@@ -701,7 +701,7 @@ describe('BuildScheduler.alarm', () => {
   });
 
   it('excludes a capped owner from the scan so an under-cap owner is not starved', async () => {
-    // Regression: the per-user cap is enforced only at claim time, so if a
+    // The per-user cap is enforced only at claim time, so if a
     // CAPPED owner held the rows the scan would surface first (lowest project_id
     // / oldest), every tick would inspect-then-skip those rows and never reach an
     // under-cap owner's later, claimable build. The scheduler must instead exclude
@@ -883,7 +883,7 @@ describe('BuildScheduler.alarm', () => {
   });
 
   it('does NOT requeue a concurrently-cancelled build on the capacity path (guarded CAS no-ops)', async () => {
-    // Regression: the capacity-shed retry used an UNCONDITIONAL
+    // The capacity-shed retry must not use an unconditional
     // updateBuildStatus('queued'). If a concurrent terminalizer
     // (terminateBuildsForProject from push-supersede / branch-executor change /
     // disconnect / install removal) flipped the claimed `starting` row to

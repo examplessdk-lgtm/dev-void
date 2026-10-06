@@ -1,5 +1,14 @@
 import { cfAccessHeaders } from '../../shared/cf-access.ts';
 
+/** Base64-encode binary values for JSON transport to the proxy. */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
 function readableMessage(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -129,7 +138,6 @@ export class ProxyClient {
    * Throws on non-OK responses.
    */
   async stream(path: string, init: RequestInit): Promise<Response> {
-    // Inject projectId into the body if it's JSON
     let body = init.body;
     if (typeof body === 'string') {
       try {

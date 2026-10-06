@@ -25,6 +25,7 @@ import {
   upsertGitHubInstallation,
 } from '../db.ts';
 import type { Db } from '../db.ts';
+import type { TerminatedBuild } from '../db/builds.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import {
@@ -182,6 +183,21 @@ function normalizeRepositorySelection(value: string | undefined): 'all' | 'selec
 }
 
 /**
+ * Poke the scheduler DO so it wakes immediately rather than waiting for its
+ * next alarm. Best-effort: a failed poke is recovered on the next scheduled
+ * wake. DO→DO fetch is permitted here (the no-`.fetch` rule only forbids
+ * dispatching to user workers).
+ */
+async function pokeBuildScheduler(env: ApiEnv['Bindings']): Promise<void> {
+  try {
+    const scheduler = env.BUILD_SCHEDULER.get(env.BUILD_SCHEDULER.idFromName('global'));
+    await scheduler.fetch('https://scheduler/poke', { method: 'POST' });
+  } catch (err) {
+    console.error('[webhooks] failed to poke build scheduler:', err);
+  }
+}
+
+/**
  * Re-run a build for an already-pushed commit, driven by GitHub's "Re-run" /
  * "Re-run all checks" buttons (`check_run:rerequested` / `check_suite:rerequested`).
  *
@@ -215,7 +231,7 @@ function normalizeRepositorySelection(value: string | undefined): 'all' | 'selec
  * conclude a suite at all — GitHub derives that from the runs — and the suite
  * payload carries no run ids.
  *
- * Deriving them from our own build rows was tried and REVERTED: the row is not
+ * Run ids must not be derived from our own build rows: the row is not
  * authoritative for the `github_actions` executor, whose check is completed
  * straight from `workflow_run.conclusion` independent of the status CAS, so a
  * `cancelled` row can carry a published `success` and rewriting it from the row
@@ -227,8 +243,8 @@ function normalizeRepositorySelection(value: string | undefined): 'all' | 'selec
  * runs needing resolution at all — a suite rerequest resets the SUITE's own state,
  * and a run that kept its conclusion is not pending. Re-PATCHing a run with the
  * conclusion it already has, hoping the suite recomputes, is a guess about GitHub
- * internals, and the last guess in this area shipped the bug above. Verify it
- * against a real suite rerequest on staging before building on it.
+ * internals. Verify it against a real suite rerequest on staging before building
+ * on it.
  *
  * DEDUP falls out of the shared helper: a `failed` build for the commit is never
  * reused, so the failing case this exists for always enqueues fresh work. A
@@ -258,9 +274,8 @@ async function rerunBuildForCommit(
   const { installationId, repoFullName, repoId, headSha, event, checkRun } = args;
 
   // GitHub flips the suite back to `queued` the moment the button is clicked. If
-  // we then enqueue nothing and say nothing, the user sees exactly what was
-  // reported here: a Re-run that does nothing. Every no-op path reports through
-  // `completeRerun` below.
+  // we then enqueue nothing and say nothing, the user sees a Re-run that does
+  // nothing. Every no-op path reports through `completeRerun` below.
   //
   // What a REFUSAL writes: the conclusion the run already had. Never a passing
   // conclusion we did not earn — GitHub counts `neutral`/`skipped` as passing for
@@ -277,7 +292,7 @@ async function rerunBuildForCommit(
     // internally, none of it against a clock, while GitHub drops a webhook delivery
     // we have not answered in 10 seconds — and does NOT redeliver a failure
     // automatically, so a lost delivery has to be replayed by hand. Racing a
-    // deadline here would not have bounded the handler anyway: the DB work, the
+    // deadline here would not bound the handler anyway: the DB work, the
     // compare call and the supersede transaction all run before this point.
     //
     // `waitUntil` is the shape the `workflow_run` completion already uses: the
@@ -340,12 +355,10 @@ async function rerunBuildForCommit(
   // the other branch at the same SHA. The per-branch freshness gate below is what
   // decides, and it is exact: a connection whose branch head is not this commit
   // fails `identical` and is skipped anyway.
-  const branchCandidates = connections;
-
   // A per-check rerun targets the ONE project whose build published that check,
   // which `external_id` names exactly. Several projects can share a repo AND a
   // branch, so nothing about the branch can substitute for it.
-  let candidates = branchCandidates;
+  let candidates = connections;
   if (checkRun) {
     // FAIL CLOSED. Falling back to the branch set here would reopen the very
     // fan-out this narrowing exists to close, and the case is reachable: deleting
@@ -361,7 +374,7 @@ async function rerunBuildForCommit(
       );
       return context.json({ ok: true, ignored: 'originating build not found' });
     }
-    candidates = branchCandidates.filter((c) => c.project_id === originating.project_id);
+    candidates = connections.filter((c) => c.project_id === originating.project_id);
   }
   if (candidates.length === 0) {
     await completeRerun(
@@ -382,16 +395,15 @@ async function rerunBuildForCommit(
   // no automatic redelivery, so the click is simply lost. The compares are
   // independent (distinct keys, no read-modify-write on `freshness`) and
   // `getBranchHeadComparisonStatus` resolves rather than throws on every failure
-  // path, so `Promise.all` cannot turn one bad branch into a 500. Latency now
+  // path, so `Promise.all` cannot turn one bad branch into a 500. Latency
   // tracks the SLOWEST branch instead of their sum, which is the push path's cost
   // regardless of how many projects share the repo.
   //
   // Warm the installation token first. `getInstallationToken` memoizes per
-  // installation, so a serial loop paid one mint and reused it; firing the
-  // compares concurrently on a cold cache would instead stampede N mints. One
-  // awaited call ahead of the fan-out restores that sharing. Failure is ignored on
-  // purpose — each compare mints and retries on its own, and this call exists only
-  // to populate the cache.
+  // installation, but concurrent compares on a cold cache would stampede N mints;
+  // one awaited call ahead of the fan-out lets them share a single mint. Failure
+  // is ignored on purpose — each compare mints and retries on its own, and this
+  // call exists only to populate the cache.
   const distinctBranches = [...new Set(candidates.map((c) => c.branch))];
   if (distinctBranches.length > 1) {
     try {
@@ -420,16 +432,11 @@ async function rerunBuildForCommit(
   );
 
   const buildIds: Array<string> = [];
-  const cancelledContainerBuilds: Array<{
-    id: string;
-    executor: Build['executor'];
-    status: Build['status'];
-    instance_type: string | null;
-  }> = [];
-  // A build that was REUSED and is already terminal is the case Codex called the
-  // visibly-broken button: `supersedeAndCreateContainerBuild` returns the existing
-  // `complete` row (non-null), so it LOOKS like an enqueue, but nothing will ever
-  // run and nothing will ever update the check again. Separate it from real work.
+  const cancelledContainerBuilds: Array<TerminatedBuild> = [];
+  // A build that was REUSED and is already terminal: `supersedeAndCreateContainerBuild`
+  // returns the existing `complete` row (non-null), so it LOOKS like an enqueue,
+  // but nothing will ever run and nothing will ever update the check again.
+  // Separate it from real work.
   const alreadyLive: Array<string> = [];
   let sawActions = false;
   for (const connection of candidates) {
@@ -510,15 +517,7 @@ async function rerunBuildForCommit(
     return context.json({ ok: true, enqueued: 0 });
   }
 
-  // Wake the scheduler now instead of waiting for its next alarm. Best-effort.
-  try {
-    const scheduler = context.env.BUILD_SCHEDULER.get(
-      context.env.BUILD_SCHEDULER.idFromName('global'),
-    );
-    await scheduler.fetch('https://scheduler/poke', { method: 'POST' });
-  } catch (err) {
-    console.error('[webhooks] failed to poke build scheduler:', err);
-  }
+  await pokeBuildScheduler(context.env);
 
   return context.json({ ok: true, buildIds });
 }
@@ -648,12 +647,7 @@ export async function handleVerifiedGitHubWebhook(
             .from(githubConnections)
             .where(eq(githubConnections.installation_id, String(installationId)))
             .for('update');
-          const acc: Array<{
-            id: string;
-            executor: Build['executor'];
-            status: Build['status'];
-            instance_type: string | null;
-          }> = [];
+          const acc: Array<TerminatedBuild> = [];
           for (const conn of conns) {
             // Match on the immutable repository id, like the build path.
             if (conn.repository_id !== repoIdStr || conn.branch !== deletedBranch) {
@@ -721,12 +715,7 @@ export async function handleVerifiedGitHubWebhook(
       }
 
       const buildIds: Array<string> = [];
-      const cancelledContainerBuilds: Array<{
-        id: string;
-        executor: Build['executor'];
-        status: Build['status'];
-        instance_type: string | null;
-      }> = [];
+      const cancelledContainerBuilds: Array<TerminatedBuild> = [];
       for (const connection of matching) {
         if (connection.build_executor !== 'container') {
           // github_actions: the workflow self-runs on push and the OIDC endpoint
@@ -753,8 +742,8 @@ export async function handleVerifiedGitHubWebhook(
         }
         // Supersede older queued AND active builds for this branch and enqueue the
         // new commit atomically, under a per-project lock, so concurrent webhook
-        // deliveries can't interleave supersede+create (which previously let an
-        // older push cancel a newer queued build then enqueue the older commit).
+        // deliveries can't interleave supersede+create (which would let an older
+        // push cancel a newer queued build then enqueue the older commit).
         // Redelivery is deduped: an in-flight build for this exact commit is
         // reused; a `complete` build is reused only when its commit is already
         // live. Otherwise — e.g. a force-push rollback to a previously built
@@ -800,18 +789,7 @@ export async function handleVerifiedGitHubWebhook(
           : context.json({ ok: true, executor: 'github_actions' });
       }
 
-      // Poke the scheduler DO once so it wakes immediately rather than waiting for
-      // its next alarm. Best-effort: a failed poke is recovered on the next
-      // scheduled wake. DO→DO fetch is permitted here (the no-`.fetch` rule only
-      // forbids dispatching to user workers).
-      try {
-        const scheduler = context.env.BUILD_SCHEDULER.get(
-          context.env.BUILD_SCHEDULER.idFromName('global'),
-        );
-        await scheduler.fetch('https://scheduler/poke', { method: 'POST' });
-      } catch (err) {
-        console.error('[webhooks] failed to poke build scheduler:', err);
-      }
+      await pokeBuildScheduler(context.env);
 
       return context.json({ ok: true, buildIds });
     }
@@ -879,12 +857,7 @@ export async function handleVerifiedGitHubWebhook(
           } else {
             await suspendGitHubInstallation(tx, String(installationId));
           }
-          const acc: Array<{
-            id: string;
-            executor: Build['executor'];
-            status: Build['status'];
-            instance_type: string | null;
-          }> = [];
+          const acc: Array<TerminatedBuild> = [];
           for (const conn of connections) {
             acc.push(...(await terminateBuildsForProject(tx, conn.project_id, { reason })));
           }
@@ -929,11 +902,9 @@ export async function handleVerifiedGitHubWebhook(
       // getBranchExistence — never hold a row lock across a GitHub call). Trust
       // the refetched selection too, so a redelivered/stale event that no longer
       // reflects 'selected' self-corrects.
-      // For an `all`→`selected` narrowing the delta is not reconstructable from
-      // the empty `all` cache, so refetch the authoritative list — a GitHub
-      // round-trip, done BEFORE the tx so no row lock is held across it. The repo
-      // set is then computed from the LOCKED, freshly-read cached set inside the
-      // tx (computeNext), NOT from the `existing` snapshot above: concurrent
+      //
+      // The repo set is then computed from the LOCKED, freshly-read cached set
+      // inside the tx (computeNext), NOT from the `existing` snapshot above: concurrent
       // installation_repositories deliveries must serialize their read-modify-
       // write, else two near-simultaneous adds from [A] persist only one of
       // [A,B]/[A,C] and the lost repo's pushes/OIDC stop resolving.
@@ -1025,8 +996,8 @@ export async function handleVerifiedGitHubWebhook(
       const removedRepositoryIds = new Set(removed.map((r) => String(r.id)));
       const cancelled = await db.transaction(async (tx) => {
         // Lock + re-read the install row FIRST, then the connection rows —
-        // matching member_removed, the connect gate, and the (now install-first)
-        // deleted/suspend branch, so a concurrent suspend/delete or
+        // matching member_removed, the connect gate, and the deleted/suspend
+        // branch, so a concurrent suspend/delete or
         // organization/member_removed for the same install can't deadlock
         // (AB-BA). The install-row lock also serializes the repositories write
         // below against concurrent installation_repositories deliveries (no lost
@@ -1063,12 +1034,7 @@ export async function handleVerifiedGitHubWebhook(
         if (staleDowngrade) {
           return [];
         }
-        const acc: Array<{
-          id: string;
-          executor: Build['executor'];
-          status: Build['status'];
-          instance_type: string | null;
-        }> = [];
+        const acc: Array<TerminatedBuild> = [];
         for (const conn of connections) {
           if (!removedRepositoryIds.has(conn.repository_id)) {
             continue;
@@ -1212,7 +1178,7 @@ export async function handleVerifiedGitHubWebhook(
         // repo removal, project teardown, or the stale-build reaper. None of those
         // paths touch the check, yet GitHub still fires workflow_run:completed
         // (including for a run it cancelled via `concurrency`); driving completion
-        // off the CAS (as before) left the check stranded `in_progress`. Placed
+        // off the CAS would leave the check stranded `in_progress`. Placed
         // BEFORE the active-status skip below so an already-terminal candidate is
         // still completed. Idempotent — re-PATCHing a completed run just re-sets
         // the same conclusion, so a redelivery is harmless. Guarded on
@@ -1384,7 +1350,7 @@ export async function handleVerifiedGitHubWebhook(
       // bearer's oauth id) never back a connection, so X's removal only DELETES
       // them. That resolution is deliberately NOT done out here: it runs INSIDE the
       // tx, AFTER the install-row lock + tombstone write, so a redemption that
-      // committed while we waited for the lock is visible and severed (R4-1). The
+      // committed while we waited for the lock is visible and severed. The
       // pre-tx step above resolves only the org install set (needed for the lock
       // scope).
       const reason = 'org membership removed';
@@ -1392,7 +1358,7 @@ export async function handleVerifiedGitHubWebhook(
         // Lock each org install row FIRST, in a deterministic (sorted) order to
         // avoid deadlock. This is the SAME row the connect gate locks, so a
         // concurrent member connect and this revocation are serialized — closing
-        // the phantom-INSERT race (Task 14). The lock is taken before the
+        // the phantom-INSERT race. The lock is taken before the
         // connection scan so a connect that commits first is seen and severed.
         for (const installId of [...orgInstallIds].sort()) {
           await tx
@@ -1402,7 +1368,7 @@ export async function handleVerifiedGitHubWebhook(
             .for('update');
         }
         // Stamp the durable revocation tombstone FIRST and UNCONDITIONALLY, keyed
-        // by the removed GitHub account id X (Task 19) — the durable identity the
+        // by the removed GitHub account id X — the durable identity the
         // stateless join_code/connect_grant artifacts carry, always known from the
         // payload even when there is NO Void user to sever (the pre-mint hole).
         // The membership hard-delete below is a TTL cache and cannot make
@@ -1411,11 +1377,11 @@ export async function handleVerifiedGitHubWebhook(
         // is rejected; the upsert advances the high-water mark on redelivery,
         // while a legit re-join after re-add mints a fresh artifact
         // (iat > revoked_at) honored.
-        // Written under the install-row lock (F5-serialized against a concurrent
+        // Written under the install-row lock (serialized against a concurrent
         // join/complete) EVEN when the affected-user set is empty.
         await recordInstallationRevocations(tx, orgInstallIds, String(removedGithubUserId));
         // Resolve the affected Void user for connection/owner severing UNDER the
-        // lock (post-tombstone) so an R4-1 redemption that committed while we
+        // lock (post-tombstone) so a redemption that committed while we
         // waited for the install-row lock is now visible and severed. Either
         // member_removed locks first (the tombstone above then blocks the
         // redemption) or the redemption commits first (this post-lock re-read sees
@@ -1424,12 +1390,7 @@ export async function handleVerifiedGitHubWebhook(
         // Connections record the owner/admin whose OAuth proof authorized them,
         // so the removed user's connections are exactly those they authorized.
         const removedUser = await getUserByOAuthAccount(tx, 'github', String(removedGithubUserId));
-        const acc: Array<{
-          id: string;
-          executor: Build['executor'];
-          status: Build['status'];
-          instance_type: string | null;
-        }> = [];
+        const acc: Array<TerminatedBuild> = [];
         if (removedUser) {
           const conns = await tx
             .select({ project_id: githubConnections.project_id })
@@ -1469,12 +1430,8 @@ export async function handleVerifiedGitHubWebhook(
       return context.json({ ok: true });
     }
 
-    case 'pull_request':
-      // PR previews are a future phase — accept and ignore for now.
-      return context.json({ ok: true, ignored: 'pull_request' });
-
     default:
-      return context.json({ ok: true, ignored: event ?? 'unknown' });
+      return context.json({ ok: true, ignored: event });
   }
 }
 
@@ -1513,4 +1470,3 @@ app.post('/github', async (context) => {
 });
 
 export const webhookRoutes = app;
-export default app;

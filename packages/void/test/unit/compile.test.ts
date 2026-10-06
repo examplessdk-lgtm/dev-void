@@ -2088,7 +2088,7 @@ describe('shared pattern compiler in generated routes', () => {
     // or a `:splat` colliding with a bare `*`. These cases still throw at
     // construction. They're caught by:
     //   1. Build-time validation (`assertUniqueCaptureNames` in config.ts)
-    //   2. Runtime per-rule try/catch in `emitApplyRoutingRules` (so one
+    //   2. Runtime per-rule try/catch in `runtime/routing.ts` (so one
     //      malformed rule cannot 500 unrelated traffic if validation is bypassed)
     expect(() => compilePattern('/:id/:id')).toThrow(/duplicate capture group name/i);
     expect(() => compilePattern('/:splat/*')).toThrow(/duplicate capture group name/i);

@@ -105,8 +105,7 @@ export async function backfillQueueTokens(
         continue;
       }
       if (!entry.workerName) {
-        // Without a workerName there is no way to fetch the baked token
-        // and no deploymentId to re-derive meaningfully. Leave alone.
+        // Without a workerName there is no binding to read the token from.
         skipped++;
         continue;
       }
@@ -134,9 +133,6 @@ export async function backfillQueueTokens(
         continue;
       }
 
-      // Re-read to shrink the write-write race with concurrent deploy/
-      // rollback. KV has no CAS, but if the snapshot no longer matches
-      // we skip the put rather than overwrite fresher metadata.
       const currentRaw = await routing.get(name);
       if (currentRaw !== snapshotRaw) {
         raced++;

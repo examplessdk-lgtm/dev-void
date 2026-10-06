@@ -193,9 +193,8 @@ export async function validateEmittedVarsViaSubprocess(
 
 /**
  * Parse the child's framed result from the DEDICATED fd-3 channel. The whole buffer
- * is the JSON result (nothing else writes to fd 3), so no sentinel scan is needed —
- * that is the truncation fix: config/env.ts stdout noise lives on a different fd and
- * can never reach here. Returns undefined on a missing/unparseable/ill-shaped result
+ * is the JSON result (nothing else writes to fd 3), so no sentinel scan is needed:
+ * config/env.ts stdout noise lives on a different fd and can never reach here. Returns undefined on a missing/unparseable/ill-shaped result
  * so the caller fails closed.
  */
 function parseProbeResult(fd3: string): EnvSchemaProbeRawResult | undefined {

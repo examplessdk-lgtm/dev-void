@@ -9,20 +9,13 @@ import {
   parsePlatformAdmissionPolicy,
   type PlatformAdmissionPolicy,
 } from '@void/platform';
-import {
-  type CANCEL_SYMBOL,
-  confirm,
-  isCancel,
-  multiselect,
-  password,
-  select,
-  text,
-} from '@voidzero-dev/vite-plus-prompts';
+import { confirm, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
 import { readOperatorToken, resolveOperatorOrigin } from './operator-auth.ts';
 import { OperatorClient } from './operator-client.ts';
 import { humanLines } from './operator-cmd.ts';
 import type { PlatformConfigArgs } from './platform-config-args.ts';
+import { platformPromptAnswer } from './platform-setup.ts';
 
 type Method = {
   id: string;
@@ -39,13 +32,6 @@ type Listing = {
   admission?: PlatformAdmissionPolicy;
   protection?: unknown;
 };
-
-function value<T>(input: T | typeof CANCEL_SYMBOL): T {
-  if (isCancel(input) || typeof input === 'symbol') {
-    throw new Error('platform: Cancelled.');
-  }
-  return input;
-}
 
 function print(result: unknown, json: boolean): void {
   console.log(json ? JSON.stringify(result, null, 2) : humanLines(result).join('\n'));
@@ -69,7 +55,7 @@ async function apply(
     }
     console.error(JSON.stringify(preview, null, 2));
     if (
-      !value(
+      !platformPromptAnswer(
         await confirm({ message: `Apply this change to ${client.origin}?`, initialValue: false }),
       )
     ) {
@@ -179,9 +165,11 @@ async function configurationInput(
   const interactive = !!process.stdin.isTTY && !args.file;
   if (interactive) {
     if (!existing && kind !== 'github' && kind !== 'google' && !args.id) {
-      input.id = value(await text({ message: 'Connection ID:', initialValue: String(input.id) }));
+      input.id = platformPromptAnswer(
+        await text({ message: 'Connection ID:', initialValue: String(input.id) }),
+      );
     }
-    input.label = value(
+    input.label = platformPromptAnswer(
       await text({
         message: 'Login button label:',
         initialValue: String(
@@ -196,15 +184,15 @@ async function configurationInput(
       }),
     );
     if (kind === 'oidc' || kind === 'cloudflare-access') {
-      input.issuer = value(
+      input.issuer = platformPromptAnswer(
         await text({ message: 'OIDC issuer URL:', initialValue: String(input.issuer ?? '') }),
       );
     }
-    input.clientId = value(
+    input.clientId = platformPromptAnswer(
       await text({ message: 'Client ID:', initialValue: String(input.clientId ?? '') }),
     );
     if (kind === 'google') {
-      const domains = value(
+      const domains = platformPromptAnswer(
         await text({
           message: 'Allowed Workspace domains (comma-separated; blank allows any Google account):',
           initialValue: Array.isArray(input.allowedDomains) ? input.allowedDomains.join(', ') : '',
@@ -216,7 +204,7 @@ async function configurationInput(
         .filter(Boolean);
     }
     if (kind === 'oidc' || kind === 'cloudflare-access') {
-      const groups = value(
+      const groups = platformPromptAnswer(
         await text({
           message: 'Allowed groups (comma-separated; blank uses the provider’s access policy):',
           initialValue: Array.isArray(input.requiredGroups) ? input.requiredGroups.join(', ') : '',
@@ -238,7 +226,7 @@ async function configurationInput(
   }
   if (!args.clientSecretEnv && interactive) {
     secret =
-      value(
+      platformPromptAnswer(
         await password({
           message: existing
             ? 'Client secret (leave blank to keep the saved secret):'
@@ -276,7 +264,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       console.log('Run void platform auth login, then return to void platform config auth.');
       return;
     }
-    const chosen = value(
+    const chosen = platformPromptAnswer(
       await select({
         message: 'Platform authentication:',
         options: [
@@ -291,7 +279,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       }),
     );
     if (chosen === ':protection') {
-      const target = value(
+      const target = platformPromptAnswer(
         await select({
           message: 'Platform protection:',
           options: [
@@ -307,7 +295,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       return runPlatformAuthConfig({ ...args, action: 'admission' });
     }
     if (chosen === ':add') {
-      const kind = value(
+      const kind = platformPromptAnswer(
         await select({
           message: 'Login method:',
           options: [
@@ -321,7 +309,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       return runPlatformAuthConfig({ ...args, action: 'add', target: kind });
     }
     const method = listing.methods.find((method) => method.id === chosen)!;
-    const action = value(
+    const action = platformPromptAnswer(
       await select({
         message: stripVTControlCharacters(method.label),
         options: [
@@ -356,7 +344,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       if (!process.stdin.isTTY || args.json) {
         throw new Error('platform: Supply --file with the signup policy in non-interactive mode.');
       }
-      const mode = value(
+      const mode = platformPromptAnswer(
         await select({
           message: 'Who can create an account?',
           initialValue: listing.admission?.mode ?? 'restricted',
@@ -370,7 +358,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
       if (mode === 'company') {
         const access =
           !!listing.protection &&
-          value(
+          platformPromptAnswer(
             await confirm({
               message: 'Allow everyone approved by Cloudflare Access protection?',
               initialValue: true,
@@ -389,7 +377,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
           );
         }
         const connections = eligible.length
-          ? value(
+          ? platformPromptAnswer(
               await multiselect({
                 message: 'Login methods whose company policies qualify new users:',
                 required: !access,
@@ -460,7 +448,7 @@ export async function runPlatformAuthConfig(args: PlatformConfigArgs): Promise<v
     testId = tested.id;
     if (
       args.action === 'enable' &&
-      value(
+      platformPromptAnswer(
         await confirm({
           message: 'Link this verified identity to your administrator account?',
           initialValue: true,

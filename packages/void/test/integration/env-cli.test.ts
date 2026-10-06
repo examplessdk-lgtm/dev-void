@@ -84,10 +84,9 @@ describe('void env check (subprocess)', () => {
     const root = createProject('{ STRIPE_KEY: string() }');
     const { stdout, status } = runVoid(root, ['env', 'check']);
     // The command prints clack's `note()` block to stdout on failure.
-    const combined = stdout;
     expect(status).toBe(1);
-    expect(combined).toContain('Env validation failed');
-    expect(combined).toContain('STRIPE_KEY');
+    expect(stdout).toContain('Env validation failed');
+    expect(stdout).toContain('STRIPE_KEY');
   });
 
   it('exits 0 when .env satisfies every required key locally', () => {

@@ -1,5 +1,7 @@
-import type { RenderOptions, Renderer, RuleBlock, StateBlock, Token } from 'markdown-exit';
+import type { RuleBlock, StateBlock, Token } from 'markdown-exit';
 import type MarkdownExit from 'markdown-exit';
+import type { Heading } from '../compile.ts';
+import { extractHeadings } from '../metadata.ts';
 
 export type TocOptions = Readonly<{
   pattern?: RegExp;
@@ -9,13 +11,7 @@ export type TocOptions = Readonly<{
   listTag?: string;
 }>;
 
-type Header = {
-  depth: number;
-  slug: string;
-  text: string;
-};
-
-function renderHeaders(headers: ReadonlyArray<Header>, listTag: string): string {
+function renderHeaders(headers: ReadonlyArray<Heading>, listTag: string): string {
   if (headers.length === 0) {
     return '';
   }
@@ -70,46 +66,8 @@ export function tocPlugin(md: MarkdownExit, options?: TocOptions): void {
     { alt: ['paragraph', 'reference', 'blockquote'] },
   );
 
-  md.renderer.rules.toc_open = (
-    tokens: Array<Token>,
-    idx: number,
-    options: RenderOptions,
-    _env: unknown,
-    self: Renderer,
-  ) => {
-    return self.renderToken(tokens, idx, options);
-  };
-
   md.renderer.rules.toc_body = (tokens: Array<Token>) => {
-    // Walk all tokens to find headings at the specified levels
-    const headers: Array<Header> = [];
-    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
-      const token = tokens[tokenIndex];
-      if (token.type === 'heading_open') {
-        const depth = Number(token.tag.slice(1));
-        if (level.includes(depth)) {
-          const slug = token.attrGet?.('id') ?? '';
-          const inline = tokens[tokenIndex + 1];
-          const text = (
-            inline?.children
-              ?.filter((child) => child.type === 'text' || child.type === 'code_inline')
-              .map((child) => child.content)
-              .join('') ?? ''
-          ).trim();
-          headers.push({ depth, slug, text });
-        }
-      }
-    }
+    const headers = extractHeadings(tokens).filter((heading) => level.includes(heading.depth));
     return renderHeaders(headers, listTag);
-  };
-
-  md.renderer.rules.toc_close = (
-    tokens: Array<Token>,
-    idx: number,
-    options: RenderOptions,
-    _env: unknown,
-    self: Renderer,
-  ) => {
-    return self.renderToken(tokens, idx, options);
   };
 }

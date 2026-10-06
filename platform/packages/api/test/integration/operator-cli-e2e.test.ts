@@ -141,7 +141,6 @@ test('built CLI authenticates, previews, changes access, and reads the actual da
   expect(list.code).toBe(0);
   expect(JSON.parse(list.stdout).users[0].login).toBe('terminal-admin');
 
-  await env.ROUTING.put('signup:enabled', 'false');
   const preview = await run(['signup', 'restrict', '--plan', '--json']);
   expect(preview.code).toBe(0);
   expect(JSON.parse(preview.stdout)).toMatchObject({ dryRun: true, action: 'signup.restrict' });

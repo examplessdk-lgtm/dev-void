@@ -20,7 +20,6 @@ function projectLabel(slug: string, root: string, url?: string): string {
 export async function runLink(root: string, slug?: string): Promise<void> {
   console.log();
 
-  // Check if already linked
   const existing = readProjectConfig(root);
   if (existing) {
     log.warn(`Already linked to ${projectLabel(existing.slug, root)}`);
@@ -28,7 +27,6 @@ export async function runLink(root: string, slug?: string): Promise<void> {
     return;
   }
 
-  // Auth
   const token = getToken(root);
   if (!token) {
     cancel('No auth token found. Run `void account login` first.');

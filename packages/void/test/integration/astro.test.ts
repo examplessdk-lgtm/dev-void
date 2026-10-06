@@ -2,7 +2,12 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  collectServerOutput,
+  getPort,
+  waitForServer,
+  killChild,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/astro';
@@ -14,18 +19,11 @@ function readWranglerConfig(root: string): {
   d1_databases?: Array<{ binding: string }>;
   kv_namespaces?: Array<{ binding: string }>;
 } {
-  const configPath = join(root, '.void-wrangler.jsonc');
-  return JSON.parse(readFileSync(configPath, 'utf-8')) as {
-    compatibility_flags?: Array<string>;
-    d1_databases?: Array<{ binding: string }>;
-    kv_namespaces?: Array<{ binding: string }>;
-  };
+  return JSON.parse(readFileSync(join(root, '.void-wrangler.jsonc'), 'utf-8'));
 }
 
 describe('playground/astro dev', () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
-  let stdout = '';
 
   const startDev = async () => {
     DEV_PORT = await getPort();
@@ -54,20 +52,10 @@ describe('playground/astro dev', () => {
       },
     );
 
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr = (stderr + String(chunk)).slice(-16000);
+    await waitForServer(DEV_BASE, 20_000, {
+      isAlive: () => child.exitCode === null && child.signalCode === null,
+      diagnostics: collectServerOutput(child),
     });
-    child.stdout!.on('data', (chunk: Buffer) => {
-      stdout = (stdout + String(chunk)).slice(-16000);
-    });
-
-    try {
-      await waitForServer(DEV_BASE, 20_000, {
-        isAlive: () => child.exitCode === null && child.signalCode === null,
-      });
-    } catch (error) {
-      throw new Error(`${String(error)}\nAstro stdout:\n${stdout}\nAstro stderr:\n${stderr}`);
-    }
   };
 
   beforeAll(async () => {

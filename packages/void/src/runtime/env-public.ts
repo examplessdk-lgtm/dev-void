@@ -56,6 +56,18 @@ const registry = (registryGlobal[ENV_REGISTRY_SYMBOL] ??= {
   bootValidation: null,
 });
 const validatedCache = new WeakMap<object, Map<string, unknown>>();
+// WeakMap does not expose its values; keep a parallel list so defineEnv can clear them.
+const cacheList: Array<Map<string, unknown>> = [];
+
+function getValidatedCache(rawEnv: object): Map<string, unknown> {
+  let cache = validatedCache.get(rawEnv);
+  if (!cache) {
+    cache = new Map();
+    validatedCache.set(rawEnv, cache);
+    cacheList.push(cache);
+  }
+  return cache;
+}
 
 /** Vite embeds the same public build inputs into server and browser bundles. */
 function getClientEnvValues(): Record<string, unknown> {
@@ -96,7 +108,7 @@ export function defineEnv<S extends AnySchema>(schema: S): InferEnv<S> {
   // swaps in an empty schema, we still know defineEnv was declared.
   registry.hasDefineEnvBeenCalled = true;
   // Drop any cached entries from a prior schema (HMR / re-import).
-  for (const map of validatedCacheValues()) {
+  for (const map of cacheList) {
     map.clear();
   }
   // Reset boot-time validation state so a re-imported schema is re-checked.
@@ -145,24 +157,15 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
     // instead of re-running validation. The cache key is the current raw
     // runtime env (matches what `readKey` will use). If no runtime env is
     // bound (e.g. called in an isolated test), skip seeding — the validator
-    // result is still cached via bootValidationState.
+    // result is still cached via registry.bootValidation.
     try {
       const cacheKey = getRawRuntimeEnv() as object;
-      let cache = validatedCache.get(cacheKey);
-      if (!cache) {
-        cache = new Map();
-        validatedCache.set(cacheKey, cache);
-        cacheList.push(cache);
-      }
+      const cache = getValidatedCache(cacheKey);
       for (const [key, value] of report.values) {
         // Never seed internal framework bindings (__VOID_*, __PROJECT_*, and —
-        // while ISR is active — ISR_CACHE) into the sync cache, even when a
-        // user's schema declares one and boot validation resolved its raw
-        // value. Exposing it via `env.X` would leak an internal binding (e.g.
-        // the ISR KV namespace). `readKey` also short-circuits internal names,
-        // so this is belt-and-suspenders that additionally keeps the cache
-        // clean. `cacheKey` is the raw runtime env — the same object the
-        // exact-name (ISR_CACHE) gate consults for the ISR-active check.
+        // while ISR is active — ISR_CACHE), even when the user's schema
+        // declares one: `env.X` must not expose them. `readKey` also
+        // short-circuits internal names.
         if (isInternalBinding(key, cacheKey as RuntimeEnv)) {
           continue;
         }
@@ -188,12 +191,6 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
   registry.bootValidation = { ok: false, error };
   throw error;
 }
-
-function validatedCacheValues(): Array<Map<string, unknown>> {
-  // WeakMap doesn't expose values; we maintain a parallel list for clears.
-  return cacheList;
-}
-const cacheList: Array<Map<string, unknown>> = [];
 
 /** Internal: framework-only access to the registered schema (for plugin/CLI). */
 export function _getRegisteredSchema(): AnySchema | null {
@@ -290,13 +287,7 @@ function readKey(key: string): unknown {
   }
   // Cache identity must be the underlying env object. `getRuntimeEnv()`
   // returns a fresh Proxy on every call, so keying by it would miss.
-  const cacheKey = rawEnv as object;
-  let cache = validatedCache.get(cacheKey);
-  if (!cache) {
-    cache = new Map();
-    validatedCache.set(cacheKey, cache);
-    cacheList.push(cache);
-  }
+  const cache = getValidatedCache(rawEnv);
   if (cache.has(key)) {
     return cache.get(key);
   }
@@ -433,9 +424,9 @@ async function validateAllEnvWithValues(
 
 export { string, number, boolean, url, email, oneOf, json, type EnvSchema } from './env-helpers.ts';
 
-// Preserve ambient Cloudflare.Env declarations from the previous env.d.ts
-// so user tsconfigs that include `types: ["void/env"]` continue to expose
-// D1/KV/R2 globals plus the auto-inferred Void framework bindings.
+// Ambient Cloudflare.Env declarations so user tsconfigs that include
+// `types: ["void/env"]` expose D1/KV/R2 globals plus the auto-inferred Void
+// framework bindings.
 declare global {
   namespace Cloudflare {
     interface Env {

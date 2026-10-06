@@ -40,14 +40,6 @@ describe('dashboard Access token refresh', () => {
     expect(readFileSync(join(root, '.env'), 'utf8')).toBe(contents);
   });
 
-  it('refreshes a token for an explicitly selected self-hosted API origin', () => {
-    const result = run(
-      'API_URL=https://platform.example.com\nCF_ACCESS_APP_URL=https://platform.example.com\n',
-    );
-    expect(result.status, result.stderr).toBe(0);
-    expect(readFileSync(join(root, '.env'), 'utf8')).toContain(`CF_ACCESS_TOKEN="${jwt}"`);
-  });
-
   it('rejects an Access origin that differs from the API destination', () => {
     const contents =
       'API_URL=https://platform.example.com\nCF_ACCESS_APP_URL=https://other.example.com\n';
@@ -75,14 +67,14 @@ describe('dashboard Access token refresh', () => {
     expect(readFileSync(join(root, '.env'), 'utf8')).toContain('CF_ACCESS_TOKEN=');
   });
 
-  it('records the origin and restricts permissions when persisting a refreshed token', () => {
+  it('refreshes and persists a token for an explicitly selected self-hosted API origin', () => {
     const result = run(
       'API_URL=https://platform.example.com\nCF_ACCESS_APP_URL=https://platform.example.com\n',
     );
     expect(result.status, result.stderr).toBe(0);
-    expect(readFileSync(join(root, '.env'), 'utf8')).toContain(
-      'CF_ACCESS_TOKEN_ORIGIN="https://platform.example.com"',
-    );
+    const contents = readFileSync(join(root, '.env'), 'utf8');
+    expect(contents).toContain(`CF_ACCESS_TOKEN="${jwt}"`);
+    expect(contents).toContain('CF_ACCESS_TOKEN_ORIGIN="https://platform.example.com"');
     expect(statSync(join(root, '.env')).mode & 0o777).toBe(0o600);
   });
 

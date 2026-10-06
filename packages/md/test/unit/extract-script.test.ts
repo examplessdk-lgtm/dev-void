@@ -7,6 +7,7 @@ describe('extractScript', () => {
     expect(result.script).toBeNull();
     expect(result.body).toBe('# Hello\n\nWorld');
     expect(result.islandImports).toEqual([]);
+    expect(result.clientCode).toBeNull();
   });
 
   it('extracts <script> block and returns body without it', () => {
@@ -80,11 +81,6 @@ import Sidebar from "./Sidebar.vue" with { island: "media:(min-width: 768px)" }
 # Page`;
     const result = extractScript(source);
     expect(result.islandImports[0].strategy).toBe('media:(min-width: 768px)');
-  });
-
-  it('returns clientCode as null when no script block', () => {
-    const result = extractScript('# Hello\n\nWorld');
-    expect(result.clientCode).toBeNull();
   });
 
   it('returns clientCode as null when script has only island imports', () => {

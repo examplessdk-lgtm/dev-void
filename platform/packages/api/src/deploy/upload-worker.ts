@@ -33,7 +33,7 @@ import {
   buildLiveUploadBindings,
   buildDurableObjectUploadMigrations,
 } from './durable-bindings.ts';
-import { assertDeploymentNotCanceled, assertProjectNotDeleting } from './guards.ts';
+import { assertDeploymentCanProceed } from './guards.ts';
 import { isCfAssetPlainText } from './migrations.ts';
 import { StaticAssetDisappearedError, attachServingStoreMetadata } from './serving-assets.ts';
 import { R2_HEAD_VERIFY_CONCURRENCY, DEFAULT_TAIL_SERVICE_NAME, CF_RETRY } from './shared.ts';
@@ -116,8 +116,7 @@ export async function uploadDeploymentWorker(input: {
       deploymentId: deployment.id,
     },
   );
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
   if (bindingLabels.length > 0) {
     emit({ event: 'provisioning_done' });
@@ -198,17 +197,13 @@ export async function uploadDeploymentWorker(input: {
         contentType: contentTypes.get(hash)!,
       });
     });
-    // `new` reflects "newly uploaded by the CLI this deploy" —
-    // for direct-to-R2 we don't re-upload, so we report 0 new
-    // (every byte was pre-uploaded). The CF asset upload session
-    // still dedupes against its own server-side index, which is
-    // what the WfP path's `cached` semantic refers to.
-    const newAssets = 0;
+    // Every byte was pre-uploaded direct-to-R2 by the CLI, so none are new
+    // to this request.
     emit({
       event: 'asset_upload',
       total: deployedAssetCount,
-      new: newAssets,
-      cached: deployedAssetCount - newAssets,
+      new: 0,
+      cached: deployedAssetCount,
     });
 
     completionJwt = await uploadAssetBuckets(
@@ -217,8 +212,7 @@ export async function uploadDeploymentWorker(input: {
       session.buckets,
       assetsByHash,
     );
-    await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-    await assertProjectNotDeleting(context.get('db'), projectId);
+    await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
     logger.info('asset_upload', 'upload_complete', {
       hasCompletionJwt: completionJwt !== undefined,
     });
@@ -246,7 +240,6 @@ export async function uploadDeploymentWorker(input: {
     input.wfpMirroredManifestDeploymentId = deployment.id;
   }
 
-  // 1. Worker upload
   input.currentStep = 'worker_upload';
   markPhase('worker_upload');
   const workerFormData = new FormData();
@@ -260,8 +253,8 @@ export async function uploadDeploymentWorker(input: {
   // same `metadata.bindings` array, so a secret named e.g. `SEND_EMAIL`
   // or `__VOID_PROJECT_SLUG` either shadows a platform binding or is
   // shadowed by one — CF resolves duplicates last-wins with no error.
-  // The secrets route now rejects these at PUT time, but rows stored
-  // before that guard existed still reach here. Failing the deploy with
+  // The secrets route rejects these at PUT time, but older stored rows
+  // can still reach here. Failing the deploy with
   // a named binding beats shipping a worker that silently reads the
   // wrong value.
   const reserved = [
@@ -298,8 +291,7 @@ export async function uploadDeploymentWorker(input: {
       },
       sandbox: manifest.sandbox,
     });
-    await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-    await assertProjectNotDeleting(context.get('db'), projectId);
+    await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   }
   const sandboxBindings = buildSandboxUploadBindings(
     manifest.sandbox,
@@ -393,8 +385,7 @@ export async function uploadDeploymentWorker(input: {
   );
   input.workerUploaded = true;
 
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
   emit({ event: 'worker_upload_done' });
   return { workerBindings, assetConfig };

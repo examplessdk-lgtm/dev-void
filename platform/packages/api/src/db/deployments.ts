@@ -14,8 +14,13 @@ import {
   getTableColumns,
 } from 'drizzle-orm';
 import { generateId } from '../id.ts';
-import { projects, deployments, migrationRenames, projectMigrations } from '../schema.ts';
-import * as schema from '../schema.ts';
+import {
+  projects,
+  deployments,
+  deploymentOperations,
+  migrationRenames,
+  projectMigrations,
+} from '../schema.ts';
 import type { Deployment, DeploymentStatus } from '../types.ts';
 import { type Db } from './client.ts';
 import { getProject } from './projects.ts';
@@ -305,12 +310,12 @@ export async function getPendingDeploymentOperation(
   projectId: string,
 ): Promise<{ id: string } | null> {
   const [operation] = await db
-    .select({ id: schema.deploymentOperations.id })
-    .from(schema.deploymentOperations)
+    .select({ id: deploymentOperations.id })
+    .from(deploymentOperations)
     .where(
       and(
-        eq(schema.deploymentOperations.project_id, projectId),
-        ne(schema.deploymentOperations.status, 'terminal'),
+        eq(deploymentOperations.project_id, projectId),
+        ne(deploymentOperations.status, 'terminal'),
       ),
     )
     .limit(1);
@@ -435,12 +440,10 @@ export async function appendProjectMigrations(
  * Atomically append newly-applied migration names to a deployment's
  * applied_migrations JSON text column, de-duping against what's already there.
  *
- * The previous read/merge/write pattern (fetch, JSON.parse, union, stringify,
- * UPDATE) lost entries under concurrent POST /migrations/apply requests: two
- * callers could both see the same pre-merge state and each overwrite with
- * their own partial union. Wrapping the read-then-write in a SERIALIZABLE
- * transaction with `SELECT … FOR UPDATE` serializes writers at the row level
- * so the second request waits for the first commit and observes its write.
+ * The read-merge-write runs in a transaction behind `SELECT … FOR UPDATE` so
+ * concurrent POST /migrations/apply requests serialize at the row level: the
+ * second request waits for the first commit and observes its write instead of
+ * overwriting it with its own partial union.
  *
  * No-op when `newMigrations` is empty or the deployment row doesn't exist.
  */
@@ -485,12 +488,11 @@ export async function appendAppliedMigrations(
  * that landed in D1 but failed to commit to pg will still reference the old
  * name on the active deployment.
  *
- * Scoped to the active deployment only. Stale retained deployment rows from
- * pre-R6 (when /migrations/rename only updated the active deployment's
- * `applied_migrations`) could be historically inaccurate and would silently
- * authorize incorrect rename requests that happen to name a
- * historically-present migration. The active deployment is the only source
- * of truth we can rely on for corroboration.
+ * Scoped to the active deployment only. Retained deployment rows can carry
+ * historically inaccurate `applied_migrations` and would silently authorize
+ * incorrect rename requests that happen to name a historically-present
+ * migration. The active deployment is the only source of truth we can rely on
+ * for corroboration.
  *
  * The column is stored as text (see `setAppliedMigrations`), so the query
  * casts at read time. `jsonb ? text` returns true iff the JSON array has
@@ -517,11 +519,9 @@ export async function activeDeploymentContainsMigration(
  * Rewrite `applied_migrations` entries across every deployment of a project.
  *
  * The rename endpoint updates remote `_void_migrations` rows in D1 and must
- * also keep the platform-side record consistent. A previous implementation
- * only rewrote the active deployment's `applied_migrations`, which left
- * retained and inactive deployments pointing at the old migration names and
- * broke rollback diffs that compare `applied_migrations` arrays. Rewriting
- * every project deployment in one transaction keeps all rows in sync.
+ * also keep the platform-side record consistent. Rollback diffs compare
+ * `applied_migrations` arrays, so retained and inactive deployments must not
+ * keep the old names; every project deployment is rewritten in one transaction.
  */
 export async function renameAppliedMigrationsForProject(
   db: Db,

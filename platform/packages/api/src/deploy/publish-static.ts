@@ -1,4 +1,3 @@
-import { platformProjectHostname, readPlatformApplication } from '@void/platform';
 import { eq, sql as drizzleSql } from 'drizzle-orm';
 import { type Context } from 'hono';
 import { type AssetManifestEntry } from '../assets.ts';
@@ -6,11 +5,8 @@ import { deleteDispatchScript } from '../cf-api.ts';
 import { clearCronScheduler } from '../cron-scheduler-client.ts';
 import {
   getProject,
-  updateDeploymentStatus,
   beginDeploymentCutover,
-  updateProjectType,
   getDomainsByProjectId,
-  setActiveDeployment,
   markDeploymentRetained,
   getRetainedDeploymentsExcluding,
   getProjectResources,
@@ -32,21 +28,16 @@ import {
   type DeploymentStatus,
 } from '../types.ts';
 import { resolveProjectZeroTrustRouting } from '../zero-trust/routing.ts';
+import { assertDeploymentCanProceed } from './guards.ts';
 import {
-  PROJECT_DELETING_ERROR_MESSAGE,
-  assertBoundBuildStillActive,
-  SUPERSEDED_BUILD_ERROR_MESSAGE,
-  assertDeploymentNotCanceled,
-  assertProjectNotDeleting,
-} from './guards.ts';
-import {
+  commitCutoverLive,
   requireActiveDeployAccess,
   cutoverIntentKey,
   cutoverReadyKey,
-  parseCutoverMarker,
   type CutoverMarker,
 } from './recovery.ts';
 import { attachServingStoreMetadata } from './serving-assets.ts';
+import { projectPublicUrls } from './shared.ts';
 
 export async function publishStaticDeployment(input: {
   currentStep: string;
@@ -125,19 +116,15 @@ export async function publishStaticDeployment(input: {
     not_found_handling: 'single-page-application',
   };
 
-  // We didn't upload anything new this request — every asset was
-  // pre-uploaded direct-to-R2 by the CLI. `new` and `cached`
-  // here represent "verified existing in R2" and convey the
-  // same information shape as the multipart path's
-  // `streamedStaticAssets` branch.
+  // Every asset was pre-uploaded direct-to-R2 by the CLI, so none are new
+  // to this request; `cached` counts assets verified in R2.
   emit({
     event: 'asset_upload',
     total: assetCount,
     new: 0,
     cached: assetCount,
   });
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   emit({ event: 'asset_upload_done' });
 
   const servingManifest = Object.fromEntries(
@@ -195,8 +182,7 @@ export async function publishStaticDeployment(input: {
     }
   });
   await snapshotCronState();
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   markPhase('routing_switch');
   await withProjectCutoverFence(deployment.id, async (txDb, currentOwner) => {
     const existingRouting = await context.env.ROUTING.get(project.slug);
@@ -242,42 +228,13 @@ export async function publishStaticDeployment(input: {
     to: 'live',
     reason: 'static_deploy',
   });
-  await context.get('db').transaction(async (tx) => {
-    await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
-    const lockedProject = await getProject(tx, projectId);
-    if (!lockedProject || lockedProject.status === 'deleting') {
-      throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
-    }
-    await requireActiveDeployAccess(tx, projectId, actor.id);
-    const [intent, ready] = await Promise.all([
-      context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
-      context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
-    ]);
-    if (
-      intent?.ownerId !== cutoverOwnerId ||
-      ready?.ownerId !== cutoverOwnerId ||
-      intent.projectId !== projectId ||
-      ready.projectId !== projectId
-    ) {
-      throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
-    }
-    await assertDeploymentNotCanceled(tx, deployment.id);
-    // Re-check the bound build under a row lock before going live. The
-    // up-front guard can pass and then a newer GitHub Actions run
-    // supersede (cancel) this build while we spent minutes building and
-    // uploading; without this re-check a superseded runner would still
-    // go live with stale code. See `assertBoundBuildStillActive`.
-    await assertBoundBuildStillActive(tx, deployBuild, projectId);
-
-    // Asset GC takes this same project lock and protects hashes from
-    // every nonterminal deployment. Once placement-bearing
-    // asset_hashes is persisted, no final object-store scan is needed.
-    await updateDeploymentStatus(tx, deployment.id, 'live', undefined, {
-      force: true,
-    });
-    await updateProjectType(tx, projectId, type);
-    await setActiveDeployment(tx, projectId, deployment.id);
-    await markDeploymentRetained(tx, deployment.id, true);
+  await commitCutoverLive(context.get('db'), context.env.ROUTING, {
+    projectId,
+    actorId: actor.id,
+    deploymentId: deployment.id,
+    cutoverOwnerId,
+    deployBuild,
+    projectType: type,
   });
   input.cutoverCommitted = true;
   input.currentStatus = 'live';
@@ -410,24 +367,14 @@ export async function publishStaticDeployment(input: {
     }
   }
 
-  const application = readPlatformApplication(context.env);
-  const activeDomains = projectDomains.filter((d) => d.status === 'active');
-  const url =
-    activeDomains.length > 0
-      ? `https://${activeDomains[0].hostname}`
-      : `https://${platformProjectHostname(project, application)}`;
-
+  const urls = projectPublicUrls(context.env, project, projectDomains);
   emit({
     event: 'done',
     deployment: deployment.id,
-    url,
-    urls: [
-      ...activeDomains.map((d) => `https://${d.hostname}`),
-      `https://${platformProjectHostname(project, application)}`,
-    ],
+    url: urls[0]!,
+    urls,
     assets: assetCount,
     workers: 0,
   });
   await finishOrphanSweep();
-  return;
 }

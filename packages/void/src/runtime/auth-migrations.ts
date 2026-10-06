@@ -9,15 +9,8 @@ export type SqliteMigrationRunner = {
   run(sql: string): Promise<void>;
 };
 
-export type PgMigrationRunner = {
-  all<T extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params?: Array<unknown>,
-  ): Promise<Array<T>>;
-  run(sql: string, params?: Array<unknown>): Promise<void>;
-};
-
-export type MySqlMigrationRunner = {
+/** PostgreSQL and MySQL runners accept bound parameters. */
+export type ParameterizedMigrationRunner = {
   all<T extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: Array<unknown>,
@@ -106,9 +99,6 @@ function resolveColumnType(
   }
   if (field.type === 'boolean' || field.type === 'date' || field.type === 'number') {
     return 'INTEGER';
-  }
-  if (field.type === 'json' || field.type === 'string[]' || field.type === 'number[]') {
-    return 'TEXT';
   }
   return 'TEXT';
 }
@@ -210,6 +200,24 @@ function buildCreateIndexSql(
   )} ON ${quoteIdentifier(tableName, dialect)} (${quoteIdentifier(fieldName, dialect)})`;
 }
 
+async function createMissingIndexes(
+  runner: { run(sql: string): Promise<void> },
+  dialect: VoidAuthMigrationSchema['dialect'],
+  table: VoidAuthMigrationTable,
+  existingIndexes: ReadonlySet<string>,
+): Promise<void> {
+  for (const [fieldName, field] of Object.entries(table.fields)) {
+    if (!field.index && !field.unique) {
+      continue;
+    }
+    const indexName = createIndexName(table.name, fieldName, field.unique);
+    if (existingIndexes.has(indexName)) {
+      continue;
+    }
+    await runner.run(buildCreateIndexSql(dialect, table.name, fieldName, field.unique));
+  }
+}
+
 async function ensureSqliteIndexes(
   runner: SqliteMigrationRunner,
   table: VoidAuthMigrationTable,
@@ -218,21 +226,11 @@ async function ensureSqliteIndexes(
     `PRAGMA index_list(${quotePragmaArg(table.name)})`,
   );
   const existingIndexes = new Set(indexRows.map((row) => String(row.name)));
-
-  for (const [fieldName, field] of Object.entries(table.fields)) {
-    if (!field.index && !field.unique) {
-      continue;
-    }
-    const indexName = createIndexName(table.name, fieldName, field.unique);
-    if (existingIndexes.has(indexName)) {
-      continue;
-    }
-    await runner.run(buildCreateIndexSql('sqlite', table.name, fieldName, field.unique));
-  }
+  await createMissingIndexes(runner, 'sqlite', table, existingIndexes);
 }
 
 async function ensurePgIndexes(
-  runner: PgMigrationRunner,
+  runner: ParameterizedMigrationRunner,
   schemaName: string,
   table: VoidAuthMigrationTable,
 ): Promise<void> {
@@ -241,17 +239,7 @@ async function ensurePgIndexes(
     [schemaName, table.name],
   );
   const existingIndexes = new Set(indexRows.map((row) => String(row.indexname)));
-
-  for (const [fieldName, field] of Object.entries(table.fields)) {
-    if (!field.index && !field.unique) {
-      continue;
-    }
-    const indexName = createIndexName(table.name, fieldName, field.unique);
-    if (existingIndexes.has(indexName)) {
-      continue;
-    }
-    await runner.run(buildCreateIndexSql('postgresql', table.name, fieldName, field.unique));
-  }
+  await createMissingIndexes(runner, 'postgresql', table, existingIndexes);
 }
 
 export async function applySqliteAuthMigrations(
@@ -288,7 +276,7 @@ export async function applySqliteAuthMigrations(
 }
 
 export async function applyPgAuthMigrations(
-  runner: PgMigrationRunner,
+  runner: ParameterizedMigrationRunner,
   schema: VoidAuthMigrationSchema,
 ): Promise<void> {
   const schemaRows = await runner.all<{ schema?: string }>('SELECT current_schema() AS schema');
@@ -325,7 +313,7 @@ export async function applyPgAuthMigrations(
 }
 
 export async function applyMySqlAuthMigrations(
-  runner: MySqlMigrationRunner,
+  runner: ParameterizedMigrationRunner,
   schema: VoidAuthMigrationSchema,
 ): Promise<void> {
   const databaseRows = await runner.all<{ database_name?: string }>(
@@ -372,14 +360,6 @@ export async function applyMySqlAuthMigrations(
       [databaseName, table.name],
     );
     const existingIndexes = new Set(indexRows.map((row) => String(row.index_name)));
-    for (const [fieldName, field] of Object.entries(table.fields)) {
-      if (!field.index && !field.unique) {
-        continue;
-      }
-      const indexName = createIndexName(table.name, fieldName, field.unique);
-      if (!existingIndexes.has(indexName)) {
-        await runner.run(buildCreateIndexSql('mysql', table.name, fieldName, field.unique));
-      }
-    }
+    await createMissingIndexes(runner, 'mysql', table, existingIndexes);
   }
 }

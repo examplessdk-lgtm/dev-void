@@ -48,7 +48,7 @@ describe('void info (subprocess)', () => {
     expect(readdirSync(root)).toEqual(before);
   });
 
-  it('prints clean JSON and exposes the new command in help', () => {
+  it('prints clean JSON and exposes the command in help', () => {
     const root = project();
     const result = runVoid(root, ['info', '--json']);
     expect(result.status, result.stderr).toBe(0);

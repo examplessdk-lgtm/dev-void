@@ -5,9 +5,9 @@ import { withRuntimeEnv } from './env.ts';
 import type { CloudEnv } from './handler.ts';
 import type {
   AnyWebSocketDefinition,
+  RoomContext,
   RoomController,
-  RoomDefinition,
-  SocketDefinition,
+  SocketContext,
   WebSocketConnection,
   WebSocketInstanceKey,
 } from './ws.ts';
@@ -256,43 +256,27 @@ function createRoomController<ServerEvent>(
   };
 }
 
-function createRoomContext<ServerEvent>(
+function createHookContext(
+  definition: AnyWebSocketDefinition,
   state: DurableObjectState,
   env: Record<string, unknown>,
   request: Request,
   webSocket: WebSocket,
   stored: StoredConnection,
-  serverSchema: StandardSchemaV1,
-) {
-  return {
+): RoomContext | SocketContext {
+  const serverSchema = definition.messages.server;
+  const base = {
     id: stored.roomId,
     params: stored.params,
     user: stored.user,
     request,
     env: env as CloudEnv['Bindings'],
     storage: state.storage,
-    room: createRoomController<ServerEvent>(state, serverSchema),
-    connection: createConnection<ServerEvent>(webSocket, serverSchema),
   };
-}
-
-function createSocketContext<ServerEvent>(
-  state: DurableObjectState,
-  env: Record<string, unknown>,
-  request: Request,
-  webSocket: WebSocket,
-  stored: StoredConnection,
-  serverSchema: StandardSchemaV1,
-) {
-  return {
-    id: stored.roomId,
-    params: stored.params,
-    user: stored.user,
-    request,
-    env: env as CloudEnv['Bindings'],
-    storage: state.storage,
-    socket: createConnection<ServerEvent>(webSocket, serverSchema),
-  };
+  const connection = createConnection<unknown>(webSocket, serverSchema);
+  return definition.__kind === 'room'
+    ? { ...base, room: createRoomController<unknown>(state, serverSchema), connection }
+    : { ...base, socket: connection };
 }
 
 function assertDefinition(definition: AnyWebSocketDefinition): void {
@@ -325,6 +309,14 @@ export function createWebSocketDurableObject(
       return withRuntimeEnv(this.env, () => this.handleFetch(request));
     }
 
+    private context(
+      request: Request,
+      webSocket: WebSocket,
+      stored: StoredConnection,
+    ): RoomContext | SocketContext {
+      return createHookContext(definition, this.state, this.env, request, webSocket, stored);
+    }
+
     private async handleFetch(request: Request): Promise<Response> {
       const params = getRouteMatch(request, route) ?? {};
       const roomId = buildWebSocketInstanceId(instanceRoute, params);
@@ -348,61 +340,18 @@ export function createWebSocketDurableObject(
         };
         setStoredConnection(server, stored);
 
-        if (definition.__kind === 'room') {
-          const ctx = createRoomContext<unknown>(
-            this.state,
-            this.env,
-            request,
-            server,
-            stored,
-            definition.messages.server,
-          );
-          const decision = await withAuthState(authState, () =>
-            (definition as RoomDefinition).onBeforeConnect?.(ctx),
-          );
-          if (decision instanceof Response) {
-            return decision;
-          }
-        } else {
-          const ctx = createSocketContext<unknown>(
-            this.state,
-            this.env,
-            request,
-            server,
-            stored,
-            definition.messages.server,
-          );
-          const decision = await withAuthState(authState, () =>
-            (definition as SocketDefinition).onBeforeConnect?.(ctx),
-          );
-          if (decision instanceof Response) {
-            return decision;
-          }
+        const beforeConnectCtx = this.context(request, server, stored);
+        const decision = await withAuthState(authState, () =>
+          definition.onBeforeConnect?.(beforeConnectCtx as never),
+        );
+        if (decision instanceof Response) {
+          return decision;
         }
 
         this.state.acceptWebSocket(server);
 
-        if (definition.__kind === 'room') {
-          const ctx = createRoomContext<unknown>(
-            this.state,
-            this.env,
-            request,
-            server,
-            stored,
-            definition.messages.server,
-          );
-          await withAuthState(authState, () => (definition as RoomDefinition).onConnect?.(ctx));
-        } else {
-          const ctx = createSocketContext<unknown>(
-            this.state,
-            this.env,
-            request,
-            server,
-            stored,
-            definition.messages.server,
-          );
-          await withAuthState(authState, () => (definition as SocketDefinition).onConnect?.(ctx));
-        }
+        const connectCtx = this.context(request, server, stored);
+        await withAuthState(authState, () => definition.onConnect?.(connectCtx as never));
 
         return new Response(null, { status: 101, webSocket: client });
       }
@@ -418,30 +367,8 @@ export function createWebSocketDurableObject(
         user,
         authState,
       };
-
-      if (definition.__kind === 'room') {
-        const fakeSocket = new WebSocketPair()[1];
-        const ctx = createRoomContext<unknown>(
-          this.state,
-          this.env,
-          request,
-          fakeSocket,
-          stored,
-          definition.messages.server,
-        );
-        return withAuthState(authState, () => (definition as RoomDefinition).onRequest!(ctx));
-      }
-
-      const fakeSocket = new WebSocketPair()[1];
-      const ctx = createSocketContext<unknown>(
-        this.state,
-        this.env,
-        request,
-        fakeSocket,
-        stored,
-        definition.messages.server,
-      );
-      return withAuthState(authState, () => (definition as SocketDefinition).onRequest!(ctx));
+      const ctx = this.context(request, new WebSocketPair()[1], stored);
+      return withAuthState(authState, () => definition.onRequest!(ctx as never));
     }
 
     webSocketMessage(
@@ -473,32 +400,10 @@ export function createWebSocketDurableObject(
       }
 
       const request = new Request(`https://void.local${route.pattern}`);
-
-      if (definition.__kind === 'room') {
-        const ctx = createRoomContext<unknown>(
-          this.state,
-          this.env,
-          request,
-          webSocket,
-          stored,
-          definition.messages.server,
-        );
-        await withAuthState(stored.authState ?? null, () =>
-          (definition as RoomDefinition).onMessage?.(ctx, result.value as never),
-        );
-      } else {
-        const ctx = createSocketContext<unknown>(
-          this.state,
-          this.env,
-          request,
-          webSocket,
-          stored,
-          definition.messages.server,
-        );
-        await withAuthState(stored.authState ?? null, () =>
-          (definition as SocketDefinition).onMessage?.(ctx, result.value as never),
-        );
-      }
+      const ctx = this.context(request, webSocket, stored);
+      await withAuthState(stored.authState ?? null, () =>
+        definition.onMessage?.(ctx as never, result.value as never),
+      );
     }
 
     webSocketClose(
@@ -521,32 +426,10 @@ export function createWebSocketDurableObject(
       completeWebSocketClose(webSocket, code, reason);
       const stored = getStoredConnection(webSocket);
       const request = new Request(`https://void.local${route.pattern}`);
-
-      if (definition.__kind === 'room') {
-        const ctx = createRoomContext<unknown>(
-          this.state,
-          this.env,
-          request,
-          webSocket,
-          stored,
-          definition.messages.server,
-        );
-        await withAuthState(stored.authState ?? null, () =>
-          (definition as RoomDefinition).onClose?.(ctx, { code, reason, wasClean }),
-        );
-      } else {
-        const ctx = createSocketContext<unknown>(
-          this.state,
-          this.env,
-          request,
-          webSocket,
-          stored,
-          definition.messages.server,
-        );
-        await withAuthState(stored.authState ?? null, () =>
-          (definition as SocketDefinition).onClose?.(ctx, { code, reason, wasClean }),
-        );
-      }
+      const ctx = this.context(request, webSocket, stored);
+      await withAuthState(stored.authState ?? null, () =>
+        definition.onClose?.(ctx as never, { code, reason, wasClean }),
+      );
     }
   }
 

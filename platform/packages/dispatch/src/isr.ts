@@ -17,7 +17,7 @@ import {
 import type { Env } from './env.ts';
 import { matchSegmentPattern } from './pattern.ts';
 
-// Re-export so callers that import from `./isr` (tests, index.ts) still work.
+// Re-exported for index.ts and tests.
 export {
   extractPageDataFromHtml,
   isFrameworkDocumentRequest,
@@ -197,7 +197,7 @@ function matchedPageTtl(
  * never an arbitrary one. Used by `matchesLiteralPage` (applied to the whole
  * pattern).
  */
-export function isLiteralPattern(pattern: string): boolean {
+function isLiteralPattern(pattern: string): boolean {
   return !/[:{*]/.test(pattern);
 }
 

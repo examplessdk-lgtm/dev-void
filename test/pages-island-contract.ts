@@ -126,7 +126,6 @@ function registerIslandTests(
       );
       expect(marker).toBeUndefined();
 
-      // Islands should be hydrated
       await waitForIslandsHydrated(page, 2);
     } finally {
       await page.context().close();

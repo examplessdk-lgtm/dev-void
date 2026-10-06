@@ -16,6 +16,7 @@ import { getAllowlist } from '../../signup-allowlist.ts';
 import { renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { renderAdminPage } from '../react/server.ts';
+import { admissionFormBody } from './auth-config.tsx';
 
 const app = new Hono<ApiEnv>();
 app.onError((error, context) =>
@@ -37,16 +38,7 @@ app.onError((error, context) =>
 app.get('/', (context) => renderFateListPage(context, 'signupControl'));
 
 app.post('/policy', async (context) => {
-  const form = await context.req.parseBody({ all: true });
-  const connections = Array.isArray(form.connections)
-    ? form.connections.map(String)
-    : form.connections
-      ? [String(form.connections)]
-      : [];
-  const body = {
-    revision: Number(form.revision),
-    admission: { mode: String(form.mode), connections, access: form.access === 'true' },
-  };
+  const body = admissionFormBody(await context.req.parseBody({ all: true }));
   return executeAuditedMutation(
     context,
     operatorAuditIntent('config/auth/admission', body),

@@ -312,7 +312,7 @@ describe('scanProjectAssetOrphanCandidates', () => {
     const r2 = createAssetScanR2Mock([
       { key: 'assets/proj_test/hash_old', uploaded: new Date(now - 3_600_001) },
       { key: 'assets/proj_test/hash_fresh', uploaded: new Date(now - 3_599_000) },
-      // Preserve the old sweep's self-healing behavior: a prefix-only key is
+      // Self-healing: a prefix-only key is
       // malformed and remains a candidate even when it was uploaded recently.
       { key: 'assets/proj_test/', uploaded: new Date(now) },
       { key: 'assets/proj_other/hash_old', uploaded: new Date(now - 3_600_001) },

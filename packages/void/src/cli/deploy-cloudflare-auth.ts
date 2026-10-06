@@ -64,9 +64,7 @@ export async function prepareExistingCloudflareDeployWithAuth(
     const configPath = existsSync(options.configPath) ? options.configPath : undefined;
     const identity = await options.runWrangler(
       { type: 'auth.whoami', configPath },
-      {
-        capture: true,
-      },
+      { capture: true },
     );
     const session = isCleanWranglerExit(identity)
       ? parseCloudflareAuthSession(identity.data)
@@ -79,12 +77,7 @@ export async function prepareExistingCloudflareDeployWithAuth(
       // Authentication works. Preserve the original Worker/permission error.
       throw error;
     }
-    let loggedOut = false;
-    try {
-      loggedOut = (identity.data as { loggedIn?: unknown } | undefined)?.loggedIn === false;
-    } catch {
-      /* The auth command may have failed before producing JSON. */
-    }
+    const loggedOut = (identity.data as { loggedIn?: unknown } | undefined)?.loggedIn === false;
     const authenticationError =
       loggedOut ||
       wrongAccount ||
@@ -335,5 +328,5 @@ export async function ensureCloudflareAuthSecret(options: {
       'verification-failed',
     );
   }
-  return { created: true, ...(workerWasMissing ? { workerWasMissing: true as const } : {}) };
+  return { created: true };
 }

@@ -26,11 +26,7 @@ export function resolveCloudflareWorkersDevSubdomain(
     return normalized;
   }
 
-  const cachedByAccount = readCloudflareLocalState(root).workersDevSubdomains;
-  const cached =
-    cachedByAccount && typeof cachedByAccount === 'object' && !Array.isArray(cachedByAccount)
-      ? (cachedByAccount as Record<string, unknown>)[accountId]
-      : undefined;
+  const cached = subdomainsByAccount(readCloudflareLocalState(root))[accountId];
   return typeof cached === 'string' ? normalizeWorkersDevSubdomain(cached) : undefined;
 }
 
@@ -45,12 +41,7 @@ export function rememberCloudflareWorkersDevSubdomain(
     return false;
   }
   const current = readCloudflareLocalState(root);
-  const currentByAccount =
-    current.workersDevSubdomains &&
-    typeof current.workersDevSubdomains === 'object' &&
-    !Array.isArray(current.workersDevSubdomains)
-      ? (current.workersDevSubdomains as Record<string, unknown>)
-      : {};
+  const currentByAccount = subdomainsByAccount(current);
   if (currentByAccount[accountId] === workersDevSubdomain) {
     return false;
   }
@@ -69,6 +60,13 @@ export function rememberCloudflareWorkersDevSubdomain(
     ) + '\n',
   );
   return true;
+}
+
+function subdomainsByAccount(state: CloudflareLocalState): Record<string, unknown> {
+  const value = state.workersDevSubdomains;
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function readCloudflareLocalState(root: string): CloudflareLocalState {

@@ -1,7 +1,7 @@
 /**
  * Scan `email/` for inbound email handlers.
  *
- * The `email/` directory sits at the project root alongside `crons/` and
+ * The `email/` directory sits at the source root alongside `crons/` and
  * `queues/` — non-HTTP handlers all live at the top level, since each is
  * wired into a separate worker export (`scheduled`, `queue`, `email`).
  *

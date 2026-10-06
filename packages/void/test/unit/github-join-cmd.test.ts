@@ -55,7 +55,7 @@ function drive(opts: {
     completeGithubJoin: opts.completeGithubJoin,
   };
 
-  const run = runGithubJoin('/project', client as unknown as PlatformClient);
+  const run = runGithubJoin(client as unknown as PlatformClient);
 
   // Once the command has built the callback URL, fire the simulated browser
   // redirect back at the localhost server. Swallow fetch errors: on the
@@ -170,7 +170,7 @@ describe('runGithubJoin', () => {
     const completeGithubJoin = vi.fn(async () => ({ status: 'joined' as const, count: 0 }));
     const client: FakeClient = { getGithubJoinUrl, completeGithubJoin };
 
-    await expect(runGithubJoin('/project', client as unknown as PlatformClient)).rejects.toThrow(
+    await expect(runGithubJoin(client as unknown as PlatformClient)).rejects.toThrow(
       'process.exit(1)',
     );
 

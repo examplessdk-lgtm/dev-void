@@ -99,7 +99,7 @@ function setLiveInstall(
 // `claims.sha` ('identical'). 'ahead' (sha stale), 'behind' (branch moved backward
 // off sha — abandoned commit), and 'diverged' (off-branch) are all rejected 409;
 // null (API error/404) is unverifiable (503). Default 'identical' is the happy-
-// path "sha IS the head" verdict, so every pre-existing OIDC test still mints a
+// path "sha IS the head" verdict, so tests that don't exercise the guard mint a
 // token. Tests exercising the guard set it to 'ahead'/'behind'/'diverged'/null
 // via `setCompareStatus`.
 let compareStatus: string | null = 'identical';
@@ -108,7 +108,7 @@ function setCompareStatus(status: string | null): void {
 }
 
 // Per-call compare verdicts, consumed in order before falling back to the static
-// `compareStatus`. The exchange now compares TWICE — a pre-check before the build
+// `compareStatus`. The exchange compares TWICE — a pre-check before the build
 // tx and a post-create re-check after the row insert (closing the compare→insert
 // TOCTOU) — so the TOCTOU tests need the calls to DIFFER: first 'identical' (pass
 // the pre-check, create the row), then 'ahead'/null (a newer push landed in the
@@ -286,7 +286,7 @@ beforeEach(async () => {
   // Reset the live-install mock to the legit default for each test.
   liveInstall = { status: 200, installationId: '1', accountId: null };
   // Default to the happy-path 'identical' verdict (sha IS the head) so the
-  // fail-closed guard lets every pre-existing OIDC test mint a token.
+  // fail-closed guard lets tests that don't exercise it mint a token.
   setCompareStatus('identical');
   setCompareStatusQueue([]);
   setCompareSideEffect(null);
@@ -294,13 +294,13 @@ beforeEach(async () => {
   setCheckRunCreateStatus(200);
   checkRunSideEffect = null;
   checkRunCreateCount = 0;
-  // The OIDC route now makes a live `GET /repos/{repo}/installation` call
+  // The OIDC route makes a live `GET /repos/{repo}/installation` call
   // and a live `GET /repos/{repo}/compare/{base}...{branch}` call for
   // the stale-SHA guard (which first mints an installation token via
   // `POST /app/installations/{id}/access_tokens`). The default mock serves the
   // installation lookup with the seeded connection's installation id and the
   // active claims' repository_owner_id, mints a stub token, and returns the
-  // (default 'identical') compare status so every pre-existing OIDC test passes.
+  // (default 'identical') compare status.
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: string | URL | Request) => {
@@ -1070,8 +1070,8 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // an empty `repositories` array must no longer be overloaded to mean
-  // "all repos". installation_repositories can legitimately reduce a `selected`
+  // An empty `repositories` array does not mean "all repos".
+  // installation_repositories can legitimately reduce a `selected`
   // install's cache to [] when the last selected repo is removed; that repo's
   // workflow must STOP minting tokens, not keep minting because the array is
   // empty. The `repository_selection` enum disambiguates the two cases.
@@ -1268,7 +1268,7 @@ describe('POST /auth/github-oidc', () => {
     // second row for the same (project_id, github_run_id, github_run_attempt).
     // Two `building` rows for one run ATTEMPT is the state that leaks an
     // active-build slot — but two DIFFERENT attempts of the same run may coexist
-    // (the rerun-correctness fix), and NULL-attempt rows are exempt entirely.
+    // (a rerun), and NULL-attempt rows are exempt entirely.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'oidc-unique-index');
     await createTestBuild(env.db, {
@@ -1320,7 +1320,7 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // build identity is scoped to the project, because a GitHub `run_id` is
+  // Build identity is scoped to the project, because a GitHub `run_id` is
   // unique only WITHIN a repository, not globally. Two different connected
   // repos/projects that happen to share a numeric run_id must each get their
   // own build with no cross-project collision on the composite unique index.
@@ -1466,11 +1466,11 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // build-slot acquisition must be ATOMIC per user. The old
-  // count-then-insert flow let two PARALLEL exchanges for DIFFERENT run_ids each
-  // read capacity below the cap before either inserted, then both insert,
-  // bypassing `concurrentBuilds`. Slot acquisition now runs in one transaction
-  // under a per-user FOR UPDATE lock, so concurrent exchanges serialize.
+  // Build-slot acquisition must be ATOMIC per user. A count-then-insert flow
+  // would let two PARALLEL exchanges for DIFFERENT run_ids each read capacity
+  // below the cap before either inserted, then both insert, bypassing
+  // `concurrentBuilds`. Slot acquisition runs in one transaction under a
+  // per-user FOR UPDATE lock, so concurrent exchanges serialize.
   // ---------------------------------------------------------------------------
 
   it('admits only ONE of two concurrent exchanges for different runs at a cap of 1', async () => {
@@ -1588,7 +1588,7 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // a completed GitHub Actions run must be re-runnable. The composite
+  // A completed GitHub Actions run must be re-runnable. The composite
   // partial-unique index is scoped to ACTIVE statuses, so once the prior
   // attempt is terminal a RERUN of the same run_id can start a FRESH build
   // (instead of colliding on a persisted terminal row and throwing). The
@@ -1639,7 +1639,7 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // the OIDC exchange must bind the deploy token to the SCAFFOLDED deploy
+  // The OIDC exchange must bind the deploy token to the SCAFFOLDED deploy
   // workflow (`.github/workflows/void-deploy.yml`). Otherwise any other workflow
   // in the connected repo that can request `id-token: write` on the connected
   // branch (a hand-added workflow, an unsafe `pull_request_target`, a manual
@@ -1845,7 +1845,7 @@ describe('POST /auth/github-oidc', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // connection identity must be keyed on the IMMUTABLE numeric repository
+  // Connection identity must be keyed on the IMMUTABLE numeric repository
   // id, not the mutable `repo_full_name`. A repo whose full_name now matches a
   // connection but whose id differs (name reuse) must NOT mint a token; a
   // renamed repo (same id, new full_name) must STILL resolve.
@@ -2401,7 +2401,7 @@ describe('POST /auth/github-oidc', () => {
     const app = makeApp(env);
     // Leave ref at the connected branch and compare at the default 'identical'
     // so the branch-match + freshness gates would BOTH pass — proving ONLY the
-    // new event check rejects this otherwise-valid-looking token.
+    // event check rejects this otherwise-valid-looking token.
     setVerifyResult(makeClaims({ event_name: 'pull_request_target' }));
     setCompareStatus('identical');
 
@@ -2425,7 +2425,7 @@ describe('POST /auth/github-oidc', () => {
 
     const app = makeApp(env);
     // Keep ref at the default connected branch so the EVENT check is what
-    // rejects, isolating the new behavior from the branch/freshness gates.
+    // rejects, isolating it from the branch/freshness gates.
     setVerifyResult(makeClaims({ event_name: 'pull_request' }));
 
     const res = await exchange(app, env, { oidcToken: 'good', project: project.slug });

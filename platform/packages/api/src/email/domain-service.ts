@@ -31,14 +31,6 @@ export type EmailDomainAddInput = Readonly<{
   attemptId?: unknown;
   managedBy: 'owner' | 'admin';
 }>;
-export function adminEmailDomainCommand(
-  verb: 'add' | 'sync' | 'remove',
-  domain: string,
-  slug?: string,
-): string {
-  const base = `void platform email domain-${verb} ${domain}`;
-  return verb === 'add' && slug ? `${base} --project ${slug}` : base;
-}
 export async function getEmailDomainRowByDomain(db: Db, domain: string) {
   return (
     (
@@ -85,6 +77,14 @@ export function serializeEmailRoute(
       },
     },
   };
+}
+async function getOperationById(db: Db, operationId: string) {
+  const [operation] = await db
+    .select()
+    .from(emailOperations)
+    .where(eq(emailOperations.id, operationId))
+    .limit(1);
+  return operation;
 }
 function serviceError(context: Context<ApiEnv>, error: unknown): Response {
   if (error instanceof EmailOperationError) {
@@ -137,7 +137,7 @@ export async function addEmailDomainForProject(
         return context.json(
           {
             error: 'email domains on this platform are managed by its administrator',
-            adminCommand: adminEmailDomainCommand('add', input.domain, project.slug),
+            adminCommand: `void platform email domain-add ${input.domain} --project ${project.slug}`,
           },
           403,
         );
@@ -359,14 +359,7 @@ export async function rotateEmailIngressSecretForProject(
       project.id,
     );
     await runEmailOperation(context.get('db'), context.env, operationId);
-    const operation = (
-      await context
-        .get('db')
-        .select()
-        .from(emailOperations)
-        .where(eq(emailOperations.id, operationId))
-        .limit(1)
-    )[0];
+    const operation = await getOperationById(context.get('db'), operationId);
     const current = await resolveEmailDomain(context.get('db'), rawDomain);
     if (!current || current.route.project_id !== project.id) {
       return context.json({ error: 'email domain not found' }, 404);
@@ -403,14 +396,7 @@ export async function removeEmailDomainForProject(
       return context.json({ error: 'email domain not found' }, 404);
     }
     await runEmailOperation(context.get('db'), context.env, operationId);
-    const op = (
-      await context
-        .get('db')
-        .select()
-        .from(emailOperations)
-        .where(eq(emailOperations.id, operationId))
-        .limit(1)
-    )[0];
+    const op = await getOperationById(context.get('db'), operationId);
     return context.json({
       ok: op?.status === 'completed',
       removed: op?.status === 'completed',

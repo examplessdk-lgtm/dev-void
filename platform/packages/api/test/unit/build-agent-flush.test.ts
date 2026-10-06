@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 // against a slow/hung DO would let every 500ms tick start ANOTHER POST, each
 // retaining its (bounded) batch + JSON body in an unresolved promise — so the
 // in-flight bodies accumulate without bound and move the OOM into the network
-// layer (logBuffer/pendingLines/stderr are already capped). flushLogs is now
+// layer (logBuffer/pendingLines/stderr are already capped). flushLogs is
 // single-flight: concurrent callers JOIN the in-flight promise instead of starting
 // a parallel POST, so at most ONE POST is ever in flight.
 //
@@ -37,7 +37,7 @@ describe('build-agent flushLogs single-flight (in-flight POST bounding)', () => 
     record('line-2', 'stdout');
     const p2 = flushLogs(); // single-flight: must JOIN p1, not open POST #2
 
-    // FAIL-WITHOUT-FIX: the old fire-and-forget flush opens a second POST here, so
+    // If broken: a fire-and-forget flush opens a second POST here, so
     // resolvers.length === 2 and p2 !== p1.
     expect(resolvers.length).toBe(1);
     expect(p2).toBe(p1);

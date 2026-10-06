@@ -50,11 +50,7 @@ export function deployTokenTtlSecondsForBuildMinutes(timeoutMinutes: number): nu
  * rejects any deploy token that has neither a `build` nor a `credential`
  * claim.
  *
- * `ttlSeconds` lets a caller size the token's lifetime to the work it must
- * cover (e.g. a remote build whose token is minted *before* a multi-minute
- * install + build + deploy). BOTH the container and the GitHub Actions OIDC
- * paths supply it via `deployTokenTtlSecondsForBuildMinutes(buildTimeout)`;
- * omitting it falls back to the 15-min default.
+ * `ttlSeconds` sizes the token's lifetime; see `DEPLOY_TOKEN_TTL_SECONDS`.
  */
 export async function signDeployToken(
   {

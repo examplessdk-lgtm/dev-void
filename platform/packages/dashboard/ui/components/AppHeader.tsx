@@ -1,13 +1,11 @@
 import { Menu } from '@base-ui/react/menu';
 import { Icon } from '@iconify/react';
-import { useEffect, useState } from 'react';
 import { useThemeContext } from '../context/ThemeContext.tsx';
-import type { IconOption } from '../types/theme-config.ts';
 
 const EXTERNAL_URL_RE = /^(?:[a-z]+:|\/\/)/i;
 
 type HeaderActionItem = Readonly<{
-  icon?: IconOption;
+  icon?: string;
   link: string;
   text: string;
 }>;
@@ -15,80 +13,21 @@ type HeaderActionItem = Readonly<{
 type AppHeaderProps = Readonly<{
   accountMenuItems?: ReadonlyArray<HeaderActionItem>;
   accountMenuLabel?: string;
-  backHref?: string;
-  homeHref?: string;
-  title?: string;
 }>;
 
 const isExternalLink = (link: string) => EXTERNAL_URL_RE.test(link);
 
-const resolveIcon = (icon: IconOption | undefined, isDark: boolean) => {
-  if (!icon) {
-    return undefined;
-  }
-  return typeof icon === 'string' ? icon : isDark ? icon.dark : icon.light;
-};
-
-function NavIcon({
-  className = 'size-[1em] shrink-0',
-  icon,
-  isDark,
-}: {
-  className?: string;
-  icon?: IconOption;
-  isDark: boolean;
-}) {
-  const iconName = resolveIcon(icon, isDark);
-  return iconName ? <Icon aria-hidden="true" className={className} icon={iconName} /> : null;
-}
-
 export default function AppHeader({
   accountMenuItems = [],
   accountMenuLabel = 'Account',
-  backHref,
-  homeHref = '/',
-  title,
 }: AppHeaderProps) {
   const { logoAlt, logoDark, logoLight } = useThemeContext();
-  const [isDark, setIsDark] = useState(false);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const updateIsDark = () => {
-      setIsDark(
-        document.documentElement.classList.contains('dark') ||
-          document.documentElement.dataset.theme === 'dark' ||
-          mediaQuery.matches,
-      );
-    };
-    const observer = new MutationObserver(updateIsDark);
-
-    updateIsDark();
-    mediaQuery.addEventListener('change', updateIsDark);
-    observer.observe(document.documentElement, {
-      attributeFilter: ['class', 'data-theme'],
-      attributes: true,
-    });
-
-    return () => {
-      mediaQuery.removeEventListener('change', updateIsDark);
-      observer.disconnect();
-    };
-  }, []);
 
   return (
     <header className="wrapper relative flex items-center justify-between px-6 py-7">
       <div className="relative flex h-11 items-center gap-2 px-2 py-1">
-        <a className="flex items-center gap-2" href={backHref ?? homeHref}>
-          <div className="relative -ml-6 flex h-6 w-6 items-center justify-center">
-            {backHref ? (
-              <Icon
-                aria-hidden="true"
-                className="size-6 transition-opacity hover:opacity-50"
-                icon="lucide:chevron-left"
-              />
-            ) : null}
-          </div>
+        <a className="flex items-center gap-2" href="/">
+          <div className="relative -ml-6 flex h-6 w-6 items-center justify-center" />
           <picture>
             <source media="(prefers-color-scheme: dark)" srcSet={logoLight} />
             <img
@@ -133,7 +72,9 @@ export default function AppHeader({
                       target={isExternalLink(item.link) ? '_blank' : undefined}
                     >
                       <span className="flex size-4 items-center justify-center">
-                        <NavIcon className="size-4" icon={item.icon} isDark={isDark} />
+                        {item.icon ? (
+                          <Icon aria-hidden="true" className="size-4" icon={item.icon} />
+                        ) : null}
                       </span>
                       <span>{item.text}</span>
                     </Menu.LinkItem>
@@ -146,12 +87,6 @@ export default function AppHeader({
       ) : (
         <div className="h-11 w-11" />
       )}
-
-      {title ? (
-        <div className="pointer-events-none absolute top-1/2 left-1/2 hidden -translate-x-1/2 -translate-y-1/2 sm:block">
-          <h2 className="text-center text-xl sm:text-2xl">{title}</h2>
-        </div>
-      ) : null}
     </header>
   );
 }

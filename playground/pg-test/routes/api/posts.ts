@@ -2,7 +2,6 @@ import { users, posts } from '@schema';
 import { defineHandler } from 'void';
 import { db, eq } from 'void/db';
 
-// GET /api/posts — list with author name
 export const GET = defineHandler(async () => {
   const all = await db
     .select({
@@ -17,7 +16,6 @@ export const GET = defineHandler(async () => {
   return all;
 });
 
-// POST /api/posts
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json<{ title: string; body: string; authorId: number }>();
   const [created] = await db

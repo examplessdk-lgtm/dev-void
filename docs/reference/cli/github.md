@@ -6,6 +6,8 @@ outline: deep
 
 Deploy-on-GitHub works from **any** Void login — Google, GitHub, or other SSO. The first time you connect GitHub, Void links your GitHub identity to your current account (a one-time step, independent of how you logged in); it never creates a second account.
 
+Project-scoped `github` and `build` commands resolve the project in the same order as deploy: the `[project]` argument or `--project`, then `VOID_PROJECT`, then the linked project (`.void/project.json`).
+
 ## `void github link` {#void-github-link}
 
 ```
@@ -78,8 +80,6 @@ void github connect my-app \
   --branch main
 ```
 
-**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
-
 You can connect only repositories your GitHub account can access.
 
 A project has one GitHub connection. Running `void github connect` on a project that is already connected fails. To connect a different repository, run `void github disconnect` first.
@@ -107,8 +107,6 @@ The CLI prompts for new settings using the current values as defaults. In CI, pa
 void github update my-app --executor github_actions
 ```
 
-**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
-
 ## `void github status` {#void-github-status}
 
 ```
@@ -127,15 +125,13 @@ Show the connected repository, branch, executor, and workflow. Container builds 
 void github status my-app
 ```
 
-**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
-
 ## `void github disconnect` {#void-github-disconnect}
 
 ```
 void github disconnect [project]
 ```
 
-Disconnect a project from its GitHub repository, stopping automatic deploys. Any in-flight builds for the project are cancelled (their deploy tokens are revoked) before the connection is removed. If the project has no connection, it reports that and exits successfully. To point a project at a different repository, disconnect first, then run `void github connect`.
+Disconnect a project from its GitHub repository, stopping automatic deploys. Any in-flight builds for the project are cancelled before the connection is removed. If the project has no connection, it reports that and exits successfully. To point a project at a different repository, disconnect first, then run `void github connect`.
 
 You are asked to confirm before anything is removed. Pass `--yes` to skip the prompt; `--yes` is **required** in a non-interactive shell (CI), where there is no prompt to answer.
 
@@ -149,8 +145,6 @@ You are asked to confirm before anything is removed. Pass `--yes` to skip the pr
 ```
 void github disconnect my-app --yes
 ```
-
-**Project resolution** follows the same order as deploy: positional / `--project`, `VOID_PROJECT`, linked project (`.void/project.json`).
 
 ## Build {#build}
 
@@ -170,9 +164,6 @@ Stream, tail, or download the build logs for a **container** build. With no
 | `--follow`, `-f`         | Live-tail: poll until the build finishes and its final logs are captured. | off     |
 | `--output <file>`, `-o`  | Write logs to a file instead of stdout (appends while following).         | stdout  |
 | `--project <slug>`, `-p` | Target project.                                                           | linked  |
-
-**Project resolution** follows the same order as deploy: positional / `--project`,
-`VOID_PROJECT`, linked project (`.void/project.json`).
 
 Builds run on **GitHub Actions** keep their logs on GitHub — the command prints
 the Actions run URL instead of streaming. Only the last 10,000 log lines of a

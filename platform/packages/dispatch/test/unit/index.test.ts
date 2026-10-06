@@ -1602,12 +1602,11 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a fallback to a DOTTED DYNAMIC endpoint returning JSON (no Cache-Control)', async () => {
-      // C10 [high] cross-user leak: a dotted path is NOT proof of a static shell. A
-      // fallback `/* → /session.json` turns a page 404 into a per-user 200 with NO
+      // Cross-user leak: a dotted path is NOT proof of a static shell. A fallback
+      // `/* → /session.json` turns a page 404 into a per-user 200 with NO
       // Cache-Control. `/session.json` has an extension but its RENDER is JSON — a
-      // DYNAMIC endpoint, not a page shell. The old `hasExtension`-only gate trusted
-      // ANY dotted target and shared-cached this body under `/dashboard`, leaking one
-      // caller's session to later callers. The `isHtmlResponse` conjunct closes it.
+      // DYNAMIC endpoint, not a page shell — so it must not be shared-cached under
+      // `/dashboard`. The `isHtmlResponse` conjunct closes it.
       let n = 0;
       const { env, workerFetch, kvStore } = createEnv({
         routing: {
@@ -1645,12 +1644,10 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a dotted HTML fallback target (dynamic per-user /account.html)', async () => {
-      // Finding 1 [high] cross-user leak: a dot + `text/html` are BOTH controlled by
-      // a dynamic handler — no static-asset provenance. A fallback `/* → /account.html`
+      // Cross-user leak: a dot + `text/html` are BOTH controlled by a dynamic
+      // handler — no static-asset provenance. A fallback `/* → /account.html`
       // returning caller-specific HTML with NO Cache-Control must NOT enter the shared
-      // page key. The old `hasExtension` arm trusted ANY dotted HTML target and cached
-      // this per-user body under `/dashboard`, leaking one caller's account to later
-      // callers. `pages` does NOT declare `/account.html` as a literal ISR page, so it
+      // page key. `pages` does NOT declare `/account.html` as a literal ISR page, so it
       // is served live but never shared-cached. See `isFallbackTargetCacheable`.
       let n = 0;
       const { env, workerFetch, kvStore } = createEnv({
@@ -1689,7 +1686,7 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('background revalidation does NOT overwrite or evict a page entry when the re-render falls back to a dotted HTML /account.html target', async () => {
-      // Finding 1 [high], background path: a stale-serve triggers a background
+      // Background path: a stale-serve triggers a background
       // re-render that 404s and falls back to `/account.html` (200 text/html, no
       // Cache-Control, per-user body). A dotted HTML target is not positively
       // identifiable as page content, so the re-render must NOT overwrite the good
@@ -1861,7 +1858,7 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a fallback rewrite to an undeclared dynamic /graphql target (no Cache-Control)', async () => {
-      // C9 [critical] cross-user leak: a user fallback `/* → /graphql` turns a page
+      // Cross-user leak: a user fallback `/* → /graphql` turns a page
       // 404 into a 200 with NO Cache-Control. `/graphql` is not `/api`, has no
       // extension, and matches no declared `pages` entry — positively-unidentifiable
       // as page content — so it must NOT be shared-cached under the `/dashboard` key
@@ -2011,12 +2008,11 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a fallback to /graphql when a CATCH-ALL page vouches for it (JSON)', async () => {
-      // C11 [critical]: a catch-all page `/:path{.+}` first-matches ANY path, so the
-      // old `resolvePageTtl(pages, undefined, '/graphql') > 0` "declared page" branch
-      // returned 60 for `/graphql` — the catch-all vouched for an arbitrary fallback
-      // target. With `/* → /graphql` this cached a per-user body under `/dashboard`
-      // (cross-user leak). A catch-all match is NOT an exact literal-page match, so
-      // it must not vouch. (JSON is also blocked by the HTML gate — see the HTML
+      // A catch-all page `/:path{.+}` first-matches ANY path, so
+      // `resolvePageTtl(pages, undefined, '/graphql') > 0` would let the catch-all
+      // vouch for an arbitrary fallback target and cache a per-user body under
+      // `/dashboard` (cross-user leak). A catch-all match is NOT an exact literal-page
+      // match, so it must not vouch. (JSON is also blocked by the HTML gate — see the HTML
       // variant below for the case only the LITERAL-match requirement catches.)
       let n = 0;
       const { env, workerFetch, kvStore } = createEnv({
@@ -2055,7 +2051,7 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a fallback to /graphql when a CATCH-ALL page vouches for it (HTML)', async () => {
-      // C11 [critical], the case the HTML gate ALONE would miss: the SAME catch-all
+      // The case the HTML gate ALONE would miss: the SAME catch-all
       // page + `/* → /graphql`, but `/graphql` renders `text/html`. The response
       // passes `isHtmlResponse`, so ONLY the exact-literal-page requirement keeps it
       // out — a catch-all page (`/:path{.+}`) is not literal, so it never positively
@@ -2096,14 +2092,13 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('does NOT ISR-cache a fallback to /graphql when a catch-all is FIRST-MATCH ahead of a later literal /graphql page (HTML)', async () => {
-      // C13 [high] route-precedence leak: `pages` is declared catch-all FIRST,
-      // literal `/graphql` SECOND (ingest validates shape, not ordering). The
-      // framework's matchRoute renders `/graphql` via its FIRST-match winner — the
-      // catch-all — i.e. dynamically. Pre-fix, `matchesLiteralPage` scanned the whole
-      // table and returned true on the LATER literal `/graphql`, so a `/* → /graphql`
-      // fallback returning a per-user HTML 200 got shared-cached under `/dashboard`
-      // (cross-user leak). Honoring first-match precedence, the catch-all is the
-      // winning route → NOT literal → the render must NOT be cached.
+      // Route-precedence leak: `pages` is declared catch-all FIRST, literal
+      // `/graphql` SECOND (ingest validates shape, not ordering). The framework's
+      // matchRoute renders `/graphql` via its FIRST-match winner — the catch-all —
+      // i.e. dynamically. Scanning the whole table would match the LATER literal
+      // `/graphql` and shared-cache a per-user HTML 200 under `/dashboard`.
+      // Honoring first-match precedence, the catch-all is the winning route → NOT
+      // literal → the render must NOT be cached.
       let n = 0;
       const { env, workerFetch, kvStore } = createEnv({
         routing: {
@@ -2143,11 +2138,10 @@ describe('ISR (stale-while-revalidate)', () => {
     });
 
     it('background revalidation does NOT overwrite or evict a page entry when a CATCH-ALL page vouches for the /graphql fallback target', async () => {
-      // C11 [critical], background path: a stale-serve triggers a re-render that 404s
-      // and falls back to `/graphql` (200 JSON, no Cache-Control) under a root
-      // catch-all page. Pre-fix, `resolvePageTtl` vouched via the catch-all and the
-      // per-user body overwrote the good `/dashboard` entry. The exact-literal-page
-      // requirement blocks it — the seeded good body must survive, un-evicted.
+      // Background path: a stale-serve triggers a re-render that 404s and falls back
+      // to `/graphql` (200 JSON, no Cache-Control) under a root catch-all page. The
+      // exact-literal-page requirement keeps the per-user body from overwriting the
+      // good `/dashboard` entry — the seeded good body must survive, un-evicted.
       let n = 0;
       const variantSeedKey = isrCacheKey(
         'proj_1',
@@ -2301,7 +2295,7 @@ describe('ISR respects response Cache-Control opt-out', () => {
     expect(written).toHaveLength(0);
   });
 
-  // Codex [high] regression (site 3 = normal write-back): the ORIGINAL `/api/*`
+  // Normal write-back site: the ORIGINAL `/api/*`
   // request bypasses the ISR ladder, 404s, and a fallback rewrites to an
   // extensionless DYNAMIC target (`/graphql`) that returns a 200 HTML body with NO
   // Cache-Control. `isApiPath` does not catch `/graphql`; the opt-out guard does
@@ -2780,7 +2774,7 @@ describe('ISR respects response Cache-Control opt-out', () => {
     expect(edgeCacheStore.has(jsonEdgeKey)).toBe(false);
   });
 
-  // C15 regression: the grace is measured from STALE-onset (`createdAt + ttl`), NOT
+  // The grace is measured from STALE-onset (`createdAt + ttl`), NOT
   // from creation. A long-TTL entry (TTL > the grace) that has only JUST become stale
   // must NOT be evicted by its first failed revalidation — otherwise a single transient
   // origin failure right after expiry wipes the last-known-good copy, defeating
@@ -2841,9 +2835,9 @@ describe('ISR respects response Cache-Control opt-out', () => {
     expect(new TextDecoder().decode(unpacked!.body)).toBe('<html>stale</html>');
   });
 
-  // Convergence (C14): a permanently-removed page whose origin now 404s and falls
-  // back to a non-declared shell can NEITHER refresh (C12 refuses to cache the
-  // shell) NOR authoritatively opt-out-evict (a fallback fired, so that branch is
+  // Convergence: a permanently-removed page whose origin now 404s and falls
+  // back to a non-declared shell can NEITHER refresh (the write gate refuses to cache
+  // the shell) NOR authoritatively opt-out-evict (a fallback fired, so that branch is
   // gated off). Without a bound it would serve its last cached body forever (ISR KV
   // puts set no expirationTtl). Once the entry has been STALE (since `createdAt + ttl`)
   // past the bounded grace (24h) — far beyond any transient deploy-race 404 — a
@@ -2912,7 +2906,7 @@ describe('ISR respects response Cache-Control opt-out', () => {
     expect(edgeCacheStore.has(jsonEdgeKey)).toBe(false);
   });
 
-  // C16: grace-eviction requires POSITIVE removal evidence — the ORIGIN page's OWN
+  // Grace-eviction requires POSITIVE removal evidence — the ORIGIN page's OWN
   // pre-fallback render returned 404/410 (gone). A TRANSIENT origin failure (5xx / 429 /
   // timeout) is a DEGRADED DEPENDENCY, not a removal, and is exactly what stale-while-
   // revalidate protects: even PAST the grace it must PRESERVE the stale entry. Wiping the
@@ -2975,7 +2969,7 @@ describe('ISR respects response Cache-Control opt-out', () => {
     expect(new TextDecoder().decode(unpacked!.body)).toBe('<html>stale</html>');
   });
 
-  // C16 (429 variant): a rate-limited origin is likewise a transient degraded dependency,
+  // 429 variant: a rate-limited origin is likewise a transient degraded dependency,
   // not a removal — beyond the grace it must still preserve the stale entry.
   it('background revalidation does NOT evict an entry stale past the grace when the re-render is a transient 429', async () => {
     const kvKey = 'proj_1/isr/v3/legacy/my-app.void.app/dashboard';

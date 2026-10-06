@@ -3,7 +3,6 @@ import type { Db } from '../../src/db.ts';
 import { provisionBindings } from '../../src/provisioning/provision.ts';
 import type { DeployManifest, Resource } from '../../src/types.ts';
 
-// Mock the CF API module
 vi.mock('../../src/provisioning/cloudflare-api', () => ({
   createD1Database: vi.fn().mockResolvedValue({ uuid: 'd1-uuid-123', name: 'test-DB' }),
   enableD1ReadReplication: vi.fn().mockResolvedValue(undefined),
@@ -19,7 +18,6 @@ vi.mock('../../src/provisioning/cloudflare-api', () => ({
   getQueueByName: vi.fn().mockResolvedValue({ queue_id: 'queue-looked-up', queue_name: 'test-q' }),
 }));
 
-// Mock db module
 vi.mock('../../src/db', () => ({
   getProjectResources: vi.fn().mockResolvedValue([]),
   createResource: vi
@@ -362,10 +360,9 @@ describe('provisionBindings', () => {
   });
 
   it('always injects __VOID_PROJECT_SLUG, for sandbox and non-sandbox projects alike', async () => {
-    // `buildSandboxIdentityBindings` used to emit this for sandbox projects
-    // only. `void/email` defaults an outbound `from` to
-    // `<slug>+noreply@<domain>` on EVERY worker, so this is now the single
-    // unconditional producer — and the sandbox runtime reads the same name.
+    // `void/email` defaults an outbound `from` to `<slug>+noreply@<domain>` on
+    // EVERY worker, so this is the single unconditional producer — and the
+    // sandbox runtime reads the same name.
     const manifest: DeployManifest = { version: 1, bindings: {} };
 
     const bindings = await provisionBindings(

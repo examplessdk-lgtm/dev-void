@@ -117,6 +117,16 @@ export function serializeEmailRecipientPolicyMirror(policy: EmailRecipientPolicy
   return JSON.stringify({ mode: policy.mode, domains: [...policy.domains] });
 }
 
+async function latestPolicyOutbox(db: DbOrTx) {
+  const [latest] = await db
+    .select()
+    .from(emailCacheOutbox)
+    .where(eq(emailCacheOutbox.resource_kind, 'policy'))
+    .orderBy(desc(emailCacheOutbox.version))
+    .limit(1);
+  return latest;
+}
+
 /** Commit the policy and its publication intent under the admission policy lock. */
 export async function setEmailRecipientPolicy(
   db: Db,
@@ -125,14 +135,7 @@ export async function setEmailRecipientPolicy(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('email-admission:policy'))`);
-    const latest = (
-      await tx
-        .select()
-        .from(emailCacheOutbox)
-        .where(eq(emailCacheOutbox.resource_kind, 'policy'))
-        .orderBy(desc(emailCacheOutbox.version))
-        .limit(1)
-    )[0];
+    const latest = await latestPolicyOutbox(tx);
     const version = (latest?.version ?? 0) + 1;
     await setPlatformSetting(tx, EMAIL_RECIPIENT_POLICY_SETTING, {
       mode: policy.mode,
@@ -157,14 +160,7 @@ export async function setEmailRecipientPolicy(
  * The unversioned value is a best-effort display hint and never authorizes sends. */
 export async function repairEmailRecipientPolicyMirror(db: Db, kv: KVNamespace): Promise<void> {
   try {
-    const latest = (
-      await db
-        .select()
-        .from(emailCacheOutbox)
-        .where(eq(emailCacheOutbox.resource_kind, 'policy'))
-        .orderBy(desc(emailCacheOutbox.version))
-        .limit(1)
-    )[0];
+    const latest = await latestPolicyOutbox(db);
     const policy = await getEmailRecipientPolicy(db);
     const expected = serializeEmailRecipientPolicyMirror(policy);
     if (latest && !latest.published_at) {

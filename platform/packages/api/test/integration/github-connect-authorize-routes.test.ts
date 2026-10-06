@@ -1,4 +1,3 @@
-import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import {
   afterAll,

@@ -39,7 +39,6 @@ import type { Db } from '../../src/db.ts';
 import {
   builds,
   deployments,
-  githubConnections,
   projectMembers,
   projects,
   resources,
@@ -67,7 +66,7 @@ afterAll(async () => {
 });
 
 // The immutable numeric repo id (as text) used by the in-tx install
-// re-check. The build txns now confirm the install still covers this repo, so
+// re-check. The build txns confirm the install still covers this repo, so
 // every test reaching that check seeds an install whose selection includes it
 // (or an `all`-repos install). Connections also carry it so the helper's
 // repositoryId arg is non-null (a null id fails closed).
@@ -203,10 +202,10 @@ describe('builds', () => {
   });
 
   it("getQueuedBuilds surfaces an idle project even when another of the user's projects is active", async () => {
-    // DISTINCT ON (user_id) would have surfaced the user's oldest
+    // A per-user scan (DISTINCT ON user_id) would surface the user's oldest
     // build across ALL projects; if that project were active, the user's OTHER
-    // startable project would never be surfaced. Per-idle-project semantics fix
-    // that — the busy project is excluded, the idle one's build is returned.
+    // startable project would never be surfaced. The per-idle-project scan
+    // excludes the busy project and returns the idle one's build.
     const user = await createTestUser(env.db);
     const busy = await createTestProject(env.db, user.id, 'starve-busy');
     const idle = await createTestProject(env.db, user.id, 'starve-idle');
@@ -745,7 +744,7 @@ describe('builds', () => {
     // The branch-delete handler sampled its DB-clock fence BEFORE the recreate push
     // is processed. Model that ordering with a fence one minute in the past: the
     // build's original stamp (now()-1h) sits below it (so WITHOUT the re-stamp it
-    // would be cancelled — the test catches the bug), while the reuse re-stamp
+    // would be cancelled), while the reuse re-stamp
     // (now()) sits above it (so WITH the re-stamp it survives). A literal `now()`
     // here would tie the re-stamp's instant and make the assertion racy.
     const fenceRes = (await env.db.execute(
@@ -1514,8 +1513,8 @@ describe('builds', () => {
       .set({ started_at: sql`now() - interval '5 minute'` })
       .where(eq(builds.id, fresh.id));
 
-    // Returns the reaped builds (not just a count, and now each with its
-    // instance_type) so the scheduled handler can best-effort stop the
+    // Returns the reaped builds with their instance_type so the scheduled
+    // handler can best-effort stop the
     // still-alive containers via the correctly-sized BuildManager namespace.
     const reaped = await failStaleActiveContainerBuilds(env.db, 75);
     expect(reaped).toEqual([{ id: stale.id, instance_type: 'standard-4' }]);
@@ -1699,7 +1698,7 @@ describe('builds', () => {
     expect((await getBuild(env.db, build.id))!.status).toBe('deploying');
   });
 
-  // The critical regression: a row a concurrent terminalizer already
+  // A row a concurrent terminalizer already
   // drove `cancelled` must NOT be resurrected to a progress status by a
   // forged/late agent report.
   it('markBuildProgressIfActive no-ops on a cancelled row (terminal preserved)', async () => {
@@ -1897,9 +1896,9 @@ describe('builds', () => {
     // build->deployment FKs (ON DELETE NO ACTION) are in play during teardown.
     await updateBuildStatus(env.db, build.id, 'complete', { deploymentId: deployment.id });
 
-    // Before the fix this throws a foreign_key_violation because builds were
-    // never deleted inside the cascade transaction. The cascade now also
-    // terminalizes in-flight builds first and returns them; a completed build is
+    // Builds reference the project and deployment, so the cascade deletes them
+    // inside its transaction (no foreign_key_violation). It terminalizes
+    // in-flight builds first and returns them; a completed build is
     // already terminal, so nothing is returned for cancellation. No resources
     // exist, so deletedResources is empty too.
     await expect(deleteProjectCascade(env.db, project.id)).resolves.toEqual({
@@ -2830,7 +2829,7 @@ describe('github_connections', () => {
   it('getGitHubConnectionsByRepo joins the owning user_id (active install)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id);
-    // The resolver now INNER JOINs github_installations and requires status=active
+    // The resolver INNER JOINs github_installations and requires status=active
     // + repo membership, so an active 'all'-repos install must exist.
     await upsertGitHubInstallation(env.db, {
       installationId: '12345',

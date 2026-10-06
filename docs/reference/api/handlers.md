@@ -182,7 +182,7 @@ export default defineQueue<{ to: string; subject: string }>(async (batch, env) =
 ```ts
 function defineQueue<T>(
   handler: (batch: QueueBatch<T>, env: CloudEnv['Bindings']) => void | Promise<void>,
-): QueueFn;
+): TypedQueueHandler<T>;
 ```
 
 ## `defineRender(handler)` {#definerender-handler}

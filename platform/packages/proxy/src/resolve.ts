@@ -1,3 +1,5 @@
+import { hmacSign } from './hmac.ts';
+
 // In-memory cache: resource mappings are stable (only change on deploy).
 // Persists across requests within the same CF worker isolate.
 const cache = new Map<string, string>();
@@ -82,7 +84,7 @@ export async function verifyProjectDeployAccess(
   }
 }
 
-export function ownerVerificationMessage(projectId: string, proxyOrigin: string): string {
+function ownerVerificationMessage(projectId: string, proxyOrigin: string): string {
   return `void-proxy-owner-v2\n${projectId}\n${proxyOrigin}`;
 }
 
@@ -116,32 +118,4 @@ export async function verifyPrerenderAuthority(
     // unavailable. A build can retry without widening its credential.
     return false;
   }
-}
-
-// --- HMAC signing (mirrors packages/api/src/auth/hmac.ts) ---
-
-const encoder = new TextEncoder();
-let cachedSignKey: CryptoKey | undefined;
-let cachedKeySecret: string | undefined;
-
-async function getSignKey(secret: string): Promise<CryptoKey> {
-  if (cachedSignKey && cachedKeySecret === secret) {
-    return cachedSignKey;
-  }
-  cachedSignKey = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  cachedKeySecret = secret;
-  return cachedSignKey;
-}
-
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await getSignKey(secret);
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-  const binary = String.fromCharCode(...new Uint8Array(sig));
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }

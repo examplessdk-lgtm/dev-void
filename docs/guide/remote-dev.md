@@ -49,16 +49,16 @@ AI requests use your platform’s account and allowance in both local and remote
 When the dev server starts with remote mode active, it prints:
 
 ```
-⚡ Remote bindings active (my-project.apps.example.com)
-   DB      → remote D1
-   KV      → remote KV
-   STORAGE → remote R2
+[void] Remote bindings active
+         DB      → remote D1
+         KV      → remote KV
+         STORAGE → remote R2
 ```
 
 ## Limitations
 
 - **Network latency:** each binding call makes a network request, so responses may be slower than local development.
 - **R2 multipart uploads:** `createMultipartUpload()` and `resumeMultipartUpload()` are not supported in remote mode.
-- **R2 conditional writes:** `put(..., { onlyIf })` requires a current Void platform and an active deployment with the native remote-binding handler. Update the platform and redeploy the project if this operation is unavailable. Failed preconditions return `null`.
+- **R2 conditional writes:** `put(..., { onlyIf })` requires an updated platform and project deployment. Failed preconditions return `null`.
 - **D1 dump:** `db.dump()` is not supported in remote mode.
 - **D1 batches:** `db.batch()` requires an updated platform and project deployment.

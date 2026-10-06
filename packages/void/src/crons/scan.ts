@@ -7,7 +7,7 @@ import {
   unwrapStaticExpression,
 } from '../shared/static-exports.ts';
 
-const JOB_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
+const JOB_PATTERN = '**/*.{ts,mts,js,mjs}';
 
 export type JobDefinition = {
   /** Relative file path from jobs/ */
@@ -71,18 +71,16 @@ function parseJobFiles(root: string, jobsDir: string, files: Array<string>): Arr
 }
 
 export async function scanJobs(root: string, jobsDir = 'crons'): Promise<Array<JobDefinition>> {
-  const pattern = `**/*.{${JOB_EXTENSIONS.join(',')}}`;
-  const files = await glob(pattern, { cwd: resolveDir(root, jobsDir), absolute: false }).catch(
+  const files = await glob(JOB_PATTERN, { cwd: resolveDir(root, jobsDir), absolute: false }).catch(
     () => [] as Array<string>,
   );
   return parseJobFiles(root, jobsDir, files);
 }
 
 export function scanJobsSync(root: string, jobsDir = 'crons'): Array<JobDefinition> {
-  const pattern = `**/*.{${JOB_EXTENSIONS.join(',')}}`;
   let files: Array<string>;
   try {
-    files = globSync(pattern, { cwd: resolveDir(root, jobsDir), absolute: false });
+    files = globSync(JOB_PATTERN, { cwd: resolveDir(root, jobsDir), absolute: false });
   } catch {
     files = [];
   }

@@ -300,18 +300,10 @@ export function parsePlatformResourceOwnershipMarker(
       `Unsupported platform resource ownership schema version: ${String(value.schemaVersion)}.`,
     );
   }
-  if (!isResourceKind(value.resourceKind)) {
-    throw new Error('Invalid ownership marker resource kind.');
-  }
-  return createPlatformResourceOwnershipMarker({
-    accountId: requiredString(value.accountId, 'ownership accountId'),
-    installationId: requiredString(value.installationId, 'ownership installationId'),
-    ownershipNonce: requiredString(value.ownershipNonce, 'ownership ownershipNonce'),
-    resourceId: requiredString(value.resourceId, 'ownership resourceId'),
-    resourceKey: requiredString(value.resourceKey, 'ownership resourceKey'),
-    resourceKind: value.resourceKind,
-    resourceName: requiredString(value.resourceName, 'ownership resourceName'),
-  });
+  // The constructor validates every field.
+  return createPlatformResourceOwnershipMarker(
+    value as Parameters<typeof createPlatformResourceOwnershipMarker>[0],
+  );
 }
 
 export function createPlatformInstallationManifest(input: {
@@ -617,7 +609,7 @@ function parseAuthenticationResources(
   return resources;
 }
 
-function parseUsageProtocolVersion(value: unknown): 0 | 1 | 2 {
+export function parseUsageProtocolVersion(value: unknown): 0 | 1 | 2 {
   if (value === undefined || value === 0) {
     return 0;
   }

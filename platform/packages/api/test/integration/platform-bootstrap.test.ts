@@ -729,7 +729,8 @@ describe('provider-independent first administrator setup', () => {
           body: Buffer.from(await response.arrayBuffer()),
         });
       });
-      // Reproduce the original header conflict with the real Origin guard.
+      // A no-referrer setup page makes the browser send `Origin: null`, which the
+      // real Origin guard rejects.
       suppressSetupOrigin = true;
       await page.goto(`${origin}/setup`);
       await page.getByLabel('Setup code').fill(code);

@@ -17,8 +17,9 @@ routes/api/
     [key].ts           # PUT store + GET read a value in KV (:key param)
 middleware/
   01.logger.ts         # Logs method + path for every request
-migrations/
-  0000_create_users.sql # Creates users table (id, name, email, created_at)
+db/
+  schema.ts            # Drizzle schema
+  migrations/          # Creates users table (id, name, email, created_at)
   seed.sql             # Seeds sample data
 crons/
   hourly-heartbeat.ts  # Writes last-heartbeat timestamp to KV every hour

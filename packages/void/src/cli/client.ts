@@ -2046,7 +2046,7 @@ export class PlatformClient {
 
   /**
    * Start the per-repo connect-authorization round-trip used by a non-owner org
-   * member (Task 7 platform contract). The callback redirects back to `redirect`
+   * member. The callback redirects back to `redirect`
    * with either `?connect_grant=<signed>` (proof of per-repo access) or
    * `?error=repo_not_accessible`. Mirrors {@link getGithubLinkUrl} but carries
    * the installation + repo the grant is scoped to.

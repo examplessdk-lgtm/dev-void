@@ -16,7 +16,7 @@ void platform user show <id>
 Use the same ID to change a plan, suspend or restore the account, or delete it:
 
 ```sh
-void platform user plan <id> <free|solo|pro|sponsored|custom>
+void platform user plan <id> <plan-id>
 void platform user suspend <id> [--reason <text>]
 void platform user restore <id>
 void platform user delete <id>

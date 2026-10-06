@@ -139,7 +139,7 @@ export function formatPlatformApiError(
           : unexplainedRejection(status);
       return `${action} (HTTP ${status}): ${explanation}`;
     }
-    // Other opaque provider failures retain the existing diagnostics behavior.
+    // Keep the raw status and body of other opaque provider failures for diagnostics.
     return `${action}: ${status} ${body}`;
   }
   const detail =

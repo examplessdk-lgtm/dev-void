@@ -189,6 +189,60 @@ function isOperatorRecoverableWriteStep(kind: string): kind is OperatorRecoverab
   return (OPERATOR_RECOVERABLE_WRITE_STEPS as ReadonlyArray<string>).includes(kind);
 }
 
+async function findEmailOperationByKey(
+  db: DbOrTx,
+  installationId: string,
+  actorScope: string,
+  key: string,
+) {
+  const [operation] = await db
+    .select()
+    .from(emailOperations)
+    .where(
+      and(
+        eq(emailOperations.installation_id, installationId),
+        eq(emailOperations.actor_scope, actorScope),
+        eq(emailOperations.idempotency_key, key),
+      ),
+    )
+    .limit(1);
+  return operation;
+}
+
+async function findUnresolvedConnectionOperation(db: DbOrTx, connectionId: string) {
+  const [operation] = await db
+    .select({ id: emailOperations.id })
+    .from(emailOperations)
+    .where(
+      and(
+        eq(emailOperations.connection_id, connectionId),
+        inArray(emailOperations.status, ['pending', 'running', 'unknown']),
+      ),
+    )
+    .limit(1);
+  return operation;
+}
+
+async function findEmailRoute(db: DbOrTx, routeId: string | null) {
+  if (!routeId) {
+    return null;
+  }
+  const [route] = await db
+    .select()
+    .from(emailDomainRoutes)
+    .where(eq(emailDomainRoutes.id, routeId))
+    .limit(1);
+  return route ?? null;
+}
+
+function supportsSubaddressing(settings: unknown): boolean {
+  return (
+    !!settings &&
+    typeof settings === 'object' &&
+    (settings as { support_subaddress?: unknown }).support_subaddress === true
+  );
+}
+
 type EmailStepRoute = Pick<
   typeof emailDomainRoutes.$inferSelect,
   'id' | 'domain' | 'desired_generation'
@@ -207,7 +261,7 @@ async function lockEmailZoneConnectionIdentity(
   await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${identity}, 0))`);
 }
 function gatewayOrigin(env: Bindings): string {
-  const origin = (env as Bindings & { EMAIL_GATEWAY_ORIGIN?: string }).EMAIL_GATEWAY_ORIGIN;
+  const origin = env.EMAIL_GATEWAY_ORIGIN;
   if (!origin || !/^https:\/\/[^/]+$/i.test(origin)) {
     throw new EmailOperationError(
       'EMAIL_GATEWAY_ORIGIN must be configured before email ingress setup',
@@ -216,15 +270,15 @@ function gatewayOrigin(env: Bindings): string {
   }
   return origin;
 }
-async function digest(value: unknown): Promise<string> {
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+export async function digest(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
-  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (x) =>
-    x.toString(16).padStart(2, '0'),
-  ).join('');
+  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 }
 function randomSecret(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return toHex(crypto.getRandomValues(new Uint8Array(32)));
 }
 function constantTimeHexEqual(a: string, b: string): boolean {
   if (a.length !== b.length) {
@@ -257,10 +311,9 @@ async function relayProof(
     false,
     ['sign'],
   );
-  return Array.from(
+  return toHex(
     new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data))),
-    (b) => b.toString(16).padStart(2, '0'),
-  ).join('');
+  );
 }
 async function probeDeployedRelay(
   client: ReturnType<typeof createCfCustomerClient>,
@@ -408,18 +461,13 @@ function isSharedGatewayConnection(
   env: Bindings,
   connection: typeof emailZoneConnections.$inferSelect,
 ): boolean {
-  const shared = env as Bindings & {
-    EMAIL_SHARED_ACCOUNT_ID?: string;
-    EMAIL_SHARED_ZONE_ID?: string;
-    EMAIL_SHARED_INGRESS_NAME?: string;
-  };
   return (
-    !!shared.EMAIL_SHARED_ACCOUNT_ID &&
-    !!shared.EMAIL_SHARED_ZONE_ID &&
-    !!shared.EMAIL_SHARED_INGRESS_NAME &&
-    connection.account_id === shared.EMAIL_SHARED_ACCOUNT_ID &&
-    connection.zone_id === shared.EMAIL_SHARED_ZONE_ID &&
-    connection.ingress_worker_name === shared.EMAIL_SHARED_INGRESS_NAME
+    !!env.EMAIL_SHARED_ACCOUNT_ID &&
+    !!env.EMAIL_SHARED_ZONE_ID &&
+    !!env.EMAIL_SHARED_INGRESS_NAME &&
+    connection.account_id === env.EMAIL_SHARED_ACCOUNT_ID &&
+    connection.zone_id === env.EMAIL_SHARED_ZONE_ID &&
+    connection.ingress_worker_name === env.EMAIL_SHARED_INGRESS_NAME
   );
 }
 function canManageConnection(
@@ -613,6 +661,39 @@ function emailStepSecretGeneration(
     return connection.staged_secret_generation;
   }
   return connection.active_secret_generation;
+}
+
+async function insertEmailOperationSteps(
+  tx: Tx,
+  env: Bindings,
+  input: {
+    operationId: string;
+    connection: typeof emailZoneConnections.$inferSelect;
+    steps: ReadonlyArray<StepKind>;
+    generation: number;
+    route: EmailStepRoute | null;
+    secretGeneration: (step: StepKind) => number | undefined;
+  },
+): Promise<void> {
+  const { operationId, connection, generation, route } = input;
+  for (const [ordinal, kind] of input.steps.entries()) {
+    const secretGeneration = input.secretGeneration(kind);
+    await tx.insert(emailOperationSteps).values({
+      id: generateId('estep'),
+      operation_id: operationId,
+      ordinal,
+      kind,
+      resource_identity: emailStepResourceIdentity(connection, kind, route, secretGeneration),
+      request_digest: await emailStepRequestDigest(
+        env,
+        connection,
+        kind,
+        generation,
+        route,
+        secretGeneration,
+      ),
+    });
+  }
 }
 
 async function resumeBlockedEmailOperationTx(
@@ -947,18 +1028,7 @@ export async function replaceBlockedSystemEmailCleanupCredential(
   if (sibling) {
     throw new EmailOperationError('email connection still has another domain assignment', 409);
   }
-  const unresolved = (
-    await db
-      .select({ id: emailOperations.id })
-      .from(emailOperations)
-      .where(
-        and(
-          eq(emailOperations.connection_id, connection.id),
-          inArray(emailOperations.status, ['pending', 'running', 'unknown']),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const unresolved = await findUnresolvedConnectionOperation(db, connection.id);
   if (unresolved) {
     throw new EmailOperationError(`connection operation ${unresolved.id} is unresolved`, 409);
   }
@@ -1082,18 +1152,7 @@ export async function replaceBlockedSystemEmailCleanupCredential(
     if (currentSibling) {
       throw new EmailOperationError('email connection still has another domain assignment', 409);
     }
-    const currentUnresolved = (
-      await tx
-        .select({ id: emailOperations.id })
-        .from(emailOperations)
-        .where(
-          and(
-            eq(emailOperations.connection_id, currentConnection.id),
-            inArray(emailOperations.status, ['pending', 'running', 'unknown']),
-          ),
-        )
-        .limit(1)
-    )[0];
+    const currentUnresolved = await findUnresolvedConnectionOperation(tx, currentConnection.id);
     if (currentUnresolved) {
       throw new EmailOperationError(
         `connection operation ${currentUnresolved.id} is unresolved`,
@@ -1240,12 +1299,7 @@ export async function inspectEmailInboundRoute(
     if (!exchanges.length || exchanges.some((exchange) => !isCloudflareEmailRoutingMx(exchange))) {
       return `MX records for ${domain} do not route mail to Cloudflare Email Routing`;
     }
-    if (
-      !settings ||
-      typeof settings !== 'object' ||
-      (settings as { enabled?: unknown }).enabled !== true ||
-      (settings as { support_subaddress?: unknown }).support_subaddress !== true
-    ) {
+    if (!supportsSubaddressing(settings) || (settings as { enabled?: unknown }).enabled !== true) {
       return 'Cloudflare Email Routing and subaddressing must be enabled for shared email';
     }
     // Domain readiness does not assert recipient coverage. Each project's
@@ -1337,19 +1391,7 @@ export async function requestEmailDomainAdd(
     actor: input.actor.kind,
     tokenDigest: input.token ? await digest(input.token) : null,
   });
-  const previous = (
-    await db
-      .select()
-      .from(emailOperations)
-      .where(
-        and(
-          eq(emailOperations.installation_id, installationId),
-          eq(emailOperations.actor_scope, actorScope),
-          eq(emailOperations.idempotency_key, key),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const previous = await findEmailOperationByKey(db, installationId, actorScope, key);
   if (previous) {
     if (previous.request_digest !== requestDigest || !previous.route_id) {
       throw new EmailOperationError('email operation key was reused with a different request');
@@ -1382,15 +1424,7 @@ export async function requestEmailDomainAdd(
       400,
     );
   }
-  const shared = env as Bindings & {
-    EMAIL_SHARED_ACCOUNT_ID?: string;
-    EMAIL_SHARED_ZONE_ID?: string;
-    EMAIL_SHARED_INGRESS_NAME?: string;
-  };
-  if (
-    zone.account.id === shared.EMAIL_SHARED_ACCOUNT_ID &&
-    zone.id === shared.EMAIL_SHARED_ZONE_ID
-  ) {
+  if (zone.account.id === env.EMAIL_SHARED_ACCOUNT_ID && zone.id === env.EMAIL_SHARED_ZONE_ID) {
     if (actor.kind !== 'admin') {
       throw new EmailOperationError(
         'the installation shared mail zone is administrator-managed',
@@ -1484,6 +1518,21 @@ export async function requestEmailDomainAdd(
     : null;
   try {
     return await db.transaction(async (tx) => {
+      const insertCredential = () =>
+        tx.insert(emailCredentials).values({
+          id: credentialId,
+          installation_id: installationId,
+          managed_by: actor.kind,
+          manager_user_id: actor.kind === 'owner' ? actor.userId : null,
+          kind: input.token ? 'api_token' : 'platform',
+          account_id: zone.account.id,
+          zone_id: zone.id,
+          ciphertext: encryptedToken?.ciphertext ?? null,
+          iv: encryptedToken?.iv ?? null,
+          key_version: encryptedToken?.keyVersion ?? null,
+          token_id: verifiedToken?.tokenId ?? null,
+          expires_on: verifiedToken?.expiresOn ?? null,
+        });
       const project = (
         await tx
           .select()
@@ -1565,18 +1614,7 @@ export async function requestEmailDomainAdd(
         throw new EmailOperationError('email domain belongs to a different Cloudflare zone', 409);
       }
       if (connection) {
-        const unresolved = (
-          await tx
-            .select({ id: emailOperations.id })
-            .from(emailOperations)
-            .where(
-              and(
-                eq(emailOperations.connection_id, connection.id),
-                inArray(emailOperations.status, ['pending', 'running', 'unknown']),
-              ),
-            )
-            .limit(1)
-        )[0];
+        const unresolved = await findUnresolvedConnectionOperation(tx, connection.id);
         if (unresolved) {
           throw new EmailOperationError(`connection operation ${unresolved.id} is unresolved`);
         }
@@ -1637,20 +1675,7 @@ export async function requestEmailDomainAdd(
             })
             .where(eq(emailCredentials.id, connection.credential_id));
         } else {
-          await tx.insert(emailCredentials).values({
-            id: credentialId,
-            installation_id: installationId,
-            managed_by: actor.kind,
-            manager_user_id: actor.kind === 'owner' ? actor.userId : null,
-            kind: input.token ? 'api_token' : 'platform',
-            account_id: zone.account.id,
-            zone_id: zone.id,
-            ciphertext: encryptedToken?.ciphertext ?? null,
-            iv: encryptedToken?.iv ?? null,
-            key_version: encryptedToken?.keyVersion ?? null,
-            token_id: verifiedToken?.tokenId ?? null,
-            expires_on: verifiedToken?.expiresOn ?? null,
-          });
+          await insertCredential();
           await tx
             .update(emailZoneConnections)
             .set({ credential_id: credentialId })
@@ -1724,46 +1749,18 @@ export async function requestEmailDomainAdd(
           domain,
           desired_generation: routeGeneration,
         };
-        for (let i = 0; i < steps.length; i++) {
-          const secretGeneration = emailStepSecretGeneration('sync', connection, steps[i]);
-          await tx.insert(emailOperationSteps).values({
-            id: generateId('estep'),
-            operation_id: operationId,
-            ordinal: i,
-            kind: steps[i],
-            resource_identity: emailStepResourceIdentity(
-              connection,
-              steps[i],
-              stepRoute,
-              secretGeneration,
-            ),
-            request_digest: await emailStepRequestDigest(
-              env,
-              connection,
-              steps[i],
-              generation,
-              stepRoute,
-              secretGeneration,
-            ),
-          });
-        }
+        await insertEmailOperationSteps(tx, env, {
+          operationId,
+          connection,
+          steps,
+          generation,
+          route: stepRoute,
+          secretGeneration: (step) => emailStepSecretGeneration('sync', connection, step),
+        });
         return { operationId, routeId: existingRoute.id };
       }
       if (!connection) {
-        await tx.insert(emailCredentials).values({
-          id: credentialId,
-          installation_id: installationId,
-          managed_by: actor.kind,
-          manager_user_id: actor.kind === 'owner' ? actor.userId : null,
-          kind: input.token ? 'api_token' : 'platform',
-          account_id: zone.account.id,
-          zone_id: zone.id,
-          ciphertext: encryptedToken?.ciphertext ?? null,
-          iv: encryptedToken?.iv ?? null,
-          key_version: encryptedToken?.keyVersion ?? null,
-          token_id: verifiedToken?.tokenId ?? null,
-          expires_on: verifiedToken?.expiresOn ?? null,
-        });
+        await insertCredential();
         await tx.insert(emailZoneConnections).values({
           id: connectionId,
           installation_id: installationId,
@@ -1789,20 +1786,7 @@ export async function requestEmailDomainAdd(
             .limit(1)
         )[0]!;
       } else if (!connection.credential_id) {
-        await tx.insert(emailCredentials).values({
-          id: credentialId,
-          installation_id: installationId,
-          managed_by: actor.kind,
-          manager_user_id: actor.kind === 'owner' ? actor.userId : null,
-          kind: input.token ? 'api_token' : 'platform',
-          account_id: zone.account.id,
-          zone_id: zone.id,
-          ciphertext: encryptedToken?.ciphertext ?? null,
-          iv: encryptedToken?.iv ?? null,
-          key_version: encryptedToken?.keyVersion ?? null,
-          token_id: verifiedToken?.tokenId ?? null,
-          expires_on: verifiedToken?.expiresOn ?? null,
-        });
+        await insertCredential();
         await tx
           .update(emailZoneConnections)
           .set({
@@ -1890,47 +1874,20 @@ export async function requestEmailDomainAdd(
             ? SETUP_STEPS
             : SIBLING_STEPS;
       const stepRoute: EmailStepRoute = { id: routeId, domain, desired_generation: 1 };
-      for (let i = 0; i < steps.length; i++) {
-        const secretGeneration = emailStepSecretGeneration('setup', connection, steps[i]);
-        await tx.insert(emailOperationSteps).values({
-          id: generateId('estep'),
-          operation_id: operationId,
-          ordinal: i,
-          kind: steps[i],
-          resource_identity: emailStepResourceIdentity(
-            connection,
-            steps[i],
-            stepRoute,
-            secretGeneration,
-          ),
-          request_digest: await emailStepRequestDigest(
-            env,
-            connection,
-            steps[i],
-            connection.desired_generation,
-            stepRoute,
-            secretGeneration,
-          ),
-        });
-      }
+      await insertEmailOperationSteps(tx, env, {
+        operationId,
+        connection,
+        steps,
+        generation: connection.desired_generation,
+        route: stepRoute,
+        secretGeneration: (step) => emailStepSecretGeneration('setup', connection, step),
+      });
       return { operationId, routeId };
     });
   } catch (error) {
     // A concurrent insert may have committed the same caller attempt while this
     // transaction waited on uniqueness. Fetch it, but never infer success from a domain row.
-    const winner = (
-      await db
-        .select()
-        .from(emailOperations)
-        .where(
-          and(
-            eq(emailOperations.installation_id, installationId),
-            eq(emailOperations.actor_scope, actorScope),
-            eq(emailOperations.idempotency_key, key),
-          ),
-        )
-        .limit(1)
-    )[0];
+    const winner = await findEmailOperationByKey(db, installationId, actorScope, key);
     if (winner && winner.request_digest === requestDigest && winner.route_id) {
       return { operationId: winner.id, routeId: winner.route_id };
     }
@@ -1946,16 +1903,7 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
   if (!configured) {
     return null;
   }
-  const shared = env as Bindings & {
-    EMAIL_SHARED_ACCOUNT_ID?: string;
-    EMAIL_SHARED_ZONE_ID?: string;
-    EMAIL_SHARED_INGRESS_NAME?: string;
-  };
-  if (
-    !shared.EMAIL_SHARED_ACCOUNT_ID ||
-    !shared.EMAIL_SHARED_ZONE_ID ||
-    !shared.EMAIL_SHARED_INGRESS_NAME
-  ) {
+  if (!env.EMAIL_SHARED_ACCOUNT_ID || !env.EMAIL_SHARED_ZONE_ID || !env.EMAIL_SHARED_INGRESS_NAME) {
     throw new EmailOperationError('shared email ingress identity is not configured', 503);
   }
   const domain = normalizeEmailDomain(configured);
@@ -1965,19 +1913,7 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
   gatewayOrigin(env);
   const installationId = emailInstallationId(env);
   const key = `shared:${domain}:literal-v1`;
-  const previous = (
-    await db
-      .select()
-      .from(emailOperations)
-      .where(
-        and(
-          eq(emailOperations.installation_id, installationId),
-          eq(emailOperations.actor_scope, 'system:shared'),
-          eq(emailOperations.idempotency_key, key),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const previous = await findEmailOperationByKey(db, installationId, 'system:shared', key);
   if (previous) {
     await resumeBlockedEmailOperation(db, env, previous.id, { kind: 'system' }, previous.route_id!);
     return previous.id;
@@ -1987,15 +1923,15 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
   if (
     !zone ||
     zone.account.id !== env.CF_ACCOUNT_ID ||
-    zone.account.id !== shared.EMAIL_SHARED_ACCOUNT_ID ||
-    zone.id !== shared.EMAIL_SHARED_ZONE_ID
+    zone.account.id !== env.EMAIL_SHARED_ACCOUNT_ID ||
+    zone.id !== env.EMAIL_SHARED_ZONE_ID
   ) {
     throw new EmailOperationError(
       'shared sender zone does not match the configured gateway identity',
       503,
     );
   }
-  const worker = shared.EMAIL_SHARED_INGRESS_NAME;
+  const worker = env.EMAIL_SHARED_INGRESS_NAME;
   let routeId = generateId('eroute');
   const connectionId = generateId('econ'),
     credentialId = generateId('ecred'),
@@ -2151,22 +2087,14 @@ export async function ensureSharedEmailConnection(db: Db, env: Bindings): Promis
       domain,
       desired_generation: route!.desired_generation,
     };
-    for (let i = 0; i < steps.length; i++) {
-      await tx.insert(emailOperationSteps).values({
-        id: generateId('estep'),
-        operation_id: operationId,
-        ordinal: i,
-        kind: steps[i],
-        resource_identity: emailStepResourceIdentity(connection, steps[i], stepRoute),
-        request_digest: await emailStepRequestDigest(
-          env,
-          connection,
-          steps[i],
-          connection.desired_generation,
-          stepRoute,
-        ),
-      });
-    }
+    await insertEmailOperationSteps(tx, env, {
+      operationId,
+      connection,
+      steps,
+      generation: connection.desired_generation,
+      route: stepRoute,
+      secretGeneration: () => undefined,
+    });
     return operationId;
   });
 }
@@ -2251,19 +2179,7 @@ export async function requestEmailSecretRotation(
   const actorScope =
     actor.kind === 'system' ? 'system:rotation' : `${actor.kind}:${actor.userId}:${connectionId}`;
   const requestDigest = await digest({ connectionId, kind: 'rotate_secret', actor: actor.kind });
-  const prior = (
-    await db
-      .select()
-      .from(emailOperations)
-      .where(
-        and(
-          eq(emailOperations.installation_id, installationId),
-          eq(emailOperations.actor_scope, actorScope),
-          eq(emailOperations.idempotency_key, key),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const prior = await findEmailOperationByKey(db, installationId, actorScope, key);
   if (prior && expectedProjectId === undefined) {
     if (prior.request_digest !== requestDigest) {
       throw new EmailOperationError('email operation key conflict');
@@ -2312,19 +2228,7 @@ export async function requestEmailSecretRotation(
     ) {
       throw new EmailOperationError('only the connection manager can rotate ingress', 403);
     }
-    const replay = (
-      await tx
-        .select()
-        .from(emailOperations)
-        .where(
-          and(
-            eq(emailOperations.installation_id, installationId),
-            eq(emailOperations.actor_scope, actorScope),
-            eq(emailOperations.idempotency_key, key),
-          ),
-        )
-        .limit(1)
-    )[0];
+    const replay = await findEmailOperationByKey(tx, installationId, actorScope, key);
     if (replay) {
       if (replay.request_digest !== requestDigest) {
         throw new EmailOperationError('email operation key conflict');
@@ -2340,18 +2244,7 @@ export async function requestEmailSecretRotation(
         409,
       );
     }
-    const unresolved = (
-      await tx
-        .select({ id: emailOperations.id })
-        .from(emailOperations)
-        .where(
-          and(
-            eq(emailOperations.connection_id, connectionId),
-            inArray(emailOperations.status, ['pending', 'running', 'unknown']),
-          ),
-        )
-        .limit(1)
-    )[0];
+    const unresolved = await findUnresolvedConnectionOperation(tx, connectionId);
     if (unresolved) {
       throw new EmailOperationError(`connection operation ${unresolved.id} is unresolved`);
     }
@@ -2412,28 +2305,14 @@ export async function requestEmailSecretRotation(
       request_digest: requestDigest,
       desired_generation: generation,
     });
-    for (let i = 0; i < ROTATE_STEPS.length; i++) {
-      await tx.insert(emailOperationSteps).values({
-        id: generateId('estep'),
-        operation_id: operationId,
-        ordinal: i,
-        kind: ROTATE_STEPS[i],
-        resource_identity: emailStepResourceIdentity(
-          connection,
-          ROTATE_STEPS[i],
-          null,
-          secretGeneration,
-        ),
-        request_digest: await emailStepRequestDigest(
-          env,
-          connection,
-          ROTATE_STEPS[i],
-          generation,
-          null,
-          secretGeneration,
-        ),
-      });
-    }
+    await insertEmailOperationSteps(tx, env, {
+      operationId,
+      connection,
+      steps: ROTATE_STEPS,
+      generation,
+      route: null,
+      secretGeneration: () => secretGeneration,
+    });
     return operationId;
   });
 }
@@ -2472,19 +2351,7 @@ async function requestExistingOperation(
     actor: actor.kind,
     ...(actor.kind === 'owner' || expectedProjectId === undefined ? {} : { expectedProjectId }),
   });
-  const existing = (
-    await db
-      .select()
-      .from(emailOperations)
-      .where(
-        and(
-          eq(emailOperations.installation_id, installationId),
-          eq(emailOperations.actor_scope, actorScope),
-          eq(emailOperations.idempotency_key, key),
-        ),
-      )
-      .limit(1)
-  )[0];
+  const existing = await findEmailOperationByKey(db, installationId, actorScope, key);
   if (existing && expectedProjectId === undefined) {
     if (existing.request_digest !== requestDigest) {
       throw new EmailOperationError('email operation key conflict');
@@ -2588,19 +2455,7 @@ async function requestExistingOperation(
         403,
       );
     }
-    const replay = (
-      await tx
-        .select()
-        .from(emailOperations)
-        .where(
-          and(
-            eq(emailOperations.installation_id, installationId),
-            eq(emailOperations.actor_scope, actorScope),
-            eq(emailOperations.idempotency_key, key),
-          ),
-        )
-        .limit(1)
-    )[0];
+    const replay = await findEmailOperationByKey(tx, installationId, actorScope, key);
     if (replay) {
       if (replay.request_digest !== requestDigest) {
         throw new EmailOperationError('email operation key conflict');
@@ -2724,24 +2579,14 @@ async function requestExistingOperation(
               ? SETUP_STEPS
               : SYNC_STEPS
         : REMOVE_STEPS;
-    for (let i = 0; i < steps.length; i++) {
-      const secretGeneration = emailStepSecretGeneration(kind, connection, steps[i]);
-      await tx.insert(emailOperationSteps).values({
-        id: generateId('estep'),
-        operation_id: opId,
-        ordinal: i,
-        kind: steps[i],
-        resource_identity: emailStepResourceIdentity(connection, steps[i], route, secretGeneration),
-        request_digest: await emailStepRequestDigest(
-          env,
-          connection,
-          steps[i],
-          generation,
-          route,
-          secretGeneration,
-        ),
-      });
-    }
+    await insertEmailOperationSteps(tx, env, {
+      operationId: opId,
+      connection,
+      steps,
+      generation,
+      route,
+      secretGeneration: (step) => emailStepSecretGeneration(kind, connection, step),
+    });
     return opId;
   });
 }
@@ -2868,10 +2713,7 @@ export async function runEmailOperation(db: Db, env: Bindings, operationId: stri
           .where(eq(emailOperations.id, operationId));
         return null;
       }
-      if (step.status === 'unknown') {
-        return null;
-      }
-      if (step.status === 'blocked') {
+      if (step.status === 'unknown' || step.status === 'blocked') {
         return null;
       }
       if (
@@ -3115,34 +2957,22 @@ async function executeEmailStep(
   step: typeof emailOperationSteps.$inferSelect,
 ): Promise<Record<string, unknown>> {
   const kind = step.kind as StepKind;
-  const route = await emailOperationPreflight(async () =>
-    op.route_id
-      ? (
-          await db
-            .select()
-            .from(emailDomainRoutes)
-            .where(eq(emailDomainRoutes.id, op.route_id))
-            .limit(1)
-        )[0]
-      : null,
-  );
+  const route = await emailOperationPreflight(() => findEmailRoute(db, op.route_id));
   if (isOperatorRecoverableWriteStep(kind) || kind === 'secret_retire') {
-    const { expectedIdentity, expectedDigest } = await emailOperationPreflight(async () => ({
-      expectedIdentity: emailStepResourceIdentity(
-        connection,
-        kind,
-        route,
-        emailStepSecretGeneration(op.kind, connection, kind),
-      ),
-      expectedDigest: await emailStepRequestDigest(
-        env,
-        connection,
-        kind,
-        op.desired_generation,
-        route,
-        emailStepSecretGeneration(op.kind, connection, kind),
-      ),
-    }));
+    const { expectedIdentity, expectedDigest } = await emailOperationPreflight(async () => {
+      const secretGeneration = emailStepSecretGeneration(op.kind, connection, kind);
+      return {
+        expectedIdentity: emailStepResourceIdentity(connection, kind, route, secretGeneration),
+        expectedDigest: await emailStepRequestDigest(
+          env,
+          connection,
+          kind,
+          op.desired_generation,
+          route,
+          secretGeneration,
+        ),
+      };
+    });
     if (step.resource_identity !== expectedIdentity || step.request_digest !== expectedDigest) {
       throw new EmailOperationError(
         'email operation intent does not match the current relay implementation',
@@ -3336,19 +3166,10 @@ async function executeEmailStep(
     const settings = await emailOperationPreflight(() =>
       client.getRoutingSettings(connection.zone_id),
     );
-    if (
-      !settings ||
-      typeof settings !== 'object' ||
-      (settings as { support_subaddress?: unknown }).support_subaddress !== true
-    ) {
+    if (!supportsSubaddressing(settings)) {
       await client.enableSubaddressing(connection.zone_id);
     }
-    const verified = await client.getRoutingSettings(connection.zone_id);
-    if (
-      !verified ||
-      typeof verified !== 'object' ||
-      (verified as { support_subaddress?: unknown }).support_subaddress !== true
-    ) {
+    if (!supportsSubaddressing(await client.getRoutingSettings(connection.zone_id))) {
       throw new EmailOperationError('Cloudflare did not enable shared email subaddressing', 503);
     }
     return { subaddressing: true };
@@ -3502,14 +3323,14 @@ async function executeEmailStep(
       );
     return { ready: true };
   }
-  if (kind === 'catchall_detach' || kind === 'ingress_delete') {
-    if (kind === 'catchall_detach') {
-      const current = await emailOperationPreflight(() => client.getCatchAll(connection.zone_id));
-      if (current?.enabled && current.workerName === connection.ingress_worker_name) {
-        await client.resetCatchAll(connection.zone_id);
-      }
-      return { detached: true };
+  if (kind === 'catchall_detach') {
+    const current = await emailOperationPreflight(() => client.getCatchAll(connection.zone_id));
+    if (current?.enabled && current.workerName === connection.ingress_worker_name) {
+      await client.resetCatchAll(connection.zone_id);
     }
+    return { detached: true };
+  }
+  if (kind === 'ingress_delete') {
     const current = await emailOperationPreflight(() => client.getCatchAll(connection.zone_id));
     if (current?.enabled && current.workerName === connection.ingress_worker_name) {
       throw new EmailOperationError('owned catch-all still targets ingress');
@@ -3631,40 +3452,24 @@ async function unknownEmailOperationRecoveryFence(
   ) {
     throw new EmailOperationError('unknown email operation not found', 404);
   }
-  const route = snapshot.route_id
-    ? lock
-      ? (
-          await db
-            .select()
-            .from(emailDomainRoutes)
-            .where(eq(emailDomainRoutes.id, snapshot.route_id))
-            .for('update')
-            .limit(1)
-        )[0]
-      : (
-          await db
-            .select()
-            .from(emailDomainRoutes)
-            .where(eq(emailDomainRoutes.id, snapshot.route_id))
-            .limit(1)
-        )[0]
+  const routeQuery = snapshot.route_id
+    ? db
+        .select()
+        .from(emailDomainRoutes)
+        .where(eq(emailDomainRoutes.id, snapshot.route_id))
+        .limit(1)
     : null;
-  const connection = lock
-    ? (
-        await db
-          .select()
-          .from(emailZoneConnections)
-          .where(eq(emailZoneConnections.id, snapshot.connection_id))
-          .for('update')
-          .limit(1)
-      )[0]
-    : (
-        await db
-          .select()
-          .from(emailZoneConnections)
-          .where(eq(emailZoneConnections.id, snapshot.connection_id))
-          .limit(1)
-      )[0];
+  const [route = null] = routeQuery
+    ? lock
+      ? await routeQuery.for('update')
+      : await routeQuery
+    : [];
+  const connectionQuery = db
+    .select()
+    .from(emailZoneConnections)
+    .where(eq(emailZoneConnections.id, snapshot.connection_id))
+    .limit(1);
+  const [connection] = lock ? await connectionQuery.for('update') : await connectionQuery;
   const operation = lock
     ? (
         await db
@@ -3675,34 +3480,18 @@ async function unknownEmailOperationRecoveryFence(
           .limit(1)
       )[0]
     : snapshot;
-  const step = lock
-    ? (
-        await db
-          .select()
-          .from(emailOperationSteps)
-          .where(
-            and(
-              eq(emailOperationSteps.operation_id, snapshot.id),
-              eq(emailOperationSteps.status, 'unknown'),
-            ),
-          )
-          .orderBy(emailOperationSteps.ordinal)
-          .for('update')
-          .limit(1)
-      )[0]
-    : (
-        await db
-          .select()
-          .from(emailOperationSteps)
-          .where(
-            and(
-              eq(emailOperationSteps.operation_id, snapshot.id),
-              eq(emailOperationSteps.status, 'unknown'),
-            ),
-          )
-          .orderBy(emailOperationSteps.ordinal)
-          .limit(1)
-      )[0];
+  const stepQuery = db
+    .select()
+    .from(emailOperationSteps)
+    .where(
+      and(
+        eq(emailOperationSteps.operation_id, snapshot.id),
+        eq(emailOperationSteps.status, 'unknown'),
+      ),
+    )
+    .orderBy(emailOperationSteps.ordinal)
+    .limit(1);
+  const [step] = lock ? await stepQuery.for('update') : await stepQuery;
   if (
     !connection ||
     !operation ||
@@ -4021,15 +3810,7 @@ export async function reconcileUnknownEmailOperation(
   let outcome: Record<string, unknown> | null = null;
   try {
     if (step.kind === 'route_disable') {
-      const route = op.route_id
-        ? (
-            await db
-              .select()
-              .from(emailDomainRoutes)
-              .where(eq(emailDomainRoutes.id, op.route_id))
-              .limit(1)
-          )[0]
-        : null;
+      const route = await findEmailRoute(db, op.route_id);
       if (route?.desired_state === 'disabled') {
         outcome = { disabled: true };
       }
@@ -4044,15 +3825,7 @@ export async function reconcileUnknownEmailOperation(
       }
     } else if (step.kind === 'secret_retire') {
       const target = Number(step.resource_identity.split('/secret/')[1]);
-      const route = op.route_id
-        ? (
-            await db
-              .select()
-              .from(emailDomainRoutes)
-              .where(eq(emailDomainRoutes.id, op.route_id))
-              .limit(1)
-          )[0]
-        : null;
+      const route = await findEmailRoute(db, op.route_id);
       const intentRoute =
         route && op.route_generation !== null
           ? { id: route.id, domain: route.domain, desired_generation: op.route_generation }
@@ -4078,15 +3851,7 @@ export async function reconcileUnknownEmailOperation(
         outcome = { retiredGeneration: target };
       }
     } else if (step.kind === 'publish') {
-      const route = op.route_id
-        ? (
-            await db
-              .select()
-              .from(emailDomainRoutes)
-              .where(eq(emailDomainRoutes.id, op.route_id))
-              .limit(1)
-          )[0]
-        : null;
+      const route = await findEmailRoute(db, op.route_id);
       const outbox = route
         ? (
             await db
@@ -4121,15 +3886,7 @@ export async function reconcileUnknownEmailOperation(
       } else if (step.kind === 'gateway_probe') {
         outcome = await probeGatewayAcceptance(env, connection, op.kind === 'rotate_secret');
       } else if (step.kind === 'inbound_probe') {
-        const route = op.route_id
-          ? (
-              await db
-                .select()
-                .from(emailDomainRoutes)
-                .where(eq(emailDomainRoutes.id, op.route_id))
-                .limit(1)
-            )[0]
-          : null;
+        const route = await findEmailRoute(db, op.route_id);
         if (
           route &&
           !(await inspectEmailInboundRoute(client, connection, route.domain, route.addressing))
@@ -4137,24 +3894,11 @@ export async function reconcileUnknownEmailOperation(
           outcome = { ready: true };
         }
       } else if (step.kind === 'subaddressing_ensure') {
-        const settings = await client.getRoutingSettings(connection.zone_id);
-        if (
-          settings &&
-          typeof settings === 'object' &&
-          (settings as { support_subaddress?: unknown }).support_subaddress === true
-        ) {
+        if (supportsSubaddressing(await client.getRoutingSettings(connection.zone_id))) {
           outcome = { subaddressing: true };
         }
       } else if (step.kind === 'catchall_ensure') {
-        const route = op.route_id
-          ? (
-              await db
-                .select()
-                .from(emailDomainRoutes)
-                .where(eq(emailDomainRoutes.id, op.route_id))
-                .limit(1)
-            )[0]
-          : null;
+        const route = await findEmailRoute(db, op.route_id);
         if (route?.addressing === 'shared') {
           // Legacy shared-domain operations used this step for an apex-only
           // catch-all. Recovery must confirm the new subdomain prerequisites.
@@ -4183,15 +3927,7 @@ export async function reconcileUnknownEmailOperation(
           outcome = { deleted: true };
         }
       } else if (step.kind === 'sending_onboard') {
-        const route = op.route_id
-          ? (
-              await db
-                .select()
-                .from(emailDomainRoutes)
-                .where(eq(emailDomainRoutes.id, op.route_id))
-                .limit(1)
-            )[0]
-          : null;
+        const route = await findEmailRoute(db, op.route_id);
         if (route && (await sendingOnboardedReadback(client, connection.zone_id, route.domain))) {
           outcome = { ready: true };
         }

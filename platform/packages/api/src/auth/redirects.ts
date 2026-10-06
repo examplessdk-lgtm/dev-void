@@ -13,10 +13,7 @@ export function isAllowedRedirect(
   }
 
   // Localhost: allow any port, require exact hostname and http protocol
-  if (
-    parsed.protocol === 'http:' &&
-    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
-  ) {
+  if (isLocalhostRedirect(parsed)) {
     return true;
   }
 

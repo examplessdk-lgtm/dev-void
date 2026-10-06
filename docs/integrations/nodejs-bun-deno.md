@@ -111,6 +111,7 @@ The following imports are **not available** with a non-CF target and produce a c
 | `void/storage` | R2 (blob storage)        |
 | `void/auth`    | Void-managed Better Auth |
 | `void/ai`      | Workers AI               |
+| `void/sandbox` | Cloudflare Sandboxes     |
 | `void/env`     | Typed environment schema |
 
 If you need a database or storage, use an external provider and connect via standard Node.js libraries.

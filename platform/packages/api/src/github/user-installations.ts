@@ -209,7 +209,7 @@ async function listUserInstallationIds(userToken: string): Promise<Set<string>> 
  *
  * When `redirectUri` is provided it is forwarded on the token-exchange POST and
  * MUST be byte-identical to the `redirect_uri` sent on the authorize redirect.
- * The install `/callback` sends none (backward compatible); the JOIN and
+ * The install `/callback` sends none; the JOIN and
  * connect-authorize callbacks send one, so they must thread it through here.
  */
 export async function authorizeInstallViaUserToken(
@@ -232,8 +232,8 @@ export async function authorizeInstallViaUserToken(
 
 /**
  * Discover the installation ids the holder of the OAuth `code` can manage,
- * together with their numeric GitHub account id. Consumed by the JOIN flow
- * (Task 6), which unions the caller's accessible installations against the ones
+ * together with their numeric GitHub account id. Consumed by the JOIN flow,
+ * which unions the caller's accessible installations against the ones
  * Void already tracks to decide which connections the caller may join.
  *
  * Fails closed:
@@ -271,7 +271,7 @@ type InstallationRepositoriesResponse = Readonly<{
 /**
  * Verify — per repo — that the holder of the OAuth `code` can actually see
  * `repoFullName` through installation `installationId`, using ONLY the caller's
- * user token. Consumed by the connect-authorize flow (Task 7) as the per-repo
+ * user token. Consumed by the connect-authorize flow as the per-repo
  * trust boundary that closes the confused-deputy hole: possessing a shared org
  * installation id is not enough; the caller must independently prove they can
  * reach the specific repo.

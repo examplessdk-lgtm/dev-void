@@ -46,6 +46,10 @@ export async function addDestination(
   });
 }
 
+const LIST_PAGE_SIZE = 50;
+const LIST_PAGE_CAP = 1000;
+const LIST_PAGE_WARN = 500;
+
 /**
  * List all destinations on the account. Used for bulk status sync — the
  * /destinations API on the platform calls this and updates row statuses
@@ -55,10 +59,6 @@ export async function addDestination(
  * list. Without pagination, status-refresh and "already exists" recovery
  * would silently miss rows once the platform account exceeds page 1.
  */
-const LIST_PAGE_SIZE = 50;
-const LIST_PAGE_CAP = 1000;
-const LIST_PAGE_WARN = 500;
-
 export async function listDestinations(
   accountId: string,
   apiToken: string,

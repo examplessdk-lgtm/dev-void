@@ -39,11 +39,7 @@ import { removeSharedEmailRecipients } from '../email/shared-recipient-service.t
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
-import {
-  getLegacyProjectWorkerName,
-  getProjectDeploymentWorkerName,
-  getProjectQueueName,
-} from '../naming.ts';
+import { getLegacyProjectWorkerName, getProjectDeploymentWorkerName } from '../naming.ts';
 import { requireProjectCapability } from '../project-access.ts';
 import {
   deployments as deploymentsTable,
@@ -220,7 +216,6 @@ async function runCleanupBatch(
 async function cleanupCriticalResources(
   context: Context<ApiEnv>,
   projectId: string,
-  _project: Pick<Project, 'slug'>,
 ): Promise<void> {
   const resources = await getProjectResources(context.get('db'), projectId);
   for (const resource of resources) {
@@ -614,7 +609,7 @@ async function lockAndMarkDeleting(
         })
         .where(eq(projectOwnershipPeriods.id, latestClosedOwnership.id))
         .returning();
-    } else if (!ownership) {
+    } else {
       [ownership] = await tx
         .insert(projectOwnershipPeriods)
         .values({
@@ -719,9 +714,8 @@ export class ProjectOperationInProgressError extends Error {
  * durable handle (the row) is now gone. `deleteProjectCascade` atomically writes
  * cleanup jobs for the COMPLETE set of missed resources before COMMIT (its FOR
  * UPDATE conflicts with the INSERT's FK FOR KEY SHARE), so failures remain
- * retryable. Containers are excluded
- * — they have their own deterministic-name double-sweep in
- * `cleanupCriticalResources`. Failures become warnings backed by jobs. Normally a
+ * retryable. Containers are excluded — they have their own deterministic-name
+ * double-sweep in `cleanupCriticalResources`. Failures become warnings backed by jobs. Normally a
  * no-op (no concurrent create → every row was in the snapshot). See design-doc 0067.
  */
 async function cleanupRaceWindowResourceOrphans(
@@ -864,7 +858,7 @@ export async function teardownProject(
     );
   }
 
-  await cleanupCriticalResources(context, projectId, project);
+  await cleanupCriticalResources(context, projectId);
   await removeSharedEmailRecipients(context.get('db'), context.env, projectId);
   // Customer-side cleanup is durable and may continue after project deletion.
   await cleanupProjectEmailAssignments(context, projectId);

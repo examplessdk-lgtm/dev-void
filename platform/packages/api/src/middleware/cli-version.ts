@@ -111,9 +111,6 @@ export function checkCliVersionOrRespond(context: Context): Response | null {
   const cliVersion = context.req.header('x-void-cli-version');
   if (cliVersion !== undefined) {
     const cmp = compareVersions(cliVersion, MIN_CLI_VERSION);
-    // Reject both "older than min" (cmp < 0) AND "couldn't parse" (cmp === null).
-    // The regex accepts MAJOR.MINOR.PATCH and MAJOR.MINOR.PATCH-prerelease,
-    // so anything else is either a buggy client or a bypass attempt.
     if (cmp === null || cmp < 0) {
       const body: CliOutdatedBody = {
         error: 'cli_outdated',

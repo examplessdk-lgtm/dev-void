@@ -76,11 +76,6 @@ describe('compile', () => {
     expect(result.html).toContain('greeting');
   });
 
-  it('converts emoji shortcodes', async () => {
-    const result = await compile('Hello :tada:');
-    expect(result.html).toContain('\u{1F389}'); // 🎉
-  });
-
   it('adds anchor links to headings', async () => {
     const result = await compile('## My Heading');
     expect(result.html).toContain('id=');

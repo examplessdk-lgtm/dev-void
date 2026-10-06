@@ -1,8 +1,8 @@
 const REQUEST_BODY_DEADLINE_MS = 5_000;
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
 
-export const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
-export const LARGE_JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
+const LARGE_JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
 
 export class RequestBodyError extends Error {
   constructor(

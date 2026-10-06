@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, relative } from 'pathslash';
 import { normalizePath, type Plugin, type ResolvedConfig } from 'vite';
-import { scanPages, resolveEffectiveLayoutChain } from 'void/pages';
+import { generateComponentManifest, scanPages, resolveEffectiveLayoutChain } from 'void/pages';
 import type { PageScanResult } from 'void/pages';
 import {
   resolveSpecifier,
@@ -18,7 +18,6 @@ import {
   type IslandSourceEdit,
 } from 'void/pages-islands-plugin';
 import type { IslandEntry } from 'void/pages-islands-plugin';
-import { generateComponentManifest } from './pages-manifest.ts';
 
 const COMPONENT_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 type MdPluginWithApi = Plugin & {
@@ -40,11 +39,19 @@ export function islandsPlugin(
   let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
-  function computePagesNeedingClientJSLocal(): Set<string> {
-    if (!pageScan) {
-      return new Set();
+  /** Resolve an island import and record it in the client manifest. */
+  function registerIsland(
+    spec: string,
+    importerDir: string,
+    hydrate: string,
+  ): { absPath: string | null; islandId: string } {
+    const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
+    if (!absPath) {
+      return { absPath, islandId: spec };
     }
-    return computePagesNeedingClientJS(pageScan, pagesDir, resolvedConfig);
+    const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
+    islandManifest.set(islandId, { componentPath: absPath, islandId, hydrate });
+    return { absPath, islandId };
   }
 
   return [
@@ -92,17 +99,7 @@ export function islandsPlugin(
             const code = readFileSync(filePath, 'utf-8');
             const importerDir = dirname(filePath);
             for (const islandImport of findIslandImports(code, filePath)) {
-              const spec = islandImport.specifier;
-              const strategy = islandImport.hydrate;
-              const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
-              if (absPath) {
-                const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
-                islandManifest.set(islandId, {
-                  componentPath: absPath,
-                  islandId,
-                  hydrate: strategy,
-                });
-              }
+              registerIsland(islandImport.specifier, importerDir, islandImport.hydrate);
             }
           }
 
@@ -163,7 +160,7 @@ export function islandsPlugin(
             const mdScriptIds: Set<string> = new Set(
               mdPlugin?.api?.getClientScripts?.()?.keys() ?? [],
             );
-            const needsJS = computePagesNeedingClientJSLocal();
+            const needsJS = computePagesNeedingClientJS(pageScan, pagesDir, resolvedConfig);
             return generateIslandRenderer(pageScan, pagesDir, isDev, mdScriptIds, needsJS);
           }
           if (id === '\0' + ISLANDS_CLIENT_ENTRY_ID) {
@@ -209,22 +206,8 @@ export function islandsPlugin(
             const spec = islandImport.specifier;
             const rawName = `_raw_island_${idx++}`;
 
-            // Resolve to absolute path for the island manifest
-            const absPath = resolveSpecifier(spec, importerDir, COMPONENT_EXTENSIONS);
-            if (absPath) {
-              const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
-              islandManifest.set(islandId, {
-                componentPath: absPath,
-                islandId,
-                hydrate: strategy,
-              });
-            }
+            const { islandId } = registerIsland(spec, importerDir, strategy);
 
-            const islandId = absPath
-              ? normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '')
-              : spec;
-
-            // Replace the import with a renamed import
             const replacement = `import ${rawName} from ${specRaw}`;
             edits.push({ start: islandImport.start, end: islandImport.end, text: replacement });
 

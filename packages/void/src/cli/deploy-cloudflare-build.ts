@@ -211,15 +211,12 @@ export async function buildCloudflareWorker(input: {
   }
   try {
     deduplicateGeneratedCompatibilityFlags(lifecycleConfigPath, configPath);
-    const lifecycleOptions = {
-      runWrangler: runWrangler,
-      configPath: lifecycleConfigPath,
-      workerName: workerName,
-      accountId: accountId,
-      apiBaseUrl: apiBaseUrl,
-    };
     await (deps.assertDurableObjectLifecycle ?? assertCloudflareDurableObjectLifecycleSupported)({
-      ...lifecycleOptions,
+      runWrangler,
+      configPath: lifecycleConfigPath,
+      workerName,
+      accountId,
+      apiBaseUrl,
       allowPendingAtomicMigration: atomic,
     });
   } catch (error) {
@@ -410,7 +407,7 @@ export async function buildCloudflareWorker(input: {
       ? prepareCfFrameworkBuildOutput({
           projectRoot: root,
           configPath: generatedConfigPath,
-          accountId: accountId,
+          accountId,
         })
       : prepareCfBuildOutput(dirname(generatedConfigPath), accountId);
   if (!deps.activateVersion && !deps.runWrangler) {

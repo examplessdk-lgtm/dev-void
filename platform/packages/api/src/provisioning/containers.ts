@@ -141,12 +141,9 @@ export async function tryCreateContainerApplication(
       },
     );
   } catch (err) {
-    // Authoritative: HTTP 409 means concurrent-create race regardless of body.
     if (err instanceof CloudflareApiError && err.status === 409) {
       return undefined;
     }
-    // Defense-in-depth: some CF endpoints return non-409 statuses but still
-    // signal the conflict in the message body.
     if (err instanceof Error && isAlreadyExistsError(err.message)) {
       return undefined;
     }

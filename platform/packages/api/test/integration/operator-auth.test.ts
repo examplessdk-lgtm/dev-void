@@ -1,3 +1,4 @@
+import { PLATFORM_SANDBOX_DRAIN_KEY } from '@void/platform';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vite-plus/test';
 import { signJwt, verifyJwt } from '../../src/auth/jwt.ts';
@@ -248,4 +249,3 @@ describe('operator authentication', () => {
     expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
   });
 });
-import { PLATFORM_SANDBOX_DRAIN_KEY } from '@void/platform';

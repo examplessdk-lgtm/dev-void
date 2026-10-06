@@ -668,11 +668,10 @@ describe('POST /projects/:id/domains', () => {
     expect(await res.json()).toEqual({ error: 'invalid hostname format' });
   });
 
-  // Regression: CF rejects certain hostnames (e.g. reserved `.test` TLD per
-  // RFC 2606) with a non-success envelope. The route used to let the resulting
-  // `CloudflareApiError` propagate to Hono's default handler, which returned
-  // `500 Internal Server Error` as plain text — opaque to the user and
-  // mis-attributing a 4xx client-input problem as a 5xx server fault.
+  // CF rejects certain hostnames (e.g. reserved `.test` TLD per RFC 2606) with
+  // a non-success envelope. That is a client-input problem, so the route must
+  // answer 4xx with CF's message rather than let the `CloudflareApiError` reach
+  // Hono's default plain-text 500.
   it('returns 400 with the CF error message when CF rejects the hostname', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'cf-rejects');
@@ -745,7 +744,7 @@ describe('POST /projects/:id/domains', () => {
     expect(errMessages.some((msg) => msg.includes(secretMessage))).toBe(true);
   });
 
-  // Regression: CF 401 means our `CF_API_TOKEN` is misconfigured — server
+  // CF 401 means our `CF_API_TOKEN` is misconfigured — server
   // fault, caller can't fix it. The caller MUST NOT see a 401 (they ARE
   // authenticated to our API) and the CF message MUST NOT leak. The error
   // re-throws to onError and becomes a generic 500.
@@ -787,7 +786,7 @@ describe('POST /projects/:id/domains', () => {
     expect(errMessages.some((msg) => msg.includes('Authentication error'))).toBe(true);
   });
 
-  // Regression: CF 403 is ambiguous — it can mean a caller-fixable rule
+  // CF 403 is ambiguous — it can mean a caller-fixable rule
   // (e.g. custom hostname matching the SaaS zone apex) OR an auth-class
   // failure (under-scoped `CF_API_TOKEN`, CF error code 10000). The HTTP
   // status alone can't disambiguate. To avoid leaking auth-error text
@@ -1091,7 +1090,7 @@ describe('GET /projects/:id/domains/:domainId', () => {
   });
 
   it('activates a fully-active HTTP-DCV hostname (no ownership_verification outstanding)', async () => {
-    // HTTP-DCV is now the default cert-validation method. Once the hostname
+    // HTTP-DCV is the default cert-validation method. Once the hostname
     // proxies through CF, ownership is proven (CF drops `ownership_verification`)
     // and the edge-validated cert reaches `ssl.status: active`. The gate is
     // method-agnostic — it keys on `status`/`ssl.status`/`!ownership_verification`,
@@ -1142,14 +1141,13 @@ describe('GET /projects/:id/domains/:domainId', () => {
   });
 
   it('does NOT activate when ownership_verification is still present despite active status', async () => {
-    // Security regression (defense-in-depth): even if CF reports BOTH
+    // Defense-in-depth: even if CF reports BOTH
     // `status: active` AND `ssl.status: active`, an outstanding
     // `ownership_verification` means the `_cf-custom-hostname` TXT is not yet
     // proven. The anti-hijack lever is the OWNERSHIP gate — a wildcard CNAME
     // (`*.victim → cname.void.app`) cannot forge the per-host ownership TXT, so
     // the gate MUST refuse to route while `ownership_verification` is present,
-    // even should CF ever flip `status` early. This locks in the
-    // `!ownership_verification` clause.
+    // even should CF ever flip `status` early.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'ownership-outstanding');
     mockCfApi({
@@ -1406,10 +1404,10 @@ describe('GET /projects/:id/domains/:domainId', () => {
   });
 
   it('keeps domain pending when slug routing is absent', async () => {
-    // Regression: CF reports active but the project has never been deployed,
-    // so `project.slug` is missing from KV. Flipping the DB row to active
+    // CF reports active but the project has never been deployed, so
+    // `project.slug` is missing from KV. Flipping the DB row to active
     // without writing `domain:<hostname>` would leave traffic 404ing forever
-    // (the gate would no longer fire on subsequent polls). DB and KV must
+    // (the gate would not fire on subsequent polls). DB and KV must
     // stay in sync — both pending until the next poll, or until a deploy
     // populates the slug entry.
     const user = await createTestUser(env.db);
@@ -2039,11 +2037,10 @@ describe('scheduled() — stale pending domain janitor', () => {
   });
 
   it('ACTIVATES a stale (>7d) pending domain that CF reports active + gated (backlog starvation gap)', async () => {
-    // Closes the >MAX_PENDING_RECONCILE_PER_RUN backlog-starvation gap: a
-    // verified-but-pending domain that aged past 7 days into the janitor used to
-    // be skipped (neither activated nor deleted), leaving it unrouted forever.
-    // The janitor now opportunistically activates it when CF reports active +
-    // the gate is satisfied + slug routing exists.
+    // A verified-but-pending domain can age past 7 days into the janitor when
+    // the reconcile backlog exceeds MAX_PENDING_RECONCILE_PER_RUN. The janitor
+    // activates it when CF reports active + the gate is satisfied + slug
+    // routing exists, instead of leaving it unrouted forever.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'janitor-activate');
     mockCfApi({
@@ -2534,9 +2531,8 @@ describe('scheduled() — cron-driven auto-activation reconciliation', () => {
   });
 
   it('hourly tier does NOT PATCH a legacy TXT-method pending domain (leaves it on txt)', async () => {
-    // FIX B regression guard: a LEGACY pending hostname created under the old
-    // TXT-DCV flow (cf.ssl.method === 'txt', user still publishing
-    // `_acme-challenge` records) must NOT be PATCHed to HTTP-DCV by the hourly
+    // A LEGACY pending hostname created under the TXT-DCV flow
+    // (cf.ssl.method === 'txt', user still publishing `_acme-challenge` records) must NOT be PATCHed to HTTP-DCV by the hourly
     // reconcile — doing so would discard the user's in-progress validation
     // method and break the no-migration guarantee. It also must not be
     // mis-activated while still pending+ungated.
@@ -2593,7 +2589,7 @@ describe('scheduled() — cron-driven auto-activation reconciliation', () => {
   });
 
   it('gate not satisfied (ownership_verification still present) — never activated on either tier', async () => {
-    // Security regression guard: even with active status+ssl, an outstanding
+    // Even with active status+ssl, an outstanding
     // ownership_verification means the anti-hijack gate must block activation.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'gate-blocked');

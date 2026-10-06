@@ -2,18 +2,11 @@
 
 import { Button } from '@astryxdesign/core/Button';
 import { Collapsible } from '@astryxdesign/core/Collapsible';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHeader,
-  TableHeaderCell,
-  TableRow,
-} from '@astryxdesign/core/Table';
+import { Table, TableBody, TableCell, TableHeaderCell, TableRow } from '@astryxdesign/core/Table';
 import { useRequest, useView } from 'react-fate';
 import type { DeployManifest } from '../../../types.ts';
 import { DeploymentDetailView, deploymentDetailRequest } from '../../fate/views.ts';
-import { useDetailTitle, type AdminPageProps } from '../page-utils.ts';
+import { type AdminPageProps } from '../page-utils.ts';
 import { CopyButton } from './CopyButton.tsx';
 import { DeploymentLogs } from './DeploymentLogs.tsx';
 import { displayStatus } from './DeploymentTable.tsx';
@@ -30,7 +23,6 @@ export function DeploymentDetailPage({ path, platformName, username }: AdminPage
   }
   const { deployment, project, canCancel, tz } = pageData;
   const manifest = pageData.manifest as DeployManifest | null;
-  useDetailTitle(`Deployment ${pageData.deployment.id}`, platformName);
   const status = displayStatus(deployment, project?.active_deployment_id);
   const statusStyle =
     status === 'live'
@@ -53,7 +45,6 @@ export function DeploymentDetailPage({ path, platformName, username }: AdminPage
             method="post"
             action={`/admin/deployments/${deployment.id}/cancel`}
             data-confirm={`Cancel deployment "${deployment.id}"?`}
-            data-deployment={deployment.id}
           >
             <Button type="submit" label="Cancel Deploy" variant="destructive" />
           </form>

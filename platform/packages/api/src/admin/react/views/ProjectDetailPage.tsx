@@ -11,7 +11,7 @@ import {
 } from '@astryxdesign/core/Table';
 import { useRequest, useView } from 'react-fate';
 import { ProjectDetailView, projectDetailRequest } from '../../fate/views.ts';
-import { useDetailTitle, type AdminPageProps } from '../page-utils.ts';
+import { type AdminPageProps } from '../page-utils.ts';
 import { BuildTable } from './BuildTable.tsx';
 import { DeploymentTable } from './DeploymentTable.tsx';
 import { formatDateTime } from './format.ts';
@@ -41,7 +41,6 @@ export function ProjectDetailPage({ path, platformName, username }: AdminPagePro
     deployUrl,
     tz,
   } = pageData;
-  useDetailTitle(pageData.project.slug, platformName);
   return (
     <Layout platformName={platformName} title={project.slug} username={username}>
       <h1>{project.slug}</h1>
@@ -175,7 +174,6 @@ export function ProjectDetailPage({ path, platformName, username }: AdminPagePro
         method="post"
         action={`/admin/projects/${project.id}/delete`}
         data-confirm={`Permanently delete project "${project.slug}" and all its resources? This cannot be undone.`}
-        data-slug={project.slug}
       >
         <Button type="submit" label="Delete Project" variant="destructive" />
       </form>

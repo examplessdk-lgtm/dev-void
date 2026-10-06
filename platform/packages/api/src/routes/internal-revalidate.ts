@@ -13,7 +13,6 @@ const app = new Hono<ApiEnv>();
 app.post('/:id', async (context) => {
   const projectId = context.req.param('id');
 
-  // Verify HMAC token
   const token = context.req.header('x-void-internal');
   if (!token) {
     return context.json({ error: 'missing internal auth' }, 401);

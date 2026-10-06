@@ -317,15 +317,14 @@ describe('CronScheduler.alarm', () => {
   it('uses alarmInfo.scheduledTime for matching and queue body when provided', async () => {
     // Workerd retries `alarm()` after a throw — `Date.now()` would read the
     // retry instant, which (for sparse crons that cross a minute boundary on
-    // retry) yields no matches and silently drops the original firing. The
-    // fix: pin both `cronMatchesMinute` and the queue-message `scheduledTime`
+    // retry) yields no matches and silently drops the original firing. So
+    // pin both `cronMatchesMinute` and the queue-message `scheduledTime`
     // to `alarmInfo.scheduledTime` so the same cron minute is preserved.
     //
     // Setup: hourly cron (`0 * * * *`). The "real" scheduled minute is
     // 10:00:00 UTC (matches). Mock `Date.now()` to 10:30:00 UTC (does NOT
-    // match). With the fix, matching still succeeds and the queued message
-    // carries scheduledTime=10:00:00. Without the fix, matching fails and
-    // the firing is silently lost.
+    // match). Matching still succeeds and the queued message carries
+    // scheduledTime=10:00:00.
     const scheduledTime = new Date('2026-03-02T10:00:00Z').getTime();
     const wallClock = new Date('2026-03-02T10:30:00Z').getTime();
     const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(wallClock);

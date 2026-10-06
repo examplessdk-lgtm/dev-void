@@ -34,7 +34,7 @@ function apiError(status: number, body = '{}'): PlatformApiError {
 
 describe('isFatalFollowError', () => {
   it('treats every 4xx except 429 as fatal (including 426 cli_outdated)', () => {
-    // 426 is the reviewer's case: a too-old CLI must exit, not retry forever.
+    // 426 cli_outdated: a too-old CLI must exit, not retry forever.
     for (const status of [400, 401, 403, 404, 409, 410, 422, 426]) {
       expect(isFatalFollowError(apiError(status))).toBe(true);
     }

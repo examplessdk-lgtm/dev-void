@@ -5,12 +5,9 @@ import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { CLIENT_ENV_PREFIX, findLegacyEnvFiles, loadLocalEnv } from './shared/env.ts';
-
-type RegisteredSchemaModule = Pick<
-  typeof import('./runtime/env-public.ts'),
-  '_getRegisteredSchema' | '_hasRegisteredSchema' | '_getSchemaDefaults' | 'validateAllEnv'
->;
+import { afterServerReady } from './plugin-dev-config.ts';
+import { loadEnvPublic } from './plugin-env-client-guard.ts';
+import { findLegacyEnvFiles, isClientEnvKey, loadLocalEnv } from './shared/env.ts';
 
 export type EnvSchemaPluginOptions = {
   /**
@@ -27,16 +24,9 @@ export type EnvSchemaFacts = {
   requiredServerKeys: Array<string>;
 };
 
-let cachedSchemaModule: RegisteredSchemaModule | null = null;
-
-async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
-  if (cachedSchemaModule) {
-    return cachedSchemaModule;
-  }
-  const mod = await import('./runtime/env-public.ts');
-  cachedSchemaModule = mod;
-  return mod;
-}
+/** Patterns Vite's `define` typically uses for env-shaped constants. */
+const DEFINE_ENV_PATTERN =
+  /^(?:globalThis\.)?(?:process\.env|import\.meta\.env)\.([A-Z_][A-Z0-9_]*)$/;
 
 /**
  * Vite plugin that auto-discovers `env.ts` at the project root and:
@@ -46,31 +36,26 @@ async function loadSchemaModule(): Promise<RegisteredSchemaModule> {
  *     on missing/invalid required keys
  *   - regenerates types + re-validates when env.ts changes (HMR)
  *
- * Hard errors are reserved for `void deploy`; dev keeps moving with warnings
+ * Hard errors are reserved for builds and deploys; dev keeps moving with warnings
  * so unrelated work isn't blocked by a stale local value.
  */
-/** Patterns Vite's `define` typically uses for env-shaped constants. */
-const DEFINE_ENV_PATTERN =
-  /^(?:globalThis\.)?(?:process\.env|import\.meta\.env)\.([A-Z_][A-Z0-9_]*)$/;
-const CLIENT_ENV_PREFIXES: ReadonlyArray<string> = [CLIENT_ENV_PREFIX];
-
 export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = {}): Plugin {
   const outDir = join(root, '.void');
   let envFile: string | null = null;
   let command: 'serve' | 'build' = 'serve';
   const appliedClientDefaults = new Map<string, string>();
 
-  async function emitSchemaFacts(prefixes: ReadonlyArray<string>) {
+  async function emitSchemaFacts() {
     if (!envFile || !options.onSchema) {
       return;
     }
-    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadSchemaModule();
+    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadEnvPublic();
     if (!_hasRegisteredSchema()) {
       return;
     }
     const schema = _getRegisteredSchema() ?? {};
     const keys = Object.keys(schema);
-    const clientKeys = keys.filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
+    const clientKeys = keys.filter(isClientEnvKey);
     const clientKeySet = new Set(clientKeys);
     const serverKeys = keys.filter((key) => !clientKeySet.has(key));
     const requiredServerKeys: Array<string> = [];
@@ -108,7 +93,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
   }
 
   async function warnOnDefineOverlap(define: Record<string, unknown>): Promise<void> {
-    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadSchemaModule();
+    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadEnvPublic();
     if (!_hasRegisteredSchema()) {
       return;
     }
@@ -144,7 +129,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     if (!envFile) {
       return;
     }
-    const { _hasRegisteredSchema, validateAllEnv } = await loadSchemaModule();
+    const { _hasRegisteredSchema, validateAllEnv } = await loadEnvPublic();
     if (!_hasRegisteredSchema()) {
       return;
     }
@@ -177,7 +162,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     appliedClientDefaults.clear();
 
     const { _hasRegisteredSchema, _getRegisteredSchema, _getSchemaDefaults } =
-      await loadSchemaModule();
+      await loadEnvPublic();
     if (!_hasRegisteredSchema()) {
       return;
     }
@@ -186,7 +171,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     const local = command === 'serve' ? loadLocalEnv(root) : {};
     const readable = { ...local, ...process.env };
     for (const key of Object.keys(schema)) {
-      if (!key.startsWith(CLIENT_ENV_PREFIX) || configEnv[key] !== undefined) {
+      if (!isClientEnvKey(key) || configEnv[key] !== undefined) {
         continue;
       }
       const value = readable[key];
@@ -196,10 +181,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     }
 
     for (const [key, value] of Object.entries(_getSchemaDefaults())) {
-      if (!key.startsWith(CLIENT_ENV_PREFIX)) {
-        continue;
-      }
-      if (configEnv[key] !== undefined) {
+      if (!isClientEnvKey(key) || configEnv[key] !== undefined) {
         continue;
       }
       configEnv[key] = value;
@@ -225,11 +207,11 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // Import env.ts at config time so onSchema can configure required
       // secrets before the Cloudflare plugin resolves worker bindings.
       await importUserEnv(environment.command === 'build');
-      await emitSchemaFacts(CLIENT_ENV_PREFIXES);
+      await emitSchemaFacts();
     },
     async configResolved(config) {
       command = config.command;
-      await emitSchemaFacts(CLIENT_ENV_PREFIXES);
+      await emitSchemaFacts();
 
       // `.env` is local-only. Vite loads it during production builds by
       // default, so remove file-sourced client values before its replacement
@@ -246,11 +228,10 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       await applyClientValuesToViteEnv(config);
 
       if (command === 'build' && envFile) {
-        const { validateAllEnv } = await loadSchemaModule();
+        const { validateAllEnv } = await loadEnvPublic();
         const report = await validateAllEnv({ ...config.env, ...process.env });
-        const clientKey = (key: string) => key.startsWith(CLIENT_ENV_PREFIX);
-        const missing = report.missing.filter(clientKey);
-        const invalid = report.invalid.filter(({ key }) => clientKey(key));
+        const missing = report.missing.filter(isClientEnvKey);
+        const invalid = report.invalid.filter(({ key }) => isClientEnvKey(key));
         if (missing.length > 0 || invalid.length > 0) {
           const lines = ['Client env validation failed:'];
           for (const key of missing) {
@@ -277,22 +258,16 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
         return;
       }
       await importUserEnv();
-      // Defer validation until after the server prints "ready".
-      const run = () => {
+      afterServerReady(server, () => {
         void validateAndWarn();
-      };
-      if (server.httpServer) {
-        server.httpServer.once('listening', () => setTimeout(run, 100));
-      } else {
-        run();
-      }
+      });
       server.watcher.add(envFile);
       server.watcher.on('change', async (file) => {
         if (file === envFile) {
           voidLog('env.ts changed — regenerating types');
           regenerateTypes();
           await importUserEnv();
-          await emitSchemaFacts(CLIENT_ENV_PREFIXES);
+          await emitSchemaFacts();
           await applyClientValuesToViteEnv(server.config);
           await validateAndWarn();
           server.ws.send({ type: 'full-reload' });

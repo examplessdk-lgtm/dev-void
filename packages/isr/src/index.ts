@@ -35,7 +35,7 @@ const ISR_LEGACY_CACHE_KEY_VERSION = 'v2';
  * KV metadata stored alongside every ISR cache entry. This is the single
  * canonical shape shared by the dispatch worker (which writes it on a live
  * miss and reads it back on a hit — see `dispatch/src/isr.ts`) AND the API
- * prerender-warm path (`api/src/routes/deploy.ts`), which pre-populates the
+ * prerender-warm path (`api/src/deploy/publish-worker.ts`), which pre-populates the
  * same KV keys during deploy. Both writers MUST use these exact field names:
  * the reader requires `c` (createdAt) and `t` (ttl) and returns null without
  * them, so a writer that drifts (e.g. writes `context` instead of `c`) produces
@@ -81,20 +81,15 @@ export function canonicalIsrPathname(pathname: string): string {
   return denormalizeIsrPath(normalizeIsrPath(pathname));
 }
 
-/**
- * Prefix shared by every ISR key for a project at the current version —
- * `<projectId>/isr/v3/`. Used internally by `isrCachePrefix`.
- */
-function isrCacheVersionPrefix(projectId: string): string {
-  return `${projectId}/isr/${ISR_CACHE_KEY_VERSION}/`;
-}
-
-/**
- * Prefix shared by every LEGACY (hostless) ISR key for a project —
- * `<projectId>/isr/v2/`. Used internally by `isrLegacyCachePrefix`.
- */
-function isrLegacyCacheVersionPrefix(projectId: string): string {
-  return `${projectId}/isr/${ISR_LEGACY_CACHE_KEY_VERSION}/`;
+function versionedIsrCachePrefix(
+  projectId: string,
+  version: string,
+  deploymentId: string | undefined,
+): string {
+  if (deploymentId !== undefined) {
+    return `${projectId}/isr/${version}/${deploymentId}/`;
+  }
+  return `${projectId}/isr/`;
 }
 
 /**
@@ -107,10 +102,7 @@ function isrLegacyCacheVersionPrefix(projectId: string): string {
  * legacy scan-all prefix (`<projectId>/isr/`).
  */
 export function isrCachePrefix(projectId: string, deploymentId?: string): string {
-  if (deploymentId !== undefined) {
-    return `${isrCacheVersionPrefix(projectId)}${deploymentId}/`;
-  }
-  return `${projectId}/isr/`;
+  return versionedIsrCachePrefix(projectId, ISR_CACHE_KEY_VERSION, deploymentId);
 }
 
 /**
@@ -126,10 +118,7 @@ export function isrCachePrefix(projectId: string, deploymentId?: string): string
  * entries have aged out.
  */
 export function isrLegacyCachePrefix(projectId: string, deploymentId?: string): string {
-  if (deploymentId !== undefined) {
-    return `${isrLegacyCacheVersionPrefix(projectId)}${deploymentId}/`;
-  }
-  return `${projectId}/isr/`;
+  return versionedIsrCachePrefix(projectId, ISR_LEGACY_CACHE_KEY_VERSION, deploymentId);
 }
 
 /**
@@ -152,21 +141,13 @@ const ISR_VARIANT_SEPARATOR = '#rw=';
  *
  * Host-scoping is a `v3` key format: `<proj>/isr/v3/<D>/<host>/<path>`. The
  * version bump is load-bearing, not cosmetic — see `ISR_LEGACY_CACHE_KEY_VERSION`.
- * Under a single version, this key would be byte-identical to a legacy hostless
- * key for a page whose leading path segment looks like a hostname (e.g.
- * `(host=example.com, /about)` vs the hostless page `/example.com/about`, both
- * `<D>/example.com/about`). Dotted leading segments are legal, so the collision
- * is reachable. `v3` keys are ALWAYS host-scoped and `v2` keys ALWAYS hostless,
- * so the version segment alone disambiguates the two shapes.
  *
  * When `originalUrl` is provided, the request was served via a dispatch-side
  * rewrite (`redirectRules`/`fallbackRules` with status 200). The original
  * request URL is mixed into the key so a direct hit to `/en/docs` and a
  * rewrite from `/docs` to `/en/docs` do not collide — user code can branch
  * on `c.isRewritten()` / `c.originalUrl()`, and the cache must honor that.
- * A missing `originalUrl` means "direct hit" and produces the legacy
- * rewriteless key (backward-compatible with entries written before this
- * feature landed).
+ * A missing `originalUrl` means "direct hit" and produces the unsuffixed key.
  */
 export function isrCacheKey(
   projectId: string,
@@ -247,9 +228,8 @@ export function isrLegacyCacheVariantPrefix(
  *   - Sync (Workers `crypto.subtle.digest` is async; we don't want to push
  *     async through every read/write path for this).
  *   - 16 hex chars (64 bits) — bounds the KV key length regardless of input.
- *   - Non-recoverable: KV is operator-readable, and the previous base64url
- *     encoding let any operator with list access read the original URLs
- *     (including sensitive query strings like `?token=…`, `?email=…`).
+ *   - Non-recoverable: KV is operator-readable, so the token must not reveal
+ *     original URLs (including sensitive query strings like `?token=…`).
  *   - Not cryptographic: collision resistance is ~2^32 (birthday). Fine for
  *     the per-deployment, per-pathname variant set we ever store in one slot.
  *

@@ -168,6 +168,4 @@ export const GET = defineHandler(async (c) => {
 });
 ```
 
-Native `EventSource` can send cookies with `withCredentials: true`. For non-cookie auth, generate a short-lived signed URL and validate it in the route handler.
-
 For shared topics and subscriptions, use [Live Event Streams](./live.md). For two-way communication, use [WebSockets](./websockets.md).

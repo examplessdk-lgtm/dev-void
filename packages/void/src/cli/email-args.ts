@@ -109,9 +109,8 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   let limit: number | undefined;
   // Raw values, one per occurrence, so a repeated flag is reported as repeated even when
   // its final value would have been accepted — the same precedence `void deploy` keeps.
-  // `--project` is collected the same way: the last value used to win silently, so a
-  // wrapper's override and a caller's could disagree and `void email disallow` would
-  // mutate whichever project came last.
+  // `--project` is collected the same way, so a wrapper's override and a caller's cannot
+  // silently disagree about which project `void email disallow` mutates.
   const projectValues: Array<string> = [];
   const platformValues: Array<string> = [];
   const subdomainValues: Array<string> = [];
@@ -120,9 +119,8 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   const rest = args.slice(1);
   for (let i = 0; i < rest.length; i++) {
     // `--project` and `--limit` take the same missing-value path as `--platform`: a bare
-    // flag used to fall through as a positional, which the read-only subcommands never
-    // reject — so `void email usage --project` ran against the linked project and
-    // `void email logs --limit` ignored the limit instead of reporting it missing.
+    // flag must not fall through as a positional, which the read-only subcommands never
+    // reject.
     if (rest[i] === '--project' || rest[i]?.startsWith('--project=')) {
       const { value, next } = readFlagValue(rest, i, '--project');
       // `--project=` and `--project ''` (an empty shell variable) read as a bare flag:
@@ -191,8 +189,8 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   const subdomain = subdomainValues[0];
 
   // The nested `domain` group parses its own positionals (verb + domain) and
-  // returns early — the one-positional rule below predates it and would
-  // read the verb as the address. Mode B needs none of this group (0078,
+  // returns early — the one-positional rule below would read the verb as the
+  // address. Mode B needs none of this group (0078,
   // "Mode B" under custom domains), so it is Void-platform-only.
   if (subcommand === 'domain') {
     if (platform === 'cloudflare') {
@@ -206,10 +204,8 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     throw new Error('email: --subdomain applies to `void email domain add` only.');
   }
 
-  // `void email allow|disallow` takes exactly one address. Silently
-  // dropping extras (the previous behavior, which kept only the first)
-  // led to confusing UX — `void email allow a@x.dev b@y.dev` quietly
-  // ignored `b@y.dev`. Error explicitly so the user knows to retry.
+  // `void email allow|disallow` takes exactly one address; extras are an
+  // error rather than silently ignored.
   if (positional.length > 1) {
     throw new Error(
       `email: \`void email ${subcommand}\` takes exactly one positional argument (got ${positional.length}: ${positional.map((p) => JSON.stringify(p)).join(', ')}).`,

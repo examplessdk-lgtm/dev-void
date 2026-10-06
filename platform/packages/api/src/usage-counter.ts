@@ -59,6 +59,9 @@ export type CounterState = {
   >;
 };
 
+/** Cadence of the AI usage reconciliation alarm. */
+const AI_ALARM_INTERVAL_MS = 15 * 60 * 1000;
+
 const SANDBOX_WATERMARK_PREFIX = 'sandbox-usage:watermark:';
 const SANDBOX_PRUNE_CURSOR_KEY = 'sandbox-usage:prune-cursor';
 const SANDBOX_PRUNE_BATCH_SIZE = 64;
@@ -240,7 +243,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       // the isolate cache afterwards also keeps a rejected commit retryable.
       await transaction.put('state', state);
       if (options.scheduleAiAlarm) {
-        const nextAlarm = Date.now() + 15 * 60 * 1000;
+        const nextAlarm = Date.now() + AI_ALARM_INTERVAL_MS;
         const alarm = await transaction.getAlarm();
         if (alarm === null || alarm > nextAlarm) {
           await transaction.setAlarm(nextAlarm);
@@ -312,7 +315,6 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       state.billingPeriodInitialized = true;
     }
 
-    // Sum incoming requests
     const incomingRequests = body.events.reduce((sum, e) => sum + e.requests, 0);
     state.totalRequests += incomingRequests;
 
@@ -422,11 +424,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       state.sandboxRuntimeSuspended = true;
     }
 
-    // Schedule AI alarm if not already set
-    const currentAlarm = await this.ctx.storage.getAlarm();
-    if (!currentAlarm) {
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
-    }
+    await this.ensureAiAlarm();
 
     await this.saveState(state, { watermarks });
 
@@ -511,23 +509,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       (projectId) => !(projectId in body.projectSlugs),
     );
     const db = createDb(this.env.HYPERDRIVE.connectionString);
-    const currentPeriodStart = Date.parse(state.billingPeriodStart);
-    if (!state.billingPeriodInitialized) {
-      state.billingPeriodStart = body.billingPeriodStart;
-      state.billingPeriodInitialized = true;
-    } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
-      // Plan reconciliation can precede the hourly rollover. Advance the
-      // ledger before stamping the period; never label old totals as new usage.
-      await this.advanceBillingPeriod(
-        state,
-        {
-          billingPeriodStart: body.billingPeriodStart,
-          plan: body.plan,
-          userId: state.ownerUserId ?? '',
-        },
-        true,
-      );
-    }
+    await this.syncBillingPeriod(state, body.billingPeriodStart, body.plan);
     await this.retainTransferredProjectWindows(db, state, removedProjectIds);
     state.projectSlugs = { ...body.projectSlugs };
     state.projectOwnershipStarts = Object.fromEntries(
@@ -561,8 +543,8 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     }
 
     await this.saveState(state);
-    if (Object.keys(state.historicalAiWindows).length > 0 && !(await this.ctx.storage.getAlarm())) {
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+    if (Object.keys(state.historicalAiWindows).length > 0) {
+      await this.ensureAiAlarm();
     }
     return Response.json({ ok: true });
   }
@@ -605,22 +587,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     // pre-transfer snapshot into this counter.
     state.plan = owner.plan;
     if (body.billingPeriodStart !== undefined) {
-      const incomingPeriodStart = Date.parse(body.billingPeriodStart);
-      const currentPeriodStart = Date.parse(state.billingPeriodStart);
-      if (!state.billingPeriodInitialized) {
-        state.billingPeriodStart = body.billingPeriodStart;
-        state.billingPeriodInitialized = true;
-      } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
-        await this.advanceBillingPeriod(
-          state,
-          {
-            billingPeriodStart: body.billingPeriodStart,
-            plan: owner.plan,
-            userId: state.ownerUserId ?? '',
-          },
-          true,
-        );
-      }
+      await this.syncBillingPeriod(state, body.billingPeriodStart, owner.plan);
     }
     if (
       !(await setProjectAiBlock(
@@ -644,9 +611,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       );
     }
     await this.saveState(state);
-    if (!(await this.ctx.storage.getAlarm())) {
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
-    }
+    await this.ensureAiAlarm();
     return Response.json({ ok: true });
   }
 
@@ -678,22 +643,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       state.plan = owner.plan;
     }
     if (body.billingPeriodStart) {
-      const incomingPeriodStart = Date.parse(body.billingPeriodStart);
-      const currentPeriodStart = Date.parse(state.billingPeriodStart);
-      if (!state.billingPeriodInitialized) {
-        state.billingPeriodStart = body.billingPeriodStart;
-        state.billingPeriodInitialized = true;
-      } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
-        await this.advanceBillingPeriod(
-          state,
-          {
-            billingPeriodStart: body.billingPeriodStart,
-            plan: state.plan,
-            userId: state.ownerUserId ?? '',
-          },
-          true,
-        );
-      }
+      await this.syncBillingPeriod(state, body.billingPeriodStart, state.plan);
     }
     if (body.ownershipEndedAt) {
       this.retainHistoricalAiWindow(
@@ -734,10 +684,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     const requestsSuspended = evaluateRequestLimit(state, 0, limits);
     const sandboxRuntimeSuspended = evaluateSandboxRuntimeLimit(state, 0, limits);
     const aiSuspended = evaluateAiLimit(state, limits);
-    const ownedIds = await this.ownedProjectIds(db, Object.keys(state.projectSlugs), userId);
-    const ownedProjects = Object.entries(state.projectSlugs).flatMap(([id, slug]) =>
-      ownedIds.has(id) ? [{ id, slug, user_id: userId }] : [],
-    );
+    const ownedProjects = await this.ownedProjects(db, state.projectSlugs, userId);
 
     await settleWrites([
       (async () => {
@@ -763,17 +710,15 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       sandboxRuntimeSuspended
         ? this.env.ROUTING.put(sandboxBlockKey(userId), '1')
         : this.env.ROUTING.delete(sandboxBlockKey(userId)),
-      ...[...ownedIds].map((projectId) =>
-        setProjectAiBlock(this.env.ROUTING, db, projectId, userId, aiSuspended),
+      ...ownedProjects.map((project) =>
+        setProjectAiBlock(this.env.ROUTING, db, project.id, userId, aiSuspended),
       ),
     ]);
     state.requestsSuspended = requestsSuspended;
     state.sandboxRuntimeSuspended = sandboxRuntimeSuspended;
     state.aiSuspended = aiSuspended;
     await this.saveState(state);
-    if (!(await this.ctx.storage.getAlarm())) {
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
-    }
+    await this.ensureAiAlarm();
     return Response.json({ ok: true, requestsSuspended, sandboxRuntimeSuspended, aiSuspended });
   }
 
@@ -839,7 +784,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       } catch (error) {
         // Native alarm retries are bounded. Preserve a future wakeup through
         // longer provider outages without replacing persisted usage with zero.
-        await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+        await this.ctx.storage.setAlarm(Date.now() + AI_ALARM_INTERVAL_MS);
         throw error;
       }
     });
@@ -852,7 +797,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     // trusted record/rollover/init instead of risking a cross-owner KV write.
     if (!state.ownerUserId) {
       await this.saveState(state);
-      await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+      await this.ctx.storage.setAlarm(Date.now() + AI_ALARM_INTERVAL_MS);
       return;
     }
 
@@ -904,7 +849,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       (limits.aiNeuronsPerMonth === 0 || projectIds.length === 0)
     ) {
       if (await this.saveState(state)) {
-        await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+        await this.ctx.storage.setAlarm(Date.now() + AI_ALARM_INTERVAL_MS);
       }
       return;
     }
@@ -935,17 +880,14 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
 
     this.recomputeTotalNeurons(state);
 
-    // Evaluate AI limit
     const exceedsAi = evaluateAiLimit(state, limits);
     if (exceedsAi && !state.aiSuspended) {
       state.aiSuspended = true;
-      // Write ai-block KV keys for each project
       for (const projectId of projectIds) {
         await setProjectAiBlock(this.env.ROUTING, db, projectId, state.ownerUserId, true);
       }
     } else if (!exceedsAi && state.aiSuspended) {
       state.aiSuspended = false;
-      // Delete ai-block KV keys
       for (const projectId of projectIds) {
         await setProjectAiBlock(this.env.ROUTING, db, projectId, state.ownerUserId, false);
       }
@@ -953,11 +895,16 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
 
     await this.saveState(state);
 
-    // Re-schedule alarm for 15 minutes later
-    await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000);
+    await this.ctx.storage.setAlarm(Date.now() + AI_ALARM_INTERVAL_MS);
   }
 
   // --- Private helpers ---
+
+  private async ensureAiAlarm(): Promise<void> {
+    if (!(await this.ctx.storage.getAlarm())) {
+      await this.ctx.storage.setAlarm(Date.now() + AI_ALARM_INTERVAL_MS);
+    }
+  }
 
   private retainHistoricalAiSample(state: CounterState, projectId: string): void {
     const billed = state.projectNeurons[projectId];
@@ -1093,6 +1040,30 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     state.totalNeurons = state.historicalNeurons + historicalWindows + current;
   }
 
+  /**
+   * Adopt the caller's billing period on an uninitialized counter, or advance the
+   * ledger when the period moved forward. Plan reconciliation can precede the
+   * hourly rollover; never label old totals as new usage.
+   */
+  private async syncBillingPeriod(
+    state: CounterState,
+    billingPeriodStart: string,
+    plan: string,
+  ): Promise<void> {
+    const incomingPeriodStart = Date.parse(billingPeriodStart);
+    const currentPeriodStart = Date.parse(state.billingPeriodStart);
+    if (!state.billingPeriodInitialized) {
+      state.billingPeriodStart = billingPeriodStart;
+      state.billingPeriodInitialized = true;
+    } else if (!Number.isFinite(currentPeriodStart) || incomingPeriodStart > currentPeriodStart) {
+      await this.advanceBillingPeriod(
+        state,
+        { billingPeriodStart, plan, userId: state.ownerUserId ?? '' },
+        true,
+      );
+    }
+  }
+
   private async advanceBillingPeriod(
     state: CounterState,
     next: { billingPeriodStart: string; plan: string; userId: string },
@@ -1124,14 +1095,7 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
       if (!ownerUserId) {
         throw new Error('cannot reconcile request suspension without an owner');
       }
-      const ownedProjectIds = await this.ownedProjectIds(
-        db,
-        Object.keys(state.projectSlugs),
-        ownerUserId,
-      );
-      const ownedProjects = Object.entries(state.projectSlugs).flatMap(([id, slug]) =>
-        ownedProjectIds.has(id) ? [{ id, slug, user_id: ownerUserId }] : [],
-      );
+      const ownedProjects = await this.ownedProjects(db, state.projectSlugs, ownerUserId);
       await settleWrites([
         unsuspendUserIfReason(db, ownerUserId, REASON_REQUESTS_EXCEEDED),
         setProjectsRoutingSuspension(this.env.ROUTING, db, ownedProjects, {
@@ -1168,26 +1132,31 @@ export class UsageCounter extends DurableObject<ApiEnv['Bindings']> {
     }
     // Stamp `suspended` on each project's slug route AND its active custom-domain
     // routes — dispatch enforces suspension from all of them, so a slug-only
-    // stamp left over-limit projects serving on their custom domains.
+    // stamp would leave over-limit projects serving on their custom domains.
     //
     // `force: false`: a usage suspension must never overwrite an admin
     // suspension already on the route. If an admin suspended the user first, the
     // route carries `admin_suspended` and this leaves it intact (the admin
     // reason already blocks dispatch; downgrading it to `requests_exceeded`
     // would let the next admin unsuspend silently un-block an admin action).
-    const ownedProjectIds = await this.ownedProjectIds(
-      db,
-      Object.keys(projectSlugs),
-      expectedOwnerUserId,
-    );
-    const projects = Object.entries(projectSlugs).flatMap(([id, slug]) =>
-      ownedProjectIds.has(id) ? [{ id, slug, user_id: expectedOwnerUserId }] : [],
-    );
+    const projects = await this.ownedProjects(db, projectSlugs, expectedOwnerUserId);
     await setProjectsRoutingSuspension(this.env.ROUTING, db, projects, {
       op: 'suspend',
       reason,
       force: false,
     });
+  }
+
+  /** Routing targets for the tracked projects `ownerUserId` still owns. */
+  private async ownedProjects(
+    db: Db,
+    projectSlugs: Record<string, string>,
+    ownerUserId: string,
+  ): Promise<Array<{ id: string; slug: string; user_id: string }>> {
+    const ownedIds = await this.ownedProjectIds(db, Object.keys(projectSlugs), ownerUserId);
+    return Object.entries(projectSlugs).flatMap(([id, slug]) =>
+      ownedIds.has(id) ? [{ id, slug, user_id: ownerUserId }] : [],
+    );
   }
 
   /** Prevent a stale former-owner counter from mutating transferred projects. */

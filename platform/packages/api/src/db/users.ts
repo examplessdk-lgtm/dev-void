@@ -195,8 +195,8 @@ export async function createOAuthAccount(
 
 /**
  * Thrown by {@link linkGitHubIdentity} when the requested GitHub identity is
- * already linked to a *different* Void user. Routes (RFC 0074, Task 2) map this
- * to HTTP 409 — it is the stable contract for that mapping.
+ * already linked to a *different* Void user. Routes map this to HTTP 409 — it
+ * is the stable contract for that mapping.
  */
 export class GitHubIdentityConflictError extends Error {
   constructor() {
@@ -279,12 +279,7 @@ export async function linkGitHubIdentity(
       // Enforce one github identity per Void account: a pre-existing github row
       // for this user must be a DIFFERENT provider_id (the same-id case is the
       // `owner.id === userId` short-circuit above), so reject.
-      const existing = await tx
-        .select({ providerId: oauthAccounts.provider_id })
-        .from(oauthAccounts)
-        .where(and(eq(oauthAccounts.user_id, userId), eq(oauthAccounts.provider, 'github')))
-        .limit(1);
-      if (existing.length > 0) {
+      if ((await getGitHubAccountIdForUser(tx, userId)) !== null) {
         throw new GitHubIdentityAlreadyLinkedError();
       }
 
@@ -321,8 +316,6 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
   // against quota; counting them would charge a deploy against quota BEFORE
   // the quota check fires for that same request, dropping the effective
   // daily limit by one for both streamed-static and worker-backed paths.
-  // See deploy.ts placeholder insert (~line 1306) and quota check sites
-  // (~lines 1725 / 2206).
   const [result] = await db
     .select({ count: count() })
     .from(deployments)
@@ -342,8 +335,7 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
 
 /**
  * Resolve a Void user's linked GitHub account id (the numeric provider id, as
- * text), or null when the user has no linked GitHub identity. Exported reverse
- * lookup mirroring the inline query in `linkGitHubIdentity`; used for the audit
+ * text), or null when the user has no linked GitHub identity. Used for the audit
  * column on membership rows and the connect-authz caller-identity bind.
  */
 export async function getGitHubAccountIdForUser(db: Db, userId: string): Promise<string | null> {

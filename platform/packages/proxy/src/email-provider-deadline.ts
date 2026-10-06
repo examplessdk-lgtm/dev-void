@@ -1,5 +1,5 @@
 export const EMAIL_PROVIDER_DEADLINE_MS = 30_000;
-export const EMAIL_PROVIDER_BATCH_DEADLINE_MS = 60_000;
+const EMAIL_PROVIDER_BATCH_DEADLINE_MS = 60_000;
 
 export class EmailProviderTimeoutError extends Error {
   constructor() {

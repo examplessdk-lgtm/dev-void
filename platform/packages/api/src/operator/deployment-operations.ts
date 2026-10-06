@@ -202,8 +202,8 @@ export async function deploymentLogs(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
     throw new OperatorError(400, 'limit must be between 1 and 500.');
   }
-  // The admin browser requests newest-first pages and has always treated `since`
-  // as an ingestion-time window: a long-running request that started before the
+  // The admin browser requests newest-first pages and treats `since` as an
+  // ingestion-time window: a long-running request that started before the
   // window can still finish and emit a new error inside it. Operator history is
   // oldest-first and remains event-time based; operator follow switches to the
   // ingestion clock explicitly through `after` and keeps its overlap protocol.

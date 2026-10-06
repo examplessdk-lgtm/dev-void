@@ -63,6 +63,12 @@ function emailConfig(env: PlatformEmailEnv) {
   return { apiUrl, from, dashboardUrl, name: getPlatformDisplayName(env) };
 }
 
+function dashboardProjectUrl(dashboardUrl: string | undefined, projectSlug: string): string | null {
+  return dashboardUrl
+    ? new URL(`/projects/${encodeURIComponent(projectSlug)}`, dashboardUrl).href
+    : null;
+}
+
 async function sendEmail(
   env: PlatformEmailEnv,
   params: { to: string; subject: string; html: string; text: string },
@@ -153,9 +159,7 @@ export async function sendDeployFailedEmail(
 ): Promise<void> {
   const { apiUrl, dashboardUrl, name } = emailConfig(env);
   const truncated = errorMessage.length > 200 ? errorMessage.slice(0, 200) + '...' : errorMessage;
-  const projectUrl = dashboardUrl
-    ? new URL(`/projects/${encodeURIComponent(projectSlug)}`, dashboardUrl).href
-    : null;
+  const projectUrl = dashboardProjectUrl(dashboardUrl, projectSlug);
   const command = platformConnectCommand(apiUrl);
   await sendEmail(env, {
     to,
@@ -203,16 +207,13 @@ export async function sendErrorAlertEmail(
   sentAt: number = Date.now(),
 ): Promise<void> {
   const { apiUrl, dashboardUrl, name } = emailConfig(env);
-  const projectUrl = dashboardUrl
-    ? new URL(`/projects/${encodeURIComponent(projectSlug)}`, dashboardUrl).href
-    : null;
+  const projectUrl = dashboardProjectUrl(dashboardUrl, projectSlug);
   const command = platformConnectCommand(apiUrl);
   const count = formatCount(errorCount);
   const when = window
     ? `between ${utcStamp(window.start)} and ${utcStamp(window.end)}`
     : 'recently';
   const range = window ? suggestRange(window.start, sentAt) : '24h';
-  // Requests include edge and static errors that never invoke a Worker or produce Worker logs.
   const requestsHint = `void project requests --status 5xx --range ${range}`;
   const logsHint = `void project logs --level error --range ${range}`;
   const hintNote =

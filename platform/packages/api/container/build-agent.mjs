@@ -75,21 +75,17 @@ export const DEFAULT_VOID_CLI_VERSION = voidPackageJson.version;
 
 // --- source-download bounds --------------------------------------------------
 //
-// The tarball fetch used to run with NO deadline of any kind, and that is how a
-// single build burned its whole 15-minute budget: the stream degraded to short
-// bursts separated by dead minutes, delivered ~4.4 MB of a 20.8 MB archive, and
-// only died at the end. Node's undici defaults are no help — `bodyTimeout` resets
-// on every chunk, so any trickle defeats it. The container sat at 0.03% CPU with
-// its memory and disk untouched for 17 minutes while the DO's log puller reported
-// healthy the entire time; nothing in the system could tell the build apart from
-// one that was legitimately busy.
+// A degraded tarball stream can deliver short bursts separated by dead minutes
+// and burn the whole build budget while looking healthy to the DO's log puller.
+// Node's undici defaults do not catch this: `bodyTimeout` resets on every chunk,
+// so any trickle defeats it.
 //
 // The guard that matters is the STALL timer, not a wall-clock cap on the attempt.
-// A healthy download streams continuously (measured: 1.5 MB/s for this archive),
-// so a "no bytes at all for 20s" rule cannot fire on it — while an absolute
-// per-attempt cap, or a minimum-throughput floor, WOULD newly fail a large repo
-// on a slow but steady link. The phase budget below is the only wall clock, and
-// it bounds every attempt together rather than each one separately.
+// A healthy download streams continuously, so a "no bytes at all for 20s" rule
+// cannot fire on it — while an absolute per-attempt cap, or a minimum-throughput
+// floor, WOULD fail a large repo on a slow but steady link. The phase budget
+// below is the only wall clock, and it bounds every attempt together rather than
+// each one separately.
 
 /**
  * No bytes received for this long aborts the in-flight attempt. Reset by every
@@ -107,10 +103,8 @@ export const SOURCE_DOWNLOAD_MAX_ATTEMPTS = 3;
 /** Backoff before attempt 2 and attempt 3. */
 export const SOURCE_RETRY_BACKOFF_MS = [2000, 5000];
 /**
- * How often the download logs progress. Without this the agent recorded one line
- * before the fetch and the next only after extraction, so a stalled download was
- * invisible in the live tail AND in the check-run tail. The check run keeps the
- * last 100 lines and the phase is capped at 4 minutes, so this can add at most
+ * How often the download logs progress, so a stalled download is visible in the
+ * live tail and the check-run tail. The check run keeps the last 100 lines and the phase is capped at 4 minutes, so this can add at most
  * ~16 lines.
  */
 export const SOURCE_PROGRESS_INTERVAL_MS = 15000;
@@ -280,17 +274,16 @@ export const MAX_PENDING_LOG_LINES = 10000;
 /**
  * Per-response bounds on `GET /logs?since=N`.
  *
- * The response used to be every retained line above the cursor: up to
- * MAX_BUFFERED_LOG_LINES entries of MAX_PARTIAL_LINE_CHARS each, so a puller that
- * fell behind a verbose build could be handed well over a gigabyte in one body.
- * The DO aborts that read at LOG_PULL_TIMEOUT_MS and only advances `logCursor`
+ * Without paging, a puller that fell behind a verbose build could be handed
+ * MAX_BUFFERED_LOG_LINES entries of MAX_PARTIAL_LINE_CHARS each — well over a
+ * gigabyte in one body. The DO aborts that read at LOG_PULL_TIMEOUT_MS and only advances `logCursor`
  * after a SUCCESSFUL parse, so an oversized body is a livelock rather than a slow
  * transfer: every retry asks for the same backlog, is aborted at the same point,
  * and the cursor never moves. Natural exit then burns the drain idle timeout
  * waiting for an ack that cannot arrive, and the tail is lost — the exact failure
  * the drain barrier exists to prevent.
  *
- * Paging fixes it because `lastSeq` reports the last line actually INCLUDED, so
+ * Paging avoids this because `lastSeq` reports the last line actually INCLUDED, so
  * each successful batch advances the cursor and the next pull asks for less. One
  * line is always returned even if it alone exceeds the byte cap, or a single
  * oversized line would reintroduce the same stall it is meant to remove.
@@ -405,7 +398,7 @@ async function reportStatus(status) {
  * MiB of UTF-16 code units is up to ~96 MiB serialized, which no longer fits the
  * MAX_LOG_PULL_PAGES x MAX_LOG_RESPONSE_BYTES a teardown drain can fetch. Stored
  * on the entry NON-ENUMERABLY, so it is measured once and never reaches the
- * response body — which also removes the second stringify the page loop did.
+ * response body.
  * @param {{ seq: number, line: string, stream: string, ts: number }} entry
  */
 function measureEntry(entry) {
@@ -1223,13 +1216,10 @@ export function extractTarball(body, options = {}) {
     const tar = spawnImpl('tar', ['xz', '--strip-components=1', '-C', WORK_DIR], {
       stdio: ['pipe', 'inherit', 'pipe'],
     });
-    // Track the extraction child as the cancel target, mirroring runChild. A
-    // /cancel (or PID-1 SIGTERM) now SIGTERMs tar promptly instead of being a
-    // no-op for the whole download: killing tar closes its stdin, so the
-    // `pipeline` below rejects and destroys the source web stream — which also
-    // aborts the in-flight fetch body pull. Previously the tar child was never
-    // registered, so a cancel during a large download kept pulling + extracting
-    // the full archive before the post-download gate (runBuild) finally bailed.
+    // Track the extraction child as the cancel target, mirroring runChild, so a
+    // /cancel (or PID-1 SIGTERM) stops a large download promptly: killing tar
+    // closes its stdin, so the `pipeline` below rejects and destroys the source
+    // web stream — which also aborts the in-flight fetch body pull.
     activeChild = tar;
 
     /** First failure seen. The promise still settles from 'close', never before. */
@@ -1354,16 +1344,15 @@ export function extractTarball(body, options = {}) {
  *      guard. A healthy download streams continuously, so it cannot fire on one;
  *      a dead stream trips it in 20s instead of holding the build until the DO's
  *      `enforceTimeout`.
- *   2. RETRY — a transient failure starts over from an empty WORK_DIR. The
- *      incident's stream recovered briefly several times, so a fresh connection
- *      is a real chance rather than a formality.
+ *   2. RETRY — a transient failure starts over from an empty WORK_DIR. Degraded
+ *      streams often recover briefly, so a fresh connection is a real chance
+ *      rather than a formality.
  *   3. PHASE BUDGET — one wall clock across ALL attempts. Catches the case no
  *      stall timer can see: a steady trickle that never pauses long enough to
  *      look dead.
  *
  * Deliberately NOT bounded by a per-attempt wall clock or a throughput floor.
- * Either would newly fail a large repo on a slow but honest link, which is a
- * worse trade than the one this fixes.
+ * Either would fail a large repo on a slow but honest link.
  *
  * Every dependency is injectable so the retry policy is unit-testable without a
  * network or a `tar` child. Timers are real — pass small millisecond values.
@@ -1606,9 +1595,7 @@ async function downloadSourceAttempt(args) {
     );
   } catch (err) {
     // An abort surfaces as a generic AbortError from fetch or the pipeline, so the
-    // watchdog's reason is the only thing that says WHICH bound was hit. Without
-    // this the log would read "This operation was aborted" and explain nothing —
-    // the exact opacity that made the original incident unreadable.
+    // watchdog's reason is the only thing that says WHICH bound was hit.
     if (abortReason) {
       throw sourceError(`source download aborted: ${abortReason}`, abortRetryable);
     }
@@ -1624,11 +1611,8 @@ async function downloadSourceAttempt(args) {
     }
     // Everything else reaching here came off the wire: `fetch` rejecting with
     // `TypeError: fetch failed`, or the body stream erroring mid-transfer so
-    // `pipeline` rejects. Those are the MOST ordinary transient failures there
-    // are — the incident's own stream died exactly this way after its last burst —
-    // and leaving them untagged made the retry loop break on the first one,
-    // silently contradicting the policy this change exists to add. Retry them;
-    // `maxAttempts` and the phase budget are what bound it.
+    // `pipeline` rejects. Those are the most ordinary transient failures, so
+    // retry them; `maxAttempts` and the phase budget are what bound it.
     throw sourceError(err instanceof Error ? err.message : String(err), true);
   } finally {
     clearInterval(watchdog);
@@ -1750,7 +1734,7 @@ function resolveInstall() {
   if (pin.startsWith('yarn@')) {
     // `--no-immutable` is REQUIRED here, and only here. Yarn Berry >= 3.0.0
     // defaults `enableImmutableInstalls` to true whenever it smells CI — and
-    // `nonInteractiveEnv()` now tells every child `CI=true` — so this branch,
+    // `nonInteractiveEnv()` tells every child `CI=true` — so this branch,
     // whose entire purpose is to CREATE the missing lockfile, would abort with
     // `YN0028: The lockfile would have been created by this install, which is
     // explicitly forbidden`. Measured on Berry 3.0.0 / 3.6.4 / 4.14.1 / 4.18.0;
@@ -1798,9 +1782,8 @@ function runChild(cmd, args, opts = {}) {
     });
     // Track every child as the active cancel target. Only one untrusted child
     // runs at a time (install is awaited before the deploy child spawns), so a
-    // cancel that arrives mid-install now interrupts the install instead of
-    // being a no-op — previously only the deploy child was tracked, so a cancel
-    // during install let it run to completion and burn the container slot.
+    // cancel that arrives mid-install interrupts the install instead of letting
+    // it run to completion and burn the container slot.
     activeChild = child;
     if (cancelled) {
       // Cancel raced the spawn — terminate immediately.

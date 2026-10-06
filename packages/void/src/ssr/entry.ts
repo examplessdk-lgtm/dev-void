@@ -15,11 +15,15 @@ import {
   type AstVariableDeclarator,
 } from '../shared/ast.ts';
 
-export const SSR_SERVER_ENTRY_RELATIVE_PATHS = ['src/main.ssr.ts', 'src/main.ssr.tsx'] as const;
-export const SSR_CLIENT_ENTRY_RELATIVE_PATHS = [
-  'src/main.client.ts',
-  'src/main.client.tsx',
-] as const;
+const SSR_SERVER_ENTRY_NAMES = ['main.ssr.ts', 'main.ssr.tsx'] as const;
+const SSR_CLIENT_ENTRY_NAMES = ['main.client.ts', 'main.client.tsx'] as const;
+
+export const SSR_SERVER_ENTRY_RELATIVE_PATHS: Array<string> = SSR_SERVER_ENTRY_NAMES.map(
+  (name) => `src/${name}`,
+);
+export const SSR_CLIENT_ENTRY_RELATIVE_PATHS: Array<string> = SSR_CLIENT_ENTRY_NAMES.map(
+  (name) => `src/${name}`,
+);
 
 type ResolvedEntry = {
   absolutePath: string;
@@ -53,9 +57,6 @@ function resolveSingleEntry(
   }
   return matches[0];
 }
-
-const SSR_SERVER_ENTRY_NAMES = ['main.ssr.ts', 'main.ssr.tsx'] as const;
-const SSR_CLIENT_ENTRY_NAMES = ['main.client.ts', 'main.client.tsx'] as const;
 
 export function getSsrServerEntryPath(
   root: string,
@@ -151,22 +152,19 @@ export function validateSsrEntries(
   if (!server && !client) {
     return null;
   }
-  if (server && !client) {
+  if (!client) {
     throw new Error(
       `ssr: Missing client entry. Add one of: ${SSR_CLIENT_ENTRY_RELATIVE_PATHS.join(', ')}.`,
     );
   }
-  if (!server && client) {
+  if (!server) {
     throw new Error(
       `ssr: Missing server entry. Add one of: ${SSR_SERVER_ENTRY_RELATIVE_PATHS.join(', ')}.`,
     );
   }
 
-  validateServerRenderExport(server!);
-  return {
-    server: server!,
-    client: client!,
-  };
+  validateServerRenderExport(server);
+  return { server, client };
 }
 
 export function validateSsrEntry(

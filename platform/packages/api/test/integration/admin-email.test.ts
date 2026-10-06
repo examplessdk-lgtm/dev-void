@@ -18,12 +18,7 @@ import { setProjectEmailLimits, setProjectEmailSuspended } from '../../src/email
 import { emailDomainRoutes, emailZoneConnections } from '../../src/email/connection-schema.ts';
 import { generateId } from '../../src/id.ts';
 import { app } from '../../src/index.ts';
-import {
-  emailDestinationCleanups,
-  emailDestinations,
-  operatorEvents,
-  platformSettings,
-} from '../../src/schema.ts';
+import { emailDestinationCleanups, emailDestinations, operatorEvents } from '../../src/schema.ts';
 import { stubCustomerCf, callsByTag } from './email-domain-cf-stub.ts';
 import {
   setupEnv,
@@ -34,7 +29,6 @@ import {
   type TestEnv,
 } from './helpers.ts';
 import { CF_ACCOUNT_ID } from './helpers.ts';
-import { setTestDb } from './setup.ts';
 
 let env: TestEnv;
 
@@ -55,47 +49,6 @@ async function seedVerifiedDestination(db: Db, projectId: string, address: strin
     })
     .returning();
   return row!;
-}
-
-/**
- * Pause the app's FIRST `db.transaction` until released — the seam for
- * landing a committed write (a credential replace) between a route's
- * unlocked entry checks and its serialized section. PGlite's single
- * connection forbids touching the db from inside an open transaction, so
- * the write must happen BEFORE the tx starts: the proxy pauses prior to
- * delegating, the test writes through the unwrapped `realDb`, then
- * releases. Same pattern as api-email-domains.test.ts.
- */
-function pauseFirstTransaction(realDb: Db): {
-  wrappedDb: Db;
-  reached: Promise<void>;
-  release: () => void;
-} {
-  const realTransaction = realDb.transaction.bind(realDb);
-  let releaseFn: (() => void) | undefined;
-  let reachedFn: (() => void) | undefined;
-  const reached = new Promise<void>((r) => {
-    reachedFn = r;
-  });
-  let fired = false;
-  const wrappedDb = new Proxy(realDb, {
-    get(target, prop, receiver) {
-      if (prop === 'transaction') {
-        return (async (fn: never) => {
-          if (!fired) {
-            fired = true;
-            reachedFn?.();
-            await new Promise<void>((r) => {
-              releaseFn = r;
-            });
-          }
-          return realTransaction(fn);
-        }) as unknown as typeof realDb.transaction;
-      }
-      return Reflect.get(target, prop, receiver);
-    },
-  }) as Db;
-  return { wrappedDb, reached, release: () => releaseFn?.() };
 }
 
 beforeAll(async () => {

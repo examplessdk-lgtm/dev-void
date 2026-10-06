@@ -168,7 +168,7 @@ Void ships with first-class support for coding agents (Claude Code, Cursor, Code
 - **`AGENTS_TEMPLATE.md`** — template shipped in the `void` npm package, limited to four brief bullets: what Void is, Cloudflare or Void platform deployment, the core development workflow, and where to read the bundled docs. Keep detailed feature guidance in docs.
 - **`skills/`** — coding agent skills shipped in the npm package:
   - `void` — unified app + CLI skill covering project architecture, runtime APIs, deployment flows, and CLI operations (deploy, db, gen, secrets, domains, projects) with lazy-loaded reference files.
-  - `migrate-cloudflare-to-void` — guides migration from `@cloudflare/vite-plugin` to `void`.
+  - `migrate-vite-cloudflare-to-void` — guides migration from `@cloudflare/vite-plugin` to `void`.
 - **`skills/void/docs/`** — Markdown files copied from the repository's `docs/` during build and included at `node_modules/void/skills/void/docs/`.
 - **`void init --agents`** — always injects the template into `AGENTS.md` with versioned markers, preserving surrounding content. It never asks which coding agent is in use or edits other instruction files. Skills are symlinked from the `void` package for detected agents; without detection, only `AGENTS.md` instructions are added.
 - **`void init` in an empty directory** — scaffolds a Pages-mode starter, then lets you pick D1, PostgreSQL, MySQL, or Static Pages before running the same setup flow.

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, resolve } from 'pathslash';
-import { readProjectPaths } from '../project-paths.ts';
+import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import {
   getPackageDependencies,
   hasPackageDependency,
@@ -397,14 +397,7 @@ function detectViteBinary(root: string): 'vite' | 'vp' {
 export function findBackendSources(root: string): Array<string> {
   const paths = readProjectPaths(root);
   const found: Array<string> = [];
-  for (const dir of [
-    paths.routesDir,
-    paths.pagesDir,
-    paths.middlewareDir,
-    paths.cronsDir,
-    paths.queuesDir,
-    paths.emailDir,
-  ]) {
+  for (const dir of backendDirs(paths)) {
     if (existsSync(dir)) {
       found.push(`${relative(root, dir)}/`);
     }
@@ -421,26 +414,16 @@ export function findBackendSources(root: string): Array<string> {
  */
 export function hasBackendFiles(root: string): boolean {
   const paths = readProjectPaths(root);
-  if (existsSync(paths.routesDir)) {
-    return true;
-  }
-  if (existsSync(paths.pagesDir)) {
-    return true;
-  }
-  if (existsSync(paths.middlewareDir)) {
-    return true;
-  }
-  if (existsSync(paths.cronsDir)) {
-    return true;
-  }
-  if (existsSync(paths.queuesDir)) {
-    return true;
-  }
-  if (existsSync(paths.emailDir)) {
-    return true;
-  }
-  if (hasSsrEntry(root, paths)) {
-    return true;
-  }
-  return false;
+  return backendDirs(paths).some((dir) => existsSync(dir)) || hasSsrEntry(root, paths);
+}
+
+function backendDirs(paths: ProjectPaths): Array<string> {
+  return [
+    paths.routesDir,
+    paths.pagesDir,
+    paths.middlewareDir,
+    paths.cronsDir,
+    paths.queuesDir,
+    paths.emailDir,
+  ];
 }

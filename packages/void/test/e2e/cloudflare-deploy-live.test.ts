@@ -8,28 +8,9 @@ import {
   decodeCloudflareOperationResult,
 } from '../../src/cli/cloudflare-process.ts';
 
-// ---------------------------------------------------------------------------------------------
-// Gated live-account e2e for the `void deploy --platform cloudflare` path.
-//
-// Runs whenever BOTH env vars are present, and cleanly SKIPS (per test, at runtime) otherwise:
-//   - VOID_E2E_CF_TOKEN       a Cloudflare API token with permissions to create + delete Workers
-//                             Scripts, D1, and KV in the target account.
-//   - VOID_E2E_CF_ACCOUNT_ID  the Cloudflare account id to deploy into.
-//
-// When they are set, this deploys the `playground/spa` app (D1 + KV + cron) to the target account
-// under a UNIQUE per-run worker name (derived from `VOID_E2E_RUN_ID` in CI, a timestamp locally) so
-// that overlapping runs — two pushes in flight, a rerun of the same commit — never collide on the
-// same worker or D1/KV. Each run owns a fresh, exclusively-named set that teardown deletes, then
-// asserts the live worker answers HTTP 200.
-//
-// The root config starts with no D1/KV ids. The deploy must automatically create both resources,
-// write their ids into the config, build, migrate D1, and upload the worker — this is the live lock
-// for the first-party one-command path, including non-interactive CI.
-//
-// In CI the two vars come from repo secrets (same-repo pushes/PRs); fork PRs get no secrets and skip.
-// Do not commit a token; to exercise the real path locally, export the two vars:
-//   VOID_E2E_CF_TOKEN=... VOID_E2E_CF_ACCOUNT_ID=... vp test run packages/void/test/e2e
-// ---------------------------------------------------------------------------------------------
+// Gated live-account e2e for the `void deploy --platform cloudflare` path. Runs only when
+// VOID_E2E_CF_TOKEN and VOID_E2E_CF_ACCOUNT_ID are set, and skips each test otherwise. See
+// README.md in this directory for prerequisites, CI wiring, and resource naming/cleanup.
 
 // Read the credentials + the enable gate at EXECUTION time, never at module top-level. Vitest imports
 // (collects) this file BEFORE the CI runner injects the job's step env into the worker's process.env,
@@ -43,11 +24,8 @@ function cfAccountId(): string {
   return process.env.VOID_E2E_CF_ACCOUNT_ID ?? '';
 }
 // Windows is intentionally excluded from the LIVE deploy: invoking the cf CLI against a real
-// account on win32 is unverified, and this gate runs on EVERY CI — a first-time, unproven windows
-// live deploy must not be what turns `main` red. The real-build integration test
-// (test/integration/cloudflare-deploy-build.test.ts) already exercises the build path on windows;
-// enabling the live path there is a follow-up gated on a verified windows run. Fork PRs also skip
-// cleanly: they receive no secrets, so the token is empty.
+// account on win32 is unverified. The real-build integration test
+// (test/integration/cloudflare-deploy-build.test.ts) exercises the build path on Windows.
 function e2eEnabled(): boolean {
   return cfToken().length > 0 && cfAccountId().length > 0 && process.platform !== 'win32';
 }
@@ -88,11 +66,10 @@ const TEARDOWN_CF_BUDGET_MS = 200_000;
 const APP = join(ROOT, 'playground', 'spa');
 const APP_WRANGLER = join(APP, 'wrangler.jsonc');
 
-// A UNIQUE per-run worker name so running this on EVERY CI is safe: two runs that overlap (two pushes
-// in flight, a rerun of the same commit) must never deploy the same-named worker or create the same
-// D1/KV, or they would clobber each other and teardown would race one against the other. The suffix is
-// `VOID_E2E_RUN_ID` (CI sets it to run-id + attempt — unique per deploying run; windows skips the live
-// path so only the ubuntu leg deploys) or, locally, a timestamp + random. The shared
+// A UNIQUE per-run worker name: two runs that overlap (two pushes in flight, a rerun of the same
+// commit) must never deploy the same-named worker or create the same D1/KV, or they would clobber
+// each other and teardown would race one against the other. The suffix is `VOID_E2E_RUN_ID` (CI
+// sets it to run-id + attempt) or, locally, a timestamp + random. The shared
 // `void-e2e-cf-deploy-` prefix keeps every resource greppable for manual cleanup of an orphan from a
 // hard-killed run. Derived names mirror the provisioner (`suffixedResourceName`): `<name>-db` (D1),
 // `<name>-kv` (KV).
@@ -642,7 +619,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
     expect(base, deployOutput).toBeDefined();
     const root = base!.replace(/\/$/, '');
     // Proves the `KV` binding resolves to the real namespace end to end: write via the deployed worker,
-    // then read it back. (The namespace id was pinned into wrangler.jsonc by beforeAll.)
+    // then read it back. (The deploy in beforeAll created the namespace and pinned its id.)
     const key = `probe-${uniqueRunSuffix()}`;
     const value = `kv-${Date.now().toString(36)}`;
     const put = await fetchWithRetry(
@@ -702,8 +679,8 @@ describe('void deploy --platform cloudflare (live account)', () => {
   it('re-deploys idempotently to the same worker', async (ctx) => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
     // A SECOND `void deploy` against the already-created worker/D1/KV must succeed cleanly: the
-    // drift-check still passes (the overlay covers every id), the remote migration is already applied
-    // (a no-op), and the worker is updated in place. The overlay wrangler.jsonc is still on disk
+    // existing D1/KV are reused, the remote migration is already applied (a no-op), and the worker
+    // is updated in place. The overlay wrangler.jsonc is still on disk
     // (afterAll restores it only after every test), so this reuses it. Runs LAST for that reason.
     const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--platform', 'cloudflare'], {
       cwd: APP,

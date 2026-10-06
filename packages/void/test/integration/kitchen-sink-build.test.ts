@@ -109,7 +109,7 @@ describe('playground/kitchen-sink build', () => {
     // `needsAI` and injects the Workers AI binding on `command === 'build'`.
     expect(wranglerConfig.ai).toEqual({ binding: 'AI' });
     // `ai.gateway` in playground/kitchen-sink/void.config.ts becomes the runtime var
-    // read by the P3 direct backend.
+    // read by the direct Workers AI backend.
     const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
     expect(vars.__VOID_AI_GATEWAY).toBe('kitchen-sink-gw');
   });
@@ -141,8 +141,8 @@ describe('playground/kitchen-sink build', () => {
     // `vite build` output — the `vp build` above never writes it to `dist`. Drive
     // the SAME production seam `runFullDeploy` uses (`assembleVoidManifest`, which
     // owns `scanPages` result → collectPages → manifest.pages) against the real
-    // kitchen-sink pages to prove the A3 wiring emits `manifest.pages` for a Void
-    // pages app (which includes an ISR page).
+    // kitchen-sink pages to prove it emits `manifest.pages` for a Void pages app
+    // (which includes an ISR page).
     const pg = playground.root;
     const deployConfig = readConfig(pg);
     const paths = resolveProjectPaths(pg, deployConfig);

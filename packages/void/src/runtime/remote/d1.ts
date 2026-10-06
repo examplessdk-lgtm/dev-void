@@ -7,7 +7,7 @@ type ProxyPreparedStatement = D1PreparedStatement & {
 
 /**
  * D1Database implementation backed by the remote proxy.
- * Used during local development when `remote: true` is set in void.json.
+ * Used during local development when `remote: true` is set in void.config.ts.
  */
 export class ProxyD1Database {
   constructor(
@@ -69,29 +69,28 @@ export class ProxyD1PreparedStatement {
     this._params = params;
   }
 
+  private query(method: 'all' | 'first' | 'run' | 'raw'): Promise<Response> {
+    return this.client.fetch('/d1/query', {
+      binding: this.binding,
+      sql: this._sql,
+      params: this._params,
+      method,
+    });
+  }
+
   bind(...values: Array<unknown>): ProxyD1PreparedStatement {
     return new ProxyD1PreparedStatement(this.client, this.binding, this._sql, values);
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const res = await this.client.fetch('/d1/query', {
-      binding: this.binding,
-      sql: this._sql,
-      params: this._params,
-      method: 'all',
-    });
+    const res = await this.query('all');
     return (await res.json()) as D1Result<T>;
   }
 
   async first<T = Record<string, unknown>>(): Promise<T | null>;
   async first<T = unknown>(col: string): Promise<T | null>;
   async first<T = unknown>(col?: string): Promise<T | null> {
-    const res = await this.client.fetch('/d1/query', {
-      binding: this.binding,
-      sql: this._sql,
-      params: this._params,
-      method: 'first',
-    });
+    const res = await this.query('first');
     const row = (await res.json()) as Record<string, unknown> | null;
     if (row === null) {
       return null;
@@ -103,22 +102,12 @@ export class ProxyD1PreparedStatement {
   }
 
   async run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const res = await this.client.fetch('/d1/query', {
-      binding: this.binding,
-      sql: this._sql,
-      params: this._params,
-      method: 'run',
-    });
+    const res = await this.query('run');
     return (await res.json()) as D1Result<T>;
   }
 
   async raw<T = Array<unknown>>(options?: { columnNames?: boolean }): Promise<Array<T>> {
-    const res = await this.client.fetch('/d1/query', {
-      binding: this.binding,
-      sql: this._sql,
-      params: this._params,
-      method: 'raw',
-    });
+    const res = await this.query('raw');
     const data = (await res.json()) as {
       columns: Array<string>;
       results: Array<Array<unknown>>;

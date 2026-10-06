@@ -464,8 +464,8 @@ async function commitOwnershipTransfer(
       .limit(1);
 
     // Ownership is implicit. Keep these convergence writes before the
-    // idempotent branch so retry also repairs data written by an older API
-    // revision that committed the owner change without cleaning target access.
+    // idempotent branch so a retry also removes target access left behind by
+    // an owner change that committed without cleaning it.
     await tx
       .delete(projectMembers)
       .where(

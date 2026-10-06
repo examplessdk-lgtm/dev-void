@@ -1,3 +1,4 @@
+import { isRecord } from '@void/deploy-core';
 import type { CloudflareCommandRunner } from './execute.ts';
 
 /**
@@ -81,7 +82,7 @@ export function createCloudflareMetadataRunner(options: {
         }
         if (response.ok) {
           const body: unknown = await response.json();
-          if (record(body) && body.success === true && record(body.result)) {
+          if (isRecord(body) && body.success === true && isRecord(body.result)) {
             const result = body.result;
             if (kind === 'deployment' && Array.isArray(result.deployments)) {
               const latest: unknown = result.deployments[0];
@@ -93,7 +94,7 @@ export function createCloudflareMetadataRunner(options: {
                   errorCode: 10007,
                 };
               }
-              if (record(latest) && Array.isArray(latest.versions)) {
+              if (isRecord(latest) && Array.isArray(latest.versions)) {
                 return { status: 0, stdout: '', data: latest, stderr: '' };
               }
             }
@@ -105,8 +106,8 @@ export function createCloudflareMetadataRunner(options: {
               if (
                 items.every(
                   (item) =>
-                    record(item) &&
-                    record(item.metadata) &&
+                    isRecord(item) &&
+                    isRecord(item.metadata) &&
                     typeof item.metadata.created_on === 'string',
                 )
               ) {
@@ -131,8 +132,4 @@ export function createCloudflareMetadataRunner(options: {
     }
     return fallback(operation, runOptions);
   };
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

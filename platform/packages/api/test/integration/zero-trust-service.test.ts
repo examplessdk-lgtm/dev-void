@@ -17,7 +17,10 @@ import {
   projects as projectTable,
   projectZeroTrust,
 } from '../../src/schema.ts';
-import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
+import {
+  readZeroTrustConfigurationStrict,
+  type ZeroTrustConfigureInput,
+} from '../../src/zero-trust/configuration.ts';
 import {
   configurePlatformZeroTrust,
   disablePlatformZeroTrust,
@@ -57,6 +60,22 @@ beforeEach(async () => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+function platformBindings(): ApiEnv['Bindings'] {
+  return {
+    ...env,
+    SITE_DOMAIN: 'apps.example.com',
+    PLATFORM_INSTALLATION_ID: 'installation-test',
+  } as unknown as ApiEnv['Bindings'];
+}
+
+const PROTECTED_CONFIGURATION: ZeroTrustConfigureInput = {
+  apiToken: 'access-management-token',
+  identityProviderIds: ['idp-1'],
+  policyIds: ['policy-1'],
+  protectNewProjects: true,
+  existingProjects: 'protected',
+};
 
 function accessApi(options?: {
   beforeCreateApplication?: (application: Record<string, unknown>) => Promise<void> | void;
@@ -164,21 +183,11 @@ describe('project Zero Trust reconciliation', () => {
     };
     cloudflare.applications.set(existing.id, existing);
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
+    const bindings = platformBindings();
     const owner = await createTestUser(env.db, 'installer-health-owner');
     const project = await createTestProject(env.db, owner.id, 'existing-protected-app');
     await expect(
-      configurePlatformZeroTrust(bindings, env.db, {
-        apiToken: 'access-management-token',
-        identityProviderIds: ['idp-1'],
-        policyIds: ['policy-1'],
-        protectNewProjects: true,
-        existingProjects: 'protected',
-      }),
+      configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION),
     ).rejects.toThrow('interrupted wildcard creation');
     expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
       enabled: false,
@@ -241,18 +250,8 @@ describe('project Zero Trust reconciliation', () => {
   it('rejects an existing-project selection on a resumed reconcile operation', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
     const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
     await env.db
       .update(platformSettings)
@@ -281,18 +280,8 @@ describe('project Zero Trust reconciliation', () => {
     const owner = await createTestUser(env.db, 'zero-trust-routing-guard-owner');
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
 
     const missing = await createTestProject(env.db, owner.id, 'zero-trust-missing-state');
     await expect(resolveProjectZeroTrustRouting(env.db, missing.id)).rejects.toThrow(
@@ -316,18 +305,8 @@ describe('project Zero Trust reconciliation', () => {
     const project = await createTestProject(env.db, owner.id, 'zero-trust-disable-routing');
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
     const configuration = (await readZeroTrustConfigurationStrict(env.db))!;
     await env.db
       .update(platformSettings)
@@ -361,18 +340,8 @@ describe('project Zero Trust reconciliation', () => {
   it('reports wildcard drift when the platform application domain changes', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
 
     await expect(
       zeroTrustStatus({ ...bindings, SITE_DOMAIN: 'new.example.com' }, env.db, { check: true }),
@@ -388,11 +357,7 @@ describe('project Zero Trust reconciliation', () => {
   it('keeps the platform health hostname outside the wildcard for its whole lifetime', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
+    const bindings = platformBindings();
     const applicationWrites = () =>
       cloudflare.fetcher.mock.calls
         .filter(([, init]) => init?.method === 'POST' || init?.method === 'DELETE')
@@ -403,13 +368,7 @@ describe('project Zero Trust reconciliation', () => {
             : new URL(input.toString()).pathname.split('/').at(-1),
         }));
 
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
 
     const configured = (await readZeroTrustConfigurationStrict(env.db))!;
     const health = configured.healthApplication!;
@@ -463,18 +422,8 @@ describe('project Zero Trust reconciliation', () => {
   it('adds the health exception to a configuration saved before it existed', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
     const {
       healthApplication,
       healthApplicationName: _name,
@@ -504,18 +453,8 @@ describe('project Zero Trust reconciliation', () => {
   it('narrows a health exception that covers the whole hostname', async () => {
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    const bindings = platformBindings();
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
     const configured = (await readZeroTrustConfigurationStrict(env.db))!;
     const health = configured.healthApplication!;
     // An exception saved for the whole hostname would leave every project path
@@ -571,13 +510,7 @@ describe('project Zero Trust reconciliation', () => {
         workersDev: { subdomain: 'test-account', installationId: 'example-123456abcdef' },
       }),
     } as unknown as ApiEnv['Bindings'];
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
     expect((await readZeroTrustConfigurationStrict(env.db))!.healthApplication).toBeNull();
     expect([...cloudflare.applications.values()].map((application) => application.domain)).toEqual([
       'void-123456abcdef-*.test-account.workers.dev',
@@ -596,11 +529,7 @@ describe('project Zero Trust reconciliation', () => {
     );
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
+    const bindings = platformBindings();
 
     const initial = await configurePlatformZeroTrust(bindings, env.db, {
       apiToken: 'access-management-token',
@@ -670,11 +599,7 @@ describe('project Zero Trust reconciliation', () => {
     const publicProject = await createTestProject(env.db, owner.id, 'public-app');
     const cloudflare = accessApi();
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
+    const bindings = platformBindings();
 
     await configurePlatformZeroTrust(bindings, env.db, {
       apiToken: 'access-management-token',
@@ -771,19 +696,9 @@ describe('project Zero Trust reconciliation', () => {
       },
     });
     vi.stubGlobal('fetch', cloudflare.fetcher);
-    const bindings = {
-      ...env,
-      SITE_DOMAIN: 'apps.example.com',
-      PLATFORM_INSTALLATION_ID: 'installation-test',
-    } as unknown as ApiEnv['Bindings'];
+    const bindings = platformBindings();
 
-    await configurePlatformZeroTrust(bindings, env.db, {
-      apiToken: 'access-management-token',
-      identityProviderIds: ['idp-1'],
-      policyIds: ['policy-1'],
-      protectNewProjects: true,
-      existingProjects: 'protected',
-    });
+    await configurePlatformZeroTrust(bindings, env.db, PROTECTED_CONFIGURATION);
 
     const publicTransition = setProjectZeroTrustProtection(bindings, env.db, project.id, false);
     await bypassCreationStarted;

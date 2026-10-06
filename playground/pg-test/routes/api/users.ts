@@ -2,13 +2,11 @@ import { users } from '@schema';
 import { defineHandler } from 'void';
 import { db } from 'void/db';
 
-// GET /api/users — list all users
 export const GET = defineHandler(async () => {
   const all = await db.select().from(users);
   return all;
 });
 
-// POST /api/users — create a user
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json<{ name: string; email: string }>();
   const [created] = await db

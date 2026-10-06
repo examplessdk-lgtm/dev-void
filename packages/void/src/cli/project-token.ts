@@ -4,7 +4,7 @@ import { PlatformClient } from './client.ts';
 import { dim, tablePrefix } from './output.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
-import { resolveProjectBySlug } from './resolve-project.ts';
+import { requireProjectBySlug } from './resolve-project.ts';
 
 type TokenArgs = Extract<ProjectArgs, { subcommand: 'token' }>;
 
@@ -15,10 +15,7 @@ async function resolveTarget(root: string, args: TokenArgs) {
   }
   const client = new PlatformClient(humanToken, { root });
   if (args.projectSlug) {
-    const resolved = resolveProjectBySlug(await client.listProjects(), args.projectSlug);
-    if (!resolved) {
-      throw new Error(`project: No project found with slug '${args.projectSlug}'.`);
-    }
+    const resolved = await requireProjectBySlug(client, args.projectSlug);
     return { client, projectId: resolved.projectId, slug: args.projectSlug };
   }
   const linked = readProjectConfig(root);

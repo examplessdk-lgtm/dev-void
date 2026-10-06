@@ -25,7 +25,7 @@ it('waits for the expected islands and every independent hydration', async () =>
     await page.setContent(
       '<div data-island="counter" data-hydrated="true"></div><div data-island="form"></div>',
     );
-    // The old any-island selector returned here while the form still had no event handlers.
+    // One hydrated island must not satisfy the wait while a sibling is still unhydrated.
     await expect(waitForIslandsHydrated(page, 2, 500)).rejects.toThrow('Timeout');
 
     await page.locator('[data-island="form"]').evaluate((el) => {

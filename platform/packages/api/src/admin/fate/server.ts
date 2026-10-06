@@ -18,6 +18,7 @@ import {
   systemOverviewBase,
 } from '../../operator/system-operations.ts';
 import { projectWithUrl } from '../../project-url.ts';
+import { requestTimezone } from './page-data.ts';
 import { PageRoot, pageQueries, pageRegistry, pageSourceByType } from './page-server.ts';
 import {
   telemetryQueries,
@@ -142,7 +143,7 @@ registry.set(dashboardSource, {
       .filter((id) => id === 'overview')
       .map((id) => ({
         id,
-        tz: (ctx.req.raw.cf?.timezone as string | undefined) ?? undefined,
+        tz: requestTimezone(ctx),
         ...(base
           ? {
               ...base,

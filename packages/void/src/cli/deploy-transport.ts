@@ -196,30 +196,6 @@ export function deployChildEnv(
 }
 
 /**
- * Cloudflare credential env vars that must not reach untrusted project code. This includes
- * Wrangler 4.131's full authentication set, verified against
- * `wrangler-dist/cli.js`. It covers every env var wrangler reads to authenticate —
- * the API-client auth inputs (`apiToken`/`apiKey`/`apiEmail`/`userServiceKey`) plus
- * the `getEnvironmentVariableFactory` auth tokens — each canonical name AND its
- * deprecated `CF_*` alias:
- *   - API token:            `CLOUDFLARE_API_TOKEN` / `CF_API_TOKEN`
- *   - global auth key:      `CLOUDFLARE_API_KEY` / `CF_API_KEY`
- *   - global auth email:    `CLOUDFLARE_EMAIL` / `CF_EMAIL`
- *   - user service key:     `CLOUDFLARE_API_USER_SERVICE_KEY`
- *   - CF authorization tok: `WRANGLER_CF_AUTHORIZATION_TOKEN`
- *   - R2 SQL auth token:    `WRANGLER_R2_SQL_AUTH_TOKEN` (a Bearer credential wrangler
- *     reads via `getEnvironmentVariableFactory`, falling back to `CLOUDFLARE_API_TOKEN`)
- *   - Access service token: `CLOUDFLARE_ACCESS_CLIENT_ID` / `CLOUDFLARE_ACCESS_CLIENT_SECRET`
- *   - Readiness user JWT:   `CF_ACCESS_TOKEN` (Void-only; Wrangler never receives it)
- * Scrubbed from EVERY child that runs untrusted project code — the env-schema probes, the
- * `vite build`, and `drizzle-kit generate` (which loads the user's schema). None of them
- * authenticates against Cloudflare, so a leaking `env.ts` / build plugin / schema module can
- * never read a real credential the parent holds. NOT scrubbed from the wrangler runner's env
- * (`createDeployWranglerRunner`), where `whoami` / `d1 migrations apply` / `deploy` need them.
- * (`provisionEnv` already scrubs Void's own `CF_ACCESS_CLIENT_ID/SECRET` pair + the
- * account-id selector; this adds the wrangler-account credentials it does not.)
- */
-/**
  * Delete every {@link WRANGLER_AUTH_CREDENTIAL_ENV_VARS} entry from `env` IN PLACE and
  * return it, for a child that executes UNTRUSTED project code and needs no Cloudflare
  * credential of its own.

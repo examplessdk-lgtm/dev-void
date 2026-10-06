@@ -115,6 +115,65 @@ const args = process.argv.slice(2);
 const command = args[0];
 const helpPath = getHelpPath(args);
 
+const subcommandGroups: Record<string, () => Promise<void>> = {
+  auth: () =>
+    runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (root, parsed) =>
+      import('./auth-router.ts').then(({ runAuthRouter }) => runAuthRouter(root, parsed)),
+    ),
+  account: () =>
+    runSubcommandGroup('account', accountSubcommands, parseAccountArgs, (root, parsed) =>
+      import('./account-cmd.ts').then(({ runAccountCommand }) => runAccountCommand(root, parsed)),
+    ),
+  platform: () =>
+    runSubcommandGroup('platform', platformSubcommands, parsePlatformArgs, (root, parsed) =>
+      import('./platform-cmd.ts').then(({ runPlatformCommand }) =>
+        runPlatformCommand(root, parsed),
+      ),
+    ),
+  cloudflare: () =>
+    runSubcommandGroup('cloudflare', cloudflareSubcommands, parseCloudflareArgs, (root, parsed) =>
+      import('./cloudflare-cmd.ts').then(({ runCloudflareCommand }) =>
+        runCloudflareCommand(root, parsed),
+      ),
+    ),
+  project: () =>
+    runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (root, parsed) =>
+      import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(root, parsed)),
+    ),
+  secret: () =>
+    runSubcommandGroup('secret', secretSubcommands, parseSecretArgs, (root, parsed) =>
+      import('./secret.ts').then(({ runSecretCommand }) => runSecretCommand(root, parsed)),
+    ),
+  domain: () =>
+    runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (root, parsed) =>
+      import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(root, parsed)),
+    ),
+  email: () =>
+    runSubcommandGroup('email', emailSubcommands, parseEmailArgs, (root, parsed) =>
+      import('./email.ts').then(({ runEmailCommand }) => runEmailCommand(root, parsed)),
+    ),
+  db: () =>
+    runSubcommandGroup('db', dbSubcommands, parseDbArgs, (root, parsed) =>
+      import('./db.ts').then(({ runDbCommand }) => runDbCommand(root, parsed)),
+    ),
+  env: () =>
+    runSubcommandGroup('env', envSubcommands, parseEnvArgs, (root, parsed) =>
+      import('./env.ts').then(({ runEnvCommand }) => runEnvCommand(root, parsed)),
+    ),
+  gen: () =>
+    runSubcommandGroup('gen', genSubcommands, parseGenArgs, (root, parsed) =>
+      import('./gen.ts').then(({ runGenCommand }) => runGenCommand(root, parsed)),
+    ),
+  github: () =>
+    runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (root, parsed) =>
+      import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(root, parsed)),
+    ),
+  build: () =>
+    runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (root, parsed) =>
+      import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(root, parsed)),
+    ),
+};
+
 if (helpPath) {
   if (helpPath.length === 0) {
     printGlobalHelp();
@@ -161,60 +220,8 @@ if (helpPath) {
     log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   });
-} else if (command === 'auth') {
-  runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (root, parsed) =>
-    import('./auth-router.ts').then(({ runAuthRouter }) => runAuthRouter(root, parsed)),
-  );
-} else if (command === 'account') {
-  runSubcommandGroup('account', accountSubcommands, parseAccountArgs, (root, parsed) =>
-    import('./account-cmd.ts').then(({ runAccountCommand }) => runAccountCommand(root, parsed)),
-  );
-} else if (command === 'platform') {
-  runSubcommandGroup('platform', platformSubcommands, parsePlatformArgs, (root, parsed) =>
-    import('./platform-cmd.ts').then(({ runPlatformCommand }) => runPlatformCommand(root, parsed)),
-  );
-} else if (command === 'cloudflare') {
-  runSubcommandGroup('cloudflare', cloudflareSubcommands, parseCloudflareArgs, (root, parsed) =>
-    import('./cloudflare-cmd.ts').then(({ runCloudflareCommand }) =>
-      runCloudflareCommand(root, parsed),
-    ),
-  );
-} else if (command === 'project') {
-  runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (root, parsed) =>
-    import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(root, parsed)),
-  );
-} else if (command === 'secret') {
-  runSubcommandGroup('secret', secretSubcommands, parseSecretArgs, (root, parsed) =>
-    import('./secret.ts').then(({ runSecretCommand }) => runSecretCommand(root, parsed)),
-  );
-} else if (command === 'domain') {
-  runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (root, parsed) =>
-    import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(root, parsed)),
-  );
-} else if (command === 'email') {
-  runSubcommandGroup('email', emailSubcommands, parseEmailArgs, (root, parsed) =>
-    import('./email.ts').then(({ runEmailCommand }) => runEmailCommand(root, parsed)),
-  );
-} else if (command === 'db') {
-  runSubcommandGroup('db', dbSubcommands, parseDbArgs, (root, parsed) =>
-    import('./db.ts').then(({ runDbCommand }) => runDbCommand(root, parsed)),
-  );
-} else if (command === 'env') {
-  runSubcommandGroup('env', envSubcommands, parseEnvArgs, (root, parsed) =>
-    import('./env.ts').then(({ runEnvCommand }) => runEnvCommand(root, parsed)),
-  );
-} else if (command === 'gen') {
-  runSubcommandGroup('gen', genSubcommands, parseGenArgs, (root, parsed) =>
-    import('./gen.ts').then(({ runGenCommand }) => runGenCommand(root, parsed)),
-  );
-} else if (command === 'github') {
-  runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (root, parsed) =>
-    import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(root, parsed)),
-  );
-} else if (command === 'build') {
-  runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (root, parsed) =>
-    import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(root, parsed)),
-  );
+} else if (command && Object.hasOwn(subcommandGroups, command)) {
+  subcommandGroups[command]!();
 } else if (command === 'info') {
   import('./info.ts').then(async ({ runInfoCommand }) => {
     try {
@@ -374,6 +381,10 @@ if (helpPath) {
     const cmd = result.subcommand;
     const root = process.cwd();
 
+    if (Object.hasOwn(subcommandGroups, cmd)) {
+      return subcommandGroups[cmd]!();
+    }
+
     switch (cmd) {
       case 'connect': {
         const { runConnectCommand } = await import('./connect.ts');
@@ -395,64 +406,6 @@ if (helpPath) {
         await runDeploy(root);
         return;
       }
-      case 'auth':
-        return runSubcommandGroup('auth', authSubcommands, parseAuthArgs, (r, p) =>
-          import('./auth-router.ts').then(({ runAuthRouter }) => runAuthRouter(r, p)),
-        );
-      case 'account':
-        return runSubcommandGroup('account', accountSubcommands, parseAccountArgs, (r, p) =>
-          import('./account-cmd.ts').then(({ runAccountCommand }) => runAccountCommand(r, p)),
-        );
-      case 'platform':
-        return runSubcommandGroup('platform', platformSubcommands, parsePlatformArgs, (r, p) =>
-          import('./platform-cmd.ts').then(({ runPlatformCommand }) => runPlatformCommand(r, p)),
-        );
-      case 'cloudflare':
-        return runSubcommandGroup(
-          'cloudflare',
-          cloudflareSubcommands,
-          parseCloudflareArgs,
-          (r, p) =>
-            import('./cloudflare-cmd.ts').then(({ runCloudflareCommand }) =>
-              runCloudflareCommand(r, p),
-            ),
-        );
-      case 'project':
-        return runSubcommandGroup('project', projectSubcommands, parseProjectArgs, (r, p) =>
-          import('./project-cmd.ts').then(({ runProjectCommand }) => runProjectCommand(r, p)),
-        );
-      case 'secret':
-        return runSubcommandGroup('secret', secretSubcommands, parseSecretArgs, (r, p) =>
-          import('./secret.ts').then(({ runSecretCommand }) => runSecretCommand(r, p)),
-        );
-      case 'domain':
-        return runSubcommandGroup('domain', domainSubcommands, parseDomainArgs, (r, p) =>
-          import('./domain.ts').then(({ runDomainCommand }) => runDomainCommand(r, p)),
-        );
-      case 'github':
-        return runSubcommandGroup('github', githubSubcommands, parseGithubArgs, (r, p) =>
-          import('./github-cmd.ts').then(({ runGithubCommand }) => runGithubCommand(r, p)),
-        );
-      case 'build':
-        return runSubcommandGroup('build', buildSubcommands, parseBuildArgs, (r, p) =>
-          import('./build-cmd.ts').then(({ runBuildCommand }) => runBuildCommand(r, p)),
-        );
-      case 'email':
-        return runSubcommandGroup('email', emailSubcommands, parseEmailArgs, (r, p) =>
-          import('./email.ts').then(({ runEmailCommand }) => runEmailCommand(r, p)),
-        );
-      case 'db':
-        return runSubcommandGroup('db', dbSubcommands, parseDbArgs, (r, p) =>
-          import('./db.ts').then(({ runDbCommand }) => runDbCommand(r, p)),
-        );
-      case 'env':
-        return runSubcommandGroup('env', envSubcommands, parseEnvArgs, (r, p) =>
-          import('./env.ts').then(({ runEnvCommand }) => runEnvCommand(r, p)),
-        );
-      case 'gen':
-        return runSubcommandGroup('gen', genSubcommands, parseGenArgs, (r, p) =>
-          import('./gen.ts').then(({ runGenCommand }) => runGenCommand(r, p)),
-        );
       case 'info': {
         const { runInfoCommand } = await import('./info.ts');
         await runInfoCommand(root, parseInfoArgs([]));

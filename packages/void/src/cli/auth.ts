@@ -192,11 +192,9 @@ export function removeToken(root: string = process.cwd()): boolean {
   const account = platformCredentialAccount(apiUrl);
   let removed = false;
 
-  // Remove from keyring
   if (keyringDelete(account)) {
     removed = true;
   }
-  // Also clean up config file if token exists there
   try {
     const config = readConfig();
     let configChanged = false;
@@ -452,8 +450,7 @@ export async function awaitBrowserCallback<T>(options: {
       // Finalize INSIDE the request path so the browser only sees the success
       // page once the underlying exchange/link succeeds. A finalize failure
       // (expired code, API error, 409 conflict, etc.) renders the failure page
-      // and rejects — matching the base login flow's exchange-in-request-path
-      // behavior. Guard against the timeout racing the in-flight finalize.
+      // and rejects. Guard against the timeout racing the in-flight finalize.
       let result: T;
       try {
         result = await finalize(url.searchParams);
@@ -538,7 +535,7 @@ export async function runPlatformLogin(
   const codeChallenge = createCodeChallenge(codeVerifier);
 
   // The exchange runs INSIDE the request handler (via finalize), so an exchange
-  // failure renders the failure page — exactly as the base login flow did.
+  // failure renders the failure page.
   return awaitBrowserCallback<string>({
     state,
     execFile,
@@ -555,9 +552,8 @@ export async function runPlatformLogin(
       p.get('error') === 'signup_restricted'
         ? 'Signup restricted: your email is not on the approved list for this environment.'
         : null,
-    // Keep listening but reject these request shapes (preserves the original
-    // localhost server behavior): a stray `?token=` is never honored, and a
-    // callback without a `code` is ignored until the real one arrives.
+    // Keep listening but reject these request shapes: a stray `?token=` is never
+    // honored, and a callback without a `code` is ignored until the real one arrives.
     validate: (p) => {
       if (p.has('token')) {
         return 'Invalid login callback. Please try again.';

@@ -1,9 +1,12 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname } from 'pathslash';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
-import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
+import {
+  generateComponentManifest,
+  resolveStaticPageDataBuildOptions,
+  scanPages,
+} from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
-import { generateComponentManifest } from './pages-manifest.ts';
 
 const RENDERER_ID = 'virtual:void-pages-renderer';
 const CLIENT_ENTRY_ID = 'virtual:void-pages-client';
@@ -15,7 +18,7 @@ const SVELTE_OPTIMIZE_DEPS = {
   include: ['svelte', 'svelte/store', 'svelte/internal', 'svelte/internal/client'],
 };
 
-type PrefetchConfig = {
+export type PrefetchConfig = {
   hoverDelay?: number;
   cacheFor?: number | string | [string, string];
 };
@@ -103,7 +106,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
           if (!pageScan) {
             return "export function renderPage() { throw new Error('No pages found'); }";
           }
-          return generateRendererModule(pageScan, pagesDir, isDev);
+          return generateRendererModule(pageScan, pagesDir);
         }
         if (id === '\0' + CLIENT_ENTRY_ID) {
           if (!pageScan) {
@@ -181,7 +184,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
   };
 }
 
-function generateRendererModule(scan: PageScanResult, pagesDir: string, _isDev: boolean): string {
+function generateRendererModule(scan: PageScanResult, pagesDir: string): string {
   return `
 import { render } from "svelte/server";
 import App from "@void/svelte/App.svelte";

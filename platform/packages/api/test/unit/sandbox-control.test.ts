@@ -10,7 +10,6 @@ vi.mock('../../src/plans.ts', async () => {
   return { resolvePlanLimits: vi.fn(async (_db: unknown, plan: string) => getPlanLimits(plan)) };
 });
 
-vi.mock('cloudflare:workers', () => ({ WorkerEntrypoint: class {} }));
 vi.mock('../../src/db.ts', () => ({
   createDb: () => {
     const query = {

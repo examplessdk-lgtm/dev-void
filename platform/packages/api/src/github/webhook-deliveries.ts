@@ -23,9 +23,9 @@ import { GITHUB_API_BASE, GITHUB_API_VERSION } from './installation-token.ts';
 const WEBHOOK_DELIVERY_RETRY_ATTEMPTS = 2;
 const WEBHOOK_DELIVERY_RETRY_DELAY_MS = 250;
 
-// GitHub caps `per_page` at 100 for this endpoint; default to the max so a scan
-// covers the most failures per request.
-const MAX_PER_PAGE = 100;
+// GitHub caps `per_page` at 100 for this endpoint; use the max so a scan covers
+// the most failures per request.
+const PER_PAGE = 100;
 const DEFAULT_MAX_PAGES = 5;
 
 export type FailedWebhookDelivery = {
@@ -166,12 +166,11 @@ async function fetchDeliveriesPage(
  */
 export async function listFailedWebhookDeliveries(
   env: ApiEnv['Bindings'],
-  opts?: { maxPages?: number; perPage?: number },
+  opts?: { maxPages?: number },
 ): Promise<Array<FailedWebhookDelivery>> {
   if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
     return [];
   }
-  const perPage = Math.min(opts?.perPage ?? MAX_PER_PAGE, MAX_PER_PAGE);
   const maxPages = opts?.maxPages ?? DEFAULT_MAX_PAGES;
 
   const results: Array<FailedWebhookDelivery> = [];
@@ -187,7 +186,7 @@ export async function listFailedWebhookDeliveries(
   }
 
   let url: string | null =
-    `${GITHUB_API_BASE}/app/hook/deliveries?per_page=${perPage}&status=failure`;
+    `${GITHUB_API_BASE}/app/hook/deliveries?per_page=${PER_PAGE}&status=failure`;
   for (let page = 0; url && page < maxPages; page++) {
     const pageResult = await fetchDeliveriesPage(url, appJwt);
     if (!pageResult) {

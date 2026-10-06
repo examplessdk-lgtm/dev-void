@@ -1,4 +1,4 @@
-import { resolveLayoutIds } from './layout-resolution.ts';
+import { resolveLayoutIds, toLayoutId } from './layout-resolution.ts';
 import type { PageScanResult } from './types.ts';
 
 /**
@@ -16,17 +16,11 @@ export function generateComponentManifest(scan: PageScanResult, pagesDir: string
       `  ${JSON.stringify(page.componentId)}: () => import(${JSON.stringify(importPath)}),`,
     );
   }
-  for (const layout of scan.layouts) {
+  for (const layout of [...scan.layouts, ...scan.namedLayouts]) {
     const importPath = `${pagesDir}/${layout.filePath}`;
-    const layoutId = layout.directory ? `${layout.directory}/layout` : 'layout';
-    lines.push(`  ${JSON.stringify(layoutId)}: () => import(${JSON.stringify(importPath)}),`);
-  }
-  for (const namedLayout of scan.namedLayouts) {
-    const importPath = `${pagesDir}/${namedLayout.filePath}`;
-    const layoutId = namedLayout.directory
-      ? `${namedLayout.directory}/_layouts/${namedLayout.name}`
-      : `_layouts/${namedLayout.name}`;
-    lines.push(`  ${JSON.stringify(layoutId)}: () => import(${JSON.stringify(importPath)}),`);
+    lines.push(
+      `  ${JSON.stringify(toLayoutId(layout))}: () => import(${JSON.stringify(importPath)}),`,
+    );
   }
   lines.push('};');
 

@@ -10,15 +10,7 @@ import {
   type PlatformDeploymentManifest,
   type PlatformLoginKind,
 } from '@void/platform';
-import {
-  type CANCEL_SYMBOL,
-  confirm,
-  isCancel,
-  multiselect,
-  password,
-  select,
-  text,
-} from '@voidzero-dev/vite-plus-prompts';
+import { confirm, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
 import {
   activatePlatformAccessCredentials,
   parsePlatformAccessSetupSpec,
@@ -28,6 +20,7 @@ import {
 import type { PlatformManagementAccess } from './platform-auth.ts';
 import type { PlatformCloudflareClient } from './platform-cloudflare.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
+import { platformPromptAnswer } from './platform-setup.ts';
 
 export type AppAccessFile = {
   mode: import('@void/platform').PlatformAppAccess;
@@ -73,13 +66,6 @@ export function platformManagementAccessForAuthentication(
     protection: !!selection.authentication.accessProtection,
     readOnly: spec?.mode === 'existing',
   };
-}
-
-function answer<T>(value: T | typeof CANCEL_SYMBOL): T {
-  if (isCancel(value) || typeof value === 'symbol') {
-    throw new Error('platform: Cancelled.');
-  }
-  return value;
 }
 
 export async function selectInstallationAuthentication(
@@ -156,7 +142,7 @@ export async function selectInstallationAuthentication(
     choices.loginMethods ??
     (!process.stdin.isTTY
       ? ['github' as const]
-      : answer(
+      : platformPromptAnswer(
           await multiselect<PlatformLoginKind>({
             message: 'Platform login methods (select all that apply):',
             initialValues: [],
@@ -173,7 +159,7 @@ export async function selectInstallationAuthentication(
     choices.accessProtection ??
     (!process.stdin.isTTY
       ? false
-      : answer(
+      : platformPromptAnswer(
           await confirm({
             message: 'Also protect the platform UI and APIs with Cloudflare Access?',
             initialValue: false,
@@ -217,8 +203,8 @@ export async function collectInstallationAuthentication(
       );
     }
     return masked
-      ? answer(await password({ message }))
-      : answer(await text({ message, initialValue }));
+      ? platformPromptAnswer(await password({ message }))
+      : platformPromptAnswer(await text({ message, initialValue }));
   };
   const entries =
     selection.file?.connections ??
@@ -336,7 +322,7 @@ export async function collectInstallationAuthentication(
     (connections.length === 1
       ? connections[0]!.configuration.id
       : process.stdin.isTTY
-        ? answer(
+        ? platformPromptAnswer(
             await select({
               message: 'Login method for the first administrator:',
               options: connections.map((entry) => ({
@@ -372,7 +358,7 @@ export async function collectInstallationAuthentication(
         entry.configuration.kind !== 'github' &&
         (entry.configuration.kind !== 'google' || entry.configuration.allowedDomains.length > 0),
     );
-    const mode = answer(
+    const mode = platformPromptAnswer(
       await select<'restricted' | 'company' | 'public'>({
         message: 'Who can create an account?',
         initialValue: eligible.length ? 'company' : 'restricted',
@@ -392,7 +378,7 @@ export async function collectInstallationAuthentication(
     );
     const ids =
       mode === 'company'
-        ? answer(
+        ? platformPromptAnswer(
             await multiselect({
               message: 'Company login methods that qualify new users:',
               required: true,

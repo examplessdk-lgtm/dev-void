@@ -52,12 +52,54 @@ function projectWranglerPaths(root: string): Array<string> {
   return ['wrangler.jsonc', 'wrangler.json'].map((name) => join(root, name));
 }
 
-function writeProjectWranglerFile(configPath: string, text: string): void {
-  writeFileSync(configPath, text);
+/** Record a change to the generated Cloudflare config in `void.lock.json`. */
+export function persistMaterializedWranglerConfig(configPath: string): void {
   if (basename(configPath) === MATERIALIZED_CLOUDFLARE_FILE) {
     persistCloudflareConfig(dirname(configPath));
   }
 }
+
+function writeProjectWranglerFile(configPath: string, text: string): void {
+  writeFileSync(configPath, text);
+  persistMaterializedWranglerConfig(configPath);
+}
+
+/**
+ * Read the first existing project Wrangler config. A missing or unparseable one is
+ * replaced by the generated config, starting from an empty object.
+ */
+function readOrCreateProjectWranglerConfig(root: string): {
+  configPath: string;
+  parsed: Record<string, unknown>;
+  created: boolean;
+} {
+  const configPath = projectWranglerPaths(root).find((path) => existsSync(path));
+  if (configPath) {
+    let parsed: Record<string, unknown> | undefined;
+    try {
+      parsed = parseJsonc(readFileSync(configPath, 'utf-8'));
+    } catch {
+      // Can't read, replace with the generated config below.
+    }
+    if (parsed) {
+      return { configPath, parsed, created: false };
+    }
+  }
+  return { configPath: materializeCloudflareConfig(root), parsed: {}, created: true };
+}
+
+function durableObjectBindingsOf(
+  config: Record<string, unknown>,
+): Array<{ name: string; class_name: string }> {
+  return (
+    (
+      config.durable_objects as
+        | { bindings?: Array<{ name: string; class_name: string }> }
+        | undefined
+    )?.bindings ?? []
+  );
+}
+
 const MANAGED_QUEUES_MARKER = /^\s*\/\/ void:managed-queues:v1:([A-Za-z0-9_-]+)\s*$/m;
 const PUBLISHED_TRAFFIC_MARKER = /^\s*\/\/ void:published-traffic:v1:([A-Za-z0-9_-]+)\s*$/m;
 export const DEFAULT_LIVE_BINDING = 'VOID_LIVE';
@@ -527,28 +569,7 @@ export function syncWranglerBindings(
     live?: boolean | LiveBindingConfig;
   },
 ): boolean {
-  // Find the wrangler config file
-  let configPath: string | undefined;
-  let parsed: Record<string, unknown> | undefined;
-  let created = false;
-  for (const p of projectWranglerPaths(root)) {
-    if (existsSync(p)) {
-      configPath = p;
-      try {
-        parsed = parseJsonc(readFileSync(p, 'utf-8'));
-      } catch {
-        // Can't read, skip
-      }
-      break;
-    }
-  }
-
-  if (!configPath || !parsed) {
-    configPath = materializeCloudflareConfig(root);
-    parsed = {};
-    created = true;
-  }
-
+  const { configPath, parsed, created } = readOrCreateProjectWranglerConfig(root);
   let modified = false;
 
   // D1
@@ -613,23 +634,17 @@ export function syncWranglerBindings(
   }
 
   if (options?.websockets) {
-    const existing =
-      ((
-        parsed.durable_objects as
-          | { bindings?: Array<{ name: string; class_name: string }> }
-          | undefined
-      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
-    const migrations = Array.isArray(parsed.migrations)
-      ? (parsed.migrations as Array<DurableObjectMigration>)
-      : [];
     // Registered Durable Object classes are data-bearing identities. Removing a
     // route must not remove its binding or emit `deleted_classes`: either action
     // can make the next upload invalid or destroy the object's SQLite storage.
     // Historical WebSocket bindings remain attached and the compiler exports a
     // tombstone class until an explicit destructive lifecycle command exists.
-    const retained = existing;
+    const existing = durableObjectBindingsOf(parsed);
+    const migrations = Array.isArray(parsed.migrations)
+      ? (parsed.migrations as Array<DurableObjectMigration>)
+      : [];
     for (const route of options.websockets) {
-      const conflict = retained.find(
+      const conflict = existing.find(
         (binding) => binding.name === route.bindingName && binding.class_name !== route.className,
       );
       if (conflict) {
@@ -639,9 +654,9 @@ export function syncWranglerBindings(
       }
     }
     const additions = options.websockets
-      .filter((route) => !retained.some((binding) => binding.name === route.bindingName))
+      .filter((route) => !existing.some((binding) => binding.name === route.bindingName))
       .map((route) => ({ name: route.bindingName, class_name: route.className }));
-    const nextBindings = [...retained, ...additions];
+    const nextBindings = [...existing, ...additions];
     if (
       nextBindings.length !== existing.length ||
       nextBindings.some(
@@ -661,7 +676,7 @@ export function syncWranglerBindings(
       migrations,
       options.websockets.map((route) => route.className),
       'void-ws-v1',
-      retained.map((binding) => binding.class_name),
+      existing.map((binding) => binding.class_name),
     );
     if (planned.added) {
       parsed.migrations = planned.migrations;
@@ -670,12 +685,7 @@ export function syncWranglerBindings(
   }
 
   if (options?.durableObjects && options.durableObjects.length > 0) {
-    const existingBindings =
-      ((
-        parsed.durable_objects as
-          | { bindings?: Array<{ name: string; class_name: string }> }
-          | undefined
-      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    const existingBindings = durableObjectBindingsOf(parsed);
     for (const module of options.durableObjects) {
       const conflict = existingBindings.find(
         (binding) => binding.name === module.bindingName && binding.class_name !== module.className,
@@ -727,12 +737,7 @@ export function syncWranglerBindings(
       options?.bindingNames?.sandbox ?? sandbox?.binding ?? DEFAULT_SANDBOX_BINDING;
     const className = sandbox.className;
     assertSandboxNamespaceConfig(parsed, sandbox);
-    const existingDurableObjectBindings =
-      ((
-        parsed.durable_objects as
-          | { bindings?: Array<{ name: string; class_name: string }> }
-          | undefined
-      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    const existingDurableObjectBindings = durableObjectBindingsOf(parsed);
     if (!existingDurableObjectBindings.some((binding) => binding.name === bindingName)) {
       parsed.durable_objects = {
         bindings: [
@@ -778,12 +783,7 @@ export function syncWranglerBindings(
   }
 
   if (bindings.needsLive || options?.live) {
-    const existingDurableObjectBindings =
-      ((
-        parsed.durable_objects as
-          | { bindings?: Array<{ name: string; class_name: string }> }
-          | undefined
-      )?.bindings as Array<{ name: string; class_name: string }> | undefined) ?? [];
+    const existingDurableObjectBindings = durableObjectBindingsOf(parsed);
     const liveConfig =
       typeof options?.live === 'object'
         ? options.live
@@ -914,25 +914,7 @@ export function readWranglerWebSocketTombstones(
 export function ensureWranglerCompatibilityDate(root: string, compatibilityDate: string): boolean {
   validateCompatDate(compatibilityDate, 'void.json worker config');
 
-  let configPath: string | undefined;
-  let parsed: Record<string, unknown> | undefined;
-  for (const p of projectWranglerPaths(root)) {
-    if (existsSync(p)) {
-      configPath = p;
-      try {
-        parsed = parseJsonc(readFileSync(p, 'utf-8'));
-      } catch {
-        // Can't read, skip
-      }
-      break;
-    }
-  }
-
-  if (!configPath || !parsed) {
-    configPath = materializeCloudflareConfig(root);
-    parsed = {};
-  }
-
+  const { configPath, parsed } = readOrCreateProjectWranglerConfig(root);
   if (parsed.compatibility_date === compatibilityDate) {
     return false;
   }
@@ -947,26 +929,7 @@ export function ensureWranglerCompatibilityDate(root: string, compatibilityDate:
  * Returns true if the config file was modified.
  */
 export function ensureWranglerNodejsAlsFlag(root: string): boolean {
-  // Find the wrangler config file
-  let configPath: string | undefined;
-  let parsed: Record<string, unknown> | undefined;
-  for (const p of projectWranglerPaths(root)) {
-    if (existsSync(p)) {
-      configPath = p;
-      try {
-        parsed = parseJsonc(readFileSync(p, 'utf-8'));
-      } catch {
-        // Can't read, skip
-      }
-      break;
-    }
-  }
-
-  if (!configPath || !parsed) {
-    configPath = materializeCloudflareConfig(root);
-    parsed = {};
-  }
-
+  const { configPath, parsed } = readOrCreateProjectWranglerConfig(root);
   const compatibilityFlags = Array.isArray(parsed.compatibility_flags)
     ? (parsed.compatibility_flags as Array<unknown>)
     : [];
@@ -1017,7 +980,7 @@ export type WranglerQueueConsumer = {
  *     wrapper (`cli/wrapper.ts`) adds a `queue: handleQueue` consumer to the
  *     framework worker. On self-host there is no Void platform to bind the
  *     queues, and `wrangler queues create` has no `--update-config`, so the
- *     orchestrator (Task 6) passes the inferred producers/consumers here to
+ *     deploy orchestrator passes the inferred producers/consumers here to
  *     bind them in the root config for framework self-host builds only.
  */
 export type ProvisionedWranglerPatch = {
@@ -1115,31 +1078,30 @@ type ManagedQueueProvenance = {
 };
 
 function readManagedQueueProvenance(text: string): ManagedQueueProvenance {
+  const none: ManagedQueueProvenance = {
+    producerBindings: [],
+    consumerQueues: [],
+    pendingConsumerRemovals: [],
+  };
   const encoded = MANAGED_QUEUES_MARKER.exec(text)?.[1];
   if (!encoded) {
-    return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+    return none;
   }
+  const strings = (value: unknown): Array<string> =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
   try {
     const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
     if (!isRecord(parsed)) {
-      return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+      return none;
     }
     return {
-      producerBindings: Array.isArray(parsed.producerBindings)
-        ? parsed.producerBindings.filter((value): value is string => typeof value === 'string')
-        : [],
-      consumerQueues: Array.isArray(parsed.consumerQueues)
-        ? parsed.consumerQueues.filter((value): value is string => typeof value === 'string')
-        : [],
-      pendingConsumerRemovals: Array.isArray(parsed.pendingConsumerRemovals)
-        ? parsed.pendingConsumerRemovals.filter(
-            (value): value is string => typeof value === 'string',
-          )
-        : [],
+      producerBindings: strings(parsed.producerBindings),
+      consumerQueues: strings(parsed.consumerQueues),
+      pendingConsumerRemovals: strings(parsed.pendingConsumerRemovals),
     };
   } catch {
     // A malformed marker proves no ownership. Fail safe by retaining every entry.
-    return { producerBindings: [], consumerQueues: [], pendingConsumerRemovals: [] };
+    return none;
   }
 }
 
@@ -1247,16 +1209,7 @@ export function writeProvisionedWranglerConfig(
   // write all operate on the SAME file — no split-brain), honor it verbatim.
   // Otherwise fall back to the same discovery idiom as the rest of this file:
   // prefer wrangler.jsonc, fall back to wrangler.json, else create wrangler.jsonc.
-  let configPath = options?.configPath;
-  if (configPath === undefined) {
-    for (const p of projectWranglerPaths(root)) {
-      if (existsSync(p)) {
-        configPath = p;
-        break;
-      }
-    }
-    configPath ??= materializeCloudflareConfig(root);
-  }
+  const configPath = options?.configPath ?? discoverWranglerConfigPath(root);
 
   // Node's utf-8 read preserves a leading BOM; wrangler itself strips the BOM
   // before parsing. Match that: strip it for parsing/editing, then re-add it on
@@ -1457,7 +1410,7 @@ export function writeProvisionedWranglerConfig(
   //
   // `identityKey` is the member property wrangler keys the field on: `binding` for
   // the id-bearing resources, `name` for `send_email` (which has no `.binding` —
-  // see `nameKeyedBindingNames`).
+  // see `nameKeyedBindingEntries`).
   const upsertAdoptedBinding = (
     field: string,
     binding: string,
@@ -2830,7 +2783,7 @@ export function findBindingNameOwner(
  *   2. MORE THAN ONE entry in the target field sharing `binding` (ambiguous identity —
  *      wrangler also rejects duplicate binding names);
  *   3. a worker-wide CROSS-TYPE collision — `binding` is ALSO owned by any OTHER binding
- *      type (reuses the {@link collectWorkerBindingNames} Task-3 collector, EXCLUDING the
+ *      type (reuses the {@link collectWorkerBindingNames} collector, EXCLUDING the
  *      target field so the entry never self-collides, and INCLUDING `queues.producers`).
  * Returns the single matching entry, or `undefined` when the binding is absent.
  */
@@ -2959,21 +2912,10 @@ const BINDING_FIELD_SHAPES: Record<string, BindingFieldShape> = {
  * `ratelimits` name-keying and `logfwdr`'s nested `.bindings`, among others).
  */
 export function bindingNamesForField(field: string, value: unknown): Array<string> {
-  const shape: BindingFieldShape = BINDING_FIELD_SHAPES[field] ?? { kind: 'namespace-array' };
-  switch (shape.kind) {
-    case 'key-map':
-      return keyMapBindingNames(field, value);
-    case 'name-keyed-array':
-      return nameKeyedBindingNames(field, value);
-    case 'namespace-array':
-      return namespaceArrayBindingNames(field, value);
-    case 'singleton':
-      return singletonBindingName(field, value, shape.bindingRequired);
-    case 'binding-list':
-      return bindingListNames(field, value, shape.bindingsRequired);
-    case 'whole-object':
-      return [];
+  if (BINDING_FIELD_SHAPES[field]?.kind === 'key-map') {
+    return keyMapBindingNames(field, value);
   }
+  return bindingEntriesForField(field, value).map((entry) => entry.name);
 }
 
 /**
@@ -2982,8 +2924,8 @@ export function bindingNamesForField(field: string, value: unknown): Array<strin
  * caller can compare not just WHICH bindings a field declares but the TARGET each one points
  * at (a `services` binding's `service`, an `unsafe` binding's `type`, …). Same fail-closed
  * philosophy as {@link bindingNamesForField} — a malformed/missing REQUIRED identity or wrong
- * outer shape THROWS. By construction `bindingEntriesForField(f, v).map((e) => e.name)` equals
- * `bindingNamesForField(f, v)` for every field (both read identity through the same shapes).
+ * outer shape THROWS. {@link bindingNamesForField} is this reader's `.name` projection for every
+ * non-key-map field.
  *
  * Exported so the deploy orchestrator's pass-through assert-set check can pin a legitimately
  * hand-declared binding's ENTRY pre-build and reject a build that KEEPS the name but REWRITES
@@ -3027,9 +2969,10 @@ function keyMapBindingEntries(field: string): never {
 }
 
 /**
- * Entry-shaped reader for a NAMESPACE-array field (mirror of {@link namespaceArrayBindingNames}):
- * a PRESENT non-array THROWS; every member is strictly validated for a non-empty string
- * `.binding` and returned with its full entry object.
+ * Entry-shaped reader for a NAMESPACE-array field (`[{ binding }]`: kv_namespaces, d1_databases,
+ * r2_buckets, hyperdrive, services, vectorize, …). A PRESENT value that is not an array THROWS
+ * rather than being re-read as a key-map (which could under-collect and hide a real collision);
+ * every member is strictly validated for a non-empty string `.binding`.
  */
 function namespaceArrayBindingEntries(
   field: string,
@@ -3049,8 +2992,15 @@ function namespaceArrayBindingEntries(
 }
 
 /**
- * Entry-shaped reader for a NAME-keyed array field (mirror of {@link nameKeyedBindingNames}):
- * identity is `.name` only; a PRESENT non-array THROWS; every member is strictly validated.
+ * Entry-shaped reader for a NAME-keyed array field (`send_email` / `ratelimits`: an array of
+ * `{ name }`). A PRESENT non-array THROWS; every member is strictly validated.
+ *
+ * Identity is the `.name` ONLY. Verified against wrangler 4.131's bundle +
+ * `config-schema.json`: NEITHER `send_email` NOR `ratelimits` has a `.binding` property in
+ * the schema, and on UPLOAD wrangler keys them by `.name`. An optional `.binding` that happens
+ * to sit on such an entry is NOT a binding identity wrangler recognizes, so unioning it would
+ * invent a PHANTOM collision (e.g. `send_email:[{name:"EMAIL_A",binding:"QUEUE_JOBS"}]` would
+ * falsely block a legitimate `QUEUE_JOBS` queue producer).
  */
 function nameKeyedBindingEntries(
   field: string,
@@ -3070,10 +3020,10 @@ function nameKeyedBindingEntries(
 }
 
 /**
- * Entry-shaped reader for a binding-LIST field (mirror of {@link bindingListNames}): the entry
- * of each member is the member itself (`{ name, ... }`), keyed on `.name`. Same throw semantics
- * as the name reader — a wrong outer shape, or a required-but-missing `bindings`, THROWS; a
- * `bindings`-less `unsafe` (optional) contributes nothing.
+ * Entry-shaped reader for a binding-LIST field (`{ bindings: [{ name }] }`: durable_objects /
+ * logfwdr / unsafe): the entry of each member is the member itself, keyed on `.name`. A wrong
+ * outer shape, or a missing `bindings` when required (durable_objects / logfwdr per schema),
+ * THROWS; a `bindings`-less `unsafe` (optional) contributes nothing.
  */
 function bindingListEntries(
   field: string,
@@ -3111,10 +3061,11 @@ function bindingListEntries(
 }
 
 /**
- * Entry-shaped reader for a SINGLETON field (mirror of {@link singletonBindingName}): the entry
- * is the singleton value itself. A PRESENT non-object THROWS; a present-but-malformed `binding`
- * THROWS; a required-but-absent `binding` THROWS; a binding-optional `assets` with no binding
- * contributes nothing.
+ * Entry-shaped reader for a SINGLETON field (`{ binding }`: ai / browser / images / stream /
+ * media / websearch / version_metadata / assets): the entry is the singleton value itself. A
+ * PRESENT non-object THROWS; a present-but-malformed `binding` THROWS; a required-but-absent
+ * `binding` THROWS (never a fall-through that would mis-collect the object's OTHER keys); a
+ * binding-optional `assets` with no binding contributes nothing.
  */
 function singletonBindingEntry(
   field: string,
@@ -3155,8 +3106,7 @@ function singletonBindingEntry(
  * Read binding names from a KEY-MAP field (`vars`/`wasm_modules`/`text_blobs`/
  * `data_blobs`): the object's KEYS are the binding names. Reads ONLY the keys — never
  * the values — so a value that happens to look like a binding list (`{bindings:[…]}`)
- * or a singleton (`{binding:'x'}`) is NOT misread (the old generic path returned the
- * VALUE, or a nested `name`, instead of the real KEY). A PRESENT value that is not a
+ * or a singleton (`{binding:'x'}`) is NOT misread. A PRESENT value that is not a
  * plain object is the wrong outer shape and THROWS (fail closed). An explicitly
  * `undefined`-valued key is not a real binding and is skipped.
  */
@@ -3175,169 +3125,11 @@ function keyMapBindingNames(field: string, value: unknown): Array<string> {
 }
 
 /**
- * Read binding names from a NAMESPACE-array field (`[{ binding }]`: kv_namespaces,
- * d1_databases, r2_buckets, hyperdrive, services, vectorize, …). A PRESENT value that
- * is not an array is the wrong outer shape and THROWS rather than being re-read as a
- * key-map (which could under-collect and hide a real collision); every member is
- * strictly validated for a non-empty string `.binding`.
- */
-function namespaceArrayBindingNames(field: string, value: unknown): Array<string> {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
-        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
-        `could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  return strictBindingArray(value, 'binding', field);
-}
-
-/**
- * Read binding names from a NAME-keyed array field (`send_email` / `ratelimits`:
- * an array of `{ name }`). Encodes the field's REQUIRED outer shape: a PRESENT value that
- * is not an array THROWS (fail closed) rather than falling back to generic key collection —
- * wrangler validates these via `validateBindingArray`, so a non-array is malformed and
- * could hide a real collision if silently re-read as a key-map. An ABSENT value contributes
- * nothing. Every array member is strictly validated (a malformed one rejects the whole
- * config).
- *
- * Identity is the `.name` ONLY. Verified against wrangler 4.131's bundle +
- * `config-schema.json`: NEITHER `send_email` NOR `ratelimits` has a `.binding` property in
- * the schema, and on UPLOAD wrangler keys them by `.name` (send_email:
- * `output[name] = { type: "send_email", ...}`; ratelimits push `{ name: binding.name, … }`).
- * An optional `.binding` that happens to sit on such an entry is NOT a binding identity
- * wrangler recognizes, so unioning it invents a PHANTOM collision — e.g. a
- * `send_email:[{name:"EMAIL_A",binding:"QUEUE_JOBS"}]` would falsely block a legitimate
- * `QUEUE_JOBS` queue producer / adopt / read-first. We therefore collect ONLY the `.name`
- * of every member (a genuine same-`name` collision is still caught).
- */
-function nameKeyedBindingNames(field: string, value: unknown): Array<string> {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" must be an array of binding ` +
-        `entries. Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
-        `could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  return strictBindingArray(value, 'name', field);
-}
-
-/**
- * Read the binding names from a binding-LIST field (`{ bindings: [{ name }] }`:
- * durable_objects / logfwdr / unsafe). A PRESENT value that is not an object is the
- * wrong outer shape and THROWS. When `bindingsRequired` (durable_objects / logfwdr per
- * schema), a MISSING `bindings` array THROWS (never a silent empty read); `unsafe` is
- * optional, so a `bindings`-less `{ metadata }` contributes nothing. A PRESENT
- * `bindings` array has EVERY member strictly validated for a non-empty string `name`.
- */
-function bindingListNames(field: string, value: unknown, bindingsRequired: boolean): Array<string> {
-  if (value === undefined) {
-    return [];
-  }
-  // Encode the REQUIRED outer shape: a binding-list field must be an object; a
-  // wrong-shaped value (array, string, …) THROWS rather than under-collecting (which
-  // could hide a real binding collision).
-  if (!isRecord(value)) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
-        `"bindings" array. Refusing to proceed on a partially-readable binding set (a wrong-shaped ` +
-        `field could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  if (value.bindings === undefined) {
-    if (bindingsRequired) {
-      throw new Error(
-        `deploy: cannot verify binding-name uniqueness — "${field}" requires a "bindings" array. ` +
-          `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
-          `a real collision). Fix the wrangler config and retry.`,
-      );
-    }
-    return [];
-  }
-  if (!Array.isArray(value.bindings)) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}.bindings" must be an array. ` +
-        `Refusing to proceed on a partially-readable binding set (a wrong-shaped field could hide ` +
-        `a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  return strictBindingArray(value.bindings, 'name', `${field}.bindings`);
-}
-
-/**
- * Read the binding name from a SINGLETON field (`{ binding }`: ai / browser /
- * images / stream / media / websearch / version_metadata / assets). A PRESENT value
- * that is not an object is the wrong outer shape and THROWS. A PRESENT-but-malformed
- * `binding` (non-string / empty) THROWS. When `bindingRequired` (every singleton except
- * `assets`, per schema), an ABSENT `binding` also THROWS — never a silent empty read,
- * and never a fall-through that would mis-collect the object's OTHER keys (e.g.
- * `{ staging: true }`) as bogus binding names. `assets` is binding-optional, so an
- * absent binding (e.g. `{ directory }`) contributes nothing.
- */
-function singletonBindingName(
-  field: string,
-  value: unknown,
-  bindingRequired: boolean,
-): Array<string> {
-  if (value === undefined) {
-    return [];
-  }
-  if (!isRecord(value)) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" must be an object with a ` +
-        `"binding". Refusing to proceed on a partially-readable binding set (a wrong-shaped field ` +
-        `could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  if (typeof value.binding === 'string' && value.binding.length > 0) {
-    return [value.binding];
-  }
-  if (value.binding !== undefined) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" has a malformed "binding" ` +
-        `(expected a non-empty string). Refusing to proceed on a partially-readable binding set (a ` +
-        `dropped binding could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  if (bindingRequired) {
-    throw new Error(
-      `deploy: cannot verify binding-name uniqueness — "${field}" requires a "binding" (a ` +
-        `non-empty string). Refusing to proceed on a partially-readable binding set (a dropped ` +
-        `binding could hide a real collision). Fix the wrangler config and retry.`,
-    );
-  }
-  return [];
-}
-
-/**
- * Strictly read `keyField` (a non-empty string) from EVERY member of a
- * binding-bearing array. THROWS (fail closed) on ANY malformed member — never
- * silently drops one. Dropping a malformed member could convert a mixed-validity
- * array (e.g. `[null, { binding: 'DB', id: '…' }]`) into an empty/partial binding
- * set, so the worker-wide uniqueness guard would MISS the existing `DB` and commit
- * a conflicting binding — a fail-open in a documented invariant. Mirrors the
- * writer's existing fail-closed-on-malformed-config philosophy.
- */
-function strictBindingArray(
-  members: Array<unknown>,
-  keyField: 'binding' | 'name',
-  field: string,
-): Array<string> {
-  return strictBindingEntries(members, keyField, field).map((e) => e.name);
-}
-
-/**
- * The entry-shaped sibling of {@link strictBindingArray}: reads `keyField` (a non-empty string)
- * from EVERY member and returns it PAIRED with the member's full entry object. Same fail-closed
- * validation — a non-record member, or one missing a non-empty string `keyField`, THROWS (never
- * silently dropped). {@link strictBindingArray} is defined in terms of this, so the two agree on
- * names and error messages for every field.
+ * Strictly read `keyField` (a non-empty string) from EVERY member of a binding-bearing array and
+ * return it PAIRED with the member's full entry object. THROWS (fail closed) on ANY malformed
+ * member — never silently drops one. Dropping a malformed member could convert a mixed-validity
+ * array (e.g. `[null, { binding: 'DB', id: '…' }]`) into an empty/partial binding set, so the
+ * worker-wide uniqueness guard would MISS the existing `DB` and commit a conflicting binding.
  */
 function strictBindingEntries(
   members: Array<unknown>,

@@ -17,16 +17,17 @@ export async function renderAdminPage(
   } = {},
 ): Promise<Response> {
   const platformName = String(props.platformName ?? 'Void');
+  const { pathname, search } = new URL(context.req.url);
   const pageObj: PageObject = {
     component,
     props,
     params: {},
     shared: {
-      adminPageUrl: new URL(context.req.url).pathname + new URL(context.req.url).search,
+      adminPageUrl: pathname + search,
       adminFateSession: `${context.get('user')?.id ?? 'guest'}:${context.get('humanSession')?.id ?? 'none'}`,
       ...(options.fateSnapshot ? { adminFateSnapshot: options.fateSnapshot } : {}),
     },
-    url: new URL(context.req.url).pathname + new URL(context.req.url).search,
+    url: pathname + search,
     errors: null,
     head: {
       title: formatPlatformPageTitle(title, platformName),

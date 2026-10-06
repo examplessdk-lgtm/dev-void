@@ -8,7 +8,6 @@ import {
   revokeConnectionSessions,
   validateHumanSession,
 } from '../../src/auth/sessions.ts';
-import { type Db } from '../../src/db.ts';
 import { app } from '../../src/index.ts';
 import {
   platformAuthSettings,

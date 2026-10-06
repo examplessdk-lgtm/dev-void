@@ -1,4 +1,3 @@
-/** Read an internal JSON request within a strict byte and time budget. */
 export class EmailInternalBodyError extends Error {
   constructor(
     readonly status: 400 | 408 | 413,
@@ -8,6 +7,7 @@ export class EmailInternalBodyError extends Error {
   }
 }
 
+/** Read an internal JSON request within a strict byte and time budget. */
 export async function readBoundedInternalJson(
   request: Request,
   maxBytes: number,

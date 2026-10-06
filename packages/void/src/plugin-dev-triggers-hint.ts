@@ -2,6 +2,7 @@ import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { scanJobsSync } from './crons/scan.ts';
 import { voidLog } from './log.ts';
+import { afterServerReady } from './plugin-dev-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import { scanQueuesSync } from './queues/scan.ts';
 import { parseDotenvFile } from './shared/dotenv.ts';
@@ -28,15 +29,7 @@ export function devTriggersHintPlugin(
         return;
       }
 
-      const afterReady = (fn: () => void) => {
-        if (server.httpServer) {
-          server.httpServer.once('listening', () => setTimeout(fn, 100));
-        } else {
-          fn();
-        }
-      };
-
-      afterReady(() => {
+      afterServerReady(server, () => {
         const address = server.httpServer?.address();
         const port = typeof address === 'object' && address ? address.port : null;
         if (port == null) {
@@ -54,15 +47,9 @@ export function devTriggersHintPlugin(
 
         console.log();
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
-        // `__VOID_PROXY_TOKEN` is the platform's prod handshake header, mirrored
-        // locally via `.env` (which Void loads into the dev worker),
-        // worker bindings). Other env sources are intentionally NOT considered:
-        // `.env`/process.env entries are stripped by `stripInternalEnvKeys` on
-        // the Void path, and wrangler `[vars]` go through the CF plugin which
-        // also surfaces them via the worker env — but that's a deploy-config
-        // path, not a dev-trigger ergonomics one. `.env` is the single
-        // place a developer is expected to define this token, so it's the
-        // single source we consult here to keep hint and dispatcher in sync.
+        // Mirror the dispatcher's auth: a configured `__VOID_PROXY_TOKEN`
+        // (the platform's prod handshake) requires `x-void-internal`;
+        // otherwise the dev-trigger token is accepted.
         const configuredProxyToken = parseDotenvFile(join(root, '.env'), {
           expand: false,
         }).__VOID_PROXY_TOKEN;

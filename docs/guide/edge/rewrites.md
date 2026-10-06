@@ -109,15 +109,13 @@ The file can include [3xx redirects](./redirects) too. Rules in `void.config.ts`
 
 ## Client navigation
 
-Rewrites run on the server. In Pages mode, a client-side `<Link to="/docs">` navigation may fetch loader data for `/docs` rather than the rewritten route `/en/docs`.
+Rewrites run on the server. In Pages mode, a client-side `<Link href="/docs">` navigation may fetch loader data for `/docs` rather than the rewritten route `/en/docs`.
 
 Use `<a href="/docs">` to make a full server request when the destination has a different loader. Use a redirect if the URL should change.
 
 ## ISR cache keys with rewrites
 
-Static rewrites cache the destination separately for each original pathname. Query parameters vary the cache only when included in `routing.revalidateQueryAllowlist`. Middleware rewrites don't create a separate cache variant.
-
-Purge the destination with `revalidate({ paths: ['/en/docs/foo'] })` to clear direct and rewritten requests. Purging only `/docs/foo` does not clear that entry. See [Revalidation](./revalidation).
+Purge the destination path, such as `/en/docs/foo`, to clear rewritten cache entries. See [Cache keys and rewrites](./revalidation#cache-keys-and-rewrites).
 
 ## Debugging with `X-Void-Routing`
 

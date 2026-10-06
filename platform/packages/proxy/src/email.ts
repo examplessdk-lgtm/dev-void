@@ -1,4 +1,3 @@
-import { isReservedEmailSlug } from '@voidcloud/api/reserved-slugs';
 import { EmailMessage } from 'cloudflare:email';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -8,6 +7,7 @@ import {
   emailPayloadDigest,
   finishEmailAttempt,
   startEmailAttempt,
+  type Admission,
 } from './email-admission.ts';
 import { leaseBearer, leaseEmailDomainCredential } from './email-lease.ts';
 import {
@@ -49,7 +49,7 @@ const BUILTIN_MIME_HEADERS = new Set([
 ]);
 
 /** Bound only app-defined top-level fields, including folded continuation lines. */
-export function customMimeHeaderBytesWithinLimit(raw: Uint8Array): boolean {
+function customMimeHeaderBytesWithinLimit(raw: Uint8Array): boolean {
   let used = 0;
   let custom = false;
   for (let start = 0; start < raw.byteLength;) {
@@ -155,7 +155,7 @@ const strictFromCache = new Map<string, RegExp>();
  * The domain is escaped before interpolation so a misconfigured value can
  * never widen the pattern (an unescaped `.` would match any character).
  */
-export function strictFromRe(domain: string): RegExp {
+function strictFromRe(domain: string): RegExp {
   const cached = strictFromCache.get(domain);
   if (cached) {
     return cached;
@@ -172,20 +172,15 @@ export function strictFromRe(domain: string): RegExp {
  * on even Unicode-escaped control refs in regex literals) does not
  * reject the pattern. Behavior is identical to a literal regex.
  *
- * Slice FIRST, then replace — the same order as `sanitize` in
- * `email-router.ts`, for the same reason: a global replace materializes one
- * part per match, so a control-heavy input costs far more than one copy
- * (measured: a 5 MB `\na\na…` value is +170 MB of transient heap through the
- * old replace-then-slice order, past the 128 MB isolate ceiling; slice-first
- * is 0 ms). Most callers already pass bounded values; `requestId` at intake
- * and the inbound `Subject:` header did not. The result is at most `maxLen`
- * chars and may be shorter — a control run inside the window collapses to
- * one space and nothing is refilled from beyond it — which loses nothing on
- * a log line.
+ * Slice FIRST, then replace: a global replace materializes one part per
+ * match, so a multi-megabyte control-heavy input could exceed the 128 MB
+ * isolate heap. The result is at most `maxLen` chars and may be shorter — a
+ * control run inside the window collapses to one space and nothing is
+ * refilled from beyond it — which loses nothing on a log line.
  */
 // oxlint-disable-next-line no-control-regex
 const CONTROL_CHARS_RE = new RegExp('[\\u0000-\\u001f\\u007f]+', 'g');
-function sanitizeForLog(value: string, maxLen = 200): string {
+export function sanitizeForLog(value: string, maxLen = 200): string {
   return value.slice(0, maxLen).replace(CONTROL_CHARS_RE, ' ');
 }
 
@@ -211,7 +206,7 @@ const MAX_REQUEST_ID_LENGTH = 128;
  * UTF-8 (which would corrupt non-text MIME parts that happen to be
  * stored in their decoded form).
  */
-function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+export function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(bytes);
@@ -261,11 +256,9 @@ function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * "What it weighs" has to mean BYTES, not lines. The scan keeps nothing
  * per line — only the byte offsets of the one `From:` it found — because
  * `MAX_MIME_BYTES` bounds bytes and a folded header can hold one line per
- * three of them (` \r\n`): 3.5 million continuations fit in 10 MiB, and an
- * earlier shape that retained one `subarray` view per continuation held
- * ~125 bytes of heap each — 437 MB, measured, in an isolate of 128 MB that
- * every tenant's AI/D1/KV/R2 traffic shares. The same message with no
- * `From:` cost 1 MB, so the amplifier was the `From:` itself. The value is
+ * three of them (` \r\n`): 3.5 million continuations fit in 10 MiB, and
+ * retaining even a small view per continuation would exceed the 128 MB
+ * isolate that every tenant's AI/D1/KV/R2 traffic shares. The value is
  * unfolded with ONE copy of the header's byte range, and no copy at all
  * when it did not fold.
  *
@@ -757,95 +750,25 @@ app.post('/send', async (context) => {
   // the admission call for the same reason as the slug pin. The refusal may
   // echo `from`: it is at most `MAX_SENDER_LENGTH` printable-ASCII bytes by
   // now.
-  const mimeFrom = readMimeFromAddrSpec(raw);
-  if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
-    const detail = mimeFrom.ok
-      ? 'the From header address does not match the envelope sender'
-      : MIME_FROM_REFUSALS[mimeFrom.reason];
-    return context.json(
-      {
-        ok: false,
-        error: {
-          code: 'INVALID_FROM',
-          message: `mime From must be the envelope sender ${from}: ${detail}`,
-        },
-      },
-      403,
-    );
+  const mimeFromRefusal = refuseMimeFromMismatch(context, raw, from);
+  if (mimeFromRefusal) {
+    return mimeFromRefusal;
   }
 
   // The API transaction is authoritative for project state, sender identity,
   // recipient consent, suspension, and attempt quotas.
-  let admission;
-  try {
-    admission = await admitEmail(
-      context.env,
-      {
-        projectId,
-        kind: 'direct',
-        key: operationKey,
-        digest: await emailPayloadDigest('direct', from, recipients, raw),
-        from,
-        recipients,
-        transport: 'binding',
-      },
-      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
-    );
-  } catch (error) {
-    const conflict = error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT';
-    return context.json(
-      {
-        ok: false,
-        error: {
-          code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'UPSTREAM_ERROR',
-          message: conflict
-            ? 'idempotency key has different content'
-            : 'email admission unavailable',
-        },
-      },
-      conflict ? 409 : 503,
-    );
+  const admitted = await admitDirectSend(context, sendDeadline, {
+    projectId,
+    operationKey,
+    from,
+    recipients,
+    raw,
+    transport: 'binding',
+  });
+  if (admitted instanceof Response) {
+    return admitted;
   }
-  const deliveries: Array<RecipientResult> = admission.recipients
-    .filter((r) => r.state !== 'reserved')
-    .map((r) => ({
-      recipient: r.recipient,
-      ok: r.state === 'provider_accepted',
-      state: r.state,
-      messageId: r.providerReference ?? undefined,
-      error:
-        r.state === 'provider_accepted'
-          ? undefined
-          : {
-              code:
-                r.errorCode ??
-                (r.state === 'outcome_unknown' || r.state === 'attempt_started'
-                  ? 'OUTCOME_UNKNOWN'
-                  : r.state === 'cancelled'
-                    ? 'UPSTREAM_ERROR'
-                    : 'UNVERIFIED_DESTINATION'),
-              message:
-                r.state === 'outcome_unknown' || r.state === 'attempt_started'
-                  ? 'provider outcome unknown; inspect email logs before retrying'
-                  : r.state === 'cancelled'
-                    ? 'email attempt was cancelled before provider submission'
-                    : 'recipient was not admitted',
-            },
-    }));
-  if (admission.replay) {
-    for (const row of admission.recipients.filter((r) => r.state === 'reserved')) {
-      deliveries.push({
-        recipient: row.recipient,
-        ok: false,
-        state: 'reserved',
-        error: {
-          code: 'OUTCOME_UNKNOWN',
-          message: 'email action remains reserved; inspect email logs before retrying',
-        },
-      });
-    }
-    return emailActionResponse(context, admission.operationId, deliveries);
-  }
+  const { admission, deliveries } = admitted;
   const allowed = admission.recipients
     .filter((r) => r.state === 'reserved')
     .map((r) => r.recipient);
@@ -967,7 +890,6 @@ app.post('/send', async (context) => {
     }
   }
 
-  // Record the per-recipient outcome.
   logSend(projectId, requestId, deliveries);
 
   // Return each outcome; an unknown provider result must be inspected before retry.
@@ -1222,24 +1144,11 @@ async function sendViaCustomDomain(
       403,
     );
   }
-  const fromLower = from.toLowerCase();
 
   // The MIME From address must match the envelope sender before admission.
-  const mimeFrom = readMimeFromAddrSpec(raw);
-  if (!mimeFrom.ok || mimeFrom.addrSpec.toLowerCase() !== fromLower) {
-    const detail = mimeFrom.ok
-      ? 'the From header address does not match the envelope sender'
-      : MIME_FROM_REFUSALS[mimeFrom.reason];
-    return context.json(
-      {
-        ok: false,
-        error: {
-          code: 'INVALID_FROM',
-          message: `mime From must be the envelope sender ${from}: ${detail}`,
-        },
-      },
-      403,
-    );
+  const mimeFromRefusal = refuseMimeFromMismatch(context, raw, from);
+  if (mimeFromRefusal) {
+    return mimeFromRefusal;
   }
 
   // send_raw carries the MIME as a JSON string. Decode FATALLY: the
@@ -1256,76 +1165,18 @@ async function sendViaCustomDomain(
     );
   }
 
-  let admission;
-  try {
-    admission = await admitEmail(
-      context.env,
-      {
-        projectId,
-        kind: 'direct',
-        key: operationKey,
-        digest: await emailPayloadDigest('direct', from, recipients, raw),
-        from,
-        recipients,
-        transport: 'send_raw',
-      },
-      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
-    );
-  } catch (error) {
-    const conflict = error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT';
-    return context.json(
-      {
-        ok: false,
-        error: {
-          code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'UPSTREAM_ERROR',
-          message: conflict
-            ? 'idempotency key has different content'
-            : 'email admission unavailable',
-        },
-      },
-      conflict ? 409 : 503,
-    );
+  const admitted = await admitDirectSend(context, sendDeadline, {
+    projectId,
+    operationKey,
+    from,
+    recipients,
+    raw,
+    transport: 'send_raw',
+  });
+  if (admitted instanceof Response) {
+    return admitted;
   }
-  const deliveries: Array<RecipientResult> = admission.recipients
-    .filter((r) => r.state !== 'reserved')
-    .map((r) => ({
-      recipient: r.recipient,
-      ok: r.state === 'provider_accepted',
-      state: r.state,
-      messageId: r.providerReference ?? undefined,
-      error:
-        r.state === 'provider_accepted'
-          ? undefined
-          : {
-              code:
-                r.errorCode ??
-                (r.state === 'outcome_unknown' || r.state === 'attempt_started'
-                  ? 'OUTCOME_UNKNOWN'
-                  : r.state === 'cancelled'
-                    ? 'UPSTREAM_ERROR'
-                    : 'UNVERIFIED_DESTINATION'),
-              message:
-                r.state === 'outcome_unknown' || r.state === 'attempt_started'
-                  ? 'provider outcome unknown; inspect email logs before retrying'
-                  : r.state === 'cancelled'
-                    ? 'email attempt was cancelled before provider submission'
-                    : 'recipient was not admitted',
-            },
-    }));
-  if (admission.replay) {
-    for (const row of admission.recipients.filter((r) => r.state === 'reserved')) {
-      deliveries.push({
-        recipient: row.recipient,
-        ok: false,
-        state: 'reserved',
-        error: {
-          code: 'OUTCOME_UNKNOWN',
-          message: 'email action remains reserved; inspect email logs before retrying',
-        },
-      });
-    }
-    return emailActionResponse(context, admission.operationId, deliveries);
-  }
+  const { admission, deliveries } = admitted;
   recipients = admission.recipients.filter((r) => r.state === 'reserved').map((r) => r.recipient);
   if (recipients.length === 0) {
     return emailActionResponse(context, admission.operationId, deliveries);
@@ -1575,8 +1426,7 @@ async function sendViaCustomDomain(
 
 /**
  * Inbound delivery log. Inlined here rather than via service binding because
- * the email-router lives in this same worker; routing through env.API would
- * 404 (and earlier did so silently).
+ * the email-router lives in this same worker; routing through env.API would 404.
  */
 export async function recordInboundDelivery(
   projectId: string,
@@ -1597,6 +1447,121 @@ interface RecipientResult {
   state?: string;
   messageId?: string;
   error?: { code: string; message: string };
+}
+
+/** Refuse a message whose MIME `From:` is not exactly the envelope sender. */
+function refuseMimeFromMismatch(
+  context: Context<ProxyEnv>,
+  raw: Uint8Array,
+  from: string,
+): Response | null {
+  const mimeFrom = readMimeFromAddrSpec(raw);
+  if (mimeFrom.ok && mimeFrom.addrSpec.toLowerCase() === from.toLowerCase()) {
+    return null;
+  }
+  const detail = mimeFrom.ok
+    ? 'the From header address does not match the envelope sender'
+    : MIME_FROM_REFUSALS[mimeFrom.reason];
+  return context.json(
+    {
+      ok: false,
+      error: {
+        code: 'INVALID_FROM',
+        message: `mime From must be the envelope sender ${from}: ${detail}`,
+      },
+    },
+    403,
+  );
+}
+
+/**
+ * Admit a direct send. Rows that already have an outcome become deliveries;
+ * a replay answers immediately with the recorded outcome.
+ */
+async function admitDirectSend(
+  context: Context<ProxyEnv>,
+  sendDeadline: EmailProviderDeadline,
+  input: {
+    projectId: string;
+    operationKey: string;
+    from: string;
+    recipients: Array<string>;
+    raw: Uint8Array;
+    transport: 'binding' | 'send_raw';
+  },
+): Promise<Response | { admission: Admission; deliveries: Array<RecipientResult> }> {
+  const { projectId, operationKey, from, recipients, raw, transport } = input;
+  let admission;
+  try {
+    admission = await admitEmail(
+      context.env,
+      {
+        projectId,
+        kind: 'direct',
+        key: operationKey,
+        digest: await emailPayloadDigest('direct', from, recipients, raw),
+        from,
+        recipients,
+        transport,
+      },
+      sendDeadline.remainingMs(EMAIL_SEND_FINALIZATION_MARGIN_MS),
+    );
+  } catch (error) {
+    const conflict = error instanceof Error && error.message === 'IDEMPOTENCY_CONFLICT';
+    return context.json(
+      {
+        ok: false,
+        error: {
+          code: conflict ? 'IDEMPOTENCY_CONFLICT' : 'UPSTREAM_ERROR',
+          message: conflict
+            ? 'idempotency key has different content'
+            : 'email admission unavailable',
+        },
+      },
+      conflict ? 409 : 503,
+    );
+  }
+  const deliveries: Array<RecipientResult> = admission.recipients
+    .filter((r) => r.state !== 'reserved')
+    .map((r) => ({
+      recipient: r.recipient,
+      ok: r.state === 'provider_accepted',
+      state: r.state,
+      messageId: r.providerReference ?? undefined,
+      error:
+        r.state === 'provider_accepted'
+          ? undefined
+          : {
+              code:
+                r.errorCode ??
+                (r.state === 'outcome_unknown' || r.state === 'attempt_started'
+                  ? 'OUTCOME_UNKNOWN'
+                  : r.state === 'cancelled'
+                    ? 'UPSTREAM_ERROR'
+                    : 'UNVERIFIED_DESTINATION'),
+              message:
+                r.state === 'outcome_unknown' || r.state === 'attempt_started'
+                  ? 'provider outcome unknown; inspect email logs before retrying'
+                  : r.state === 'cancelled'
+                    ? 'email attempt was cancelled before provider submission'
+                    : 'recipient was not admitted',
+            },
+    }));
+  if (admission.replay) {
+    for (const row of admission.recipients.filter((r) => r.state === 'reserved')) {
+      deliveries.push({
+        recipient: row.recipient,
+        ok: false,
+        state: 'reserved',
+        error: {
+          code: 'OUTCOME_UNKNOWN',
+          message: 'email action remains reserved; inspect email logs before retrying',
+        },
+      });
+    }
+    return emailActionResponse(context, admission.operationId, deliveries);
+  }
+  return { admission, deliveries };
 }
 
 /**
@@ -1670,8 +1635,6 @@ function logSend(projectId: string, requestId: string, deliveries: Array<Recipie
 }
 
 function base64Decode(b64: string): Uint8Array {
-  // workerd `atob` is fast for body-sized payloads; fall back to manual
-  // decode only when needed.
   const binary = atob(b64);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {

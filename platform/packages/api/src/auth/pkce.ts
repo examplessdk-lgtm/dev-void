@@ -1,7 +1,5 @@
 // PKCE (RFC 7636) primitives shared by the CLI login flow (`routes/auth.ts`)
-// and the GitHub-identity link flow (`routes/github.ts`). Extracted here as a
-// pure move from `routes/auth.ts` — no behavior change — so both routers depend
-// on one implementation.
+// and the GitHub-identity link flow (`routes/github.ts`).
 
 /** The only `code_challenge_method` we accept: SHA-256 → base64url. */
 export const CLI_CODE_CHALLENGE_METHOD = 'S256';

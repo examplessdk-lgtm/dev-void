@@ -136,39 +136,21 @@ function adjustCspValue(value: string, nonce: string): string {
     return { name: name.toLowerCase(), originalName: name, sources };
   });
 
-  const styleElem = parsed.find((directive) => directive.name === 'style-src-elem');
-  if (styleElem) {
-    if (!styleElem.sources.some((source) => hasCompatibleStyleSource(source, nonceSource))) {
-      styleElem.sources.push(nonceSource);
-    }
-    return parsed
-      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
-      .join('; ');
-  }
-
-  const style = parsed.find((directive) => directive.name === 'style-src');
+  const style =
+    parsed.find((directive) => directive.name === 'style-src-elem') ??
+    parsed.find((directive) => directive.name === 'style-src');
   if (style) {
     if (!style.sources.some((source) => hasCompatibleStyleSource(source, nonceSource))) {
       style.sources.push(nonceSource);
     }
-    return parsed
-      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
-      .join('; ');
-  }
-
-  const defaultSrc = parsed.find((directive) => directive.name === 'default-src');
-  if (defaultSrc) {
+  } else {
+    const defaultSrc = parsed.find((directive) => directive.name === 'default-src');
     parsed.push({
       name: 'style-src',
       originalName: 'style-src',
-      sources: [...defaultSrc.sources, nonceSource],
+      sources: [...(defaultSrc?.sources ?? []), nonceSource],
     });
-    return parsed
-      .map((directive) => [directive.originalName, ...directive.sources].join(' '))
-      .join('; ');
   }
-
-  parsed.push({ name: 'style-src', originalName: 'style-src', sources: [nonceSource] });
   return parsed
     .map((directive) => [directive.originalName, ...directive.sources].join(' '))
     .join('; ');
@@ -243,6 +225,22 @@ function renderClientOnlyPage(
   ${assetTags.body}
 </body>
 </html>`;
+}
+
+async function renderPageHtml(
+  c: CloudContext,
+  pageObj: PageObject,
+  componentId: string,
+  renderMode: PageRenderMode,
+  renderFn: RenderPageWithMetadata,
+  getAssetTags: GetAssetTags,
+): Promise<{ html: PageRenderResult; assetTags: AssetTags }> {
+  const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
+  const html =
+    renderMode === 'client'
+      ? renderClientOnlyPage(pageObj, assetTags, renderFn)
+      : await renderWithAssetTags(renderFn, pageObj, assetTags);
+  return { html, assetTags };
 }
 
 function pageJsonResponse(c: CloudContext, pageObj: PageObject): Response {
@@ -376,12 +374,7 @@ function streamDeferredResponse(
     writer.abort(error).catch(() => {});
   });
 
-  return new Response(readable, {
-    headers: adjustDevCssCsp(
-      pageResponseHeaders(c, { 'content-type': contentType, ...POWERED_BY }),
-      assetTags?.devCssNonce,
-    ),
-  });
+  return renderedResponse(c, readable, contentType, assetTags);
 }
 
 /** Handle GET page request — run handler, return page object or SSR HTML */
@@ -419,22 +412,18 @@ export async function handlePageGet(
     props = await extractProps(result);
   }
 
-  // Resolve head metadata
   const pageHead = headFn ? headFn(c, props) : undefined;
   const middlewareHead = c.get('headDefaults') as HeadDescriptor | undefined;
   const head = resolveHead(configHead, middlewareHead, pageHead);
 
-  // Separate immediate props from deferred sentinels
   const { immediateProps, deferredMap } = separateDeferred(props);
   const hasDeferred = Object.keys(deferredMap).length > 0;
 
   // Build key-to-group mapping for the client
   const deferredKeys: Record<string, string> = {};
-  if (hasDeferred) {
-    for (const [group, { keys }] of Object.entries(deferredMap)) {
-      for (const key of keys) {
-        deferredKeys[key] = group;
-      }
+  for (const [group, { keys }] of Object.entries(deferredMap)) {
+    for (const key of keys) {
+      deferredKeys[key] = group;
     }
   }
 
@@ -502,11 +491,14 @@ export async function handlePageGet(
     );
   }
 
-  const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-  const html =
-    renderMode === 'client'
-      ? renderClientOnlyPage(pageObj, assetTags, renderFn)
-      : await renderWithAssetTags(renderFn, pageObj, assetTags);
+  const { html, assetTags } = await renderPageHtml(
+    c,
+    pageObj,
+    componentId,
+    renderMode,
+    renderFn,
+    getAssetTags,
+  );
 
   if (!hasDeferred) {
     return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
@@ -584,26 +576,37 @@ export async function handlePageMutation(
     };
   }
 
+  /** Re-run the GET loader and respond with the page, optionally carrying validation errors. */
+  async function respondWithPage(errors: Record<string, string> | null): Promise<Response> {
+    const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
+    const pageObj = buildMutationPageObj(stripDeferred(rawProps), errors);
+    if (isPagesRequest(c)) {
+      return pageJsonResponse(c, pageObj);
+    }
+    const { html, assetTags } = await renderPageHtml(
+      c,
+      pageObj,
+      componentId,
+      renderMode,
+      renderFn,
+      getAssetTags,
+    );
+    return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
+  }
+
+  function respondWithErrors(errors: Record<string, string>): Promise<Response> {
+    if (renderMode === 'island') {
+      return Promise.resolve(Response.json({ errors }, { status: 422 }));
+    }
+    return respondWithPage(errors);
+  }
+
   let result: unknown;
   try {
     result = mutationHandler ? await mutationHandler(c) : undefined;
   } catch (e) {
     if (e instanceof ValidationError) {
-      if (renderMode === 'island') {
-        return Response.json({ errors: e.errors }, { status: 422 });
-      }
-      const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
-      const props = stripDeferred(rawProps);
-      const pageObj = buildMutationPageObj(props, e.errors);
-      if (isPagesRequest(c)) {
-        return pageJsonResponse(c, pageObj);
-      }
-      const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-      const html =
-        renderMode === 'client'
-          ? renderClientOnlyPage(pageObj, assetTags, renderFn)
-          : await renderWithAssetTags(renderFn, pageObj, assetTags);
-      return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
+      return respondWithErrors(e.errors);
     }
     throw e;
   }
@@ -617,23 +620,7 @@ export async function handlePageMutation(
     }
     // withValidator 400
     if (status === 400) {
-      const body = await result.json();
-      const errors = flattenValidationErrors(body);
-      if (renderMode === 'island') {
-        return Response.json({ errors }, { status: 422 });
-      }
-      const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
-      const props = stripDeferred(rawProps);
-      const pageObj = buildMutationPageObj(props, errors);
-      if (isPagesRequest(c)) {
-        return pageJsonResponse(c, pageObj);
-      }
-      const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-      const html =
-        renderMode === 'client'
-          ? renderClientOnlyPage(pageObj, assetTags, renderFn)
-          : await renderWithAssetTags(renderFn, pageObj, assetTags);
-      return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
+      return respondWithErrors(flattenValidationErrors(await result.json()));
     }
     // 204 (void from withValidator) — fall through to re-run GET
     if (status !== 204) {
@@ -645,16 +632,5 @@ export async function handlePageMutation(
   if (renderMode === 'island') {
     return Response.json({ success: true });
   }
-  const rawProps = getHandler ? await extractProps(await getHandler(c)) : {};
-  const props = stripDeferred(rawProps);
-  const pageObj = buildMutationPageObj(props, null);
-  if (isPagesRequest(c)) {
-    return pageJsonResponse(c, pageObj);
-  }
-  const assetTags = prepareAssetTags(await getAssetTags(c.req.raw, c.env, componentId));
-  const html =
-    renderMode === 'client'
-      ? renderClientOnlyPage(pageObj, assetTags, renderFn)
-      : await renderWithAssetTags(renderFn, pageObj, assetTags);
-  return renderedResponse(c, html, 'text/html; charset=utf-8', assetTags);
+  return respondWithPage(null);
 }

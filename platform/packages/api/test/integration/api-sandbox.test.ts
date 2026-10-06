@@ -134,7 +134,7 @@ async function listR2Keys(prefix: string): Promise<Array<string>> {
 
 describe('per-deploy sandbox integration', () => {
   // ----------------------------------------------------------------------
-  // 1. First sandbox deploy
+  // First sandbox deploy
   // ----------------------------------------------------------------------
   it('provisions a trusted controller and gives the tenant only its restricted service', async () => {
     const user = await createTestUser(env.db);
@@ -213,7 +213,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 2. Sandbox redeploy creates fresh user worker + container with NEW namespace
+  // Sandbox redeploy creates fresh user worker + container with NEW namespace
   // ----------------------------------------------------------------------
   it('sandbox redeploy: brand-new user worker name, brand-new namespace_id, brand-new container app (no namespace preservation across deploys)', async () => {
     const user = await createTestUser(env.db, 'sb-rd-user', 'github', undefined, 'solo');
@@ -266,7 +266,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 4. Static-only deploy doesn't write bundle
+  // Static-only deploy doesn't write bundle
   // ----------------------------------------------------------------------
   it('static-only deploy does NOT write a worker bundle (bundle_stored stays false, no R2 objects)', async () => {
     const user = await createTestUser(env.db);
@@ -331,7 +331,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 5. Retention eviction
+  // Retention eviction
   // ----------------------------------------------------------------------
   it('retention eviction: oldest sandbox deploy has its user worker, container app, AND R2 bundle deleted when retention limit is exceeded', async () => {
     // Free plan: retainedDeployments=1 — second deploy evicts the first.
@@ -418,28 +418,16 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 6. Pre-routing failure: catch deletes user worker AND container
+  // Pre-routing failure: catch deletes user worker AND container
   // ----------------------------------------------------------------------
   it('pre-routing failure: outer catch deletes the user worker AND the per-deploy container app (no orphans)', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'sb-prefail');
 
-    // Make CF reject the worker secret PUT to fail BETWEEN the user worker
-    // PUT (and container POST) AND routing flip. This forces the
-    // `routingSwitched=false` cleanup branch.
-    //
-    // Actually, an easier approach: stub `c.env.DISPATCH.get(...)` so the
-    // readiness probe times out / fails. But the readiness probe only runs
-    // when there are migrations (`manifest.migrations.pending > 0`). For a
-    // sandbox-only deploy, the failure point we need is between the
-    // container POST and the routing flip. Make `setWorkerSecret` fail —
-    // it runs as part of secret upload AFTER the user worker PUT and
-    // sandbox container POST. (No, that runs BEFORE worker PUT.)
-    //
-    // Simpler: make the slug ROUTING.put fail. We spy on env.ROUTING.put
-    // and reject when key === project.slug, which is exactly the routing
-    // flip step (`routingSwitched` is set true RIGHT AFTER that put, so a
-    // failing put aborts before `routingSwitched=true`).
+    // Fail BETWEEN the user worker PUT (and container POST) AND the routing
+    // flip to force the `routingSwitched=false` cleanup branch: reject the
+    // slug ROUTING.put, which is exactly the routing flip step
+    // (`routingSwitched` is set true RIGHT AFTER that put).
     const originalPut = env.ROUTING.put.bind(env.ROUTING);
     const putSpy = vi.spyOn(env.ROUTING, 'put').mockImplementation((async (
       key: string,
@@ -498,7 +486,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 7. Post-routing teardown race: rollback branch deletes the container app
+  // Post-routing teardown race: rollback branch deletes the container app
   // ----------------------------------------------------------------------
   it('post-routing teardown race: when status flips to deleting after the slug routing PUT, the rollback branch deletes the user worker AND the per-deploy container app', async () => {
     const user = await createTestUser(env.db);
@@ -526,9 +514,9 @@ describe('per-deploy sandbox integration', () => {
       // commits and before the deploy's finalize transaction opens, so the
       // teardown writes can be awaited here: no transaction is open, nothing
       // deadlocks, and the flip is guaranteed to land before the finalize read.
-      // Queuing them instead (the earlier shape) only ordered them in PGlite's
-      // favour — on a pooled Postgres the flip opened a new session and lost the
-      // race against the deploy's warm connection, which committed live.
+      // Queuing them instead only orders them in PGlite's favour — on a pooled
+      // Postgres the flip opens a new session and loses the race against the
+      // deploy's warm connection, which commits live.
       if (key.startsWith('cutover-ready:') && !teardownTriggered) {
         teardownTriggered = true;
         await env.db
@@ -553,10 +541,9 @@ describe('per-deploy sandbox integration', () => {
     );
     expect(errorEvent).toBeDefined();
 
-    // Teardown's deletion remains authoritative. Before the compensation
-    // fence, restoreTrackedRouting() put `previousRouting` back here and a
-    // deleted project (or a later tenant reusing the slug) could be served by
-    // dispatch without consulting PostgreSQL.
+    // Teardown's deletion remains authoritative: the compensation must not put
+    // `previousRouting` back, or a deleted project (or a later tenant reusing
+    // the slug) could be served by dispatch without consulting PostgreSQL.
     expect(await env.ROUTING.get(project.slug)).toBeNull();
 
     putSpy.mockRestore();
@@ -589,7 +576,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 8. Mock regression: cross-script DO binding to non-existent script
+  // Mock CF: cross-script DO binding to non-existent script
   // ----------------------------------------------------------------------
   it('mock regression: cross-script DO binding referencing a non-existent dispatch-namespace script returns CF error (validates the architectural constraint)', async () => {
     mockCfApi();
@@ -634,12 +621,9 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 8b. Mock regression: cross-script DO binding to an EXISTING dispatch
-  // script is also rejected. CF rejects ALL cross-script DO bindings between
-  // dispatch namespace scripts; the mock used to allow this when the target
-  // existed (and was container-enabled), letting some bad architectures slip
-  // through tests. The unconditional rejection is the closest analog to real
-  // CF behavior.
+  // Mock CF: cross-script DO binding to an EXISTING dispatch script is also
+  // rejected. CF rejects ALL cross-script DO bindings between dispatch
+  // namespace scripts, even when the target exists and is container-enabled.
   // ----------------------------------------------------------------------
   it('mock regression: cross-script DO binding to an EXISTING dispatch-namespace script is also rejected with 10061', async () => {
     const cf = mockCfApi();
@@ -689,7 +673,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 9. Mock regression: 2nd container POST for same namespace_id returns 1608
+  // Mock CF: 2nd container POST for same namespace_id returns 1608
   // ----------------------------------------------------------------------
   it('mock regression: 2nd container POST for the same namespace_id returns CF code 1608 DURABLE_OBJECT_ALREADY_HAS_APPLICATION', async () => {
     const cf = mockCfApi();
@@ -723,7 +707,7 @@ describe('per-deploy sandbox integration', () => {
   });
 
   // ----------------------------------------------------------------------
-  // 10. Project teardown deletes all retained deployments' container apps
+  // Project teardown deletes all retained deployments' container apps
   // ----------------------------------------------------------------------
   it('project teardown deletes per-deploy container apps for ALL retained deployments via deterministic-name orphan recovery', async () => {
     skipOrphanSweepDelay();

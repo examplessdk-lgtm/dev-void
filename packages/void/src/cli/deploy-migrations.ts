@@ -14,29 +14,21 @@ import {
   type TableInfoRow,
   type DeployWranglerRun,
 } from './deploy-types.ts';
-// The provision module pulls in the whole-provision cross-process lock
-// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
-// `process.reallyExit` and installs exit handlers the moment it is imported. An
-// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
-// must not pay that side effect. Keep ONLY erasable `import type` at module scope
-// and load the runtime values with a DYNAMIC `import()` inside the fork
-// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
-// deploy) never evaluates the provision lifecycle.
+// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { ProvisionDriftEntry } from './provision.ts';
 
 /**
  * Apply the checked-in migrations to an in-memory SQLite database (`node:sqlite`, a repo
  * dependency — the same driver `auth/node.ts` uses) and assert the effective schema contains
- * every REQUIRED auth table, its columns, AND the constraints that carry correctness. This
- * replaces a raw `CREATE TABLE` token search (defeated by comments/strings/renames/plugin
- * tables) with the real POST-migration schema — the identical thing wrangler will apply to
- * remote D1 (SQLite).
+ * every REQUIRED auth table, its columns, AND the constraints that carry correctness. It reads
+ * the real POST-migration schema (a token search is defeated by comments/strings/renames/plugin
+ * tables) — the identical thing wrangler will apply to remote D1 (SQLite).
  *
  * Names alone are not enough: Void ships no auth migration scaffolder, so users hand-write
  * `db/schema.ts` and run `void db generate`, where Drizzle's `.unique()` and `.references()`
  * are both opt-in. A migration set with every right NAME but no unique index on `user.email`
  * and no `session.userId` foreign key is a materially weaker schema than the one the managed
- * path builds (`applySqliteAuthMigrations`), and it used to sail through this gate.
+ * path builds (`applySqliteAuthMigrations`), so this gate rejects it.
  *
  * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `required`
  * (NOT NULL), `unique: true`, and `references` (parent table + column — including that an
@@ -360,11 +352,11 @@ export async function assertMigrationsProduceAuthSchema(
       // re-deriving its parent-key rules here. Those rules are subtler than they look: a
       // parent key must be a PRIMARY KEY, or a UNIQUE index whose columns AND COLLATING
       // SEQUENCES match the reference, and an omitted target column resolves only to the
-      // parent's PRIMARY KEY. Hand-modelling them has produced a green deploy on a schema
-      // SQLite rejects more than once (an ordinary parent column; a UNIQUE-only parent under
-      // the implicit shorthand; a unique index declared `COLLATE NOCASE` over a plainly
-      // declared column). `PRAGMA foreign_key_check` applies SQLite's own rule, so a case
-      // this file has not anticipated can no longer pass.
+      // parent's PRIMARY KEY. Hand-modelling them easily lets a schema SQLite rejects pass
+      // (an ordinary parent column; a UNIQUE-only parent under the implicit shorthand; a
+      // unique index declared `COLLATE NOCASE` over a plainly declared column).
+      // `PRAGMA foreign_key_check` applies SQLite's own rule, so a case this file has not
+      // anticipated cannot pass.
       //
       // It reports a STRUCTURAL mismatch by THROWING (`foreign key mismatch - "child"
       // referencing "parent"`), not by returning rows; returned rows mean orphaned DATA,
@@ -672,8 +664,8 @@ function listWranglerMigrationFiles(directory: string, pattern: string): Array<s
  * divergent content would otherwise be applied UNVALIDATED; and (2) ORDER parity — the numeric
  * order wrangler applies must equal Void's gated order position-for-position, so the local
  * runner + deploy gates validate the exact order remote D1 receives (an unpadded prefix like
- * `2_` vs `10_` sorts differently lexicographically-vs-numerically and diverges — reject). A
- * custom patterns are accepted only when their exact result matches that gated set. Exported for
+ * `2_` vs `10_` sorts differently lexicographically-vs-numerically and diverges — reject).
+ * Custom patterns are accepted only when their exact result matches that gated set. Exported for
  * unit testing.
  */
 export async function checkWranglerMigrationApplySet(
@@ -772,7 +764,6 @@ export async function applyAndVerifyRemoteD1Migrations(
     if (!assertUploaderStillPinned()) {
       return false;
     }
-    // 9a. Apply.
     const migrate = await Promise.resolve(
       runWrangler(
         { type: 'd1.migrations.apply', database: d1MigrateToken, configPath },

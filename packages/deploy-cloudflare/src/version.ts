@@ -6,7 +6,13 @@ import { isRecord } from '@void/deploy-core';
 import { join } from 'pathslash';
 import { parseRootWranglerConfig } from './config.ts';
 import { cloudflareCommandDiagnostic } from './diagnostics.ts';
-import type { CloudflareCommandResult, CloudflareCommandRunner } from './execute.ts';
+import {
+  isCleanCommandExit,
+  isCompletedCommand,
+  isWorkerNotFound,
+  type CloudflareCommandResult,
+  type CloudflareCommandRunner,
+} from './execute.ts';
 import type { CloudflareUploadResult } from './operations.ts';
 import { isVoidSecretOnlyDraft, isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
@@ -408,6 +414,15 @@ export async function stabilizeCloudflareVersionTriggers(options: {
   return { ok: false, reason: 'status-failed' };
 }
 
+function triggerRepairOutcome(
+  result: CloudflareTriggerStabilization,
+): 'succeeded' | 'failed' | 'unavailable' {
+  if (result.ok) {
+    return 'succeeded';
+  }
+  return result.reason === 'metadata-unavailable' ? 'unavailable' : 'failed';
+}
+
 function mergeTriggerCleanupBaselines(
   ...configs: Array<CloudflareTriggerConfig | undefined>
 ): CloudflareTriggerConfig {
@@ -590,6 +605,17 @@ function triggerConfigFromWrangler(config: Record<string, unknown>): CloudflareT
   };
 }
 
+/** Trigger state recorded by a schema-2 version message, otherwise read from local config. */
+function desiredTriggerConfigFor(
+  metadata: CloudflareVersionMetadata | null,
+  configPath: string | undefined,
+): CloudflareTriggerConfig {
+  if (metadata?.schema === 2) {
+    return metadata.triggerConfig;
+  }
+  return configPath ? readCloudflareTriggerConfig(configPath) : triggerConfigFromWrangler({});
+}
+
 /** A well-formed `addresses` array, or `undefined` when the field is absent or malformed. */
 function readEmailAddresses(value: unknown): ReadonlyArray<string> | undefined {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
@@ -675,17 +701,11 @@ function triggerWranglerConfig(
     config.routes = [...triggerConfig.routes];
   }
   // Only a snapshot that carried `addresses` may reach Wrangler's Email Routing plan: an
-  // absent key skips the plan, which is what a version deployed without email must do.
-  // That holds in both directions of a rollback — the snapshot being LEFT lends nothing
-  // here — so rolling back from an email-enabled version to one recorded without the key
-  // (a pre-`addresses` snapshot, or a deploy that had no handlers) leaves the rules where
-  // they are, routed to a Worker that no longer exports `email()`. Do not encode that
-  // transition as `[]`: wrangler plans the deletion of every rule this Worker owns on `[]`,
-  // a destructive plan it confirms (default No) in a TTY and refuses in CI, and a
-  // non-zero `triggers deploy` here is `triggers-failed`, which the rollback compensates
-  // by restoring the version it just left. Whether a rollback should touch Email Routing
-  // at all is a product call (design doc 0078, decision 13); this code replays the
-  // snapshot verbatim.
+  // absent key skips the plan, so rolling back to a version recorded without the key leaves
+  // existing rules in place. Never send `[]` for that case: Wrangler plans deletion of every
+  // rule this Worker owns, confirms it in a TTY and refuses it in CI, which fails the rollback
+  // as `triggers-failed`. Whether a rollback should touch Email Routing is a product call
+  // (design doc 0078, decision 13); this code replays the snapshot verbatim.
   if (triggerConfig.addresses !== undefined) {
     config.addresses = [...triggerConfig.addresses];
   }
@@ -966,12 +986,7 @@ async function activateCloudflareVersionWithSecretsFile(
     inheritanceBaseline = recent;
   }
   const desiredMetadata = parseCloudflareVersionMessage(options.message);
-  let desiredTriggerConfig =
-    desiredMetadata?.schema === 2
-      ? desiredMetadata.triggerConfig
-      : options.configPath
-        ? readCloudflareTriggerConfig(options.configPath)
-        : triggerConfigFromWrangler({});
+  let desiredTriggerConfig = desiredTriggerConfigFor(desiredMetadata, options.configPath);
   let previousVersion =
     previousVersionId && desiredMetadata?.schema === 2
       ? await readCloudflareVersionInspection(
@@ -1182,19 +1197,17 @@ async function activateCloudflareVersionWithSecretsFile(
     }
   }
   options.onProgress?.('Uploading the Worker and assets...');
-  const upload = await Promise.resolve(
-    options.runWrangler(
-      {
-        type: 'versions.upload',
-        configPath,
-        workerName: options.workerName,
-        message,
-        secretsFilePath: options.candidateSecretsFilePath,
-        assetsDirectory: options.assetsDirectoryOverride,
-        previewAlias: alias,
-      },
-      { capture: true },
-    ),
+  const upload = await options.runWrangler(
+    {
+      type: 'versions.upload',
+      configPath,
+      workerName: options.workerName,
+      message,
+      secretsFilePath: options.candidateSecretsFilePath,
+      assetsDirectory: options.assetsDirectoryOverride,
+      previewAlias: alias,
+    },
+    { capture: true },
   );
   if (!isCleanCommandExit(upload)) {
     const cloudflareErrorCode = upload.errorCode;
@@ -1335,59 +1348,34 @@ async function activateCloudflareVersionWithSecretsFile(
     if (fallbackSubdomain && fallbackSubdomain === options.readinessHeadersWorkersDevSubdomain) {
       authenticatedWorkersDevSubdomain = fallbackSubdomain;
     }
-    if (!options.verifyUploader()) {
-      return {
-        ok: false,
-        reason: 'uploader-changed',
-        versionId,
-        previousVersionId: previous.versionId,
-        rollback: 'not-needed',
-      };
-    }
-    const stagingOwnerFailure = await verifyReadinessStagingOwner(
+    const stagingFailure = await stageCandidateForReadiness(
       options,
       configPath,
       previous.versionId,
       versionId,
-    );
-    if (stagingOwnerFailure) {
-      return stagingOwnerFailure;
-    }
-    const staged = await deployVersionPercentages(
-      options,
-      configPath,
-      [`${previous.versionId}@100`, `${versionId}@0`],
       message,
     );
-    if (!isCleanCommandExit(staged)) {
-      const cloudflareErrorCode = staged.errorCode;
-      return {
-        ok: false,
-        reason: 'readiness-staging-failed',
-        status: staged.status,
-        ...commandDiagnosticFields(staged),
-        ...(cloudflareErrorCode === undefined ? {} : { cloudflareErrorCode }),
-        versionId,
-        previousVersionId: previous.versionId,
-        rollback: 'not-needed',
-      };
+    if (stagingFailure) {
+      return stagingFailure;
     }
     stagedVersionOverride = true;
   }
 
+  const probe = (url: string) =>
+    probeReadiness(
+      `${url.replace(/\/$/, '')}/__void/ready`,
+      options.workerName,
+      readinessUsesCustomRoute ? undefined : options.readinessHeaders,
+      authenticatedWorkersDevSubdomain,
+      stagedVersionOverride ? versionId : undefined,
+      options.fetch ?? globalThis.fetch,
+      options.sleep ?? defaultSleep,
+      options.readinessAttempts ?? 6,
+      Number.POSITIVE_INFINITY,
+      options.requireVersionMetadata ? versionId : undefined,
+    );
   options.onProgress?.('Waiting for the Worker to become ready...');
-  let ready = await probeReadiness(
-    `${readinessUrl.replace(/\/$/, '')}/__void/ready`,
-    options.workerName,
-    readinessUsesCustomRoute ? undefined : options.readinessHeaders,
-    authenticatedWorkersDevSubdomain,
-    stagedVersionOverride ? versionId : undefined,
-    options.fetch ?? globalThis.fetch,
-    options.sleep ?? defaultSleep,
-    options.readinessAttempts ?? 6,
-    Number.POSITIVE_INFINITY,
-    options.requireVersionMetadata ? versionId : undefined,
-  );
+  let ready = await probe(readinessUrl);
 
   // Account-wide Access default-deny commonly blocks Wrangler's generated preview alias even
   // when the stable `<worker>.<account>.workers.dev` destination has an application admitting the
@@ -1409,59 +1397,21 @@ async function activateCloudflareVersionWithSecretsFile(
         )
       : customRouteReadinessUrl(desiredTriggerConfig.routes);
     if (stableReadinessUrl && stableReadinessUrl !== readinessUrl) {
-      if (!options.verifyUploader()) {
-        return {
-          ok: false,
-          reason: 'uploader-changed',
-          versionId,
-          previousVersionId: previous.versionId,
-          rollback: 'not-needed',
-        };
-      }
-      const stagingOwnerFailure = await verifyReadinessStagingOwner(
+      const stagingFailure = await stageCandidateForReadiness(
         options,
         configPath,
         previous.versionId,
         versionId,
-      );
-      if (stagingOwnerFailure) {
-        return stagingOwnerFailure;
-      }
-      const staged = await deployVersionPercentages(
-        options,
-        configPath,
-        [`${previous.versionId}@100`, `${versionId}@0`],
         message,
       );
-      if (!isCleanCommandExit(staged)) {
-        const cloudflareErrorCode = staged.errorCode;
-        return {
-          ok: false,
-          reason: 'readiness-staging-failed',
-          status: staged.status,
-          ...commandDiagnosticFields(staged),
-          ...(cloudflareErrorCode === undefined ? {} : { cloudflareErrorCode }),
-          versionId,
-          previousVersionId: previous.versionId,
-          rollback: 'not-needed',
-        };
+      if (stagingFailure) {
+        return stagingFailure;
       }
       readinessUrl = stableReadinessUrl;
       authenticatedWorkersDevSubdomain = extractWorkersDevSubdomain(stableReadinessUrl);
       readinessUsesCustomRoute = !desiredTriggerConfig.workers_dev;
       stagedVersionOverride = true;
-      ready = await probeReadiness(
-        `${readinessUrl.replace(/\/$/, '')}/__void/ready`,
-        options.workerName,
-        readinessUsesCustomRoute ? undefined : options.readinessHeaders,
-        authenticatedWorkersDevSubdomain,
-        versionId,
-        options.fetch ?? globalThis.fetch,
-        options.sleep ?? defaultSleep,
-        options.readinessAttempts ?? 6,
-        Number.POSITIVE_INFINITY,
-        options.requireVersionMetadata ? versionId : undefined,
-      );
+      ready = await probe(readinessUrl);
     }
   }
   if (ready !== 'ready') {
@@ -1632,7 +1582,7 @@ async function activateCloudflareVersionWithSecretsFile(
         previousVersionId: previous.versionId,
         activeVersionId: triggers.activeVersionId,
         rollback: 'not-needed',
-        triggerRepair: triggers.reason === 'metadata-unavailable' ? 'unavailable' : 'failed',
+        triggerRepair: triggerRepairOutcome(triggers),
       };
     }
     if (!triggers.activeVersionId) {
@@ -1676,11 +1626,7 @@ async function activateCloudflareVersionWithSecretsFile(
         previousVersionId: previous.versionId,
         activeVersionId: repair.activeVersionId ?? ownerBeforeCompensation.versionId,
         rollback: 'not-needed',
-        triggerRepair: repair.ok
-          ? 'succeeded'
-          : repair.reason === 'metadata-unavailable'
-            ? 'unavailable'
-            : 'failed',
+        triggerRepair: triggerRepairOutcome(repair),
       };
     }
     const rollback = await restorePreviousVersionAndTriggers(
@@ -1850,17 +1796,15 @@ async function readCloudflareVersionInspection(
         Object.keys(annotations).length === 1 &&
         !isWranglerSecretOnlyDraft(entry)
       ) {
-        const inspection = await Promise.resolve(
-          options.runWrangler(
-            {
-              type: 'versions.view',
-              versionId,
-              configPath,
-              workerName: options.workerName,
-              includeSource: true,
-            },
-            { capture: true },
-          ),
+        const inspection = await options.runWrangler(
+          {
+            type: 'versions.view',
+            versionId,
+            configPath,
+            workerName: options.workerName,
+            includeSource: true,
+          },
+          { capture: true },
         );
         if (isCleanCommandExit(inspection)) {
           const inspected: unknown = inspection.data;
@@ -1889,43 +1833,34 @@ async function readRecentCloudflareVersionIds(
   options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
   configPath: string | undefined,
 ): Promise<Array<RecentCloudflareVersion> | null> {
-  const result = await Promise.resolve(
-    options.runWrangler(
-      { type: 'versions.list', configPath, workerName: options.workerName },
-      { capture: true },
-    ),
+  const result = await options.runWrangler(
+    { type: 'versions.list', configPath, workerName: options.workerName },
+    { capture: true },
   );
   if (!isCleanCommandExit(result)) {
-    if (
-      isCompletedCommand(result) &&
-      (result.failure === 'not-found' || result.errorCode === 10007)
-    ) {
+    if (isWorkerNotFound(result)) {
       return [];
     }
     return null;
   }
-  try {
-    const versions = result.data as unknown;
-    if (
-      !Array.isArray(versions) ||
-      !versions.every(
-        (version) =>
-          isRecord(version) &&
-          typeof version.id === 'string' &&
-          typeof version.number === 'number' &&
-          Number.isSafeInteger(version.number),
-      )
-    ) {
-      return null;
-    }
-    return versions.map((version) => ({
-      id: version.id as string,
-      number: version.number as number,
-      inspection: version,
-    }));
-  } catch {
+  const versions = result.data;
+  if (
+    !Array.isArray(versions) ||
+    !versions.every(
+      (version) =>
+        isRecord(version) &&
+        typeof version.id === 'string' &&
+        typeof version.number === 'number' &&
+        Number.isSafeInteger(version.number),
+    )
+  ) {
     return null;
   }
+  return versions.map((version) => ({
+    id: version.id as string,
+    number: version.number as number,
+    inspection: version,
+  }));
 }
 
 function arraysEqual(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean {
@@ -1966,38 +1901,32 @@ async function readCloudflareVersionSecretBindings(
   configPath: string | undefined,
   versionId: string,
 ): Promise<Array<{ name: string; type: 'secret_key' | 'secret_text' }> | null> {
-  const result = await Promise.resolve(
-    options.runWrangler(
-      { type: 'versions.view', versionId, configPath, workerName: options.workerName },
-      { capture: true },
-    ),
+  const result = await options.runWrangler(
+    { type: 'versions.view', versionId, configPath, workerName: options.workerName },
+    { capture: true },
   );
   if (!isCleanCommandExit(result)) {
     return null;
   }
-  try {
-    const version = result.data as unknown;
-    if (!isRecord(version) || version.id !== versionId || !isRecord(version.resources)) {
-      return null;
-    }
-    const bindings = version.resources.bindings;
-    if (!Array.isArray(bindings) || !bindings.every(isRecord)) {
-      return null;
-    }
-    const secrets: Array<{ name: string; type: 'secret_key' | 'secret_text' }> = [];
-    for (const binding of bindings) {
-      if (binding.type !== 'secret_text' && binding.type !== 'secret_key') {
-        continue;
-      }
-      if (typeof binding.name !== 'string') {
-        return null;
-      }
-      secrets.push({ name: binding.name, type: binding.type });
-    }
-    return secrets;
-  } catch {
+  const version = result.data;
+  if (!isRecord(version) || version.id !== versionId || !isRecord(version.resources)) {
     return null;
   }
+  const bindings = version.resources.bindings;
+  if (!Array.isArray(bindings) || !bindings.every(isRecord)) {
+    return null;
+  }
+  const secrets: Array<{ name: string; type: 'secret_key' | 'secret_text' }> = [];
+  for (const binding of bindings) {
+    if (binding.type !== 'secret_text' && binding.type !== 'secret_key') {
+      continue;
+    }
+    if (typeof binding.name !== 'string') {
+      return null;
+    }
+    secrets.push({ name: binding.name, type: binding.type });
+  }
+  return secrets;
 }
 
 /**
@@ -2040,18 +1969,16 @@ async function bootstrapFirstDeployment(
   options.onProgress?.(
     atomic ? 'Publishing the Worker atomically...' : 'Publishing the first Worker deployment...',
   );
-  const bootstrap = await Promise.resolve(
-    options.runWrangler(
-      {
-        type: 'worker.deploy',
-        configPath,
-        workerName: options.workerName,
-        message: options.message,
-        secretsFilePath: options.candidateSecretsFilePath,
-        assetsDirectory: options.assetsDirectoryOverride,
-      },
-      { capture: true },
-    ),
+  const bootstrap = await options.runWrangler(
+    {
+      type: 'worker.deploy',
+      configPath,
+      workerName: options.workerName,
+      message: options.message,
+      secretsFilePath: options.candidateSecretsFilePath,
+      assetsDirectory: options.assetsDirectoryOverride,
+    },
+    { capture: true },
   );
   if (!isCleanCommandExit(bootstrap)) {
     const cloudflareErrorCode = bootstrap.errorCode;
@@ -2067,12 +1994,7 @@ async function bootstrapFirstDeployment(
   const published = readUploadResult(bootstrap);
   const versionId = published?.versionId;
   const desiredMetadata = parseCloudflareVersionMessage(options.message);
-  const desiredTriggerConfig =
-    desiredMetadata?.schema === 2
-      ? desiredMetadata.triggerConfig
-      : options.configPath
-        ? readCloudflareTriggerConfig(options.configPath)
-        : triggerConfigFromWrangler({});
+  const desiredTriggerConfig = desiredTriggerConfigFor(desiredMetadata, options.configPath);
   const reportedUrl = published?.previewUrl ?? published?.workersDevUrl;
   const reportedOrConfiguredUrl =
     reportedUrl ??
@@ -2220,11 +2142,7 @@ async function bootstrapFirstDeployment(
       rollback: superseded ? 'not-needed' : triggers.activeVersionId ? 'unavailable' : 'unsafe',
       ...(superseded
         ? {
-            triggerRepair: triggers.ok
-              ? 'succeeded'
-              : triggers.reason === 'metadata-unavailable'
-                ? 'unavailable'
-                : 'failed',
+            triggerRepair: triggerRepairOutcome(triggers),
           }
         : {}),
     };
@@ -2308,11 +2226,7 @@ async function bootstrapFirstDeployment(
       previousVersionId,
       activeVersionId: repair.activeVersionId,
       rollback: 'not-needed',
-      triggerRepair: repair.ok
-        ? 'succeeded'
-        : repair.reason === 'metadata-unavailable'
-          ? 'unavailable'
-          : 'failed',
+      triggerRepair: triggerRepairOutcome(repair),
     };
   }
   return {
@@ -2383,17 +2297,12 @@ async function readCurrentProductionVersion(
   options: Pick<Parameters<typeof activateCloudflareVersion>[0], 'runWrangler' | 'workerName'>,
   configPath: string | undefined,
 ): Promise<CurrentProductionVersion> {
-  const result = await Promise.resolve(
-    options.runWrangler(
-      { type: 'deployments.status', configPath, workerName: options.workerName },
-      { capture: true },
-    ),
+  const result = await options.runWrangler(
+    { type: 'deployments.status', configPath, workerName: options.workerName },
+    { capture: true },
   );
   if (!isCleanCommandExit(result)) {
-    if (
-      isCompletedCommand(result) &&
-      (result.failure === 'not-found' || result.errorCode === 10007)
-    ) {
+    if (isWorkerNotFound(result)) {
       return { kind: 'ok', versionId: null, versions: [] };
     }
     return { kind: 'failed', status: result.status };
@@ -2458,6 +2367,54 @@ function stagedVersionPercentages(
         { versionId, percentage: 0 },
       ]
     : [];
+}
+
+/** Stage the candidate at 0% beside the unchanged previous version so readiness can select it. */
+async function stageCandidateForReadiness(
+  options: CloudflareVersionActivationOptions,
+  configPath: string | undefined,
+  previousVersionId: string | null,
+  versionId: string,
+  message: string,
+): Promise<Extract<CloudflareVersionActivation, { ok: false }> | null> {
+  if (!options.verifyUploader()) {
+    return {
+      ok: false,
+      reason: 'uploader-changed',
+      versionId,
+      previousVersionId,
+      rollback: 'not-needed',
+    };
+  }
+  const ownerFailure = await verifyReadinessStagingOwner(
+    options,
+    configPath,
+    previousVersionId,
+    versionId,
+  );
+  if (ownerFailure) {
+    return ownerFailure;
+  }
+  const staged = await deployVersionPercentages(
+    options,
+    configPath,
+    [`${previousVersionId}@100`, `${versionId}@0`],
+    message,
+  );
+  if (!isCleanCommandExit(staged)) {
+    const cloudflareErrorCode = staged.errorCode;
+    return {
+      ok: false,
+      reason: 'readiness-staging-failed',
+      status: staged.status,
+      ...commandDiagnosticFields(staged),
+      ...(cloudflareErrorCode === undefined ? {} : { cloudflareErrorCode }),
+      versionId,
+      previousVersionId,
+      rollback: 'not-needed',
+    };
+  }
+  return null;
 }
 
 async function verifyReadinessStagingOwner(
@@ -2775,19 +2732,6 @@ export function extractWorkersDevSubdomain(url: string): string | undefined {
 function workersDevSubdomainResult(url: string): { workersDevSubdomain?: string } {
   const workersDevSubdomain = extractWorkersDevSubdomain(url);
   return workersDevSubdomain ? { workersDevSubdomain } : {};
-}
-
-function isCompletedCommand(result: CloudflareCommandResult): boolean {
-  return (
-    Number.isSafeInteger(result.status) &&
-    result.status >= 0 &&
-    result.signal == null &&
-    (result.error == null || result.error === '')
-  );
-}
-
-function isCleanCommandExit(result: CloudflareCommandResult): boolean {
-  return result.status === 0 && isCompletedCommand(result);
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {

@@ -159,11 +159,6 @@ export function readProjectPlatformUrl(root: string): string | null {
   return typeof value === 'string' && value !== '' ? normalizePlatformApiUrl(value) : null;
 }
 
-export function readProjectApplicationDomain(root: string): string | null {
-  const value = readProjectConfigFile(root)?.applicationDomain;
-  return typeof value === 'string' && value !== '' ? normalizeApplicationDomain(value) : null;
-}
-
 /** A deploy can establish a first link, but must never replace a saved destination. */
 export function shouldLinkDeployProject(root: string, apiUrl: string): boolean {
   const platform = readDeploymentPlatform(root);

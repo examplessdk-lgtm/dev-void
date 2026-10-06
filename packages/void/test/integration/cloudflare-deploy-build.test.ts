@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
 import spawn from 'cross-spawn';
 import { toSlash } from 'pathslash';
@@ -26,7 +26,7 @@ import {
 } from '../../src/sandbox/config.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../../src/shared/env.ts';
 
-// Real-build FP-safety lock for `void deploy --platform cloudflare`. The 600+ unit tests drive
+// Real-build FP-safety lock for `void deploy --platform cloudflare`. The unit tests drive
 // `runCloudflareDeploy` with a STUBBED `vite build` and HAND-WRITTEN emitted configs, so nothing
 // there proves the guard's core premise: that a REAL `@cloudflare/vite-plugin` + wrangler build
 // emits exactly the shape `verifyGeneratedDeployConfig` reconstructs, adding nothing that would
@@ -43,14 +43,13 @@ const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const SOURCE_PLAYGROUND = 'playground/kitchen-sink';
 let playground: IsolatedPlayground;
 let pg = '';
-let configPath = '';
 let emittedPath = '';
 
-// Real-SHAPED ids the guard treats as genuine (`isRealD1Id` UUID / `isRealKvId` 32-hex). Because
-// Provisioning writes real ids into the root config before the build, and the build
-// merges the root config into the emitted artifact, an overlaid `cloudflare` config carrying
-// these ids yields an emitted artifact whose id-bearing bindings match the pinned snapshot — the
-// exact clean-deploy condition the guard authorizes.
+// Real-SHAPED ids the guard treats as genuine (`isRealD1Id` UUID / `isRealKvId` 32-hex).
+// Provisioning writes real ids into the root config before the build, and the build merges the
+// root config into the emitted artifact, so an overlaid `cloudflare` config carrying these ids
+// yields an emitted artifact whose id-bearing bindings match the pinned snapshot — the exact
+// clean-deploy condition the guard authorizes.
 const ACCOUNT_ID = '0123456789abcdef0123456789abcdef';
 const WORKER_NAME = 'void-kitchen-sink';
 const REAL_D1_ID = '52b3bbc7-c473-4b26-9486-1345f5de61c4';
@@ -82,16 +81,9 @@ const OVERLAY_WRANGLER = {
 // the same exported builders.
 type ExpectedPayload = Parameters<typeof verifyGeneratedDeployConfig>[1];
 
-let buildStatus: number | null = null;
-let buildOutput = '';
 // The pristine real emission, parsed once and reused (deep-cloned) across every tamper case.
 let pristineEmitted: Record<string, unknown> = {};
 let expectedPayload: ExpectedPayload;
-
-// Snapshot guard: only touch/restore the generated Cloudflare config if we actually reached the snapshot step, so
-// an early beforeAll failure never deletes a developer-local file the hook never saw.
-let wranglerSnapshotTaken = false;
-let wranglerOriginal: string | undefined;
 
 /** A fresh deep clone of the pristine emitted config, so a tamper never mutates the shared copy. */
 function cloneEmitted(): Record<string, unknown> {
@@ -139,12 +131,8 @@ describe('playground/kitchen-sink --platform cloudflare real-build deploy guard'
         },
       }),
     );
-    configPath = materializeCloudflareConfig(pg);
+    const configPath = materializeCloudflareConfig(pg);
     emittedPath = join(pg, 'dist', 'ssr', 'wrangler.json');
-
-    // Snapshot BEFORE any other filesystem work.
-    wranglerOriginal = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : undefined;
-    wranglerSnapshotTaken = true;
 
     // Fresh build inputs: drop the previous dist + the stale CF-plugin deploy pointer so the guard
     // trusts only a pointer this build wrote.
@@ -179,24 +167,13 @@ describe('playground/kitchen-sink --platform cloudflare real-build deploy guard'
       maxBuffer: 10 * 1024 * 1024,
       env: { ...process.env, [CLOUDFLARE_DEPLOY_BUILD_ENV]: '1' },
     });
-    buildStatus = result.status;
-    buildOutput = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    expect(buildStatus, buildOutput).toBe(0);
+    expect(result.status, `${result.stdout ?? ''}${result.stderr ?? ''}`).toBe(0);
 
     pristineEmitted = JSON.parse(readFileSync(emittedPath, 'utf-8')) as Record<string, unknown>;
   });
 
   afterAll(() => {
-    if (!wranglerSnapshotTaken) {
-      playground?.cleanup();
-      return;
-    }
-    if (wranglerOriginal === undefined) {
-      rmSync(configPath, { force: true });
-    } else {
-      writeFileSync(configPath, wranglerOriginal);
-    }
-    playground.cleanup();
+    playground?.cleanup();
   });
 
   // --- Proof this is a REAL build (not a hand-written facsimile) ---------------------------------

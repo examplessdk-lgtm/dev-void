@@ -2,12 +2,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { resolvePagesDir } from 'void/pages';
 import { islandsPlugin } from './plugin-islands.ts';
-import { pagesPlugin } from './plugin-pages.ts';
-
-type PrefetchConfig = {
-  hoverDelay?: number;
-  cacheFor?: number | string | [string, string];
-};
+import { pagesPlugin, type PrefetchConfig } from './plugin-pages.ts';
 
 export type VoidSvelteOptions = Readonly<{
   svelte?: Parameters<typeof svelte>[0];

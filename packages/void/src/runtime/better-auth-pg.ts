@@ -1,33 +1,17 @@
 import { applyPgAuthMigrations } from './auth-migrations.ts';
 import {
+  assertRuntimeDialect,
   createVoidAuthRuntime,
+  resolveConnectionString,
   type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
 } from './better-auth-shared.ts';
 import { disablePgPassFallback } from './pg.ts';
 
-function resolveConnectionString(env: VoidAuthEnv): string {
-  const connectionString =
-    typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
-      ? env.DATABASE_URL
-      : typeof env.HYPERDRIVE?.connectionString === 'string' &&
-          env.HYPERDRIVE.connectionString.length > 0
-        ? env.HYPERDRIVE.connectionString
-        : undefined;
-
-  if (!connectionString) {
-    throw new Error(
-      'auth: Better Auth requires DATABASE_URL for local PostgreSQL dev or HYPERDRIVE in production.',
-    );
-  }
-
-  return connectionString;
-}
-
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
   const { default: pg } = await import('pg');
-  const connectionString = resolveConnectionString(env);
+  const connectionString = resolveConnectionString(env, 'PostgreSQL');
   const pool = new pg.Pool({ connectionString, max: 1 });
   return {
     database: pool,
@@ -46,9 +30,7 @@ async function runPostgresAuthMigrations(
   if (!migrationSchema) {
     throw new Error('auth: Migration schema is unavailable.');
   }
-  if (runtime.dialect !== 'postgresql') {
-    throw new Error(`auth: Runtime mismatch. Expected postgresql, received '${runtime.dialect}'.`);
-  }
+  assertRuntimeDialect(runtime, 'postgresql');
   if (migrationSchema.dialect !== 'postgresql') {
     throw new Error(
       `auth: Runtime mismatch. Expected postgresql, received '${migrationSchema.dialect}'.`,
@@ -56,7 +38,7 @@ async function runPostgresAuthMigrations(
   }
 
   const { Client } = await import('pg');
-  const client = new Client({ connectionString: resolveConnectionString(env) });
+  const client = new Client({ connectionString: resolveConnectionString(env, 'PostgreSQL') });
   disablePgPassFallback(client);
   await client.connect();
   try {

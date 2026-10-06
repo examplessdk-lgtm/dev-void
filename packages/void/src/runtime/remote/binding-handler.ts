@@ -1,19 +1,22 @@
 import { Hono } from 'hono';
 import { parseR2Conditional } from './r2-conditions.ts';
 
+function decodeBase64(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (ch) => ch.charCodeAt(0));
+}
+
 /**
  * Creates a Hono app that handles `/__void/*` routes for native binding access.
  * Deployed user workers expose this so the proxy can dispatch D1/KV/R2 operations
  * via Workers for Platforms instead of the Cloudflare REST API (~1-5ms vs ~50-200ms).
  *
  * Authenticated via `x-void-internal` header against `env.__VOID_PROXY_TOKEN`.
- * Response formats match the proxy's existing REST API responses so the
- * ProxyClient doesn't need changes.
+ * Response formats match the proxy's REST API responses, so ProxyClient
+ * handles both paths.
  */
 export function createBindingHandler(env: Record<string, unknown>): Hono {
   const app = new Hono();
 
-  // Auth middleware
   app.use('*', async (c, next) => {
     const token = c.req.header('x-void-internal');
     const expected = env.__VOID_PROXY_TOKEN as string | undefined;
@@ -175,12 +178,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
 
     let value: string | ArrayBuffer;
     if (body.base64 && typeof body.value === 'string') {
-      const binary = atob(body.value);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      value = bytes.buffer as ArrayBuffer;
+      value = decodeBase64(body.value).buffer as ArrayBuffer;
     } else {
       value = typeof body.value === 'string' ? body.value : JSON.stringify(body.value);
     }
@@ -293,7 +291,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     }
 
     const data = body.base64
-      ? Uint8Array.from(atob(body.base64), (ch) => ch.charCodeAt(0))
+      ? decodeBase64(body.base64)
       : new TextEncoder().encode(body.value ?? '');
 
     let onlyIf: R2Conditional | Headers | undefined;

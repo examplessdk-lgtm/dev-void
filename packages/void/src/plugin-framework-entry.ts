@@ -14,10 +14,8 @@ import { compileAssetFallbackHelper } from './router/compile.ts';
  * Resolve the server entry module for a Class A framework. We always wrap
  * the framework's own entry with a tiny shim that intercepts
  * `/__void/{scheduled,queue}` in dev so cron and queue handlers run with
- * the worker's full CF bindings. The interception block is gated on
- * `import.meta.env.DEV` and the dispatch module is loaded via dynamic
- * `import()` so the entire dev path (including user cron imports) is
- * dead-code-eliminated in `vite build`. Production deploys go through
+ * the worker's full CF bindings. `vite build` gets a dispatch-free shim
+ * (see `generateClassATriggerWrapper`). Production deploys go through
  * `cli/wrapper.ts` instead.
  */
 export function getFrameworkEntry(
@@ -30,14 +28,8 @@ export function getFrameworkEntry(
   // In dev, eagerly write the dispatch file so the wrapper's dynamic
   // import resolves on the very first request (the plugin's
   // `configResolved` hook also rewrites it, but we can't rely on that
-  // having run before the first request hits the worker).
-  //
-  // In `vite build`, we instead emit a dispatch-free wrapper, so the
-  // dispatch file is unreferenced and we don't write it. Rolldown
-  // would otherwise emit it as a separate chunk in the prod bundle —
-  // an `if (import.meta.env.DEV)` guard around `await import()` is
-  // *not* enough to suppress chunk emission, because chunk splitting
-  // runs before constant folding eliminates the dead branch.
+  // having run before the first request hits the worker). The build
+  // wrapper does not reference it, so it is not written there.
   if (!isBuild) {
     writeFrameworkTriggersDispatch(root, devTriggerToken);
   }

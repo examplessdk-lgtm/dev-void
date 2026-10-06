@@ -253,10 +253,8 @@ describe('assertJournalCoherence', () => {
     // Bare-legacy projects (hand-written .sql migrations, no db/schema.ts,
     // no drizzle-kit) never have a `_journal.json`. The drift check has
     // nothing to diff against there — the local/remote runners track
-    // applied migrations by filename via `_void_migrations`. Gating those
-    // projects here used to break `void deploy`, `void db migrate`, and
-    // `void db reset` for a path that worked pre-patch. Missing journal
-    // must pass silently.
+    // applied migrations by filename via `_void_migrations`. Missing
+    // journal must pass silently.
     rmSync(join(migrationsDir, 'meta', '_journal.json'), { force: true });
     expect(() =>
       assertJournalCoherence(migrationsDir, [
@@ -294,12 +292,8 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws on an empty-entries journal when a snapshot is also present', () => {
-    // Round 31: an empty journal with snapshot files is NOT the bare-
-    // legacy shape; it's a half-deleted drizzle state. The old drift
-    // diff silently passed when all `.sql` files were also gone
-    // (empty journalTags + empty collectedTags = no orphans, no
-    // missing) and left every downstream command to continue on a
-    // corrupted project. Surface the partial state as a hard error
+    // An empty journal with snapshot files is NOT the bare-legacy shape;
+    // it's a half-deleted drizzle state. Surface it as a hard error
     // referencing the specific leftover artifact, the same way the
     // missing-journal branch does. The presence of `.sql` files on
     // disk is irrelevant — the journal-vs-artifacts mismatch is the
@@ -321,13 +315,10 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws on an empty-entries journal with a snapshot even when no .sql files remain', () => {
-    // Round 31 regression target: the half-deleted shape where
-    // `_journal.json` has `entries: []`, a stale `meta/*_snapshot.json`
-    // is still present, and every on-disk `.sql` file has been
-    // deleted. Under the old code the drift diff found neither
-    // orphans nor missing entries and returned silently, leaving
-    // downstream commands to run on a corrupted project. The new
-    // guard must fire here regardless of whether any orphans exist.
+    // The half-deleted shape where `_journal.json` has `entries: []`, a
+    // stale `meta/*_snapshot.json` is still present, and every on-disk
+    // `.sql` file has been deleted. The drift diff finds neither orphans
+    // nor missing entries here, so the guard must fire on its own.
     writeJournal([]);
     writeFileSync(join(migrationsDir, 'meta', '0000_snapshot.json'), JSON.stringify({ id: 'abc' }));
 
@@ -343,7 +334,7 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws on an empty-entries journal when the bundled migrations.js is still present', () => {
-    // Same Round 31 half-deleted shape but with the bundled-mode
+    // Same half-deleted shape but with the bundled-mode
     // artifact (`db/migrations/migrations.js`) left behind instead of
     // a snapshot JSON. `void gen migration` already refuses this
     // shape; `assertJournalCoherence` must match so every downstream
@@ -449,10 +440,9 @@ describe('assertJournalCoherence', () => {
   it('throws an actionable error when the journal file is a JSON scalar null', () => {
     // `readJournal` returns `undefined` only when the file is missing on
     // disk. A hand-edit or merge can leave `_journal.json` parseable as
-    // the JSON scalar `null` — the old `!journal` branch would have
-    // silently collapsed that into bare-legacy mode and let `void db
-    // status`/`migrate`/`reset`/deploy continue on a corrupted drizzle
-    // project. Reject the malformed shape instead.
+    // the JSON scalar `null`. Treating that as bare-legacy mode would let
+    // `void db status`/`migrate`/`reset`/deploy continue on a corrupted
+    // drizzle project. Reject the malformed shape instead.
     writeFileSync(join(migrationsDir, 'meta', '_journal.json'), 'null');
     let message = '';
     try {
@@ -581,12 +571,11 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws an actionable error when top-level `version` is missing', () => {
-    // Round 28: `runRenameMigrations` rewrites `journal.version` and
+    // `runRenameMigrations` rewrites `journal.version` and
     // `journal.dialect` verbatim when it writes the updated journal. A
-    // malformed top-level missing `version` used to pass through this
-    // guard and produce `{ version: undefined, dialect: ..., entries: [...] }`
-    // after the rewrite — an unusable journal. Surface the corrupted
-    // shape up front instead.
+    // missing top-level `version` would produce
+    // `{ version: undefined, dialect: ..., entries: [...] }` after the
+    // rewrite — an unusable journal. Surface the corrupted shape up front.
     writeFileSync(
       join(migrationsDir, 'meta', '_journal.json'),
       JSON.stringify({ dialect: 'sqlite', entries: [] }),
@@ -623,8 +612,8 @@ describe('assertJournalCoherence', () => {
 
   it('throws an actionable error when top-level `version` is a non-string', () => {
     // Drizzle writes `version` as a string literal (e.g. `"7"`). A
-    // hand-edit to a JSON number would pass the old weaker guard but
-    // leak into the rewritten journal as a number.
+    // hand-edit to a JSON number would leak into the rewritten journal
+    // as a number.
     writeFileSync(
       join(migrationsDir, 'meta', '_journal.json'),
       JSON.stringify({ version: 7, dialect: 'sqlite', entries: [] }),
@@ -641,7 +630,7 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws an actionable error when a journal entry is missing `idx`', () => {
-    // Round 28: `runMigration` (the custom-migration path) computes the
+    // `runMigration` (the custom-migration path) computes the
     // next entry's `idx` via `Math.max(...entries.map(e => e.idx)) + 1`.
     // An entry missing `idx` would make that `NaN + 1 === NaN` and
     // write a corrupted entry back to disk. Reject the shape up front.
@@ -690,7 +679,7 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws an actionable error when a journal entry is missing `breakpoints`', () => {
-    // Round 28: `runMigration` inherits `breakpoints` from the last
+    // `runMigration` inherits `breakpoints` from the last
     // entry into the new one (`breakpoints: lastEntry.breakpoints`).
     // A missing field would serialize as `breakpoints: undefined` in
     // the rewritten entry, producing a malformed output journal.
@@ -715,7 +704,7 @@ describe('assertJournalCoherence', () => {
   });
 
   it('throws an actionable error when a journal entry is missing `version`', () => {
-    // Round 28: `runMigration` inherits `version` from the last entry
+    // `runMigration` inherits `version` from the last entry
     // into the new one — the drizzle-kit snapshot schema version (e.g.
     // `"6"` / `"7"`). Missing it here would produce `version: undefined`
     // in the rewritten entry.
@@ -740,10 +729,8 @@ describe('assertJournalCoherence', () => {
   });
 
   it('passes on a journal with all required top-level and entry fields (happy-path regression)', () => {
-    // Regression guard for round 28: confirm the broadened validator
-    // still accepts a well-formed journal. A canonical drizzle-kit
-    // journal with an entry matching the on-disk .sql file must pass
-    // through silently.
+    // A canonical drizzle-kit journal with an entry matching the on-disk
+    // .sql file must pass through silently.
     writeFileSync(
       join(migrationsDir, 'meta', '_journal.json'),
       JSON.stringify({

@@ -116,7 +116,6 @@ describe('pagesPlugin dev config', () => {
     const renderer = await load('\0virtual:void-pages-renderer');
 
     expect(renderer).toContain('__vite_plugin_react_preamble_installed__ = true');
-    expect(renderer).toContain('export const renderPreambleScript = PREAMBLE_SCRIPT');
     expect(renderer).toContain('renderPage.preambleScript = PREAMBLE_SCRIPT');
   });
 });

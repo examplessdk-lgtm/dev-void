@@ -26,9 +26,9 @@ import {
   platformEvents,
   invitations,
   githubConnections,
+  platformLoginConnections,
   platformLoginIdentities,
 } from '../schema.ts';
-import * as schema from '../schema.ts';
 import type { AllowlistEntry } from '../signup-allowlist.ts';
 import {
   isAdminSuspended,
@@ -147,30 +147,26 @@ async function withAdminRemovalGuard<T>(
     await tx.execute(sql`LOCK TABLE ${users} IN SHARE ROW EXCLUSIVE MODE`);
     const user = await getUser(tx, id);
     if (user?.role === 'admin') {
-      let others = await tx
-        .select({ suspended_reason: users.suspended_reason })
-        .from(users)
-        .where(and(eq(users.role, 'admin'), ne(users.id, id)));
-      if (authSettings?.sessions_required) {
-        others = await tx
-          .select({ suspended_reason: users.suspended_reason })
-          .from(users)
-          .innerJoin(
-            schema.platformLoginIdentities,
-            eq(schema.platformLoginIdentities.user_id, users.id),
-          )
-          .innerJoin(
-            schema.platformLoginConnections,
-            eq(schema.platformLoginConnections.id, schema.platformLoginIdentities.connection_id),
-          )
-          .where(
-            and(
-              eq(users.role, 'admin'),
-              ne(users.id, id),
-              eq(schema.platformLoginConnections.enabled, true),
-            ),
-          );
-      }
+      const others = authSettings?.sessions_required
+        ? await tx
+            .select({ suspended_reason: users.suspended_reason })
+            .from(users)
+            .innerJoin(platformLoginIdentities, eq(platformLoginIdentities.user_id, users.id))
+            .innerJoin(
+              platformLoginConnections,
+              eq(platformLoginConnections.id, platformLoginIdentities.connection_id),
+            )
+            .where(
+              and(
+                eq(users.role, 'admin'),
+                ne(users.id, id),
+                eq(platformLoginConnections.enabled, true),
+              ),
+            )
+        : await tx
+            .select({ suspended_reason: users.suspended_reason })
+            .from(users)
+            .where(and(eq(users.role, 'admin'), ne(users.id, id)));
       if (!others.some((admin) => !isAdminSuspended(admin.suspended_reason))) {
         throw new LastAdminError();
       }
@@ -300,8 +296,15 @@ export async function deleteUser(db: Db, id: string): Promise<ReadonlyArray<Term
   });
 }
 
-function getLatestDeploymentByProjectSubquery(db: Db) {
-  return db
+type ProjectWithOwner = Project & {
+  owner_login: string | null;
+  last_deploy: string | null;
+  last_deploy_id: string | null;
+  last_deploy_status: string | null;
+};
+
+function selectProjectsWithOwner(db: Db) {
+  const lastDeploy = db
     .selectDistinctOn([deployments.project_id], {
       project_id: deployments.project_id,
       last_deploy: deployments.created_at,
@@ -311,25 +314,7 @@ function getLatestDeploymentByProjectSubquery(db: Db) {
     .from(deployments)
     .orderBy(deployments.project_id, desc(deployments.created_at), desc(deployments.id))
     .as('last_deploy_sq');
-}
-
-export async function searchProjects(
-  db: Db,
-  query: string,
-): Promise<
-  ReadonlyArray<
-    Project & {
-      owner_login: string | null;
-      last_deploy: string | null;
-      last_deploy_id: string | null;
-      last_deploy_status: string | null;
-    }
-  >
-> {
-  const pattern = `%${query}%`;
-  const lastDeploy = getLatestDeploymentByProjectSubquery(db);
-
-  return db
+  const query = db
     .select({
       ...getTableColumns(projects),
       owner_login: users.login,
@@ -339,7 +324,17 @@ export async function searchProjects(
     })
     .from(projects)
     .leftJoin(users, eq(projects.user_id, users.id))
-    .leftJoin(lastDeploy, eq(projects.id, lastDeploy.project_id))
+    .leftJoin(lastDeploy, eq(projects.id, lastDeploy.project_id));
+  return { lastDeploy, query };
+}
+
+export async function searchProjects(
+  db: Db,
+  query: string,
+): Promise<ReadonlyArray<ProjectWithOwner>> {
+  const pattern = `%${query}%`;
+  const { lastDeploy, query: projectsWithOwner } = selectProjectsWithOwner(db);
+  return projectsWithOwner
     .where(
       or(
         ilike(projects.slug, pattern),
@@ -387,35 +382,14 @@ export async function getAllProjectsWithOwner(
   db: Db,
   limit: number,
   offset: number,
-): Promise<
-  ReadonlyArray<
-    Project & {
-      owner_login: string | null;
-      last_deploy: string | null;
-      last_deploy_id: string | null;
-      last_deploy_status: string | null;
-    }
-  >
-> {
-  const lastDeploy = getLatestDeploymentByProjectSubquery(db);
-
-  return db
-    .select({
-      ...getTableColumns(projects),
-      owner_login: users.login,
-      last_deploy: lastDeploy.last_deploy,
-      last_deploy_id: lastDeploy.last_deploy_id,
-      last_deploy_status: lastDeploy.last_deploy_status,
-    })
-    .from(projects)
-    .leftJoin(users, eq(projects.user_id, users.id))
-    .leftJoin(lastDeploy, eq(projects.id, lastDeploy.project_id))
-    .orderBy(desc(projects.created_at))
+): Promise<ReadonlyArray<ProjectWithOwner>> {
+  return selectProjectsWithOwner(db)
+    .query.orderBy(desc(projects.created_at))
     .limit(limit)
     .offset(offset);
 }
 
-// --- Consolidated queries (previously inline) ---
+// --- Users ---
 
 export async function getFirstAdmin(db: Db) {
   const [row] = await db
@@ -589,33 +563,22 @@ export async function getAllowlistEntryStatuses(
       : [];
   const deployedUserIds = new Set(deployedUserRows.map((row) => row.id));
 
-  function userMatchesEntry(user: (typeof matchingUsers)[number], entry: AllowlistEntry): boolean {
-    if (entry.type === 'identity') {
-      return false;
-    }
-    if (entry.type === 'github') {
-      return user.provider === 'github' && user.login.toLowerCase() === entry.pattern.toLowerCase();
-    }
-
-    if (!user.email) {
-      return false;
-    }
-
-    const email = user.email.toLowerCase();
-    const pattern = entry.pattern.toLowerCase();
-    return pattern.startsWith('*@') ? email.endsWith(pattern.slice(1)) : email === pattern;
-  }
-
-  function invitationMatchesEntry(email: string, entry: AllowlistEntry): boolean {
+  function emailMatchesEntry(email: string, entry: AllowlistEntry): boolean {
     if (entry.type !== 'email') {
       return false;
     }
-
     const normalizedEmail = email.toLowerCase();
     const pattern = entry.pattern.toLowerCase();
     return pattern.startsWith('*@')
       ? normalizedEmail.endsWith(pattern.slice(1))
       : normalizedEmail === pattern;
+  }
+
+  function userMatchesEntry(user: (typeof matchingUsers)[number], entry: AllowlistEntry): boolean {
+    if (entry.type === 'github') {
+      return user.provider === 'github' && user.login.toLowerCase() === entry.pattern.toLowerCase();
+    }
+    return !!user.email && emailMatchesEntry(user.email, entry);
   }
 
   return entries.map((entry) => {
@@ -634,7 +597,7 @@ export async function getAllowlistEntryStatuses(
     }
     const usersForEntry = matchingUsers.filter((user) => userMatchesEntry(user, entry));
     const hasAcceptedInvitation = acceptedInvitations.some((invitation) =>
-      invitationMatchesEntry(invitation.email, entry),
+      emailMatchesEntry(invitation.email, entry),
     );
 
     return {

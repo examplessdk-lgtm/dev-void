@@ -59,7 +59,7 @@ export const users = pgTable('users', {
 });
 ```
 
-`void gen model` generates PostgreSQL-appropriate code when the dialect is set to `postgresql`.
+`void gen model` generates PostgreSQL-appropriate code when `database` is set to `"pg"`.
 
 ## Migrations
 
@@ -88,4 +88,4 @@ To update a linked Void project's connection, for example after moving the datab
 void db set-url
 ```
 
-This prompts for the new connection string and updates the Hyperdrive configuration. The change takes effect on the next deploy.
+This prompts for the new connection string and updates the Hyperdrive configuration.

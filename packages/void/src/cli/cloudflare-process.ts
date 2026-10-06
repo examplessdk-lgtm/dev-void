@@ -15,17 +15,19 @@ type ProcessResult = {
   error?: string | null;
 };
 
-/** Decode the private process envelope once, retaining cancellation provenance. */
-export function decodeCloudflareOperationResult<T extends ProcessResult>(
-  result: T,
-): T & {
+type OperationEnvelopeFields = {
   data?: unknown;
   errorCode?: number;
   errors?: Array<{ code?: number; message: string }>;
-  failure?: 'not-found' | 'durable-migration' | 'containers-unavailable';
+  failure?: CloudflareCommandResult['failure'];
   signal?: NodeJS.Signals | null;
   error?: string | null;
-} {
+};
+
+/** Decode the private process envelope once, retaining cancellation provenance. */
+export function decodeCloudflareOperationResult<T extends ProcessResult>(
+  result: T,
+): T & OperationEnvelopeFields {
   if (result.signal || result.error || result.status === null) {
     return result;
   }
@@ -43,15 +45,7 @@ export function decodeCloudflareOperationResult<T extends ProcessResult>(
     ) {
       throw new Error('Invalid operation envelope.');
     }
-    const envelope = value as {
-      data?: unknown;
-      errorCode?: number;
-      errors?: Array<{ code?: number; message: string }>;
-      failure?: 'not-found' | 'durable-migration' | 'containers-unavailable';
-      output?: string;
-      signal?: NodeJS.Signals | null;
-      error?: string | null;
-    };
+    const envelope = value as OperationEnvelopeFields & { output?: string };
     if (
       (envelope.output !== undefined && typeof envelope.output !== 'string') ||
       (envelope.signal != null && typeof envelope.signal !== 'string') ||
@@ -91,6 +85,16 @@ export function decodeCloudflareOperationResult<T extends ProcessResult>(
         .filter(Boolean)
         .join('\n'),
     };
+  }
+}
+
+/** Echo a decoded result to the terminal when the caller did not capture it. */
+export function writeUncapturedOperationOutput(result: { stdout: string; stderr: string }): void {
+  if (result.stdout) {
+    process.stdout.write(result.stdout);
+  }
+  if (result.stderr) {
+    process.stderr.write(result.stderr);
   }
 }
 
@@ -134,12 +138,7 @@ export function createCloudflareProcessRunner(options: {
     }
     const decoded = decodeCloudflareOperationResult(raw);
     if (!run.capture) {
-      if (decoded.stdout) {
-        process.stdout.write(decoded.stdout);
-      }
-      if (decoded.stderr) {
-        process.stderr.write(decoded.stderr);
-      }
+      writeUncapturedOperationOutput(decoded);
     }
     return decoded;
   };

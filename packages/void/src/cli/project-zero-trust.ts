@@ -8,7 +8,7 @@ import {
 import { note, sanitizeTerminalText } from './output.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
-import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
+import { getRequestedProjectSlug, requireProjectBySlug } from './resolve-project.ts';
 
 type ZeroTrustArgs = Extract<ProjectArgs, { subcommand: 'zero-trust' }> & {
   action: 'status' | 'protect' | 'public' | 'reconcile';
@@ -22,10 +22,7 @@ async function resolveTarget(root: string, args: ZeroTrustArgs) {
   const client = new PlatformClient(token, { root });
   const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectSlug });
   if (requestedSlug) {
-    const project = resolveProjectBySlug(await client.listProjects(), requestedSlug);
-    if (!project) {
-      throw new Error(`project: No project found with slug '${requestedSlug}'.`);
-    }
+    const project = await requireProjectBySlug(client, requestedSlug);
     return { client, projectId: project.projectId, slug: project.slug };
   }
   const linked = readProjectConfig(root);

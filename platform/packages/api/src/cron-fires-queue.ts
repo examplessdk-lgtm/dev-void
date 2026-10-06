@@ -2,7 +2,7 @@ import type { ApiEnv } from './env.ts';
 
 /**
  * One enqueued cron firing. The CronScheduler DO writes one of these per
- * distinct cron expression whose minute matches `now`. The DO itself can no longer reach the
+ * distinct cron expression whose minute matches `now`. The DO itself cannot reach the
  * user worker via `DISPATCH.get(...).fetch(...)` because workerd dispatches
  * such calls to a named entrypoint matching the calling DO's class —
  * "CronScheduler" — which doesn't exist on user workers, so every fetch fails
@@ -66,12 +66,7 @@ async function invokeWorker(
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // We deliberately do NOT distinguish "transport never reached the worker"
-    // from "the dispatched worker partially executed and then threw" (CPU
-    // limit, OOM, top-level uncaught) — exceptions from the dispatched
-    // worker can surface here too, and retrying those would duplicate side
-    // effects of cron handlers that fail mid-execution. At-most-once is the
-    // correct semantic for crons; the next matching minute will fire again.
+    // Not retried: see the at-most-once note in processCronFiresBatch.
     return {
       responseReceived: false,
       unreachable: isWorkerNotFoundError(err),
@@ -91,9 +86,7 @@ async function invokeWorker(
   // otherwise workerd flags the user worker's tail event as
   // `outcome: "canceled"` even though the handler ran to completion.
   // arrayBuffer() (not cancel()) is required: cancel() aborts the stream rather
-  // than reading it, so workerd still sees an unfinished subrequest. Verified
-  // against prod logs after PR #146 — cancel() resolved cleanly but the tail
-  // outcome remained canceled.
+  // than reading it, so workerd still sees an unfinished subrequest.
   // Swallow rejection from the body read locally: a stream errored mid-drain
   // would otherwise throw out of invokeWorker, get swallowed by
   // Promise.allSettled in processCronFiresBatch, and skip msg.ack() — which CF

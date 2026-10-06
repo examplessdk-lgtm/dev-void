@@ -687,9 +687,8 @@ describe('email verification gating on account linking', () => {
       // `users.email` and the owner-inherited demotion are committed
       // together: if the demotion cannot run, the email change rolls back
       // too, so the next login still sees `previousEmail !== email` and
-      // retries. Before this, `users.email` was committed first and the
-      // demotion error swallowed — every later login saw
-      // `previousEmail === email` and the stale grant survived forever.
+      // retries. Committing `users.email` alone would make every later login
+      // see `previousEmail === email`, and the stale grant would survive.
       const { existing } = await seedRotatingOwner('919191', 'blip-user');
       const inheritedId = 'edst_inherited_919191';
 
@@ -777,8 +776,7 @@ describe('email verification gating on account linking', () => {
     // Interleaves at the Cloudflare stub: the projects route awaits the stub,
     // and the stub drives the real `/auth/callback` before answering. Both
     // routes run against the same PGlite session, so the login's transaction
-    // has fully committed before the auto-add gets its answer — exactly the
-    // ordering the reviewer described.
+    // has fully committed before the auto-add gets its answer.
     const emailEnv = () => ({
       ...env,
       EMAIL_GATEWAY_ORIGIN: 'https://void-email-gateway-staging.voidzer0.workers.dev',
@@ -803,7 +801,7 @@ describe('email verification gating on account linking', () => {
       return calls;
     }
 
-    async function loginAs(providerId: string, login: string): Promise<Response> {
+    async function completeGitHubCallback(): Promise<Response> {
       const state = await buildSignedState('github');
       await seedOAuthNonce(env.db, 'test-nonce');
       return app.fetch(
@@ -845,7 +843,7 @@ describe('email verification gating on account linking', () => {
           );
         }
         // The owner's email changes while the add is recovering the tag.
-        loginDuringAdd = await loginAs('939393', 'racing-user');
+        loginDuringAdd = await completeGitHubCallback();
         return Response.json({
           success: true,
           errors: [],
@@ -894,7 +892,7 @@ describe('email verification gating on account linking', () => {
 
       // A later login sees no change and revokes nothing — which is exactly
       // why the row must never have been written.
-      const later = await loginAs('939393', 'racing-user');
+      const later = await completeGitHubCallback();
       expect(later.status).toBe(302);
       const after = await env.db
         .select()
@@ -1080,7 +1078,7 @@ describe('email verification gating on account linking', () => {
         const owner = await realGetUser(...args);
         reads += 1;
         if (reads === 2) {
-          loginDuringRefresh = await loginAs('959595', 'racing-listing');
+          loginDuringRefresh = await completeGitHubCallback();
         }
         return owner;
       });

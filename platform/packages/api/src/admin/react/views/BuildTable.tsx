@@ -9,7 +9,7 @@ import {
 } from '@astryxdesign/core/Table';
 import { ACTIVE_BUILD_STATUSES } from '../../../build-status.ts';
 import type { Build } from '../../../types.ts';
-import { formatDateTime } from './format.ts';
+import { formatDateTime, parseUtcDate } from './format.ts';
 
 const STATUS_SYMBOL: Record<Build['status'], string> = {
   queued: '○ queued',
@@ -45,14 +45,8 @@ function duration(build: Build): string {
   if (!build.started_at) {
     return '-';
   }
-  const start = new Date(
-    build.started_at.endsWith('Z') ? build.started_at : build.started_at + 'Z',
-  ).getTime();
-  const end = build.completed_at
-    ? new Date(
-        build.completed_at.endsWith('Z') ? build.completed_at : build.completed_at + 'Z',
-      ).getTime()
-    : Date.now();
+  const start = parseUtcDate(build.started_at).getTime();
+  const end = build.completed_at ? parseUtcDate(build.completed_at).getTime() : Date.now();
   if (isNaN(start) || isNaN(end) || end < start) {
     return '-';
   }

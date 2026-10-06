@@ -112,6 +112,18 @@ function applyPatch(
   };
 }
 
+function loweredLimitKeys(
+  previous: PlatformPlanDefinition,
+  next: PlatformPlanDefinition,
+): Array<string> {
+  return Object.entries(next.limits)
+    .filter(([key, limit]) => {
+      const old = previous.limits[key as keyof typeof previous.limits];
+      return limit !== 0 && (old === 0 || limit < old);
+    })
+    .map(([key]) => key);
+}
+
 /** Build and validate a proposed catalog before either preview or database writes. */
 export function proposePlanCatalog(
   catalog: PlatformPlanCatalog,
@@ -139,12 +151,7 @@ export function proposePlanCatalog(
       previous.buildInstanceType !== plan.buildInstanceType
     ) {
       affectedPlanIds = [plan.id];
-      loweredLimits = Object.entries(plan.limits)
-        .filter(([key, limit]) => {
-          const old = previous.limits[key as keyof typeof previous.limits];
-          return limit !== 0 && (old === 0 || limit < old);
-        })
-        .map(([key]) => key);
+      loweredLimits = loweredLimitKeys(previous, plan);
     }
   };
   if (action === 'add') {
@@ -236,12 +243,7 @@ export function proposePlanCatalog(
           throw new OperatorError(409, 'The replacement plan is archived.', 'plan_archived');
         }
         affectedPlanIds = [replacementPlanId];
-        loweredLimits = Object.entries(replacement.limits)
-          .filter(([key, limit]) => {
-            const old = existing.limits[key as keyof typeof existing.limits];
-            return limit !== 0 && (old === 0 || limit < old);
-          })
-          .map(([key]) => key);
+        loweredLimits = loweredLimitKeys(existing, replacement);
       }
       if (existing.id === defaultPlanId) {
         if (!replacementPlanId) {
@@ -346,32 +348,7 @@ export async function mutateOperatorPlanCatalog(
         'Earlier platform versions did not record unlimited request totals in quota counters. Existing counters may omit pre-upgrade requests; request analytics remain available. This change does not backfill historical requests.',
       );
     }
-    if (preview) {
-      return {
-        dryRun: true as const,
-        action: `plans.${action}`,
-        target: id ?? String(body.id ?? 'platform'),
-        expectedRevision: previous.revision,
-        catalog: proposal.catalog,
-        affectedAccounts,
-        loweredLimits: proposal.loweredLimits,
-        warnings,
-        ...(proposal.removedPlanId
-          ? {
-              removedPlanId: proposal.removedPlanId,
-              replacementPlanId: proposal.replacementPlanId ?? null,
-            }
-          : {}),
-      };
-    }
-    if (proposal.removedPlanId && proposal.replacementPlanId) {
-      await tx
-        .update(users)
-        .set({ plan: proposal.replacementPlanId })
-        .where(eq(users.plan, proposal.removedPlanId));
-    }
-    await writePlanCatalog(tx, proposal.catalog);
-    return {
+    const outcome = {
       action: `plans.${action}`,
       target: id ?? String(body.id ?? 'platform'),
       catalog: proposal.catalog,
@@ -385,6 +362,17 @@ export async function mutateOperatorPlanCatalog(
           }
         : {}),
     };
+    if (preview) {
+      return { dryRun: true as const, expectedRevision: previous.revision, ...outcome };
+    }
+    if (proposal.removedPlanId && proposal.replacementPlanId) {
+      await tx
+        .update(users)
+        .set({ plan: proposal.replacementPlanId })
+        .where(eq(users.plan, proposal.removedPlanId));
+    }
+    await writePlanCatalog(tx, proposal.catalog);
+    return outcome;
   });
   if (preview) {
     const overLimitAccounts = result.loweredLimits.length

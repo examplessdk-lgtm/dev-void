@@ -14,8 +14,9 @@ src/
     users.tsx             # Users page — D1 query via server function
   types/
     bindings.d.ts         # Worker bindings type
-migrations/
-  0000_create_users.sql    # Users table with sample data
+db/
+  schema.ts                # Drizzle schema
+  migrations/              # Users table with sample data
 ```
 
 ## Features
@@ -23,6 +24,6 @@ migrations/
 - **File-based routing** — TanStack's file-based routing from `src/routes/`
 - **Server functions** — `createServerFn().handler()` for type-safe server-side operations
 - **Data loaders** — `loader()` on routes pre-fetches data before component render
-- **D1 integration** — server function accesses `env.DB` from `cloudflare:workers` directly
+- **D1 integration** — server function queries D1 through `db` from `void/db`
 - **SSR** — TanStack Start handles SSR + client hydration automatically
 - **Plugin ordering** — `voidPlugin()` must come **before** `tanstackStart()` in the Vite plugins array

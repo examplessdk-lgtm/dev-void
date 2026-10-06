@@ -15,7 +15,7 @@ import {
   DEFAULT_EMAIL_MONTHLY_LIMIT as DEFAULT_MONTHLY_LIMIT,
 } from '../../../email/limits.ts';
 import { EmailProjectView, emailProjectRequest } from '../../fate/views.ts';
-import { useDetailTitle, type AdminPageProps } from '../page-utils.ts';
+import { type AdminPageProps } from '../page-utils.ts';
 import { STATUS_COLORS, formatDateTime } from './format.ts';
 import { FormNumberInput, FormTextInput } from './FormControls.tsx';
 import { Layout } from './Layout.tsx';
@@ -51,7 +51,6 @@ export function EmailProjectPage({ path, platformName, username }: AdminPageProp
     senderDomain,
     tz,
   } = pageData;
-  useDetailTitle(`Email - ${pageData.project.slug}`, platformName);
   return (
     <Layout platformName={platformName} title={`Email - ${project.slug}`} username={username}>
       <h1>
@@ -185,7 +184,6 @@ export function EmailProjectPage({ path, platformName, username }: AdminPageProp
                     method="post"
                     action={`/admin/email/${projectId}/destinations/${destination.id}/delete`}
                     data-confirm={`Remove "${destination.address}" from this project?`}
-                    data-address={destination.address}
                   >
                     <Button type="submit" label="Remove" variant="destructive" size="sm" />
                   </form>
@@ -291,14 +289,11 @@ export function EmailProjectPage({ path, platformName, username }: AdminPageProp
                   >
                     <Button type="submit" label="Rotate secret" size="sm" />
                   </form>
-                  {/* Keep apostrophes out of the `onsubmit` text (see the Danger
-                      Zone note above); the typed slug is the real confirmation
-                      and is checked on the server. */}
+                  {/* The typed slug is the real confirmation; the server checks it. */}
                   <form
                     method="post"
                     action={`/admin/email/${projectId}/domains/${domain.domain}/revoke`}
                     data-confirm={`Remove "${domain.domain}"? This disables its exact assignment. Shared ingress stays while another domain uses it.`}
-                    data-domain={domain.domain}
                   >
                     <FormTextInput
                       label="Confirm project slug"

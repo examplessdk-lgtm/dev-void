@@ -26,7 +26,7 @@ function getMetadataCompiler(): MarkdownExit {
   return markdown;
 }
 
-function extractHeadings(tokens: ReadonlyArray<Token>): ReadonlyArray<Heading> {
+export function extractHeadings(tokens: ReadonlyArray<Token>): ReadonlyArray<Heading> {
   const headings: Array<Heading> = [];
   for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
     const token = tokens[tokenIndex];

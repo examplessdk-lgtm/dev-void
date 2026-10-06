@@ -66,8 +66,8 @@ An invitation is bound to the registered account. Forwarding its ID does not let
 These three commands use the active platform connection selected by
 `void connect`, even inside a directory linked to another project or deployed
 directly to Cloudflare. `VOID_API_URL` takes precedence when set. If you use
-`VOID_TOKEN`, set `VOID_API_URL` to the matching platform; a token without that
-URL selects Void Cloud. Each command shows the platform it contacts.
+`VOID_TOKEN`, also set `VOID_API_URL` to the matching platform. Each command
+shows the platform it contacts.
 
 Accepting an invitation grants access without linking your current directory.
 Open the invited application's directory and run `void project link` if it is

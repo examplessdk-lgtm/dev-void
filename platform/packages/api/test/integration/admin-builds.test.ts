@@ -289,17 +289,14 @@ describe('project detail Builds section', () => {
     expect(res.status).toBe(200);
     const html = await res.text();
 
-    // Section present.
     expect(html).toContain('Builds');
     // Both builds link to their build pages.
     expect(html).toContain(`/admin/builds/${ongoing.id}`);
     expect(html).toContain(`/admin/builds/${done.id}`);
     // Short commit shown, not the full sha.
     expect(html).toContain('abc1234');
-    // The ongoing build's status text is rendered.
     expect(html).toContain('building');
     expect(html).toContain('complete');
-    // Executors rendered.
     expect(html).toContain('github_actions');
 
     // The ongoing row carries the active-build highlight class; the terminal
@@ -342,7 +339,6 @@ describe('GET /admin/builds/:id (build page)', () => {
     expect(res.status).toBe(200);
     const html = await res.text();
 
-    // Metadata.
     expect(html).toContain(build.id);
     expect(html).toContain('container');
     expect(html).toContain('building');

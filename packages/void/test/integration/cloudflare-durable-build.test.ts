@@ -92,7 +92,7 @@ export default defineDurableState({ initialState: { count: 0 }, methods: { incre
         const analysis = analyzeApplicationSync(root, { config });
         const configPath = materializeCloudflareConfig(root);
         // Native classification retains pre-existing WebSocket/class history; the build appends
-        // Sandbox and Live. This exercises the actual fallback arrays that used to be repeated.
+        // Sandbox and Live.
         syncWranglerBindings(
           root,
           { ...analysis.bindings, needsSandbox: false, needsLive: false },

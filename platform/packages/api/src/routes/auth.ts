@@ -9,8 +9,7 @@ import {
   getGoogleUser,
 } from '../auth/google.ts';
 import { hmacSignState, hmacVerifyState } from '../auth/hmac.ts';
-import { signJwt } from '../auth/jwt.ts';
-import { verifyJwt } from '../auth/jwt.ts';
+import { signJwt, verifyJwt } from '../auth/jwt.ts';
 import {
   startPlatformLogin,
   completePlatformLogin,
@@ -27,7 +26,7 @@ import { updateUserRevokingInheritedDestinations } from '../auth/profile.ts';
 import { isAllowedRedirect, isLocalhostRedirect } from '../auth/redirects.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
-export { isAllowedRedirect, isLocalhostRedirect } from '../auth/redirects.ts';
+export { isAllowedRedirect } from '../auth/redirects.ts';
 import {
   getUserByOAuthAccount,
   getUserByEmail,
@@ -256,7 +255,6 @@ app.get('/callback', async (context) => {
     return handleAdminOAuthCallback(context);
   }
 
-  // Verify state HMAC
   const dotIndex = state.lastIndexOf('.');
   if (dotIndex === -1) {
     return context.json({ error: 'invalid state' }, 400);
@@ -446,14 +444,12 @@ app.get('/callback', async (context) => {
     } catch (err) {
       console.error(`Failed to accept invitation for ${email} (user ${user.id}):`, err);
     }
-    if (createdUser) {
-      if (context.env.EMAIL) {
-        context.executionCtx.waitUntil(
-          sendWelcomeEmail(context.env, email, login).catch((err) =>
-            console.error(`[welcome-email] Failed for ${email}:`, err),
-          ),
-        );
-      }
+    if (createdUser && context.env.EMAIL) {
+      context.executionCtx.waitUntil(
+        sendWelcomeEmail(context.env, email, login).catch((err) =>
+          console.error(`[welcome-email] Failed for ${email}:`, err),
+        ),
+      );
     }
   }
 
@@ -469,7 +465,6 @@ app.get('/callback', async (context) => {
     }
   }
 
-  // Sign JWT
   const jwt = await signJwt({ sub: user.id, login, aud: 'api' }, context.env.JWT_SECRET);
 
   const redirectUrl = new URL(redirect);

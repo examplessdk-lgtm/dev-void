@@ -304,7 +304,7 @@ describe('direct-to-R2 deploy flow', () => {
     expect(finalizeBody.workerFiles).toBeUndefined(); // static → no worker bytes
   });
 
-  it('reads each asset file from disk EXACTLY ONCE end-to-end (Codex Finding #2)', async () => {
+  it('reads each asset file from disk EXACTLY ONCE end-to-end', async () => {
     installPlatformMocks();
     const client = makeClient();
 

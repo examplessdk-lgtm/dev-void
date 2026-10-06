@@ -18,6 +18,7 @@ import {
 import type { Db } from '../db.ts';
 import {
   createProject,
+  createResource,
   getBuild,
   getProjectBuilds,
   getProjectBySlug,
@@ -63,14 +64,19 @@ import { resolvePlan, resolvePlanLimits } from '../plans.ts';
 import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
 import { encryptProjectSecret, decryptProjectSecret } from '../project-secrets.ts';
 import { ProjectRequiresNormalizationError, requireNormalizedProject } from '../project-state.ts';
+import { projectWithUrl } from '../project-url.ts';
 import {
   CloudflareApiError,
   InvalidHyperdriveConnectionStringError,
   addQueueConsumer,
+  createHyperdrive,
+  deleteHyperdrive,
   getDispatchWorkerProxyToken,
+  getHyperdriveByName,
   removeQueueConsumer,
   restoreQueueConsumer,
   snapshotQueueConsumer,
+  updateHyperdrive,
 } from '../provisioning/cloudflare-api.ts';
 import {
   addDestination,
@@ -100,7 +106,7 @@ import {
 import { publicProjectZeroTrustState } from '../zero-trust/state.ts';
 import { rollbackCfDestination } from './email.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
-import { getRequestsDataset, queryProjectRequestOverview } from './usage.ts';
+import { getRequestsDataset, queryAnalyticsEngine, queryProjectRequestOverview } from './usage.ts';
 
 /**
  * Slugs no project may claim. Two overlapping reasons:
@@ -342,13 +348,6 @@ function sortProjectList(a: ProjectListItem, b: ProjectListItem): number {
 }
 
 /**
- * D1 returns "no such table" when a table is missing. GET /:id/migrations
- * probes both `_void_migrations` and `_migrations` and must tolerate either
- * being absent, but must NOT silently swallow unrelated errors (auth failure,
- * timeout, quota, "database is locked", etc.) — those should surface to the
- * caller instead of returning an empty applied set.
- */
-/**
  * Resolve the proxy token to use when re-targeting routing/cron at a
  * historical deployment.
  *
@@ -395,6 +394,13 @@ async function resolveRollbackProxyToken(
   return hmacSignState(projectId, env.JWT_SECRET);
 }
 
+/**
+ * D1 returns "no such table" when a table is missing. GET /:id/migrations
+ * probes both `_void_migrations` and `_migrations` and must tolerate either
+ * being absent, but must NOT silently swallow unrelated errors (auth failure,
+ * timeout, quota, "database is locked", etc.) — those should surface to the
+ * caller instead of returning an empty applied set.
+ */
 function isMissingTableError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /no such table/i.test(msg);
@@ -1045,18 +1051,14 @@ const app = new Hono<ApiEnv>()
     if (!preCheck.retained) {
       return context.json({ error: 'deployment not retained (worker script evicted)' }, 400);
     }
-    if (
-      preCheck.manifest &&
-      (JSON.parse(preCheck.manifest) as DeployManifest).sandbox &&
-      !getPlatformCapabilities(context.env).sandbox
-    ) {
-      return context.json(
-        { error: 'This Void platform does not enable rollback to Sandbox deployments.' },
-        501,
-      );
-    }
     if (preCheck.manifest) {
       const manifest = JSON.parse(preCheck.manifest) as DeployManifest;
+      if (manifest.sandbox && !getPlatformCapabilities(context.env).sandbox) {
+        return context.json(
+          { error: 'This Void platform does not enable rollback to Sandbox deployments.' },
+          501,
+        );
+      }
       if (manifest.sandbox && (!isManagedSandbox(manifest) || preCheck.admission_protocol < 3)) {
         return context.json(
           {
@@ -1248,18 +1250,14 @@ const app = new Hono<ApiEnv>()
           if (!target.retained) {
             throw new RollbackError(400, 'deployment not retained (worker script evicted)');
           }
-          if (
-            target.manifest &&
-            (JSON.parse(target.manifest) as DeployManifest).sandbox &&
-            !getPlatformCapabilities(context.env).sandbox
-          ) {
-            throw new RollbackError(
-              501,
-              'This Void platform does not enable rollback to Sandbox deployments.',
-            );
-          }
           if (target.manifest) {
             const manifest = JSON.parse(target.manifest) as DeployManifest;
+            if (manifest.sandbox && !getPlatformCapabilities(context.env).sandbox) {
+              throw new RollbackError(
+                501,
+                'This Void platform does not enable rollback to Sandbox deployments.',
+              );
+            }
             if (manifest.sandbox) {
               if (!isManagedSandbox(manifest) || target.admission_protocol < 3) {
                 throw new RollbackError(
@@ -1530,7 +1528,6 @@ const app = new Hono<ApiEnv>()
             // prior failed cutover could leave the DO holding schedules that
             // no pg manifest still mentions, and a guarded clear would let
             // that stale DO state persist across every future rollback.
-            //
             const previousCronState = await snapshotCronScheduler(context.env, projectId);
             externalUndo.push(() =>
               restoreCronScheduler(context.env, projectId, previousCronState),
@@ -2013,7 +2010,7 @@ const app = new Hono<ApiEnv>()
     //
     // Dedup uses a name → applied_at map with last-write-wins, and
     // _void_migrations is always read second so its timestamps win on
-    // overlaps (matching the pre-fix "primary is _void_migrations" semantics).
+    // overlaps.
     const byName = new Map<string, string>();
 
     try {
@@ -2192,10 +2189,10 @@ const app = new Hono<ApiEnv>()
             tx,
             projectId,
             effectiveNames,
-            locked?.active_deployment_id ?? undefined,
+            locked.active_deployment_id ?? undefined,
           );
         }
-        if (effectiveNames.length > 0 && locked?.active_deployment_id) {
+        if (effectiveNames.length > 0 && locked.active_deployment_id) {
           await appendAppliedMigrations(tx, locked.active_deployment_id, effectiveNames);
         }
 
@@ -2621,17 +2618,9 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'invalid since parameter, use format like 15m, 2h, 3d' }, 400);
     }
 
-    // Validate before use: an unchecked negative reaches the SQL `LIMIT` and
-    // surfaces an Analytics Engine rejection as a misleading 502 rather than a
-    // client error.
-    const limitParam = context.req.query('limit');
-    let limit = 200;
-    if (limitParam !== undefined) {
-      const parsedLimit = Number(limitParam);
-      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
-        return context.json({ error: 'invalid limit parameter, use a positive integer' }, 400);
-      }
-      limit = Math.min(parsedLimit, 500);
+    const limit = parseAnalyticsLimit(context.req.query('limit'));
+    if (limit === null) {
+      return context.json({ error: 'invalid limit parameter, use a positive integer' }, 400);
     }
     const deploymentId = context.req.query('deploymentId');
     if (deploymentId && !/^dpl_[0-9a-z]+$/.test(deploymentId)) {
@@ -2693,16 +2682,10 @@ const app = new Hono<ApiEnv>()
       LIMIT ${limit}
     `;
 
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${context.env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${context.env.CF_API_TOKEN}`,
-          'Content-Type': 'text/plain',
-        },
-        body: query,
-      },
+    const response = await queryAnalyticsEngine(
+      context.env.CF_ACCOUNT_ID,
+      context.env.CF_API_TOKEN,
+      query,
     );
 
     const responseText = await response.text();
@@ -2747,8 +2730,8 @@ const app = new Hono<ApiEnv>()
       );
     }
 
-    // Query newest-first to match the working admin path, then return entries
-    // in chronological order for CLI readability.
+    // Query newest-first to match the admin log path, then return entries in
+    // chronological order for CLI readability.
     const data = [...(result.data ?? [])].reverse().map((row) => ({
       timestamp: row.ts,
       outcome: row.outcome,
@@ -2779,17 +2762,9 @@ const app = new Hono<ApiEnv>()
       return context.json({ error: 'invalid since parameter, use format like 15m, 2h, 3d' }, 400);
     }
 
-    // Validate before use: an unchecked negative reaches the SQL `LIMIT` and
-    // surfaces an Analytics Engine rejection as a misleading 502 rather than a
-    // client error.
-    const limitParam = context.req.query('limit');
-    let limit = 200;
-    if (limitParam !== undefined) {
-      const parsedLimit = Number(limitParam);
-      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
-        return context.json({ error: 'invalid limit parameter, use a positive integer' }, 400);
-      }
-      limit = Math.min(parsedLimit, 500);
+    const limit = parseAnalyticsLimit(context.req.query('limit'));
+    if (limit === null) {
+      return context.json({ error: 'invalid limit parameter, use a positive integer' }, 400);
     }
 
     // Optional status filter: a class like `5xx` (LIKE '5%') or an exact 3-digit
@@ -2812,9 +2787,7 @@ const app = new Hono<ApiEnv>()
     }
 
     const sinceStr = new Date(Date.now() - sinceMs).toISOString().replace('T', ' ').slice(0, 19);
-    const dataset =
-      context.env.REQUESTS_DATASET ??
-      (context.env.PLATFORM_ENV === 'staging' ? 'void_requests_staging' : 'void_requests');
+    const dataset = getRequestsDataset(context.env);
 
     // void_requests columns (see dispatch recordRequest): blob2 type, blob3
     // method, blob4 status, blob5 slug; double2 responseBytes, double3 durationMs.
@@ -2833,16 +2806,10 @@ const app = new Hono<ApiEnv>()
       LIMIT ${limit}
     `;
 
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${context.env.CF_ACCOUNT_ID}/analytics_engine/sql`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${context.env.CF_API_TOKEN}`,
-          'Content-Type': 'text/plain',
-        },
-        body: query,
-      },
+    const response = await queryAnalyticsEngine(
+      context.env.CF_ACCOUNT_ID,
+      context.env.CF_API_TOKEN,
+      query,
     );
 
     const responseText = await response.text();
@@ -2966,20 +2933,13 @@ const app = new Hono<ApiEnv>()
       //  (b) the genuine stale-active window (PG terminal write threw) — PG is
       //      still non-terminal, so trust the DO's local terminal status.
       const fresh = await getBuild(context.get('db'), build.id);
-      if (fresh && isTerminalBuildStatus(fresh.status)) {
-        return context.json({
-          lines: body.lines,
-          lastSeq: body.lastSeq,
-          status: fresh.status,
-          terminal: true,
-          logsComplete,
-          external: null,
-        });
-      }
       return context.json({
         lines: body.lines,
         lastSeq: body.lastSeq,
-        status: body.status ?? build.status,
+        status:
+          fresh && isTerminalBuildStatus(fresh.status)
+            ? fresh.status
+            : (body.status ?? build.status),
         terminal: true,
         logsComplete,
         external: null,
@@ -3010,9 +2970,6 @@ const app = new Hono<ApiEnv>()
     }
 
     const { connectionString } = await context.req.json<{ connectionString: string }>();
-    const { createHyperdrive, updateHyperdrive, getHyperdriveByName, deleteHyperdrive } =
-      await import('../provisioning/cloudflare-api.ts');
-    const { createResource, getProjectResources } = await import('../db.ts');
 
     // Check if Hyperdrive already exists
     const existing = await getProjectResources(context.get('db'), projectId);
@@ -3063,47 +3020,15 @@ const app = new Hono<ApiEnv>()
         }
 
         try {
-          const hd = await createHyperdrive(
-            context.env.CF_ACCOUNT_ID,
-            context.env.CF_API_TOKEN,
-            resourceName,
-            connectionString,
-          );
+          const hd = await createOrAdoptHyperdrive(context.env, resourceName, connectionString);
           hyperdriveId = hd.id;
-          hyperdriveCreatedByUs = true;
+          hyperdriveCreatedByUs = hd.created;
         } catch (err: unknown) {
-          if (isAlreadyExistsError(err)) {
-            // CF already has a Hyperdrive for this name (orphaned from a prior
-            // partial failure). Update it while access is still protected by
-            // the project lock, then durably adopt its id below.
-            try {
-              const hd = await getHyperdriveByName(
-                context.env.CF_ACCOUNT_ID,
-                context.env.CF_API_TOKEN,
-                resourceName,
-              );
-              await updateHyperdrive(
-                context.env.CF_ACCOUNT_ID,
-                context.env.CF_API_TOKEN,
-                hd.id,
-                connectionString,
-                resourceName,
-              );
-              hyperdriveId = hd.id;
-            } catch (lookupErr: unknown) {
-              const response = toDatabaseProvisioningError(lookupErr);
-              if (response) {
-                return context.json(response.body, response.status);
-              }
-              throw lookupErr;
-            }
-          } else {
-            const response = toDatabaseProvisioningError(err);
-            if (response) {
-              return context.json(response.body, response.status);
-            }
-            throw err;
+          const response = toDatabaseProvisioningError(err);
+          if (response) {
+            return context.json(response.body, response.status);
           }
+          throw err;
         }
 
         if (!hyperdriveId) {
@@ -3165,9 +3090,6 @@ const app = new Hono<ApiEnv>()
     }
 
     const { connectionString } = await context.req.json<{ connectionString: string }>();
-    const { createHyperdrive, updateHyperdrive, getHyperdriveByName, deleteHyperdrive } =
-      await import('../provisioning/cloudflare-api.ts');
-    const { createResource, getProjectResources } = await import('../db.ts');
 
     const encrypted = await encryptProjectSecret(
       context.env,
@@ -3217,47 +3139,17 @@ const app = new Hono<ApiEnv>()
         } else {
           let hyperdriveId: string;
           try {
-            const hd = await createHyperdrive(
-              context.env.CF_ACCOUNT_ID,
-              context.env.CF_API_TOKEN,
-              resourceName,
-              connectionString,
-            );
+            const hd = await createOrAdoptHyperdrive(context.env, resourceName, connectionString);
             hyperdriveId = hd.id;
-            createdHyperdriveId = hd.id;
-          } catch (err: unknown) {
-            if (isAlreadyExistsError(err)) {
-              // An earlier partial attempt can leave an untracked object.
-              // Adopt it under the same project lock so no membership change
-              // can interleave its live update and the durable resource row.
-              try {
-                const hd = await getHyperdriveByName(
-                  context.env.CF_ACCOUNT_ID,
-                  context.env.CF_API_TOKEN,
-                  resourceName,
-                );
-                await updateHyperdrive(
-                  context.env.CF_ACCOUNT_ID,
-                  context.env.CF_API_TOKEN,
-                  hd.id,
-                  connectionString,
-                  resourceName,
-                );
-                hyperdriveId = hd.id;
-              } catch (lookupErr: unknown) {
-                const response = toDatabaseProvisioningError(lookupErr);
-                if (response) {
-                  return context.json(response.body, response.status);
-                }
-                throw lookupErr;
-              }
-            } else {
-              const response = toDatabaseProvisioningError(err);
-              if (response) {
-                return context.json(response.body, response.status);
-              }
-              throw err;
+            if (hd.created) {
+              createdHyperdriveId = hd.id;
             }
+          } catch (err: unknown) {
+            const response = toDatabaseProvisioningError(err);
+            if (response) {
+              return context.json(response.body, response.status);
+            }
+            throw err;
           }
           try {
             await createResource(tx, projectId, 'hyperdrive', hyperdriveId, 'HYPERDRIVE');
@@ -3357,8 +3249,61 @@ function parseDuration(input: string): number | null {
   return ms;
 }
 
+/**
+ * Parse an optional positive `limit` query (default 200, capped at 500).
+ * Validated before use: an unchecked negative reaches the SQL `LIMIT` and
+ * surfaces an Analytics Engine rejection as a misleading 502 rather than a
+ * client error.
+ */
+function parseAnalyticsLimit(value: string | undefined): number | null {
+  if (value === undefined) {
+    return 200;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.min(parsed, 500);
+}
+
 function isAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && error.message.toLowerCase().includes('already exists');
+}
+
+/**
+ * Create the project's Hyperdrive, or adopt one an earlier partial attempt left
+ * untracked under the same name by updating it in place. Callers hold the
+ * project lock so no membership change can interleave the live update and the
+ * durable resource row. `created` is true only for a fresh object — the only
+ * kind that is safe to delete if persistence later fails.
+ */
+async function createOrAdoptHyperdrive(
+  env: ApiEnv['Bindings'],
+  resourceName: string,
+  connectionString: string,
+): Promise<{ id: string; created: boolean }> {
+  try {
+    const hd = await createHyperdrive(
+      env.CF_ACCOUNT_ID,
+      env.CF_API_TOKEN,
+      resourceName,
+      connectionString,
+    );
+    return { id: hd.id, created: true };
+  } catch (err: unknown) {
+    if (!isAlreadyExistsError(err)) {
+      throw err;
+    }
+  }
+  const hd = await getHyperdriveByName(env.CF_ACCOUNT_ID, env.CF_API_TOKEN, resourceName);
+  await updateHyperdrive(
+    env.CF_ACCOUNT_ID,
+    env.CF_API_TOKEN,
+    hd.id,
+    connectionString,
+    resourceName,
+  );
+  return { id: hd.id, created: false };
 }
 
 function getHyperdriveResourceName(projectId: string): string {
@@ -3557,4 +3502,3 @@ function isSyntheticProviderEmail(email: string): boolean {
 }
 
 export default app;
-import { projectWithUrl } from '../project-url.ts';

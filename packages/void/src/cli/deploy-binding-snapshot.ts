@@ -20,14 +20,7 @@ import {
 } from '../sandbox/config.ts';
 import { type BindingIdentitySnapshot } from './deploy-types.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
-// The provision module pulls in the whole-provision cross-process lock
-// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
-// `process.reallyExit` and installs exit handlers the moment it is imported. An
-// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
-// must not pay that side effect. Keep ONLY erasable `import type` at module scope
-// and load the runtime values with a DYNAMIC `import()` inside the fork
-// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
-// deploy) never evaluates the provision lifecycle.
+// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet, ProvisionDriftEntry } from './provision.ts';
 import {
   readExistingLiveBindingConfig,
@@ -207,7 +200,7 @@ export const DEPLOY_PASSTHROUGH_ASSERT_FIELDS: ReadonlyArray<string> = Object.ke
  *     reconciles the account's Email Routing rules from this array on `wrangler deploy`: a build
  *     that injects an address redirects the account's inbound mail to the deployed worker, and one
  *     that drops the root's removes the rules Void's email step set up. Not a binding either, and
- *     the CF plugin passes the key through verbatim, so it used to fail OPEN.
+ *     the CF plugin passes the key through verbatim.
  * Void's own build emits NONE of them: a clean `vite build` (root declaring none) leaves every one
  * ABSENT from the emitted artifact (verified against a real build), so an emptiness check
  * ({@link isEmptyPassthroughValue}) keeps the normalizer's default-fill from false-positiving.
@@ -301,9 +294,8 @@ export function snapshotPassthroughIdentities(
 
 /**
  * Companion of {@link snapshotPassthroughIdentities} for the fields the per-binding ENTRY pin
- * cannot cover ({@link DEPLOY_RAW_SNAPSHOT_FIELDS}): capture the RAW pre-build root value for each
- * of `unsafe` / `tail_consumers` / `streaming_tail_consumers` (whole-object-pinned),
- * `durable_objects` (external-DO check), and `ai` (binding pin). Taken at the SAME pre-build point
+ * cannot cover: capture the RAW pre-build root value for each {@link DEPLOY_RAW_SNAPSHOT_FIELDS}
+ * entry. Taken at the SAME pre-build point
  * as the other snapshots, so a build that INJECTS or REWRITES one of these into the emitted
  * artifact is caught at {@link verifyGeneratedDeployConfig}, while a user's own hand-declared value
  * (present here, unchanged) passes.

@@ -24,17 +24,16 @@ const TERMINAL_ERROR_MSG = 'deploy_end';
 
 const RESERVED_KEYS = new Set(['ts', 'elapsedMs', 'lvl', 'msg', 'err']);
 
-/**
- * The trace was a file the user opened by hand; the summary publishes it to
- * whatever reads stderr, which in CI is a stored, often public, log.
- *
- * Scrubbing here covers only credentials this code emits itself — a presigned
- * URL it built, an auth header it set, a field it named. Scrubbing user data is
- * left to the CI platform, which owns the secrets and masks them before the log
- * is written. GitHub Actions does this for everything under `secrets.*`. Void
- * does not guess at credential-shaped names or at credentials embedded in
- * values the user supplied.
- */
+// The trace was a file the user opened by hand; the summary publishes it to
+// whatever reads stderr, which in CI is a stored, often public, log.
+//
+// Scrubbing here covers only credentials this code emits itself — a presigned
+// URL it built, an auth header it set, a field it named. Scrubbing user data is
+// left to the CI platform, which owns the secrets and masks them before the log
+// is written. GitHub Actions does this for everything under `secrets.*`. Void
+// does not guess at credential-shaped names or at credentials embedded in
+// values the user supplied.
+
 /** Query parameters whose value must never reach a CI log. */
 const SIGNED_QUERY_RE =
   /([?&](?:X-Amz-[A-Za-z0-9-]+|[Ss]ignature|sig|token|access_token|key)=)[^&\s]+/g;

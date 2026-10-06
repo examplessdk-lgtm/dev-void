@@ -19,9 +19,9 @@ import type { Build } from '../types.ts';
  * the token is already revoked by the committed status flip.
  *
  * Uses the trusted `cancelBuild` RPC on BuildManager (NOT the agent-authenticated
- * POST /cancel — that secret is minted inside the DO and unavailable here). The
- * RPC tears down the orphaned container so it stops billing; without it a
- * 0/unlimited-plan build (no timeout alarm) could run far past any sane ceiling.
+ * POST /cancel — that secret is minted inside the DO and unavailable here).
+ * Without it a 0/unlimited-plan build (no timeout alarm) could run far past any
+ * sane ceiling.
  *
  * The container size is a distinct DO class per size (`@cloudflare/containers`
  * has no per-start sizing), so the cancel MUST address the SAME namespace the

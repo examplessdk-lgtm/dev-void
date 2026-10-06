@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
-// Feature B integration: the BuildManager DO drives a GitHub Check Run across the
+// The BuildManager DO drives a GitHub Check Run across the
 // build lifecycle — POST `/check-runs` once all pre-start rechecks pass, then PATCH
 // it `completed` at every terminal site (onStop / onError / enforceTimeout /
 // cancelBuild / the startBuild catch). This mirrors the unit harness
@@ -204,10 +204,7 @@ import { BuildManager } from '../../src/build-manager.ts';
 import type { BuildConfig } from '../../src/build-types.ts';
 import { getBuild, markBuildTerminalIfActive } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
-import {
-  getBranchHeadComparisonStatus,
-  getInstallationToken,
-} from '../../src/github/installation-token.ts';
+import { getBranchHeadComparisonStatus } from '../../src/github/installation-token.ts';
 
 // --- ctx / env / config fakes (mirror the unit harness) ---
 
@@ -522,7 +519,7 @@ describe('BuildManager check-run lifecycle — create', () => {
 
     await m.startBuild(makeConfig());
 
-    // Fix B: a 5xx on create is NOT retried (the POST is not idempotent) → exactly one
+    // A 5xx on create is NOT retried (the POST is not idempotent) → exactly one
     // attempt, returns null.
     expect(posts).toHaveLength(1);
     // The build started anyway.
@@ -530,7 +527,7 @@ describe('BuildManager check-run lifecycle — create', () => {
     expect(dbState.checkRunIds.has('b1')).toBe(false);
     expect(ctx._kv.get('checkRunId')).toBeUndefined();
 
-    // A finalize site now no-ops (no id stored) → no PATCH.
+    // A finalize site no-ops (no id stored) → no PATCH.
     dbState.writes = [];
     await m.onStop({ exitCode: 0, reason: 'exit' });
     expect(patches).toHaveLength(0);
@@ -653,8 +650,8 @@ describe('BuildManager check-run lifecycle — finalize terminal sites', () => {
     await m.cancelBuild('project disconnected');
 
     expect(patches).toHaveLength(1);
-    // details_url is now set on the cancel finalize (was previously omitted) and is
-    // env-aware via projectUrl() — default env (no SITE_DOMAIN) → prod fallback.
+    // The cancel finalize sets an env-aware details_url via projectUrl() — default
+    // env (no SITE_DOMAIN) → prod fallback.
     expect(patches[0].body).toMatchObject({
       conclusion: 'cancelled',
       details_url: 'https://my-app.void.app',
@@ -705,8 +702,8 @@ describe('BuildManager check-run lifecycle — finalize terminal sites', () => {
   });
 });
 
-describe('BuildManager check-run lifecycle — gap closures', () => {
-  // Gap closure #1: a non-capacity throw AFTER the check-run is created must finalize
+describe('BuildManager check-run lifecycle — startBuild failures after create', () => {
+  // A non-capacity throw AFTER the check-run is created must finalize
   // the run as `failure` via the startBuild catch — otherwise it strands `in_progress`
   // forever (no onStop ever finalizes a force-stopped build). The slot still frees.
   it('startBuild throws AFTER create (non-capacity) → build failed via catch, one failure PATCH, no stranded in_progress', async () => {
@@ -739,7 +736,7 @@ describe('BuildManager check-run lifecycle — gap closures', () => {
     startSpy.mockRestore();
   });
 
-  // Gap closure #1b: even if the terminal CAS write itself throws, the catch's
+  // Even if the terminal CAS write itself throws, the catch's
   // `finally { pokeScheduler() }` must still run — finalizeCheckRun never throws and
   // does not perturb that.
   it('startBuild catch still pokes the scheduler when the terminal write throws (finalize never perturbs)', async () => {
@@ -764,7 +761,7 @@ describe('BuildManager check-run lifecycle — gap closures', () => {
     warnSpy.mockRestore();
   });
 
-  // Gap closure #2: a capacity error AFTER create re-throws WITHOUT terminalizing
+  // A capacity error AFTER create re-throws WITHOUT terminalizing
   // (the build is requeued). The run stays `in_progress` (NO PATCH). When the
   // scheduler re-runs startBuild on the SAME DO, the stored id is reused → NO
   // second POST. Total: exactly ONE POST, ZERO PATCH.
@@ -805,11 +802,11 @@ describe('BuildManager check-run lifecycle — gap closures', () => {
 });
 
 describe('BuildManager check-run lifecycle — CAS-lost finalize (matches the DB outcome)', () => {
-  // Fix 2: when a terminal site LOSES the CAS (the row was terminalized out-of-band
+  // When a terminal site LOSES the CAS (the row was terminalized out-of-band
   // before this site ran), the check-run must be PATCHed to the AUTHORITATIVE recorded
   // outcome — never this site's assumed one — so GitHub never contradicts the DB.
   //
-  // Force the out-of-band terminalization the same way the existing
+  // Force the out-of-band terminalization the same way the
   // 'already-terminal' scenarios do: pre-set the DB row terminal BEFORE invoking the
   // handler, so `markBuildTerminalIfActive(...)` CAS-no-ops (current ∉ ACTIVE → false).
   // The DO's in-memory `config.status` is still 'starting' (set by startBuild), so the
@@ -854,7 +851,7 @@ describe('BuildManager check-run lifecycle — CAS-lost finalize (matches the DB
 });
 
 describe('BuildManager check-run lifecycle — cancel during create (post-create recheck)', () => {
-  // Fix 3: a cancel that interleaves DURING the createCheckRun POST. The createCheckRun
+  // A cancel that interleaves DURING the createCheckRun POST. The createCheckRun
   // fetch yields the DO input gate, so a cancelBuild RPC can terminalize the row
   // mid-POST (its own finalize ran BEFORE the id was stored → no-op). The post-create
   // recheck (`getBuild` after the POST) must see the non-'starting' row, finalize the
@@ -899,10 +896,9 @@ describe('BuildManager check-run lifecycle — cancel during create (post-create
 });
 
 describe('BuildManager check-run lifecycle — best-effort DO-storage cache', () => {
-  // Fix 1: caching the check-run id in DO storage is BEST-EFFORT. A rejecting
+  // Caching the check-run id in DO storage is BEST-EFFORT. A rejecting
   // `ctx.storage.put` for the check-run key must NOT fail or perturb the build — the
-  // container still starts and the scheduler is still poked. (The id is lost for
-  // finalizers, but a later requeue self-heals; that's out of scope here.)
+  // container still starts and the scheduler is still poked.
   it('storage.put rejection for the check-run key does not fail the build', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { posts } = installFetch();
@@ -965,16 +961,15 @@ describe('BuildManager check-run lifecycle — redelivery (single build, single 
 });
 
 describe('BuildManager check-run lifecycle — finalize hardening (DO-miss fallback + lost-CAS throw)', () => {
-  // F1: a DO-storage MISS for the check-run id must NOT strand the run `in_progress`.
+  // A DO-storage MISS for the check-run id must NOT strand the run `in_progress`.
   // `finalizeCheckRun` falls back to the persisted `builds.check_run_id` (the column
-  // `setBuildCheckRunId` wrote at create). Recreate the miss exactly like the existing
-  // best-effort-put scenario — reject `ctx.storage.put('checkRunId')` ONCE so the DO
-  // cache never holds the id — but the Postgres persist still ran (dbState.checkRunIds).
-  // Then drive a terminal finalizer and assert a PATCH DID happen (the existing
-  // best-effort-put test deliberately did NOT cover this recovery).
+  // `setBuildCheckRunId` wrote at create). Recreate the miss like the best-effort-put
+  // scenario — reject `ctx.storage.put('checkRunId')` ONCE so the DO cache never
+  // holds the id — but the Postgres persist still ran (dbState.checkRunIds). Then
+  // drive a terminal finalizer and assert a PATCH DID happen.
   it('onStop exit 0 with the DO-storage id missing → finalize recovers it from builds.check_run_id, one success PATCH', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { posts, patches } = installFetch();
+    const { patches } = installFetch();
     const ctx = makeStubCtx();
     const env = makeEnv();
 
@@ -1001,8 +996,7 @@ describe('BuildManager check-run lifecycle — finalize hardening (DO-miss fallb
 
     await m.onStop({ exitCode: 0, reason: 'exit' });
 
-    // The finalizer recovered the id from the persisted column and PATCHed success —
-    // had it only consulted DO storage (the old behavior) it would have no-op'd.
+    // The finalizer recovered the id from the persisted column and PATCHed success.
     expect(patches).toHaveLength(1);
     expect(patches[0].url).toMatch(/\/check-runs\/99001$/);
     expect(patches[0].body).toMatchObject({ status: 'completed', conclusion: 'success' });
@@ -1010,7 +1004,7 @@ describe('BuildManager check-run lifecycle — finalize hardening (DO-miss fallb
     warnSpy.mockRestore();
   });
 
-  // F3: on the lost-CAS `!won` path the terminal site calls
+  // On the lost-CAS `!won` path the terminal site calls
   // `finalizeCheckRunToRecordedOutcome`, which reads the authoritative row via
   // `getBuild`. If that read THROWS it must be swallowed (log + return) — never
   // propagate out of the terminal handler (which would skip the PATCH AND, worse,
@@ -1052,8 +1046,8 @@ describe('BuildManager check-run lifecycle — finalize hardening (DO-miss fallb
   });
 });
 
-describe('BuildManager check-run lifecycle — requeue/create-cancel id reuse (Bugbot #1+#2)', () => {
-  // Bugbot #1: a requeue runs startBuild on a FRESH DO (or one whose best-effort
+describe('BuildManager check-run lifecycle — requeue/create-cancel id reuse', () => {
+  // A requeue runs startBuild on a FRESH DO (or one whose best-effort
   // DO-storage cache was lost), so DO storage holds NO check-run id — but the
   // FIRST run's `setBuildCheckRunId` persisted it to `builds.check_run_id`. The
   // create-gate must reuse that PERSISTED id (the pre-create-recheck `row` carries
@@ -1088,7 +1082,7 @@ describe('BuildManager check-run lifecycle — requeue/create-cancel id reuse (B
     expect(patches[0].body).toMatchObject({ status: 'completed', conclusion: 'success' });
   });
 
-  // Bugbot #2: a cancel interleaves DURING the create POST AND both persists fail —
+  // A cancel interleaves DURING the create POST AND both persists fail —
   // the DO-storage cache put rejects and the Postgres `setBuildCheckRunId` rejects —
   // so the just-created id lives ONLY in startBuild's local variable. The post-create
   // recheck must still finalize the run to the recorded outcome using that in-hand id
@@ -1148,8 +1142,8 @@ describe('BuildManager check-run lifecycle — requeue/create-cancel id reuse (B
   });
 });
 
-describe('BuildManager check-run lifecycle — dual persist fail, build continues (Bugbot #3)', () => {
-  // Bugbot #3: createCheckRun succeeds but BOTH the DO put and the Postgres persist
+describe('BuildManager check-run lifecycle — dual persist fail, build continues', () => {
+  // createCheckRun succeeds but BOTH the DO put and the Postgres persist
   // fail, and NO cancel interleaves — the post-create recheck sees 'starting', so the
   // build CONTINUES to run the container. The id then lives ONLY in the in-memory
   // `activeCheckRunId` field (the explicitId path is not taken — that's only the cancel
@@ -1197,17 +1191,17 @@ describe('BuildManager check-run lifecycle — dual persist fail, build continue
   });
 });
 
-describe('BuildManager check-run lifecycle — pre-start terminalize finalizes a PRIOR run (Fix A)', () => {
-  // Fix A: the pre-start terminalizing early-returns in `startBuild` now call
+describe('BuildManager check-run lifecycle — pre-start terminalize finalizes a PRIOR run', () => {
+  // The pre-start terminalizing early-returns in `startBuild` call
   // `finalizeCheckRunToStatus(config, <status>)` before returning. A capacity requeue
   // re-runs `startBuild` on the SAME build id, and `builds.check_run_id` survives the
   // requeue, so a run created on a PRIOR attempt would otherwise be stranded
-  // `in_progress` forever when a pre-start recheck now terminalizes the build. The
+  // `in_progress` forever when a pre-start recheck terminalizes the build. The
   // finalize NO-OPS on a first attempt (no id anywhere → `finalizeCheckRun` returns
   // before any PATCH) and PATCHes on a requeue (id recovered from `builds.check_run_id`
   // — the harness's `getBuild` carries `dbState.checkRunIds`).
 
-  // Pre-create cancel recheck (line ~282): the row is terminal BEFORE startBuild runs,
+  // Pre-create cancel recheck: the row is terminal BEFORE startBuild runs,
   // so freshness + coverage pass (they don't read status) and the cancellation recheck
   // `getBuild` observes a non-'starting' terminal row → early return. A PRIOR run was
   // persisted, so it must be finalized to the recorded outcome ('cancelled').
@@ -1237,7 +1231,7 @@ describe('BuildManager check-run lifecycle — pre-start terminalize finalizes a
     expect(vi.mocked(signDeployToken)).not.toHaveBeenCalled();
   });
 
-  // Non-identical head branch (line ~221): a missed newer-push leaves a stale queued
+  // Non-identical head branch: a missed newer-push leaves a stale queued
   // build; the just-in-time freshness recheck returns non-'identical' → cancel + return
   // BEFORE the create block. A PRIOR run must be finalized to 'cancelled'.
   it('non-identical head finalizes the prior run → no create POST, one cancelled PATCH', async () => {
@@ -1285,20 +1279,20 @@ describe('BuildManager check-run lifecycle — pre-start terminalize finalizes a
   });
 });
 
-describe('BuildManager check-run lifecycle — pre-start finalize is CAS-aware (Fix A2)', () => {
-  // Fix A2: the three pre-start terminalizing early-returns (freshness aged-out,
+describe('BuildManager check-run lifecycle — pre-start finalize is CAS-aware', () => {
+  // The three pre-start terminalizing early-returns (freshness aged-out,
   // non-identical head, uncovered repo) call `markBuildTerminalIfActive` then finalize
   // a PRIOR-attempt run. Their awaits (getBranchHeadComparisonStatus fetch /
   // installationCoversRepo Hyperdrive read) release the DO input gate, so a concurrent
   // terminalizer (terminateBuildsForProject commits an out-of-band terminal status,
   // then the cancelBuild RPC) can win the CAS with a DIFFERENT status. Like the catch
-  // site + the 6 terminal sites, each path now captures the `won` boolean and, on a
+  // site and the terminal sites, each path captures the `won` boolean and, on a
   // loss, finalizes to the AUTHORITATIVE recorded outcome — so GitHub never contradicts
   // the DB. Forced the same way as the terminal-site lost-CAS tests: pre-set the row
   // terminal so `markBuildTerminalIfActive` CAS-no-ops (current ∉ ACTIVE → false).
 
   // --- lost-CAS branch: the conclusion must match the recorded DB status, NOT the
-  // path's hardcoded one (the proof for the two bot findings on line 214). ---
+  // path's hardcoded one. ---
 
   it('aged-out freshness, row cancelled out-of-band → PATCH cancelled (not the hardcoded failure)', async () => {
     // null comparison + aged-out → the 'failed' aged-out branch. The row was cancelled
@@ -1362,7 +1356,7 @@ describe('BuildManager check-run lifecycle — pre-start finalize is CAS-aware (
   });
 
   // --- won branch (CAS wins → finalize to this site's own conclusion). The
-  // non-identical-head won case is already covered by Fix A above; cover the other two. ---
+  // non-identical-head won case is covered by the prior-run suite above. ---
 
   it('aged-out freshness wins the CAS → PATCH failure (the aged-out conclusion)', async () => {
     vi.mocked(getBranchHeadComparisonStatus).mockResolvedValueOnce(null);

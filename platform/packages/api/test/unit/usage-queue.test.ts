@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
 
-// Mock cloudflare:workers since DurableObject base class isn't available in unit tests
-vi.mock('cloudflare:workers', () => ({
-  DurableObject: class {},
-}));
-
 // Mock db.ts (createDb is called inside processUsageEventBatch).
 const getUserMock = vi.fn();
 const getProjectsByIdsMock = vi.fn();

@@ -110,7 +110,7 @@ export async function runAiSetupPrompt(
 
   const options = [
     { value: '__create__' as const, label: 'Create new project' },
-    ...projects.map((p: import('./cli/client.ts').ProjectResponse) => ({
+    ...projects.map((p) => ({
       value: p.id,
       label: p.slug,
     })),
@@ -164,9 +164,7 @@ export async function runAiSetupPrompt(
     projectId = created.id;
     slug = created.slug;
   } else {
-    const project = projects.find(
-      (p: import('./cli/client.ts').ProjectResponse) => p.id === result,
-    )!;
+    const project = projects.find((p) => p.id === result)!;
     projectId = project.id;
     slug = project.slug;
   }

@@ -35,31 +35,12 @@ import {
   cfError,
   cfSuccess,
   createMockExecutionContext,
+  recordingBuildManager,
   skipOrphanSweepDelay,
   type TestEnv,
 } from './helpers.ts';
 
 let env: TestEnv;
-
-// A BUILD_MANAGER stand-in that records which build ids received a `cancelBuild`
-// RPC (the DO name is the build id). Mirrors the helper in api-webhooks.test.ts /
-// api-github.test.ts: teardown's container-build cleanup calls `cancelBuild` on
-// BuildManager, so we assert it was invoked rather than touching a real DO.
-function recordingBuildManager(): {
-  namespace: DurableObjectNamespace;
-  cancelledIds: ReadonlyArray<string>;
-} {
-  const cancelledIds: Array<string> = [];
-  const namespace = {
-    idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
-    get: (id: DurableObjectId) => ({
-      cancelBuild: async (_reason?: string) => {
-        cancelledIds.push(id.toString());
-      },
-    }),
-  } as unknown as DurableObjectNamespace;
-  return { namespace, cancelledIds };
-}
 
 beforeAll(async () => {
   env = await setupEnv();
@@ -250,7 +231,6 @@ describe('DELETE /projects/:id', () => {
     const body = (await res.json()) as { ok: boolean; id: string; slug: string };
     expect(body).toEqual({ ok: true, id: project.id, slug: 'empty-app' });
 
-    // Verify project is gone from DB
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
     expect(await env.ROUTING.get(`ai-block:${project.id}`)).toBeNull();
@@ -328,19 +308,16 @@ describe('DELETE /projects/:id', () => {
     const project = await createTestProject(env.db, user.id, 'full-app');
     mockCfApi();
 
-    // Add resources
     await addResource(project.id, 'd1', 'd1-uuid-123', 'DB');
     await addResource(project.id, 'kv', 'kv-id-456', 'KV');
     await addResource(project.id, 'r2', 'r2-bucket-789', 'STORAGE');
 
-    // Add a deployment
     await env.db.insert(deployments).values({
       id: 'dpl_test1',
       project_id: project.id,
       status: 'live',
     });
 
-    // Add KV routing entry
     await env.ROUTING.put(
       'full-app',
       JSON.stringify({ workerName: 'user-full-app', projectId: project.id }),
@@ -357,7 +334,6 @@ describe('DELETE /projects/:id', () => {
     const body = (await res.json()) as { ok: boolean; id: string; slug: string };
     expect(body).toEqual({ ok: true, id: project.id, slug: 'full-app' });
 
-    // Verify DB records are gone
     const [dbProject] = await env.db.select().from(projects).where(eq(projects.id, project.id));
     expect(dbProject).toBeUndefined();
 
@@ -373,7 +349,6 @@ describe('DELETE /projects/:id', () => {
       .where(eq(deployments.project_id, project.id));
     expect(dbDeployments).toHaveLength(0);
 
-    // Verify KV routing removed
     const routing = await env.ROUTING.get('full-app');
     expect(routing).toBeNull();
   });
@@ -673,7 +648,6 @@ describe('DELETE /projects/:id', () => {
     const fetchMock = mockCfApi();
     const queueRoutingKey = `queue:${project.id.replaceAll('_', '-')}-demo-queue`;
 
-    // Add a queue resource
     await addResource(project.id, 'queue', '25832cb0ce3d4f60b1e538911a4629f4', 'demo-queue');
     await env.db.insert(deployments).values([
       {
@@ -711,15 +685,14 @@ describe('DELETE /projects/:id', () => {
     );
     expect(res.status).toBe(200);
 
-    // Verify deleteQueue CF API was called
-    const deleteQueueCall = fetchMock.mock.calls.find((call: Array<unknown>) => {
+    const queueDeleteIndex = fetchMock.mock.calls.findIndex((call: Array<unknown>) => {
       const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
       return (
         url.includes('/queues/25832cb0ce3d4f60b1e538911a4629f4') &&
         (call[1] as RequestInit)?.method === 'DELETE'
       );
     });
-    expect(deleteQueueCall).toBeDefined();
+    expect(queueDeleteIndex).toBeGreaterThanOrEqual(0);
 
     const workerDeleteCalls = fetchMock.mock.calls.filter((call: Array<unknown>) => {
       const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
@@ -737,13 +710,6 @@ describe('DELETE /projects/:id', () => {
       ]),
     );
 
-    const queueDeleteIndex = fetchMock.mock.calls.findIndex((call: Array<unknown>) => {
-      const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
-      return (
-        url.includes('/queues/25832cb0ce3d4f60b1e538911a4629f4') &&
-        (call[1] as RequestInit)?.method === 'DELETE'
-      );
-    });
     for (const workerName of ['user-queue-app-dpl_active', 'user-queue-app-dpl_failed']) {
       const workerDeleteIndex = fetchMock.mock.calls.findIndex((call: Array<unknown>) => {
         const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
@@ -755,11 +721,9 @@ describe('DELETE /projects/:id', () => {
       expect(workerDeleteIndex).toBeLessThan(queueDeleteIndex);
     }
 
-    // Verify queue routing KV entry is removed
     const routing = await env.ROUTING.get(queueRoutingKey);
     expect(routing).toBeNull();
 
-    // Verify DB records are gone
     const dbResources = await env.db
       .select()
       .from(resources)
@@ -781,7 +745,6 @@ describe('DELETE /projects/:id', () => {
     );
     expect(res.status).toBe(200);
 
-    // Find the legacy worker delete call
     const deleteWorkerCall = fetchMock.mock.calls.find((call: Array<unknown>) => {
       const url = typeof call[0] === 'string' ? call[0] : String(call[0]);
       return (
@@ -793,9 +756,8 @@ describe('DELETE /projects/:id', () => {
     expect(deleteWorkerCall).toBeDefined();
   });
 
-  // Regression for direct-to-R2 orphan accumulation: bytes uploaded via the
-  // direct-to-R2 presigned PUTs that never finalized into a live deploy (e.g.
-  // upload-urls / teardown TOCTOU race, abandoned upload) live durably under
+  // Bytes uploaded via direct-to-R2 presigned PUTs that never finalized into a
+  // live deploy (e.g. upload-urls / teardown TOCTOU race, abandoned upload) live durably under
   // `assets/{projectId}/{blake3}` keys. Retention cleanup only walks hashes
   // referenced by retained manifests, so without a teardown sweep these would
   // leak permanently. Project teardown must clear the entire prefix.
@@ -898,8 +860,7 @@ describe('DELETE /projects/:id — CF email destination cleanup', () => {
     );
     expect(res.status).toBe(200);
 
-    // The whole point: the account-level address is gone from Cloudflare.
-    // A cleanup that ran AFTER `deleteProjectCascade` would see no rows and
+    // The account-level address is gone from Cloudflare. A cleanup that ran AFTER `deleteProjectCascade` would see no rows and
     // make no call here.
     expect(emailCalls).toEqual([
       {

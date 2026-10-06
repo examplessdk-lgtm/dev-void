@@ -9,6 +9,8 @@ import {
 import { join } from 'pathslash';
 
 const CANDIDATE_FILE = '.void/cloudflare-candidate.json';
+const INVALID_CANDIDATE_MESSAGE =
+  'The saved Cloudflare candidate receipt is invalid. Restore or remove .void/cloudflare-candidate.json before retrying.';
 
 export type CloudflareCandidateReceipt = {
   accountId: string;
@@ -16,6 +18,16 @@ export type CloudflareCandidateReceipt = {
   parentVersionId: string;
   versionIds: Array<string>;
 };
+
+/** A saved upload chain: a non-empty list of distinct, non-empty version IDs. */
+export function isVersionIdChain(value: unknown): value is Array<string> {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((id: unknown) => typeof id === 'string' && id.length > 0) &&
+    new Set(value).size === value.length
+  );
+}
 
 /** A failed normal deploy keeps its locally verified upload chain across retries. */
 export function readCloudflareCandidate(root: string): CloudflareCandidateReceipt | null {
@@ -27,9 +39,7 @@ export function readCloudflareCandidate(root: string): CloudflareCandidateReceip
   try {
     value = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    throw new Error(
-      'The saved Cloudflare candidate receipt is invalid. Restore or remove .void/cloudflare-candidate.json before retrying.',
-    );
+    throw new Error(INVALID_CANDIDATE_MESSAGE);
   }
   if (
     typeof value !== 'object' ||
@@ -45,14 +55,9 @@ export function readCloudflareCandidate(root: string): CloudflareCandidateReceip
     typeof value.parentVersionId !== 'string' ||
     !value.parentVersionId ||
     !('versionIds' in value) ||
-    !Array.isArray(value.versionIds) ||
-    !value.versionIds.length ||
-    !value.versionIds.every((id: unknown) => typeof id === 'string' && id.length > 0) ||
-    new Set(value.versionIds).size !== value.versionIds.length
+    !isVersionIdChain(value.versionIds)
   ) {
-    throw new Error(
-      'The saved Cloudflare candidate receipt is invalid. Restore or remove .void/cloudflare-candidate.json before retrying.',
-    );
+    throw new Error(INVALID_CANDIDATE_MESSAGE);
   }
   return value as CloudflareCandidateReceipt;
 }

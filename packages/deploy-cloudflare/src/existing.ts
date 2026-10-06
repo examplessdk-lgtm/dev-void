@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
+import { isRecord } from '@void/deploy-core';
 import { parseRootWranglerConfig } from './config.ts';
-import type { CloudflareCommandRunner } from './execute.ts';
+import { isCleanCommandExit, isWorkerNotFound, type CloudflareCommandRunner } from './execute.ts';
 import type { CloudflareOperation } from './operations.ts';
 import { isVoidSecretOnlyDraft, isWranglerSecretOnlyDraft } from './secret-draft.ts';
 
@@ -39,12 +40,9 @@ export type CloudflareWorkerMigrationTagOptions = {
 };
 
 /** Read the deployed version, not the most recently uploaded candidate. */
-export async function readExistingCloudflareWorker(options: {
-  runWrangler: CloudflareCommandRunner;
-  configPath: string;
-  workerName: string;
-  versionId?: string;
-}): Promise<ExistingCloudflareWorker> {
+export async function readExistingCloudflareWorker(
+  options: ExistingCloudflareWorkerOptions,
+): Promise<ExistingCloudflareWorker> {
   const worker = await readCloudflareWorker(options, false);
   if (!worker) {
     throw new Error(`Cloudflare Worker "${options.workerName}" does not have an active version.`);
@@ -63,28 +61,16 @@ async function readCloudflareWorker(
     missingIsNull = false,
   ): Promise<Record<string, unknown> | null> => {
     const result = await options.runWrangler(operation, { capture: true });
-    if (result.status !== 0 || result.signal || result.error) {
-      if (
-        missingIsNull &&
-        Number.isSafeInteger(result.status) &&
-        result.status >= 0 &&
-        result.signal == null &&
-        (result.error == null || result.error === '') &&
-        (result.failure === 'not-found' || result.errorCode === 10007)
-      ) {
+    if (!isCleanCommandExit(result)) {
+      if (missingIsNull && isWorkerNotFound(result)) {
         return null;
       }
       throw new CloudflareWorkerInspectionError(
         `Could not verify existing Cloudflare Worker "${options.workerName}". Check the account, Worker name, and Cloudflare permissions before retrying.`,
       );
     }
-    try {
-      const value: unknown = result.data;
-      if (record(value)) {
-        return value;
-      }
-    } catch {
-      /* Report no response contents: bindings may contain private values. */
+    if (isRecord(result.data)) {
+      return result.data;
     }
     throw new Error('Cloudflare returned an invalid existing Worker response.');
   };
@@ -101,7 +87,7 @@ async function readCloudflareWorker(
   if (
     !Array.isArray(versions) ||
     versions.length !== 1 ||
-    !record(versions[0]) ||
+    !isRecord(versions[0]) ||
     versions[0].percentage !== 100 ||
     typeof versions[0].version_id !== 'string'
   ) {
@@ -117,11 +103,11 @@ async function readCloudflareWorker(
   const resources = version.resources;
   if (
     version.id !== versionId ||
-    !record(resources) ||
+    !isRecord(resources) ||
     !Array.isArray(resources.bindings) ||
-    !resources.bindings.every(record) ||
-    !record(resources.script_runtime) ||
-    !record(resources.script)
+    !resources.bindings.every(isRecord) ||
+    !isRecord(resources.script_runtime) ||
+    !isRecord(resources.script)
   ) {
     throw new Error('Cloudflare did not return the existing Worker configuration.');
   }
@@ -129,7 +115,7 @@ async function readCloudflareWorker(
   if (
     proveSecretDraft &&
     !isSecretOnlyDraft &&
-    record(version.annotations) &&
+    isRecord(version.annotations) &&
     Object.keys(version.annotations).length === 1 &&
     version.annotations['workers/triggered_by'] === 'secret'
   ) {
@@ -159,14 +145,14 @@ async function readCloudflareWorker(
 
 /** Parse legacy version-detail shapes; this is not authoritative Worker migration state. */
 export function readCloudflareVersionMigrationTag(version: unknown): string | null {
-  if (!record(version)) {
+  if (!isRecord(version)) {
     return null;
   }
-  const resources = record(version.resources) ? version.resources : undefined;
+  const resources = isRecord(version.resources) ? version.resources : undefined;
   const candidates = [
-    resources && record(resources.script_runtime) ? resources.script_runtime.migration_tag : null,
-    resources && record(resources.script) ? resources.script.migration_tag : null,
-    record(version.script) ? version.script.migration_tag : null,
+    resources && isRecord(resources.script_runtime) ? resources.script_runtime.migration_tag : null,
+    resources && isRecord(resources.script) ? resources.script.migration_tag : null,
+    isRecord(version.script) ? version.script.migration_tag : null,
     version.migration_tag,
   ];
   const tag = candidates.find((candidate) => typeof candidate === 'string');
@@ -199,15 +185,15 @@ export async function readCloudflareWorkerMigrationTag(
       `Cloudflare returned an invalid Durable Object migration response for Worker "${options.workerName}".`,
     );
   }
-  if (!response.ok || !record(body) || body.success !== true || !Array.isArray(body.result)) {
+  if (!response.ok || !isRecord(body) || body.success !== true || !Array.isArray(body.result)) {
     throw new Error(
       `Could not verify Durable Object migration state for Cloudflare Worker "${options.workerName}".`,
     );
   }
   const worker = body.result.find(
-    (candidate) => record(candidate) && candidate.id === options.workerName,
+    (candidate) => isRecord(candidate) && candidate.id === options.workerName,
   );
-  if (!record(worker)) {
+  if (!isRecord(worker)) {
     throw new Error(
       `Cloudflare did not return migration state for Worker "${options.workerName}".`,
     );
@@ -227,16 +213,11 @@ async function readCloudflareApiAuthentication(
   runWrangler: CloudflareCommandRunner,
 ): Promise<Record<string, string>> {
   const result = await runWrangler({ type: 'auth.token' }, { capture: true });
-  if (result.status !== 0 || result.signal || result.error) {
+  if (!isCleanCommandExit(result)) {
     throw new Error('Could not read the authenticated Cloudflare session.');
   }
-  let value: unknown;
-  try {
-    value = result.data;
-  } catch {
-    throw new Error('Cloudflare returned an invalid authentication response.');
-  }
-  if (!record(value)) {
+  const value = result.data;
+  if (!isRecord(value)) {
     throw new Error('Cloudflare returned an invalid authentication response.');
   }
   if (
@@ -342,7 +323,7 @@ function parseDurableObjectMigrations(
     throw new Error('deploy: generated Cloudflare config has a malformed migrations field.');
   }
   return value.map((migration) => {
-    if (!record(migration) || typeof migration.tag !== 'string') {
+    if (!isRecord(migration) || typeof migration.tag !== 'string') {
       throw new Error('deploy: generated Cloudflare config has a malformed class migration.');
     }
     const fields = [
@@ -369,7 +350,7 @@ function declarativeClassesMatch(
   migrations: Array<{ step: Record<string, unknown> }>,
   actualValue: unknown,
 ): boolean {
-  if (!record(actualValue)) {
+  if (!isRecord(actualValue)) {
     return false;
   }
   const desired = new Map<string, 'sqlite' | 'legacy-kv' | 'deleted'>();
@@ -386,7 +367,7 @@ function declarativeClassesMatch(
       }
     }
     for (const item of (step.renamed_classes ?? []) as Array<unknown>) {
-      if (!record(item) || typeof item.from !== 'string' || typeof item.to !== 'string') {
+      if (!isRecord(item) || typeof item.from !== 'string' || typeof item.to !== 'string') {
         return false;
       }
       const storage = desired.get(item.from);
@@ -409,9 +390,9 @@ function declarativeClassesMatch(
   return [...desired].every(([name, storage]) => {
     const current = actualValue[name];
     if (storage === 'deleted') {
-      return current === undefined || (record(current) && current.state === 'deleted');
+      return current === undefined || (isRecord(current) && current.state === 'deleted');
     }
-    return record(current) && current.type === 'durable-object' && current.storage === storage;
+    return isRecord(current) && current.type === 'durable-object' && current.storage === storage;
   });
 }
 
@@ -477,7 +458,7 @@ export function assertCloudflareBindingsPreserved(
 function isAssetsOnlyWorker(worker: ExistingCloudflareWorker): boolean {
   const handlers = worker.script.handlers;
   return (
-    record(worker.runtime.assets) &&
+    isRecord(worker.runtime.assets) &&
     (handlers === null || (Array.isArray(handlers) && handlers.length === 0))
   );
 }
@@ -500,7 +481,7 @@ export function assertExistingCloudflareConfig(
     const entries = config.kv_namespaces;
     for (const addition of additions) {
       const matches = Array.isArray(entries)
-        ? entries.filter((entry) => record(entry) && entry.binding === addition.binding)
+        ? entries.filter((entry) => isRecord(entry) && entry.binding === addition.binding)
         : [];
       if (
         (built || matches.length > 0) &&
@@ -516,7 +497,7 @@ export function assertExistingCloudflareConfig(
         ...config,
         kv_namespaces: entries.filter(
           (entry) =>
-            !record(entry) || !additions.some((addition) => addition.binding === entry.binding),
+            !isRecord(entry) || !additions.some((addition) => addition.binding === entry.binding),
         ),
       };
     }
@@ -547,9 +528,9 @@ export function assertExistingCloudflareConfig(
     }
   }
   if (
-    record(existing.runtime.exports) &&
+    isRecord(existing.runtime.exports) &&
     Object.values(existing.runtime.exports).some(
-      (value) => record(value) && value.type !== 'worker',
+      (value) => isRecord(value) && value.type !== 'worker',
     )
   ) {
     throw new Error(
@@ -569,11 +550,11 @@ export function assertExistingCloudflareConfig(
       );
     }
   }
-  const vars = record(config.vars) ? config.vars : {};
+  const vars = isRecord(config.vars) ? config.vars : {};
   const metadataBindings = existing.bindings.filter(
     (binding) => binding.type === 'version_metadata',
   );
-  const metadata = record(config.version_metadata) ? config.version_metadata : undefined;
+  const metadata = isRecord(config.version_metadata) ? config.version_metadata : undefined;
   if (
     metadataBindings.length > 1 ||
     (metadataBindings.length === 1 && metadata?.binding !== metadataBindings[0]!.name) ||
@@ -621,7 +602,7 @@ export function assertExistingCloudflareConfig(
       continue;
     }
     if (binding.type === 'assets') {
-      if (built && (!record(config.assets) || config.assets.binding !== binding.name)) {
+      if (built && (!isRecord(config.assets) || config.assets.binding !== binding.name)) {
         throw new Error(`Keep the existing assets binding ${binding.name} when linking.`);
       }
       continue;
@@ -635,12 +616,12 @@ export function assertExistingCloudflareConfig(
     const [field, localId, remoteId] = mapping;
     const entries = config[field];
     const matches = Array.isArray(entries)
-      ? entries.filter((entry) => record(entry) && entry.binding === binding.name)
+      ? entries.filter((entry) => isRecord(entry) && entry.binding === binding.name)
       : [];
     const entry = matches[0];
     if (
       matches.length !== 1 ||
-      !record(entry) ||
+      !isRecord(entry) ||
       typeof binding[remoteId] !== 'string' ||
       entry[localId] !== binding[remoteId] ||
       (binding.type === 'service' &&
@@ -659,7 +640,7 @@ export function assertExistingCloudflareConfig(
     const entries = config[field];
     if (
       Array.isArray(entries) &&
-      entries.some((entry) => !record(entry) || !found.has(String(entry.binding)))
+      entries.some((entry) => !isRecord(entry) || !found.has(String(entry.binding)))
     ) {
       throw new Error(
         `Linking cannot add or replace ${field}. Use the existing resource bindings.`,
@@ -719,10 +700,6 @@ function stringSetEqual(left: unknown, right: unknown): boolean {
   return isDeepStrictEqual([...new Set(left)].sort(), [...new Set(right)].sort());
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function hasContent(value: unknown): boolean {
   if (value === undefined || value === null) {
     return false;
@@ -730,7 +707,7 @@ function hasContent(value: unknown): boolean {
   if (Array.isArray(value)) {
     return value.length > 0;
   }
-  if (record(value)) {
+  if (isRecord(value)) {
     return Object.values(value).some(hasContent);
   }
   return true;

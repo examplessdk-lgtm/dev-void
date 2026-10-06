@@ -96,7 +96,7 @@ describe('resolveAssetConfig', () => {
     // manifest.migrations (validatedMigrations is passed to buildVoidManifest
     // independently of routes), but has none of the asset-routing flags, so it
     // falls to the pure-SPA branch. Without /__void there, CF serves index.html
-    // for GET /__void/migrate/capabilities and negotiation fails. (Codex #250 P2)
+    // for GET /__void/migrate/capabilities and negotiation fails.
     const config = resolveAssetConfig({
       isSsr: false,
       hasPages: false,

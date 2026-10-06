@@ -1,6 +1,6 @@
 import { createElement } from 'react';
 
-function parseUtcDate(iso: string): Date {
+export function parseUtcDate(iso: string): Date {
   const normalized = iso.replace(' ', 'T');
   return new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`);
 }

@@ -80,6 +80,21 @@ export async function migrateCloudflareWorker(input: {
 
   let workerWasMissingBeforeSecretProvisioning = false;
   let initialAuthSecret: string | undefined;
+  const verifyOptions = {
+    accountId,
+    workerName,
+    desired,
+    bindingIdentitySnapshot,
+    passthroughIdentitySnapshot,
+    passthroughRawFields,
+    needsAI,
+    aiBindingName,
+    authEnabled,
+    expectedContainers,
+    expectedDurableObjectBindings: expectedDurableObjectState.bindings,
+    expectedMigrations: expectedDurableObjectState.migrations,
+    expectedCrons,
+  };
 
   // 8e. Persistent Better Auth secret — after every local/build-derived gate,
   // but before the first remote migration or worker upload. Existing secrets
@@ -90,21 +105,10 @@ export async function migrateCloudflareWorker(input: {
     // replaces Worker versions on deploy; without `secrets.required`, a secret
     // successfully written to the draft/current Worker can be dropped by the
     // immediately following upload.
-    const inheritance = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(root, {
-      accountId: accountId,
-      workerName: workerName,
-      desired: desired,
-      bindingIdentitySnapshot: bindingIdentitySnapshot,
-      passthroughIdentitySnapshot: passthroughIdentitySnapshot,
-      passthroughRawFields: passthroughRawFields,
-      needsAI: needsAI,
-      aiBindingName: aiBindingName,
-      authEnabled: authEnabled,
-      expectedContainers: expectedContainers,
-      expectedDurableObjectBindings: expectedDurableObjectState.bindings,
-      expectedMigrations: expectedDurableObjectState.migrations,
-      expectedCrons: expectedCrons,
-    });
+    const inheritance = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(
+      root,
+      verifyOptions,
+    );
     if (!inheritance.ok) {
       log.error(
         [
@@ -118,22 +122,22 @@ export async function migrateCloudflareWorker(input: {
     }
     try {
       const authSecret = await (deps.ensureAuthSecret ?? ensureCloudflareAuthSecret)({
-        root: root,
-        configPath: configPath,
-        accountId: accountId,
-        workerName: workerName,
-        runWrangler: runWrangler,
+        root,
+        configPath,
+        accountId,
+        workerName,
+        runWrangler,
         beforeWranglerRun: assertUploaderStillPinned,
       });
-      workerWasMissingBeforeSecretProvisioning ||= authSecret.workerWasMissing === true;
+      workerWasMissingBeforeSecretProvisioning = authSecret.workerWasMissing === true;
       initialAuthSecret = authSecret.candidateSecret;
       cliLog.info('cloudflare_auth_secret_ready', { created: authSecret.created });
     } catch (error) {
-      if (error instanceof CloudflareAuthSecretError && error.reason === 'uploader-changed') {
-        return exit(1);
-      }
       if (error instanceof CloudflareAuthSecretError) {
-        log.error(error.message);
+        // The uploader check has already logged its own failure.
+        if (error.reason !== 'uploader-changed') {
+          log.error(error.message);
+        }
         return exit(1);
       }
       throw error;
@@ -142,52 +146,34 @@ export async function migrateCloudflareWorker(input: {
 
   let appliedMigrations = 0;
 
-  // 9. Apply pending PostgreSQL migrations transactionally before the Worker upload. The
+  // 9. Apply pending PostgreSQL or MySQL migrations before the Worker upload. The
   // production URL is intentionally provided by the deploy environment rather than recovered
-  // from Hyperdrive (Cloudflare never returns the database password). `runPgMigrations` records
+  // from Hyperdrive (Cloudflare never returns the database password). The runners record
   // applied names in `_void_migrations`, so retries are idempotent.
-  if (dialect === 'postgresql' && migrations.length > 0) {
+  if (dialect !== 'sqlite' && migrations.length > 0) {
+    const mysql = dialect === 'mysql';
+    const label = mysql ? 'MySQL' : 'PostgreSQL';
     const databaseUrl = process.env.DATABASE_URL;
     if (!databaseUrl) {
-      log.error('deploy: DATABASE_URL disappeared before PostgreSQL migrations could run.');
+      log.error(`deploy: DATABASE_URL disappeared before ${label} migrations could run.`);
       return exit(1);
     }
     try {
-      const applied = await (deps.applyPostgresMigrations ?? runPgMigrations)(
-        migrationsDir,
-        databaseUrl,
-      );
-      appliedMigrations += applied.length;
-      cliLog.info('cloudflare_postgres_migrations', { applied: applied.length });
+      const applyMigrations = mysql
+        ? (deps.applyMySqlMigrations ?? runMySqlMigrations)
+        : (deps.applyPostgresMigrations ?? runPgMigrations);
+      const applied = await applyMigrations(migrationsDir, databaseUrl);
+      appliedMigrations = applied.length;
+      cliLog.info(mysql ? 'cloudflare_mysql_migrations' : 'cloudflare_postgres_migrations', {
+        applied: applied.length,
+      });
       if (applied.length > 0) {
         log.success(
-          `Applied ${applied.length} PostgreSQL migration${applied.length === 1 ? '' : 's'}.`,
+          `Applied ${applied.length} ${label} migration${applied.length === 1 ? '' : 's'}.`,
         );
       }
     } catch (err) {
-      log.error(`deploy: PostgreSQL migrations failed — ${getErrorMessage(err)}`);
-      return exit(1);
-    }
-  }
-
-  if (dialect === 'mysql' && migrations.length > 0) {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (!databaseUrl) {
-      log.error('deploy: DATABASE_URL disappeared before MySQL migrations could run.');
-      return exit(1);
-    }
-    try {
-      const applied = await (deps.applyMySqlMigrations ?? runMySqlMigrations)(
-        migrationsDir,
-        databaseUrl,
-      );
-      appliedMigrations += applied.length;
-      cliLog.info('cloudflare_mysql_migrations', { applied: applied.length });
-      if (applied.length > 0) {
-        log.success(`Applied ${applied.length} MySQL migration${applied.length === 1 ? '' : 's'}.`);
-      }
-    } catch (err) {
-      log.error(`deploy: MySQL migrations failed — ${getErrorMessage(err)}`);
+      log.error(`deploy: ${label} migrations failed — ${getErrorMessage(err)}`);
       return exit(1);
     }
   }
@@ -205,20 +191,8 @@ export async function migrateCloudflareWorker(input: {
 
   if (
     !verifyCloudflareDeployArtifact(root, deps, {
-      accountId: accountId,
-      workerName: workerName,
-      desired: desired,
-      bindingIdentitySnapshot: bindingIdentitySnapshot,
-      passthroughIdentitySnapshot: passthroughIdentitySnapshot,
-      passthroughRawFields: passthroughRawFields,
-      needsAI: needsAI,
-      aiBindingName: aiBindingName,
-      authEnabled: authEnabled,
+      ...verifyOptions,
       requiredSecretNames: schemaFacts.requiredKeys,
-      expectedContainers: expectedContainers,
-      expectedDurableObjectBindings: expectedDurableObjectState.bindings,
-      expectedMigrations: expectedDurableObjectState.migrations,
-      expectedCrons: expectedCrons,
     })
   ) {
     return exit(1);

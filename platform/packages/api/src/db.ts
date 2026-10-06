@@ -139,7 +139,6 @@ export {
 } from './db/email.ts';
 
 export {
-  type AllowlistEntryStatus,
   countUsers,
   countProjects,
   getAllUsers,

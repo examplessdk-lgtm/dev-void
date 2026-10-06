@@ -42,10 +42,10 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await runInstall('/project', client, linkIdentity);
+    await runInstall(client, linkIdentity);
 
     expect(linkIdentity).toHaveBeenCalledTimes(1);
-    expect(linkIdentity).toHaveBeenCalledWith('/project', client);
+    expect(linkIdentity).toHaveBeenCalledWith(client);
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);
     // The install URL was opened in the browser on the success retry.
     expect(mockExecFile).toHaveBeenCalledTimes(1);
@@ -62,7 +62,7 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(err);
+    await expect(runInstall(client, linkIdentity)).rejects.toBe(err);
 
     expect(linkIdentity).not.toHaveBeenCalled();
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(1);
@@ -76,7 +76,7 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(err);
+    await expect(runInstall(client, linkIdentity)).rejects.toBe(err);
 
     expect(linkIdentity).not.toHaveBeenCalled();
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(1);
@@ -92,7 +92,7 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await expect(runInstall('/project', client, linkIdentity)).rejects.toThrow('process.exit(1)');
+    await expect(runInstall(client, linkIdentity)).rejects.toThrow('process.exit(1)');
 
     expect(linkIdentity).toHaveBeenCalledTimes(1);
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);
@@ -112,7 +112,7 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(retryErr);
+    await expect(runInstall(client, linkIdentity)).rejects.toBe(retryErr);
 
     expect(linkIdentity).toHaveBeenCalledTimes(1);
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);
@@ -133,7 +133,7 @@ describe('runInstall', () => {
     const client = { getGithubInstallUrl } as unknown as PlatformClient;
     const linkIdentity = vi.fn(async () => {});
 
-    await expect(runInstall('/project', client, linkIdentity)).rejects.toBe(retryErr);
+    await expect(runInstall(client, linkIdentity)).rejects.toBe(retryErr);
 
     expect(linkIdentity).toHaveBeenCalledTimes(1);
     expect(getGithubInstallUrl).toHaveBeenCalledTimes(2);

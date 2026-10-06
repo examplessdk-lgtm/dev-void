@@ -30,6 +30,7 @@ import { OperatorError } from '../../operator/common.ts';
 import { setOperatorEmailPolicy, setOperatorEmailSettings } from '../../operator/email-routes.ts';
 import { getPlatformDisplayName } from '../../platform-identity.ts';
 import { runEmailDestinationCleanup } from '../../provisioning/email-destination-cleanup.ts';
+import { requestTimezone } from '../fate/page-data.ts';
 import { renderFateDetailPage, renderFateListPage } from '../fate/render.ts';
 import { renderOperationError } from '../operation-error.tsx';
 import { renderAdminPage } from '../react/server.ts';
@@ -82,6 +83,22 @@ async function incompleteEmailOperationResponse(
     },
     { status: status === 'blocked' || status === 'unknown' ? 409 : 202 },
   );
+}
+
+async function emailOperationResult(
+  context: Context<ApiEnv>,
+  projectId: string,
+  label: string,
+  result: Response,
+): Promise<{ response: Response; succeeded: boolean }> {
+  const outcome = (await result.json()) as AdminEmailOperationOutcome;
+  if (outcome.operationStatus !== 'completed') {
+    return {
+      response: await incompleteEmailOperationResponse(context, projectId, label, outcome),
+      succeeded: false,
+    };
+  }
+  return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
 }
 
 export async function loadEmailSettingsData(context: Context<ApiEnv>) {
@@ -214,7 +231,7 @@ export async function loadEmailProjectData(context: Context<ApiEnv>, projectId: 
     ),
   }));
   const senderDomain = context.env.EMAIL_SENDER_DOMAIN;
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
+  const tz = requestTimezone(context);
 
   return {
     projectId,
@@ -267,19 +284,7 @@ app.post('/:projectId/domains/add', async (context) => {
           typeof json.error === 'string' ? json.error : 'Adding the email domain failed.',
         );
       }
-      const outcome = (await res.json()) as AdminEmailOperationOutcome;
-      if (outcome.operationStatus !== 'completed') {
-        return {
-          response: await incompleteEmailOperationResponse(
-            context,
-            projectId,
-            `Adding ${domain}`,
-            outcome,
-          ),
-          succeeded: false,
-        };
-      }
-      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+      return emailOperationResult(context, projectId, `Adding ${domain}`, res);
     },
   );
 });
@@ -370,19 +375,7 @@ app.post('/:projectId/domains/:domain/revoke', async (context) => {
           succeeded: false,
         };
       }
-      const outcome = (await result.json()) as AdminEmailOperationOutcome;
-      if (outcome.operationStatus !== 'completed') {
-        return {
-          response: await incompleteEmailOperationResponse(
-            context,
-            projectId,
-            'Email domain removal',
-            outcome,
-          ),
-          succeeded: false,
-        };
-      }
-      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+      return emailOperationResult(context, projectId, 'Email domain removal', result);
     },
   );
 });
@@ -408,19 +401,7 @@ app.post('/:projectId/domains/:domain/rotate-secret', async (context) => {
           succeeded: false,
         };
       }
-      const outcome = (await result.json()) as AdminEmailOperationOutcome;
-      if (outcome.operationStatus !== 'completed') {
-        return {
-          response: await incompleteEmailOperationResponse(
-            context,
-            projectId,
-            'Email ingress rotation',
-            outcome,
-          ),
-          succeeded: false,
-        };
-      }
-      return { response: context.redirect(`/admin/email/${projectId}`), succeeded: true };
+      return emailOperationResult(context, projectId, 'Email ingress rotation', result);
     },
   );
 });

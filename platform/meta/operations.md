@@ -19,7 +19,7 @@ Run the source checks before deployment. From the repository root:
 
 ```sh
 vp run build
-vp run --filter './platform/packages/**' build
+vp run build:platform
 vp run check
 vp test run
 ```

@@ -22,11 +22,7 @@ import { pathToFileURL } from 'node:url';
 
 let loadCounter = 0;
 
-/**
- * Returns the specifier from a Node resolution error if the error looks
- * like one — otherwise `null`. Both `ERR_MODULE_NOT_FOUND` and
- * `ERR_UNSUPPORTED_DIR_IMPORT` have the specifier embedded in the message.
- */
+/** Returns the failed specifier from a Node module-resolution error, or `null`. */
 function extractFailedSpecifier(err: unknown): string | null {
   if (!(err instanceof Error)) {
     return null;

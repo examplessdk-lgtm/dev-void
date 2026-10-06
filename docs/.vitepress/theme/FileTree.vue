@@ -366,7 +366,6 @@ const TreeNode = defineComponent({
 }
 
 /* Adapter tabs */
-/* Adapter tabs */
 .adapter-tabs {
   display: flex;
   gap: 0;

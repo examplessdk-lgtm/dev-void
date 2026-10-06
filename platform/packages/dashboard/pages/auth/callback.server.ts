@@ -17,21 +17,36 @@ function requestOrigin(context: Context): string {
   return `${isLocal ? 'http' : 'https'}://${host}`;
 }
 
+/** The login page binds the nonce to both a cookie and the callback URL to prevent login CSRF. */
+function hasMatchingNonce(context: Context): boolean {
+  const nonceCookie = getCookie(context, 'void_auth_nonce');
+  const nonceParam = context.req.query('login_nonce');
+  if (!nonceCookie || !nonceParam || nonceCookie !== nonceParam) {
+    console.warn('[dashboard] auth callback nonce mismatch');
+    return false;
+  }
+  return true;
+}
+
+function setSessionCookie(context: Context, token: string, secure: boolean): void {
+  deleteCookie(context, 'void_auth_nonce', { path: '/' });
+  deleteCookie(context, 'void_auth_nonce', { path: '/auth' });
+  setCookie(context, 'void_token', token, {
+    httpOnly: true,
+    secure,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: 30 * 24 * 60 * 60,
+  });
+}
+
 export const loader = defineHandler(async (context) => {
   const homeUrl = `${requestOrigin(context)}/`;
 
-  // Production/staging: exchange short-lived auth code for JWT via API
+  // Exchange the short-lived auth code for a JWT; localhost redeems it with PKCE.
   const code = context.req.query('code');
   if (code) {
-    // Verify login nonce — prevents login CSRF / session fixation.
-    // The nonce is set as a cookie on /login and included in the redirect URL.
-    // The API passes it through, so we get it back as ?login_nonce=<value>.
-    // Both the cookie and URL param must match — an attacker crafting
-    // /auth/callback?code=xxx can't match the victim's cookie.
-    const nonceCookie = getCookie(context, 'void_auth_nonce');
-    const nonceParam = context.req.query('login_nonce');
-    if (!nonceCookie || !nonceParam || nonceCookie !== nonceParam) {
-      console.warn('[dashboard] auth callback nonce mismatch');
+    if (!hasMatchingNonce(context)) {
       return context.redirect(loginUrl(context));
     }
     const host = context.req.header('host') ?? '';
@@ -71,16 +86,8 @@ export const loader = defineHandler(async (context) => {
       console.warn(`[dashboard] ${exchangePath} returned no token`);
       return context.redirect(loginUrl(context));
     }
-    deleteCookie(context, 'void_auth_nonce', { path: '/' });
-    deleteCookie(context, 'void_auth_nonce', { path: '/auth' });
     deleteCookie(context, 'void_auth_pkce', { path: '/auth/callback' });
-    setCookie(context, 'void_token', exchange.token, {
-      httpOnly: true,
-      secure: !isLocal,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: 30 * 24 * 60 * 60,
-    });
+    setSessionCookie(context, exchange.token, !isLocal);
     return context.redirect(homeUrl);
   }
 
@@ -93,22 +100,10 @@ export const loader = defineHandler(async (context) => {
     if (!isLocalDashboardHost(host)) {
       return context.redirect(loginUrl(context));
     }
-    // Verify login nonce — same protection as the OAuth code path above.
-    const nonceCookie = getCookie(context, 'void_auth_nonce');
-    const nonceParam = context.req.query('login_nonce');
-    if (!nonceCookie || !nonceParam || nonceCookie !== nonceParam) {
-      console.warn('[dashboard] auth callback nonce mismatch');
+    if (!hasMatchingNonce(context)) {
       return context.redirect(loginUrl(context));
     }
-    deleteCookie(context, 'void_auth_nonce', { path: '/' });
-    deleteCookie(context, 'void_auth_nonce', { path: '/auth' });
-    setCookie(context, 'void_token', token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: 30 * 24 * 60 * 60,
-    });
+    setSessionCookie(context, token, false);
     return context.redirect(homeUrl);
   }
 

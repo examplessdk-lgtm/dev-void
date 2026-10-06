@@ -106,10 +106,6 @@ All handler actions are validated again at the platform boundary. MIME is capped
 
 `EMAIL_SENDER_DOMAIN` configures the shared mail domain for each installation. Deployed apps receive `__VOID_EMAIL_DOMAIN` and `__VOID_PROJECT_SLUG` to construct their default `<slug>+noreply@<domain>` sender. Missing configuration fails closed. Email-enabled installations provision the shared binding and verify gateway ingress before opening traffic.
 
-### Managed Sandbox
-
-Authenticated `POST /sandbox/*` requests return `501` because managed Sandbox is unavailable. The proxy has no Sandbox handlers or concurrency-counter binding. Native `void/sandbox` on direct Cloudflare deployments is independent of this proxy.
-
 ### Health
 
 `GET /health` returns binding presence for `ai`, `kv`, `jwt`, `api`, `sendEmail`, and
@@ -147,7 +143,7 @@ test/unit/
 | `AI`                   | Workers AI         | Real inference binding                                 |
 | `API`                  | Service binding    | Internal API calls (`revalidate`, resource resolution) |
 | `DISPATCH`             | Dispatch namespace | Fast path to deployed user workers                     |
-| `ROUTING`              | KV                 | AI limit flags, routing blobs, email allowlists/quotas |
+| `ROUTING`              | KV                 | AI limit flags and the platform disabled marker        |
 | `SEND_EMAIL`           | send_email         | Account-level outbound mail                            |
 | `JWT_SECRET`           | Secret             | HMAC/JWT verification                                  |
 | `EMAIL_SIGNING_SECRET` | Secret             | Email request proofs, credential leases, and receipts  |

@@ -82,6 +82,10 @@ import {
 } from './shared/env.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
+const scheduledPointerCleanups = new Set<string>();
+
+const scheduledPreviewPointerCleanups = new Set<string>();
+
 /**
  * Void plugin — the main entry point.
  *
@@ -99,10 +103,6 @@ import { validateSsrEntry } from './ssr/entry.ts';
  * that are missing. This allows `vite build && wrangler deploy` to work
  * for deploying directly to Cloudflare without the Void platform.
  */
-const scheduledPointerCleanups = new Set<string>();
-
-const scheduledPreviewPointerCleanups = new Set<string>();
-
 export function voidPlugin(options?: {
   persistTo?: string;
   auxiliaryWorkers?: PluginConfig['auxiliaryWorkers'];
@@ -302,10 +302,8 @@ export function voidPlugin(options?: {
     : undefined;
   const shouldEmitLive = () => bindings.needsLive || existingLiveConfig !== undefined;
 
-  // Class B/C: lighter composition — DB types + migrations only.
-  // The framework's own adapter handles the CF worker build and dev server.
-  // voidPlugin() only provides DB type codegen, migration management, and
-  // wrangler.jsonc binding sync for local dev.
+  // Class B/C: the framework's own adapter handles the CF worker build and dev
+  // server. Void adds only its supporting plugins (see `createFrameworkPlugins`).
   if (detected && (detected.class === 'b' || detected.class === 'c')) {
     return createFrameworkPlugins({
       localD1,
@@ -385,12 +383,9 @@ export function voidPlugin(options?: {
   const outDir = join(root, '.void');
   mkdirSync(outDir, { recursive: true });
 
-  // Config function that merges inferred bindings with the resolved config.
-  // When the user has a wrangler.json with real binding IDs (for raw CF
-  // deployment), those take precedence. We only add placeholder bindings
-  // for inferred bindings that are missing from their config.
-  // When no wrangler.json exists, resolved config has empty bindings and
-  // all inferred bindings are added — matching the previous behavior.
+  // Config function that merges inferred bindings with the resolved Cloudflare
+  // config. Bindings already declared there (with real IDs) take precedence;
+  // placeholders are added only for inferred bindings that are missing.
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
     return mergeWorkerBindings(resolved, {
       websocketRoutes,
@@ -605,15 +600,11 @@ export function voidPlugin(options?: {
 
   // Binding watch plugin — detects new binding imports mid-session and
   // notifies the developer via terminal log + browser toast.
-  const autoDetectBindings = true;
   const autoDetectAuth = !authEnabled;
   const bindingWatchPlugin: Plugin = {
     name: 'void:binding-watch',
     apply: 'serve',
     configureServer(server) {
-      if (!autoDetectBindings && !autoDetectAuth) {
-        return;
-      }
       const effectiveDirs = scanDirs ?? DEFAULT_SCAN_DIRS;
       const watchDirs = [...new Set([...effectiveDirs, 'src'])].map((d) => join(root, d));
       let hintShown = false;
@@ -631,25 +622,23 @@ export function voidPlugin(options?: {
             config.inference?.bindings,
           );
           const newBindings: Array<string> = [];
-          if (autoDetectBindings) {
-            if (fileBindings.needsD1 && !bindings.needsD1) {
-              newBindings.push('D1 (void/db)');
-            }
-            if (fileBindings.needsKV && !bindings.needsKV) {
-              newBindings.push('KV (void/kv)');
-            }
-            if (fileBindings.needsR2 && !bindings.needsR2) {
-              newBindings.push('R2 (void/storage)');
-            }
-            if (fileBindings.needsAI && !bindings.needsAI) {
-              newBindings.push('AI (void/ai)');
-            }
-            if (fileBindings.needsSandbox && !bindings.needsSandbox) {
-              newBindings.push('Sandbox (void/sandbox)');
-            }
-            if (fileBindings.needsEmail && !bindings.needsEmail) {
-              newBindings.push('Email (void/email)');
-            }
+          if (fileBindings.needsD1 && !bindings.needsD1) {
+            newBindings.push('D1 (void/db)');
+          }
+          if (fileBindings.needsKV && !bindings.needsKV) {
+            newBindings.push('KV (void/kv)');
+          }
+          if (fileBindings.needsR2 && !bindings.needsR2) {
+            newBindings.push('R2 (void/storage)');
+          }
+          if (fileBindings.needsAI && !bindings.needsAI) {
+            newBindings.push('AI (void/ai)');
+          }
+          if (fileBindings.needsSandbox && !bindings.needsSandbox) {
+            newBindings.push('Sandbox (void/sandbox)');
+          }
+          if (fileBindings.needsEmail && !bindings.needsEmail) {
+            newBindings.push('Email (void/email)');
           }
           if (autoDetectAuth && fileBindings.needsAuth) {
             newBindings.push('Auth (void/auth)');
@@ -702,16 +691,13 @@ export function voidPlugin(options?: {
     // (`runFullDeploy` → `resolveAssetConfig` → `manifest.assetConfig`), so it
     // IS honored there.
     //
-    // On a hand-rolled `vite build && wrangler deploy` it is NOT necessarily
-    // dropped, which is why this says "Void does not generate it" rather than
-    // "it does nothing": the generated wrapper consumes `routing.notFound` and
-    // serves through `env.ASSETS`, and `mergeBindings` leaves a Class A root
-    // wrangler config's `assets` untouched (its gate needs `workerConfig.assets`,
-    // which is never set here). So a user who declares a COMPLETE policy of their
-    // own — `binding`, `directory`, `not_found_handling`, `run_worker_first` —
-    // gets working behavior, and must not be told their config is inert. Warn
-    // once per build, and only when this build is not a managed deploy
-    // (`void deploy` sets `VOID_DEPLOY_BUILD` on the build child env).
+    // On a self-hosted build it can still apply: the generated wrapper consumes
+    // `routing.notFound` and serves through `env.ASSETS`, and `mergeBindings`
+    // leaves an authored `assets` config untouched (its gate needs
+    // `workerConfig.assets`, which is never set here). So a user who declares a
+    // complete `assets` policy gets working behavior. Warn once per build, and
+    // only when this build is not a managed deploy (`void deploy` sets
+    // `VOID_DEPLOY_BUILD` on the build child env).
     let notFoundIgnoredWarned = false;
     const frameworkBuildWrapperPlugin: Plugin = {
       name: 'void:framework-build-wrapper',

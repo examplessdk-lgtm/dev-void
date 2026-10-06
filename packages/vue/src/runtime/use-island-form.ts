@@ -128,7 +128,7 @@ export function useIslandForm<T extends Record<string, unknown>>(defaults: T): I
           recentlySuccessful.value = false;
         }, 2000);
         window.location.reload();
-      } else if (!response.ok) {
+      } else {
         const body = await readActionErrorBody(response);
         const actionError = new VoidActionError({
           body,

@@ -73,14 +73,12 @@ function PlanAction({
   id,
   revision,
   label,
-  replacement,
   archived,
 }: {
   action: string;
   id: string;
   revision: number;
   label: string;
-  replacement?: string;
   archived?: boolean;
 }) {
   return (
@@ -88,7 +86,6 @@ function PlanAction({
       <input type="hidden" name="action" value={action} />
       <input type="hidden" name="id" value={id} />
       <input type="hidden" name="revision" value={revision} />
-      {replacement && <input type="hidden" name="replacementPlanId" value={replacement} />}
       {archived !== undefined && <input type="hidden" name="archived" value={String(archived)} />}
       <Button type="submit" label={label} variant="secondary" />
     </form>

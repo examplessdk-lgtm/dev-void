@@ -38,6 +38,10 @@ class MimeHeaderError extends Error {
   }
 }
 
+function isTrafficPaused(env: Env): boolean {
+  return env.PLATFORM_TRAFFIC_STATE === 'staging' || env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain';
+}
+
 async function withDeliverySlot<T>(run: () => Promise<T>): Promise<T> {
   if (activeDeliveries >= MAX_CONCURRENT_DELIVERIES) {
     throw new Error('email gateway busy');
@@ -305,7 +309,7 @@ function parseHeaders(raw: Uint8Array): Record<string, string> {
 }
 
 async function ingress(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (env.PLATFORM_TRAFFIC_STATE === 'staging' || env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain') {
+  if (isTrafficPaused(env)) {
     return new Response(null, { status: 503 });
   }
   if (request.headers.get('content-encoding')) {
@@ -664,7 +668,7 @@ async function confirmDestination(request: Request, env: Env): Promise<Response>
   ) {
     return confirmationResponse(null, 400);
   }
-  if (env.PLATFORM_TRAFFIC_STATE === 'staging' || env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain') {
+  if (isTrafficPaused(env)) {
     return confirmationResponse(null, 503);
   }
 
@@ -744,10 +748,7 @@ export default {
     return new Response(null, { status: 404 });
   },
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (
-      env.PLATFORM_TRAFFIC_STATE === 'staging' ||
-      env.PLATFORM_TRAFFIC_STATE === 'sandbox-drain'
-    ) {
+    if (isTrafficPaused(env)) {
       throw new Error('Email gateway temporarily unavailable');
     }
     const accountId = env.EMAIL_SHARED_ACCOUNT_ID;

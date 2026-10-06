@@ -65,8 +65,7 @@ function validateUploadUrlsAsset(asset: unknown, index: number): string | null {
   if (
     typeof assetObject.size !== 'number' ||
     !Number.isInteger(assetObject.size) ||
-    assetObject.size < 0 ||
-    !Number.isFinite(assetObject.size)
+    assetObject.size < 0
   ) {
     return `invalid assets[${index}].size: must be a non-negative integer`;
   }
@@ -75,6 +74,12 @@ function validateUploadUrlsAsset(asset: unknown, index: number): string | null {
   }
   return null;
 }
+
+// Sentinel thrown out of the upload-urls FOR-SHARE transaction to signal
+// "project flipped to status='deleting' before we acquired the lock".
+// Caught at the awaiting site to surface a 410 to the CLI. Mirrors the
+// `PROJECT_DELETING_ERROR_MESSAGE` pattern used by `handleManifestOnlyDeploy`.
+const UPLOAD_URLS_PROJECT_DELETING = 'upload_urls:project_deleting';
 
 /**
  * Issue presigned R2 PUT URLs for a batch of declared assets.
@@ -97,12 +102,6 @@ function validateUploadUrlsAsset(asset: unknown, index: number): string | null {
  * off a CLI-side retry against `/deploy/upload-urls` for the affected
  * blake3s. Tracking issue: see meta/design-docs/0068 follow-up.
  */
-// Sentinel thrown out of the upload-urls FOR-SHARE transaction to signal
-// "project flipped to status='deleting' before we acquired the lock".
-// Caught at the awaiting site to surface a 410 to the CLI. Mirrors the
-// `PROJECT_DELETING_ERROR_MESSAGE` pattern used by `handleManifestOnlyDeploy`.
-const UPLOAD_URLS_PROJECT_DELETING = 'upload_urls:project_deleting';
-
 app.post('/:id/deploy/upload-urls', async (context) => {
   const projectId = context.req.param('id');
   const access = await requireProjectRouteCapability(context, projectId, 'deploy');
@@ -263,12 +262,10 @@ app.post('/:id/deploy/upload-urls', async (context) => {
             key: `assets/${projectId}/${asset.blake3}`,
             md5: asset.md5,
             contentType: asset.contentType,
-            // 30 minutes. With ~570 assets, concurrency=10, and a slow uplink
-            // a tail asset can sit in the pool for >10 min before its first
-            // PUT — 600s expired and R2 returned 403 SignatureExpired which
-            // the CLI treats as terminal. 1800s covers all realistic
-            // deploys; pathological multi-hour deploys are deferred to the
-            // re-presign-on-expiry follow-up noted in the docstring above.
+            // 30 minutes. On a slow uplink a tail asset can wait in the upload
+            // pool for more than 10 minutes before its first PUT, and the CLI
+            // treats R2's 403 SignatureExpired as terminal. Longer deploys need
+            // the re-presign-on-expiry follow-up noted in the docstring above.
             ttlSeconds: 1800,
           },
           signingKeyCache,
@@ -524,11 +521,7 @@ app.post('/:id/deploy/preflight', async (context) => {
 
 export default app;
 
-export {
-  databaseTimestampMs,
-  type SandboxDrainDeploymentSettlement,
-  settleDeploymentForSandboxDrain,
-} from '../deploy/recovery.ts';
+export { databaseTimestampMs, settleDeploymentForSandboxDrain } from '../deploy/recovery.ts';
 
 export {
   buildDurableObjectUploadMigrations,

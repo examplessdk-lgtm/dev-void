@@ -23,6 +23,7 @@ import {
   createTestProject,
   createTestUser,
   mockCfApi,
+  readAllEvents,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -260,10 +261,7 @@ describe('deployment compensation during Zero Trust changes', () => {
         await deployRequest(project.id, user.jwt, type),
         deploymentPlatform,
       );
-      const events = (await response.text())
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line));
+      const events = await readAllEvents(response);
       expect(events.at(-1)).toMatchObject({
         event: 'error',
         message: 'injected post-cutover failure',

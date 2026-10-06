@@ -255,7 +255,7 @@ export function platformAccessPublicDestinations(application: ObjectValue): Arra
     }),
   ];
 }
-export function platformAccessOverlapsOrigin(destination: string, origin: string): boolean {
+function platformAccessOverlapsOrigin(destination: string, origin: string): boolean {
   const host = destination.split('/')[0]!;
   const pattern =
     '^' +
@@ -265,6 +265,27 @@ export function platformAccessOverlapsOrigin(destination: string, origin: string
       .join('.*') +
     '$';
   return new RegExp(pattern, 'i').test(new URL(origin).hostname);
+}
+/** Whether an application path-covers, or exactly covers, any protected platform origin. */
+export function platformAccessOverlapsOrigins(
+  application: ObjectValue,
+  origins: ReadonlyArray<string>,
+): boolean {
+  return platformAccessPublicDestinations(application).some(
+    (destination) =>
+      origins.some((origin) => platformAccessOverlapsOrigin(destination, origin)) &&
+      (destination.includes('/') ||
+        origins.some((origin) => destination === new URL(origin).hostname)),
+  );
+}
+/** A definitive 4xx means the create did not happen, so a retry may not find a hidden duplicate. */
+export function platformAccessCreateRejected(error: unknown): boolean {
+  return (
+    error instanceof PlatformCloudflareApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    ![408, 409, 429].includes(error.status)
+  );
 }
 
 export async function inspectPlatformAccess(
@@ -341,11 +362,6 @@ export async function provisionPlatformAccess(
       }),
     ),
   ];
-  for (const origin of origins) {
-    if (!origin.startsWith('https://')) {
-      throw new Error('platform: Access protection requires HTTPS platform origins.');
-    }
-  }
   const state: PlatformAccessCheckpoint = previous
     ? structuredClone(previous)
     : {
@@ -403,14 +419,7 @@ export async function provisionPlatformAccess(
       ) {
         continue;
       }
-      if (
-        platformAccessPublicDestinations(app).some(
-          (destination) =>
-            origins.some((origin) => platformAccessOverlapsOrigin(destination, origin)) &&
-            (destination.includes('/') ||
-              origins.some((origin) => destination === new URL(origin).hostname)),
-        )
-      ) {
+      if (platformAccessOverlapsOrigins(app, origins)) {
         throw new Error(
           'platform: An existing Access application overlaps a platform endpoint. Connect or reconcile it explicitly before provisioning protection.',
         );
@@ -501,12 +510,7 @@ export async function provisionPlatformAccess(
         'Access application',
       );
     } catch (error) {
-      if (
-        error instanceof PlatformCloudflareApiError &&
-        error.status >= 400 &&
-        error.status < 500 &&
-        ![408, 409, 429].includes(error.status)
-      ) {
+      if (platformAccessCreateRejected(error)) {
         checkpoint.pending = false;
         save(state);
       }

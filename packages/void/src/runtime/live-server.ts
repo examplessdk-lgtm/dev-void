@@ -325,13 +325,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           }
           return new Response('connection queue full', { status: 410 });
         }
-        const event: LiveClientEvent = {
-          subscriptionId: row.subscriptionId,
-          topic: message.topic,
-          ...(message.type !== undefined && { type: message.type }),
-          ...(message.eventId !== undefined && { eventId: message.eventId }),
-          data: message.data,
-        };
+        const event = liveEvent(row.subscriptionId, message);
         if (encodedLiveEventSize(event) > connection.limits.maxEncodedEventSize) {
           return payloadTooLargeResponse(connection.limits.maxEncodedEventSize);
         }
@@ -423,20 +417,9 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
       const rows = await this.state.storage.list<SubscriberRow>({
         prefix: subscriberPrefix(message.streamId, message.topicKey),
       });
-      const grouped = new Map<string, Array<{ key: string; row: SubscriberRow }>>();
-      for (const [key, row] of rows) {
-        const list = grouped.get(row.connectionId) ?? [];
-        list.push({ key, row });
-        grouped.set(row.connectionId, list);
-      }
+      const grouped = groupByConnection(rows);
       for (const { row } of [...grouped.values()].flat()) {
-        const event: LiveClientEvent = {
-          subscriptionId: row.subscriptionId,
-          topic: message.topic,
-          ...(message.type !== undefined && { type: message.type }),
-          ...(message.eventId !== undefined && { eventId: message.eventId }),
-          data: message.data,
-        };
+        const event = liveEvent(row.subscriptionId, message);
         if (encodedLiveEventSize(event) > message.limits.maxEncodedEventSize) {
           return payloadTooLargeResponse(message.limits.maxEncodedEventSize);
         }
@@ -512,12 +495,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
       entries: Array<[string, SubscriberRow]>,
       limits: Pick<LiveLimits, 'deliveryAttemptTimeoutMs'>,
     ): Promise<Array<string>> {
-      const grouped = new Map<string, Array<{ key: string; row: SubscriberRow }>>();
-      for (const [key, row] of entries) {
-        const list = grouped.get(row.connectionId) ?? [];
-        list.push({ key, row });
-        grouped.set(row.connectionId, list);
-      }
+      const grouped = groupByConnection(entries);
 
       const staleKeys: Array<string> = [];
       const groups = [...grouped];
@@ -622,6 +600,31 @@ function isStaleSubscriber(row: SubscriberRow, connection: ActiveConnection): bo
   }
   const subscription = connection.subscriptions.get(row.subscriptionId);
   return !subscription || !subscription.active || subscription.revision !== row.revision;
+}
+
+function liveEvent(
+  subscriptionId: string,
+  message: Pick<PublishRequest, 'topic' | 'data' | 'type' | 'eventId'>,
+): LiveClientEvent {
+  return {
+    subscriptionId,
+    topic: message.topic,
+    ...(message.type !== undefined && { type: message.type }),
+    ...(message.eventId !== undefined && { eventId: message.eventId }),
+    data: message.data,
+  };
+}
+
+function groupByConnection(
+  entries: Iterable<[string, SubscriberRow]>,
+): Map<string, Array<{ key: string; row: SubscriberRow }>> {
+  const grouped = new Map<string, Array<{ key: string; row: SubscriberRow }>>();
+  for (const [key, row] of entries) {
+    const list = grouped.get(row.connectionId) ?? [];
+    list.push({ key, row });
+    grouped.set(row.connectionId, list);
+  }
+  return grouped;
 }
 
 function encodedLiveEventSize(event: LiveClientEvent): number {

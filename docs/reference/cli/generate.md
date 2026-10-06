@@ -109,7 +109,7 @@ void gen cron hourly-sync
 void gen queue <name>
 ```
 
-Create a queue consumer file in `queues/` with `defineQueue`, a `Message` interface, and commented-out batch options.
+Create a queue consumer file in `queues/` with `defineQueue`, a `Message` type, and commented-out batch options.
 
 ```sh
 void gen queue emails

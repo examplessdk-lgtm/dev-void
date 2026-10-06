@@ -536,7 +536,7 @@ describe('void db rename-migrations', () => {
         '0002_b.sql': '-- b\n',
       },
     });
-    // Round 29: journal-backed projects must have matching snapshots on
+    // Journal-backed projects must have matching snapshots on
     // disk. Seed them so the pre-rename gate passes.
     const migrationsDirForSnapshots = join(root, 'db', 'migrations');
     writeFileSync(
@@ -648,7 +648,7 @@ describe('void db rename-migrations', () => {
     });
 
     const migrationsDir = join(root, 'db', 'migrations');
-    // Round 29: seed snapshots so the pre-rename gate passes and we
+    // Seed snapshots so the pre-rename gate passes and we
     // actually exercise the `writeJournal` failure path below.
     writeFileSync(join(migrationsDir, 'meta', '0001_snapshot.json'), '{"id":"snap-a"}');
     writeFileSync(join(migrationsDir, 'meta', '0002_snapshot.json'), '{"id":"snap-b"}');
@@ -686,7 +686,7 @@ describe('void db rename-migrations', () => {
     });
 
     const migrationsDir = join(root, 'db', 'migrations');
-    // Round 29: seed snapshots so the pre-rename gate passes and we
+    // Seed snapshots so the pre-rename gate passes and we
     // actually reach the sqlite tracking-table branch below.
     writeFileSync(join(migrationsDir, 'meta', '0001_snapshot.json'), '{"id":"snap-a"}');
     writeFileSync(join(migrationsDir, 'meta', '0002_snapshot.json'), '{"id":"snap-b"}');
@@ -797,15 +797,10 @@ describe('void db rename-migrations', () => {
   });
 
   it('renames bare-legacy placeholder journal projects (empty entries, no snapshots)', async () => {
-    // Round 30: the pre-rename gate used to check for missing snapshots
-    // whenever `_journal.json` existed on disk. That rejected the
-    // kitchen-sink playground shape — a placeholder journal of the
+    // The kitchen-sink playground ships a placeholder journal of the
     // form `{"version":"7","dialect":"sqlite","entries":[]}` with no
-    // `meta/*_snapshot.json` files — even though
-    // `assertJournalCoherence` treats that exact shape as identical to
-    // bare-legacy and lets the rest of the CLI run. The gate now
-    // honors the same equivalence: no snapshots to worry about means
-    // no pre-rename gate to run.
+    // `meta/*_snapshot.json` files. `assertJournalCoherence` treats that
+    // shape as bare-legacy, so the pre-rename snapshot gate must not run.
     const root = mkdtempSync(join(tmpdir(), 'void-rename-placeholder-'));
     rootsToClean.push(root);
 
@@ -1125,15 +1120,10 @@ describe('void db rename-migrations', () => {
   });
 
   it('refuses to rename when a journal-backed snapshot is missing', async () => {
-    // Round 29: journal-backed project where the snapshot for one of
-    // the tags has disappeared (bad merge, hand cleanup). Previously
-    // the rename loop's `if (existsSync(snapshotFrom))` guard silently
-    // skipped the missing snapshot — the .sql got renamed and the
-    // journal entry was rewritten to the new tag, leaving the chain
-    // broken: the next `void gen migration` or `void db generate`
-    // couldn't locate the expected snapshot under the new filename.
-    // The fix refuses up front with a concrete recovery path BEFORE
-    // any rename happens.
+    // Journal-backed project where the snapshot for one of the tags has
+    // disappeared (bad merge, hand cleanup). Renaming would leave the
+    // snapshot chain broken for the next `void gen migration` or
+    // `void db generate`, so the command refuses BEFORE any rename happens.
     const root = createRenameProjectRoot({
       files: {
         '0000_foo.sql': '-- foo\n',

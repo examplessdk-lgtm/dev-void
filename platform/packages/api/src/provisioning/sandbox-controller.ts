@@ -114,16 +114,13 @@ function plainTextBinding(settings: WorkerSettings, name: string): string | unde
   return binding?.text;
 }
 
-function assertConfiguration(
-  settings: WorkerSettings,
+function controllerTextBindings(
   identity: SandboxControllerIdentity,
-  apiService: string,
   digest: string,
   image: string,
   instance: string,
-): void {
-  assertOwnership(settings, identity.projectId, identity.deploymentId);
-  const expectedText = {
+): Record<string, string> {
+  return {
     __VOID_SANDBOX_SOURCE: digest,
     __VOID_USER_ID: identity.userId,
     __PROJECT_ID: identity.projectId,
@@ -132,6 +129,15 @@ function assertConfiguration(
     __VOID_SANDBOX_IMAGE: image,
     __VOID_SANDBOX_INSTANCE: instance,
   };
+}
+
+function assertConfiguration(
+  settings: WorkerSettings,
+  identity: SandboxControllerIdentity,
+  apiService: string,
+  expectedText: Record<string, string>,
+): void {
+  assertOwnership(settings, identity.projectId, identity.deploymentId);
   for (const [name, value] of Object.entries(expectedText)) {
     if (plainTextBinding(settings, name) !== value) {
       throw new Error(`Sandbox controller binding ${name} differs from this deployment.`);
@@ -162,16 +168,20 @@ export async function provisionSandboxController(input: {
     new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source))),
     (byte) => byte.toString(16).padStart(2, '0'),
   ).join('');
+  const expectedText = controllerTextBindings(
+    identity,
+    digest,
+    sandbox.image,
+    sandbox.instanceType ?? 'lite',
+  );
+  const applicationName = perDeployContainerApplicationName(
+    identity.projectId,
+    identity.deploymentId,
+    sandbox.containerName ?? 'void-sandbox-v1',
+  );
   let settings = await readSettings(accountId, apiToken, workerName);
   if (settings) {
-    assertConfiguration(
-      settings,
-      identity,
-      apiService,
-      digest,
-      sandbox.image,
-      sandbox.instanceType ?? 'lite',
-    );
+    assertConfiguration(settings, identity, apiService, expectedText);
   } else {
     const form = new FormData();
     const metadata = {
@@ -197,24 +207,14 @@ export async function provisionSandboxController(input: {
             projectId: identity.projectId,
             deploymentId: identity.deploymentId,
           }),
-          __VOID_SANDBOX_SOURCE: digest,
-          __VOID_USER_ID: identity.userId,
-          __PROJECT_ID: identity.projectId,
-          __VOID_PROJECT_SLUG: identity.slug,
-          __VOID_DEPLOYMENT_ID: identity.deploymentId,
-          __VOID_SANDBOX_IMAGE: sandbox.image,
-          __VOID_SANDBOX_INSTANCE: sandbox.instanceType ?? 'lite',
+          ...expectedText,
         }).map(([name, text]) => ({ type: 'plain_text', name, text })),
       ],
       migrations: { new_tag: 'v1', steps: [{ new_sqlite_classes: [CONTROLLER_CLASS] }] },
       containers: [
         {
           class_name: CONTROLLER_CLASS,
-          name: perDeployContainerApplicationName(
-            identity.projectId,
-            identity.deploymentId,
-            sandbox.containerName ?? 'void-sandbox-v1',
-          ),
+          name: applicationName,
           images: sandbox.image === 'cloudflare/debian-trixie' ? {} : { default: sandbox.image },
         },
       ],
@@ -239,25 +239,13 @@ export async function provisionSandboxController(input: {
     if (!settings) {
       throw new Error('Sandbox controller was not visible after upload. Retry the deployment.');
     }
-    assertConfiguration(
-      settings,
-      identity,
-      apiService,
-      digest,
-      sandbox.image,
-      sandbox.instanceType ?? 'lite',
-    );
+    assertConfiguration(settings, identity, apiService, expectedText);
   }
   await cfFetch(`${workerUrl(accountId, workerName)}/subdomain`, apiToken, {
     method: 'POST',
     body: JSON.stringify({ enabled: false, previews_enabled: false }),
   });
   const namespace = namespaceId(settings);
-  const applicationName = perDeployContainerApplicationName(
-    identity.projectId,
-    identity.deploymentId,
-    sandbox.containerName ?? 'void-sandbox-v1',
-  );
   const created = await tryCreateContainerApplication(accountId, apiToken, {
     name: applicationName,
     namespaceId: namespace,

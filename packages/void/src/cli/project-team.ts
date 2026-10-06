@@ -10,7 +10,7 @@ import { formatCount, note } from './output.ts';
 import { parsePlatformErrorBody, platformErrorMessage } from './platform-errors.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
-import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
+import { getRequestedProjectSlug, requireProjectBySlug } from './resolve-project.ts';
 
 type ProjectTeamArgs = Exclude<Extract<ProjectArgs, { subcommand: 'team' }>, { action: '' }>;
 
@@ -61,11 +61,7 @@ async function resolveProjectId(
 ): Promise<string> {
   const requestedSlug = getRequestedProjectSlug({ projectSlug });
   if (requestedSlug) {
-    const project = resolveProjectBySlug(await client.listProjects(), requestedSlug);
-    if (!project) {
-      throw new Error(`project: No project found with slug '${requestedSlug}'.`);
-    }
-    return project.projectId;
+    return (await requireProjectBySlug(client, requestedSlug)).projectId;
   }
   const linked = readProjectConfig(root);
   if (!linked) {

@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { hmacVerifyState } from '../auth/hmac.ts';
 import {
   admitEmailAction,
@@ -98,18 +98,20 @@ app.use('*', async (context, next) => {
   await next();
 });
 
-function status(error: EmailAdmissionError): 400 | 404 | 409 {
-  return error.code === 'NOT_FOUND'
-    ? 404
-    : error.code === 'CONFLICT' || error.code === 'INVALID_STATE'
-      ? 409
-      : 400;
+function admissionErrorResponse(context: Context<ApiEnv>, error: unknown): Response {
+  if (!(error instanceof EmailAdmissionError)) {
+    throw error;
+  }
+  const status =
+    error.code === 'NOT_FOUND'
+      ? 404
+      : error.code === 'CONFLICT' || error.code === 'INVALID_STATE'
+        ? 409
+        : 400;
+  return context.json({ error: error.message, code: error.code }, status);
 }
 
 function receiptRoute(value: unknown): EmailReceiptRouteFence | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
@@ -151,10 +153,7 @@ app.post('/admit', async (context) => {
       }),
     );
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 
@@ -185,10 +184,7 @@ app.post('/receipts', async (context) => {
     });
     return context.json({ ok: true });
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 
@@ -215,10 +211,7 @@ app.post('/receipts/claim', async (context) => {
       }),
     );
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 
@@ -241,10 +234,7 @@ app.post('/receipts/complete', async (context) => {
     });
     return context.json({ ok: true });
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 
@@ -263,10 +253,7 @@ app.post('/:id/start', async (context) => {
       ),
     });
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 
@@ -300,10 +287,7 @@ app.post('/:id/finish', async (context) => {
       ),
     });
   } catch (error) {
-    if (error instanceof EmailAdmissionError) {
-      return context.json({ error: error.message, code: error.code }, status(error));
-    }
-    throw error;
+    return admissionErrorResponse(context, error);
   }
 });
 

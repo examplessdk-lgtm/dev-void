@@ -236,7 +236,7 @@ export function createDb(connectionString) {
 `;
         }
 
-        // SQLite (default) — existing code
+        // SQLite (default)
         return `
 import { drizzle } from ${JSON.stringify(drizzleD1Resolved)};
 import { getRuntimeRequestResource, requireRuntimeBinding } from ${JSON.stringify(envModuleResolved)};

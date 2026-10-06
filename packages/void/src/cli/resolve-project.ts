@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'pathslash';
-import type { ProjectResponse } from './client.ts';
+import type { PlatformClient, ProjectResponse } from './client.ts';
 import type { ProjectConfig } from './project.ts';
 
 export function getRequestedProjectSlug(options?: { projectSlug?: string }): string | null {
@@ -23,6 +23,17 @@ export function resolveProjectBySlug(
 ): ProjectConfig | null {
   const project = projects.find((candidate) => candidate.slug === slug);
   return project ? { projectId: project.id, slug: project.slug } : null;
+}
+
+export async function requireProjectBySlug(
+  client: Pick<PlatformClient, 'listProjects'>,
+  slug: string,
+): Promise<ProjectConfig> {
+  const project = resolveProjectBySlug(await client.listProjects(), slug);
+  if (!project) {
+    throw new Error(`project: No project found with slug '${slug}'.`);
+  }
+  return project;
 }
 
 export function inferDefaultSlug(root: string): string {

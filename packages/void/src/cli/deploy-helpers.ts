@@ -4,6 +4,13 @@ import { log as clackLog } from '@voidzero-dev/vite-plus-prompts';
 import { join, resolve } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { type DatabaseDialect, type VoidConfig, isNodeTarget } from '../config.ts';
+import type { JobDefinition } from '../crons/scan.ts';
+import {
+  assertJournalCoherence,
+  validateMigrations,
+  type MigrationFile,
+} from '../migrations/validate.ts';
+import type { QueueDefinition } from '../queues/scan.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { PlatformClient, type DeploymentResponse, type ProjectResponse } from './client.ts';
 import { formatCloudflareUserMessage } from './cloudflare-user-output.ts';
@@ -11,11 +18,12 @@ import { promptAndCreateProject, reportProjectCreationWarnings } from './create-
 import {
   type PrerenderSourceInputs,
   type NonPageBackendInputs,
+  type ResourceSummary,
   type RunDeployOptions,
 } from './deploy-types.ts';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
-import { pc } from './output.ts';
+import { formatCount, pc } from './output.ts';
 import {
   detectPreset,
   formatProjectCommand,
@@ -30,7 +38,7 @@ import {
   type ProjectConfig,
 } from './project.ts';
 import { promptProjectSelection, promptProjectSetupAction } from './prompt.ts';
-import type { DeployManifest } from './types.ts';
+import type { DeployManifest, QueueMeta, ScheduleMeta } from './types.ts';
 import {
   readExistingLiveBindingConfig,
   normalizeWranglerCompatibilityFlags,
@@ -159,8 +167,6 @@ export async function resolveDeployLiveBindingConfig(
   });
 }
 
-export { resolveAssetConfig } from '../asset-routing.ts';
-
 export function getExitCode(error: unknown): number {
   if (
     typeof error === 'object' &&
@@ -277,7 +283,7 @@ export async function promptDeployProjectConfig(
     throw new Error('Unexpected project selection result.');
   }
   const config = { projectId: result.project.id, slug: result.project.slug };
-  if (shouldLinkDeployProject(root, client.apiUrl)) {
+  if (link) {
     writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
     log.step(`Linked to ${pc.blue(config.slug)}`);
     cliLog?.info('project_linked', { projectId: config.projectId, slug: config.slug });
@@ -302,11 +308,9 @@ export function resolveStaticBuildCommand(
  * Resolve the build command for a FULL (Class A / Void app) deploy.
  *
  * `inference.build` wins when set, matching `runFrameworkDeploy` and the static
- * path's `resolveStaticBuildCommand`. Without it the full path was the only
- * deploy mode that ignored the config and hardcoded `vite build`, so an app that
- * needs more than one build step — an SSG that emits the site, then Void's build
- * packaging it via `publicDir` alongside the worker — had no way to express it
- * and died on the missing `index.html` entry.
+ * path's `resolveStaticBuildCommand`, so an app that needs more than one build
+ * step (an SSG that emits the site, then Void's build packaging it via
+ * `publicDir` alongside the worker) can express it.
  *
  * The two returned strings are deliberately different for the FALLBACK: `label`
  * goes to the user (`formatProjectCommand` rewrites `vite` → `vp` without
@@ -436,7 +440,7 @@ export function getGitCommit(root: string): string | null {
 
     // `git status` can invoke a repo-configured `core.fsmonitor` hook, so keep
     // the CF Access service-token pair out of these git children too (matches
-    // the build spawns and the prior global env scrub).
+    // the build spawns).
     const gitEnv = buildEnv();
     // Check if in a git repo
     execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore', env: gitEnv });
@@ -454,6 +458,96 @@ export function getGitCommit(root: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Check journal coherence and validate the checked-in migrations of a managed
+ * deploy. Logs and exits on failure; returns `undefined` when there are none.
+ */
+export function validateDeployMigrations(
+  migrationsDir: string,
+  rawMigrations: Array<{ name: string; sql: string }>,
+): Array<MigrationFile> | undefined {
+  try {
+    assertJournalCoherence(migrationsDir, rawMigrations);
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
+    process.exit(1);
+  }
+  if (rawMigrations.length === 0) {
+    return undefined;
+  }
+  try {
+    const validated = validateMigrations(rawMigrations);
+    log.info(`Found ${formatCount(validated.length, 'migration')}`);
+    return validated;
+  } catch (err: unknown) {
+    log.error(getErrorMessage(err));
+    process.exit(1);
+  }
+}
+
+/**
+ * Ensure a managed external SQL project has Hyperdrive, prompting for the
+ * connection string when it is missing. When the resources endpoint is not
+ * available, Hyperdrive is checked at deploy time instead.
+ */
+export async function ensureManagedHyperdrive(
+  client: PlatformClient,
+  projectId: string,
+  dialect: Exclude<DatabaseDialect, 'sqlite'>,
+): Promise<void> {
+  let resources: Array<ResourceSummary> | null = null;
+  try {
+    resources = await client.getResources(projectId);
+  } catch {
+    // Resources endpoint not available — Hyperdrive will be checked at deploy time
+  }
+  if (!resources || resources.some((resource) => resource.type === 'hyperdrive')) {
+    return;
+  }
+  const { text: promptText, isCancel: isCancelPrompt } =
+    await import('@voidzero-dev/vite-plus-prompts');
+  const connectionString = await promptText({
+    message: `Your project uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'}. Enter your connection string:`,
+    placeholder:
+      dialect === 'mysql'
+        ? 'mysql://user:pass@host:3306/dbname'
+        : 'postgresql://user:pass@host:5432/dbname',
+    validate(value) {
+      const valid =
+        dialect === 'mysql'
+          ? value?.startsWith('mysql://')
+          : value?.startsWith('postgres://') || value?.startsWith('postgresql://');
+      if (!valid) {
+        return dialect === 'mysql'
+          ? 'Must start with "mysql://"'
+          : 'Must start with "postgres://" or "postgresql://"';
+      }
+    },
+  });
+  if (isCancelPrompt(connectionString)) {
+    log.info('Deploy cancelled.');
+    process.exit(0);
+  }
+  await client.provisionDatabase(projectId, connectionString as string);
+  log.success('Hyperdrive provisioned.');
+}
+
+/** Convert scanned cron jobs and queues into deploy-manifest entries. */
+export function toManifestSchedulesAndQueues(
+  jobs: Array<JobDefinition>,
+  queues: Array<QueueDefinition>,
+): { schedules: Array<ScheduleMeta>; queues: Array<QueueMeta> } {
+  return {
+    schedules: jobs.flatMap((job) => job.crons.map((cron) => ({ name: job.name, cron }))),
+    queues: queues.map((q) => ({
+      name: q.name,
+      bindingName: q.bindingName,
+      ...(q.maxBatchSize != null && { maxBatchSize: q.maxBatchSize }),
+      ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
+    })),
+  };
 }
 
 /**

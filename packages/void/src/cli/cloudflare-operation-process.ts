@@ -43,6 +43,21 @@ const operation = (() => {
 // deployment, and ancillary API calls. API-token overrides still win.
 process.env.CLOUDFLARE_AUTH_USE_KEYRING ??= 'true';
 
+function hasProxyEnvironment(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.HTTP_PROXY || env.HTTPS_PROXY || env.http_proxy || env.https_proxy);
+}
+
+function proxyAgent(): EnvHttpProxyAgent | null {
+  return hasProxyEnvironment(process.env) ? new EnvHttpProxyAgent() : null;
+}
+
+function apiBaseUrl(): string {
+  return (process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4').replace(
+    /\/$/,
+    '',
+  );
+}
+
 function cfEnvironment(): NodeJS.ProcessEnv {
   // The pinned bin otherwise delegates to any cf installed by the project.
   const env: NodeJS.ProcessEnv = {
@@ -55,7 +70,7 @@ function cfEnvironment(): NodeJS.ProcessEnv {
   // cf uses Node's built-in fetch for API operations. Node does not consult
   // HTTP(S)_PROXY for fetch unless its environment proxy support is enabled.
   // Match the proxy handling of our direct API reads below.
-  if (env.HTTP_PROXY || env.HTTPS_PROXY || env.http_proxy || env.https_proxy) {
+  if (hasProxyEnvironment(env)) {
     env.NODE_USE_ENV_PROXY = '1';
   }
   for (const [canonical, alias] of [
@@ -310,15 +325,8 @@ async function cloudflareApiGet(
   failure: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<Json> {
-  const base = process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4';
-  const url = `${base.replace(/\/$/, '')}${path}`;
-  const proxy =
-    process.env.HTTP_PROXY ||
-    process.env.HTTPS_PROXY ||
-    process.env.http_proxy ||
-    process.env.https_proxy
-      ? new EnvHttpProxyAgent()
-      : null;
+  const url = `${apiBaseUrl()}${path}`;
+  const proxy = proxyAgent();
   try {
     const response = await httpFetch(url, {
       headers: { ...(await apiHeaders()), ...extraHeaders },
@@ -337,17 +345,8 @@ async function cloudflareApiGet(
 }
 
 async function clearWorkerCronSchedules(worker: string): Promise<Result> {
-  const base = (
-    process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4'
-  ).replace(/\/$/, '');
-  const endpoint = `${base}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/schedules`;
-  const proxy =
-    process.env.HTTP_PROXY ||
-    process.env.HTTPS_PROXY ||
-    process.env.http_proxy ||
-    process.env.https_proxy
-      ? new EnvHttpProxyAgent()
-      : null;
+  const endpoint = `${apiBaseUrl()}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/schedules`;
+  const proxy = proxyAgent();
   try {
     const response = await httpFetch(endpoint, {
       method: 'PUT',
@@ -376,17 +375,8 @@ async function clearWorkerCronSchedules(worker: string): Promise<Result> {
 }
 
 async function clearWorkerCustomDomains(worker: string): Promise<Result> {
-  const base = (
-    process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4'
-  ).replace(/\/$/, '');
-  const endpoint = `${base}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/domains/records`;
-  const proxy =
-    process.env.HTTP_PROXY ||
-    process.env.HTTPS_PROXY ||
-    process.env.http_proxy ||
-    process.env.https_proxy
-      ? new EnvHttpProxyAgent()
-      : null;
+  const endpoint = `${apiBaseUrl()}/accounts/${encodeURIComponent(accountId())}/workers/scripts/${encodeURIComponent(worker)}/domains/records`;
+  const proxy = proxyAgent();
   try {
     const response = await httpFetch(endpoint, {
       method: 'PUT',
@@ -1145,10 +1135,7 @@ async function tail(): Promise<Result> {
   if (operation.status === 'error') {
     filters.push({ outcome: ['exception', 'exceededCpu', 'exceededMemory', 'unknown'] });
   }
-  const base = (
-    process.env.CLOUDFLARE_API_BASE_URL ?? 'https://api.cloudflare.com/client/v4'
-  ).replace(/\/$/, '');
-  const endpoint = `${base}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(worker)}/tails`;
+  const endpoint = `${apiBaseUrl()}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(worker)}/tails`;
   const headers = { ...(await apiHeaders()), 'Content-Type': 'application/json' };
   const stopped = new AbortController();
   let socket: WebSocket | undefined;

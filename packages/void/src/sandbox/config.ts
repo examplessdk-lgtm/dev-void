@@ -6,7 +6,7 @@ import type { VoidConfig } from '../config.ts';
 
 export const DEFAULT_SANDBOX_BINDING = 'SANDBOX';
 export const DEFAULT_SANDBOX_CLASS_NAME = 'SandboxV1';
-export const DEFAULT_SANDBOX_CONTAINER_NAME = 'void-sandbox-v1';
+const DEFAULT_SANDBOX_CONTAINER_NAME = 'void-sandbox-v1';
 export const SANDBOX_MIGRATION_TAG = 'void-sandbox-v2';
 
 export type SandboxInstanceType =
@@ -40,24 +40,20 @@ export function isSandboxEnabled(config: VoidConfig): boolean {
   return config.sandbox !== undefined && config.sandbox !== false;
 }
 
-export function getDefaultSandboxImage(): string {
+function getDefaultSandboxImage(): string {
   return fileURLToPath(new URL('../../sandbox.Dockerfile', import.meta.resolve('void/sandbox')));
 }
 
-export function getDefaultSandboxPlatformImage(): string {
+function getDefaultSandboxPlatformImage(): string {
   return 'cloudflare/debian-trixie';
 }
 
-export function isLocalSandboxImage(image: string): boolean {
-  const lowerImage = image.toLowerCase();
+function isLocalSandboxImage(image: string): boolean {
   return (
     isAbsolute(image) ||
     image.startsWith('./') ||
     image.startsWith('../') ||
-    lowerImage === 'dockerfile' ||
-    lowerImage.includes('dockerfile') ||
-    lowerImage.endsWith('/dockerfile') ||
-    lowerImage.endsWith('\\dockerfile')
+    image.toLowerCase().includes('dockerfile')
   );
 }
 
@@ -136,7 +132,7 @@ export function sandboxContainerConfig(sandbox: ResolvedSandboxConfig): Record<s
 }
 
 /** Resolve the final local storage kind without recreating a renamed or deleted class. */
-export function resolveSandboxMigrationStorage(
+function resolveSandboxMigrationStorage(
   migrations: ReadonlyArray<DurableObjectMigrationStep>,
   className: string,
 ): 'sqlite' | 'legacy-kv' | 'unknown' | undefined {

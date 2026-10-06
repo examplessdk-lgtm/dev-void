@@ -4,7 +4,7 @@ outline: deep
 
 # Authentication {#auth}
 
-Imported from `"void"` or `"void/auth"`. Client-side helpers imported from `"void/client"`.
+Imported from `"void/auth"`. Client-side helpers imported from `"void/client"`.
 
 ## `defineAuth(config)` {#defineauth-config}
 

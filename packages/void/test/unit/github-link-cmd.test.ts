@@ -55,7 +55,7 @@ function drive(opts: {
     completeGithubLink: opts.completeGithubLink,
   };
 
-  const run = runGithubLink('/project', client as unknown as PlatformClient);
+  const run = runGithubLink(client as unknown as PlatformClient);
 
   // Once the command has built the callback URL, fire the simulated browser
   // redirect back at the localhost server. Swallow fetch errors: on the

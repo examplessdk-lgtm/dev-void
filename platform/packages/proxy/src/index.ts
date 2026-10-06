@@ -1,12 +1,14 @@
+import { isRecord } from '@void/deploy-core';
 import { usageLimitResponse } from '@void/edge';
 import { verifyEmailReceipt } from '@void/platform/email-protocol';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
-import { asString, isProxyBody } from './body.ts';
+import { asString } from './body.ts';
 import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
 import { email } from './email.ts';
+import { hmacSign } from './hmac.ts';
 import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
@@ -70,24 +72,6 @@ app.all('/*', async (context, next) => {
   await next();
 });
 
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const bytes = new Uint8Array(
-    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data)),
-  );
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-}
-
 // The tenant calls this over its internal service binding. EMAIL_SIGNING_SECRET never
 // enters the tenant, so a project token cannot mint a gateway receipt.
 app.post('/email/verify-receipt', async (context) => {
@@ -142,7 +126,7 @@ app.post('/*', async (context, next) => {
     const maxBytes =
       path === '/email' || path.startsWith('/email/') ? 8 * 1024 * 1024 : requestBodyMaxBytes(path);
     const json = await readRequestJson(context.req.raw, maxBytes);
-    if (!isProxyBody(json)) {
+    if (!isRecord(json)) {
       return context.json({ error: 'invalid JSON body' }, 400);
     }
     body = json;

@@ -8,7 +8,7 @@ import { sortUnique } from './serving-assets.ts';
 
 export function buildDurableObjectUploadMigrations(
   websocketMigrations: ReadonlyArray<WebSocketMigrationMeta> | undefined,
-  liveMigrations: ReadonlyArray<LiveMigrationMeta> | undefined = undefined,
+  liveMigrations?: ReadonlyArray<LiveMigrationMeta>,
 ):
   | {
       new_tag: string;
@@ -214,21 +214,6 @@ export function enrichLiveManifest(
   const previousMigrations = previousLive?.migrations ?? [];
   const nextClasses = sortUnique(manifest.live.classes);
   const nextClass = manifest.live.className;
-
-  if (previousLive?.className === nextClass && previousMigrations.length > 0) {
-    return {
-      manifest: {
-        ...manifest,
-        live: {
-          ...manifest.live,
-          classes: nextClasses,
-          migrations: previousMigrations,
-        },
-      },
-      changed: false,
-      nextVersion: currentVersion,
-    };
-  }
 
   const existingClasses = new Set<string>();
   if (previousLive?.className) {

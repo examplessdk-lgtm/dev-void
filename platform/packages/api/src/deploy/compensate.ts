@@ -116,8 +116,7 @@ export async function recoverFailedDeployment(input: {
     workerUploaded: workerUploaded,
   });
 
-  // Wfp mirror manifest cleanup on pre-routing failure (mirror of
-  // multipart `cleanupStreamedAssetsOnAbort`'s mirror-only branch).
+  // Evict the WfP mirror manifest on pre-routing failure.
   if (!routingSwitched && input.wfpMirroredManifestDeploymentId) {
     const id = input.wfpMirroredManifestDeploymentId;
     input.wfpMirroredManifestDeploymentId = null;
@@ -133,6 +132,35 @@ export async function recoverFailedDeployment(input: {
   const failedManifest = manifest!;
   const failedWorkerName = workerName!;
   const failedDispatchNamespace = dispatchNamespace!;
+
+  const cleanupSandboxController = async (): Promise<void> => {
+    if (sandboxControllerAttempted && deployment && manifest?.sandbox) {
+      await deleteSandboxController(
+        context.env.CF_ACCOUNT_ID,
+        context.env.CF_API_TOKEN,
+        projectId,
+        deployment.id,
+        manifest.sandbox,
+        context.env.SANDBOX_CONCURRENCY_COUNTER,
+        context.get('db'),
+      ).catch((error) =>
+        logger.error('catch', 'sandbox_controller_cleanup_failed', error, {
+          deploymentId: deployment?.id,
+        }),
+      );
+    }
+  };
+  const emitSlugDone = (): void => {
+    const slugUrl = `https://${platformProjectHostname(project, readPlatformApplication(context.env))}`;
+    emit({
+      event: 'done',
+      deployment: failedDeployment.id,
+      url: slugUrl,
+      urls: [slugUrl],
+      assets: 0,
+      workers: 0,
+    });
+  };
 
   // A connection can fail after PostgreSQL has committed the go-live
   // transaction but before the client receives COMMIT's acknowledgement.
@@ -333,21 +361,7 @@ export async function recoverFailedDeployment(input: {
         }),
       );
     }
-    if (sandboxControllerAttempted && deployment && manifest?.sandbox) {
-      await deleteSandboxController(
-        context.env.CF_ACCOUNT_ID,
-        context.env.CF_API_TOKEN,
-        projectId,
-        deployment.id,
-        manifest.sandbox,
-        context.env.SANDBOX_CONCURRENCY_COUNTER,
-        context.get('db'),
-      ).catch((error) =>
-        logger.error('catch', 'sandbox_controller_cleanup_failed', error, {
-          deploymentId: deployment?.id,
-        }),
-      );
-    }
+    await cleanupSandboxController();
 
     if (needsProtectedClaim) {
       const compensatedKey = cutoverCompensatedKey(failedDeployment.id);
@@ -402,16 +416,7 @@ export async function recoverFailedDeployment(input: {
       ]).catch(() => {
         // Stale markers are harmless once PostgreSQL is live.
       });
-      const application = readPlatformApplication(context.env);
-      const slugUrl = `https://${platformProjectHostname(project, application)}`;
-      emit({
-        event: 'done',
-        deployment: failedDeployment.id,
-        url: slugUrl,
-        urls: [slugUrl],
-        assets: 0,
-        workers: 0,
-      });
+      emitSlugDone();
     } else {
       emit({ event: 'error', message: msg, step: currentStep });
     }
@@ -437,16 +442,7 @@ export async function recoverFailedDeployment(input: {
     ).catch(() => {});
     await setActiveDeployment(context.get('db'), projectId, failedDeployment.id).catch(() => {});
     await markDeploymentRetained(context.get('db'), failedDeployment.id, true).catch(() => {});
-    const application = readPlatformApplication(context.env);
-    const slugUrl = `https://${platformProjectHostname(project, application)}`;
-    emit({
-      event: 'done',
-      deployment: failedDeployment.id,
-      url: slugUrl,
-      urls: [slugUrl],
-      assets: 0,
-      workers: 0,
-    });
+    emitSlugDone();
   } else {
     const latest = await getDeployment(context.get('db'), failedDeployment.id);
     const wasCanceled =
@@ -462,21 +458,7 @@ export async function recoverFailedDeployment(input: {
         workerName: failedWorkerName,
       }),
     );
-    if (sandboxControllerAttempted && deployment && manifest?.sandbox) {
-      await deleteSandboxController(
-        context.env.CF_ACCOUNT_ID,
-        context.env.CF_API_TOKEN,
-        projectId,
-        deployment.id,
-        manifest.sandbox,
-        context.env.SANDBOX_CONCURRENCY_COUNTER,
-        context.get('db'),
-      ).catch((error) =>
-        logger.error('catch', 'sandbox_controller_cleanup_failed', error, {
-          deploymentId: deployment?.id,
-        }),
-      );
-    }
+    await cleanupSandboxController();
     await clearIsrCache(context.env.ISR_CACHE, projectId, failedDeployment.id).catch((e) =>
       logger.error('catch', 'isr_cache_clear_failed', e, {
         deploymentId: failedDeployment.id,

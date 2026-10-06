@@ -2,7 +2,6 @@ import { users } from '@schema';
 import { defineHandler } from 'void';
 import { db, eq } from 'void/db';
 
-// GET /api/users/:id
 export const GET = defineHandler(async (c) => {
   const id = Number(c.req.param('id'));
   const [user] = await db.select().from(users).where(eq(users.id, id));
@@ -12,7 +11,6 @@ export const GET = defineHandler(async (c) => {
   return user;
 });
 
-// PUT /api/users/:id
 export const PUT = defineHandler(async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json<{ name?: string; email?: string; active?: boolean }>();
@@ -23,7 +21,6 @@ export const PUT = defineHandler(async (c) => {
   return updated;
 });
 
-// DELETE /api/users/:id
 export const DELETE = defineHandler(async (c) => {
   const id = Number(c.req.param('id'));
   const [deleted] = await db.delete(users).where(eq(users.id, id)).returning();

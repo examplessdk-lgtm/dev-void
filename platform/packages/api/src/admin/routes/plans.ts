@@ -1,4 +1,8 @@
-import { PLAN_EDITABLE_LIMIT_KEYS, parsePlatformPlanId } from '@void/platform/plans';
+import {
+  PLAN_EDITABLE_LIMIT_KEYS,
+  parsePlatformPlanId,
+  type PlatformPlanCatalog,
+} from '@void/platform/plans';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { ApiEnv } from '../../env.ts';
@@ -56,7 +60,7 @@ function planId(value: unknown): string {
 }
 
 function progress(result: {
-  catalog: import('@void/platform/plans').PlatformPlanCatalog;
+  catalog: PlatformPlanCatalog;
   reconciliation: { complete: boolean; processed: number; error?: { message: string } };
 }): AdminPlanProgress {
   return {
@@ -64,7 +68,7 @@ function progress(result: {
     complete: result.reconciliation.complete,
     processed: result.reconciliation.processed,
     cursor: result.catalog.reconciliation?.cursor ?? null,
-    error: 'error' in result.reconciliation ? (result.reconciliation.error?.message ?? null) : null,
+    error: result.reconciliation.error?.message ?? null,
   };
 }
 

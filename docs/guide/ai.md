@@ -41,7 +41,7 @@ export const POST = defineHandler(async (c) => {
 });
 ```
 
-AI methods return promises. Await them to receive the result, or return the promise directly from a handler. Usage limits reject with [`UsageLimit`](#usage-limits); Void route handlers and Pages actions automatically send a structured HTTP 429 when it is left uncaught.
+AI methods return promises. Await them to receive the result, or return the promise directly from a handler. See [Usage Limits](#usage-limits) for limit errors.
 
 You can use any model available through Cloudflare's AI binding, including Workers AI models such as `@cf/meta/llama-3.3-70b-instruct-fp8-fast` and Cloudflare Gateway models such as `google/gemini-2.5-flash` or `openai/gpt-4.1-mini`. The input object must match the selected Cloudflare model's schema. Models that return binary data, such as generated images, are returned as a `Blob` from `ai.run()`.
 

@@ -124,12 +124,7 @@ export const DEV_INBOX_ACK_VALUE: string = 'captured';
  * `(4/3 + 3.75) * MAX_MESSAGE_BYTES` (5.09x) plus what has no MIME footprint of
  * its own — the JSON framing, ids, timestamps, and the `bcc` addresses
  * (`MAX_RECIPIENTS * MAX_ADDRESS_LENGTH`, 32 KB). 6x is the smallest integer
- * multiple that covers it. At 32 MiB this refused a legal 10.3 MB message of
- * control-character text (33.6 MB serialized) with a 413 that `sendEmail`
- * reported as `UPSTREAM_ERROR`. Measured: that message serializes to 3.26x
- * `MAX_MESSAGE_BYTES`, a legal 10 MiB one of CRLF text to 3.33x, and one of a
- * control-character subject (or display name, or custom header value) to
- * 4.93x — the body-only figure would not have covered it.
+ * multiple that covers it.
  *
  * Three caller strings have NO MIME footprint, so no multiple of
  * `MAX_MESSAGE_BYTES` bounds them: a `bcc` display name (never rendered), a
@@ -139,7 +134,7 @@ export const DEV_INBOX_ACK_VALUE: string = 'captured';
  */
 export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 6 * MAX_MESSAGE_BYTES;
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   // 8KB chunks keep us well under the typical V8 fromCharCode arg limit.
   const CHUNK = 0x2000;
   let binary = '';
@@ -267,14 +262,13 @@ const DEFAULT_BUFFER_LIMIT = 100;
  *
  * A count cap alone does not bound the buffer: every item holds its full raw
  * MIME plus the decoded `text`/`html`, and a single message may reach
- * `MAX_MESSAGE_BYTES` (10 MiB), so 100 html-heavy messages is on the order of
+ * `MAX_MESSAGE_BYTES` (5 MiB), so 100 html-heavy messages is on the order of
  * gigabytes. This buffer lives in the Vite dev server's Node process — not in
  * workerd — so that is the dev server's own heap.
  */
 const DEFAULT_BUFFER_BYTES = 64 * 1024 * 1024;
 
 interface DevBuffer {
-  limit: number;
   /** Running total of {@link messageBytes} over `items`. */
   bytes: number;
   items: Array<CapturedMessage>;
@@ -305,22 +299,16 @@ export function registerEmailSink(sink: EmailSink): () => void {
   return () => r.sinks.delete(sink);
 }
 
-export function dispatchToSinks(message: CapturedMessage): boolean {
-  const r = registry();
-  if (r.sinks.size === 0) {
-    return false;
-  }
-  for (const sink of r.sinks) {
+export function dispatchToSinks(message: CapturedMessage): void {
+  for (const sink of registry().sinks) {
     try {
       sink(message);
     } catch (err) {
-      // Sinks are best-effort observers — never let one break send.
-      // Surface the error so test/dev-server authors notice misbehaving
-      // sinks (silent swallow hid genuine bugs in test-harness setup).
+      // Sinks are best-effort observers — never let one break send, but
+      // surface the error so a misbehaving sink is noticed.
       console.warn('[email-dev-inbox] sink error:', err);
     }
   }
-  return true;
 }
 
 export function hasActiveSink(): boolean {
@@ -328,10 +316,10 @@ export function hasActiveSink(): boolean {
 }
 
 /** Get or create the shared dev-server ring buffer. */
-export function getDevBuffer(limit: number = DEFAULT_BUFFER_LIMIT): DevBuffer {
+function getDevBuffer(): DevBuffer {
   let b = inboxGlobal[BUFFER_KEY];
   if (!b) {
-    b = { limit, bytes: 0, items: [] };
+    b = { bytes: 0, items: [] };
     inboxGlobal[BUFFER_KEY] = b;
   }
   return b;
@@ -349,7 +337,10 @@ export function pushToDevBuffer(message: CapturedMessage): void {
   // Oldest-first on either bound. The `items.length > 1` guard keeps the
   // newest message even when it alone blows the budget: a send the developer
   // just made must always be visible in the inbox.
-  while (b.items.length > b.limit || (b.bytes > DEFAULT_BUFFER_BYTES && b.items.length > 1)) {
+  while (
+    b.items.length > DEFAULT_BUFFER_LIMIT ||
+    (b.bytes > DEFAULT_BUFFER_BYTES && b.items.length > 1)
+  ) {
     const evicted = b.items.shift();
     if (evicted) {
       b.bytes -= messageBytes(evicted);

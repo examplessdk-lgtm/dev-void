@@ -3,6 +3,7 @@ import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import {
   encodeCloudflareOperation,
   decodeCloudflareOperationResult,
+  writeUncapturedOperationOutput,
 } from './cloudflare-process.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
 
@@ -186,7 +187,7 @@ export function createBundledCloudflareAuthRunner(root: string): CloudflareAuthR
   const [command, ...prefix] = resolveCloudflareOperationArgv(root);
   return (operation, capture) => {
     const args = encodeCloudflareOperation(operation);
-    const env = cloudflareAuthCommandEnvironment(operation);
+    const env = cloudflareAuthEnvironment();
     const streaming = cloudflareAuthNeedsTerminal(operation);
     const result = spawnSync(command!, [...prefix, ...args], {
       cwd: root,
@@ -210,12 +211,7 @@ export function createBundledCloudflareAuthRunner(root: string): CloudflareAuthR
     }
     const decoded = decodeCloudflareOperationResult(raw);
     if (!capture) {
-      if (decoded.stdout) {
-        process.stdout.write(decoded.stdout);
-      }
-      if (decoded.stderr) {
-        process.stderr.write(decoded.stderr);
-      }
+      writeUncapturedOperationOutput(decoded);
     }
     return decoded;
   };
@@ -234,7 +230,7 @@ export function runCloudflareAuthCommand(
     return new Promise((resolve) => {
       const child = spawn(command!, [...prefix, ...args], {
         cwd: root,
-        env: cloudflareAuthCommandEnvironment(operation),
+        env: cloudflareAuthEnvironment(),
         shell: false,
         signal,
         stdio: 'inherit',
@@ -256,7 +252,7 @@ export function runCloudflareAuthCommand(
       {
         cwd: root,
         encoding: 'utf8',
-        env: cloudflareAuthCommandEnvironment(operation),
+        env: cloudflareAuthEnvironment(),
         maxBuffer: 10 * 1024 * 1024,
         shell: false,
         signal,
@@ -279,14 +275,6 @@ export function runCloudflareAuthCommand(
   });
 }
 
-export function cloudflareAuthCommandEnvironment(
-  operation: CloudflareOperation,
-  source: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  void operation;
-  return cloudflareAuthEnvironment(source);
-}
-
 /** Browser login must display cf's prompts before it completes. */
 export function cloudflareAuthNeedsTerminal(operation: CloudflareOperation): boolean {
   return operation.type === 'auth.login';
@@ -296,10 +284,11 @@ export function cloudflareAuthEnvironment(
   source: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const env = { ...source };
-  const scrubbedWranglerKeys = new Set([
+  const scrubbedKeys = new Set([
     'WRANGLER_OUTPUT_FILE_DIRECTORY',
     'WRANGLER_OUTPUT_FILE_PATH',
     'WRANGLER_LOG_SANITIZE',
+    'CLOUDFLARE_AUTH_USE_KEYRING',
   ]);
   for (const key of Object.keys(env)) {
     if (
@@ -307,11 +296,8 @@ export function cloudflareAuthEnvironment(
       /^(?:DATABASE_URL|CF_ACCESS_CLIENT_ID|CF_ACCESS_CLIENT_SECRET|CF_ACCESS_TOKEN|VOID_ACCESS_CREDENTIALS|VOID_ACCESS_ORIGIN)$/i.test(
         key,
       ) ||
-      scrubbedWranglerKeys.has(key.toUpperCase())
+      scrubbedKeys.has(key.toUpperCase())
     ) {
-      delete env[key];
-    }
-    if (key.toUpperCase() === 'CLOUDFLARE_AUTH_USE_KEYRING') {
       delete env[key];
     }
   }

@@ -15,9 +15,9 @@ export type InferredBindings = {
   needsEmail?: boolean;
 };
 
-// SEND_EMAIL is intentionally absent from this regex: outbound email routes
-// through __VOID_PROXY/email/send, so the user worker never has a SEND_EMAIL
-// binding to detect. The `void/email` import source (tiers 1-2 below) is the
+// SEND_EMAIL is intentionally absent from this regex: Void owns that binding
+// (managed sends go through __VOID_PROXY/email/send; native Cloudflare deploys
+// add SEND_EMAIL themselves), so the `void/email` import (tier 1 below) is the
 // sole driver of `needsEmail`.
 const ENV_BINDING_RE = /\benv\s*\.\s*(DB|KV|STORAGE|QUEUE_\w+|AI|SANDBOX)\b/;
 

@@ -12,33 +12,20 @@ import { collectMigrations } from '../migrations/collect.ts';
 import { detectFramework } from '../plugin-inference.ts';
 import { readVersionMetadataBinding } from '../shared/version-metadata.ts';
 import { prepareCfBuildOutput } from './cf-build-output.ts';
+import { createActiveSecretPinner } from './cf-version-runner.ts';
 import {
-  createActiveSecretPinner,
-  createCfCommand,
-  createCfResourceVerifier,
-  createCfVersionRunner,
-} from './cf-version-runner.ts';
-import {
-  assertCloudflareCandidateUnchanged,
   clearCloudflareCandidate,
   readCloudflareCandidate,
   recordCloudflareCandidateUpload,
 } from './cloudflare-candidate.ts';
-import {
-  completeCloudflareLink,
-  recordCloudflareCandidate,
-  assertCloudflareLinkUnchanged,
-  type CloudflareLink,
-} from './cloudflare-link.ts';
-import {
-  createCloudflareEmptyCronPublisher,
-  createCloudflareEmptyDomainPublisher,
-} from './cloudflare-operations.ts';
-import { rememberCloudflareWorkersDevSubdomain } from './cloudflare-readiness.ts';
-import { runWranglerAuthToken } from './deploy-cloudflare-auth.ts';
+import { recordCloudflareCandidate, type CloudflareLink } from './cloudflare-link.ts';
 import {
   activateCloudflareVersionWithProgress,
+  assertCloudflareDeployTargetUnchanged,
   cloudflareWorkerReadinessHeaders,
+  createCfActivationRunner,
+  createCloudflareEmptyTriggerPublishers,
+  recordCloudflareActivation,
   reportCloudflareActivationFailure,
   formatCloudflareActivationError,
 } from './deploy-cloudflare-helpers.ts';
@@ -46,16 +33,13 @@ import { prepareCloudflareDeploySource } from './deploy-cloudflare-preflight.ts'
 import { log } from './deploy-helpers.ts';
 import { formatCloudflareSandboxUnavailable, BETTER_AUTH_SECRET_NAME } from './deploy-resources.ts';
 import { formatDeploySummary } from './deploy-summary.ts';
-import { deployChildEnv } from './deploy-transport.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
 import { type SelfHostSchemaFacts } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
 import { note } from './output.ts';
 import {
-  acknowledgeWranglerManagedQueueRemovals,
   readWranglerManagedQueueCleanupCandidates,
   readWranglerPublishedTrafficSnapshot,
-  writeWranglerPublishedTrafficSnapshot,
 } from './wrangler.ts';
 
 export async function publishCloudflareWorker(input: {
@@ -122,76 +106,52 @@ export async function publishCloudflareWorker(input: {
   } = input;
 
   const queueConsumerCleanup = readWranglerManagedQueueCleanupCandidates(configPath);
-  if (existingWorker) {
-    assertCloudflareLinkUnchanged(root, pinnedHandoffLink);
-  }
-  assertCloudflareCandidateUnchanged(root, initialCloudflareCandidate);
-  if (
-    initialCloudflareCandidate &&
-    (initialCloudflareCandidate.accountId !== accountId ||
-      initialCloudflareCandidate.workerName !== workerName)
-  ) {
-    throw new Error(
-      'The saved Cloudflare candidate belongs to a different account or Worker. Inspect its receipt before retrying.',
-    );
-  }
+  assertCloudflareDeployTargetUnchanged({
+    root,
+    existingWorker,
+    pinnedHandoffLink,
+    initialCloudflareCandidate,
+    accountId,
+    workerName,
+  });
   const candidateReceipt = pinnedHandoffLink?.candidateReceipt;
-  if (!deps.activateVersion && !deps.runWrangler && !cfUploaderIsPinned()) {
+  const usesCf = !deps.activateVersion && !deps.runWrangler;
+  if (usesCf && !cfUploaderIsPinned()) {
     return exit(1);
   }
-  const cfOutput = deps.activateVersion || deps.runWrangler ? null : await prepareBuildOutput();
-  if (!cfOutput && !deps.activateVersion && !deps.runWrangler) {
+  const cfOutput = usesCf ? await prepareBuildOutput() : null;
+  if (!cfOutput && usesCf) {
     log.error('deploy: cf could not prepare the built Worker for deployment.');
     return exit(1);
   }
-  const cfCommand = cfOutput
-    ? createCfCommand({
-        accountId: accountId,
-        apiBaseUrl: apiBaseUrl,
-        env: deployChildEnv,
-        verifyUploader: cfUploaderIsPinned,
-      })
-    : null;
-  const activationRunner =
-    cfOutput && cfCommand
-      ? createCfVersionRunner({
-          output: cfOutput,
-          workerName: workerName,
-          runCf: cfCommand,
-          pinnedUpload: {
-            accountId: accountId,
-            apiBaseUrl: apiBaseUrl,
-            getToken: () => runWranglerAuthToken(runWrangler, generatedConfigPath),
-            verifyUploader: cfUploaderIsPinned,
-          },
-          verifyResources: createCfResourceVerifier({
-            configPath: generatedConfigPath,
-            runCf: cfCommand,
-            runWrangler: runWrangler,
-            verifyCompatibilityRunner: assertUploaderStillPinned,
-          }),
-        })
-      : runWrangler;
+  const activationRunner = createCfActivationRunner({
+    cfOutput,
+    accountId,
+    apiBaseUrl,
+    workerName,
+    configPath: generatedConfigPath,
+    runWrangler,
+    cfUploaderIsPinned,
+    verifyCompatibilityRunner: assertUploaderStillPinned,
+  });
   const pinActiveSecrets = createActiveSecretPinner({
     output: cfOutput,
     handoffPending: pinnedHandoffLink !== null,
     requiredNames: schemaFacts.requiredKeys,
     ...(initialAuthSecret ? { explicitNames: [BETTER_AUTH_SECRET_NAME] } : {}),
   });
+  const hasVersionMetadata =
+    readVersionMetadataBinding(parseRootWranglerConfig(generatedConfigPath)) !== undefined;
   const execution = await activateCloudflareVersionWithProgress(
     deps.activateVersion ?? activateCloudflareVersion,
     {
       runWrangler: activationRunner,
       verifyUploader: cfOutput ? cfUploaderIsPinned : assertUploaderStillPinned,
-      workerName: workerName,
+      workerName,
       configPath: generatedConfigPath,
       preserveTriggers: existingWorker !== null,
-      requireVersionMetadata:
-        existingWorker === null ||
-        readVersionMetadataBinding(parseRootWranglerConfig(generatedConfigPath)) !== undefined,
-      requirePreviewForReadiness:
-        existingWorker !== null &&
-        readVersionMetadataBinding(parseRootWranglerConfig(generatedConfigPath)) === undefined,
+      requireVersionMetadata: existingWorker === null || hasVersionMetadata,
+      requirePreviewForReadiness: existingWorker !== null && !hasVersionMetadata,
       expectedPreviousVersionId: existingWorker?.versionId,
       trustedInheritanceVersionIds: existingWorker
         ? candidateReceipt?.parentVersionId === existingWorker.versionId
@@ -204,9 +164,9 @@ export async function publishCloudflareWorker(input: {
               throw new Error('The deployment uploader changed.');
             }
             const uploaded = await (deps.readExistingWorker ?? readExistingCloudflareWorker)({
-              runWrangler: runWrangler,
+              runWrangler,
               configPath: generatedConfigPath,
-              workerName: workerName,
+              workerName,
               versionId,
             });
             assertCloudflareBindingsPreserved(existingWorker, uploaded, approvedHandoffKv);
@@ -236,29 +196,22 @@ export async function publishCloudflareWorker(input: {
       ),
       allowFirstDeploymentBootstrap: workerWasMissingBeforeSecretProvisioning,
       readinessHeaders: cloudflareWorkerReadinessHeaders(),
-      workersDevSubdomain: workersDevSubdomain,
+      workersDevSubdomain,
       readinessHeadersWorkersDevSubdomain: process.env.CLOUDFLARE_WORKERS_SUBDOMAIN?.trim()
         ? workersDevSubdomain
         : undefined,
-      publishEmptyCustomDomains: createCloudflareEmptyDomainPublisher({
-        accountId: accountId,
-        apiBaseUrl: apiBaseUrl,
+      ...createCloudflareEmptyTriggerPublishers({
+        accountId,
+        apiBaseUrl,
         configPath: generatedConfigPath,
-        workerName: workerName,
-        runWrangler: runWrangler,
-      }),
-      publishEmptyCrons: createCloudflareEmptyCronPublisher({
-        accountId: accountId,
-        apiBaseUrl: apiBaseUrl,
-        configPath: generatedConfigPath,
-        workerName: workerName,
-        runWrangler: runWrangler,
+        workerName,
+        runWrangler,
       }),
       previousTrafficConfig: readWranglerPublishedTrafficSnapshot(configPath),
       queueConsumerCleanup,
       verifyInheritedSecrets: true,
       ...(pinActiveSecrets ? { pinActiveSecrets } : {}),
-      atomic: atomic,
+      atomic,
       ...(initialAuthSecret
         ? { candidateSecrets: { [BETTER_AUTH_SECRET_NAME]: initialAuthSecret } }
         : {}),
@@ -281,31 +234,19 @@ export async function publishCloudflareWorker(input: {
     );
     return exit(1);
   }
-  clearCloudflareCandidate(root);
-  if (existingWorker) {
-    completeCloudflareLink(root);
-  }
-  acknowledgeWranglerManagedQueueRemovals(configPath, queueConsumerCleanup);
-  rememberCloudflareWorkersDevSubdomain(root, accountId, execution.previewUrl);
-  if (execution.trafficConfig) {
-    writeWranglerPublishedTrafficSnapshot(
-      configPath,
-      {
-        workers_dev: execution.trafficConfig.workers_dev,
-        preview_urls: execution.trafficConfig.preview_urls,
-        routes: [...execution.trafficConfig.routes],
-      },
-      { create: false },
-    );
-  }
-  cliLog.info('cloudflare_deploy_end', {
-    ok: true,
-    worker: workerName,
-    versionId: execution.versionId,
+  recordCloudflareActivation({
+    root,
+    configPath,
+    accountId,
+    workerName,
+    existingWorker,
+    queueConsumerCleanup,
+    execution,
+    cliLog,
   });
   note(
     formatDeploySummary({
-      workerName: workerName,
+      workerName,
       migrations: appliedMigrations,
       d1MigrationsCurrent: d1MigrateToken !== undefined,
       // Existing Worker handoffs preserve remote triggers rather than publishing source jobs.

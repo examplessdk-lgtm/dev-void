@@ -1,9 +1,12 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, relative } from 'pathslash';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
-import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
+import {
+  generateComponentManifest,
+  resolveStaticPageDataBuildOptions,
+  scanPages,
+} from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
-import { generateComponentManifest } from './pages-manifest.ts';
 
 const RENDERER_ID = 'virtual:void-pages-renderer';
 const CLIENT_ENTRY_ID = 'virtual:void-pages-client';
@@ -19,7 +22,7 @@ const REACT_OPTIMIZE_DEPS = [
 ];
 const WORKER_OPTIMIZE_DEPS = [...REACT_OPTIMIZE_DEPS, 'void/live/client'];
 
-type PrefetchConfig = {
+export type PrefetchConfig = {
   hoverDelay?: number;
   cacheFor?: number | string | [string, string];
 };
@@ -166,8 +169,6 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
             dedupe: REACT_DEDUPE,
           },
           optimizeDeps: {
-            // Exclude @void/react so the virtual module and user
-            // components share the same React context objects (identity).
             exclude: ['@void/react'],
             // Pre-include React entries that are discovered late via dynamic
             // imports during SPA navigation, avoiding a full-page reload
@@ -237,7 +238,6 @@ import { renderReactPage } from "@void/react/pages-server";
 ${generateComponentManifest(scan, pagesDir)}
 
 	const PREAMBLE_SCRIPT = ${JSON.stringify(preambleScript)};
-	export const renderPreambleScript = PREAMBLE_SCRIPT;
 	
 	export async function renderPage(pageObj, assetTags) {
 	  return renderReactPage({

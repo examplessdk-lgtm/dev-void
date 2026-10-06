@@ -33,6 +33,7 @@ import {
   type CompileOptions,
   type SsrCompileOptions,
   type PagesCompileOptions,
+  type WorkerEntryOptions,
 } from './router/compile.ts';
 import type { RouteEnvironment } from './router/parse-filename.ts';
 import type { ScanResult } from './router/scan.ts';
@@ -63,12 +64,6 @@ const RESOLVE_ID_FILTER =
 const LOAD_ID_FILTER =
   /^virtual:void-(routes|client-worker(?::(react|vue|svelte|solid))?|client-browser(?::(react|vue|svelte|solid))?)$/;
 
-/**
- * Vite plugin that provides file-based routing.
- * - Scans routes/ and middleware/ directories
- * - Generates virtual modules for the route table and worker entry
- * - Watches for file changes and triggers HMR
- */
 type RoutingPluginOptions = {
   getApplicationAnalysis?: (
     environment: RouteEnvironment,
@@ -84,10 +79,10 @@ type RoutingPluginOptions = {
   bindingNames?: { d1?: string; kv?: string; r2?: string };
   target?: 'node' | 'bun' | 'deno';
   /**
-   * Full `routing` section from `void.json`. The plugin merges
+   * Full `routing` section from `void.config.ts`. The plugin merges
    * `_redirects` / `_headers` under Vite's `publicDir` with the config
    * rules on every compile, matching the deploy-time merge order (file
-   * rules first, `void.json` last — last match wins).
+   * rules first, `void.config.ts` last — last match wins).
    *
    * The watcher also watches those two files during `vite dev` and
    * re-runs the merge + invalidates the route module when either changes.
@@ -113,6 +108,12 @@ type RoutingPluginOptions = {
   onDevAssetRoutingPolicyChange?: (policy: AssetRoutingPolicy) => boolean;
 };
 
+/**
+ * Vite plugin that provides file-based routing.
+ * - Scans routes/ and middleware/ directories
+ * - Generates virtual modules for the route table and worker entry
+ * - Watches for file changes and triggers HMR
+ */
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
   let scan: ScanResult | null = null;
   let routeEnvironment: RouteEnvironment = 'prod';
@@ -443,6 +444,50 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     });
   }
 
+  const sandboxEntry = options.hasSandbox
+    ? {
+        bindingName: options.sandboxBindingName,
+        className: options.sandboxClassName,
+        instanceType: options.sandboxInstanceType,
+        runtimePath: sandboxRuntimePath,
+      }
+    : false;
+
+  function writeNodeEntries(target: NonNullable<RoutingPluginOptions['target']>): void {
+    writeFileIfChanged(
+      join(outDir, 'app.ts'),
+      compileNodeApp(target, compileOptions.honoPath, getEnvSchemaModule()),
+    );
+    writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(target));
+  }
+
+  /** Write the Cloudflare worker entry from the completed scan. */
+  function writeWorkerEntry(isr: WorkerEntryOptions['isr']): void {
+    writeFileIfChanged(
+      join(outDir, 'entry.ts'),
+      compileWorkerEntry({
+        versionMetadataBinding: options.getVersionMetadataBinding?.(),
+        hasQueues: scan!.queues.length > 0,
+        remote,
+        assetsDir: resolvedConfig?.build.assetsDir,
+        webSocketClasses: [
+          ...(scan!.websockets ?? []).map((route) => route.className),
+          ...(options.websocketTombstones ?? []),
+        ],
+        runtimeEnvPath: compileOptions.runtimeEnvPath,
+        runtimeEmailPath: compileOptions.runtimeEmailPath,
+        envSchemaModule: getEnvSchemaModule(),
+        sandbox: sandboxEntry,
+        hasEmail: hasEmailHandlers(),
+        serveSpaFallback: shouldServeSpaFallback(),
+        live: options.live,
+        isr,
+        notFound: currentNotFoundHandling(),
+        durableObjects: options.durableObjects,
+      }),
+    );
+  }
+
   // Generate the entry file and tsconfig eagerly (at plugin creation time,
   // during voidPlugin()). The CF plugin needs the `main` file to exist at
   // config resolution time, which is before any hooks like buildStart fire.
@@ -452,11 +497,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   mkdirSync(outDir, { recursive: true });
   // Write initial entry — will be re-written with hasQueues once scan completes
   if (options.target) {
-    writeFileIfChanged(
-      join(outDir, 'app.ts'),
-      compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
-    );
-    writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
+    writeNodeEntries(options.target);
   } else {
     writeFileIfChanged(
       join(outDir, 'entry.ts'),
@@ -467,14 +508,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         runtimeEnvPath: compileOptions.runtimeEnvPath,
         runtimeEmailPath: compileOptions.runtimeEmailPath,
         envSchemaModule: getEnvSchemaModule(),
-        sandbox: options.hasSandbox
-          ? {
-              bindingName: options.sandboxBindingName,
-              className: options.sandboxClassName,
-              instanceType: options.sandboxInstanceType,
-              runtimePath: sandboxRuntimePath,
-            }
-          : false,
+        sandbox: sandboxEntry,
         live: options.live,
         durableObjects: options.durableObjects,
       }),
@@ -596,13 +630,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           compileOptions.migrationDialect = dialect;
         }
       }
-      // Re-write entry with queue handler if needed
+      // Re-write entries from the completed scan.
       if (options.target) {
-        writeFileIfChanged(
-          join(outDir, 'app.ts'),
-          compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
-        );
-        writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
+        writeNodeEntries(options.target);
       } else {
         // ISR gate. Only a real (non-managed) production CF `vite build` bakes
         // ISR into the worker: managed `void deploy` sets VOID_DEPLOY_PROJECT_ID
@@ -614,7 +644,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         const merged = collectRevalidate(buildConfig, scan!.pages);
         const configuredRevalidate = buildConfig.routing?.revalidate;
         const emitIsr =
-          !options.target &&
           resolvedConfig?.command === 'build' &&
           !process.env.VOID_DEPLOY_PROJECT_ID &&
           hasRevalidate(merged);
@@ -634,36 +663,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
               queryAllowlist: buildConfig.routing?.revalidateQueryAllowlist,
             }
           : undefined;
-        writeFileIfChanged(
-          join(outDir, 'entry.ts'),
-          compileWorkerEntry({
-            versionMetadataBinding: options.getVersionMetadataBinding?.(),
-            hasQueues: scan!.queues.length > 0,
-            remote,
-            assetsDir: resolvedConfig?.build.assetsDir,
-            webSocketClasses: [
-              ...(scan!.websockets ?? []).map((route) => route.className),
-              ...(options.websocketTombstones ?? []),
-            ],
-            runtimeEnvPath: compileOptions.runtimeEnvPath,
-            runtimeEmailPath: compileOptions.runtimeEmailPath,
-            envSchemaModule: getEnvSchemaModule(),
-            sandbox: options.hasSandbox
-              ? {
-                  bindingName: options.sandboxBindingName,
-                  className: options.sandboxClassName,
-                  instanceType: options.sandboxInstanceType,
-                  runtimePath: sandboxRuntimePath,
-                }
-              : false,
-            hasEmail: hasEmailHandlers(),
-            serveSpaFallback: shouldServeSpaFallback(),
-            live: options.live,
-            isr: isr,
-            notFound: currentNotFoundHandling(),
-            durableObjects: options.durableObjects,
-          }),
-        );
+        writeWorkerEntry(isr);
       }
     },
 
@@ -730,7 +730,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     },
 
     configureServer(devServer) {
-      // Watch routes/ and middleware/ for new/removed files
+      // Watch the source convention directories for file changes
       const watcher = devServer.watcher;
 
       const handleFileChange = async (path: string, event: 'add' | 'change' | 'unlink') => {
@@ -744,11 +744,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           isInDirectory(normalizedPath, normalizedPagesDir) ||
           isPotentialAuthConfigPath(normalizedPath) ||
           isPotentialEnvFilePath(normalizedPath);
-        if (
-          !sourceConventionChanged &&
-          !isInDirectory(normalizedPath, normalizedSsrDir) &&
-          !isPotentialEnvFilePath(normalizedPath)
-        ) {
+        if (!sourceConventionChanged && !isInDirectory(normalizedPath, normalizedSsrDir)) {
           return;
         }
 
@@ -776,42 +772,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         writeRouteTypes();
         writeQueueTypes();
         if (options.target) {
-          writeFileIfChanged(
-            join(outDir, 'app.ts'),
-            compileNodeApp(options.target, compileOptions.honoPath, getEnvSchemaModule()),
-          );
-          writeFileIfChanged(join(outDir, 'index.ts'), compileNodeServer(options.target));
+          writeNodeEntries(options.target);
         } else {
-          writeFileIfChanged(
-            join(outDir, 'entry.ts'),
-            compileWorkerEntry({
-              versionMetadataBinding: options.getVersionMetadataBinding?.(),
-              hasQueues: scan!.queues.length > 0,
-              remote,
-              assetsDir: resolvedConfig?.build.assetsDir,
-              webSocketClasses: [
-                ...(scan!.websockets ?? []).map((route) => route.className),
-                ...(options.websocketTombstones ?? []),
-              ],
-              runtimeEnvPath: compileOptions.runtimeEnvPath,
-              runtimeEmailPath: compileOptions.runtimeEmailPath,
-              envSchemaModule: getEnvSchemaModule(),
-              sandbox: options.hasSandbox
-                ? {
-                    bindingName: options.sandboxBindingName,
-                    className: options.sandboxClassName,
-                    instanceType: options.sandboxInstanceType,
-                    runtimePath: sandboxRuntimePath,
-                  }
-                : false,
-              hasEmail: hasEmailHandlers(),
-              serveSpaFallback: shouldServeSpaFallback(),
-              live: options.live,
-              isr: undefined,
-              notFound: currentNotFoundHandling(),
-              durableObjects: options.durableObjects,
-            }),
-          );
+          writeWorkerEntry(undefined);
         }
 
         // For structural changes (file add/remove), send full-reload to trigger

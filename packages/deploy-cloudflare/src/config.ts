@@ -25,8 +25,23 @@ export function readWranglerTopLevelString(
   config: Record<string, unknown>,
   field: string,
 ): string | undefined {
-  const value = config[field];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  return readConfigEntryString(config, field);
+}
+
+/** The first entry of `config[field]` whose `binding` matches. */
+function findBindingEntry(
+  config: Record<string, unknown>,
+  field: string,
+  binding: string,
+): Record<string, unknown> | undefined {
+  const list = config[field];
+  if (!Array.isArray(list)) {
+    return undefined;
+  }
+  return list.find(
+    (entry): entry is Record<string, unknown> =>
+      entry && typeof entry === 'object' && (entry as { binding?: unknown }).binding === binding,
+  );
 }
 
 export function readStoredResourceName(
@@ -35,21 +50,7 @@ export function readStoredResourceName(
   binding: string,
   nameField: string,
 ): string | undefined {
-  const list = config[field];
-  if (!Array.isArray(list)) {
-    return undefined;
-  }
-  for (const entry of list) {
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      (entry as { binding?: unknown }).binding === binding
-    ) {
-      const name = (entry as Record<string, unknown>)[nameField];
-      return typeof name === 'string' && name.length > 0 ? name : undefined;
-    }
-  }
-  return undefined;
+  return readConfigEntryString(findBindingEntry(config, field, binding), nameField);
 }
 
 export function readBindingFieldPresence(
@@ -58,22 +59,10 @@ export function readBindingFieldPresence(
   binding: string,
   key: string,
 ): { present: boolean; value: unknown } {
-  const list = config[field];
-  if (!Array.isArray(list)) {
-    return { present: false, value: undefined };
-  }
-  for (const entry of list) {
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      (entry as { binding?: unknown }).binding === binding
-    ) {
-      return Object.hasOwn(entry as object, key)
-        ? { present: true, value: (entry as Record<string, unknown>)[key] }
-        : { present: false, value: undefined };
-    }
-  }
-  return { present: false, value: undefined };
+  const entry = findBindingEntry(config, field, binding);
+  return entry && Object.hasOwn(entry, key)
+    ? { present: true, value: entry[key] }
+    : { present: false, value: undefined };
 }
 
 export function readConfigEntryString(entry: unknown, field: string): string | undefined {

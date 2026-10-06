@@ -10,14 +10,12 @@ import type { DevCssAsset } from './types.ts';
 
 export const DEV_CSS_ASSET_MODULE_ID = 'virtual:void-pages-dev-assets';
 export const DEV_CSS_ASSET_ENDPOINT = '/__void/dev/pages-css';
-export const DEV_CSS_ASSET_GUARD_HEADER = 'X-Void-Dev-Asset-Request';
-export const DEV_CSS_ASSET_GUARD_VALUE = 'pages-css';
+const DEV_CSS_ASSET_GUARD_HEADER = 'X-Void-Dev-Asset-Request';
+const DEV_CSS_ASSET_GUARD_VALUE = 'pages-css';
 
-export type DevCssRootPhases = Array<Array<string>>;
+type DevCssRootPhases = Array<Array<string>>;
 
 type DevCssRequestBody = {
-  componentId?: string;
-  kind?: 'pages' | 'islands';
   rootPhases?: DevCssRootPhases;
 };
 
@@ -61,7 +59,6 @@ export function normalizeDevCssUrl(id: string, root: string): string {
   if (
     pathname.startsWith('/@fs/') ||
     pathname.startsWith('/@vite/') ||
-    pathname === '/@vite/client' ||
     pathname.startsWith('/@react-refresh') ||
     pathname.startsWith('/node_modules/.vite/')
   ) {
@@ -79,10 +76,6 @@ export function normalizeDevCssUrl(id: string, root: string): string {
 
 function normalizeRequestUrl(url: string): string {
   return normalizePath(url).replace(/^\/@id\/__x00__/, '\0');
-}
-
-function toTransformRequestUrl(url: string): string {
-  return normalizeRequestUrl(url);
 }
 
 function isCssRequest(url: string): boolean {
@@ -270,7 +263,7 @@ class DevCssProvider {
       if (isOptimizedDepUrl(url)) {
         return;
       }
-      const requestUrl = toTransformRequestUrl(url);
+      const requestUrl = normalizeRequestUrl(url);
       let result: { code: string } | null | undefined;
       try {
         result = await environment.transformRequest(requestUrl);
@@ -348,20 +341,11 @@ class DevCssProvider {
         assets.push({ url, id: cssViteDevIds.get(url) ?? url, css: existingCss });
         continue;
       }
-      const inlineUrl = appendInlineQuery(url);
-      let result: { code: string } | null | undefined;
       try {
-        result = await environment.transformRequest(inlineUrl);
-      } catch (error) {
-        this.server.config.logger.warnOnce(
-          `[void] Skipping dev CSS asset for ${url}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        continue;
-      }
-      if (!result) {
-        continue;
-      }
-      try {
+        const result = await environment.transformRequest(appendInlineQuery(url));
+        if (!result) {
+          continue;
+        }
         assets.push({
           url,
           id: cssViteDevIds.get(url) ?? url,

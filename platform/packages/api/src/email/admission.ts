@@ -17,6 +17,11 @@ import {
   resolveEmailDomain,
   resolveEmailDomains,
 } from './connection-service.ts';
+import {
+  DEFAULT_EMAIL_BURST_LIMIT,
+  DEFAULT_EMAIL_MONTHLY_LIMIT,
+  MAX_EMAIL_LIMIT,
+} from './limits.ts';
 import { getEmailRecipientPolicy } from './settings.ts';
 
 export type EmailActionState =
@@ -210,13 +215,16 @@ export async function setProjectEmailLimits(
       version: ReturnType<typeof sql>;
     } = { version: sql`${emailProjectControls.version} + 1` };
     if (limits.monthly !== undefined) {
-      update.monthly_limit = limits.monthly ?? 200;
+      update.monthly_limit = limits.monthly ?? DEFAULT_EMAIL_MONTHLY_LIMIT;
     }
     if (limits.burst !== undefined) {
-      update.burst_limit = limits.burst ?? 10;
+      update.burst_limit = limits.burst ?? DEFAULT_EMAIL_BURST_LIMIT;
     }
     for (const value of [update.monthly_limit, update.burst_limit]) {
-      if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 1_000_000)) {
+      if (
+        value !== undefined &&
+        (!Number.isInteger(value) || value < 1 || value > MAX_EMAIL_LIMIT)
+      ) {
         throw new EmailAdmissionError('INVALID_REQUEST', 'invalid email limit');
       }
     }
@@ -244,11 +252,7 @@ export async function setProjectEmailSuspended(db: Db, projectId: string, suspen
   });
 }
 
-function monthStart(now: Date): string {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-}
-
-function utcMonth(timestamp: string): string {
+function utcMonth(timestamp: string | Date): string {
   return new Date(timestamp).toISOString().slice(0, 7);
 }
 
@@ -281,6 +285,15 @@ async function currentRecipients(
     errorCode: r.error_code,
     providerReference: r.provider_reference,
   }));
+}
+
+async function isCredentialUsable(tx: Tx, credentialId: string): Promise<boolean> {
+  const [credential] = await tx
+    .select({ status: emailCredentials.status, expiresOn: emailCredentials.expires_on })
+    .from(emailCredentials)
+    .where(eq(emailCredentials.id, credentialId))
+    .limit(1);
+  return credential?.status === 'healthy' && !isEmailCredentialExpired(credential.expiresOn);
 }
 
 function validAddress(address: string): boolean {
@@ -387,13 +400,7 @@ export async function admitEmailAction(
       verifiedOnlyTransport =
         nativeCustomTransport || domain?.route.outbound_status === 'verified_only';
       if (senderAllowed && domain?.connection.credential_id) {
-        const [credential] = await tx
-          .select({ status: emailCredentials.status, expiresOn: emailCredentials.expires_on })
-          .from(emailCredentials)
-          .where(eq(emailCredentials.id, domain.connection.credential_id))
-          .limit(1);
-        senderAllowed =
-          credential?.status === 'healthy' && !isEmailCredentialExpired(credential.expiresOn);
+        senderAllowed = await isCredentialUsable(tx, domain.connection.credential_id);
       } else {
         senderAllowed = false;
       }
@@ -425,7 +432,7 @@ export async function admitEmailAction(
           ne(emailActionRecipients.state, 'cancelled'),
         ),
       );
-    const month = monthStart(now).slice(0, 7);
+    const month = utcMonth(now);
     await tx
       .insert(emailMonthlyUsage)
       .values({ project_id: input.projectId, month })
@@ -617,15 +624,10 @@ export async function transitionEmailRecipients(
           ) {
             throw new EmailAdmissionError('INVALID_STATE', 'email route is not active');
           }
-          if (!route.connection.credential_id) {
-            throw new EmailAdmissionError('INVALID_STATE', 'email route credential is unavailable');
-          }
-          const [credential] = await tx
-            .select({ status: emailCredentials.status, expiresOn: emailCredentials.expires_on })
-            .from(emailCredentials)
-            .where(eq(emailCredentials.id, route.connection.credential_id))
-            .limit(1);
-          if (credential?.status !== 'healthy' || isEmailCredentialExpired(credential.expiresOn)) {
+          if (
+            !route.connection.credential_id ||
+            !(await isCredentialUsable(tx, route.connection.credential_id))
+          ) {
             throw new EmailAdmissionError('INVALID_STATE', 'email route credential is unavailable');
           }
         }
@@ -684,6 +686,28 @@ export async function transitionEmailRecipients(
   });
 }
 
+async function refundCancelledReservations(
+  tx: Tx,
+  projectId: string,
+  cancelled: ReadonlyArray<{ reservedAt: string | null }>,
+): Promise<void> {
+  const monthlyRefunds = new Map<string, number>();
+  for (const row of cancelled) {
+    if (row.reservedAt) {
+      const month = utcMonth(row.reservedAt);
+      monthlyRefunds.set(month, (monthlyRefunds.get(month) ?? 0) + 1);
+    }
+  }
+  for (const [month, amount] of monthlyRefunds) {
+    await tx
+      .update(emailMonthlyUsage)
+      .set({
+        recipient_attempts: sql`greatest(0, ${emailMonthlyUsage.recipient_attempts} - ${amount})`,
+      })
+      .where(and(eq(emailMonthlyUsage.project_id, projectId), eq(emailMonthlyUsage.month, month)));
+  }
+}
+
 /** Fence all new starts and release only reservations that never reached a provider. */
 export async function drainProjectEmailAdmissions(
   db: Db,
@@ -718,23 +742,7 @@ export async function drainProjectEmailAdmissions(
         ),
       )
       .returning({ reservedAt: emailActionRecipients.reserved_at });
-    const monthlyRefunds = new Map<string, number>();
-    for (const row of cancelled) {
-      if (row.reservedAt) {
-        const month = utcMonth(row.reservedAt);
-        monthlyRefunds.set(month, (monthlyRefunds.get(month) ?? 0) + 1);
-      }
-    }
-    for (const [month, amount] of monthlyRefunds) {
-      await tx
-        .update(emailMonthlyUsage)
-        .set({
-          recipient_attempts: sql`greatest(0, ${emailMonthlyUsage.recipient_attempts} - ${amount})`,
-        })
-        .where(
-          and(eq(emailMonthlyUsage.project_id, projectId), eq(emailMonthlyUsage.month, month)),
-        );
-    }
+    await refundCancelledReservations(tx, projectId, cancelled);
     const [unresolved] = await tx
       .select({ n: count() })
       .from(emailUnresolvedAttempts)
@@ -786,23 +794,7 @@ export async function disableEmailDomainRouteAndDrainTx(
       )
     `)
     .returning({ reservedAt: emailActionRecipients.reserved_at });
-  const monthlyRefunds = new Map<string, number>();
-  for (const row of cancelled) {
-    if (row.reservedAt) {
-      const month = utcMonth(row.reservedAt);
-      monthlyRefunds.set(month, (monthlyRefunds.get(month) ?? 0) + 1);
-    }
-  }
-  for (const [month, amount] of monthlyRefunds) {
-    await tx
-      .update(emailMonthlyUsage)
-      .set({
-        recipient_attempts: sql`greatest(0, ${emailMonthlyUsage.recipient_attempts} - ${amount})`,
-      })
-      .where(
-        and(eq(emailMonthlyUsage.project_id, route.project_id), eq(emailMonthlyUsage.month, month)),
-      );
-  }
+  await refundCancelledReservations(tx, route.project_id, cancelled);
   const [unresolved] = await tx
     .select({ n: count() })
     .from(emailUnresolvedAttempts)
@@ -959,6 +951,15 @@ export async function recordEmailReceipt(
   });
 }
 
+type RelayClaimState = { state: 'claimed' | 'in_progress' | 'completed'; reject?: boolean };
+
+function relayClaimState(receipt: typeof emailReceipts.$inferSelect): RelayClaimState {
+  return (receipt.status === 'delivery_completed' || receipt.status === 'actions_rejected') &&
+    receipt.final_reject !== null
+    ? { state: 'completed', reject: receipt.final_reject }
+    : { state: 'in_progress' };
+}
+
 export async function claimRelayedEmailReceipt(
   db: Db,
   input: {
@@ -967,7 +968,7 @@ export async function claimRelayedEmailReceipt(
     payloadDigest: string;
     route?: EmailReceiptRouteFence;
   },
-): Promise<{ state: 'claimed' | 'in_progress' | 'completed'; reject?: boolean }> {
+): Promise<RelayClaimState> {
   if (
     !/^[a-f0-9]{64}$/.test(input.receiptId) ||
     !/^[a-f0-9]{64}$/.test(input.payloadDigest) ||
@@ -992,10 +993,7 @@ export async function claimRelayedEmailReceipt(
       ) {
         throw new EmailAdmissionError('CONFLICT', 'relay invocation content conflict');
       }
-      return (existing.status === 'delivery_completed' || existing.status === 'actions_rejected') &&
-        existing.final_reject !== null
-        ? { state: 'completed', reject: existing.final_reject }
-        : { state: 'in_progress' };
+      return relayClaimState(existing);
     }
     if (!input.route) {
       throw new EmailAdmissionError('INVALID_REQUEST', 'receipt route is required');
@@ -1030,11 +1028,7 @@ export async function claimRelayedEmailReceipt(
     ) {
       throw new EmailAdmissionError('CONFLICT', 'relay invocation content conflict');
     }
-    return (concurrent.status === 'delivery_completed' ||
-      concurrent.status === 'actions_rejected') &&
-      concurrent.final_reject !== null
-      ? { state: 'completed', reject: concurrent.final_reject }
-      : { state: 'in_progress' };
+    return relayClaimState(concurrent);
   });
 }
 
@@ -1075,7 +1069,7 @@ export async function completeRelayedEmailReceipt(
 }
 
 export async function getProjectEmailUsage(db: Db, projectId: string) {
-  const now = new Date();
+  const month = utcMonth(new Date());
   const [controls] = await db
     .select()
     .from(emailProjectControls)
@@ -1084,16 +1078,11 @@ export async function getProjectEmailUsage(db: Db, projectId: string) {
   const [monthly] = await db
     .select()
     .from(emailMonthlyUsage)
-    .where(
-      and(
-        eq(emailMonthlyUsage.project_id, projectId),
-        eq(emailMonthlyUsage.month, monthStart(now).slice(0, 7)),
-      ),
-    );
-  const limit = controls?.monthly_limit ?? 200;
+    .where(and(eq(emailMonthlyUsage.project_id, projectId), eq(emailMonthlyUsage.month, month)));
+  const limit = controls?.monthly_limit ?? DEFAULT_EMAIL_MONTHLY_LIMIT;
   const attempts = monthly?.recipient_attempts ?? 0;
   return {
-    month: monthStart(now).slice(0, 7),
+    month,
     attempts,
     received: monthly?.inbound_receipts ?? 0,
     limit,
@@ -1154,7 +1143,7 @@ export async function pruneEmailActionHistory(
   `);
   await db.delete(emailReceipts).where(sql`${emailReceipts.created_at} < ${before.toISOString()}`);
   await db.delete(emailMonthlyUsage).where(sql`
-    ${emailMonthlyUsage.month} < ${new Date().toISOString().slice(0, 7)}
+    ${emailMonthlyUsage.month} < ${utcMonth(new Date())}
   `);
 }
 

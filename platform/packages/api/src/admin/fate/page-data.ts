@@ -29,8 +29,7 @@ import { OperatorError } from '../../operator/common.ts';
 import { cliVersionStats } from '../../operator/system-operations.ts';
 import { readPlanCatalog, readPlanCatalogWithAccounts, planFromCatalog } from '../../plans.ts';
 import { getPlatformApiUrl, platformConnectCommand } from '../../platform-identity.ts';
-import { projectWithUrl } from '../../project-url.ts';
-import { projectUrl } from '../../project-url.ts';
+import { projectUrl, projectWithUrl } from '../../project-url.ts';
 import { invitations, platformLoginTests } from '../../schema.ts';
 import type { DeployManifest } from '../../types.ts';
 
@@ -65,6 +64,10 @@ function detailLocation(path: string, prefix: string): { id: string; url: URL } 
   return { id: decodeURIComponent(encodedId), url };
 }
 
+export function requestTimezone(context: AdminContext): string | undefined {
+  return context.req.raw.cf?.timezone as string | undefined;
+}
+
 function pageNumber(url: URL) {
   return Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
 }
@@ -72,7 +75,7 @@ function pageNumber(url: URL) {
 export async function loadUsersPage(context: AdminContext, path: string) {
   const url = pageLocation(path, '/admin/users');
   const search = url.searchParams.get('search') ?? undefined;
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
+  const tz = requestTimezone(context);
   if (search) {
     return { id: path, users: await searchUsers(context.get('db'), search), search, tz };
   }
@@ -88,7 +91,7 @@ export async function loadProjectsPage(context: AdminContext, path: string) {
   const url = pageLocation(path, '/admin/projects');
   const search = url.searchParams.get('search') ?? undefined;
   const siteDomain = context.env.SITE_DOMAIN ?? SITE_DOMAIN;
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
+  const tz = requestTimezone(context);
   if (search) {
     const projects = await searchProjects(context.get('db'), search);
     return {
@@ -117,7 +120,7 @@ export async function loadProjectsPage(context: AdminContext, path: string) {
 export async function loadDeploymentsPage(context: AdminContext, path: string) {
   const url = pageLocation(path, '/admin/deployments');
   const search = url.searchParams.get('search') ?? undefined;
-  const tz = (context.req.raw.cf?.timezone as string | undefined) ?? undefined;
+  const tz = requestTimezone(context);
   if (search) {
     return {
       id: path,
@@ -152,7 +155,7 @@ export async function loadUserDetailPage(context: AdminContext, path: string) {
     plans: catalog.plans
       .filter((plan) => !plan.archived || plan.id === detail.user.plan)
       .map((plan) => ({ id: plan.id, name: plan.name, archived: plan.archived })),
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -218,7 +221,7 @@ export async function loadProjectDetailPage(context: AdminContext, path: string)
     zeroTrust,
     cfAccountId: context.env.CF_ACCOUNT_ID,
     deployUrl: projectUrl(detail.project, context.env),
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -243,7 +246,7 @@ export async function loadDeploymentDetailPage(context: AdminContext, path: stri
     project,
     manifest,
     canCancel: ['pending', 'uploading', 'migrating', 'prerendering'].includes(deployment.status),
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -259,7 +262,7 @@ export async function loadBuildDetailPage(context: AdminContext, path: string) {
   return {
     id: path,
     build,
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -268,7 +271,7 @@ export async function loadCliVersionsPage(context: AdminContext, path: string) {
   return {
     id: path,
     ...(await cliVersionStats(context.get('db'))),
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -342,7 +345,7 @@ export async function loadSignupPage(context: AdminContext, path: string) {
     connectCommand: platformConnectCommand(apiUrl),
     inviteUrl: `${apiUrl}/invite`,
     result: url.searchParams.get('result') === 'invited' ? 'invited' : null,
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 
@@ -360,7 +363,7 @@ export async function loadInvitationsPage(context: AdminContext, path: string) {
     invitations: result.invitations,
     page,
     totalPages: result.totalPages,
-    tz: (context.req.raw.cf?.timezone as string | undefined) ?? undefined,
+    tz: requestTimezone(context),
   };
 }
 

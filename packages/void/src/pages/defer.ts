@@ -24,7 +24,6 @@ export type Deferred<T> = DeferredState<T> & Promise<T>;
 /** Extract the props type from a typed handler (loader). */
 export type InferProps<T> = T extends { __output: infer R } ? R : never;
 
-// Overloads
 export function defer<T>(resolver: (c: CloudContext) => Promise<T>): Deferred<T>;
 export function defer<T>(group: string, resolver: (c: CloudContext) => Promise<T>): Deferred<T>;
 export function defer(

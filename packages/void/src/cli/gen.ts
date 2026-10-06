@@ -420,22 +420,7 @@ function generateIndexRoute(
   const insertFields = columns.map((c) => `${c.name}: body.${c.name}`).join(', ');
 
   if (columns.length === 0 || validator === 'none') {
-    if (columns.length > 0) {
-      return `import { defineHandler } from "void";
-import { db } from "void/db";
-import { ${name} } from "@schema";
-
-export const GET = defineHandler(async () => {
-  return db.select().from(${name});
-});
-
-export const POST = defineHandler(async (c) => {
-  const body = await c.req.json();
-  await db.insert(${name}).values({ ${insertFields} });
-  return { created: true };
-});
-`;
-    }
+    const values = columns.length > 0 ? `{ ${insertFields} }` : 'body';
     return `import { defineHandler } from "void";
 import { db } from "void/db";
 import { ${name} } from "@schema";
@@ -446,7 +431,7 @@ export const GET = defineHandler(async () => {
 
 export const POST = defineHandler(async (c) => {
   const body = await c.req.json();
-  await db.insert(${name}).values(body);
+  await db.insert(${name}).values(${values});
   return { created: true };
 });
 `;
@@ -686,26 +671,22 @@ function runMigration(root: string, name: string): void {
   // in-process without re-implementing a schema compiler:
   //
   //   1. A fresh `<timestamp>_<name>.sql` stub under `db/migrations/`
-  //      (drizzle-kit writes an empty `.sql` for `--custom`, exactly the
-  //      `-- <name>\n` shape `void gen migration` produced before).
+  //      (drizzle-kit writes an empty `.sql` for `--custom`).
   //   2. An updated `_journal.json` with a new entry appended (new idx,
   //      new timestamp, inherited version/breakpoints).
   //   3. A new `meta/<prefix>_snapshot.json` that is a snapshot of the
   //      **current** `db/schema.ts`, NOT a clone of the previous
   //      snapshot.
   //
-  // Bullet 3 is the whole reason we delegate. An earlier in-process
-  // implementation cloned the previous snapshot (re-issuing `id`/
-  // `prevId` to chain the drizzle history correctly) and wrote that
-  // clone as the new snapshot. That left the new journal entry pointing
-  // at a stale schema state: if the user had changed `db/schema.ts`
-  // before running `void gen migration` to hand-write the matching DDL,
-  // the next `void db generate` / `drizzle-kit generate` would diff the
-  // current schema against the stale snapshot and re-emit the same DDL
-  // the custom migration had already applied. Shelling out to
-  // drizzle-kit's own `generate --custom` path uses drizzle-kit's
-  // schema-compilation pipeline, so the emitted snapshot always matches
-  // what drizzle-kit would produce on the next invocation.
+  // Bullet 3 is the whole reason we delegate. Cloning the previous
+  // snapshot in-process would leave the new journal entry pointing at a
+  // stale schema state: if the user had changed `db/schema.ts` before
+  // running `void gen migration` to hand-write the matching DDL, the next
+  // `void db generate` / `drizzle-kit generate` would diff the current
+  // schema against the stale snapshot and re-emit the same DDL the custom
+  // migration had already applied. drizzle-kit's own `generate --custom`
+  // path uses its schema-compilation pipeline, so the emitted snapshot
+  // always matches what drizzle-kit would produce on the next invocation.
   //
   // We still verify up front that the snapshot matching the last journal
   // entry is on disk. Without it drizzle-kit would fail with its own
@@ -767,7 +748,7 @@ function runMigration(root: string, name: string): void {
     );
     const sqlFilesBefore = new Set(readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')));
 
-    // Round 40: the journal is authoritative once it exists. `existingJournal.
+    // The journal is authoritative once it exists. `existingJournal.
     // dialect` is the dialect drizzle-kit committed to when the first migration
     // was generated; every subsequent snapshot under `meta/` is chained off
     // that same dialect. Reading the dialect from `void.config.ts` and passing it
@@ -827,7 +808,7 @@ function runMigration(root: string, name: string): void {
       { additionalSchemas },
     );
 
-    // Round 38: under Yarn Berry PnP, there is no `node_modules` tree —
+    // Under Yarn Berry PnP, there is no `node_modules` tree —
     // dependencies live inside ZIP archives (`.yarn/cache/*.zip`) and are
     // resolved through `.pnp.cjs`, which patches `fs` +
     // `Module._resolveFilename` to handle the virtual paths. Plain `node

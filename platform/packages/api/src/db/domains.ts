@@ -111,7 +111,7 @@ export async function getPendingDomains(db: Db, limit: number): Promise<Readonly
     .limit(limit);
 }
 
-// Recently-created pending rows (cron 30-min fast reconciliation tier).
+// Recently-created pending rows (cron fast reconciliation tier).
 // `created_at` is a string-mode timestamp, compared as an ISO string. Capped at
 // `limit` and ordered oldest-first so the per-run cap truncates the newest
 // (least urgent) domains rather than starving older ones.

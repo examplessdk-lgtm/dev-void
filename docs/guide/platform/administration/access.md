@@ -30,15 +30,7 @@ the company sign-in before Void login. Interactive Access authentication uses a
 locally installed `cloudflared` and saves its short-lived credential in your
 system keychain for that platform origin. You do not need to copy browser cookies.
 
-For CI, use a [project deploy token](/guide/platform/installation/first-deployment) alongside your Access credentials. An Access service token does not authorize a Void deployment.
-
-Store Access credentials in origin-keyed `VOID_ACCESS_CREDENTIALS`. A deploy
-that uses prerendering or remote bindings needs entries for both the exact API
-and proxy HTTPS origins, even when both entries contain the same admitted
-service-token pair. `VOID_ACCESS_ORIGIN` selects only one recipient and therefore
-cannot cover both calls. Keep the JSON value in your secret manager, not in
-application configuration. See [CI deployment setup](/guide/platform/installation/first-deployment)
-for the required shape.
+For CI, use a [project deploy token](/guide/platform/installation/first-deployment) alongside your Access credentials in origin-keyed `VOID_ACCESS_CREDENTIALS`. An Access service token does not authorize a Void deployment. See [CI deployment setup](/guide/platform/installation/first-deployment) for the required origins and shape.
 
 ## Choosing a Platform
 

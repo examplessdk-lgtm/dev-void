@@ -100,7 +100,6 @@ export function useForm(
   let defaults_ = { ...formDefaults };
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // hasChanges computed via deep watch
   const hasChanges = ref(false);
   watch(
     () => ({ ...data }),

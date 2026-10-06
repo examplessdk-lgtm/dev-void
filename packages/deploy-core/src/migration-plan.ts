@@ -20,18 +20,22 @@ export function canonicalSql(sql: string): string {
   return withoutBom.replace(/\r\n?/g, '\n');
 }
 
-function isStandalonePragmaLine(line: string, pragma: string): boolean {
-  return line.trim() === pragma;
-}
-
 export function hasStandalonePragma(sql: string, pragma: string): boolean {
   return canonicalSql(sql)
     .split('\n')
-    .some((line) => isStandalonePragmaLine(line, pragma));
+    .some((line) => line.trim() === pragma);
 }
 
-function isBreakpointComment(text: string): boolean {
-  return text.trim() === '--> statement-breakpoint';
+/** Yield `--> statement-breakpoint` line comments outside literals. */
+function* breakpointComments(normalized: string): Generator<{ start: number; end: number }> {
+  for (const segment of tokenizeSql(normalized)) {
+    if (
+      segment.kind === 'line-comment' &&
+      normalized.slice(segment.start, segment.end).trim() === '--> statement-breakpoint'
+    ) {
+      yield segment;
+    }
+  }
 }
 
 function splitBreakpointFramedSql(sql: string): Array<string> {
@@ -39,18 +43,12 @@ function splitBreakpointFramedSql(sql: string): Array<string> {
   const statements: Array<string> = [];
   let cursor = 0;
 
-  for (const segment of tokenizeSql(normalized)) {
-    if (segment.kind !== 'line-comment') {
-      continue;
+  for (const segment of breakpointComments(normalized)) {
+    const statement = normalized.slice(cursor, segment.start).trim();
+    if (statement) {
+      statements.push(statement);
     }
-    const comment = normalized.slice(segment.start, segment.end);
-    if (isBreakpointComment(comment)) {
-      const statement = normalized.slice(cursor, segment.start).trim();
-      if (statement) {
-        statements.push(statement);
-      }
-      cursor = segment.end;
-    }
+    cursor = segment.end;
   }
 
   const statement = normalized.slice(cursor).trim();
@@ -61,17 +59,7 @@ function splitBreakpointFramedSql(sql: string): Array<string> {
 }
 
 function hasStatementBreakpointOutsideLiterals(sql: string): boolean {
-  const normalized = canonicalSql(sql);
-  for (const segment of tokenizeSql(normalized)) {
-    if (segment.kind !== 'line-comment') {
-      continue;
-    }
-    const comment = normalized.slice(segment.start, segment.end);
-    if (isBreakpointComment(comment)) {
-      return true;
-    }
-  }
-  return false;
+  return !breakpointComments(canonicalSql(sql)).next().done;
 }
 
 type StatementScan = {

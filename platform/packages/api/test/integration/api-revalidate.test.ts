@@ -243,8 +243,8 @@ describe('POST /projects/:id/revalidate', () => {
     // Pre-host-scoping rewrite variant: `<proj>/isr/v2/<D>/en/docs#rw=<token>`
     // (NO `<host>` segment). Written before ISR keys were host-scoped; still
     // persists (ISR puts set no expirationTtl). The host-scoped variant scan
-    // cannot see it, so before the fix its token was never recovered and the
-    // stale edge entry was never purged.
+    // cannot see it, so only the legacy scan can recover its token and purge
+    // the stale edge entry.
     const originalUrl = `https://${project.slug}.void.app/docs`;
     const token = hashOriginalUrl(originalUrl);
     const legacyVariantKey = `${legacyIsrKey(project.id, deployment.id, 'en/docs')}#rw=${token}`;
@@ -291,7 +291,7 @@ describe('POST /projects/:id/revalidate', () => {
 
     // Only a HOST-SCOPED (v3) variant key exists:
     // `<proj>/isr/v3/<D>/<slug>.void.app/en/docs#rw=<token>`. The v3 scan must
-    // delete + purge it (behavior unchanged). The legacy hostless scan (prefix
+    // delete + purge it. The legacy hostless scan (prefix
     // `<proj>/isr/v2/<D>/en/docs#rw=`) must NOT match it — the v2/v3 version
     // segment keeps the two namespaces disjoint — so no phantom duplicate purge
     // is emitted.
@@ -314,7 +314,7 @@ describe('POST /projects/:id/revalidate', () => {
     );
 
     expect(res.status).toBe(200);
-    // Host-scoped variant is still purged (regression guard).
+    // Host-scoped variant is still purged.
     expect(await env.ISR_CACHE.get(hostScopedVariantKey)).toBeNull();
 
     const purgeCalls = fetchMock.mock.calls.filter(
@@ -397,8 +397,7 @@ describe('POST /projects/:id/revalidate', () => {
       status: 'active',
     });
 
-    // Two keys that would ALIAS under a single key version (the exact bug the v3
-    // bump fixes):
+    // Two keys that would ALIAS under a single key version:
     //   v3 host-scoped: (host=example.com, /about) -> `<proj>/isr/v3/<D>/example.com/about`
     //   v2 legacy page /example.com/about          -> `<proj>/isr/v2/<D>/example.com/about`
     const v3Key = isrKey(project.id, deployment.id, 'example.com', 'about');
@@ -757,8 +756,8 @@ describe('POST /projects/:id/revalidate', () => {
     const fetchMock = mockCfApi();
 
     // Genuine nested pre-host-scoping key: `<proj>/isr/v2/<D>/blog/post`.
-    // The old code split on the first slash and mis-parsed host=`blog`,
-    // path=`/post`, purging garbage `https://blog/post?...`.
+    // Splitting on the first slash would mis-parse host=`blog`, path=`/post`
+    // and purge garbage `https://blog/post?...`.
     const key = legacyIsrKey(project.id, deployment.id, 'blog/post');
     await env.ISR_CACHE.put(key, 'legacy-blog-post');
 
@@ -1192,7 +1191,7 @@ describe('POST /projects/:id/revalidate', () => {
     // `updateDomainStatus`). A crash in that window strands a `pending` row that
     // dispatch already serves — and ISR-caches — under its own host-scoped keys.
     // The targeted purge must still reach it; an active-only target filter would
-    // miss the pending host entirely (the exact regression this guards).
+    // miss the pending host entirely.
     await env.ROUTING.put(project.slug, JSON.stringify({ version: deployment.id }));
     await env.ROUTING.put('domain:pending.example.com', JSON.stringify({ version: deployment.id }));
     await env.db.insert(domains).values({

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { signConfirmToken, type ConfirmTokenPayload } from '../auth/confirm-token.ts';
@@ -679,7 +679,7 @@ const app = new Hono<ApiEnv>()
     );
   });
 
-function parseCounter(raw: string | null): number {
+export function parseCounter(raw: string | null): number {
   if (!raw) {
     return 0;
   }
@@ -690,10 +690,9 @@ function parseCounter(raw: string | null): number {
 /**
  * Loose RFC 5322 sanity check. Defers real validation to CF Email
  * Routing — we just want to keep obviously-bad input out of the rate
- * limiter / CF API call. Exported so the admin route can share the
- * same regex without duplicating it.
+ * limiter / CF API call.
  */
-export function isValidEmail(s: string): boolean {
+function isValidEmail(s: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
 }
 
@@ -879,7 +878,7 @@ async function checkAndIncrementAddRate(
   return { allowed: true };
 }
 
-function minuteBucket(now: Date): string {
+export function minuteBucket(now: Date): string {
   return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
     now.getUTCDate(),
   ).padStart(2, '0')}T${String(now.getUTCHours()).padStart(2, '0')}${String(
@@ -887,7 +886,7 @@ function minuteBucket(now: Date): string {
   ).padStart(2, '0')}`;
 }
 
-function dayBucket(now: Date): string {
+export function dayBucket(now: Date): string {
   return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
     now.getUTCDate(),
   ).padStart(2, '0')}`;

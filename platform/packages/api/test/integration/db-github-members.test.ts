@@ -16,11 +16,7 @@ import {
 } from '../../src/db.ts';
 import type { Db } from '../../src/db.ts';
 import { generateId } from '../../src/id.ts';
-import {
-  githubInstallationMembers,
-  githubInstallationRevocations,
-  githubInstallations,
-} from '../../src/schema.ts';
+import { githubInstallationMembers, githubInstallationRevocations } from '../../src/schema.ts';
 import {
   getTestGitHubInstallationMembers,
   clearTables,
@@ -369,8 +365,8 @@ describe('github_installations account queries', () => {
 });
 
 describe('github_installation_revocations — monotonic revocation tombstone', () => {
-  // The tombstone is keyed by the GitHub ACCOUNT id (X), NOT a Void user id
-  // (Task 19). These helpers take that github account id as their third arg.
+  // The tombstone is keyed by the GitHub ACCOUNT id (X), NOT a Void user id.
+  // These helpers take that github account id as their third arg.
   const X = 'gh-acct-42';
   const Y = 'gh-acct-99';
 

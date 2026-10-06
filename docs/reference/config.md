@@ -297,6 +297,18 @@ Curated Cloudflare Workers configuration. `void init` pins `compatibility_date` 
 
 `worker.vars` values must be strings. Root `.env` values override them during local development only. Production builds do not load `.env`, and reject any `worker.vars` name declared as a server key in `env.ts`. Use `void secret put` for production server values.
 
+`worker.limits.cpu_ms` sets the CPU time limit per request, from 1 to 300000 ms. On a Void platform, deploy fails if the limit exceeds the account plan; lower it in `void.config.ts` before retrying. Rollback instead caps the old limit at the current plan ceiling. On direct deploys, [Cloudflare enforces the value](https://developers.cloudflare.com/workers/platform/limits/#cpu-time): Workers Free allows up to 10 ms and Workers Paid up to 300000 ms per request.
+
+```json
+{
+  "worker": {
+    "limits": {
+      "cpu_ms": 30000
+    }
+  }
+}
+```
+
 ### `cloudflare`
 
 The complete Cloudflare Worker configuration for direct Cloudflare builds and deployment. Put custom bindings, `name`, `account_id`, routes, services, vars, migrations, and any other Cloudflare fields here. Void passes these fields through to the generated Cloudflare build configuration. Settings you edit here take precedence over values Void previously recorded in `void.lock.json`.
@@ -324,18 +336,6 @@ deploy: { cloudflare: { mode: 'atomic' } },
 ```
 
 This choice applies to subsequent `void deploy` runs. Atomic deployment sends traffic to the new Worker before Void checks readiness; a Durable Object class migration cannot be rolled back across its migration boundary. Use `--atomic` for a single deployment instead. `deploy` is a Void setting and is not passed to Cloudflare's Worker config.
-
-`worker.limits.cpu_ms` sets the CPU time limit per request, from 1 to 300000 ms. On a Void platform, deploy fails if the limit exceeds the account plan; lower it in `void.config.ts` before retrying. Rollback instead caps the old limit at the current plan ceiling. On direct deploys, [Cloudflare enforces the value](https://developers.cloudflare.com/workers/platform/limits/#cpu-time): Workers Free allows up to 10 ms and Workers Paid up to 300000 ms per request.
-
-```json
-{
-  "worker": {
-    "limits": {
-      "cpu_ms": 30000
-    }
-  }
-}
-```
 
 ### `routing`
 

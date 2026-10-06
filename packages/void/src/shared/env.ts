@@ -2,9 +2,8 @@ import { readdirSync } from 'node:fs';
 import { join } from 'pathslash';
 import { parseDotenvFile } from './dotenv.ts';
 
-// Shared helpers for environment resolution. Imported by the Vite plugin
-// (index.ts), the prerender runner (prerender.ts), and the prerender Vite
-// plugin (plugin-prerender.ts). Keep these as leaf helpers — they must not
+// Shared helpers for environment resolution, used by the Vite plugins,
+// prerender, and the CLI. Keep these as leaf helpers — they must not
 // import from any non-leaf module, otherwise the prerender subprocess's
 // worker bundle acquires unwanted transitive dependencies.
 
@@ -64,12 +63,12 @@ export function findLegacyEnvFiles(root: string): Array<string> {
  * Tri-state override semantics:
  *   - `VOID_REMOTE=1` → force remote mode on
  *   - `VOID_REMOTE=0` → force remote mode off (e.g. local/CI builds of a
- *     project whose `void.json` has `remote: true`)
+ *     project whose `void.config.ts` sets `remote: true`)
  *   - unset / any other value → fall back to `config.remote`
  *
- * Both the dev-server plugin (index.ts) and the prerender build plugin
- * (plugin-prerender.ts) must derive `remoteMode` through this helper so
- * dev and build stay in lockstep.
+ * The dev-server plugin (index.ts), the prerender build plugin
+ * (plugin-prerender.ts), and managed deploy (cli/deploy-managed-full.ts) must
+ * derive `remoteMode` through this helper so dev and build stay in lockstep.
  */
 export function resolveRemoteMode(configRemote: boolean | undefined): boolean {
   const override = process.env.VOID_REMOTE;
@@ -88,9 +87,8 @@ export function resolveRemoteMode(configRemote: boolean | undefined): boolean {
  * of them should ever originate from user-authored `.env` files, shell env,
  * or CI config — if they do, we strip them and warn at the call site.
  *
- * Callers: `index.ts` envPlugin.config (dev wrangler.json vars),
- * `prerender.ts` buildPrerenderBindings (CF prerender subprocess bindings),
- * `prerender.ts` runNodePrerenderRunner (Node prerender child process env).
+ * Callers: `index.ts` envPlugin.config (dev wrangler.json vars) and
+ * `prerender.ts` buildPrerenderBindings (CF prerender subprocess bindings).
  */
 export const INTERNAL_ENV_KEYS = [
   '__VOID_ACCESS_CREDENTIALS',

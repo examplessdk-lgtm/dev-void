@@ -113,6 +113,23 @@ function readEnvString(env: VoidAuthEnv, ...keys: Array<string>): string | undef
   return undefined;
 }
 
+/** Local development uses `DATABASE_URL`; production uses the Hyperdrive binding. */
+export function resolveConnectionString(
+  env: VoidAuthEnv,
+  database: 'PostgreSQL' | 'MySQL',
+): string {
+  const hyperdrive = env.HYPERDRIVE?.connectionString;
+  const connectionString =
+    readEnvString(env, 'DATABASE_URL') ??
+    (typeof hyperdrive === 'string' && hyperdrive.length > 0 ? hyperdrive : undefined);
+  if (!connectionString) {
+    throw new Error(
+      `auth: Better Auth requires DATABASE_URL for local ${database} dev or HYPERDRIVE in production.`,
+    );
+  }
+  return connectionString;
+}
+
 const PASSWORD_SALT_LENGTH = 16;
 const SCRYPT_KEY_LENGTH = 64;
 const SCRYPT_OPTIONS = {
@@ -276,7 +293,10 @@ function resolveUserConfig(
   return mergeEmailAndPasswordDefaults({ ...defaults, ...userConfig });
 }
 
-function assertRuntimeDialect(runtime: VoidAuthRuntimeOptions, dialect: VoidAuthDialect): void {
+export function assertRuntimeDialect(
+  runtime: VoidAuthRuntimeOptions,
+  dialect: VoidAuthDialect,
+): void {
   if (runtime.dialect !== dialect) {
     throw new Error(`auth: Runtime mismatch. Expected ${dialect}, received '${runtime.dialect}'.`);
   }
@@ -449,11 +469,11 @@ export function createVoidAuthRuntime(
   }
 
   return {
-    resolveVoidAuthOptions: resolveVoidAuthOptions,
-    createVoidAuth: createVoidAuth,
-    resolveVoidAuthState: resolveVoidAuthState,
-    runVoidAuthMiddleware: runVoidAuthMiddleware,
-    handleVoidAuthRequest: handleVoidAuthRequest,
-    runVoidAuthMigrations: runVoidAuthMigrations,
+    resolveVoidAuthOptions,
+    createVoidAuth,
+    resolveVoidAuthState,
+    runVoidAuthMiddleware,
+    handleVoidAuthRequest,
+    runVoidAuthMigrations,
   };
 }

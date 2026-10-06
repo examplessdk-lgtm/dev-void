@@ -1,4 +1,11 @@
-import { canonicalJson, splitSqlStatements } from '@void/deploy-core';
+import {
+  canonicalJson,
+  canonicalSql,
+  getMigrationPlanHashInput,
+  isSingleStatement,
+  splitSqlStatements,
+  type MigrationPlanHashInput,
+} from '@void/deploy-core';
 
 export type MigrationEntry = {
   name: string;
@@ -655,11 +662,6 @@ async function verifyPlanBundle(
   return planBundle;
 }
 
-function canonicalSql(sql: string): string {
-  const withoutBom = sql.charCodeAt(0) === 0xfeff ? sql.slice(1) : sql;
-  return withoutBom.replace(/\r\n?/g, '\n');
-}
-
 async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const hash = await crypto.subtle.digest('SHA-256', bytes);
@@ -667,18 +669,7 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 async function hashPlan(plan: MigrationExecutionPlan): Promise<string> {
-  const hashInput: Record<string, unknown> = {
-    classifierVersion: plan.classifierVersion,
-    dialect: plan.dialect,
-    kind: plan.kind,
-    name: plan.name,
-    sqlHash: plan.sqlHash,
-    stability: plan.stability,
-  };
-  if (plan.kind === 'breakpoint-framed') {
-    hashInput.statements = plan.statements;
-  }
-  return sha256Hex(canonicalJson(hashInput));
+  return sha256Hex(canonicalJson(getMigrationPlanHashInput(plan as MigrationPlanHashInput)));
 }
 
 async function runD1LegacyMigrations(
@@ -701,7 +692,7 @@ async function runD1LegacyMigrations(
     try {
       const statements = splitMigrationSql(migration.sql);
       if (statements.length === 1) {
-        if (isSingleSqlStatement(statements[0])) {
+        if (isSingleStatement(statements[0])) {
           await db.prepare(statements[0]).run();
           await recordLegacyMigration(db, migration.name);
         } else {
@@ -791,86 +782,4 @@ function isStatementBreakpointLine(line: string): boolean {
 
 function hasInlineStatementBreakpoint(line: string): boolean {
   return /;\s*-->\s*statement-breakpoint\s*$/.test(line.trim());
-}
-
-function isSingleSqlStatement(sql: string): boolean {
-  let statements = 0;
-  let inStatement = false;
-  let index = 0;
-
-  while (index < sql.length) {
-    const character = sql[index];
-    const next = index + 1 < sql.length ? sql[index + 1] : '';
-
-    if (character === '-' && next === '-') {
-      index += 2;
-      while (index < sql.length && sql[index] !== '\n') {
-        index++;
-      }
-      continue;
-    }
-
-    if (character === '/' && next === '*') {
-      index += 2;
-      while (index < sql.length - 1 && !(sql[index] === '*' && sql[index + 1] === '/')) {
-        index++;
-      }
-      index = Math.min(index + 2, sql.length);
-      continue;
-    }
-
-    if (character === "'") {
-      inStatement = true;
-      index++;
-      while (index < sql.length) {
-        if (sql[index] === "'" && sql[index + 1] === "'") {
-          index += 2;
-          continue;
-        }
-        if (sql[index] === "'") {
-          index++;
-          break;
-        }
-        index++;
-      }
-      continue;
-    }
-
-    if (character === '"' || character === '`' || character === '[') {
-      inStatement = true;
-      const close = character === '[' ? ']' : character;
-      index++;
-      while (index < sql.length) {
-        if (close !== ']' && sql[index] === close && sql[index + 1] === close) {
-          index += 2;
-          continue;
-        }
-        if (sql[index] === close) {
-          index++;
-          break;
-        }
-        index++;
-      }
-      continue;
-    }
-
-    if (character === ';') {
-      if (inStatement) {
-        statements++;
-        inStatement = false;
-      }
-      index++;
-      continue;
-    }
-
-    if (character !== ' ' && character !== '\t' && character !== '\n' && character !== '\r') {
-      inStatement = true;
-    }
-    index++;
-  }
-
-  if (inStatement) {
-    statements++;
-  }
-  return statements === 1;
 }

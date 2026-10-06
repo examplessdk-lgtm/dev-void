@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-// The container's exit path used to live inside `main()`'s `finally`, which is not
-// exported — so its ORDERING had no coverage at all, and two separate review
-// findings on this PR were ordering bugs on exactly this path. `finishBuildLogging`
-// exists as the seam.
+// `finishBuildLogging` is the seam that makes the container's exit-path ORDERING
+// testable.
 //
-// The specific bug it locks down: the exit path awaited `flushLogs()` BEFORE the
-// drain barrier. That push has no route to the DO's log sink (BuildManager
+// The exit path must not await `flushLogs()` BEFORE the drain barrier. That push
+// has no route to the DO's log sink (BuildManager
 // registers no `outboundByHost`/`outbound` handler and the api worker exports no
 // `ContainerProxy`, so `@cloudflare/containers` never installs outbound
 // interception; the POST leaves for the public internet where the single-label
-// `DO_LOG_URL` host is unresolvable). So it delivered nothing while it could spend
+// `DO_LOG_URL` host is unresolvable). It would deliver nothing while spending
 // the DO's LOG_DRAIN_GRACE_SECONDS window — up to 2 x DO_POST_TIMEOUT_MS, since the
 // exit call JOINS an in-flight interval flush and then drains one more batch. A
 // grace miss inside the barrier makes `enforceTimeout` overwrite an already-live,
@@ -43,7 +41,7 @@ describe('build-agent exit path (finishBuildLogging)', () => {
     record('[build-agent] void deploy exited with code 0', 'stdout');
 
     const startedAt = Date.now();
-    // FAIL-WITHOUT-FIX: never resolves — the hung POST holds the exit path open,
+    // If broken: never resolves — the hung POST holds the exit path open,
     // so this hits the test timeout instead of the assertions below.
     await finishBuildLogging(null, { timeoutMs: 50, pollMs: 5 });
 

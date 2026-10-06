@@ -25,6 +25,7 @@ import type {
   ProjectMemberRole,
   User,
 } from '../types.ts';
+import { dayBucket, minuteBucket, parseCounter } from './email.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
 const MEMBER_ROLES = new Set<ProjectMemberRole>(['reader', 'collaborator', 'admin']);
@@ -99,9 +100,9 @@ function parseRole(value: unknown): ProjectMemberRole | null {
     : null;
 }
 
-function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Response | null {
+function mutationErrorResponse(context: Context<ApiEnv>, error: unknown): Response {
   if (!(error instanceof ProjectTeamMutationError)) {
-    return null;
+    throw error;
   }
   const errors: Record<ProjectTeamMutationError['reason'], string> = {
     'project-not-found': 'project not found',
@@ -190,17 +191,11 @@ async function consumeInvitationEmailDelivery(
   projectId: string,
 ): Promise<boolean> {
   const now = new Date();
-  const minute = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(
-    now.getUTCDate(),
-  ).padStart(2, '0')}T${String(now.getUTCHours()).padStart(2, '0')}${String(
-    now.getUTCMinutes(),
-  ).padStart(2, '0')}`;
-  const day = minute.slice(0, 8);
-  const minuteKey = `project-invitation-email-rate:${projectId}:${minute}`;
-  const dayKey = `project-invitation-email-rate:${projectId}:${day}`;
+  const minuteKey = `project-invitation-email-rate:${projectId}:${minuteBucket(now)}`;
+  const dayKey = `project-invitation-email-rate:${projectId}:${dayBucket(now)}`;
   const [minuteRaw, dayRaw] = await Promise.all([kv.get(minuteKey), kv.get(dayKey)]);
-  const minuteCount = parseDeliveryCounter(minuteRaw);
-  const dayCount = parseDeliveryCounter(dayRaw);
+  const minuteCount = parseCounter(minuteRaw);
+  const dayCount = parseCounter(dayRaw);
 
   if (minuteCount >= INVITATION_EMAILS_PER_MINUTE || dayCount >= INVITATION_EMAILS_PER_DAY) {
     return false;
@@ -210,14 +205,6 @@ async function consumeInvitationEmailDelivery(
     kv.put(dayKey, String(dayCount + 1), { expirationTtl: 25 * 60 * 60 }),
   ]);
   return true;
-}
-
-function parseDeliveryCounter(raw: string | null): number {
-  if (!raw) {
-    return 0;
-  }
-  const count = parseInt(raw, 10);
-  return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
 export const projectTeamRoutes = new Hono<ApiEnv>()
@@ -297,11 +284,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
         result.refreshed ? 200 : 201,
       );
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   })
 
@@ -327,11 +310,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
         ),
       });
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   })
 
@@ -349,11 +328,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       });
       return context.body(null, 204);
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   })
 
@@ -393,11 +368,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       }
       return context.json({ member: memberJson(member, user) });
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   })
 
@@ -420,11 +391,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       );
       return context.body(null, 204);
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   })
 
@@ -457,11 +424,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       );
       return context.body(null, 204);
     } catch (error) {
-      const response = mutationErrorResponse(context, error);
-      if (response) {
-        return response;
-      }
-      throw error;
+      return mutationErrorResponse(context, error);
     }
   });
 
@@ -530,11 +493,7 @@ async function respond(context: Context<ApiEnv>, response: 'accept' | 'decline')
     }
     return context.json({ member: memberJson(result.member, context.get('user')) });
   } catch (error) {
-    const errorResponse = mutationErrorResponse(context, error);
-    if (errorResponse) {
-      return errorResponse;
-    }
-    throw error;
+    return mutationErrorResponse(context, error);
   }
 }
 

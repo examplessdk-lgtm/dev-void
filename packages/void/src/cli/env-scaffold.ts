@@ -11,18 +11,13 @@
  */
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'pathslash';
-import { expandDotenv, parseDotenvFile as sharedParseDotenvFile } from '../shared/dotenv.ts';
-
-/** Void has one local dotenv source. */
-export const SCAFFOLD_SOURCE_FILES = ['.env'] as const;
+import { parseDotenvFile } from '../shared/dotenv.ts';
 
 export type InferredHelper = 'string' | 'number' | 'boolean' | 'url';
 
 export type InferredEntry = {
   key: string;
   helper: InferredHelper;
-  /** First non-empty value seen for this key, if any (used for diagnostics only). */
-  sampleValue?: string;
 };
 
 const BOOLEAN_LITERAL = /^(true|false)$/i;
@@ -57,53 +52,12 @@ export function inferHelperForValue(value: string | undefined): InferredHelper {
   return 'string';
 }
 
-/**
- * Thin re-export of the shared dotenv parser. Kept as a named export so the
- * unit test surface (`parseDotenvFile`) is unchanged from when this module
- * carried its own copy.
- */
-export function parseDotenvFile(filePath: string): Record<string, string> {
-  return sharedParseDotenvFile(filePath);
-}
-
-/** Collect a deduped list of inferred entries from the dotenv files we find. */
+/** Collect the inferred entries from the local `.env`, sorted by key. */
 export function collectInferredEntries(root: string): Array<InferredEntry> {
-  const seen = new Map<string, InferredEntry>();
-  // Keep this loop-shaped so the parser remains easy to extend, while the
-  // supported source set intentionally contains only `.env`.
-  const cumulative: Record<string, string> = {};
-  for (const file of SCAFFOLD_SOURCE_FILES) {
-    const parsed = sharedParseDotenvFile(join(root, file), { expand: false });
-    // Build an expansion view: cumulative entries overlaid with this file's
-    // raw values (earlier files win for already-seen keys, but this file's
-    // new keys are still available as expansion targets).
-    const expansionView: Record<string, string> = { ...parsed, ...cumulative };
-    const expanded = expandDotenv(expansionView);
-    for (const key of Object.keys(parsed)) {
-      const value = expanded[key] ?? '';
-      // Lock in cumulative with earliest-wins semantics.
-      if (!(key in cumulative)) {
-        cumulative[key] = parsed[key]!;
-      }
-      const existing = seen.get(key);
-      // First file to mention the key wins for the sample value, but a
-      // later source with a non-empty value can still upgrade inference.
-      if (!existing) {
-        seen.set(key, {
-          key,
-          helper: inferHelperForValue(value),
-          sampleValue: value || undefined,
-        });
-      } else if (!existing.sampleValue && value) {
-        seen.set(key, {
-          key,
-          helper: inferHelperForValue(value),
-          sampleValue: value,
-        });
-      }
-    }
-  }
-  return [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const values = parseDotenvFile(join(root, '.env'));
+  return Object.keys(values)
+    .sort((a, b) => a.localeCompare(b))
+    .map((key) => ({ key, helper: inferHelperForValue(values[key]) }));
 }
 
 /**
@@ -158,21 +112,16 @@ export type ScaffoldResult = {
  * no-ops when `env.ts` is present. Never overwrites an existing file.
  */
 export function maybeScaffoldEnvTs(root: string): ScaffoldResult {
-  const envTsCandidates = ['env.ts', 'env.mts', 'env.js', 'env.mjs'];
-  for (const candidate of envTsCandidates) {
-    if (existsSync(join(root, candidate))) {
-      return { written: null, skipReason: 'env-ts-exists', entries: [] };
-    }
-  }
-  // Same for `src/env.*` — respect whichever location the user already uses.
-  for (const candidate of ['src/env.ts', 'src/env.mts', 'src/env.js', 'src/env.mjs']) {
-    if (existsSync(join(root, candidate))) {
-      return { written: null, skipReason: 'env-ts-exists', entries: [] };
+  // Respect `env.*` at the root or under `src/`, whichever the user already uses.
+  for (const dir of ['', 'src/']) {
+    for (const ext of ['ts', 'mts', 'js', 'mjs']) {
+      if (existsSync(join(root, `${dir}env.${ext}`))) {
+        return { written: null, skipReason: 'env-ts-exists', entries: [] };
+      }
     }
   }
 
-  const hasAnyDotenv = SCAFFOLD_SOURCE_FILES.some((f) => existsSync(join(root, f)));
-  if (!hasAnyDotenv) {
+  if (!existsSync(join(root, '.env'))) {
     return { written: null, skipReason: 'no-dotenv-files', entries: [] };
   }
 

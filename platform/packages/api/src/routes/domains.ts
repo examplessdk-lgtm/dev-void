@@ -80,22 +80,18 @@ const app = new Hono<ApiEnv>()
 
     const { hostname } = await context.req.json<{ hostname: string }>();
 
-    // Validate hostname format
     if (!hostname || typeof hostname !== 'string') {
       return context.json({ error: 'hostname is required' }, 400);
     }
 
-    // Must be a valid domain (basic check)
     if (!/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(hostname)) {
       return context.json({ error: 'invalid hostname format' }, 400);
     }
 
-    // Cannot be a subdomain of the platform's app domain
     if (hostname.endsWith(`.${SITE_DOMAIN}`)) {
       return context.json({ error: `cannot use ${SITE_DOMAIN} subdomains` }, 400);
     }
 
-    // Uniqueness check
     const existing = await getDomainByHostname(context.get('db'), hostname);
     if (existing) {
       return context.json({ error: 'hostname already in use' }, 409);
@@ -118,10 +114,8 @@ const app = new Hono<ApiEnv>()
     // whose CF message ("Authentication error", "permission denied", etc.)
     // would leak internal state if surfaced. 403 is also returned for some
     // caller-fixable cases (SaaS zone-apex collision), but the HTTP status
-    // alone can't disambiguate — discriminating would need CF's internal
-    // error code (`errors[].code`), which `CloudflareApiError` does not
-    // currently preserve. Until it does, the conservative choice is to
-    // treat 403 like 401 and re-throw → onError → generic 500.
+    // alone can't disambiguate and this route does not map CF error codes,
+    // so 403 is treated like 401 and re-thrown → onError → generic 500.
     //
     // Same for 404 (could be zone-not-found = misconfig) and any other
     // status not in the whitelist. CF 5xx (upstream degraded) also re-throws.

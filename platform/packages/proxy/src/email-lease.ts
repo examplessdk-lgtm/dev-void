@@ -1,5 +1,6 @@
 /** Lease a customer API token from the platform for a custom-domain send. */
 
+import { hmacSign } from './hmac.ts';
 import type { Env } from './types.ts';
 
 export type EmailDomainLease = { kind: 'api_token'; token: string; accountId: string };
@@ -135,32 +136,4 @@ function parseLease(data: unknown): EmailDomainLease | null {
     return typeof token === 'string' && token.length > 0 ? { kind, token, accountId } : null;
   }
   return null;
-}
-
-// --- HMAC signing (mirrors resolve.ts) ---
-
-const encoder = new TextEncoder();
-let cachedSignKey: CryptoKey | undefined;
-let cachedKeySecret: string | undefined;
-
-async function getSignKey(secret: string): Promise<CryptoKey> {
-  if (cachedSignKey && cachedKeySecret === secret) {
-    return cachedSignKey;
-  }
-  cachedSignKey = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  cachedKeySecret = secret;
-  return cachedSignKey;
-}
-
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await getSignKey(secret);
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-  const binary = String.fromCharCode(...new Uint8Array(sig));
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }

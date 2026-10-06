@@ -103,7 +103,6 @@ describe('typed routing in generated Workers', () => {
           null,
           {
             honoPath: fileURLToPath(import.meta.resolve('hono')),
-
             runtimeEnvPath: source('env.ts'),
             projectRoot: directory,
             homeDir: tmpdir(),
@@ -120,7 +119,6 @@ describe('typed routing in generated Workers', () => {
           {
             pagesDir: pages,
             pagesDirRelative: 'pages',
-
             clientEntryId: 'virtual:fixture-client',
           },
         ),

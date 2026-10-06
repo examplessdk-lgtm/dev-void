@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveConfig } from 'vite';
@@ -108,10 +108,9 @@ describe('envSchemaPlugin auto-discovery', () => {
     const dtsPath = join(root, '.void', 'env.d.ts');
     expect(existsSync(dtsPath)).toBe(true);
 
-    const { readFileSync } = await import('node:fs');
     const dts = readFileSync(dtsPath, 'utf-8');
     // Top-level export makes this a module augmentation (required; see the
-    // "declare module augmentation requires `export {}`" pitfall in CLAUDE.md).
+    // "declare module augmentation requires `export {}`" pitfall in AGENTS.md).
     expect(dts).toContain('export {}');
     // Augments both public type surfaces — env proxy and Hono c.env bindings.
     expect(dts).toContain('declare module "void/env"');
@@ -124,7 +123,6 @@ describe('envSchemaPlugin auto-discovery', () => {
 
   it('discovers env.ts nested under src/ and resolves the import path correctly', async () => {
     const root = createTempRoot();
-    const { mkdirSync } = await import('node:fs');
     mkdirSync(join(root, 'src'), { recursive: true });
     writeFileSync(
       join(root, 'src', 'env.ts'),
@@ -135,7 +133,6 @@ describe('envSchemaPlugin auto-discovery', () => {
     const plugin = envSchemaPlugin(root);
     await runConfig(plugin);
 
-    const { readFileSync } = await import('node:fs');
     const dts = readFileSync(join(root, '.void', 'env.d.ts'), 'utf-8');
     // Relative path from .void/ to src/env.ts.
     expect(dts).toContain('typeof import("../src/env.ts")');

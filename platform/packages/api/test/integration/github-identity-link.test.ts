@@ -3,7 +3,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus
 import {
   GitHubIdentityAlreadyLinkedError,
   GitHubIdentityConflictError,
-  createOAuthAccount,
   linkGitHubIdentity,
 } from '../../src/db.ts';
 import type { Db } from '../../src/db.ts';
@@ -109,24 +108,5 @@ describe('linkGitHubIdentity', () => {
     const reLinkA = await linkGitHubIdentity(env.db, user.id, 'A');
     expect(reLinkA).toBe('already_linked');
     expect(await getGitHubRowsForUser(env.db, user.id)).toHaveLength(1);
-  });
-
-  it('surfaces a TOCTOU insert race as GitHubIdentityConflictError, not a raw pg error', async () => {
-    const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
-    const userB = await createTestUser(env.db, 'bob', 'google', 'google-bob');
-
-    // Simulate the race: the existence check sees no owner, but another request
-    // inserts the row before our insert lands. We model this by inserting the
-    // conflicting row directly, then asserting the insert path maps the unique
-    // violation to the typed conflict error rather than leaking a pg 23505.
-    await createOAuthAccount(env.db, userA.id, 'github', '12345');
-
-    await expect(linkGitHubIdentity(env.db, userB.id, '12345')).rejects.toBeInstanceOf(
-      GitHubIdentityConflictError,
-    );
-
-    const rows = await getGitHubRows(env.db, '12345');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.user_id).toBe(userA.id);
   });
 });

@@ -41,7 +41,7 @@ import {
 } from './metering.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
 import { applicationEdgeCache, resolveProjectHostname } from './project-hostname.ts';
-import { classifyDynamicRequestType, hasExtension } from './request-type.ts';
+import { classifyDynamicRequestType, hasExtension, isApiPath } from './request-type.ts';
 import { applyRoutingRules, mergeQueryIntoLocation, type RedirectRule } from './routing-rules.ts';
 import { resolveStaticPath, resolveAssetContentType, safeDecodePathname } from './static.ts';
 import type { AssetConfig } from './static.ts';
@@ -262,31 +262,22 @@ async function applyWorkerFallbackRules(opts: {
   originalUrlVariant?: string;
   applied: boolean;
 }> {
+  const unchanged = {
+    response: opts.response,
+    pathname: opts.pathname,
+    originalUrlVariant: opts.originalUrlVariant,
+    applied: false,
+  };
   if (opts.response.status !== 404 || !opts.routing.fallbackRules?.length) {
-    return {
-      response: opts.response,
-      pathname: opts.pathname,
-      originalUrlVariant: opts.originalUrlVariant,
-      applied: false,
-    };
+    return unchanged;
   }
   if (opts.routing.type === 'void' && opts.response.headers.get('X-Void-No-Match') !== '1') {
-    return {
-      response: opts.response,
-      pathname: opts.pathname,
-      originalUrlVariant: opts.originalUrlVariant,
-      applied: false,
-    };
+    return unchanged;
   }
 
   const fallback = applyRoutingRules(opts.pathname, opts.routing.fallbackRules, opts.url.hostname);
   if (fallback?.type !== 'rewrite') {
-    return {
-      response: opts.response,
-      pathname: opts.pathname,
-      originalUrlVariant: opts.originalUrlVariant,
-      applied: false,
-    };
+    return unchanged;
   }
 
   const fallbackHeader = opts.originalUrlHeader ?? opts.originalRequestUrl;
@@ -365,11 +356,6 @@ function isLikelyCfAssetStub(response: Response): boolean {
   return contentLength > 0 && contentLength < 200;
 }
 
-// Serve the requested asset from platform R2/KV using the mirror written
-// on deploy. Returns null if the routing entry lacks a manifest, the
-// manifest is missing from KV, or the path/hash cannot be resolved. The
-// caller turns that confirmed poison-stub fallback miss into an attributed
-// platform 503 so no successful cache entry can be written.
 function remainingTimeoutBudget(
   startedAt: number,
   timeoutMs: number,
@@ -385,16 +371,19 @@ function remainingTimeoutBudget(
   return remainingMs;
 }
 
+function staticAssetHedgeDelayMs(timeoutMs: number): number {
+  return timeoutMs > 0 && Number.isFinite(timeoutMs)
+    ? Math.min(STATIC_ASSET_HEDGE_DELAY_MS, timeoutMs / 2)
+    : 0;
+}
+
 async function fetchAssetManifest(
   env: Env,
   deploymentId: string,
   projectId: string,
   timeoutMs: number,
 ): Promise<Record<string, string> | null> {
-  const hedgeDelayMs =
-    timeoutMs > 0 && Number.isFinite(timeoutMs)
-      ? Math.min(STATIC_ASSET_HEDGE_DELAY_MS, timeoutMs / 2)
-      : 0;
+  const hedgeDelayMs = staticAssetHedgeDelayMs(timeoutMs);
   try {
     const raw = await withDelayedHedge(
       () => env.ROUTING.get(`manifest:${deploymentId}`, { cacheTtl: 86400 }),
@@ -444,6 +433,11 @@ async function fetchAssetManifest(
   }
 }
 
+// Serve the requested asset from platform R2/KV using the mirror written
+// on deploy. Returns null if the routing entry lacks a manifest, the
+// manifest is missing from KV, or the path/hash cannot be resolved. The
+// caller turns that confirmed poison-stub fallback miss into an attributed
+// platform 503 so no successful cache entry can be written.
 async function serveWfpAssetFallback(
   env: Env,
   routing: RoutingEntry,
@@ -690,10 +684,7 @@ export default {
     }
     const startTime = Date.now();
     // Budget for the bounded hot paths (static-asset reads, primary dispatch).
-    // Unset → the 10s default. An explicit `0`/negative/non-finite override is
-    // passed through verbatim, disabling the timers via `withTimeout`'s escape
-    // hatch (any non-positive/non-finite value = "no timer") — an operator kill
-    // switch that works WITHOUT a redeploy.
+    // See `resolveTimeoutMs` for the operator kill switch.
     const timeoutMs = resolveTimeoutMs(env.DISPATCH_TIMEOUT_MS);
 
     // Block Void-internal routes from external HTTP access.
@@ -797,7 +788,7 @@ export default {
     let requestType: RequestType =
       request.headers.get('upgrade')?.toLowerCase() === 'websocket' ? 'websocket' : 'static';
 
-    const meter = (response: Response, options?: { failureKind?: FailureKind }) => {
+    const meter = (response: Response, failureKind?: FailureKind) => {
       const responseBytes = isEventStreamResponse(response)
         ? 0
         : Number(response.headers.get('content-length') ?? 0);
@@ -809,7 +800,7 @@ export default {
         responseBytes,
         durationMs: Date.now() - startTime,
         slug: slug ?? url.hostname,
-        ...(options?.failureKind && { failureKind: options.failureKind }),
+        ...(failureKind && { failureKind }),
       });
       if (routing.userId) {
         ctx.waitUntil(
@@ -820,7 +811,7 @@ export default {
             requests: 1,
             responseBytes,
             ...(response.status >= 500 && { status: response.status }),
-            ...(options?.failureKind && { failureKind: options.failureKind }),
+            ...(failureKind && { failureKind }),
           }),
         );
       }
@@ -832,6 +823,8 @@ export default {
       res.headers.set('X-Hosted-By', 'void.cloud');
       return res;
     };
+    const meterStaticAssetFailure = (kind: FailureKind) =>
+      meter(staticAssetFailureResponse(kind), kind);
 
     // The user's worker blew the dispatch budget. It returned nothing, so it
     // logged nothing, and its own tail event records only `canceled` — which a
@@ -955,7 +948,7 @@ export default {
               }
             }
           }
-          return meter(ruled, failureKind ? { failureKind } : undefined);
+          return meter(ruled, failureKind);
         };
 
         const cache = applicationEdgeCache;
@@ -1006,21 +999,15 @@ export default {
             );
           } catch (err) {
             if (err instanceof DispatchTimeoutError) {
-              return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_TIMEOUT), {
-                failureKind: PLATFORM_STATIC_ASSET_TIMEOUT,
-              });
+              return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
             }
             if (err instanceof StaticAssetReadError) {
-              return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_ERROR), {
-                failureKind: PLATFORM_STATIC_ASSET_ERROR,
-              });
+              return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_ERROR);
             }
             throw err;
           }
           if (!assetManifest) {
-            return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_MISSING), {
-              failureKind: PLATFORM_STATIC_ASSET_MISSING,
-            });
+            return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_MISSING);
           }
           // Manifest keys are decoded on-disk paths, but `pathname` stays
           // percent-encoded. Try the raw key, then the decoded key (e.g. a
@@ -1047,23 +1034,17 @@ export default {
               );
               if (!assetResponse) {
                 logStaticAssetMissing(routing, assetPath, hash);
-                return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_MISSING), {
-                  failureKind: PLATFORM_STATIC_ASSET_MISSING,
-                });
+                return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_MISSING);
               }
               response = assetResponse;
             } catch (err) {
               // No `resolved.notFound` in scope on this hashed-asset branch — a
               // storage failure is always a real asset read, so fast 503.
               if (err instanceof DispatchTimeoutError) {
-                return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_TIMEOUT), {
-                  failureKind: PLATFORM_STATIC_ASSET_TIMEOUT,
-                });
+                return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
               }
               if (err instanceof StaticAssetReadError) {
-                return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_ERROR), {
-                  failureKind: PLATFORM_STATIC_ASSET_ERROR,
-                });
+                return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_ERROR);
               }
               throw err;
             }
@@ -1110,9 +1091,7 @@ export default {
           return finalizeAsset(response, failureKind);
         } catch (err) {
           if (err instanceof DispatchTimeoutError) {
-            return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_TIMEOUT), {
-              failureKind: PLATFORM_STATIC_ASSET_TIMEOUT,
-            });
+            return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
           }
           if (err instanceof Error && err.message.includes('Worker exceeded')) {
             return meter(await limitResponse('execution'));
@@ -1214,7 +1193,7 @@ export default {
                 repairResult.response.ok
                   ? clientRevalidateResponse(repairResult.response)
                   : repairResult.response,
-                repairResult.failureKind ? { failureKind: repairResult.failureKind } : undefined,
+                repairResult.failureKind,
               );
             }
             return meter(clientRevalidateResponse(edgeCached));
@@ -1251,7 +1230,7 @@ export default {
                 repairResult.response.ok
                   ? clientRevalidateResponse(repairResult.response)
                   : repairResult.response,
-                repairResult.failureKind ? { failureKind: repairResult.failureKind } : undefined,
+                repairResult.failureKind,
               );
             }
             if (stale) {
@@ -1302,16 +1281,12 @@ export default {
           }
           let isWorkerEventStream = isEventStreamResponse(workerResponse);
           let workerResponseFailureKind: FailureKind | undefined;
-          const cachePathname = pathname;
-          const cacheOriginalUrlVariant = isrOriginalUrlVariant;
-          const cacheKeyForWrite = cacheKey;
-          const jsonCacheKeyForWrite = jsonCacheKey;
           // The pathname the ISR write is effectively for. A fallback rewrite can
           // turn a page 404 into a 200 from `/api/*` — a dynamic body that must
           // never be cached under the original page URL. `fallbackResult` is
           // block-scoped below, so capture its post-fallback pathname AND whether a
           // fallback fired here (the write gate needs both, out of that scope).
-          let effectiveMissPathname = cachePathname;
+          let effectiveMissPathname = pathname;
           let missFallbackApplied = false;
           if (!isWorkerEventStream) {
             const assetFallbackResult = await maybeServeWfpAssetFallback({
@@ -1408,15 +1383,13 @@ export default {
                 routing.projectId,
                 isrDeploymentId,
                 url.hostname,
-                cachePathname,
+                pathname,
                 workerResponse,
                 ttl,
-                cacheOriginalUrlVariant,
+                isrOriginalUrlVariant,
               ),
             );
-            ctx.waitUntil(
-              populateJsonEdgeCache(cache, jsonCacheKeyForWrite, workerResponse, ttl, 'HIT'),
-            );
+            ctx.waitUntil(populateJsonEdgeCache(cache, jsonCacheKey, workerResponse, ttl, 'HIT'));
             const cacheHeaders = new Headers(workerResponse.headers);
             cacheHeaders.set(
               'Cache-Control',
@@ -1434,7 +1407,7 @@ export default {
               status: workerResponse.status,
               headers: edgeHeaders,
             });
-            ctx.waitUntil(cache.put(cacheKeyForWrite, cacheResponse.clone()));
+            ctx.waitUntil(cache.put(cacheKey, cacheResponse.clone()));
 
             const clientHeaders = new Headers(cacheHeaders);
             clientHeaders.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
@@ -1443,10 +1416,7 @@ export default {
               status: workerResponse.status,
               headers: clientHeaders,
             });
-            return meter(
-              clientResponse,
-              workerResponseFailureKind ? { failureKind: workerResponseFailureKind } : undefined,
-            );
+            return meter(clientResponse, workerResponseFailureKind);
           }
           if (
             workerResponse.status === 200 &&
@@ -1457,10 +1427,7 @@ export default {
           ) {
             ctx.waitUntil(purgePoisonedIsrEntry());
           }
-          return meter(
-            workerResponse,
-            workerResponseFailureKind ? { failureKind: workerResponseFailureKind } : undefined,
-          );
+          return meter(workerResponse, workerResponseFailureKind);
         }
       }
     }
@@ -1534,10 +1501,7 @@ export default {
               return meter(clientRevalidateResponse(finalRes));
             }
             ctx.waitUntil(staticCache.delete(candidateCacheKey));
-            return meter(
-              repairResult.response,
-              repairResult.failureKind ? { failureKind: repairResult.failureKind } : undefined,
-            );
+            return meter(repairResult.response, repairResult.failureKind);
           }
         }
         return meter(clientRevalidateResponse(cached));
@@ -1562,21 +1526,15 @@ export default {
         );
       } catch (err) {
         if (err instanceof DispatchTimeoutError) {
-          return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_TIMEOUT), {
-            failureKind: PLATFORM_STATIC_ASSET_TIMEOUT,
-          });
+          return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
         }
         if (err instanceof StaticAssetReadError) {
-          return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_ERROR), {
-            failureKind: PLATFORM_STATIC_ASSET_ERROR,
-          });
+          return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_ERROR);
         }
         throw err;
       }
       if (!assetManifest) {
-        return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_MISSING), {
-          failureKind: PLATFORM_STATIC_ASSET_MISSING,
-        });
+        return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_MISSING);
       }
       const assetConfig: AssetConfig = routing.assetConfig ?? {};
 
@@ -1632,7 +1590,7 @@ export default {
         if (err instanceof DispatchTimeoutError) {
           return meter(
             timeoutResponse(resolved.notFound ? 404 : 503, 'static-asset'),
-            resolved.notFound ? undefined : { failureKind: PLATFORM_STATIC_ASSET_TIMEOUT },
+            resolved.notFound ? undefined : PLATFORM_STATIC_ASSET_TIMEOUT,
           );
         }
         if (err instanceof StaticAssetReadError) {
@@ -1640,7 +1598,7 @@ export default {
             resolved.notFound
               ? createErrorResponse(request, 404, 'Not Found')
               : staticAssetFailureResponse(PLATFORM_STATIC_ASSET_ERROR),
-            resolved.notFound ? undefined : { failureKind: PLATFORM_STATIC_ASSET_ERROR },
+            resolved.notFound ? undefined : PLATFORM_STATIC_ASSET_ERROR,
           );
         }
         throw err;
@@ -1650,9 +1608,7 @@ export default {
           return meter(createErrorResponse(request, 404, 'Not Found'));
         }
         logStaticAssetMissing(routing, resolved.path, resolved.hash);
-        return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_MISSING), {
-          failureKind: PLATFORM_STATIC_ASSET_MISSING,
-        });
+        return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_MISSING);
       }
 
       const status = resolved.notFound ? 404 : 200;
@@ -1726,8 +1682,8 @@ export default {
         isEventStream = isEventStreamResponse(response);
       }
 
-      // routing.fallbackRules — for static deployments these fire post-asset
-      // (line ~533). The user worker is the equivalent path resolver here, so
+      // routing.fallbackRules — for static deployments these fire post-asset.
+      // The user worker is the equivalent path resolver here, so
       // a 404 is the analogue of a static-asset miss. Single-pass: the
       // rewrite target's response is returned as-is even if it's also 404.
       //
@@ -1807,10 +1763,7 @@ export default {
         );
         markSharedCachePolicy(cacheRes.headers);
         ctx.waitUntil(applicationEdgeCache.put(staticCacheKey, cacheRes.clone()));
-        return meter(
-          clientRevalidateResponse(finalRes),
-          responseFailureKind ? { failureKind: responseFailureKind } : undefined,
-        );
+        return meter(clientRevalidateResponse(finalRes), responseFailureKind);
       }
 
       // Classify for metering
@@ -1900,19 +1853,14 @@ export default {
         stripped.headers.delete('x-void-page-data');
         return meter(
           applyHeaderRules(stripped, pathname, routing.headerRules),
-          responseFailureKind ? { failureKind: responseFailureKind } : undefined,
+          responseFailureKind,
         );
       }
-      return meter(
-        applyHeaderRules(response, pathname, routing.headerRules),
-        responseFailureKind ? { failureKind: responseFailureKind } : undefined,
-      );
+      return meter(applyHeaderRules(response, pathname, routing.headerRules), responseFailureKind);
     } catch (err) {
       if (err instanceof DispatchTimeoutError) {
         if (err.label === 'static-asset') {
-          return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_TIMEOUT), {
-            failureKind: PLATFORM_STATIC_ASSET_TIMEOUT,
-          });
+          return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
         }
         const dynamicType = classifyDynamicRequestType(pathname, routing.ssr);
         if (dynamicType) {
@@ -1921,9 +1869,7 @@ export default {
         return meterWorkerTimeout();
       }
       if (err instanceof StaticAssetReadError) {
-        return meter(staticAssetFailureResponse(PLATFORM_STATIC_ASSET_ERROR), {
-          failureKind: PLATFORM_STATIC_ASSET_ERROR,
-        });
+        return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_ERROR);
       }
       if (err instanceof Error && err.message.includes('Worker exceeded')) {
         return meter(await limitResponse('execution'));
@@ -2121,10 +2067,7 @@ async function fetchStaticAsset(
   deploymentId?: string,
   timeoutMs = 10000,
 ): Promise<Response | null> {
-  const hedgeDelayMs =
-    timeoutMs > 0 && Number.isFinite(timeoutMs)
-      ? Math.min(STATIC_ASSET_HEDGE_DELAY_MS, timeoutMs / 2)
-      : 0;
+  const hedgeDelayMs = staticAssetHedgeDelayMs(timeoutMs);
   const startedAt = Date.now();
   let hedged = false;
 
@@ -2226,39 +2169,26 @@ async function fetchStaticAssetOnce(
     return new Response(obj.body, { headers });
   }
 
-  // Try scoped key first, then legacy
-  if (scopedKey) {
-    const scoped = await env.STATIC_ASSETS.getWithMetadata<{ ct: string }>(scopedKey, {
+  const readKvAsset = async (key: string): Promise<Response | null> => {
+    const { value, metadata } = await env.STATIC_ASSETS.getWithMetadata<{ ct: string }>(key, {
       type: 'arrayBuffer',
       cacheTtl: 86400,
     });
-    if (scoped.value) {
-      const contentType = resolveAssetContentType(scoped.metadata?.ct, path);
-      const headers: HeadersInit = {
-        'Content-Length': String((scoped.value as ArrayBuffer).byteLength),
-      };
-      if (contentType) {
-        (headers as Record<string, string>)['Content-Type'] = contentType;
-      }
-      return new Response(scoped.value, { headers });
+    if (!value) {
+      return null;
     }
-  }
-
-  const { value, metadata } = await env.STATIC_ASSETS.getWithMetadata<{ ct: string }>(legacyKey, {
-    type: 'arrayBuffer',
-    cacheTtl: 86400,
-  });
-  if (!value) {
-    return null;
-  }
-  const contentType = resolveAssetContentType(metadata?.ct, path);
-  const headers: HeadersInit = {
-    'Content-Length': String((value as ArrayBuffer).byteLength),
+    const contentType = resolveAssetContentType(metadata?.ct, path);
+    const headers: HeadersInit = {
+      'Content-Length': String((value as ArrayBuffer).byteLength),
+    };
+    if (contentType) {
+      (headers as Record<string, string>)['Content-Type'] = contentType;
+    }
+    return new Response(value, { headers });
   };
-  if (contentType) {
-    (headers as Record<string, string>)['Content-Type'] = contentType;
-  }
-  return new Response(value, { headers });
+
+  // Try scoped key first, then legacy
+  return (scopedKey ? await readKvAsset(scopedKey) : null) ?? readKvAsset(legacyKey);
 }
 
 /** Get a dispatch worker, applying custom limits if configured. */
@@ -2439,8 +2369,8 @@ async function revalidateInBackground(
       // Convergence — ONLY on positive removal evidence: the ORIGIN page's OWN
       // pre-fallback render returned 404 or 410 (gone). Such a re-render could neither
       // refresh this entry nor trigger the authoritative opt-out eviction above (a
-      // permanent origin 404 that falls back to a non-declared shell — C12 refuses to
-      // cache it). It has now been STALE (since `createdAt + ttl`) beyond the bounded
+      // permanent origin 404 that falls back to a non-declared shell — the write gate
+      // refuses to cache it). It has now been STALE (since `createdAt + ttl`) beyond the bounded
       // grace — far past any transient deploy-race 404 — so the page is permanently
       // removed: evict it rather than serve its last cached body forever. A 5xx / 429 /
       // timeout / any other status is a DEGRADED DEPENDENCY, not a removal — it MUST
@@ -2460,15 +2390,6 @@ async function revalidateInBackground(
     console.error('ISR revalidation failed:', err);
     return false;
   }
-}
-
-// An `/api` route (worker-dynamic). Such a path must never enter the shared
-// page ISR cache — directly, or via a fallback that rewrites a page 404 into a
-// 200 from `/api/*`. A `/api` response is per-request dynamic (cookies, auth,
-// live data); caching it under a page URL would serve one caller's response to
-// everyone. Used at every ISR write site on the effective post-fallback path.
-function isApiPath(pathname: string): boolean {
-  return pathname === '/api' || pathname.startsWith('/api/');
 }
 
 // ISR eligibility for a REQUEST's own pathname: SSR page paths only — never an

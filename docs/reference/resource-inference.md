@@ -80,22 +80,7 @@ Paths are relative to the project root. When `inference.scanDirs` is set, it rep
 
 ## Explicit Binding Overrides
 
-Override individual bindings when inference does not match your setup:
-
-```json
-{
-  "inference": {
-    "bindings": {
-      "db": true,
-      "kv": true,
-      "storage": false,
-      "ai": false
-    }
-  }
-}
-```
-
-Explicit values override only their named bindings. Omitted bindings continue to be inferred, so setting `kv` does not disable storage, auth, or other features. Auth and checked-in migrations still require a database even when `db` is `false`.
+Use [`inference.bindings`](./config.md#inference-bindings) to enable, disable, or rename a binding when inference does not match your setup. It overrides only the bindings you name; the rest are still inferred.
 
 ## File Types
 

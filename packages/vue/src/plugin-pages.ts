@@ -1,9 +1,12 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname } from 'pathslash';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
-import { resolveStaticPageDataBuildOptions, scanPages } from 'void/pages';
+import {
+  generateComponentManifest,
+  resolveStaticPageDataBuildOptions,
+  scanPages,
+} from 'void/pages';
 import type { PageScanResult, StaticPageDataBuildOptions } from 'void/pages';
-import { generateComponentManifest } from './pages-manifest.ts';
 
 const RENDERER_ID = 'virtual:void-pages-renderer';
 const CLIENT_ENTRY_ID = 'virtual:void-pages-client';
@@ -402,7 +405,7 @@ currentLayouts.value = initialLayouts;
 
 const appEl = document.getElementById("app");
 if (!appEl) throw new Error("pages: Missing #app element for Void Vue pages hydration.");
-const createVoidApp = appEl?.getAttribute("data-void-ssr") === "false" ? createApp : createSSRApp;
+const createVoidApp = appEl.getAttribute("data-void-ssr") === "false" ? createApp : createSSRApp;
 const app = createVoidApp({
   setup() {
     provide("__void_shared", shared);

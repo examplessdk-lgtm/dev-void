@@ -56,9 +56,6 @@ export function prerenderPlugin(root: string, config: VoidConfig): Plugin {
           clientDir,
           persistDir,
           remoteMode,
-          // closeBundle runs inside the vite build subprocess, so the parent
-          // deploy process's in-memory projectId only crosses via env var.
-          projectId: process.env.VOID_DEPLOY_PROJECT_ID || undefined,
         });
       }
 

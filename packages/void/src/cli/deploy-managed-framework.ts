@@ -5,29 +5,28 @@ import { analyzeApplicationSync } from '../application-analysis.ts';
 import { type VoidConfig } from '../config.ts';
 import { scanDurableObjectModules } from '../durable/scan.ts';
 import { collectRevalidate } from '../isr-config.ts';
-import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { type DetectedFramework } from '../plugin-inference.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { PlatformClient } from './client.ts';
 import { assertDeploySchemaDriftFree } from './deploy-drift.ts';
 import {
   log,
-  getErrorMessage,
   generateDeployWrapperIfNeeded,
   resolveDeployWranglerCompat,
   assertEnvSchemaValid,
+  validateDeployMigrations,
+  ensureManagedHyperdrive,
+  toManifestSchedulesAndQueues,
 } from './deploy-helpers.ts';
 import {
-  warnRedundantForceOn3xx,
+  mergeAndLintRoutingRules,
   warnIgnoredNotFoundForFramework,
   streamDirectR2Deploy,
   warnUnpublishedRouting,
 } from './deploy-managed-events.ts';
 import { formatDeploySummary, printDeploySuccess } from './deploy-summary.ts';
 import { MANAGED_DEPLOY_BUILD_ENV } from './deploy-transport.ts';
-import { type ResourceSummary } from './deploy-types.ts';
 import { type GitDeployMetadata } from './git-metadata.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
 import { createSpinner, formatCount, note } from './output.ts';
 import { collectAndHashAssets, buildFrameworkManifest, collectWorkerFiles } from './package.ts';
@@ -81,26 +80,15 @@ export async function runFrameworkDeploy(
   // Netlify-symmetric phases:
   //   - `_redirects` `200!` + routing.rewrites  → redirectRules (always-fires)
   //   - `_redirects` `200`  + routing.fallbacks → fallbackRules (asset-miss only)
-  const { headerRules, redirectRules, fallbackRules, redundantForceOn3xx } = mergeRoutingRules({
-    dir: assetsDir,
-    routing: voidConfig.routing,
-  });
-  warnRedundantForceOn3xx(redundantForceOn3xx);
+  const { headerRules, redirectRules, fallbackRules } = mergeAndLintRoutingRules(
+    assetsDir,
+    voidConfig.routing,
+  );
 
   // `assetConfig` below is pinned to `not_found_handling: 'none'` on this path,
   // so `routing.notFound` is inert. Warned here (outside the packaging spinner)
   // rather than at the pin itself.
   warnIgnoredNotFoundForFramework(voidConfig.routing?.notFound, detected.name);
-
-  // Lint each phase independently: duplicates across phases (redirects vs
-  // fallbacks) don't shadow each other, only duplicates within a phase do.
-  lintDuplicateSources(redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDuplicateSources(fallbackRules, 'fallbacks (post-asset)');
-
-  // Warn on destinations containing a literal `*` — only `:name` tokens are
-  // substituted at dispatch time, so `*` is almost always a user mistake.
-  lintDestinationSplats(redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDestinationSplats(fallbackRules, 'fallbacks (post-asset)');
 
   if (!existsSync(workerDir)) {
     log.error(`deploy: Worker output '${fwPreset.workerDir}' not found. Run '${buildCmd}' first.`);
@@ -122,70 +110,14 @@ export async function runFrameworkDeploy(
     process.exit(1);
   }
 
-  const migrationsDir = paths.migrationsDir;
-
   assertDeploySchemaDriftFree(root, dialect);
 
   // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
-  const rawMigrations = analysis.migrations;
-  let validatedMigrations;
-  try {
-    assertJournalCoherence(migrationsDir, rawMigrations);
-  } catch (err: unknown) {
-    log.error(getErrorMessage(err));
-    process.exit(1);
-  }
-  if (rawMigrations.length > 0) {
-    try {
-      validatedMigrations = validateMigrations(rawMigrations);
-      log.info(`Found ${formatCount(validatedMigrations.length, 'migration')}`);
-    } catch (err: unknown) {
-      log.error(getErrorMessage(err));
-      process.exit(1);
-    }
-  }
+  const validatedMigrations = validateDeployMigrations(paths.migrationsDir, analysis.migrations);
 
   // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
   if (dialect !== 'sqlite' && analysis.needsDatabase) {
-    let resources: Array<ResourceSummary> | null = null;
-    try {
-      resources = await client.getResources(config.projectId);
-    } catch {
-      // Resources endpoint not available
-    }
-    if (resources) {
-      const hasHyperdrive = resources.some(
-        (resource: ResourceSummary) => resource.type === 'hyperdrive',
-      );
-      if (!hasHyperdrive) {
-        const { text: promptText, isCancel: isCancelPrompt } =
-          await import('@voidzero-dev/vite-plus-prompts');
-        const connectionString = await promptText({
-          message: `Your project uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'}. Enter your connection string:`,
-          placeholder:
-            dialect === 'mysql'
-              ? 'mysql://user:pass@host:3306/dbname'
-              : 'postgresql://user:pass@host:5432/dbname',
-          validate(value) {
-            const valid =
-              dialect === 'mysql'
-                ? value?.startsWith('mysql://')
-                : value?.startsWith('postgres://') || value?.startsWith('postgresql://');
-            if (!valid) {
-              return dialect === 'mysql'
-                ? 'Must start with "mysql://"'
-                : 'Must start with "postgres://" or "postgresql://"';
-            }
-          },
-        });
-        if (isCancelPrompt(connectionString)) {
-          log.info('Deploy cancelled.');
-          process.exit(0);
-        }
-        await client.provisionDatabase(config.projectId, connectionString as string);
-        log.success('Hyperdrive provisioned.');
-      }
-    }
+    await ensureManagedHyperdrive(client, config.projectId, dialect);
   }
 
   // 5. Generate wrapper if needed (crons or queues present)
@@ -230,18 +162,7 @@ export async function runFrameworkDeploy(
   const prerender = voidConfig.routing?.isr === false ? undefined : voidConfig.routing?.prerender;
 
   // Build manifest-format schedules and queues from raw scans
-  const schedules = rawJobs.flatMap((job) =>
-    job.crons.map((cron) => ({
-      name: job.name,
-      cron,
-    })),
-  );
-  const queues = rawQueues.map((q) => ({
-    name: q.name,
-    bindingName: q.bindingName,
-    ...(q.maxBatchSize != null && { maxBatchSize: q.maxBatchSize }),
-    ...(q.maxBatchTimeout != null && { maxBatchTimeout: q.maxBatchTimeout }),
-  }));
+  const { schedules, queues } = toManifestSchedulesAndQueues(rawJobs, rawQueues);
 
   // Production env values are remote secrets. Client values are compiled
   // from schema defaults or the build shell; no dotenv value enters the manifest.
@@ -256,7 +177,7 @@ export async function runFrameworkDeploy(
 
   // Preflight: hash assets and check which ones changed.
   // `assetFiles` is threaded through to the upload step so each asset is
-  // read from disk once, end-to-end (Codex Finding #2 in design doc 0068).
+  // read from disk once, end-to-end.
   s.start('Checking for changes...');
   cliLog?.info('preflight_start', { dir: assetsDir });
   const { assetManifest, assetFiles } = await collectAndHashAssets(assetsDir, onProgress, {

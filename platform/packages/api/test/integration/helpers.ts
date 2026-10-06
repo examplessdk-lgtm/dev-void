@@ -163,13 +163,6 @@ export function recordingBuildManager(options: Readonly<{ recordFetchCancel?: bo
 type StoredValue = {
   value: string | ArrayBuffer;
   metadata?: unknown;
-  /**
-   * KV `expirationTtl` option captured so tests can assert that ISR
-   * entries come with an upper-bound reclaim window. Real KV enforces
-   * this at the storage layer; the in-memory mock only records it for
-   * assertions — it does not evict.
-   */
-  expirationTtl?: number;
 };
 
 function toArrayBuffer(value: ArrayBuffer | ArrayBufferView): ArrayBuffer {
@@ -238,16 +231,7 @@ export class MemoryKVNamespace {
     this.store.set(key, {
       value: normalized,
       metadata: options?.metadata === undefined ? undefined : structuredClone(options.metadata),
-      expirationTtl: options?.expirationTtl,
     });
-  }
-
-  /**
-   * Read the recorded `expirationTtl` for a key. Returns `undefined`
-   * if the key doesn't exist or was put without the option.
-   */
-  getExpirationTtl(key: string): number | undefined {
-    return this.store.get(key)?.expirationTtl;
   }
 
   async delete(key: string): Promise<void> {
@@ -343,8 +327,8 @@ class MemoryR2Bucket {
     // Evaluate precondition BEFORE draining the stream, matching R2's
     // behaviour on a wildcard etagDoesNotMatch='*' hit: if the key exists,
     // the put is a no-op and returns null. We still need to drain any
-    // ReadableStream so our streaming producer (hashing transform in
-    // `streamStaticAssetToR2`) sees closure and settles its hash state.
+    // ReadableStream so a streaming producer (such as a hashing transform)
+    // sees closure and settles its state.
     const preconditionFail = options?.onlyIf?.etagDoesNotMatch === '*' && this.store.has(key);
 
     let body: ArrayBuffer;
@@ -813,9 +797,9 @@ export function cfError(message: string, status = 400, code = 1000): Response {
 //     container POST also enforces the CF invariant that a given DO
 //     namespace_id can only ever be bound to ONE container application
 //     (CF code 1608 DURABLE_OBJECT_ALREADY_HAS_APPLICATION).
-//   - Cross-script DO binding validation kept as a regression guard against
-//     PR #131 — CF rejects cross-script DO bindings to dispatch namespace
-//     scripts; only same-script DO bindings work in dispatch namespaces.
+//   - Cross-script DO binding validation — CF rejects cross-script DO bindings
+//     to dispatch namespace scripts; only same-script DO bindings work in
+//     dispatch namespaces.
 //   - Recording of CF call ordering so tests can assert PUT/POST sequencing.
 //
 // The state container is fresh per `mockCfApi()` call.
@@ -877,7 +861,7 @@ async function parseMultipartMetadata(
   if (!init?.body) {
     return null;
   }
-  // FormData is what `deploy.ts` and the sandbox provisioner build.
+  // Worker uploads send FormData.
   if (init.body instanceof FormData) {
     const metaEntry = init.body.get('metadata');
     if (typeof metaEntry === 'string') {
@@ -1096,9 +1080,8 @@ const baseDefaultMocks: Omit<CfApiMocks, 'uploadWorker' | 'listWorkerBindings' |
   deleteQueue: () => cfSuccess(null),
   queryD1: () => cfSuccess([{ results: [] }]),
   assetUploadSession: async (_url: string, init?: RequestInit) => {
-    // Extract real hashes from the manifest in the request body so the mock
-    // bucket matches what the streaming deploy route actually computed
-    // (BLAKE3 hashes from readAssetBody / collectBufferedAsset).
+    // Echo the manifest hashes so the mock bucket matches what the deploy
+    // route computed.
     try {
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
       if (body?.manifest) {
@@ -1201,13 +1184,9 @@ const baseDefaultMocks: Omit<CfApiMocks, 'uploadWorker' | 'listWorkerBindings' |
 };
 
 /**
- * Backwards-compatible mock fetch handle. Existing tests use the return value
- * directly as a `vi.fn()` (e.g. `fetchMock.mock.calls`); new tests destructure
- * `state` / `seedHostScript` / `seedContainerApp` / `expectCallOrder` to drive
- * sandbox-related scenarios (dispatch namespace scripts + container apps).
- *
- * The handle IS the `vi.fn()` — the additional fields are attached via
- * `Object.assign` so existing call sites continue to work unchanged.
+ * Mock fetch handle. The handle IS the `vi.fn()` (e.g. `fetchMock.mock.calls`),
+ * with `state` / `seedHostScript` / `seedContainerApp` / `expectCallOrder`
+ * attached for sandbox scenarios (dispatch namespace scripts + container apps).
  */
 export type MockCfApiHandle = ReturnType<typeof vi.fn> & {
   /** Live state container — fresh per `mockCfApi()` call. */
@@ -1260,21 +1239,19 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
 
     const parsed = await parseMultipartMetadata(init);
     if (!parsed) {
-      // Body shape is opaque (string body or non-FormData). Behave like the
-      // legacy `() => new Response('ok')` default — tests that need state
-      // recording for these cases will install their own override.
+      // Opaque body (string or non-FormData): accept without recording state.
+      // Tests that need state for these bodies install their own override.
       return new Response('ok', { status: 200 });
     }
 
     const { metadata } = parsed;
     const bindings = extractBindings(metadata);
 
-    // Cross-script binding validation — regression guard against PR #131.
-    // CF empirically rejects ALL cross-script DO bindings between dispatch
+    // Cross-script binding validation. CF empirically rejects ALL cross-script DO bindings between dispatch
     // namespace scripts, regardless of whether the target script exists or
     // declares the class as container-enabled. Reject unconditionally so any
-    // future code that reintroduces cross-script DO bindings (the architecture
-    // PR #131 attempted) fails fast in CI instead of shipping to production.
+    // future code that introduces cross-script DO bindings fails fast in CI
+    // instead of shipping to production.
     for (const binding of bindings) {
       const refScript = (binding as { script_name?: unknown }).script_name;
       if (typeof refScript === 'string' && refScript !== scriptName) {
@@ -1336,8 +1313,7 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
   };
 
   // Default `listWorkerBindings` reads from state when the script has been
-  // PUT through the stateful path; otherwise returns the legacy proxy-token
-  // payload so existing tests keep passing.
+  // PUT through the stateful path; otherwise returns a proxy-token binding.
   const defaultListWorkerBindings = (url: string): Response => {
     const scriptName = parseScriptNameFromUrl(url);
     if (scriptName && state.hostScripts.has(scriptName)) {
@@ -1349,22 +1325,14 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
     ]);
   };
 
-  // Default `deleteWorker` removes the script from state. Returns a CF-shaped
-  // 404 envelope when the script doesn't exist (so `cfFetch` callers see the
-  // right `CloudflareApiError.status`).
+  // Default `deleteWorker` removes the script from state. Unknown scripts
+  // also return 200 (idempotent delete); tests that need a 404 install an
+  // override.
   const defaultDeleteWorker = (url: string): Response => {
     const scriptName = parseScriptNameFromUrl(url);
-    if (!scriptName) {
-      return new Response('ok', { status: 200 });
+    if (scriptName) {
+      state.hostScripts.delete(scriptName);
     }
-    if (!state.hostScripts.has(scriptName)) {
-      // Existing tests historically expect 200 from deleteWorker even for
-      // unknown scripts (idempotent semantics on the platform side). Keep
-      // that default; tests that need 404 differentiation can install an
-      // override.
-      return new Response('ok', { status: 200 });
-    }
-    state.hostScripts.delete(scriptName);
     return new Response('ok', { status: 200 });
   };
 
@@ -1373,11 +1341,8 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
   // Matches the real CF API envelope:
   //   { success: true, result: { script: { id, migration_tag, ... } } }
   //
-  // (See workers-sdk/packages/wrangler/src/durable.ts:32-38 — wrangler reads
-  // `result.script.migration_tag`. The previous mock returned the script
-  // fields hoisted into `result` directly, which masked a production bug
-  // where `fetchScriptMigrationTag` read `result.migration_tag` and always
-  // got `null`.)
+  // (See workers-sdk/packages/wrangler/src/durable.ts — wrangler reads
+  // `result.script.migration_tag`, not `result.migration_tag`.)
   const defaultGetDispatchScript = (url: string): Response => {
     const scriptName = parseScriptNameFromUrl(url);
     if (!scriptName || !state.hostScripts.has(scriptName)) {
@@ -1446,14 +1411,10 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
         { status: 409 },
       );
     }
-    // Regression guard: CF rejects a 2nd container application bound to the
-    // same DO namespace_id with code 1608 DURABLE_OBJECT_ALREADY_HAS_APPLICATION.
-    // Empirically verified against the real CF API. Without this check, the
-    // mock accepted duplicate namespace bindings and tests passed while
-    // production failed — the same regression pattern as PR #131. Per-deploy
-    // architecture mints a fresh namespace_id per deploy so this should never
-    // fire in healthy code; if a future change reintroduces a stable
-    // namespace_id rebound across deploys, this rejection will surface it.
+    // CF rejects a 2nd container application bound to the same DO
+    // namespace_id with code 1608 DURABLE_OBJECT_ALREADY_HAS_APPLICATION
+    // (verified against the real CF API). Each deploy mints a fresh
+    // namespace_id, so healthy code never hits this.
     const namespaceId = (body.durable_objects as { namespace_id?: string } | undefined)
       ?.namespace_id;
     if (namespaceId) {
@@ -1563,9 +1524,8 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
       typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const method = init?.method ?? 'GET';
 
-    // Record every call (excluding bare GETs without a method? — they're
-    // already useful for ordering). Bodies are recorded only when serializable
-    // as a string — multipart FormData bodies are summarized as `[FormData]`.
+    // Record every call for ordering assertions. Non-string bodies are
+    // summarized as `[FormData]` or `[binary]`.
     let bodySnapshot: string | undefined;
     if (init?.body !== undefined) {
       if (typeof init.body === 'string') {

@@ -224,32 +224,7 @@ function buildDatabaseManifest() {
       timestampMillis: when,
     };
   });
-  for (let index = 0; index < migrations.length; index++) {
-    const migration = migrations[index];
-    const previous = migrations[index - 1];
-    if (
-      migrations.some(
-        (candidate, candidateIndex) =>
-          candidateIndex !== index &&
-          (candidate.index === migration.index ||
-            candidate.tag === migration.tag ||
-            candidate.timestampMillis === migration.timestampMillis),
-      )
-    ) {
-      throw new Error('Void Platform migration journal entries must be unique.');
-    }
-    if (
-      previous &&
-      (migration.index <= previous.index || migration.timestampMillis <= previous.timestampMillis)
-    ) {
-      throw new Error('Void Platform migration journal entries must be strictly ordered.');
-    }
-  }
-  const prefixDigests = new Set(
-    Array.from({ length: migrations.length + 1 }, (_, length) =>
-      platformDatabaseSchemaDigest(compatibility.lineage, migrations.slice(0, length)),
-    ),
-  );
+  // parsePlatformRuntimeManifest enforces migration order, uniqueness, and rollback lineage.
   const rollbackSafeFrom = compatibility.rollbackSafeFrom.map((value, position) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error(`Void Platform compatibility entry ${position} must be an object.`);
@@ -261,19 +236,8 @@ function buildDatabaseManifest() {
     if (typeof schemaDigest !== 'string' || !/^[0-9a-f]{64}$/.test(schemaDigest)) {
       throw new Error(`Void Platform compatibility entry ${position} has an invalid digest.`);
     }
-    if (!prefixDigests.has(schemaDigest)) {
-      throw new Error(
-        `Void Platform compatibility entry ${position} references a schema outside this migration lineage.`,
-      );
-    }
     return { platformVersion, schemaDigest };
   });
-  const keys = rollbackSafeFrom.map(
-    ({ platformVersion, schemaDigest }) => `${platformVersion}\0${schemaDigest}`,
-  );
-  if (new Set(keys).size !== keys.length) {
-    throw new Error('Void Platform compatibility entries must be unique.');
-  }
   return {
     journalSha256: sha256(journalContents),
     lineage: compatibility.lineage,

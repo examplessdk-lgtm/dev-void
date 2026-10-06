@@ -56,7 +56,6 @@ export async function tryActivateDomain(
   // is computed against the pre-mutation state.
   const wasPending = domain.status === 'pending';
 
-  // Poll CF API for live status
   const cf = await getCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
 
   // Custom-hostname validation has two independent axes:
@@ -67,10 +66,9 @@ export async function tryActivateDomain(
   // The anti-wildcard-hijack lever is the OWNERSHIP gate, NOT the cert-DCV
   // method: a wildcard CNAME (`*.victim → cname.void.app`) cannot forge a
   // per-host `_cf-custom-hostname` TXT value, so ownership stays unsatisfied
-  // and `status` never reaches `active`. Cert DCV (now HTTP-based, edge-
-  // validated, auto-renewing) is orthogonal and method-agnostic here, which
-  // is also what keeps legacy `txt`-method pending domains activatable with
-  // no migration.
+  // and `status` never reaches `active`. Cert DCV (HTTP-based, edge-validated,
+  // auto-renewing) is orthogonal and method-agnostic here, which also keeps
+  // pending domains still on `txt` DCV activatable.
   //
   // The primary signal is CF's own `status === 'active'`: for a hostname
   // proxying through CF (which a custom domain always is), CF only flips
@@ -81,9 +79,7 @@ export async function tryActivateDomain(
   // to route even if CF ever surfaced `active` with an ownership challenge
   // still outstanding. We deliberately do NOT add our own DNS re-check here:
   // it would break a domain whenever a user removed the TXT after setup, for
-  // no real gain over CF's gate. The foundational assumption (CF won't go
-  // `active` without DNS ownership for a proxying hostname) is validated by
-  // the staging spike (plan Phase 0) before this ships.
+  // no real gain over CF's gate.
   const gateOk =
     cf.status === 'active' &&
     cf.ssl.status === 'active' &&

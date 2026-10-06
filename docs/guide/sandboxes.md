@@ -97,7 +97,7 @@ Files, running processes, and listening servers last only as long as the contain
 
 ## Configuration
 
-The default environment provides Node.js 24 on Debian Trixie. Managed platform deploys use Cloudflare's managed Node.js image.
+The default environment provides Node.js 26 on Debian Trixie. Managed platform deploys use Cloudflare's managed Node.js image.
 
 Use `void.config.ts` when you need a custom image or container size:
 
@@ -118,7 +118,7 @@ See the [configuration reference](../reference/config.md#sandbox) for binding na
 Custom images must include the helper matching Void's installed Sandbox SDK version. The SDK image supplies this binary, but is not a runnable environment itself:
 
 ```dockerfile
-FROM node:24.21.0-trixie-slim
+FROM node:26.10.0-trixie-slim
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

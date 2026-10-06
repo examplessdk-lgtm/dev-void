@@ -2,14 +2,9 @@ import type { Plugin } from 'vite';
 import solid from 'vite-plugin-solid';
 import { resolvePagesDir } from 'void/pages';
 import { islandsPlugin } from './plugin-islands.ts';
-import { pagesPlugin } from './plugin-pages.ts';
+import { pagesPlugin, type PrefetchConfig } from './plugin-pages.ts';
 
 const SOLID_RUNTIME_PACKAGE = '@void/solid';
-
-type PrefetchConfig = {
-  hoverDelay?: number;
-  cacheFor?: number | string | [string, string];
-};
 
 export type VoidSolidOptions = Readonly<{
   solid?: Parameters<typeof solid>[0];

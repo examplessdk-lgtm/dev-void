@@ -3,7 +3,7 @@ import { isAbsolute, join } from 'pathslash';
 import { glob, globSync } from 'tinyglobby';
 import { staticExportInitializers, staticLiteral } from '../shared/static-exports.ts';
 
-const QUEUE_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
+const QUEUE_PATTERN = '**/*.{ts,mts,js,mjs}';
 
 export type QueueDefinition = {
   /** Relative file path from queues/ */
@@ -26,18 +26,17 @@ function extractName(filePath: string): string {
   return filePath.replace(/\.[^.]+$/, '').replaceAll('/', '-');
 }
 
-export function deriveQueueBindingName(name: string): string {
+function deriveQueueBindingName(name: string): string {
   return 'QUEUE_' + name.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
 const OPTION_NAMES = ['maxBatchSize', 'maxBatchTimeout', 'maxRetries', 'retryDelay'] as const;
 
-function parseQueueFiles(
-  root: string,
-  queuesDir: string,
-  files: Array<string>,
-): Array<QueueDefinition> {
-  const queuesDirPath = isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
+function resolveQueuesDir(root: string, queuesDir: string): string {
+  return isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
+}
+
+function parseQueueFiles(queuesDirPath: string, files: Array<string>): Array<QueueDefinition> {
   const definitions = files
     .filter((filePath) => !filePath.split('/').some((segment) => segment.startsWith('_')))
     .sort()
@@ -103,22 +102,20 @@ export async function scanQueues(
   root: string,
   queuesDir = 'queues',
 ): Promise<Array<QueueDefinition>> {
-  const pattern = `**/*.{${QUEUE_EXTENSIONS.join(',')}}`;
-  const queuesDirPath = isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
-  const files = await glob(pattern, { cwd: queuesDirPath, absolute: false }).catch(
+  const queuesDirPath = resolveQueuesDir(root, queuesDir);
+  const files = await glob(QUEUE_PATTERN, { cwd: queuesDirPath, absolute: false }).catch(
     () => [] as Array<string>,
   );
-  return parseQueueFiles(root, queuesDir, files);
+  return parseQueueFiles(queuesDirPath, files);
 }
 
 export function scanQueuesSync(root: string, queuesDir = 'queues'): Array<QueueDefinition> {
-  const pattern = `**/*.{${QUEUE_EXTENSIONS.join(',')}}`;
+  const queuesDirPath = resolveQueuesDir(root, queuesDir);
   let files: Array<string>;
   try {
-    const queuesDirPath = isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
-    files = globSync(pattern, { cwd: queuesDirPath, absolute: false });
+    files = globSync(QUEUE_PATTERN, { cwd: queuesDirPath, absolute: false });
   } catch {
     files = [];
   }
-  return parseQueueFiles(root, queuesDir, files);
+  return parseQueueFiles(queuesDirPath, files);
 }

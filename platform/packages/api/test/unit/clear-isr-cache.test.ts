@@ -40,8 +40,8 @@ describe('clearIsrCache', () => {
     const { kv, deleted, store } = makeKv([v3a, v3b, v2a, v2b, otherV3, otherV2]);
     await clearIsrCache(kv, proj, dep);
 
-    // Both namespaces for dep1 are reaped — the v2 sweep is the regression guard:
-    // without it, v2a/v2b would leak forever (no expirationTtl, never re-scanned).
+    // Both namespaces for dep1 are reaped: v2 keys have no expirationTtl and are
+    // never re-scanned, so skipping the v2 sweep would leak them forever.
     expect([...deleted].sort()).toEqual([v3a, v3b, v2a, v2b].sort());
     expect(store.has(v2a)).toBe(false);
     expect(store.has(v2b)).toBe(false);

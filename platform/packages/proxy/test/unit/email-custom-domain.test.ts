@@ -130,7 +130,6 @@ function createMockEnv() {
     CF_API_TOKEN: 'cf-token',
     API: { fetch: apiFetch },
     DISPATCH: { get: vi.fn(() => ({ email: vi.fn(async () => []) })) },
-    SANDBOX_CONCURRENCY_COUNTER: {},
     SEND_EMAIL: { send: sendEmail },
     EMAIL_SENDER_DOMAIN: PROD_DOMAIN,
   };

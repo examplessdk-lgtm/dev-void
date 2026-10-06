@@ -601,8 +601,8 @@ describe('deploy token scope enforcement', () => {
     });
   }
 
-  // CONFIRMED TOCTOU: the up-front build guard in `handleManifestOnlyDeploy`
-  // checks the bound build ONCE at request entry. The request then spends
+  // The up-front build guard in `handleManifestOnlyDeploy` checks the bound
+  // build ONCE at request entry. The request then spends
   // minutes parsing, prechecking, provisioning, and uploading. During that
   // window a newer GitHub Actions run can supersede (cancel) the OLD bound
   // build. Without a re-check inside the final publish transaction a superseded
@@ -663,8 +663,7 @@ describe('deploy token scope enforcement', () => {
   });
 
   // Control: a bound build that stays ACTIVE through the entire pipeline
-  // (up-front guard AND final-tx re-check) deploys normally and goes live. This
-  // proves the new final-tx guard does not regress the happy path.
+  // (up-front guard AND final-tx re-check) deploys normally and goes live.
   it('lets a deploy go live when the bound build stays active through the final tx', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'build-active-through');

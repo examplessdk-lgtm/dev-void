@@ -82,10 +82,8 @@ function rejectCRLF(field: string, value: string): void {
  * `rejectCRLF` is enough for a value `encodeWord` renders (the subject, a
  * custom header value, a display name): anything outside printable ASCII
  * sends the whole value into base64, so a control never reaches the wire.
- * These three go through `quoteParam` or straight into the line, so
- * `invoice\x01.pdf` was written raw into `name="…"` and `filename="…"`,
- * captured as a success under `void dev` and by the test harness, and left
- * for the receiving MTA to refuse.
+ * These three go through `quoteParam` or straight into the line, so a
+ * control would reach the wire for the receiving MTA to refuse.
  *
  * RFC 5322 §3.2.4 `qtext` is printable US-ASCII less `"` and `\`; a
  * control inside a quoted-string is `obs-qtext`, which §4 says MUST NOT be
@@ -126,12 +124,9 @@ function isTokenChar(c: number): boolean {
  * `type "/" subtype *(";" parameter)`.
  *
  * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
- * the value verbatim ahead of its own `; name="…"`, so `text/plain; x="`
- * rendered `Content-Type: text/plain; x="; name="a.txt"` — captured as a
- * success under `void dev` and by the harness, while Python's `email`
- * reports `end of header inside quoted string` on that line and reads the
- * builder's `name` parameter as the VALUE of `x`. `text` (no subtype),
- * `text/plain; charset` (no value) and `text/plain;;` went the same way.
+ * the value verbatim ahead of its own `; name="…"`, so an unterminated
+ * quote such as `text/plain; x="` would swallow the builder's `name`
+ * parameter as the value of `x`.
  *
  * The grammar is the RFC's, read as a generator: a `token` is printable
  * US-ASCII less SPACE and `tspecials`; a `value` is a `token` or a
@@ -250,10 +245,8 @@ function isAtext(c: number): boolean {
  *
  * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
  * the value verbatim — adding `<` and `>` unless the value already starts
- * with `<` — so `logo other` rendered `Content-ID: <logo other>`, `<logo`
- * rendered `Content-ID: <logo` and `logo>` rendered `Content-ID: <logo>>`:
- * captured as a success under `void dev` and by the harness, and left for
- * the receiver to refuse or to fail the `cid:` reference against.
+ * with `<` — so a malformed id would reach the receiver and break the
+ * `cid:` reference.
  *
  * The grammar is the RFC's, read as a generator, with two deliberate
  * differences. An `msg-id` is `"<" id-left "@" id-right ">"`, each side a
@@ -271,9 +264,7 @@ function isAtext(c: number): boolean {
  *
  * Refused, then: whitespace of any kind, a second `@`, `<` or `>` anywhere
  * but as that one pair, `"`, `(`, `)`, `,`, `;`, `:`, `\`, `[`, `]`,
- * anything non-ASCII, and the empty string (which used to be validated
- * and then silently NOT rendered). Everything accepted renders exactly as
- * it did.
+ * anything non-ASCII, and the empty string.
  *
  * One pass, no allocation, which is why this runs AFTER the value's length
  * bound. The message names the rule and never echoes the value.
@@ -383,12 +374,7 @@ function fieldErrorCode(field: string): MimeErrorCode {
  * `email-router.ts`), so there is exactly ONE address syntax in the tree:
  * an action the framework records is never dropped by the router for its
  * shape, and a test harness never captures as a success what the managed
- * deployment would lose. The hand-written predecessor grew one character
- * per review round — the exactly-one-`@` rule, then every C0 control and
- * DEL, then `:`, then a parity test against the router's own regex, which
- * had drifted on the dot in the domain — and still admitted `a..b@x.com`,
- * `.a@x.com` and `a@x..com`, which no dot-atom allows and every MTA
- * refuses. One maintained rule on both sides ends that series.
+ * deployment would lose.
  *
  * What it enforces: at most 254 characters in total; an ASCII dot-atom
  * local part of at most 64 characters (RFC 5322 §3.2.3 `atext`, dots only
@@ -428,7 +414,8 @@ export function validateAddressParts(field: string, email: string, name?: string
     rejectCRLF(`${field} display name`, name);
     // An ASCII name with specials is rendered as one quoted-string, which
     // `foldHeader` never splits: ` "name"` is a line of at least 3 octets
-    // plus the name. Same reason as the filename guard above — the escaping
+    // plus the name. Same reason as the filename guard in
+    // `normalizeAttachment` — the escaping
     // in `formatAddress` costs heap per escaped character, and the line
     // check that would refuse it runs only after everything is rendered.
     // A non-ASCII name becomes encoded-words and folds; a plain name folds
@@ -462,9 +449,7 @@ export function validateAddressParts(field: string, email: string, name?: string
  * `x` for any `x` (RFC 5322 §3.2.4 — `qtext` excludes `"` and `\`, so a
  * quoted-string carries either only as a quoted-pair). The parsed name is
  * the RAW text `formatAddress` will quote and escape again, so leaving the
- * pairs in place rendered `"Smith \"Bob\"" <a@x.dev>` as
- * `"Smith \\\"Bob\\\""` and the recipient saw `Smith \"Bob\"`, while the
- * object form of the same name rendered correctly. Only the quoted branch
+ * pairs in place would escape them twice. Only the quoted branch
  * of `parseAddress` calls this; a backslash in an unquoted name is a
  * character like any other, as it is in the object form.
  *
@@ -475,7 +460,7 @@ export function validateAddressParts(field: string, email: string, name?: string
  * never bounded at all. Measured, 10 MiB of `\"` pairs peaked at 307 MB of
  * heap that way and terminated a 128 MB isolate; this shape peaks at 49 MB.
  * Same discipline as `to7bitBody`: one counting pass, a buffer of exactly
- * the output size, one fill, and the 32K-chunk conversion `base64` uses.
+ * the output size, one fill, and one chunked `codeUnitsToString`.
  * The common case — no backslash at all — is one scan and no allocation.
  * The regex that admits the text guarantees every backslash is followed by
  * a character, so the fill never reads past the end.
@@ -503,36 +488,25 @@ function unquotePairs(text: string): string {
     }
     out[n++] = c;
   }
-  let s = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < n; i += chunk) {
-    s += String.fromCharCode(...out.subarray(i, i + chunk));
-  }
-  return s;
+  return codeUnitsToString(out);
 }
 
 /**
  * Parse one address — a bare `email@domain` or `Display Name <email@domain>`
  * — into its parts, throwing a `MimeError` for `field` on anything else.
- * Exported so `void.json` `email.from` is validated by the same rules the
- * runtime applies to `from` at send time.
+ * Exported so `void.config.ts` `email.from` is validated by the same rules
+ * the runtime applies to `from` at send time.
  */
 export function parseAddress(value: Address, field: string): { email: string; name?: string } {
   if (typeof value === 'string') {
     rejectCRLF(`${field} address`, value);
     // Match `Display Name <email@domain>` with paired quotes around the
-    // name (both or neither). The earlier regex had two independent
-    // optional quotes, so a single stray `"` slipped through.
+    // name (both or neither).
     //
-    // The unquoted name must start and end on a non-whitespace character.
-    // The earlier `^\s*([^"<]+?)?\s*<` let three consecutive quantifiers
-    // compete for the same run of whitespace, which the backtracker
-    // resolves by trying every split — cubic in the run length. Measured:
-    // 4,000 leading spaces before a valid address (accepted, then trimmed)
-    // cost 10 s; a 16 KB run would exceed the 30 s CPU limit. Both forms
-    // accept the same strings with the same captures (checked exhaustively
-    // to length 7 over `a`, space, tab, `<`, `>`, `"`, `@`, `\`, `,`);
-    // this one is linear because `[^"<\s]` cannot take a space from `\s*`.
+    // The unquoted name must start and end on a non-whitespace character so
+    // `[^"<\s]` cannot take a space from the surrounding `\s*`. Letting
+    // consecutive quantifiers compete for one whitespace run makes the
+    // backtracker cubic in its length (4,000 leading spaces cost 10 s).
     const quoted = value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/);
     const angle =
       quoted ?? value.match(/^\s*(?:([^"<\s](?:[^"<]*[^"<\s])?)\s*)?<\s*([^>\s]+)\s*>\s*$/);
@@ -887,10 +861,9 @@ const ENCODED_WORD_PAYLOAD_BYTES = 45;
  * Text longer than one word's payload becomes several encoded-words
  * separated by a space, which `foldHeader` turns into CRLF + SPACE
  * wherever a line would otherwise overrun (RFC 2047 §6.2: whitespace
- * between adjacent encoded-words is dropped on decode either way). A
- * single unbounded word breached both §2's 75-character ceiling and —
- * for a long subject or display name — RFC 5322 §2.1.1's 998-octet hard
- * line limit, which nothing downstream repairs.
+ * between adjacent encoded-words is dropped on decode either way). This
+ * keeps each word under §2's 75-character ceiling and a long subject or
+ * display name under RFC 5322 §2.1.1's 998-octet line limit.
  */
 function encodeWord(text: string): string {
   if (ASCII_PRINTABLE.test(text)) {
@@ -938,14 +911,8 @@ function encodeWord(text: string): string {
  * quoted-string`, and `atext` is everything printable EXCEPT these, so an
  * ASCII name containing any of them must be rendered as one quoted-string.
  * The class below lists the thirteen in the RFC's order so it can be checked
- * against the production by eye. This check has been wrong twice: it once
- * sat inside a branch that had already excluded every special, so it was
- * unreachable and a comma in a name split the address list; then the list
- * itself lacked `.`, so `Dr. Smith <a@x.dev>` went out unquoted. That is
- * `obs-phrase` (§4.1, `word *(word / "." / CFWS)`), which §4 says MUST NOT
- * be generated, and a strict receiver flags it as obsolete syntax (Python's
- * `email` parser: "period in 'phrase'"). Every conforming generator —
- * Python's `email.headerregistry.Address`, for one — emits `"Dr. Smith"`.
+ * against the production by eye. `.` matters: an unquoted `Dr. Smith` is
+ * `obs-phrase` (§4.1), which §4 says MUST NOT be generated.
  */
 const RFC5322_SPECIALS = /[()<>[\]:;@\\,."]/;
 
@@ -957,11 +924,9 @@ function formatAddress(addr: { email: string; name?: string }): string {
   if (!ASCII_PRINTABLE.test(addr.name)) {
     return `${encodeWord(addr.name)} <${addr.email}>`;
   }
-  // ASCII with any specials → quoted-string. Escape backslashes first so
-  // the subsequent quote-escape doesn't double-escape them.
+  // ASCII with any specials → quoted-string.
   if (RFC5322_SPECIALS.test(addr.name)) {
-    const escaped = addr.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    return `"${escaped}" <${addr.email}>`;
+    return `"${quoteParam(addr.name)}" <${addr.email}>`;
   }
   // Plain atom / atom-with-spaces.
   return `${addr.name} <${addr.email}>`;
@@ -987,13 +952,10 @@ function formatAddressList(addrs: Array<{ email: string; name?: string }>): stri
  * best a WSP-only fold rule allows (§3.2.2 permits folding only at WSP).
  *
  * One pass, and the only thing kept per input character is the folded
- * output itself: each finished line is one flat string in `lines`. The
- * earlier shape — tokenize the whole value into an array of slices, wrap
- * each in a `{ text, comma }` object, then grow the result with `out +=`
- * per token — held about 130 bytes of heap per token for the length of the
- * fold (a slice, an object and a cons-string node each), so a legal 3 MB
- * subject of one-letter words terminated a 128 MB isolate. That was a
- * per-TOKEN cost, invisible to any size projection: the message fit.
+ * output itself: each finished line is one flat string in `lines`. Any
+ * per-token allocation (a slice array, token objects, `out +=`) costs about
+ * 130 bytes of heap per token, so a legal 3 MB subject of one-letter words
+ * would terminate a 128 MB isolate even though the message fits.
  */
 function foldHeader(name: string, value: string): string {
   const line = `${name}: ${value}`;
@@ -1133,10 +1095,9 @@ const HEADER_NAME_LINE_OVERHEAD = 1;
  * fixed width — so a hit is always a header.
  *
  * One pass over the string, counting UTF-8 octets per CRLF-delimited line,
- * with NO allocation. The earlier `text.split(CRLF)` held one array slot and
- * one substring per line for the whole scan, and a legal body of millions of
- * short lines — pasted logs, say — is millions of lines. Only a CRLF pair
- * ends a line, exactly as the split did; a bare CR or LF is content.
+ * with NO allocation: a `split(CRLF)` would hold one substring per line, and
+ * a legal body of pasted logs is millions of lines. Only a CRLF pair ends a
+ * line; a bare CR or LF is content.
  */
 function findOverlongLine(text: string): { index: number; octets: number } | undefined {
   let index = 0;
@@ -1174,32 +1135,17 @@ function findOverlongLine(text: string): { index: number; octets: number } | und
  * quoted-string comes from RFC 5322 §3.2.4).
  *
  * `qtext` excludes both `\\` and `"`, so each may appear only as a
- * quoted-pair. Deleting the quotes and leaving backslashes raw — what this
- * did before — is wrong in two ways: a TRAILING backslash escapes the
- * closing quote and leaves the parameter unterminated, and every embedded
- * backslash is silently eaten by a conformant parser, so a Windows path
- * `C:\\Users\\bob\\report.pdf` arrived as `C:Usersbobreport.pdf`. Measured,
- * Python's `email.policy.default` and postal-mime both report
- * `InvalidHeaderDefect: end of header inside quoted string` on the first
- * case and disagree with a naive parser on the second.
+ * quoted-pair: a raw trailing backslash would escape the closing quote, and
+ * a conformant parser drops every other raw backslash.
  *
  * Backslash first, then quote — the other order would double-escape.
- *
- * Note this file's own `foldHeader` already tracks quoted-pairs when
- * folding, so the emitter was contradicting the folder.
  */
 function quoteParam(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function base64(bytes: Uint8Array): string {
-  // workerd, browsers, and Node 18+ all expose btoa + binary string conversion.
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+  return btoa(codeUnitsToString(bytes));
 }
 
 function base64Wrapped(bytes: Uint8Array): string {
@@ -1280,15 +1226,15 @@ function quotedPrintable(text: string): string {
     }
     flush(b);
   }
-  return bytesToAsciiString(out.subarray(0, n));
+  return codeUnitsToString(out.subarray(0, n));
 }
 
-/** Pure-ASCII bytes to a string, in the same 32K chunks `base64` uses. */
-function bytesToAsciiString(bytes: Uint8Array): string {
+/** One character per code unit, in 32K chunks to stay under the call-argument limit. */
+function codeUnitsToString(units: Uint8Array | Uint16Array): string {
   let s = '';
   const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    s += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  for (let i = 0; i < units.length; i += chunk) {
+    s += String.fromCharCode(...units.subarray(i, i + chunk));
   }
   return s;
 }
@@ -1299,13 +1245,9 @@ function bytesToAsciiString(bytes: Uint8Array): string {
  * makes 998 octets the hard limit). Only LF and CRLF end a line; a bare CR
  * is a control character like any other and forces the encoding.
  *
- * One pass over the string with NO allocation. The earlier shape — strip
- * every line break with a global `replace`, test the copy, then `split` the
- * text into an array of lines — was linear in the message but held a copy
- * of the body plus one array slot and one substring per line, and a legal
- * 6 MB body of millions of two-character lines needed 64 MB for the strip
- * and another 24-40 MB for the split. Those are per-LINE costs, invisible
- * to any size projection: the message fit.
+ * One pass over the string with NO allocation: a `replace`/`split` shape
+ * holds a copy of the body plus one substring per line, and a legal 6 MB
+ * body of millions of two-character lines needed about 100 MB that way.
  */
 function needsQuotedPrintable(text: string): boolean {
   let lineLen = 0;
@@ -1365,7 +1307,7 @@ function to7bitBody(text: string): string {
     }
     out[n++] = c;
   }
-  return bytesToAsciiString(out);
+  return codeUnitsToString(out);
 }
 
 /**
@@ -1452,42 +1394,36 @@ function makeBoundary(prefix: string): string {
 function wrapMultipart(
   type: 'mixed' | 'alternative' | 'related',
   parts: Array<MimePart>,
-  extra: Record<string, string> = {},
 ): MimePart {
   const boundary = makeBoundary(type);
   const headerEntries: Array<[string, string]> = [
     ['Content-Type', `multipart/${type}; boundary="${boundary}"`],
   ];
-  for (const [k, v] of Object.entries(extra)) {
-    headerEntries.push([k, v]);
-  }
   const body =
     parts.map((p) => `--${boundary}${CRLF}${renderPart(p)}`).join(CRLF) +
     `${CRLF}--${boundary}--${CRLF}`;
   return { headers: headerEntries, body };
 }
 
-const RESERVED_HEADERS = new Set(
-  [
-    'from',
-    'to',
-    'cc',
-    'bcc',
-    'subject',
-    'reply-to',
-    'date',
-    'message-id',
-    // Threading headers are owned by replyEmail() — accepting them via
-    // the user-supplied `headers` map would let a caller spoof reply
-    // chains. replyEmail builds them itself from the original message.
-    'in-reply-to',
-    'references',
-    'mime-version',
-    'content-type',
-    'content-transfer-encoding',
-    'content-disposition',
-  ].map((h) => h.toLowerCase()),
-);
+const RESERVED_HEADERS = new Set([
+  'from',
+  'to',
+  'cc',
+  'bcc',
+  'subject',
+  'reply-to',
+  'date',
+  'message-id',
+  // Threading headers are owned by replyEmail() — accepting them via
+  // the user-supplied `headers` map would let a caller spoof reply
+  // chains. replyEmail builds them itself from the original message.
+  'in-reply-to',
+  'references',
+  'mime-version',
+  'content-type',
+  'content-transfer-encoding',
+  'content-disposition',
+]);
 
 /**
  * Lower bound on the octets one header VALUE occupies once `encodeWord` (or
@@ -1660,10 +1596,8 @@ const CUSTOM_HEADER_FRAMING_OCTETS: number = ': '.length + CRLF.length;
  *   empty values the names and the `: ` CRLF around each are the entire
  *   size, and the framing is exact once the name is counted (see
  *   `CUSTOM_HEADER_FRAMING_OCTETS`), so charging both cannot reject a
- *   message that fits. Measured before the name was charged, 60k empty
- *   headers with 500-character names — a 30 MB message — projected to
- *   zero, rendered in full and peaked at 121 MB of a 128 MB isolate; 100k
- *   of them (50 MB) went to 169 MB.
+ *   message that fits. Uncharged, 60k empty headers with 500-character
+ *   names (a 30 MB message) would project to zero.
  * - An attachment part: `normalizeAttachment` bounds ONE filename at under
  *   a kilobyte, not the sum, and a message is free to carry any number of
  *   parts, so the filename and the framing every part is wrapped in are
@@ -1673,7 +1607,7 @@ const CUSTOM_HEADER_FRAMING_OCTETS: number = ': '.length + CRLF.length;
  *   `rawText` and `raw` — and terminated a 128 MB isolate before the final
  *   size check could return `MIME_ERROR`.
  *
- * The header COUNT is deliberately not bounded here. Each header now costs
+ * The header COUNT is deliberately not bounded here. Each header costs
  * at least five octets (a one-character name, `: `, CRLF), so the count
  * the projection can admit is finite, and past a few hundred thousand keys
  * the caller's own object — measured at about 74 bytes per key, before

@@ -3,8 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { renderCapturedLog } from './log-tail-helpers.ts';
 
-// `@cloudflare/containers` Container base class isn't available in unit tests.
-// Stub it with a minimal shape the manager relies on: ctx/env wiring plus
+// Stub the `@cloudflare/containers` Container base class with a minimal shape the manager relies on: ctx/env wiring plus
 // `start`/`stop`/`fetch` (the latter as the "forward to container" fallback).
 //
 // The real base Container OWNS the single DO alarm to drive its monitor loop +
@@ -292,7 +291,7 @@ vi.mock('../../src/github/installation-token.ts', () => ({
 // check-run.ts is mocked here so startBuild's BEST-EFFORT check-run create is INERT
 // in this suite — it must not make outbound `fetch` calls or consume a
 // `getInstallationToken` mock. `createCheckRun` returns null by default (no run
-// created → finalizers no-op), keeping every existing lifecycle assertion unchanged.
+// created → finalizers no-op).
 // The real create/finalize wiring is covered by test/integration/api-check-runs.test.ts.
 // Partial mock: stub the two network calls, keep everything else REAL. The module
 // also exports `VOID_BUILD_CHECK_RUN_NAME`, which `startBuild` reads — spelling it
@@ -821,7 +820,7 @@ describe('BuildManager.startBuild', () => {
   });
 
   // The deploy token is minted *before* download + install + deploy, so its
-  // TTL must cover the whole build (plan timeout + margin), not a fixed 15 min.
+  // TTL must cover the whole build (plan timeout + margin).
   it('sizes the deploy token TTL to the plan build timeout + margin', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
@@ -832,7 +831,7 @@ describe('BuildManager.startBuild', () => {
 
     const opts = vi.mocked(signDeployToken).mock.calls[0]?.[2];
     expect(opts?.ttlSeconds).toBe(20 * 60 + 5 * 60); // 25 min
-    // Strictly longer than the old fixed 15-min TTL.
+    // Strictly longer than a fixed 15-min TTL.
     expect(opts?.ttlSeconds).toBeGreaterThan(15 * 60);
   });
 
@@ -848,7 +847,7 @@ describe('BuildManager.startBuild', () => {
 
     await m.startBuild(makeConfig({ timeoutMinutes: 10 }));
 
-    // FAIL-WITHOUT-FIX: armed at exactly 10*60, so a build returning in the final
+    // If broken: armed at exactly 10*60, so a build returning in the final
     // seconds of its budget gets killed mid-drain and reported as a timeout.
     // Asserts the SLACK rather than the literal, so the relation survives a retune
     // of either constant.
@@ -950,8 +949,7 @@ describe('BuildManager.startBuild', () => {
     expect(containerCalls.stopped).toBe(0);
   });
 
-  // a failure AFTER a successful this.start() (now only arming the timeout
-  // schedule — the redundant post-start `starting` write was removed) must stop
+  // A failure AFTER a successful this.start() (arming the timeout schedule) must stop
   // the already-running container before finalizing — otherwise it keeps running
   // the real `void deploy` CLI with a live token and can publish a deployment
   // while Postgres records the build as `failed`. The row must still be marked
@@ -1050,7 +1048,7 @@ describe('BuildManager.startBuild', () => {
 
     await expect(m.startBuild(makeConfig())).rejects.toThrow('schedule arming failed');
 
-    // FAIL-WITHOUT-FIX: ['drain', 'revoke'] — the token stays honored across the drain.
+    // If broken: ['drain', 'revoke'] — the token stays honored across the drain.
     expect(order).toEqual(['revoke', 'drain']);
 
     scheduleSpy.mockRestore();
@@ -1128,9 +1126,9 @@ describe('BuildManager.startBuild', () => {
   // resolving). The catch must FORCE the live container down (SIGTERM→SIGKILL),
   // not leak it running the real `void deploy` CLI with a live token while
   // Postgres records the build `failed` and a fleet slot is pinned until the idle
-  // net. Discriminator for the fix: if `containerStarted` only flipped after a
-  // resolved start(), this onStart-reject would be treated as pre-launch and
-  // skip the teardown (stopped/destroyed stay 0).
+  // net. If `containerStarted` only flipped after a resolved start(), this
+  // onStart-reject would be treated as pre-launch and skip the teardown
+  // (stopped/destroyed stay 0).
   it('force-stops the live container + fails + pokes when onStart throws inside start()', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
@@ -1229,8 +1227,8 @@ describe('BuildManager.startBuild', () => {
 
   // `sleepAfter` is an IDLE safety-net, not the wall-clock cap. It must sit
   // ABOVE the deploy-token hard max so a legitimately busy build that runs up to
-  // the hard max is never idle-stopped before `enforceTimeout` fires. (The bug:
-  // a fixed '30m' sleepAfter could stop a 60-min custom-plan build at 30m.)
+  // the hard max is never idle-stopped before `enforceTimeout` fires (a fixed
+  // '30m' sleepAfter would stop a 60-min custom-plan build at 30m).
   it('sizes sleepAfter ABOVE the deploy-token hard max', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
@@ -1952,18 +1950,12 @@ describe('BuildManager.onStop', () => {
     expect(ctx._kv.get('buildConfig')).toMatchObject({ status: 'failed' });
   });
 
-  // 3382011778: the exit-0 deployment lookup is BEST-EFFORT and runs AFTER
+  // The exit-0 deployment lookup is BEST-EFFORT and runs AFTER
   // `void deploy` has already exited 0. A transient Hyperdrive/Postgres throw on
   // it must NOT strand the build — onStop must still finalize 'complete' (with a
-  // null link) and poke the scheduler.
-  //
-  // FAIL-WITHOUT-FIX: the lookup used to run OUTSIDE the try/finally, so a
-  // rejection propagated out of onStop BEFORE setStatus('complete'),
-  // markBuildTerminalIfActive, and the finally poke — leaving the row ACTIVE and
-  // the slot pinned until the 75m idle reaper while the deploy was already live.
-  // All three assertions below (no reject, 'complete' write present, scheduler
-  // poked) would fail without the fix.
-  it('finalizes complete + pokes the scheduler when the exit-0 deployment lookup throws (3382011778)', async () => {
+  // null link) and poke the scheduler. Otherwise the row stays ACTIVE and the
+  // slot is pinned until the 75m idle reaper while the deploy is already live.
+  it('finalizes complete + pokes the scheduler when the exit-0 deployment lookup throws', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
     const m = makeManager(ctx, env);
@@ -2053,7 +2045,7 @@ describe('BuildManager.onError', () => {
 
     await m.onError(new Error('container crashed'));
 
-    // FAIL-WITHOUT-FIX: ['finalize'] only — the diagnostic never reaches the check run.
+    // If broken: ['finalize'] only — the diagnostic never reaches the check run.
     expect(order).toEqual(['drain', 'finalize']);
     expect(ctx._logs.map((r) => r.line)).toContain('FATAL: out of memory');
   });
@@ -2256,15 +2248,11 @@ describe('BuildManager.onError', () => {
     expect(vi.mocked(completeCheckRun)).toHaveBeenCalled();
   });
 
-  // 3382105553: onError's terminal write ran first, UNGUARDED — a transient
-  // Postgres throw rejected onError before setStatus('failed') and pokeScheduler(),
-  // leaving the row ACTIVE and the slot pinned until the 75m reaper. Mirror
-  // onStop / enforceTimeout: local status first, DB write in a try whose finally
-  // always pokes.
-  //
-  // FAIL-WITHOUT-FIX: the throw skipped both setStatus('failed') and
-  // pokeScheduler() — the scheduler-poke and local-'failed' assertions fail.
-  it('still pokes the scheduler + sets local failed when the onError terminal DB write throws (3382105553)', async () => {
+  // A transient Postgres throw on onError's terminal write must not skip
+  // setStatus('failed') and pokeScheduler(), or the row stays ACTIVE and the slot
+  // is pinned until the 75m reaper. Mirrors onStop / enforceTimeout: local status
+  // first, DB write in a try whose finally always pokes.
+  it('still pokes the scheduler + sets local failed when the onError terminal DB write throws', async () => {
     const ctx = makeStubCtx();
     const env = makeEnv();
     const m = makeManager(ctx, env);
@@ -2296,7 +2284,7 @@ describe('BuildManager.onError', () => {
   });
 });
 
-// Lifecycle status-race regressions (the confirmed bug): the base `start()`
+// Lifecycle status races: the base `start()`
 // runs onStart inside `blockConcurrencyWhile` BEFORE resolving, and a
 // fast-exiting container's onStop can fire too. The DB row must never be
 // resurrected to `starting`/`building` after a terminal outcome, and a duplicate
@@ -2329,13 +2317,13 @@ describe('BuildManager lifecycle status-race CAS guards', () => {
     const env = makeEnv();
     const m = makeManager(ctx, env);
 
-    // The DB row is `starting` (scheduler claim). startBuild no longer writes
+    // The DB row is `starting` (scheduler claim). startBuild does not write
     // status, so a fast-exit onStop fires immediately after start().
     await m.startBuild(makeConfig());
     await m.onStop({ exitCode: 0, reason: 'exit' });
 
     // The terminal outcome stands in the DB — there is no later `starting`
-    // write in startBuild that could downgrade it (the bug). The row ends
+    // write in startBuild that could downgrade it. The row ends
     // `complete`, and `starting` was never (re)written by startBuild.
     expect(dbState.status.get('b1')).toBe('complete');
     expect(dbState.writes.some((w) => w.status === 'starting')).toBe(false);
@@ -2396,7 +2384,7 @@ describe('BuildManager lifecycle status-race CAS guards', () => {
 
 describe('BuildManager timeout integration (base-owned alarm + scheduled enforceTimeout)', () => {
   it('does NOT override alarm() — the base Container owns the DO alarm loop', () => {
-    // Regression: a manager-level alarm() override would treat every base
+    // A manager-level alarm() override would treat every base
     // monitor tick as a timeout (failing healthy builds) AND starve the base
     // loop that dispatches onStop. The manager must inherit the base alarm.
     const proto = Object.getPrototypeOf(BuildManager.prototype) as Record<string, unknown>;
@@ -2846,8 +2834,7 @@ describe('BuildManager log ingest + WebSocket replay', () => {
     const m = makeManager(ctx, env);
     await m.startBuild(makeConfig());
 
-    // Seed via ingestLines (the pull-loop sink) — the sole producer now that the
-    // DO no longer accepts a POST /logs ingest.
+    // Seed via ingestLines (the pull-loop sink), the sole producer.
     await (m as unknown as { ingestLines: (lines: Array<LogRow>) => Promise<void> }).ingestLines([
       { line: 'installing deps', stream: 'stdout', ts: 1 } as unknown as LogRow,
       { line: 'build done', stream: 'stdout', ts: 2 } as unknown as LogRow,
@@ -2934,8 +2921,7 @@ describe('BuildManager log ingest + WebSocket replay', () => {
 // status writes, no broadcast — it just reads the SQLite `logs` table and returns
 // JSON `{ lines: Array<{seq,line,stream,ts}>, lastSeq }` (rows with seq > N, asc).
 // It must COEXIST with the WS upgrade (which branches first on the `Upgrade`
-// header). Logs reach the store via the pull-loop sink (`ingestLines`); there is
-// no longer a POST /logs ingest path.
+// header). Logs reach the store only via the pull-loop sink (`ingestLines`).
 describe('BuildManager.fetch GET /logs?since=N (admin poll read)', () => {
   /** Seed a batch of lines through the pull-loop sink (`ingestLines`). */
   async function seedLogs(
@@ -3355,7 +3341,6 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await (m as unknown as { pollLogs: () => Promise<void> }).pollLogs();
 
-    // FAIL-WITHOUT-FIX: the terminal branch used to `return` before any fetch.
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(fetchFn.mock.calls[0][0]).toBe('http://manager/logs?since=0');
     expect(ctx._logs.map((r) => r.line)).toContain('vite build failed');
@@ -3601,7 +3586,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.cancelBuild('build superseded');
 
-    // FAIL-WITHOUT-FIX: drop the pull from forceStopContainer and this is 0 calls.
+    // If broken: drop the pull from forceStopContainer and this is 0 calls.
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(fetchFn.mock.calls[0][0]).toBe('http://manager/logs?since=0');
     expect(fetchFn.mock.calls[0][1]).toBe(4000);
@@ -3630,7 +3615,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.enforceTimeout();
 
-    // FAIL-WITHOUT-FIX: drop the pull from forceStopContainer and this is 0 calls.
+    // If broken: drop the pull from forceStopContainer and this is 0 calls.
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(teardownAtPull).toEqual([{ stopped: 0, destroyed: 0 }]);
     expect(containerCalls.stopped).toBe(1);
@@ -3670,7 +3655,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.enforceTimeout();
 
-    // FAIL-WITHOUT-FIX: ['drain', 'revoke'] — the token stays honored for the whole
+    // If broken: ['drain', 'revoke'] — the token stays honored for the whole
     // drain. The drain must still happen (it is the only thing that saves the tail),
     // just behind the revocation.
     expect(order).toEqual(['revoke', 'drain']);
@@ -3678,9 +3663,9 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
   });
 
   it('still tears the container down when the Postgres revocation throws', async () => {
-    // The revocation moved in FRONT of the teardown, so it must not be able to gate
+    // The revocation runs in FRONT of the teardown, so it must not be able to gate
     // it: a Hyperdrive blip would otherwise leave a timed-out container alive on a
-    // pinned fleet slot — the failure the old ordering existed to prevent.
+    // pinned fleet slot.
     const ctx = makeStubCtx();
     const env = makeEnv();
     const m = makeManager(ctx, env);
@@ -3769,7 +3754,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.cancelBuild('build superseded');
 
-    // FAIL-WITHOUT-FIX: drop the marker ingest and the second row is missing.
+    // If broken: drop the marker ingest and the second row is missing.
     expect(ctx._logs.map((r) => r.line)).toEqual([
       'vp build failed: Unexpected token',
       '[build-manager] container terminated: build superseded',
@@ -3849,12 +3834,11 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
   // AUTOINCREMENT), so duplicates are stored, re-broadcast, and spend the
   // MAX_STORED_LOG_LINES / check-run-tail budgets, evicting genuine history.
   //
-  // The first attempt at this fixed the duplicate by having teardown JOIN the
-  // in-flight pull — which lost the tail instead, because the agent freezes a
-  // response body at receipt and there is no later poll on the teardown path. So
-  // teardown now AWAITS the in-flight pull and then takes a fresh snapshot: the
-  // await is what removes the duplicate (it advances the cursor first), and the
-  // fresh pull is what keeps the tail. The three tests below pin the three halves —
+  // Joining the in-flight pull would lose the tail instead, because the agent
+  // freezes a response body at receipt and there is no later poll on the teardown
+  // path. So teardown AWAITS the in-flight pull and then takes a fresh snapshot:
+  // the await removes the duplicate (it advances the cursor first), and the fresh
+  // pull keeps the tail. The three tests below pin the three halves —
   // no duplicate, no loss, and no unbounded chain of pulls.
   it('sequences a teardown pull behind an already in-flight scheduled pull', async () => {
     const ctx = makeStubCtx();
@@ -4063,10 +4047,9 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     release();
     await Promise.all([poll, cancel]);
 
-    // FAIL-WITHOUT-FIX: joining the in-flight pull was treated as the teardown drain,
-    // so only one request ever went out (`since=0`), the ERROR line was never
-    // fetched, and `process.exit(1)` in the agent's SIGTERM handler took it to the
-    // grave — the agent's own exit-time barrier does not run on that path.
+    // If broken: if joining the in-flight pull counts as the teardown drain,
+    // only one request goes out (`since=0`), the ERROR line is never fetched,
+    // and `process.exit(1)` in the agent's SIGTERM handler loses it — the agent's own exit-time barrier does not run on that path.
     expect(ctx._logs.map((r) => r.line)).toEqual([
       'vite building for production',
       'ERROR: Unexpected token in vite.config.ts',
@@ -4132,7 +4115,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     // raced. Never three.
     expect(fetchFn).toHaveBeenCalledTimes(2);
 
-    // FAIL-WITHOUT-FIX: both reasons appear, so the reader and the check-run tail get
+    // If broken: both reasons appear, so the reader and the check-run tail get
     // two authoritative-looking, contradictory explanations for one termination. Only
     // the caller that won the terminal CAS may claim it.
     const markers = ctx._logs
@@ -4213,7 +4196,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     releaseLatePull();
     await second;
 
-    // FAIL-WITHOUT-FIX: caller two starts fetch #2 after caller one has drained
+    // If broken: caller two starts fetch #2 after caller one has drained
     // but while its stop/destroy calls are still pending. Its response can then
     // ingest after the terminal marker and after check-run finalization.
     expect(fetchesBeforeSignal).toBe(1);
@@ -4396,7 +4379,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.cancelBuild('project deleted');
 
-    // FAIL-WITHOUT-FIX: `shouldTerminalize && claim()` short-circuits, so the kill goes
+    // If broken: `shouldTerminalize && claim()` short-circuits, so the kill goes
     // unexplained.
     const markers = ctx._logs
       .map((r) => r.line)
@@ -4431,7 +4414,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await m.cancelBuild('build superseded');
 
-    // FAIL-WITHOUT-FIX: gated on `terminal?.won === true`, this is `false` and the
+    // If broken: gated on `terminal?.won === true`, this is `false` and the
     // only marker these builds would ever get is suppressed.
     //
     // The REASON defers to the CAS even though ownership does not: losing it means the
@@ -4465,7 +4448,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await expect(m.startBuild(makeConfig())).rejects.toThrow('schedule arming failed');
 
-    // FAIL-WITHOUT-FIX: 'build failed: schedule arming failed' — a local reason
+    // If broken: 'build failed: schedule arming failed' — a local reason
     // contradicting the outcome the check run actually publishes.
     const markers = ctx._logs
       .map((r) => r.line)
@@ -4493,7 +4476,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await expect(m.enforceTimeout()).rejects.toThrow('hyperdrive blip');
 
-    // FAIL-WITHOUT-FIX: the teardown pull runs anyway, holding a still-valid token
+    // If broken: the teardown pull runs anyway, holding a still-valid token
     // open for the length of the drain.
     expect(fetchFn).not.toHaveBeenCalled();
     // The kill itself is unaffected — skipping the drain must not skip the SIGTERM.
@@ -4565,7 +4548,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     releaseRevocation();
     await timeout;
 
-    // FAIL-WITHOUT-FIX: the peer had no claim and the owner had no live container, so
+    // If broken: the peer had no claim and the owner had no live container, so
     // the marker was gated out on both sides and the log simply stopped. Exactly one,
     // from the caller that owns the claim.
     const markers = ctx._logs
@@ -4601,12 +4584,12 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     // `terminalError` ahead of the original cause once teardown has run.
     await expect(m.startBuild(makeConfig())).rejects.toThrow('hyperdrive blip');
 
-    // FAIL-WITHOUT-FIX #1: the second claim returns false, so nothing says why.
+    // If broken (1): the second claim returns false, so nothing says why.
     const markers = ctx._logs
       .map((r) => r.line)
       .filter((line) => line.startsWith('[build-manager] container terminated:'));
     expect(markers).toEqual(['[build-manager] container terminated: build terminated out of band']);
-    // FAIL-WITHOUT-FIX #2: drainFirst defaulted to true, holding a still-valid token
+    // If broken (2): drainFirst defaulted to true, holding a still-valid token
     // open for the length of the drain.
     expect(fetchFn).not.toHaveBeenCalled();
   });
@@ -4636,7 +4619,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await expect(m.enforceTimeout()).rejects.toThrow('did not settle');
 
-    // FAIL-WITHOUT-FIX: no PATCH at all, and nothing else will ever send one.
+    // If broken: no PATCH at all, and nothing else will ever send one.
     expect(vi.mocked(completeCheckRun)).toHaveBeenCalledTimes(1);
   });
 
@@ -4673,7 +4656,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     dbState.status.set('b1', 'failed');
     await runDueSchedules(m);
 
-    // FAIL-WITHOUT-FIX: no reconcile is ever armed, so this PATCH never happens and
+    // If broken: no reconcile is ever armed, so this PATCH never happens and
     // the check run stays `in_progress` for the life of the repository.
     expect(vi.mocked(completeCheckRun)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(completeCheckRun).mock.calls[0][4]).toMatchObject({
@@ -4781,7 +4764,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     (m as unknown as { _schedules: Array<ScheduledTask> })._schedules = [];
     await m.reconcileTerminalWrite();
 
-    // FAIL-WITHOUT-FIX: an absent row was treated like an active one and re-armed.
+    // If broken: an absent row was treated like an active one and re-armed.
     expect(scheduledTasks(m).some((t) => t.callback === 'reconcileTerminalWrite')).toBe(false);
     expect(vi.mocked(completeCheckRun)).not.toHaveBeenCalled();
   });
@@ -4810,7 +4793,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
       vi.useRealTimers();
     }
 
-    // FAIL-WITHOUT-FIX: the await never returns, so nothing is ever re-armed.
+    // If broken: the await never returns, so nothing is ever re-armed.
     expect(scheduledTasks(m).some((t) => t.callback === 'reconcileTerminalWrite')).toBe(true);
   });
 
@@ -4834,7 +4817,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
       running: true,
     });
 
-    // FAIL-WITHOUT-FIX: one page per call, so seven pages wait for seven ticks.
+    // If broken: one page per call, so seven pages wait for seven ticks.
     // One final empty request carries `since=<last ingested seq>` back to the agent,
     // acknowledging the last page without waiting for another scheduled callback.
     expect(fetchFn).toHaveBeenCalledTimes(pages.length + 1);
@@ -4886,7 +4869,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
       nowSpy.mockRestore();
     }
 
-    // FAIL-WITHOUT-FIX: MAX_LOG_PULL_PAGES (32) calls, i.e. 48s in one callback.
+    // If broken: MAX_LOG_PULL_PAGES (32) calls, i.e. 48s in one callback.
     const affordable = Math.ceil(LOG_DRAIN_BUDGET_MS / perPageMs);
     expect(fetchFn.mock.calls.length).toBe(affordable);
     expect(fetchFn.mock.calls.length).toBeLessThan(MAX_LOG_PULL_PAGES);
@@ -4955,7 +4938,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await withFrozenWorkerClock(() => pullOnce(m, fetchFn));
 
-    // FAIL-WITHOUT-FIX: MAX_LOG_PULL_PAGES (32) calls — 64000 rows inserted and
+    // If broken: MAX_LOG_PULL_PAGES (32) calls — 64000 rows inserted and
     // broadcast in one callback, with the deadline never once observing a tick.
     expect(fetchFn).toHaveBeenCalledTimes(pages);
     expect(pages).toBeLessThan(MAX_LOG_PULL_PAGES);
@@ -4999,7 +4982,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
     const watchedFetch = stubEndlessPages(watchedManager, rowsPerPage);
     await withFrozenWorkerClock(() => pullOnce(watchedManager, watchedFetch));
 
-    // FAIL-WITHOUT-FIX: both drain the same 10 pages, and the watched one does
+    // If broken: both drain the same 10 pages, and the watched one does
     // five times the sink work doing it.
     expect(quietFetch).toHaveBeenCalledTimes(MAX_LOG_SINK_OPS_PER_DRAIN / rowsPerPage);
     expect(watchedFetch).toHaveBeenCalledTimes(
@@ -5025,7 +5008,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await withFrozenWorkerClock(() => pullOnce(m, fetchFn));
 
-    // FAIL-WITHOUT-FIX: MAX_LOG_PULL_PAGES (32) calls / 64 MiB in one callback.
+    // If broken: MAX_LOG_PULL_PAGES (32) calls / 64 MiB in one callback.
     const pages = Math.ceil(MAX_LOG_SINK_OPS_PER_DRAIN / (rowsPerPage * rowCost));
     expect(fetchFn).toHaveBeenCalledTimes(pages);
     expect(pages).toBeLessThan(MAX_LOG_PULL_PAGES);
@@ -5033,7 +5016,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
   });
 
   it('caps the teardown drain so the SIGTERM is not held behind unbounded sink work', async () => {
-    // The reviewer's actual hazard: `forceStopContainer` drains in FRONT of the
+    // `forceStopContainer` drains in FRONT of the
     // stop/destroy that frees a global fleet slot. On a frozen clock the drain has
     // no deadline it can observe, so only the work budget can return control to the
     // signals.
@@ -5048,7 +5031,7 @@ describe('BuildManager.pollLogs (DO log pull-loop)', () => {
 
     await withFrozenWorkerClock(() => m.cancelBuild('user cancelled'));
 
-    // FAIL-WITHOUT-FIX: 32 pages of maximum-shape ingestion before the SIGTERM.
+    // If broken: 32 pages of maximum-shape ingestion before the SIGTERM.
     expect(fetchFn.mock.calls.length).toBe(MAX_LOG_SINK_OPS_PER_DRAIN / MAX_LOG_RESPONSE_LINES);
     expect(containerCalls.stopped).toBe(1);
     expect(ctx._logs.map((row) => row.line)).toContain(
@@ -5374,10 +5357,9 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
   });
 
   it('renders a trailing erase as the blank row a terminal would show', async () => {
-    // This used to assert '◆  Deployed!', on the theory that a message beats a
-    // blank line. A terminal disagrees: the writer moved to column 1 and erased
-    // from there, so the row IS blank (xterm.js confirms — see
-    // sanitize-log-line-oracle.test.ts). Nothing real is lost, because clack
+    // The writer moved to column 1 and erased from there, so the row IS blank
+    // (xterm.js confirms — see sanitize-log-line-oracle.test.ts). Nothing real is
+    // lost, because clack
     // erases BEFORE writing each frame, so the final message lands after the
     // last erase and survives — second assertion.
     expect(await renderCapturedLog(`◆  Deployed!${ESC}[1G${ESC}[J`)).toBe('');
@@ -5404,8 +5386,7 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
 
   // Expectations for the string-control cases below are ground truth from
   // @xterm/headless (a full VT500 parser), NOT from pyte — pyte implements OSC
-  // only and has no DCS/SOS/PM/APC handling at all, so it reproduces the very
-  // bug these lock down and cannot adjudicate them.
+  // only and has no DCS/SOS/PM/APC handling at all, so it cannot adjudicate them.
   it('consumes every C1 string control WHOLE, payload included', async () => {
     // A terminal displays nothing for any of these; leaving the payload behind
     // spends the check-run tail budget on bytes no reader will ever see.
@@ -5511,8 +5492,7 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
   it('overwrites in place on a partial column move', async () => {
     // `ESC[5G` is neither a frame boundary nor a full rewrite: it parks the
     // cursor at column 5 and the text that follows overwrites from there,
-    // leaving the tail of the old content visible. The previous sanitizer
-    // approximated this as 'Downloading done'; a terminal shows the splice.
+    // leaving the tail of the old content visible; a terminal shows the splice.
     expect(await renderCapturedLog(`Downloading${ESC}[5G done`)).toBe('Down doneng');
   });
 
@@ -5524,7 +5504,7 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
     // could take out the BuildManager before its scheduler cleanup ran.
     for (const seq of ['[999999999G', '[1;999999999H', '[999999999C', `[${'9'.repeat(400)}G`]) {
       const out = await renderCapturedLog(`x${ESC}${seq}y`);
-      // FAIL-WITHOUT-FIX: allocates until the isolate dies. Resource-bound rows
+      // If broken: allocates until the isolate dies. Resource-bound rows
       // drop fail-closed instead of partially applying a terminal mutation.
       expect(out).toBe('');
     }
@@ -5624,11 +5604,9 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
   });
 
   it('does not let tab expansion amplify a hostile line', async () => {
-    // Tabs advance 8 columns per byte, so bounding the row at `length * 8` let a
-    // 128KB line of tabs (the agent's per-line capture cap) expand to a ~1M-cell
-    // row. `formatLogTailMarkdown` used to sanitize every line before trimming
-    // any, so a repo could hold ~100 of those live at once inside the DO while
-    // publishing 60KB of them.
+    // Tabs advance 8 columns per byte, so bounding the row at `length * 8` would
+    // let a 128KB line of tabs (the agent's per-line capture cap) expand to a
+    // ~1M-cell row.
     const hostile = '\t'.repeat(MAX_PARTIAL_LINE_CHARS) + 'END';
     const row = await renderCapturedLog(hostile);
     // The controlled input cap is checked before allocating the fixed grid.
@@ -5650,7 +5628,7 @@ describe('renderCapturedLog (terminal-visible text for the check run)', () => {
     // Long enough to cross the deterministic controlled-input cap before xterm
     // allocates a grid or executes any insertion.
     const hostile = `seed${`${ESC}[130000@`.repeat(2000)}END`;
-    // FAIL-WITHOUT-FIX: RangeError from the spread, or minutes of quadratic copying.
+    // If broken: RangeError from the spread, or minutes of quadratic copying.
     expect(await renderCapturedLog(hostile)).toBe('');
   });
 
@@ -6348,10 +6326,9 @@ describe('build-agent sanitizeChildEnv (env scrub)', () => {
 // only: `sanitizeChildEnv` already strips the COPY handed to every untrusted
 // child. It does NOT scrub `/proc/self/environ` — `unsetenv()` only mutates the
 // heap `environ`, while `/proc/<pid>/environ` keeps the initial-stack block — so
-// a same-uid child running as root can still recover these via
-// `/proc/<ppid>/environ` (closing that needs a non-root uid for untrusted
-// children, a tracked follow-up). The deploy-child→vite-build VOID_TOKEN
-// inheritance is the deferred CLI-trust-split item, out of scope here.
+// a same-uid child can still recover these via `/proc/<ppid>/environ`, which is
+// why untrusted children run under a non-root uid. This does not cover the
+// deploy-child→vite-build VOID_TOKEN inheritance.
 describe('build-agent shutdown handlers (PID-1 SIGTERM delivery)', () => {
   it('registers SIGTERM + SIGINT listeners so the DO stop() SIGTERM is not dropped by PID 1', () => {
     // The agent is PID 1 in the container; Linux delivers a signal to PID 1 only
@@ -6552,8 +6529,8 @@ describe('build-agent non-root child isolation', () => {
     expect(opts.gid).toBe(BUILDER_GID);
     expect(BUILDER_UID).toBe(1000);
     expect(BUILDER_GID).toBe(1000);
-    // Non-zero (non-root) is the security invariant — co-locating with the root
-    // agent's uid is the bug this closes.
+    // Non-zero (non-root) is the security invariant: the child must not share the
+    // root agent's uid.
     expect(opts.uid).toBeGreaterThan(0);
     expect(opts.cwd).toBe('/tmp/build/src');
   });
@@ -6771,8 +6748,8 @@ describe('parseProcStatusUid', () => {
 // and close its control server on every failure path, so the container never
 // hangs on a still-open listening socket (which would leak a build slot until
 // the DO's `sleepAfter` ceiling — or indefinitely for unlimited plans with no
-// timeout alarm). Previously a non-zero install exit `return`ed out of the
-// driver, bypassing `process.exit` and `server.close`.
+// timeout alarm). A non-zero install exit must not bypass `process.exit` and
+// `server.close`.
 describe('build-agent lifecycle (container must always exit)', () => {
   const REQUIRED_ENV = [
     'VOID_TOKEN',
@@ -7008,10 +6985,10 @@ describe('build-agent lifecycle (container must always exit)', () => {
 // The DO PULLS logs (`GET /logs?since=N`) on a ~1s cadence and cannot pull at all
 // once the container exits — `logBuffer` and the control server die with the
 // process, and the DO's own `container.running` guard early-outs before it ever
-// fetches. So every line between the last successful poll and exit was lost,
-// including the failing build's actual error output and the closing
-// `[build-agent] void deploy exited with code N`. `waitForLogDrain` is the fix:
-// the agent holds the control server open at exit until the DO has ACKNOWLEDGED
+// fetches. Without a barrier every line between the last successful poll and
+// exit is lost, including the failing build's actual error output and the closing
+// `[build-agent] void deploy exited with code N`. With `waitForLogDrain` the
+// agent holds the control server open at exit until the DO has ACKNOWLEDGED
 // every recorded line. The ack is the `since` cursor on a subsequent
 // `GET /logs?since=N` — the DO advances that cursor only after a successful
 // `res.json()` + `ingestLines()`, so it proves storage. The served mark
@@ -7095,7 +7072,7 @@ describe('build-agent exit-time log drain barrier', () => {
       },
     });
 
-    // The old fixed 8s deadline closed during the second/third productive pull.
+    // A fixed 8s deadline would close during the second/third productive pull.
     expect(drained).toBe(true);
     expect(clock).toBe(21_000);
   });
@@ -7209,7 +7186,7 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
     const res = await fetch(`http://127.0.0.1:${address.port}/logs?since=${since}`);
     const text = await res.text();
 
-    // FAIL-WITHOUT-FIX: ~12.6 MB, six times the cap it claims to honour.
+    // If broken: ~12.6 MB, six times the cap it claims to honour.
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(MAX_LOG_RESPONSE_BYTES);
     const body = JSON.parse(text) as { lines: Array<{ seq: number }>; hasMore: boolean };
     // Still makes progress, and still reports the remainder.
@@ -7219,7 +7196,7 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
   });
 
   it('pages an oversized backlog so each pull advances the cursor', async () => {
-    // The response used to be every retained line above the cursor — up to
+    // Unpaged, the response would be every retained line above the cursor — up to
     // MAX_BUFFERED_LOG_LINES x MAX_PARTIAL_LINE_CHARS in one body. The DO aborts
     // at LOG_PULL_TIMEOUT_MS and only advances `logCursor` after a SUCCESSFUL
     // parse, so an oversized body is a LIVELOCK, not a slow transfer: every retry
@@ -7249,7 +7226,7 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
         lastSeq: number;
       };
 
-    // FAIL-WITHOUT-FIX: one body carries all 40 lines (~5MB) and `lastSeq` jumps
+    // If broken: one body carries all 40 lines (~5MB) and `lastSeq` jumps
     // straight to the end, so nothing bounds the transfer the DO must finish.
     const first = await pull(since);
     expect(JSON.stringify(first.lines).length).toBeLessThanOrEqual(MAX_LOG_RESPONSE_BYTES * 1.1);
@@ -7299,14 +7276,14 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
       lastSeq: number;
     };
 
-    // FAIL-WITHOUT-FIX (in production): the container used to exit before the DO's
-    // next ~1s poll, so this line never reached the DO's store or the check run.
+    // Without the drain barrier the container exits before the DO's next ~1s
+    // poll, so this line would never reach the DO's store or the check run.
     expect(body.lines.map((l) => l.line)).toContain('[build-agent] void deploy exited with code 0');
     // The handler stamps the served high-water mark — diagnostic only.
     expect(body.lastSeq).toBeGreaterThan(since);
     expect(getServedLogSeq()).toBe(body.lastSeq);
 
-    // FAIL-WITHOUT-FIX: serving the tail must NOT release the barrier. The DO has
+    // Serving the tail must NOT release the barrier. The DO has
     // received bytes but has not said it stored them, and if its `res.json()` or
     // `ingestLines()` throws it leaves its cursor unadvanced and retries — against
     // an agent that would already be gone.
@@ -7343,7 +7320,7 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
     // Recorded AFTER the forgery — exactly the line a suppressed tail would lose.
     record('[build-agent] void deploy exited with code 1', 'stdout');
 
-    // FAIL-WITHOUT-FIX: resolves true, because the forged mark already covers this
+    // If broken: resolves true, because the forged mark already covers this
     // line's seq. The honest DO is unaffected — its cursor is always a previously
     // served `lastSeq`, so the clamp is a no-op for it (asserted by the test above,
     // which still reaches `true` on a genuine ack).
@@ -7437,8 +7414,7 @@ describe('build-agent install + deploy resolution', () => {
   // NO packageManager pin — the flag is sniffed from the yarn.lock header.
   // Corepack's REAL unpinned default is Yarn 1.22 (Classic), and a v1 lockfile
   // carries a `# yarn lockfile v1` header → must install `--frozen-lockfile`
-  // (Yarn 1 silently ignores Berry's `--immutable` → mutable install). Without
-  // the header sniff this regressed to `--immutable`, the original bug.
+  // (Yarn 1 silently ignores Berry's `--immutable` → mutable install).
   it('yarn.lock (v1 header) + NO pin → install with --frozen-lockfile', async () => {
     writeFileSync(
       `${WORK_DIR}/yarn.lock`,
@@ -7513,7 +7489,7 @@ describe('build-agent install + deploy resolution', () => {
 
     const seen = await runAndCapture(() => true);
 
-    // FAIL-WITHOUT-FIX: Berry >= 3.0.0 defaults `enableImmutableInstalls` to true
+    // If broken: Berry >= 3.0.0 defaults `enableImmutableInstalls` to true
     // under CI, and `nonInteractiveEnv()` sets `CI=true` on this child — so a bare
     // `yarn install` aborts with YN0028 on the one plan whose job is to CREATE the
     // missing lockfile. Measured against Berry 3.0.0 / 3.6.4 / 4.14.1 / 4.18.0.
@@ -7579,8 +7555,7 @@ describe('build-agent install + deploy resolution', () => {
   // that `void` is locally resolvable — under PnP (no `node_modules/.bin/void`)
   // it checks whether the repo DECLARES `void`. A PnP repo that declares void →
   // `yarn void deploy`; one that does not → the `yarn dlx void@<ver>` fetch
-  // fallback. Previously the default always reported local under PnP, so the dlx
-  // fallback was dead and a PnP repo without a `void` dep wrongly ran `yarn void`.
+  // fallback.
   it('default hasLocalVoid: PnP repo that DECLARES void → corepack yarn void deploy', async () => {
     writeFileSync(`${WORK_DIR}/yarn.lock`, '');
     writeFileSync(`${WORK_DIR}/.pnp.cjs`, '');
@@ -7630,18 +7605,12 @@ describe('build-agent install + deploy resolution', () => {
     expect(seen.some((s) => s.cmd === 'npx')).toBe(false);
   });
 
-  // 3382105547: `pnpPresent` must be computed AFTER download() populates WORK_DIR.
-  // It used to be an eager `const` at runBuild entry, but download() runs INSIDE
-  // runBuild, so for real builds WORK_DIR was empty when it ran → pnpPresent was
-  // always false → every PnP repo silently took the bare-`npx` path (which can't
-  // resolve PnP-managed deps during `void deploy`). The PnP tests above
-  // pre-wrote `.pnp.cjs` BEFORE runBuild, which masked the ordering — here the
-  // `.pnp.cjs` appears only when download() runs, exactly like a real container.
-  //
-  // FAIL-WITHOUT-FIX: with the eager const, pnpPresent is false at entry, so the
-  // deploy spawns as bare `npx void deploy` and both the `corepack` and no-`npx`
-  // assertions below fail.
-  it('detects PnP created by download() (not pre-existing) → corepack yarn (3382105547)', async () => {
+  // `pnpPresent` must be computed AFTER download() populates WORK_DIR; at runBuild
+  // entry WORK_DIR is still empty, and a false reading sends a PnP repo down the
+  // bare-`npx` path (which can't resolve PnP-managed deps during `void deploy`).
+  // The PnP tests above pre-write `.pnp.cjs` BEFORE runBuild — here it appears
+  // only when download() runs, exactly like a real container.
+  it('detects PnP created by download() (not pre-existing) → corepack yarn', async () => {
     const seen: Array<{ cmd: string; args: ReadonlyArray<string> }> = [];
     const code = await runBuild({
       // WORK_DIR starts clean (beforeEach); the source — including `.pnp.cjs` —
@@ -7666,16 +7635,13 @@ describe('build-agent install + deploy resolution', () => {
     expect(seen.some((s) => s.cmd === 'npx')).toBe(false);
   });
 
-  // 3435922052: `pnpPresent` must be computed AFTER the install step, not just
+  // `pnpPresent` must be computed AFTER the install step, not just
   // after download(). A Yarn Berry PnP repo can gitignore `.pnp.cjs` and let
   // `yarn install` GENERATE it — a snapshot taken before install reads false, so
   // the deploy wrongly takes the bare-`npx` path (no node_modules, no active PnP
   // runtime → the build children `void deploy` spawns can't resolve deps). Here
   // `.pnp.cjs` appears only when the install command runs.
-  //
-  // FAIL-WITHOUT-FIX: pnpPresent snapshotted before install is false → deploy is
-  // bare `npx void deploy` → the corepack + no-`npx` assertions below fail.
-  it('detects PnP created by yarn install (not committed) → corepack yarn (3435922052)', async () => {
+  it('detects PnP created by yarn install (not committed) → corepack yarn', async () => {
     const seen: Array<{ cmd: string; args: ReadonlyArray<string> }> = [];
     const code = await runBuild({
       downloadSource: vi.fn(async () => {
@@ -7704,14 +7670,11 @@ describe('build-agent install + deploy resolution', () => {
   });
 });
 
-// 3382226043: `record()` appended every line to `logBuffer` with no eviction, so
-// a verbose build (large package-manager / compiler output) could OOM the agent
-// on the memory-constrained standard-1 container and fail an otherwise-valid
-// build. The buffer is now capped at MAX_BUFFERED_LOG_LINES (oldest evicted in a
-// chunk), keeping only a best-effort recent tail for the /logs pull.
-describe('build-agent log buffer is bounded (3382226043)', () => {
-  // FAIL-WITHOUT-FIX: without eviction, `logBuffer.length` grows to the total
-  // number of recorded lines (>> the cap), so the length assertion fails.
+// An unbounded `logBuffer` lets a verbose build (large package-manager / compiler
+// output) OOM the agent on the memory-constrained standard-1 container. The buffer
+// is capped at MAX_BUFFERED_LOG_LINES (oldest evicted in a chunk), keeping only a
+// best-effort recent tail for the /logs pull.
+describe('build-agent log buffer is bounded', () => {
   it('caps logBuffer at MAX_BUFFERED_LOG_LINES while keeping the most recent line', () => {
     const flood = MAX_BUFFERED_LOG_LINES * 2 + 137;
     for (let i = 0; i < flood; i += 1) {
@@ -7745,7 +7708,6 @@ describe('build-agent log buffer is bounded (3382226043)', () => {
     }
 
     const buf = getBufferedLogLines();
-    // FAIL-WITHOUT-FIX: nothing evicts, so this is ~2x the cap.
     // Measured the way `/logs` budgets a page — serialized bytes, not UTF-16 code
     // units. Counting code units here would let the ring hold up to 6x this on the
     // wire, which no longer fits what one drain can fetch.
@@ -7781,7 +7743,7 @@ describe('build-agent log buffer is bounded (3382226043)', () => {
       (sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)) + 1,
       0,
     );
-    // FAIL-WITHOUT-FIX: ~6x the cap, because only code units were counted.
+    // If broken: ~6x the cap, because only code units were counted.
     expect(wire).toBeLessThanOrEqual(MAX_BUFFERED_LOG_BYTES);
     // And still comfortably inside one full drain.
     expect(wire).toBeLessThanOrEqual(MAX_LOG_PULL_PAGES * MAX_LOG_RESPONSE_BYTES);
@@ -7806,9 +7768,7 @@ describe('build-agent log buffer is bounded (3382226043)', () => {
       for (let i = 0; i < flood; i += 1) {
         record(`line ${i}`, 'stdout');
       }
-      // FAIL-WITHOUT-FIX: without the latch, write() is called once per line
-      // (== flood). With it, the first false latches saturation and the rest skip,
-      // so the call count is tiny and independent of flood size.
+      // The first false latches saturation and the rest skip, so the call count is tiny and independent of flood size.
       expect(spy.mock.calls.length).toBeLessThanOrEqual(2);
     } finally {
       spy.mockRestore();
@@ -7818,15 +7778,13 @@ describe('build-agent log buffer is bounded (3382226043)', () => {
   });
 });
 
-// pipeStream turns a child's byte stream into line-delimited record() calls. Two
-// verified bugs: (1) it split only on `\n`, so `\r` progress frames (install /
-// build spinners that rewrite a line with bare CR) produced ZERO log lines until
-// the process exited — live tail showed nothing during the build. (2) the
-// partial-line buffer had no byte cap, so a `\n`-free run grew unbounded and the
-// MAX_BUFFERED_LOG_LINES ring (a LINE-count cap, not a byte cap) never bounded it
-// — able to OOM the standard-1 container. The fix splits on CR/LF/CRLF and, past
-// MAX_PARTIAL_LINE_CHARS, records ONE truncated line then drops the rest of that
-// line until its terminator (so a terminator-free flood = one bounded record).
+// pipeStream turns a child's byte stream into line-delimited record() calls. It
+// splits on CR/LF/CRLF so `\r` progress frames (install / build spinners that
+// rewrite a line with bare CR) reach the live tail before the process exits. The
+// MAX_BUFFERED_LOG_LINES ring caps LINE count, not bytes, so the partial-line
+// buffer needs its own cap or a `\n`-free run can OOM the standard-1 container.
+// Past MAX_PARTIAL_LINE_CHARS it records ONE truncated line then drops the rest of
+// that line until its terminator (so a terminator-free flood = one bounded record).
 // The CR for a torn CRLF is tracked in a flag, never buffered as data, so it is
 // never emitted mid-line or at EOF.
 describe('build-agent pipeStream line splitting + tail cap', () => {
@@ -7866,7 +7824,7 @@ describe('build-agent pipeStream line splitting + tail cap', () => {
   }
 
   it('flushes bare-CR progress frames as lines instead of holding them until end', () => {
-    // FAIL-WITHOUT-FIX: splitting only on `\n`, "a\rb\rc" carries the whole run
+    // If broken: splitting only on `\n`, "a\rb\rc" carries the whole run
     // in `tail` and records nothing before 'end' — live tail stays empty.
     const src = new FakeReadable();
     const before = getBufferedLogLines().length;
@@ -7943,7 +7901,7 @@ describe('build-agent pipeStream line splitting + tail cap', () => {
   });
 
   it('bounds a terminator-free flood to ONE truncated record (memory cap)', () => {
-    // FAIL-WITHOUT-FIX: recording the full over-cap tail (and the line-count ring
+    // If broken: recording the full over-cap tail (and the line-count ring
     // not being a byte cap) lets a `\n`-free flood retain ~its entire size. The
     // fix records one truncated line, then drops the rest until a terminator.
     const before = getBufferedLogLines().length;
@@ -7976,9 +7934,9 @@ describe('build-agent pipeStream line splitting + tail cap', () => {
   });
 
   it('does not flush a carried CR as data at the force-flush boundary (torn CRLF)', () => {
-    // FAIL-WITH-OLD-FIX: carrying the `\r` into `tail` let the force-flush emit a
-    // line ending in `\r`, then the next chunk's `\n` opened a spurious empty
-    // line. The CR is now a flag, never buffered, so neither happens.
+    // Carrying the `\r` into `tail` would let the force-flush emit a line ending
+    // in `\r`, then the next chunk's `\n` would open a spurious empty line. The CR
+    // is a flag, never buffered, so neither happens.
     const lines = capture((src) => {
       src.feed('x'.repeat(MAX_PARTIAL_LINE_CHARS) + '\r', '\nZ');
       src.end();
@@ -7989,8 +7947,8 @@ describe('build-agent pipeStream line splitting + tail cap', () => {
   });
 
   it('treats a stream ending on a bare CR as a delimiter, not trailing data', () => {
-    // FAIL-WITH-OLD-FIX: end() recorded the carried `\r` as data ("a\r"). A CR is
-    // a delimiter, so the line is "a".
+    // If broken: end() records the carried `\r` as data ("a\r"). A CR is a
+    // delimiter, so the line is "a".
     const lines = capture((src) => {
       src.feed('a\r');
       src.end();
@@ -8042,8 +8000,8 @@ describe('build-agent pipeStream line splitting + tail cap', () => {
     const src = new FakeReadable();
     pipeStream(src as unknown as NodeJS.ReadableStream, 'stdout');
     src.feed('\r'.repeat(flood));
-    // FAIL-WITHOUT-FIX: without the cap, every CR pushes a row and the batch grows
-    // to `flood` (>> the cap) before any flush — the OOM path Codex flagged.
+    // Uncapped, every CR would push a row and the batch would grow to `flood`
+    // (>> the cap) before any flush.
     expect(getPendingLogLineCount()).toBeLessThanOrEqual(MAX_PENDING_LOG_LINES);
   });
 });

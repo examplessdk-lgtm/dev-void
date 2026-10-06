@@ -473,7 +473,6 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
   }
   const localSet = new Set(localApplied.map((m) => m.name));
 
-  // Try to get remote status
   let remoteApplied: Array<{ name: string; applied_at: string }> | null = null;
   const deploymentPlatform = readDeploymentPlatform(root);
   if (deploymentPlatform === 'cloudflare') {
@@ -551,11 +550,9 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 }
 
 async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<number> {
-  // Coherence check must happen before any destructive work. Route
-  // failures through `log.error` + `process.exit(1)` instead of letting
-  // malformed `_journal.json` bubble as a raw stack trace — this matches
-  // `runStatus`, `runMigrate`, and the deploy path, and this is the exact
-  // drift case the preflight is here to surface.
+  // Coherence check must happen before any destructive work. Report a
+  // malformed `_journal.json` like `runStatus`, `runMigrate`, and the deploy
+  // path do, not as a raw stack trace.
   const paths = readProjectPaths(root);
   const migrationsDir = paths.migrationsDir;
   const migrations = collectMigrations(migrationsDir);
@@ -700,7 +697,7 @@ async function runSeed(
  *   users` or `EXPLAIN -- c\n ANALYZE ...` can't bypass the EXPLAIN ANALYZE
  *   check by hiding the `ANALYZE` keyword behind a comment that PostgreSQL
  *   treats as whitespace. This also handles leading comments, so
- *   `-- header\nSELECT 1` is now correctly classified as safe.
+ *   `-- header\nSELECT 1` is classified as safe.
  * - The comment-stripping regex is naive and doesn't understand string
  *   literals: a string literal containing a block-comment marker will have its
  *   contents stripped. That's harmless here (still classified as SELECT, still
@@ -1544,7 +1541,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   const snapshotPathFor = (tag: string): string =>
     join(metaDir, `${snapshotPrefix(tag)}_snapshot.json`);
 
-  // Round 29 gate: if this is a journal-backed project, every tag we're
+  // If this is a journal-backed project, every tag we're
   // about to rename MUST have its matching snapshot on disk. The rename
   // loop below silently skips missing snapshots so bare-legacy projects
   // (no journal, no snapshots at all) keep working — but a journal-backed
@@ -1554,7 +1551,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // would be unable to locate the expected snapshot under the new
   // filename. Refuse up front with a concrete recovery path.
   //
-  // Round 30 refinement: the "journal file exists on disk" signal
+  // The "journal file exists on disk" signal
   // (`originalJournalBytes !== null`) is not enough on its own. The
   // kitchen-sink playground ships a placeholder journal of the form
   // `{ "version": "7", "dialect": "sqlite", "entries": [] }` with no

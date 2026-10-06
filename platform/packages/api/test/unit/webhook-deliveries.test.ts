@@ -200,7 +200,7 @@ describe('listFailedWebhookDeliveries', () => {
     ]);
   });
 
-  it('clamps per_page to 100', async () => {
+  it('requests the maximum page size of failed deliveries', async () => {
     let seenUrl = '';
     vi.stubGlobal(
       'fetch',
@@ -210,10 +210,9 @@ describe('listFailedWebhookDeliveries', () => {
       }),
     );
 
-    await listFailedWebhookDeliveries(makeEnv(), { perPage: 500 });
+    await listFailedWebhookDeliveries(makeEnv());
 
     expect(seenUrl).toContain('per_page=100');
-    expect(seenUrl).not.toContain('per_page=500');
     expect(seenUrl).toContain('status=failure');
   });
 

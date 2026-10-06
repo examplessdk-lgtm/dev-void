@@ -1,7 +1,12 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { type Context } from 'hono';
 import { retryWithBackoff } from '../cf-api.ts';
-import { updateDeploymentStatus, setAppliedMigrations, appendProjectMigrations } from '../db.ts';
+import {
+  updateDeploymentStatus,
+  setAppliedMigrations,
+  appendProjectMigrations,
+  type Db,
+} from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { generateId } from '../id.ts';
 import { type DeployLogger } from '../observability/logger.ts';
@@ -12,7 +17,7 @@ import {
   type Deployment,
   type DeploymentStatus,
 } from '../types.ts';
-import { assertDeploymentNotCanceled, assertProjectNotDeleting } from './guards.ts';
+import { assertDeploymentCanProceed } from './guards.ts';
 import {
   isCfAssetPlainText,
   probeWorkerMigrationCapabilities,
@@ -67,11 +72,14 @@ export async function migrateDeploymentWorker(input: {
       await updateDeploymentStatus(context.get('db'), deployment.id, 'migrating');
       input.currentStatus = 'migrating';
     }
-    await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-    await assertProjectNotDeleting(context.get('db'), projectId);
+    await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
     emit({ event: 'worker_readiness' });
 
-    const proxyTokenBinding = workerBindings.find((b) => b.name === '__VOID_PROXY_TOKEN');
+    const proxyToken = workerBindings.find((b) => b.name === '__VOID_PROXY_TOKEN')?.text ?? '';
+    const lockProjectForDeploy = async (tx: Db): Promise<void> => {
+      await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+      await requireActiveDeployAccess(tx, projectId, actor.id);
+    };
     const readinessError = 'worker readiness probe failed: new worker not reachable after retries';
     let readinessFailure = 'no readiness attempts completed';
     try {
@@ -141,18 +149,16 @@ export async function migrateDeploymentWorker(input: {
       manifestProtocol === 2
         ? await probeWorkerMigrationCapabilities(
             context.env.DISPATCH.get(workerName),
-            proxyTokenBinding?.text ?? '',
+            proxyToken,
             logger,
           )
         : null;
     const stableCapabilities = probe && probe.ok ? probe.caps : null;
     const canUseStable =
       stableCapabilities &&
-      stableCapabilities.protocolVersion === 2 &&
       stableCapabilities.dialect === manifest.migrations.dialect &&
       stableCapabilities.classifierVersion === manifest.migrations.classifierVersion &&
-      stableCapabilities.migrationListHash === manifest.migrations.migrationListHash &&
-      stableCapabilities.destructiveValidation === 'passed';
+      stableCapabilities.migrationListHash === manifest.migrations.migrationListHash;
 
     if (manifestProtocol === 2 && !canUseStable) {
       const reason = !probe
@@ -163,9 +169,6 @@ export async function migrateDeploymentWorker(input: {
               const c = probe.caps;
               const m = manifest.migrations;
               const diffs: Array<string> = [];
-              if (c.protocolVersion !== 2) {
-                diffs.push(`protocolVersion worker=${c.protocolVersion} manifest=2`);
-              }
               if (c.dialect !== m.dialect) {
                 diffs.push(`dialect worker=${c.dialect} manifest=${m.dialect}`);
               }
@@ -179,9 +182,6 @@ export async function migrateDeploymentWorker(input: {
                   `migrationListHash worker=${c.migrationListHash} manifest=${m.migrationListHash}`,
                 );
               }
-              if (c.destructiveValidation !== 'passed') {
-                diffs.push(`destructiveValidation=${c.destructiveValidation}`);
-              }
               return `deployed worker build differs from manifest (${diffs.join('; ')})`;
             })();
       logger.warn('migrate', 'capability_negotiation_failed', { reason });
@@ -193,11 +193,10 @@ export async function migrateDeploymentWorker(input: {
     if (canUseStable) {
       const attemptId = generateId('migatt');
       const stableOutcome = await context.get('db').transaction(async (tx) => {
-        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
-        await requireActiveDeployAccess(tx, projectId, actor.id);
+        await lockProjectForDeploy(tx);
         const appResult = await dispatchStableAppMigration(
           context.env.DISPATCH.get(workerName),
-          proxyTokenBinding?.text ?? '',
+          proxyToken,
           attemptId,
           deployment.id,
           logger,
@@ -234,19 +233,12 @@ export async function migrateDeploymentWorker(input: {
       if (stableCapabilities.endpoints.auth) {
         // Persist the remotely committed app result before auth runs, and
         // release the project lock before this request's 300-second timeout.
-        await context.get('db').transaction(async (tx) => {
-          await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
-          await requireActiveDeployAccess(tx, projectId, actor.id);
-        });
-        await dispatchStableAuthMigration(
-          context.env.DISPATCH.get(workerName),
-          proxyTokenBinding?.text ?? '',
-        );
+        await context.get('db').transaction(lockProjectForDeploy);
+        await dispatchStableAuthMigration(context.env.DISPATCH.get(workerName), proxyToken);
       }
     } else {
       const result = await context.get('db').transaction(async (tx) => {
-        await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
-        await requireActiveDeployAccess(tx, projectId, actor.id);
+        await lockProjectForDeploy(tx);
         const externalResult = await retryWithBackoff<UserWorkerMigrationResult>(
           async (attempt) => {
             const attemptStart = Date.now();
@@ -255,7 +247,7 @@ export async function migrateDeploymentWorker(input: {
             const migrateResponse = await userWorker.fetch(
               new Request('https://internal/__void/migrate', {
                 method: 'POST',
-                headers: { 'x-void-internal': proxyTokenBinding?.text ?? '' },
+                headers: { 'x-void-internal': proxyToken },
                 signal: AbortSignal.timeout(300_000),
               }),
             );
@@ -316,8 +308,7 @@ export async function migrateDeploymentWorker(input: {
         }
       }
     }
-    await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-    await assertProjectNotDeleting(context.get('db'), projectId);
+    await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   }
   return { migrationsApplied };
 }

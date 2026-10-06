@@ -107,7 +107,7 @@ export async function initializeAuthentication(
         400,
       );
     }
-    const requiredOrigins = [apiOrigin, ...(env.PROXY_URL ? [new URL(env.PROXY_URL).origin] : [])];
+    const requiredOrigins = [apiOrigin, new URL(env.PROXY_URL).origin];
     if (
       requiredOrigins.some(
         (origin) =>

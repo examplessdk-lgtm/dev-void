@@ -908,7 +908,7 @@ export const emailDomains = pgTable(
     index('idx_email_domains_project_id').on(table.project_id),
     // One LIVE row per zone, one relay name per account — the DB backstop
     // for the check-then-write windows the engine cannot close against the
-    // CF API (concurrent adds; design doc 0078, fix round 2026-09-17). The
+    // CF API (concurrent adds; design doc 0078). The
     // zone index covers only live statuses so a 'failed' row can still
     // RECORD the zone it failed in (the catch-all conflict path needs
     // that); the relay index reserves every deployed name outright,
@@ -1161,7 +1161,7 @@ export const githubInstallations = pgTable(
     // (the `repositories` cache is then irrelevant); `selected` restricts to
     // the cached set. Defaults to `selected` so the OIDC connection lookup
     // requires explicit membership unless a webhook proves an all-repos
-    // install — an empty `repositories` array no longer means "all".
+    // install — an empty `repositories` array never means "all".
     repository_selection: text('repository_selection')
       .notNull()
       .default('selected')

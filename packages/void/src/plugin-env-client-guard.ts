@@ -11,15 +11,16 @@ import {
   type AstNode,
   type AstProgram,
 } from './shared/ast.ts';
+import { isClientEnvKey } from './shared/env.ts';
 
 type EnvPublicModule = Pick<
   typeof import('./runtime/env-public.ts'),
-  '_getRegisteredSchema' | '_hasRegisteredSchema'
+  '_getRegisteredSchema' | '_hasRegisteredSchema' | '_getSchemaDefaults' | 'validateAllEnv'
 >;
 
 let cachedModule: EnvPublicModule | null = null;
 
-async function loadEnvPublic(): Promise<EnvPublicModule> {
+export async function loadEnvPublic(): Promise<EnvPublicModule> {
   if (cachedModule) {
     return cachedModule;
   }
@@ -37,23 +38,37 @@ const SKIP_EXT =
 const SCRIPT_LANG_RE = /[?&]lang\.([a-z0-9]+)/i;
 
 /**
- * Quick check: does the source mention `void/env` at all? If not, skip the
- * full AST walk. Catches static imports, dynamic imports, and edge cases
- * like comments — false positives here just mean we parse a file we didn't
- * have to, never that we miss a real reference.
+ * Cheap prefilter shared with the fold plugin: is this a client script
+ * module that mentions `void/env`? Anything we'd want to parse is JS/TS or
+ * has a script sub-resource (Vue/Svelte SFC virtual chunks include a
+ * `lang.tsx` / `lang.ts` / `lang.js` query). SFC files themselves
+ * (`.svelte`, `.vue`, `.astro`) are accepted because both plugins run with
+ * `enforce: 'post'`, after the framework compiler has turned them into
+ * plain JS. The `void/env` substring check lets most files skip the AST
+ * walk; a false positive only means an unneeded parse.
  */
-function mentionsVoidEnv(code: string): boolean {
+export function isVoidEnvScriptCandidate(id: string, code: string): boolean {
+  if (id.includes('/node_modules/') || SKIP_EXT.test(id)) {
+    return false;
+  }
+  const langMatch = SCRIPT_LANG_RE.exec(id);
+  const isScriptQuery = langMatch !== null && /^(?:m?[jt]sx?|cjs)$/i.test(langMatch[1]!);
+  const isPlainScript = /\.(?:[mc]?[jt]sx?)(?:\?|$)/.test(id);
+  const isSfc = /\.(?:svelte|vue|astro)(?:\?|$)/.test(id);
+  if (!isScriptQuery && !isPlainScript && !isSfc) {
+    return false;
+  }
   return code.includes('void/env');
 }
 
-type ImportBindings = {
+export type ImportBindings = {
   /** Identifiers that are the `env` proxy directly (e.g. `import { env }` or `import { env as e }`). */
   directNames: Set<string>;
   /** Identifiers that are the namespace import (e.g. `import * as voidEnv`); reads look like `<name>.env.X`. */
   namespaceNames: Set<string>;
 };
 
-function extractEnvBindings(program: AstProgram): ImportBindings | null {
+export function extractEnvBindings(program: AstProgram): ImportBindings | null {
   const direct = new Set<string>();
   const namespace = new Set<string>();
   let found = false;
@@ -80,8 +95,6 @@ function extractEnvBindings(program: AstProgram): ImportBindings | null {
       } else if (spec.type === 'ImportNamespaceSpecifier') {
         // import * as voidEnv
         namespace.add((spec as AstImportNamespaceSpecifier).local.name);
-      } else if (spec.type === 'ImportDefaultSpecifier') {
-        // void/env has no default export — ignore.
       }
     }
   }
@@ -123,20 +136,15 @@ function offsetToLineCol(index: OffsetIndex, offset: number): { line: number; co
   return { line: lowerBound + 1, column: offset - lineStarts[lowerBound]! + 1 };
 }
 
-type Hit = {
-  kind: 'error' | 'warn';
-  property: string | null;
-  start: number;
-};
-
 /**
- * Walk the AST collecting every `env.X` (or `<ns>.env.X`) read where `env`
- * is bound to the `void/env` proxy. Computed access produces a warning hit
- * with `property === null`; everything else carries the property name.
+ * Visit every `env.X` (or `<ns>.env.X`) member expression where `env` is
+ * bound to the `void/env` proxy.
  */
-function findHits(program: AstProgram, bindings: ImportBindings): Array<Hit> {
-  const hits: Array<Hit> = [];
-
+export function walkEnvReads(
+  program: AstProgram,
+  bindings: ImportBindings,
+  visit: (node: AstMemberExpression) => void,
+): void {
   walk(program as unknown as Parameters<typeof walk>[0], {
     enter(node) {
       const current = node as AstNode;
@@ -146,7 +154,7 @@ function findHits(program: AstProgram, bindings: ImportBindings): Array<Hit> {
 
       // Case 1: direct env.X — node.object is an Identifier in directNames.
       if (isIdentifier(current.object) && bindings.directNames.has(current.object.name)) {
-        recordHit(current, hits);
+        visit(current);
         return;
       }
 
@@ -161,11 +169,25 @@ function findHits(program: AstProgram, bindings: ImportBindings): Array<Hit> {
         isIdentifier(obj.property) &&
         obj.property.name === 'env'
       ) {
-        recordHit(current, hits);
+        visit(current);
       }
     },
   });
+}
 
+type Hit = {
+  kind: 'error' | 'warn';
+  property: string | null;
+  start: number;
+};
+
+/**
+ * Collect every `void/env` read. Computed access produces a warning hit
+ * with `property === null`; everything else carries the property name.
+ */
+function findHits(program: AstProgram, bindings: ImportBindings): Array<Hit> {
+  const hits: Array<Hit> = [];
+  walkEnvReads(program, bindings, (node) => recordHit(node, hits));
   return hits;
 }
 
@@ -192,8 +214,6 @@ function recordHit(node: AstMemberExpression, hits: Array<Hit>): void {
  * No-op when no `env.ts` is registered. Server / SSR / worker environments
  * are skipped — only the `client` environment is checked.
  */
-const CLIENT_ENV_PREFIX = 'VITE_';
-
 export function envClientGuardPlugin(root: string): Plugin {
   return {
     name: 'void:env-client-guard',
@@ -210,35 +230,8 @@ export function envClientGuardPlugin(root: string): Plugin {
         return;
       }
 
-      // Skip non-source files. Anything we'd want to parse is JS/TS or has a
-      // script sub-resource (Vue/Svelte SFC virtual chunks include a
-      // `lang.tsx` / `lang.ts` / `lang.js` query). Bail out cheaply for the
-      // rest before the schema load.
-      if (id.includes('/node_modules/')) {
-        return;
-      }
-      if (SKIP_EXT.test(id)) {
-        return;
-      }
-
-      // For SFC virtual modules with a `?vue&type=script&lang.ts` style query
-      // (or analogous Svelte/Solid output), make sure we still cover them.
-      // For SFC files themselves (`.svelte`, `.vue`, `.astro`), rely on the
-      // framework compiler running before us (see `enforce: 'post'` above) —
-      // by the time we see them the file content is plain JS. For everything
-      // else, require a recognised JS/TS extension.
-      const langMatch = SCRIPT_LANG_RE.exec(id);
-      const isScriptQuery = langMatch !== null && /^(?:m?[jt]sx?|cjs)$/i.test(langMatch[1]!);
-      const isPlainScript = /\.(?:[mc]?[jt]sx?)(?:\?|$)/.test(id);
-      const isSfc = /\.(?:svelte|vue|astro)(?:\?|$)/.test(id);
-      if (!isScriptQuery && !isPlainScript && !isSfc) {
-        return;
-      }
-
-      // Fast path: if the source doesn't even mention `void/env`, the only
-      // thing we'd find is nothing. The vast majority of files take this
-      // branch — keeps overhead negligible on every transform.
-      if (!mentionsVoidEnv(code)) {
+      // Bail out cheaply before the schema load.
+      if (!isVoidEnvScriptCandidate(id, code)) {
         return;
       }
 
@@ -295,7 +288,7 @@ export function envClientGuardPlugin(root: string): Plugin {
         if (!(key in schema)) {
           continue;
         }
-        if (key.startsWith(CLIENT_ENV_PREFIX)) {
+        if (isClientEnvKey(key)) {
           continue;
         }
 

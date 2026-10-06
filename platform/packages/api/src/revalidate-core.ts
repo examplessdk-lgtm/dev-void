@@ -113,16 +113,9 @@ export async function runRevalidate(
     const pathnameSet = new Set<string>();
 
     for (const deploymentId of union) {
-      // Hostnames whose routing resolves to this deployment id. Precomputed
-      // once per id: used by the legacy scan's superset fan-out. The union
-      // invariant guarantees this is non-empty for every id we scan (union is
-      // built from perHostname's id-sets).
-      const hostsForId: Array<string> = [];
-      for (const [hostname, ids] of perHostname) {
-        if (ids.has(deploymentId)) {
-          hostsForId.push(hostname);
-        }
-      }
+      // Used by the legacy scan's superset fan-out. Non-empty for every id we
+      // scan, since union is built from perHostname's id-sets.
+      const hostsForId = hostsResolvingTo(perHostname, deploymentId);
 
       // --- v3 host-scoped scan: `<host>/<normalizedPath>[#rw=<token>]`. ---
       // The version encodes the shape, so the first tail segment IS the host —
@@ -134,7 +127,7 @@ export async function runRevalidate(
       do {
         const listed = await context.env.ISR_CACHE.list({ prefix, cursor });
         if (listed.keys.length > 0) {
-          const pageDirect = new Map<string, { host: string; pathname: string }>();
+          const pageDirect = new Map<string, PurgeEdgeTarget>();
           const pageVariants: Array<PurgeEdgeTarget> = [];
           for (const key of listed.keys) {
             const tail = key.name.slice(prefix.length);
@@ -152,7 +145,7 @@ export async function runRevalidate(
             pathnameSet.add(pathname);
             const dedupKey = `${host}\n${pathname}`;
             if (!pageDirect.has(dedupKey)) {
-              pageDirect.set(dedupKey, { host, pathname });
+              pageDirect.set(dedupKey, { host, pathname, deploymentId, variantToken: null });
             }
             if (split.variantToken) {
               pageVariants.push({
@@ -163,15 +156,10 @@ export async function runRevalidate(
               });
             }
           }
-          const pageTargets: Array<PurgeEdgeTarget> = [];
-          for (const { host, pathname } of pageDirect.values()) {
-            pageTargets.push({ host, pathname, deploymentId, variantToken: null });
-          }
-          pageTargets.push(...pageVariants);
           await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
             context.env.ISR_CACHE.delete(key.name),
           );
-          await purgeEdgeCache(context, pageTargets);
+          await purgeEdgeCache(context, [...pageDirect.values(), ...pageVariants]);
         }
         cursor = listed.list_complete ? undefined : listed.cursor;
       } while (cursor);
@@ -191,7 +179,7 @@ export async function runRevalidate(
           cursor: legacyCursor,
         });
         if (listed.keys.length > 0) {
-          const pageDirect = new Map<string, { host: string; pathname: string }>();
+          const pageDirect = new Map<string, PurgeEdgeTarget>();
           const pageVariants: Array<PurgeEdgeTarget> = [];
           for (const key of listed.keys) {
             const split = splitIsrCacheKey(key.name.slice(legacyPrefix.length));
@@ -200,7 +188,7 @@ export async function runRevalidate(
             for (const host of hostsForId) {
               const dedupKey = `${host}\n${pathname}`;
               if (!pageDirect.has(dedupKey)) {
-                pageDirect.set(dedupKey, { host, pathname });
+                pageDirect.set(dedupKey, { host, pathname, deploymentId, variantToken: null });
               }
               if (split.variantToken) {
                 pageVariants.push({
@@ -212,15 +200,10 @@ export async function runRevalidate(
               }
             }
           }
-          const pageTargets: Array<PurgeEdgeTarget> = [];
-          for (const { host, pathname } of pageDirect.values()) {
-            pageTargets.push({ host, pathname, deploymentId, variantToken: null });
-          }
-          pageTargets.push(...pageVariants);
           await uploadPool(listed.keys, R2_CONCURRENCY, (key) =>
             context.env.ISR_CACHE.delete(key.name),
           );
-          await purgeEdgeCache(context, pageTargets);
+          await purgeEdgeCache(context, [...pageDirect.values(), ...pageVariants]);
         }
         legacyCursor = listed.list_complete ? undefined : listed.cursor;
       } while (legacyCursor);
@@ -283,8 +266,7 @@ export async function runRevalidate(
   //
   // The `v2` namespace is host-INDEPENDENT, so scan it once per
   // (deploymentId, path) over the union of resolved ids — NOT once per hostname
-  // (which would issue redundant, identical KV `list` calls). Precompute the
-  // hostnames carrying each id up front.
+  // (which would issue redundant, identical KV `list` calls).
   //
   // No collision with the `v3` scan: the two live under distinct key-version
   // prefixes (`isr/v3/` vs `isr/v2/`), so neither scan can ever see or delete
@@ -293,16 +275,8 @@ export async function runRevalidate(
   // no key version and is host+path+id identical for every host in hostsForId),
   // so the legacy direct delete only needs to reap the orphaned KV key.
   for (const deploymentId of union) {
-    const hostsForId: Array<string> = [];
-    for (const [hostname, ids] of perHostname) {
-      if (ids.has(deploymentId)) {
-        hostsForId.push(hostname);
-      }
-    }
+    const hostsForId = hostsResolvingTo(perHostname, deploymentId);
     for (const path of body.paths) {
-      // Reap the legacy hostless direct key. Its edge URL is already covered by
-      // the v3 direct-hit purge above (see block comment), so no new edge
-      // target is added here.
       await context.env.ISR_CACHE.delete(isrLegacyCacheKey(projectId, deploymentId, path));
 
       const legacyVariantPrefix = isrLegacyCacheVariantPrefix(projectId, deploymentId, path);
@@ -331,6 +305,19 @@ export async function runRevalidate(
   // `purged` = unique path entries the caller asked for. The per-host KV
   // deletes above are an implementation detail of the drift-handling hedge.
   return context.json({ purged: body.paths.length });
+}
+
+function hostsResolvingTo(
+  perHostname: ReadonlyMap<string, ReadonlySet<string>>,
+  deploymentId: string,
+): Array<string> {
+  const hosts: Array<string> = [];
+  for (const [hostname, ids] of perHostname) {
+    if (ids.has(deploymentId)) {
+      hosts.push(hostname);
+    }
+  }
+  return hosts;
 }
 
 type PurgeEdgeTarget = Readonly<{

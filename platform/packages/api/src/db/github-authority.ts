@@ -2,6 +2,32 @@ import { and, eq, or, sql } from 'drizzle-orm';
 import { projects, projectMembers, githubConnections, githubInstallations } from '../schema.ts';
 import { type Db } from './client.ts';
 
+/** The connection's recorded authorizer is still the project owner or an admin. */
+export function githubConnectionAuthorityClause() {
+  return or(
+    eq(githubConnections.authorized_by_user_id, projects.user_id),
+    sql`exists (
+      select 1
+      from ${projectMembers}
+      where ${projectMembers.project_id} = ${projects.id}
+        and ${projectMembers.user_id} = ${githubConnections.authorized_by_user_id}
+        and ${projectMembers.role} = 'admin'
+    )`,
+  );
+}
+
+/**
+ * The installation's repository selection grants the repo: an `all` install
+ * covers every repo; a `selected` install needs the immutable numeric repo id
+ * (rename-safe) in its cached `repositories` jsonb, which stores `id` as a number.
+ */
+export function installationSelectionCoversRepoClause(repositoryId: string) {
+  return or(
+    eq(githubInstallations.repository_selection, 'all'),
+    sql`${githubInstallations.repositories} @> ${JSON.stringify([{ id: Number(repositoryId) }])}::jsonb`,
+  );
+}
+
 /**
  * Re-check, INSIDE a build-creation transaction, that the GitHub App installation
  * still grants access to the repo. Both build txns already hold a `FOR UPDATE`
@@ -21,19 +47,6 @@ import { type Db } from './client.ts';
  * repo id in its cache. This is the shared predicate used by webhook and OIDC
  * resolvers as well as enqueue and final startup checks.
  */
-export function githubConnectionAuthorityClause() {
-  return or(
-    eq(githubConnections.authorized_by_user_id, projects.user_id),
-    sql`exists (
-      select 1
-      from ${projectMembers}
-      where ${projectMembers.project_id} = ${projects.id}
-        and ${projectMembers.user_id} = ${githubConnections.authorized_by_user_id}
-        and ${projectMembers.role} = 'admin'
-    )`,
-  );
-}
-
 export async function installationCoversRepoInTx(
   tx: Db,
   connectionId: string,
@@ -56,10 +69,7 @@ export async function installationCoversRepoInTx(
         eq(githubInstallations.installation_id, installationId),
         eq(githubInstallations.status, 'active'),
         githubConnectionAuthorityClause(),
-        or(
-          eq(githubInstallations.repository_selection, 'all'),
-          sql`${githubInstallations.repositories} @> ${JSON.stringify([{ id: Number(repositoryId) }])}::jsonb`,
-        ),
+        installationSelectionCoversRepoClause(repositoryId),
       ),
     )
     .limit(1);
@@ -68,12 +78,8 @@ export async function installationCoversRepoInTx(
 
 /**
  * Non-transaction sibling of `installationCoversRepoInTx`: a fresh, plain
- * (non-locking) read that the GitHub App installation still grants access to the
- * repo. Identical fail-closed predicate — returns false unless the
- * `github_installations` row exists AND `status === 'active'` AND the repo is
- * still in the install's selection (`repository_selection === 'all'`, or the
- * immutable numeric repo id is in the cached `repositories` set). A stored
- * build config without a connection id fails closed.
+ * (non-locking) read with the same fail-closed predicate. A stored build config
+ * without a connection id fails closed.
  *
  * Used by the container `BuildManager.startBuild` to re-verify coverage at token
  * mint, AFTER a queue wait during which an uninstall/suspension/repo-removal
@@ -92,27 +98,5 @@ export async function installationCoversRepo(
   if (!connectionId) {
     return false;
   }
-  const [row] = await db
-    .select({ id: githubConnections.id })
-    .from(githubConnections)
-    .innerJoin(projects, eq(githubConnections.project_id, projects.id))
-    .innerJoin(
-      githubInstallations,
-      eq(githubConnections.installation_id, githubInstallations.installation_id),
-    )
-    .where(
-      and(
-        eq(githubConnections.id, connectionId),
-        eq(githubConnections.project_id, projectId),
-        eq(githubInstallations.installation_id, installationId),
-        eq(githubInstallations.status, 'active'),
-        githubConnectionAuthorityClause(),
-        or(
-          eq(githubInstallations.repository_selection, 'all'),
-          sql`${githubInstallations.repositories} @> ${JSON.stringify([{ id: Number(repositoryId) }])}::jsonb`,
-        ),
-      ),
-    )
-    .limit(1);
-  return row !== undefined;
+  return installationCoversRepoInTx(db, connectionId, projectId, installationId, repositoryId);
 }

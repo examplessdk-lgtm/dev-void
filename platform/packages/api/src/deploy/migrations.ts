@@ -1,6 +1,5 @@
 import { type DeployLogger } from '../observability/logger.ts';
 
-// 32 MiB
 /**
  * Detect the known CF WfP bug where APIs return plain text about asset state
  * instead of JSON. CF returns different messages depending on propagation state

@@ -52,13 +52,13 @@ export function scanDurableObjectModules(root: string): Array<DurableObjectModul
         DURABLE_HELPERS,
       );
       const name = definition?.name;
-      const parts = resourceNameWords(name ?? inferDurableResourceName(entry.name));
-      if (parts.length === 0) {
+      const resourceName = name ?? inferDurableResourceName(entry.name);
+      if (resourceNameWords(resourceName).length === 0) {
         throw new Error(`durable: cannot derive a name from durable-objects/${entry.name}.`);
       }
       return {
         filePath,
-        ...deriveDurableResourceIdentity(name ?? inferDurableResourceName(entry.name)),
+        ...deriveDurableResourceIdentity(resourceName),
         ...(name === undefined ? {} : { name }),
       };
     });

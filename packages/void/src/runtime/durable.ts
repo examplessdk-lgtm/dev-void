@@ -94,10 +94,6 @@ type StoredState<TState> = {
   value: TState;
 };
 
-function cloneInitialState<TState>(state: TState): TState {
-  return structuredClone(state);
-}
-
 function assertMigrations<TState>(
   version: number,
   migrations: ReadonlyArray<DurableStateMigration<TState>>,
@@ -175,7 +171,7 @@ export function defineDurableState<
             ? await (definition.initialState as (env: TEnv) => TState | Promise<TState>)(
                 this.#runtimeEnv,
               )
-            : cloneInitialState(definition.initialState);
+            : structuredClone(definition.initialState);
         this.#value = initial;
         await this.#persist();
         return;
@@ -190,12 +186,9 @@ export function defineDurableState<
       }
 
       let value: unknown = stored.value;
+      // assertMigrations() guarantees a migration for every version in 1..version.
       for (let nextVersion = stored.version + 1; nextVersion <= version; nextVersion++) {
-        const migration = migrations.get(nextVersion);
-        if (!migration) {
-          throw new Error(`durable: missing state migration for version ${nextVersion}.`);
-        }
-        value = await migration.migrate(value);
+        value = await migrations.get(nextVersion)!.migrate(value);
       }
       this.#value = value as TState;
       if (stored.version !== version) {

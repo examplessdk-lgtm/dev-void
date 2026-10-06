@@ -117,15 +117,29 @@ export async function runCloudflareDeploy(
     emailHandlers,
   } = source;
 
-  // (The auth-migration guard runs at 3d below, AFTER the transport + account pin, so it can
-  // derive the Better Auth schema in an isolated subprocess under the build's EFFECTIVE mode +
-  // the SAME scrubbed env the build uses — still BEFORE whoami / provision / build / deploy.)
-
   // 3. Preflight — pin ONE transport, pin the account, confirm wrangler auth. `rootConfig` is the
   // pre-probe ground truth the post-probe laundering guard (after 3c) compares against; the ONLY
   // re-parses are the account discovery's (3b) and the email step's (3b-ii), both of which write
   // BEFORE any project code runs.
-  const preflightCloudflareWorkerResult = await preflightCloudflareWorker({
+  const {
+    apiBaseUrl,
+    cfUploaderIsPinned,
+    assertUploaderStillPinned,
+    accountId,
+    workersDevSubdomain,
+    runWrangler,
+    workerName,
+    emailMap,
+    schemaFacts,
+    existingWorker,
+    pinnedHandoffLink,
+    approvedHandoffKv,
+    bindingIdentitySnapshot,
+    passthroughIdentitySnapshot,
+    passthroughRawFields,
+    expectedContainers,
+    expectedDurableObjectState,
+  } = await preflightCloudflareWorker({
     configPath,
     needsSandbox,
     voidConfig,
@@ -148,23 +162,6 @@ export async function runCloudflareDeploy(
     source,
     needsLive,
   });
-  const apiBaseUrl = preflightCloudflareWorkerResult.apiBaseUrl;
-  const cfUploaderIsPinned = preflightCloudflareWorkerResult.cfUploaderIsPinned;
-  const assertUploaderStillPinned = preflightCloudflareWorkerResult.assertUploaderStillPinned;
-  const accountId = preflightCloudflareWorkerResult.accountId;
-  const workersDevSubdomain = preflightCloudflareWorkerResult.workersDevSubdomain;
-  const runWrangler = preflightCloudflareWorkerResult.runWrangler;
-  const workerName = preflightCloudflareWorkerResult.workerName;
-  const emailMap = preflightCloudflareWorkerResult.emailMap;
-  const schemaFacts = preflightCloudflareWorkerResult.schemaFacts;
-  const existingWorker = preflightCloudflareWorkerResult.existingWorker;
-  const pinnedHandoffLink = preflightCloudflareWorkerResult.pinnedHandoffLink;
-  const approvedHandoffKv = preflightCloudflareWorkerResult.approvedHandoffKv;
-  const bindingIdentitySnapshot = preflightCloudflareWorkerResult.bindingIdentitySnapshot;
-  const passthroughIdentitySnapshot = preflightCloudflareWorkerResult.passthroughIdentitySnapshot;
-  const passthroughRawFields = preflightCloudflareWorkerResult.passthroughRawFields;
-  const expectedContainers = preflightCloudflareWorkerResult.expectedContainers;
-  const expectedDurableObjectState = preflightCloudflareWorkerResult.expectedDurableObjectState;
 
   // (The LOCAL migration gates run POST-build at step 8d, immediately before the remote
   // apply — not here — so they validate the exact files on disk AFTER the build. See step 8d.)
@@ -200,70 +197,64 @@ export async function runCloudflareDeploy(
   // `CLOUDFLARE_*` dotenv keys back into the child's `process.env`. Those values are already
   // on disk and readable by the build code either way — the scrub is about the credentials
   // the PARENT holds, which the project never had.
-  const buildCloudflareWorkerResult = await buildCloudflareWorker({
-    accountId,
-    apiBaseUrl,
-    existingWorker,
-    deps,
-    frameworkPreset,
-    voidConfig,
-    root,
-    exit,
-    detectedFramework,
-    configPath,
-    workerName,
-    schemaFacts,
-    needsAI,
-    aiBindingName,
-    assertUploaderStillPinned,
-    migrationsDir,
-    dialect,
-    atomic,
-    runWrangler,
-    authEnabled,
-    approvedHandoffKv,
-    desired,
-    bindingIdentitySnapshot,
-  });
-  const migrations = buildCloudflareWorkerResult.migrations;
-  const d1MigrateToken = buildCloudflareWorkerResult.d1MigrateToken;
-  const generatedConfigPath = buildCloudflareWorkerResult.generatedConfigPath;
-  const prepareBuildOutput = buildCloudflareWorkerResult.prepareBuildOutput;
+  const { migrations, d1MigrateToken, generatedConfigPath, prepareBuildOutput } =
+    await buildCloudflareWorker({
+      accountId,
+      apiBaseUrl,
+      existingWorker,
+      deps,
+      frameworkPreset,
+      voidConfig,
+      root,
+      exit,
+      detectedFramework,
+      configPath,
+      workerName,
+      schemaFacts,
+      needsAI,
+      aiBindingName,
+      assertUploaderStillPinned,
+      migrationsDir,
+      dialect,
+      atomic,
+      runWrangler,
+      authEnabled,
+      approvedHandoffKv,
+      desired,
+      bindingIdentitySnapshot,
+    });
 
   // Remember whether a secret operation proved the Worker was absent before it wrote anything.
   // Wrangler creates an active placeholder version while attaching the first secret. The version
   // activator needs this proof to distinguish that placeholder from an existing application when
   // Cloudflare requires a one-time ordinary deploy for initial Durable Object migrations.
-  const migrateCloudflareWorkerResult = await migrateCloudflareWorker({
-    authEnabled,
-    deps,
-    root,
-    accountId,
-    workerName,
-    desired,
-    bindingIdentitySnapshot,
-    passthroughIdentitySnapshot,
-    passthroughRawFields,
-    needsAI,
-    aiBindingName,
-    expectedContainers,
-    expectedDurableObjectState,
-    expectedCrons,
-    exit,
-    configPath,
-    runWrangler,
-    assertUploaderStillPinned,
-    cliLog,
-    dialect,
-    migrations,
-    migrationsDir,
-    d1MigrateToken,
-    schemaFacts,
-  });
-  const workerWasMissingBeforeSecretProvisioning =
-    migrateCloudflareWorkerResult.workerWasMissingBeforeSecretProvisioning;
-  const initialAuthSecret = migrateCloudflareWorkerResult.initialAuthSecret;
-  const appliedMigrations = migrateCloudflareWorkerResult.appliedMigrations;
+  const { workerWasMissingBeforeSecretProvisioning, initialAuthSecret, appliedMigrations } =
+    await migrateCloudflareWorker({
+      authEnabled,
+      deps,
+      root,
+      accountId,
+      workerName,
+      desired,
+      bindingIdentitySnapshot,
+      passthroughIdentitySnapshot,
+      passthroughRawFields,
+      needsAI,
+      aiBindingName,
+      expectedContainers,
+      expectedDurableObjectState,
+      expectedCrons,
+      exit,
+      configPath,
+      runWrangler,
+      assertUploaderStillPinned,
+      cliLog,
+      dialect,
+      migrations,
+      migrationsDir,
+      d1MigrateToken,
+      schemaFacts,
+    });
 
   // 11. Deploy the exact generated config verified above. Passing its absolute path
   // explicitly keeps the version upload AND the later trigger synchronization on the
@@ -271,17 +262,6 @@ export async function runCloudflareDeploy(
   // `triggers deploy` does not; omitting `configPath` here would therefore upload the
   // generated cron/queue configuration and then synchronize triggers from the root
   // config, silently dropping generated Cron Triggers and queue consumers.
-  // `--experimental-provision=false` / `--experimental-auto-create=false` disable
-  // wrangler 4.131's OWN resource provisioning (both default true, deployCommand +
-  // globalFlags, wrangler-dist/cli.js), so ONLY `provisionCloudflareResources` may create
-  // resources — a bare deploy can never auto-create a missing binding (e.g. an R2 bucket
-  // absent remotely but passing the local drift predicate), even in CI.
-  // `--autoconfig=false` disables wrangler 4.131's framework detection + auto-config
-  // (`autoconfig` defaults true, deployCommand cli.js:283108). Without it, a detected
-  // framework marker (e.g. OpenNext) can make wrangler DELEGATE the deploy to another tool
-  // (`maybeDelegateToOpenNextDeployCommand`, cli.js:282991) — which
-  // would upload something OTHER than the artifact Void just built and verified. Forcing it
-  // off guarantees wrangler uploads exactly the verified `dist/ssr/wrangler.json`.
   //
   // Final uploader re-verification immediately before the deploy — the last and most privileged
   // credentialed run of the hashed bundle. Against the same pre-build baseline; fail closed.
@@ -326,8 +306,5 @@ export async function runCloudflareDeploy(
 
 export {
   discoverRootWranglerConfig,
-  reportCloudflareActivationFailure,
-  activateCloudflareVersionWithProgress,
   formatCloudflareActivationError,
-  cloudflareWorkerReadinessHeaders,
 } from './deploy-cloudflare-helpers.ts';

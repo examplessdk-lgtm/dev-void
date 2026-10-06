@@ -15,19 +15,27 @@ export type IslandSourceEdit = { start: number; end: number; text: string };
 
 export type StaticCssImport = { statement: string; specifier: string };
 
+type ScriptBlock = { source: string; offset: number; filename: string };
+
+/** The whole JS/TS module, or each `<script>` block of a Vue/Svelte SFC with its offset in the file. */
+function scriptBlocks(code: string, filename: string): Array<ScriptBlock> {
+  if (!/\.(?:vue|svelte)$/.test(filename)) {
+    return [{ source: code, offset: 0, filename }];
+  }
+  const scriptFilename = filename.replace(/\.(?:vue|svelte)$/, '.ts');
+  return [...code.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => {
+    const source = match[1]!;
+    return { source, offset: match.index! + match[0].indexOf(source), filename: scriptFilename };
+  });
+}
+
 /** Collect stylesheet imports from authored modules without treating dynamic imports or text as dependencies. */
 export function findStaticCssImports(code: string, filename: string): Array<StaticCssImport> {
   if (!code.includes('import')) {
     return [];
   }
-  const scripts = /\.(?:vue|svelte)$/.test(filename)
-    ? [...code.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => ({
-        source: match[1]!,
-        filename: filename.replace(/\.(?:vue|svelte)$/, '.ts'),
-      }))
-    : [{ source: code, filename }];
   const imports: Array<StaticCssImport> = [];
-  for (const script of scripts) {
+  for (const script of scriptBlocks(code, filename)) {
     if (!script.source.includes('import')) {
       continue;
     }
@@ -83,21 +91,8 @@ export function findIslandImports(code: string, filename: string): Array<IslandI
   if (!code.includes('import') || !code.includes('island')) {
     return [];
   }
-  const scripts: Array<{ source: string; offset: number; filename: string }> = [];
-  if (/\.(?:vue|svelte)$/.test(filename)) {
-    for (const match of code.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
-      const source = match[1]!;
-      scripts.push({
-        source,
-        offset: match.index! + match[0].indexOf(source),
-        filename: filename.replace(/\.(?:vue|svelte)$/, '.ts'),
-      });
-    }
-  } else {
-    scripts.push({ source: code, offset: 0, filename });
-  }
   const imports: Array<IslandImportSource> = [];
-  for (const script of scripts) {
+  for (const script of scriptBlocks(code, filename)) {
     if (!script.source.includes('island')) {
       continue;
     }

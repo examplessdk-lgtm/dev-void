@@ -263,8 +263,7 @@ function isBinaryData(data: unknown): boolean {
   return (
     data instanceof ArrayBuffer ||
     ArrayBuffer.isView(data) ||
-    (typeof Blob !== 'undefined' && data instanceof Blob) ||
-    (typeof File !== 'undefined' && data instanceof File)
+    (typeof Blob !== 'undefined' && data instanceof Blob)
   );
 }
 

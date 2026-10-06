@@ -21,35 +21,13 @@ import type {
   users,
 } from './schema.ts';
 
-export { MANIFEST_REDIRECT_RULE_STATUSES, SUPPORTED_MANIFEST_VERSIONS } from '@void/deploy-core';
+export { SUPPORTED_MANIFEST_VERSIONS } from '@void/deploy-core';
 export type {
   AssetConfig,
-  DeployAppType,
-  DeployArtifact,
-  DeployCapabilitySupport,
-  DeployAssetManifestEntry,
-  DeployAssetUploadRequest,
   DeployEvent,
-  DeployIntent,
   DeployManifest,
-  DeployRuntimeFeatures,
-  DeploySourceMetadata,
-  DeployTarget,
-  DeployTargetAdapter,
-  DeployTargetCapabilities,
-  DeployUploadPayload,
-  HeaderRule,
-  LiveManifestMeta,
   LiveMigrationMeta,
-  MigrationMeta,
-  QueueMeta,
-  RedirectRule,
-  SandboxManifestMeta,
-  SandboxMigrationMeta,
-  ScheduleMeta,
-  WebSocketManifestMeta,
   WebSocketMigrationMeta,
-  WebSocketRouteMeta,
 } from '@void/deploy-core';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked';

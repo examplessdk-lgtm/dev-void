@@ -88,6 +88,12 @@ export async function findDeploymentOperation(
   return operation ?? null;
 }
 
+async function sha256Hex(bytes: BufferSource): Promise<string> {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
 export async function prepareDeploymentInput(
   r2: R2Bucket,
   projectId: string,
@@ -106,10 +112,7 @@ export async function prepareDeploymentInput(
     for (let index = 0; index < files.length; index++) {
       const { name, content } = files[index]!;
       const bytes = await content.arrayBuffer();
-      const digest = Array.from(
-        new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
-        (byte) => byte.toString(16).padStart(2, '0'),
-      ).join('');
+      const digest = await sha256Hex(bytes);
       const key = `${prefix}${index}`;
       await r2.put(key, bytes);
       input.modules.push({ name, key, digest, type: content.type });
@@ -118,10 +121,7 @@ export async function prepareDeploymentInput(
       body: input.body,
       modules: input.modules.map(({ name, digest, type }) => ({ name, digest, type })),
     });
-    const digest = Array.from(
-      new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity))),
-      (byte) => byte.toString(16).padStart(2, '0'),
-    ).join('');
+    const digest = await sha256Hex(new TextEncoder().encode(identity));
     // A marker lets the orphan sweep recognize complete and partial staging.
     await r2.put(`${prefix}receipt`, JSON.stringify({ createdAt: Date.now() }));
     return { input, prefix, digest };
@@ -284,6 +284,29 @@ export async function dispatchDeploymentOperation(
   await env.DEPLOYMENTS_QUEUE.send({ deploymentId: id });
 }
 
+/** Queued, or abandoned by a runner whose lease has expired. */
+function claimableOperation() {
+  return or(
+    eq(deploymentOperations.status, 'queued'),
+    and(
+      ne(deploymentOperations.status, 'terminal'),
+      lte(deploymentOperations.lease_expires_at, sql`now()`),
+    ),
+  );
+}
+
+async function deleteDeploymentInputs(
+  env: ApiEnv['Bindings'],
+  db: Db,
+  operation: Readonly<{ id: string; input_prefix: string }>,
+): Promise<void> {
+  await paginatedR2Delete(env.STATIC_ASSETS_R2, operation.input_prefix);
+  await db
+    .update(deploymentOperations)
+    .set({ inputs_deleted: true, payload: { body: {}, modules: [] } })
+    .where(eq(deploymentOperations.id, operation.id));
+}
+
 export async function dispatchPendingDeployments(env: ApiEnv['Bindings'], db: Db): Promise<void> {
   if (!env.DEPLOYMENTS_QUEUE) {
     return;
@@ -291,18 +314,7 @@ export async function dispatchPendingDeployments(env: ApiEnv['Bindings'], db: Db
   const pending = await db
     .select({ id: deploymentOperations.id })
     .from(deploymentOperations)
-    .where(
-      and(
-        lte(deploymentOperations.next_dispatch_at, sql`now()`),
-        or(
-          eq(deploymentOperations.status, 'queued'),
-          and(
-            ne(deploymentOperations.status, 'terminal'),
-            lte(deploymentOperations.lease_expires_at, sql`now()`),
-          ),
-        ),
-      ),
-    )
+    .where(and(lte(deploymentOperations.next_dispatch_at, sql`now()`), claimableOperation()))
     .limit(20);
   for (const operation of pending) {
     await dispatchDeploymentOperation(env, db, operation.id);
@@ -318,11 +330,7 @@ export async function dispatchPendingDeployments(env: ApiEnv['Bindings'], db: Db
     )
     .limit(20);
   for (const operation of completed) {
-    await paginatedR2Delete(env.STATIC_ASSETS_R2, operation.input_prefix);
-    await db
-      .update(deploymentOperations)
-      .set({ inputs_deleted: true, payload: { body: {}, modules: [] } })
-      .where(eq(deploymentOperations.id, operation.id));
+    await deleteDeploymentInputs(env, db, operation);
   }
   // Stage-before-admission avoids holding a project transaction across R2
   // uploads. A killed request can leave partial input; walk one bounded page
@@ -381,18 +389,7 @@ export async function processDeploymentBatch(
         lease_expires_at: sql`now() + (${DEPLOYMENT_EXECUTION_LEASE_MS} * interval '1 millisecond')`,
         status: sql`CASE WHEN status = 'queued' THEN 'running' ELSE 'recovering' END`,
       })
-      .where(
-        and(
-          eq(deploymentOperations.id, id),
-          or(
-            eq(deploymentOperations.status, 'queued'),
-            and(
-              ne(deploymentOperations.status, 'terminal'),
-              lte(deploymentOperations.lease_expires_at, sql`now()`),
-            ),
-          ),
-        ),
-      )
+      .where(and(eq(deploymentOperations.id, id), claimableOperation()))
       .returning();
     if (!operation) {
       message.ack();
@@ -429,11 +426,7 @@ export async function processDeploymentBatch(
         message.retry({ delaySeconds: 60 });
         continue;
       }
-      await paginatedR2Delete(env.STATIC_ASSETS_R2, operation.input_prefix);
-      await db
-        .update(deploymentOperations)
-        .set({ inputs_deleted: true, payload: { body: {}, modules: [] } })
-        .where(eq(deploymentOperations.id, id));
+      await deleteDeploymentInputs(env, db, operation);
       message.ack();
     } catch (error) {
       console.error('[deployment-execution] execution/reconciliation interrupted', {

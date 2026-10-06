@@ -1324,24 +1324,6 @@ export class PlatformCloudflareClient {
       );
     }
   }
-
-  async setWorkerSubdomain(accountId: string, workerName: string, enabled: boolean): Promise<void> {
-    try {
-      await this.request(
-        `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
-        {
-          body: JSON.stringify({ enabled, previews_enabled: enabled }),
-          headers: { 'Cloudflare-Workers-Script-Api-Date': '2025-08-01' },
-          method: 'POST',
-        },
-      );
-    } catch (error) {
-      if (!enabled && error instanceof PlatformCloudflareApiError && error.status === 404) {
-        return;
-      }
-      throw error;
-    }
-  }
 }
 
 function accessResourcePath(

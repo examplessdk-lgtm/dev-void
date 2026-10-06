@@ -12,12 +12,6 @@ const PLATFORM_STATIC_ASSET_FAILURES: ReadonlySet<NonNullable<UsageEvent['failur
   ['platform-static-asset-timeout', 'platform-static-asset-error', 'platform-static-asset-missing'],
 );
 
-const FAILURE_KINDS = new Set([
-  'platform-static-asset-timeout',
-  'platform-static-asset-error',
-  'platform-static-asset-missing',
-]);
-
 function nonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
@@ -43,7 +37,10 @@ function validSignedEvent(
     }
     if (
       (event.status !== undefined && !nonnegativeSafeInteger(event.status)) ||
-      (event.failureKind !== undefined && !FAILURE_KINDS.has(event.failureKind as string)) ||
+      (event.failureKind !== undefined &&
+        !PLATFORM_STATIC_ASSET_FAILURES.has(
+          event.failureKind as NonNullable<UsageEvent['failureKind']>,
+        )) ||
       event.sandboxRuntimeSeconds !== undefined ||
       event.sandboxInstanceId !== undefined ||
       event.sandboxMeteredFrom !== undefined ||
@@ -88,11 +85,6 @@ export async function processUsageEventBatch(
   batch: MessageBatch<unknown>,
   env: ApiEnv['Bindings'],
 ): Promise<void> {
-  // Cloudflare stamps each message with its enqueue time — which is when
-  // dispatch metered the response at the edge. Keep it: the 5xx alert window
-  // must report when the errors happened, not when this consumer drained the
-  // batch (a backlog or a retried batch can put hours between the two).
-  // Defensive fallback because this is also the billing path.
   let signingKey: string;
   try {
     signingKey = await ensureUsageSigningKey(env.ROUTING, env.JWT_SECRET);
@@ -109,6 +101,11 @@ export async function processUsageEventBatch(
         return null;
       }
       const event = validSignedEvent(envelope.source, envelope.event);
+      // Cloudflare stamps each message with its enqueue time — which is when
+      // dispatch metered the response at the edge. Keep it: the 5xx alert window
+      // must report when the errors happened, not when this consumer drained the
+      // batch (a backlog or a retried batch can put hours between the two).
+      // Defensive fallback because this is also the billing path.
       return event
         ? {
             event,
@@ -193,9 +190,6 @@ export async function processUsageEventBatch(
       if (!user) {
         return;
       } // Unknown user, skip
-      const plan = user.plan ?? 'free';
-
-      // Forward to DO
       const doId = env.USAGE_COUNTER.idFromName(userId);
       const stub = env.USAGE_COUNTER.get(doId);
       const res = await stub.fetch(
@@ -204,7 +198,7 @@ export async function processUsageEventBatch(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             events: userEvents,
-            plan,
+            plan: user.plan,
             userId,
             billingPeriodStart: getCurrentBillingPeriodStart(
               user.billing_cycle_start ?? user.created_at,

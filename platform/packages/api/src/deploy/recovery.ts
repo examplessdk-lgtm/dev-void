@@ -1,5 +1,6 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { hmacSignState } from '../auth/hmac.ts';
+import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import { clearCronScheduler, syncCronScheduler } from '../cron-scheduler-client.ts';
 import {
   getProject,
@@ -12,6 +13,9 @@ import {
   getDomainsByProjectId,
   getProjectResources,
   getAllProjectDeployments,
+  markDeploymentRetained,
+  setActiveDeployment,
+  updateProjectType,
   TERMINAL_DEPLOYMENT_STATUSES,
   type Db,
 } from '../db.ts';
@@ -31,7 +35,12 @@ import {
   resolveProjectZeroTrustRouting,
   resolveProjectZeroTrustRoutingForPublication,
 } from '../zero-trust/routing.ts';
-import { DEFAULT_DISPATCH_NAMESPACE } from './shared.ts';
+import {
+  PROJECT_DELETING_ERROR_MESSAGE,
+  SUPERSEDED_BUILD_ERROR_MESSAGE,
+  assertBoundBuildStillActive,
+  assertDeploymentNotCanceled,
+} from './guards.ts';
 
 export const CUTOVER_RECOVERY_STALE_MS = 90 * 60 * 1000;
 
@@ -43,6 +52,60 @@ export const cutoverReadyKey = (deploymentId: string): string => `cutover-ready:
 
 export const cutoverCompensatedKey = (deploymentId: string): string =>
   `cutover-compensated:${deploymentId}`;
+
+/**
+ * Flip a protected cutover to live under the project lock. Aborts when the
+ * project is being deleted, another owner took over the cutover markers, the
+ * deployment was canceled, or the bound build was superseded.
+ */
+export async function commitCutoverLive(
+  db: Db,
+  routing: KVNamespace,
+  input: Readonly<{
+    projectId: string;
+    actorId: string;
+    deploymentId: string;
+    cutoverOwnerId: string;
+    deployBuild: string | undefined;
+    projectType: Project['type'];
+  }>,
+): Promise<void> {
+  const { projectId, deploymentId, cutoverOwnerId } = input;
+  await db.transaction(async (tx) => {
+    await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
+    const lockedProject = await getProject(tx, projectId);
+    if (!lockedProject || lockedProject.status === 'deleting') {
+      throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
+    }
+    await requireActiveDeployAccess(tx, projectId, input.actorId);
+    const [intent, ready] = await Promise.all([
+      routing.get(cutoverIntentKey(deploymentId)).then(parseCutoverMarker),
+      routing.get(cutoverReadyKey(deploymentId)).then(parseCutoverMarker),
+    ]);
+    if (
+      intent?.ownerId !== cutoverOwnerId ||
+      ready?.ownerId !== cutoverOwnerId ||
+      intent.projectId !== projectId ||
+      ready.projectId !== projectId
+    ) {
+      throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
+    }
+    await assertDeploymentNotCanceled(tx, deploymentId);
+    // Re-check the bound build under a row lock before going live. The
+    // up-front guard can pass and then a newer GitHub Actions run
+    // supersede (cancel) this build while we spent minutes building and
+    // uploading; without this re-check a superseded runner would still
+    // go live with stale code. See `assertBoundBuildStillActive`.
+    await assertBoundBuildStillActive(tx, input.deployBuild, projectId);
+    // Asset GC takes this same project lock and protects hashes from every
+    // nonterminal deployment. Serving placement was persisted before cutover
+    // began, so no final object-store scan is needed.
+    await updateDeploymentStatus(tx, deploymentId, 'live', undefined, { force: true });
+    await updateProjectType(tx, projectId, input.projectType);
+    await setActiveDeployment(tx, projectId, deploymentId);
+    await markDeploymentRetained(tx, deploymentId, true);
+  });
+}
 
 export async function requireActiveDeployAccess(db: Db, projectId: string, actorUserId: string) {
   return requireProjectCapability(db, projectId, actorUserId, 'deploy');
@@ -145,6 +208,43 @@ export async function reconcileProjectDomainRoutes(
   }
 }
 
+/** Queue names declared by any of the project's persisted deployments. */
+async function persistedQueueNames(db: Db, projectId: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  for (const row of await getAllProjectDeployments(db, projectId)) {
+    try {
+      const rowManifest = row.manifest ? (JSON.parse(row.manifest) as DeployManifest) : null;
+      for (const queue of rowManifest?.queues ?? []) {
+        names.add(queue.name);
+      }
+    } catch {
+      // Corrupt historical metadata cannot authorize a queue write.
+    }
+  }
+  return names;
+}
+
+async function detachProjectQueue(
+  env: ApiEnv['Bindings'],
+  resources: Awaited<ReturnType<typeof getProjectResources>>,
+  dispatchWorkerName: string,
+  projectId: string,
+  queueName: string,
+): Promise<void> {
+  const resource = resources.find(
+    (entry) => entry.type === 'queue' && entry.binding_name === queueName,
+  );
+  if (resource) {
+    await removeQueueConsumer(
+      env.CF_ACCOUNT_ID,
+      env.CF_API_TOKEN,
+      resource.cf_id,
+      dispatchWorkerName,
+    );
+  }
+  await env.ROUTING.delete(`queue:${getProjectQueueName(projectId, queueName)}`);
+}
+
 /** Idempotently make every authoritative external surface match one deployment. */
 export async function replayDeploymentCutover(
   env: ApiEnv['Bindings'],
@@ -215,17 +315,7 @@ export async function replayDeploymentCutover(
   // longer persist `compensating` or restore the authoritative deployment.
   const domains = await getDomainsByProjectId(db, project.id);
   const resources = await getProjectResources(db, project.id);
-  const historicalQueueNames = new Set<string>();
-  for (const row of await getAllProjectDeployments(db, project.id)) {
-    try {
-      const rowManifest = row.manifest ? (JSON.parse(row.manifest) as DeployManifest) : null;
-      for (const queue of rowManifest?.queues ?? []) {
-        historicalQueueNames.add(queue.name);
-      }
-    } catch {
-      // Corrupt historical metadata cannot authorize a queue write.
-    }
-  }
+  const historicalQueueNames = await persistedQueueNames(db, project.id);
   const desiredQueues = isStatic ? [] : (manifest.queues ?? []);
   const desiredQueueNames = new Set(desiredQueues.map((queue) => queue.name));
   const desiredQueueResources = new Map<string, (typeof resources)[number]>();
@@ -280,21 +370,9 @@ export async function replayDeploymentCutover(
   }
 
   for (const queueName of historicalQueueNames) {
-    if (desiredQueueNames.has(queueName)) {
-      continue;
+    if (!desiredQueueNames.has(queueName)) {
+      await detachProjectQueue(env, resources, dispatchWorkerName, project.id, queueName);
     }
-    const resource = resources.find(
-      (entry) => entry.type === 'queue' && entry.binding_name === queueName,
-    );
-    if (resource) {
-      await removeQueueConsumer(
-        env.CF_ACCOUNT_ID,
-        env.CF_API_TOKEN,
-        resource.cf_id,
-        dispatchWorkerName,
-      );
-    }
-    await env.ROUTING.delete(`queue:${getProjectQueueName(project.id, queueName)}`);
   }
 }
 
@@ -308,35 +386,14 @@ export async function clearProjectExternalState(
   // preventing the caller from persisting its compensation fence.
   const domains = await getDomainsByProjectId(db, project.id);
   const resources = await getProjectResources(db, project.id);
-  const queueNames = new Set<string>();
-  for (const row of await getAllProjectDeployments(db, project.id)) {
-    try {
-      const rowManifest = row.manifest ? (JSON.parse(row.manifest) as DeployManifest) : null;
-      for (const queue of rowManifest?.queues ?? []) {
-        queueNames.add(queue.name);
-      }
-    } catch {
-      // Invalid historical metadata cannot authorize a queue write.
-    }
-  }
+  const queueNames = await persistedQueueNames(db, project.id);
 
   await env.ROUTING.delete(project.slug);
   await reconcileProjectDomainRoutes(env, domains, null);
   await clearCronScheduler(env, project.id);
   const dispatchWorkerName = env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
   for (const queueName of queueNames) {
-    const resource = resources.find(
-      (entry) => entry.type === 'queue' && entry.binding_name === queueName,
-    );
-    if (resource) {
-      await removeQueueConsumer(
-        env.CF_ACCOUNT_ID,
-        env.CF_API_TOKEN,
-        resource.cf_id,
-        dispatchWorkerName,
-      );
-    }
-    await env.ROUTING.delete(`queue:${getProjectQueueName(project.id, queueName)}`);
+    await detachProjectQueue(env, resources, dispatchWorkerName, project.id, queueName);
   }
 }
 

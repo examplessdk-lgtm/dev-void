@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import {
@@ -100,8 +100,6 @@ const fetchMock = vi.fn();
 let originalFetch: typeof globalThis.fetch | undefined;
 let savedToken: string | undefined;
 let savedProject: string | undefined;
-let projectJsonSnapshot: string | undefined;
-let projectJsonSnapshotTaken = false;
 
 type Captured = { finalizeBody: { manifest?: { pages?: unknown } } | null };
 
@@ -194,9 +192,7 @@ function ndjson(events: Array<unknown>): Response {
 // End-to-end guard for the `assembleVoidManifest` seam: drives the REAL exported
 // runDeploy → runDeployInner → runFullDeploy (Void/SSR path) against a
 // pre-built minimal Void pages fixture, with only network + prompts + prerender
-// stubbed, and asserts the finalize manifest carries `pages`. Reverting
-// runFullDeploy's `assembleVoidManifest(pageScan, …)` back to
-// `buildVoidManifest({ … })` drops `pages` and turns this RED.
+// stubbed, and asserts the finalize manifest carries `pages`.
 describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () => {
   beforeAll(() => {
     playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
@@ -213,10 +209,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     });
     expect(result.status, `${result.stdout ?? ''}${result.stderr ?? ''}`).toBe(0);
 
-    // Link the fixture to a fake project (snapshot any real link first so we
-    // restore developer-local state exactly on teardown).
-    projectJsonSnapshot = existsSync(projectJson) ? readFileSync(projectJson, 'utf-8') : undefined;
-    projectJsonSnapshotTaken = true;
+    // Link the fixture to a fake project.
     mkdirSync(join(fixture, '.void'), { recursive: true });
     writeFileSync(
       projectJson,
@@ -229,16 +222,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   }, 180_000);
 
   afterAll(() => {
-    if (!projectJsonSnapshotTaken) {
-      playground?.cleanup();
-      return;
-    }
-    if (projectJsonSnapshot === undefined) {
-      rmSync(projectJson, { force: true });
-    } else {
-      writeFileSync(projectJson, projectJsonSnapshot);
-    }
-    playground.cleanup();
+    playground?.cleanup();
   });
 
   beforeEach(() => {
@@ -304,8 +288,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
       | Array<{ pattern: string; revalidate?: number }>
       | undefined;
 
-    // manifest.pages must be a non-empty array — this is exactly what dropping
-    // the assembleVoidManifest seam (reverting to buildVoidManifest) removes.
+    // manifest.pages must be a non-empty array.
     expect(Array.isArray(pages)).toBe(true);
     expect(pages!.length).toBeGreaterThan(0);
     // Every entry carries a string pattern (raw, route-shaped).
@@ -319,7 +302,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     // The object `routing.revalidate` in the fixture void.config.ts is NOT baked into
     // per-page TTLs — a REAL build must emit the 3-state table + the RAW object
     // config as `manifest.pathRevalidate` (this is the producer half of the
-    // cross-repo contract dispatch consumes; a manually-constructed manifest
+    // contract platform dispatch consumes; a manually-constructed manifest
     // would not prove the actual CLI emits it). `/docs` and `/docs/ref` have no
     // per-page export, so they ship INHERIT-ELIGIBLE (no `revalidate` key) and
     // dispatch resolves the per-path config against the real request path.
@@ -351,9 +334,7 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     expect(captured.finalizeBody).not.toBeNull();
     expect(captured.finalizeBody!.manifest).toBeDefined();
     // ...but `pages` (the Void pages-mode ISR table) is suppressed in framework
-    // mode even though the fixture has a pages/ dir with an ISR page. Removing
-    // the `isFrameworkMode ? undefined :` gate in assembleVoidManifest turns
-    // this RED (pages becomes the populated array instead of undefined).
+    // mode even though the fixture has a pages/ dir with an ISR page.
     expect(captured.finalizeBody!.manifest?.pages).toBeUndefined();
   });
 

@@ -90,7 +90,7 @@ export function formatStreamDeployError(
       return err;
     }
 
-    const detail = parsedError ?? trimSnippet(err.body);
+    const detail = trimSnippet(err.body);
     const base = detail
       ? `deploy: Deploy failed (HTTP ${err.status}): ${detail}`
       : `deploy: Deploy failed (HTTP ${err.status}).`;

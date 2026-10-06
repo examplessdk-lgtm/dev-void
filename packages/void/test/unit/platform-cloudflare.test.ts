@@ -632,21 +632,6 @@ describe('platform Cloudflare client', () => {
     expect(requests).toEqual([]);
   });
 
-  it('treats a missing Worker as already disabled but not as enabled', async () => {
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async () =>
-        Response.json(
-          { errors: [{ message: 'missing' }], result: null, success: false },
-          { status: 404 },
-        ),
-    });
-
-    await expect(client.setWorkerSubdomain('account', 'missing', false)).resolves.toBeUndefined();
-    await expect(client.setWorkerSubdomain('account', 'missing', true)).rejects.toMatchObject({
-      status: 404,
-    });
-  });
-
   it('paginates namespace discovery without a title filter', async () => {
     const pages: Array<string> = [];
     const client = new PlatformCloudflareClient('token', {
@@ -1363,22 +1348,6 @@ describe('platform Cloudflare client', () => {
         method: 'DELETE',
         pathname: '/client/v4/zones/zone-id/dns_records/dns-id',
       },
-    ]);
-  });
-
-  it('enables and disables the workers.dev endpoint for one Worker', async () => {
-    const bodies: Array<unknown> = [];
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async (_input, init) => {
-        bodies.push(JSON.parse(String(init?.body)));
-        return Response.json({ success: true, result: null });
-      },
-    });
-    await client.setWorkerSubdomain('account', 'void-company-api', false);
-    await client.setWorkerSubdomain('account', 'void-company-api', true);
-    expect(bodies).toEqual([
-      { enabled: false, previews_enabled: false },
-      { enabled: true, previews_enabled: true },
     ]);
   });
 

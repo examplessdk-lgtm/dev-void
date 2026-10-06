@@ -340,7 +340,6 @@ export function registerSharedClientTests({
       await page.goto(BASE + '/users');
       await waitForHydration(page);
 
-      // Submit form without filling fields
       await page.click('button[type="submit"]');
       await page.waitForFunction(() => document.body?.textContent?.includes('Name is required'));
 
@@ -366,7 +365,6 @@ export function registerSharedClientTests({
       await page.goto(BASE + '/users');
       await waitForHydration(page);
 
-      // Add a new user
       await page.fill('input:near(:text("Name:"))', name);
       await page.fill('input:near(:text("Email:"))', email);
       await page.click('button[type="submit"]');
@@ -376,7 +374,6 @@ export function registerSharedClientTests({
       expect(submittedText).not.toContain('Email is required');
       expect(page.url()).toBe(BASE + '/users');
 
-      // Click the link to the newly added user's detail page
       await page.getByRole('link', { name, exact: true }).click();
       await page.waitForFunction(
         (value) => document.querySelector('h1')?.textContent?.includes(value),

@@ -79,21 +79,19 @@ export function hasLocalLockfile(dir: string): boolean {
  * PnP monorepo, `.pnp.cjs` lives at the workspace root, not in each
  * subpackage. Checking only `start` would miss the common shape.
  *
- * Round 46: local PnP files at `start` are always authoritative and
- * take precedence over the leaf-managed guard below. When `start` has
- * no local PnP files but DOES have local install ownership (lockfile or
- * Corepack pin), stop here — ancestor PnP data belongs to a different
- * install graph and injecting it will break resolution for the local
- * one. Only walk past `start` when neither condition holds.
- *
- * Internal: only `buildDrizzleKitSpawnEnv` below consumes this. The
- * stricter `findInstalledYarnPnpRuntime` is the public variant callers
- * outside this module reach for.
+ * Local PnP files at `start` are always authoritative and take
+ * precedence over the leaf-managed guard below. When `start` has no
+ * local PnP files but DOES have a local lockfile, stop here — ancestor
+ * PnP data belongs to a different install graph and injecting it will
+ * break resolution for the local one. Only walk past `start` when
+ * neither condition holds.
  */
-function findYarnPnpRuntime(start: string): { pnpCjs?: string; pnpLoader?: string } | undefined {
+function findYarnPnpRuntime(
+  start: string,
+): { dir: string; runtime: { pnpCjs?: string; pnpLoader?: string } } | undefined {
   const local = readPnpRuntimeAt(start);
   if (local !== undefined) {
-    return local;
+    return { dir: start, runtime: local };
   }
   if (hasLocalLockfile(start)) {
     return undefined;
@@ -105,7 +103,7 @@ function findYarnPnpRuntime(start: string): { pnpCjs?: string; pnpLoader?: strin
   while (true) {
     const found = readPnpRuntimeAt(dir);
     if (found !== undefined) {
-      return found;
+      return { dir, runtime: found };
     }
     const parent = dirname(dir);
     if (parent === dir) {
@@ -120,7 +118,7 @@ function findYarnPnpRuntime(start: string): { pnpCjs?: string; pnpLoader?: strin
  * when the PnP runtime files AND a post-install marker live in the
  * SAME ancestor directory.
  *
- * Round 40 rationale: Yarn Berry repos commonly commit `.pnp.cjs` to
+ * Yarn Berry repos commonly commit `.pnp.cjs` to
  * version control but NOT `.yarn/cache/*.zip` (zero-install is an
  * opt-in, not the default). A fresh `git clone` before `yarn install`
  * therefore has `.pnp.cjs` on disk while the PnP data points at ZIP
@@ -129,7 +127,7 @@ function findYarnPnpRuntime(start: string): { pnpCjs?: string; pnpLoader?: strin
  * install step, and the subsequent `drizzle-kit generate` spawn crashes
  * because PnP tries to load `void/schema-d1` from a missing ZIP.
  *
- * Round 42: accept EITHER of two markers, to cover both non-zero-install
+ * Accept EITHER of two markers, to cover both non-zero-install
  * and zero-install shapes:
  *
  *   1. `.yarn/install-state.gz` in the same dir. Yarn Berry (3.x and
@@ -158,39 +156,8 @@ function findYarnPnpRuntime(start: string): { pnpCjs?: string; pnpLoader?: strin
 export function findInstalledYarnPnpRuntime(
   start: string,
 ): { pnpCjs?: string; pnpLoader?: string } | undefined {
-  // Round 46: mirror the `findYarnPnpRuntime` gate so a leaf-managed
-  // nested project nested inside an unrelated Yarn PnP monorepo does
-  // not fall through to the ancestor's install graph. See
-  // `hasLocalLockfile` above for the full rationale.
-  const local = readPnpRuntimeAt(start);
-  if (local !== undefined) {
-    // Local PnP is authoritative regardless of ownership markers —
-    // still require the post-install marker in the same directory.
-    return isYarnPnpInstalled(start) ? local : undefined;
-  }
-  if (hasLocalLockfile(start)) {
-    return undefined;
-  }
-  let dir = dirname(start);
-  if (dir === start) {
-    return undefined;
-  }
-  while (true) {
-    const found = readPnpRuntimeAt(dir);
-    if (found !== undefined) {
-      // Require a post-install marker in the SAME directory as the
-      // PnP runtime files. A fresh clone has `.pnp.cjs` committed but
-      // neither `install-state.gz` nor a populated cache — refuse, so
-      // the caller triggers the install step instead of proceeding
-      // against unfetched archives.
-      return isYarnPnpInstalled(dir) ? found : undefined;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) {
-      return undefined;
-    }
-    dir = parent;
-  }
+  const found = findYarnPnpRuntime(start);
+  return found && isYarnPnpInstalled(found.dir) ? found.runtime : undefined;
 }
 
 /**
@@ -238,7 +205,7 @@ function isYarnPnpInstalled(dir: string): boolean {
  */
 export function buildDrizzleKitSpawnEnv(root: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  const pnp = findYarnPnpRuntime(root);
+  const pnp = findYarnPnpRuntime(root)?.runtime;
   if (!pnp) {
     return env;
   }

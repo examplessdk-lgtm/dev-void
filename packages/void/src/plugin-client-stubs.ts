@@ -33,20 +33,12 @@ export function createClientStubsPlugin(): Plugin {
       }
       export const sandbox = { get: getSandbox };
     `,
-    // Server-only for the same reason as the rest: `void/email` reaches
-    // `runtime/env-raw.ts`, whose top-level `node:async_hooks` import and
-    // module-scope `new AsyncLocalStorage()` have no browser equivalent.
-    // Without a stub the client build SUCCEEDS with only an externalization
-    // warning and ships `new (emptyStub).AsyncLocalStorage` — the page then
-    // white-screens on load, which is worse than a build failure.
-    // `void/email/testing` needs its own entry (the filter is anchored) for
-    // a different reason: it pulls `router/email.ts`, dragging node:path,
-    // node:fs and node:module plus ~24 KB of build-time router machinery
-    // into the browser bundle.
-    //
-    // Throwing rather than returning `{}`, following `void/sandbox`: an
-    // accidental client import should fail legibly instead of silently
-    // no-oping a send the caller believes happened.
+    // `void/email` reaches `runtime/env-raw.ts` (`node:async_hooks`), so an
+    // unstubbed client import builds with only a warning and white-screens on
+    // load. `void/email/testing` needs its own entry (the filter is anchored)
+    // because it pulls build-time router code and Node built-ins. Both throw,
+    // like `void/sandbox`, so an accidental client send fails legibly instead
+    // of silently no-oping.
     'void/email': `
       const serverOnly = (name) => () => {
         throw new Error(name + ' is server-only and cannot be imported by browser code.');

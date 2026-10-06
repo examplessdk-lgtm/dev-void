@@ -136,7 +136,7 @@ import {
 } from './schema.ts';
 import { isAdminSuspended, REASON_REQUESTS_EXCEEDED } from './suspension.ts';
 import { getCurrentBillingPeriodStart } from './tiers.ts';
-import type { Domain, Project } from './types.ts';
+import type { Domain } from './types.ts';
 import { ensureUsageSigningKey, USAGE_PROTOCOL_VERSION } from './usage-auth.ts';
 import { UsageCounter } from './usage-counter.ts';
 import { replayFailedWebhookDeliveries } from './webhook-replay.ts';
@@ -761,11 +761,7 @@ async function scheduled(
     .catch((err) => console.error('[scheduled] failed to clean up stale deployments:', err));
 
   // Auto-fail GitHub Actions builds stuck ACTIVE far longer than any plan's
-  // build timeout. A missed `workflow_run` completion webhook — or a disconnect
-  // mid-run — would otherwise leave an Actions build active forever, pinning one
-  // of the owner's concurrency slots. Container builds free their slot via the
-  // BuildManager DO timeout, so this is scoped to executor='github_actions'.
-  // Best-effort and isolated like the steps around it.
+  // build timeout (see STALE_ACTIONS_BUILD_MAX_AGE_MINUTES).
   if (capabilities.managedBuilds) {
     await failStaleActiveGithubActionsBuilds(db, STALE_ACTIONS_BUILD_MAX_AGE_MINUTES)
       .then((n) => {
@@ -779,25 +775,16 @@ async function scheduled(
   }
 
   // Auto-fail container builds stuck ACTIVE far longer than the hard-max build
-  // timeout. The BuildManager DO normally reaps these via its own timeout, but
-  // if that timeout path tears down the container yet its terminal-status write
-  // to Postgres throws (Hyperdrive transient failure), the row stays ACTIVE
-  // forever — pinning a concurrency slot and blocking the project's queue.
+  // timeout (see STALE_CONTAINER_BUILD_MAX_AGE_MINUTES).
   //
-  // Two phases, ordered deliberately. (1) The DB terminalize is AUTHORITATIVE:
+  // Two phases, ordered deliberately. (1) The DB terminalize is authoritative:
   // it frees the concurrency slot and revokes the bound deploy token (build-row
-  // status is the token authority) even if the DO is unreachable — that is the
-  // whole point of this backstop, so it must run first and stand alone. (2) The
-  // `started_at > maxAge` predicate does NOT prove the container is gone: if the
-  // DO was evicted or its timeout alarm lost, the container may still be RUNNING.
-  // So we best-effort issue a BuildManager `cancelBuild` for each reaped id —
-  // stopping any still-alive orphan (halting its billing) and converging DO-local
-  // status. cancelBuild against an already-terminal row is harmless: it still
-  // calls stop() but its CAS no-ops the DB write (no double-deploy), setting
-  // DO-local status to 'cancelled' while the DB row stays 'failed' — both
-  // terminal, acceptable. A DO RPC failure must NOT break the handler (the slot
-  // is already freed by phase 1), so this is wrapped best-effort and isolated
-  // like the steps around it. Scoped to executor='container'.
+  // status is the token authority) even if the DO is unreachable, so it runs
+  // first and stands alone. (2) The age predicate does not prove the container
+  // is gone — an evicted DO or lost timeout alarm can leave it running — so each
+  // reaped build also gets a best-effort `cancelBuild`. That is harmless on an
+  // already-terminal row: its CAS no-ops the DB write and only DO-local status
+  // becomes 'cancelled'. A DO RPC failure must not break the handler.
   if (capabilities.managedBuilds) {
     await failStaleActiveContainerBuilds(db, STALE_CONTAINER_BUILD_MAX_AGE_MINUTES)
       .then(async (staleBuilds) => {
@@ -944,13 +931,9 @@ async function reconcilePendingDomains(
     return;
   }
 
-  // Batch-load projects for the deduped set of project_ids in a single query.
   const projectIds = [...new Set(pending.map((d) => d.project_id))];
   const projectRows = await getProjectsByIds(db, projectIds);
-  const projectMap = new Map<string, Project>();
-  for (const project of projectRows) {
-    projectMap.set(project.id, project);
-  }
+  const projectMap = new Map(projectRows.map((project) => [project.id, project]));
 
   // Batch-load the owners of the loaded projects so we can skip domains whose
   // owner is ADMIN-suspended. The authenticated `void domain status` route is
@@ -1021,10 +1004,9 @@ async function cleanupPendingDomainUnderProjectFence(
   });
 }
 
-// Exported for direct integration testing of the janitor branch in isolation
-// from the reconcile pass (the hourly `scheduled()` runs reconcile first, which
-// would otherwise activate any gate-passing pending domain before the janitor
-// sees it — masking the >200-backlog starvation path the janitor now handles).
+// Exported so tests can exercise the janitor without the reconcile pass that
+// `scheduled()` runs first, which would activate any gate-passing pending
+// domain before the janitor sees it.
 export async function cleanupStalePendingDomains(
   env: ApiEnv['Bindings'],
   db: Db,

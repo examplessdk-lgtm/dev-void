@@ -24,6 +24,20 @@ const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '.
 
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 
+/** Top-level entries never copied into the isolated drift-check project. */
+const DRIFT_PROJECT_SKIPPED_ENTRIES = new Set([
+  '.git',
+  '.void',
+  'node_modules',
+  'dist',
+  'build',
+  '.wrangler',
+  '.turbo',
+  '.next',
+  '.svelte-kit',
+  '.output',
+]);
+
 export function assertDeploySchemaDriftFree(root: string, dialect: DatabaseDialect): void {
   try {
     if (!hasDeploySchemaDrift(root, dialect)) {
@@ -178,18 +192,7 @@ function createDeployDriftProject(root: string, driftProjectRoot: string): void 
   mkdirSync(driftProjectRoot, { recursive: true });
 
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (entry.name === '.git' || entry.name === '.void' || entry.name === 'node_modules') {
-      continue;
-    }
-    if (
-      entry.name === 'dist' ||
-      entry.name === 'build' ||
-      entry.name === '.wrangler' ||
-      entry.name === '.turbo' ||
-      entry.name === '.next' ||
-      entry.name === '.svelte-kit' ||
-      entry.name === '.output'
-    ) {
+    if (DRIFT_PROJECT_SKIPPED_ENTRIES.has(entry.name)) {
       continue;
     }
 
@@ -201,7 +204,7 @@ function createDeployDriftProject(root: string, driftProjectRoot: string): void 
 
   // The build-generated Better Auth schema participates in `void db generate`, so
   // it must also participate in the isolated drift check. Copy only this known
-  // generated input; the rest of `.void` remains excluded as before.
+  // generated input; the rest of `.void` stays excluded.
   const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
   if (existsSync(authSchemaPath)) {
     const target = join(driftProjectRoot, '.void', 'better-auth-schema.ts');

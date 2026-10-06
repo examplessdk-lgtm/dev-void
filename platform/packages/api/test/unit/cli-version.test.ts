@@ -130,9 +130,8 @@ describe('checkCliVersionOrRespond', () => {
     expect(res.status).toBe(426);
   });
 
-  // Fail-closed regression guard for the previous fail-open semantics.
-  // Anything the regex rejects (non-semver, two-segment, empty string, etc.)
-  // is now treated as a stale CLI — either a buggy client we should surface
+  // Fail closed: anything the regex rejects (non-semver, two-segment, empty
+  // string, etc.) is treated as a stale CLI — either a buggy client we should surface
   // or a forged bypass attempt. Pre-release tags like `0.7.0-rc.1` are
   // explicitly allowed by the regex so legitimate CLIs don't hit this.
   describe('rejects malformed version headers (fail closed)', () => {

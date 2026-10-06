@@ -26,31 +26,11 @@ function pathIdentifier(value: string | undefined) {
   return boundedString(value, 512);
 }
 
-function invitationEmails(value: unknown) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+function boundedList(value: unknown, maxItems: number, maxLength: number, lowerCase = false) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maxItems) {
     return undefined;
   }
-  const emails = value.map((email) => boundedString(email, 320, true));
-  return emails.every((email): email is string => email !== undefined)
-    ? [...new Set(emails)]
-    : undefined;
-}
-
-function accessPatterns(value: unknown) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
-    return undefined;
-  }
-  const patterns = value.map((pattern) => boundedString(pattern, 320, true));
-  return patterns.every((pattern): pattern is string => pattern !== undefined)
-    ? [...new Set(patterns)]
-    : undefined;
-}
-
-function boundedIds(value: unknown) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
-    return undefined;
-  }
-  const values = value.map((entry) => boundedString(entry, 128));
+  const values = value.map((entry) => boundedString(entry, maxLength, lowerCase));
   return values.every((entry): entry is string => entry !== undefined)
     ? [...new Set(values)]
     : undefined;
@@ -176,7 +156,7 @@ function auditTarget(
       return JSON.stringify({ restrictionsEnabled: segments[1] === 'restrict' });
     }
     if (segments[1] === 'allow' || segments[1] === 'remove' || segments[1] === 'disallow') {
-      const patterns = accessPatterns(body.patterns);
+      const patterns = boundedList(body.patterns, 100, 320, true);
       const type = boundedString(body.type, 512);
       return JSON.stringify({
         type,
@@ -193,7 +173,7 @@ function auditTarget(
   }
   if (segments[0] === 'invitations') {
     if (segments[1] === 'send') {
-      return JSON.stringify({ emails: invitationEmails(body.emails) });
+      return JSON.stringify({ emails: boundedList(body.emails, 100, 320, true) });
     }
     if (id && segments[2] === 'revoke') {
       return JSON.stringify({ invitationId: id });
@@ -236,10 +216,11 @@ function auditTarget(
         project: boundedString(body.project, 512),
       });
     }
-    if (segments[1] === 'domains' && domain && segments[3] === 'sync') {
-      return JSON.stringify({ domain });
-    }
-    if (segments[1] === 'domains' && domain && segments[3] === 'rotate-secret') {
+    if (
+      segments[1] === 'domains' &&
+      domain &&
+      (segments[3] === 'sync' || segments[3] === 'rotate-secret')
+    ) {
       return JSON.stringify({ domain });
     }
     if (segments[1] === 'domains' && domain && segments[3] === 'remove') {
@@ -267,8 +248,8 @@ function auditTarget(
     if (segments[1] === 'configure') {
       return JSON.stringify({
         accountId: boundedString(body.accountId, 128),
-        identityProviderIds: boundedIds(body.identityProviderIds),
-        policyIds: boundedIds(body.policyIds),
+        identityProviderIds: boundedList(body.identityProviderIds, 16, 128),
+        policyIds: boundedList(body.policyIds, 16, 128),
         protectNewProjects: body.protectNewProjects === true,
         existingProjects: boundedString(body.existingProjects, 16),
       });
@@ -454,9 +435,8 @@ export const operatorAudit: MiddlewareHandler<ApiEnv> = async (context, next) =>
     return next();
   }
   const path = context.req.path.replace(/^\/operator\/v1\//, '');
-  // Keep the middleware's catch-all behavior for authenticated POSTs. Known
-  // operations use the canonical allowlist; an unknown future route still gets
-  // an observable intent with an empty target, matching the original API.
+  // Known operations use the canonical allowlist; any other authenticated POST
+  // still records an observable intent with an empty target.
   const id = await insertAuditIntent(context, {
     action: path,
     target: auditTarget(path, body, context.env.PLATFORM_ENV) ?? '',

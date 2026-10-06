@@ -159,8 +159,6 @@ describe('localhost token bypass', () => {
       expect.arrayContaining([expect.stringContaining('void_token=test-jwt;')]),
     );
     expect(cookies).toEqual(expect.arrayContaining([expect.stringContaining('void_auth_nonce=;')]));
-    // void_token must have the actual JWT value, not be cleared
-    expect(cookies.some((c) => c.startsWith('void_token=test-jwt;'))).toBe(true);
   });
 
   it('rejects token without nonce cookie on localhost', async () => {

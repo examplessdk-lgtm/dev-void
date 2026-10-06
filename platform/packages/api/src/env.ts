@@ -43,9 +43,9 @@ export type ApiEnv = Env & {
     GITHUB_CLIENT_SECRET: string;
     /**
      * GitHub App credentials for the "Deploy on GitHub" build system. Distinct
-     * from the OAuth-login `GITHUB_CLIENT_ID/SECRET` above. All optional so old
-     * code (and environments without the App configured) tolerates absence —
-     * the webhook/OIDC routes return inert when these are unset.
+     * from the OAuth-login `GITHUB_CLIENT_ID/SECRET` above. All optional so
+     * environments without the App configured tolerate absence — the
+     * webhook/OIDC routes return inert when these are unset.
      */
     GITHUB_APP_ID?: string;
     /** App private key in PKCS#8 PEM form (`openssl pkcs8 -topk8 -nocrypt`). */
@@ -103,7 +103,6 @@ export type ApiEnv = Env & {
     /** Private readiness checks, attached after the proxy Worker has been provisioned. */
     PLATFORM_PROXY?: Fetcher;
     SANDBOX_CONTROL_SERVICE?: string;
-    VOID_PROXY_TOKEN?: string;
     /** Trusted producer used by the API-owned sandbox lease counter. */
     USAGE_EVENTS_QUEUE?: Queue<unknown>;
     DEPLOYMENTS_QUEUE?: Queue<{ deploymentId: string }>;

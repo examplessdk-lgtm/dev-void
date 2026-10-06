@@ -357,9 +357,6 @@ export function createPlatformDeploymentManifest(
     if (value !== null) {
       normalizeApplicationDomain(value);
     }
-    if (value === '') {
-      throw new Error(`controlPlane.${key} must be a hostname or null.`);
-    }
   }
   if (manifest.controlPlane.dashboardUrl) {
     const hostname = new URL(manifest.controlPlane.dashboardUrl).hostname;
@@ -498,11 +495,7 @@ export function parsePlatformDeploymentManifest(value: unknown): PlatformDeploym
       ? { emailSharedZoneId: requiredString(value.emailSharedZoneId, 'emailSharedZoneId') }
       : {}),
     ...(value.emailSenderDomain !== undefined
-      ? {
-          emailSenderDomain: normalizeApplicationDomain(
-            requiredString(value.emailSenderDomain, 'emailSenderDomain'),
-          ),
-        }
+      ? { emailSenderDomain: requiredString(value.emailSenderDomain, 'emailSenderDomain') }
       : {}),
     controlPlane: {
       apiHostname: readHostname('apiHostname'),

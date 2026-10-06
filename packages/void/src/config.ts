@@ -184,8 +184,8 @@ const VALID_TARGETS = new Set(['cloudflare', 'node', 'bun', 'deno']);
 const VALID_APP_TYPES = new Set(['spa', 'static', 'void', 'framework']);
 const VALID_OUTPUTS = new Set(['server', 'static']);
 /**
- * Accepted `routing.notFound` values. Source of truth for the framework, the
- * `AssetConfig.not_found_handling` field, and the schema.json enum.
+ * Accepted `routing.notFound` values. Keep in sync with the schema.json enum
+ * and `AssetConfig.not_found_handling` in `@void/deploy-core`.
  */
 export const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
   'single-page-application',
@@ -214,31 +214,23 @@ const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
  * Count anonymous `*` wildcards in a pattern, ignoring the `*` that
  * terminates a `:name*` multi-segment named capture.
  *
- * Both the framework's emitted `__compilePattern` (router/compile.ts) and
- * dispatch's `compilePattern` (packages/dispatch/src/pattern.ts) emit a
- * distinct `(?<name>.*)` group for `:name*` and a `(?<splat>.*)` group for
- * the first bare `*` — those don't clash, so a pattern with both a named
- * multi-segment capture and a bare splat is legitimate and must validate.
- * Walking raw chars would over-count and cause `assertSingleSplat` to
- * reject such patterns.
+ * The shared `compilePattern` (`@void/edge`) emits a distinct `(?<name>.*)`
+ * group for `:name*` and a `(?<splat>.*)` group for the first bare `*` —
+ * those don't clash, so a pattern with both a named multi-segment capture and
+ * a bare splat is legitimate and must validate. Walking raw chars would
+ * over-count and cause `assertSingleSplat` to reject such patterns.
  *
- * The identifier character class matches `[A-Za-z0-9_]+` from both compilers.
+ * The identifier character class matches `compilePattern`'s `[A-Za-z0-9_]+`.
  */
 export function countSplats(source: string): number {
-  // Strip `:name*` first — the `*` there is the tail of a named multi-segment
-  // capture (matches `[A-Za-z0-9_]+` per both compilers' identifier class),
-  // not an anonymous splat. The remaining `*`s are the ones validators care
-  // about for duplicate-group-name avoidance.
   return source.replace(/:[A-Za-z0-9_]+\*/g, '').match(/\*/g)?.length ?? 0;
 }
 
 /**
- * Reject a rule source containing more than one `*` wildcard. The dispatch
- * worker compiles each `*` into a `(?<splat>...)` named capture group; having
- * two of them in one pattern means `new RegExp()` throws at startup with a
- * cryptic "duplicate group name" error. Fail at config-read time with a
- * clear message instead. `kind` is a capitalised noun (e.g. "Redirect",
- * "Rewrite") used in the error text.
+ * Reject a rule source containing more than one anonymous `*` wildcard. Only
+ * the first `*` is captured (as `:splat`), so a second one is ambiguous.
+ * `kind` is a capitalised noun (e.g. "Redirect", "Rewrite") used in the error
+ * text.
  */
 export function assertSingleSplat(source: string, kind: string): void {
   const count = countSplats(source);
@@ -260,17 +252,15 @@ export function assertSingleSplat(source: string, kind: string): void {
  *   2. A `:splat` (named) token alongside a bare `*` — both compile to a
  *      `(?<splat>...)` group.
  *
- * `assertSingleSplat` already prevents two bare `*`s clashing on the
- * implicit `splat` name. This complements it. The runtime emitter has a
- * try/catch defense-in-depth in `emitApplyRoutingRules`, but failing at
- * config-read with a precise message is friendlier than a CLI-log warn.
+ * The runtime skips a rule whose pattern fails to compile
+ * (`runtime/routing.ts`), but failing at config-read with a precise message
+ * is friendlier than a log warning.
  */
 export function assertUniqueCaptureNames(source: string, kind: string): void {
   const seen = new Set<string>();
   const dups = new Set<string>();
-  // Same identifier class as both compilers (`__compilePattern` and
-  // dispatch's `compilePattern`). Trailing `*` is optional — `:name` and
-  // `:name*` both produce a `<name>` capture group.
+  // Same identifier class as `compilePattern`. Trailing `*` is optional —
+  // `:name` and `:name*` both produce a `<name>` capture group.
   const captureNameRe = /:([A-Za-z0-9_]+)\*?/g;
   let captureMatch: RegExpExecArray | null;
   while ((captureMatch = captureNameRe.exec(source)) !== null) {
@@ -298,10 +288,9 @@ export function assertUniqueCaptureNames(source: string, kind: string): void {
  * `//host/path` → `https://host/path`, which silently turns an intended
  * in-worker rewrite/redirect into a cross-origin proxy.
  *
- * Shared by the `void.json` validators below and the `_redirects` parser
- * (`cli/headers.ts`). The `c.rewrite()` codegen in `router/compile.ts`
- * inlines an equivalent check in emitted worker code — it validates
- * runtime user input rather than config, so it can't call through here.
+ * Shared by the config validators below and the `_redirects` parser
+ * (`cli/headers.ts`). `c.rewrite()` in `runtime/routing.ts` has an equivalent
+ * check for runtime input; it runs in the Worker and cannot import this module.
  */
 export function isProtocolRelative(dest: string): boolean {
   return dest.startsWith('//');
@@ -327,10 +316,10 @@ function assertNotProtocolRelative(
 /**
  * Strict literal-hostname regex used by `parseHostPrefixedSource` to validate
  * the host portion of an `https://host/path` rule source. Mirrors
- * `LITERAL_HOSTNAME_REGEX` in `packages/api/src/routes/deploy.ts` and the
- * regex in `packages/api/src/routes/domains.ts`. Rejects scheme prefixes,
- * ports, paths, whitespace, control chars, wildcards, single-label hosts,
- * IPv4 literals, and userinfo. The host is lowercased before testing so the
+ * `LITERAL_HOSTNAME_REGEX` in `packages/deploy-core/src/validate.ts` and the
+ * regex in `platform/packages/api/src/routes/domains.ts`. Rejects scheme
+ * prefixes, ports, paths, whitespace, control chars, wildcards, single-label
+ * hosts, IPv4 literals, and userinfo. The host is lowercased before testing so the
  * same byte-exact form reaches dispatch (which compares against the
  * lowercase `url.hostname`).
  */
@@ -1244,11 +1233,7 @@ export function convertRedirectsConfig(
   const origin = 'void.json#routing.redirects';
   const rules: Array<DevRedirectRule> = [];
   for (const [rawSource, dest] of Object.entries(redirects)) {
-    // `readConfig` already validated the source via `parseHostPrefixedSource`
-    // and threw on errors, so the parse here is effectively re-extraction.
-    // Defensive: callers that bypass `readConfig` (e.g. tests, programmatic
-    // config) get the same parse path, and an error here surfaces as a
-    // thrown exception for diagnosability.
+    // Re-parse so callers that bypass `readConfig` get the same validation.
     const parsed = parseHostPrefixedSource(rawSource);
     if ('error' in parsed) {
       throw new Error(`convertRedirectsConfig: source "${rawSource}": ${parsed.error}`);

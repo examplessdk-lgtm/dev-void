@@ -62,7 +62,6 @@ export async function runEmailCommand(root: string, args: EmailArgs): Promise<vo
 
   const client = new PlatformClient(token, { root });
 
-  // Resolve project
   const requestedSlug = args.projectSlug ?? process.env.VOID_PROJECT?.trim();
   let projectId: string | undefined;
 

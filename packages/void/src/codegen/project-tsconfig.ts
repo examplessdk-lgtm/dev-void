@@ -22,7 +22,8 @@ export type ProjectTsconfig = {
  *
  * @param hasRouteTypes - When true, include routes.d.ts. When omitted,
  *   auto-detect by checking for a routes/ directory.
- * @param hasDrizzle - When true, configure `@schema` paths for the user's
+ * @param hasDb - When true, include db.d.ts and redirect `void/db` to it.
+ * @param hasSchema - When true, configure `@schema` paths for the user's
  *   Drizzle schema.
  */
 export function createProjectTsconfig(

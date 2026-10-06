@@ -13,8 +13,7 @@ import {
   type TestEnv,
 } from './helpers.ts';
 
-// Reusable DO namespace spy (from admin-builds.test.ts). Records fetched URLs
-// and returns a fixed JSON payload.
+// DO namespace spy: records fetched URLs and returns a fixed JSON payload.
 function spyNamespace(payload: unknown): { ns: DurableObjectNamespace; calls: Array<string> } {
   const calls: Array<string> = [];
   const ns = {

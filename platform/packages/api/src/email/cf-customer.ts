@@ -18,8 +18,8 @@ type CfCustomerResult<T> = Readonly<{
 }>;
 
 /**
- * cfFetch with a customer credential. Same envelope handling and typed
- * error; the only addition is the FormData Content-Type carve-out above.
+ * cfFetch with a customer credential: same envelope handling and typed error,
+ * but FormData bodies keep their multipart Content-Type.
  */
 export async function cfCustomerFetch<T>(
   url: string,
@@ -147,7 +147,7 @@ export type CfCustomerClient = Readonly<{
   relayScriptExists: (accountId: string, scriptName: string) => Promise<boolean>;
   /**
    * PUT /accounts/{a}/workers/scripts/{name} as multipart FormData:
-   * a metadata part (main_module + compatibility_date + the two plain-text
+   * a metadata part (main_module + compatibility_date + the plain-text
    * vars) and one module part — the WfP upload shape from routes/deploy.ts
    * minus the dispatch namespace.
    */
@@ -189,7 +189,7 @@ export type CfCustomerClient = Readonly<{
   resetCatchAll: (zoneId: string) => Promise<void>;
   /**
    * GET /zones/{z}/email/routing — raw result. The subdomain-readiness
-   * fields are probe-pinned (probe 8), so callers parse defensively.
+   * fields are probe-pinned, so callers parse defensively.
    */
   getRoutingSettings: (zoneId: string) => Promise<unknown>;
   /** DELETE the relay script. 404 is success — the customer may have deleted it themselves. */
@@ -471,7 +471,6 @@ export function createCfCustomerClient(credential: string): CfCustomerClient {
       });
     },
 
-    // cfCustomerFetch already unwraps the envelope's `result`.
     getRoutingSettings: (zoneId) => call<unknown>(`/zones/${zoneId}/email/routing`),
 
     deleteRelayScript: async (accountId, scriptName) => {

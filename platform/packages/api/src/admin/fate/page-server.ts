@@ -317,57 +317,29 @@ async function loadPages<Item>(
     throw error;
   }
 }
-pageRegistry.set(plansSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadPlansPage),
-});
-pageRegistry.set(usersSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadUsersPage),
-});
-pageRegistry.set(projectsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadProjectsPage),
-});
-pageRegistry.set(deploymentsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadDeploymentsPage),
-});
-pageRegistry.set(userDetailSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadUserDetailPage),
-});
-pageRegistry.set(projectDetailSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadProjectDetailPage),
-});
-pageRegistry.set(deploymentDetailSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadDeploymentDetailPage),
-});
-pageRegistry.set(buildDetailSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadBuildDetailPage),
-});
-pageRegistry.set(cliVersionsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadCliVersionsPage),
-});
-pageRegistry.set(signupSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadSignupPage),
-});
-pageRegistry.set(invitationsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadInvitationsPage),
-});
-pageRegistry.set(authSettingsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadAuthSettingsPage),
-});
-pageRegistry.set(authNewSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadAuthNewPage),
-});
-pageRegistry.set(authEditSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadAuthEditPage),
-});
-pageRegistry.set(emailSettingsSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadEmailSettingsPage),
-});
-pageRegistry.set(emailProjectSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadEmailProjectPage),
-});
-pageRegistry.set(zeroTrustSource, {
-  byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loadZeroTrustPage),
-});
+function registerPage(
+  source: SourceDefinition,
+  loader: (context: AdminContext, path: string) => Promise<Record<string, unknown>>,
+) {
+  pageRegistry.set(source, { byIds: async ({ ctx, ids }) => loadPages(ctx, ids, loader) });
+}
+registerPage(plansSource, loadPlansPage);
+registerPage(usersSource, loadUsersPage);
+registerPage(projectsSource, loadProjectsPage);
+registerPage(deploymentsSource, loadDeploymentsPage);
+registerPage(userDetailSource, loadUserDetailPage);
+registerPage(projectDetailSource, loadProjectDetailPage);
+registerPage(deploymentDetailSource, loadDeploymentDetailPage);
+registerPage(buildDetailSource, loadBuildDetailPage);
+registerPage(cliVersionsSource, loadCliVersionsPage);
+registerPage(signupSource, loadSignupPage);
+registerPage(invitationsSource, loadInvitationsPage);
+registerPage(authSettingsSource, loadAuthSettingsPage);
+registerPage(authNewSource, loadAuthNewPage);
+registerPage(authEditSource, loadAuthEditPage);
+registerPage(emailSettingsSource, loadEmailSettingsPage);
+registerPage(emailProjectSource, loadEmailProjectPage);
+registerPage(zeroTrustSource, loadZeroTrustPage);
 
 function pagePath(input: { args?: Record<string, unknown> }) {
   const path = input.args?.path;
@@ -397,311 +369,43 @@ export const PageRoot = {
   zeroTrust: zeroTrustDataView,
 };
 
+function pageQuery(source: SourceDefinition) {
+  return {
+    resolve: ({
+      ctx,
+      input,
+      select,
+    }: {
+      ctx: AdminContext;
+      input: { args?: Record<string, unknown> };
+      select: Array<string>;
+    }) =>
+      resolveSourceById({
+        ctx,
+        id: pagePath(input),
+        input: { select },
+        registry: pageRegistry,
+        source,
+      }),
+  };
+}
+
 export const pageQueries = {
-  plans: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: plansSource,
-      }),
-  },
-  usersPage: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: usersSource,
-      }),
-  },
-  projectsPage: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: projectsSource,
-      }),
-  },
-  deploymentsPage: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: deploymentsSource,
-      }),
-  },
-  userDetail: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: userDetailSource,
-      }),
-  },
-  projectDetail: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: projectDetailSource,
-      }),
-  },
-  deploymentDetail: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: deploymentDetailSource,
-      }),
-  },
-  buildDetail: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: buildDetailSource,
-      }),
-  },
-  cliVersions: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: cliVersionsSource,
-      }),
-  },
-  signupControl: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: signupSource,
-      }),
-  },
-  invitations: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: invitationsSource,
-      }),
-  },
-  authSettings: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: authSettingsSource,
-      }),
-  },
-  authNew: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: authNewSource,
-      }),
-  },
-  authEdit: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: authEditSource,
-      }),
-  },
-  emailSettings: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: emailSettingsSource,
-      }),
-  },
-  emailProject: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: emailProjectSource,
-      }),
-  },
-  zeroTrust: {
-    resolve: ({
-      ctx,
-      input,
-      select,
-    }: {
-      ctx: AdminContext;
-      input: { args?: Record<string, unknown> };
-      select: Array<string>;
-    }) =>
-      resolveSourceById({
-        ctx,
-        id: pagePath(input),
-        input: { select },
-        registry: pageRegistry,
-        source: zeroTrustSource,
-      }),
-  },
+  plans: pageQuery(plansSource),
+  usersPage: pageQuery(usersSource),
+  projectsPage: pageQuery(projectsSource),
+  deploymentsPage: pageQuery(deploymentsSource),
+  userDetail: pageQuery(userDetailSource),
+  projectDetail: pageQuery(projectDetailSource),
+  deploymentDetail: pageQuery(deploymentDetailSource),
+  buildDetail: pageQuery(buildDetailSource),
+  cliVersions: pageQuery(cliVersionsSource),
+  signupControl: pageQuery(signupSource),
+  invitations: pageQuery(invitationsSource),
+  authSettings: pageQuery(authSettingsSource),
+  authNew: pageQuery(authNewSource),
+  authEdit: pageQuery(authEditSource),
+  emailSettings: pageQuery(emailSettingsSource),
+  emailProject: pageQuery(emailProjectSource),
+  zeroTrust: pageQuery(zeroTrustSource),
 };

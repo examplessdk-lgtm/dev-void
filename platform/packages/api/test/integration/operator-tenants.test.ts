@@ -102,10 +102,9 @@ function req(
   );
 }
 
-function captureUsageCounter(
-  calls: Array<{ ownerId: string; path: string; body: Record<string, unknown> }>,
-  failPath?: string,
-) {
+type CounterCall = { ownerId: string; path: string; body: Record<string, unknown> };
+
+function captureUsageCounter(calls: Array<CounterCall>, failPath?: string) {
   return {
     idFromName: (name: string) => name,
     get: (ownerId: string) => ({
@@ -193,14 +192,13 @@ describe('operator tenant reads', () => {
     const formerOwner = await createTestUser(env.db, 'operator-usage-former');
     const currentOwner = await createTestUser(env.db, 'operator-usage-current');
     const project = await createTestProject(env.db, currentOwner.id, 'operator-usage-project');
-    // Both ownership intervals must fall inside the billing period anchored on
-    // the 1st, so pin the clock mid-month instead of relying on today's date.
+    // Pin the clock and anchor both billing cycles at the first interval so
+    // both ownership intervals fall inside the current billing period.
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
     const ownedFrom = new Date(Date.now() - 5 * 24 * 60 * 60 * 1_000);
     const transferredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000);
     transferredAt.setMilliseconds(500);
-    // Keep both ownership intervals in this billing cycle across month boundaries.
     await env.db
       .update(users)
       .set({ billing_cycle_start: ownedFrom.toISOString() })
@@ -446,11 +444,7 @@ describe('operator tenant mutations', () => {
       project.slug,
       JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
     );
-    const counterCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const counterCalls: Array<CounterCall> = [];
     const USAGE_COUNTER = captureUsageCounter(counterCalls);
 
     const response = await req(
@@ -557,11 +551,7 @@ describe('operator tenant mutations', () => {
       JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
     );
 
-    const transferCounterCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const transferCounterCalls: Array<CounterCall> = [];
     const pausingCounter = (
       detachStarted: ReturnType<typeof deferred>,
       resumeTransfer: ReturnType<typeof deferred>,
@@ -592,11 +582,7 @@ describe('operator tenant mutations', () => {
     );
     await detachStarted.promise;
 
-    const planCounterCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const planCounterCalls: Array<CounterCall> = [];
     const planChange = await req(
       `/users/${target.id}/plan`,
       { plan: 'pro' },
@@ -775,11 +761,7 @@ describe('operator tenant mutations', () => {
       .update(deployments)
       .set({ manifest: JSON.stringify({ sandbox: { runtime: { protocol: 1 } } }) })
       .where(eq(deployments.id, deployment.id));
-    const counterCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const counterCalls: Array<CounterCall> = [];
     const USAGE_COUNTER = captureUsageCounter(counterCalls);
 
     const blocked = await req(
@@ -837,11 +819,7 @@ describe('operator tenant mutations', () => {
       project.slug,
       JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
     );
-    const failedCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const failedCalls: Array<CounterCall> = [];
     const failed = await req(
       `/projects/${project.id}/owner`,
       { userId: target.id },
@@ -894,11 +872,7 @@ describe('operator tenant mutations', () => {
       changed: false,
     });
 
-    const retryCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const retryCalls: Array<CounterCall> = [];
     const retry = await req(
       `/projects/${project.id}/owner`,
       { userId: target.id },
@@ -925,11 +899,7 @@ describe('operator tenant mutations', () => {
       project.slug,
       JSON.stringify({ workerName: 'worker', projectId: project.id, userId: owner.id }),
     );
-    const counterCalls: Array<{
-      ownerId: string;
-      path: string;
-      body: Record<string, unknown>;
-    }> = [];
+    const counterCalls: Array<CounterCall> = [];
     const failingRouting = {
       get: (key: string) => env.ROUTING.get(key),
       put: async () => {
@@ -1071,7 +1041,7 @@ describe('operator tenant mutations', () => {
         suspended: 'requests_exceeded',
       }),
     );
-    const calls: Array<{ ownerId: string; path: string; body: Record<string, unknown> }> = [];
+    const calls: Array<CounterCall> = [];
     const response = await req(
       `/users/${user.id}/plan`,
       { plan: 'pro' },

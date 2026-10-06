@@ -13,7 +13,7 @@ export type AssetRoutingInputs = {
   authEnabled?: boolean;
   liveEnabled?: boolean;
   /**
-   * `routing.notFound` from void.json. Overrides the INFERRED
+   * `routing.notFound` from the Void config. Overrides the INFERRED
    * `not_found_handling`. `run_worker_first`, `workerFirst` and
    * `apiWorkerFirst` are untouched, so which layer sees a request first never
    * changes. `workerSpaFallback` DOES follow it — see below.
@@ -94,21 +94,12 @@ export function resolveAssetRoutingPolicy(inputs: AssetRoutingInputs): AssetRout
     assetConfig,
     apiWorkerFirst,
     workerFirst,
-    // The worker-side SPA fallback exists to REPLACE the SPA behavior the
-    // INFERRED config gives up on this shape: `workerFirst` infers
-    // `not_found_handling: 'none'`, so `env.ASSETS.fetch()` hands back a bare
-    // 404 for an unmatched navigation and the worker has to hardcode
-    // `/index.html` at status 200 itself.
-    //
-    // `run_worker_first: ['/**']` is NOT what disables the platform switch — it
-    // only decides who sees the request FIRST. It skips the pre-worker asset
-    // layer, but `not_found_handling` still applies inside `env.ASSETS.fetch()`.
-    //
-    // So an explicit `notFound` that asks for anything else must turn the
-    // fallback off, or the generated helper answers the unmatched navigation
-    // with the shell before `not_found_handling` is ever consulted and the
-    // override is inert. `single-page-application` keeps it (that is what it
-    // asks for); `undefined` keeps the inferred behavior.
+    // The worker-side SPA fallback replaces the SPA behavior the inferred
+    // `workerFirst` config gives up (`not_found_handling: 'none'` makes
+    // `env.ASSETS.fetch()` return a bare 404 for an unmatched navigation).
+    // `not_found_handling` still applies inside `env.ASSETS.fetch()`, so an
+    // explicit `notFound` other than `single-page-application` must turn the
+    // fallback off, or the shell would answer before that setting is consulted.
     workerSpaFallback:
       workerFirst &&
       !inputs.isSsr &&

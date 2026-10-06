@@ -18,8 +18,9 @@ routes/api/
   health.ts                 # Health check endpoint (GET /api/health)
 middleware/
   01.shared.ts              # Sets shared context data (appName)
-migrations/
-  0000_create_users.sql      # Users table schema
+db/
+  schema.ts                 # Drizzle schema
+  migrations/               # Users table schema
 ```
 
 ## Features

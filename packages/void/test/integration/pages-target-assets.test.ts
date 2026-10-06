@@ -5,6 +5,7 @@ import spawn from 'cross-spawn';
 import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
+  collectServerOutput,
   createIsolatedPlayground,
   getPort,
   killChild,
@@ -48,7 +49,6 @@ for (const { target, command, args } of targets) {
     let playground: IsolatedPlayground;
     let base: string;
     let child: ReturnType<typeof spawn>;
-    let errors = '';
 
     beforeAll(async () => {
       // Keep the copy on the same drive as the installed dependency links.
@@ -81,14 +81,10 @@ export default function Home() {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, PORT: String(port) },
       });
-      child.stderr!.on('data', (chunk) => {
-        errors += String(chunk);
+      await waitForServer(base, 20_000, {
+        isAlive: () => child.exitCode === null,
+        diagnostics: collectServerOutput(child),
       });
-      try {
-        await waitForServer(base, 20_000, { isAlive: () => child.exitCode === null });
-      } catch (error) {
-        throw new Error(`${String(error)}\n${errors}`);
-      }
     });
 
     afterAll(async () => {

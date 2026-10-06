@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
-  cloudflareAuthCommandEnvironment,
   cloudflareAuthEnvironment,
   ensureCloudflareAuthentication,
   parseCloudflareAuthSession,
@@ -107,23 +106,12 @@ describe('Cloudflare authentication', () => {
     ).toEqual({ PATH: '/bin', CLOUDFLARE_AUTH_USE_KEYRING: 'true' });
   });
 
-  it('uses the same safe environment for all cf auth commands', () => {
-    expect(cloudflareAuthCommandEnvironment({ type: 'auth.login' }, { PATH: '/bin' })).toEqual({
-      PATH: '/bin',
-      CLOUDFLARE_AUTH_USE_KEYRING: 'true',
-    });
-    expect(cloudflareAuthCommandEnvironment({ type: 'auth.whoami' }, { PATH: '/bin' })).toEqual({
-      PATH: '/bin',
-      CLOUDFLARE_AUTH_USE_KEYRING: 'true',
-    });
+  it('pins the encrypted cf store over any keyring override spelling', () => {
     expect(
-      cloudflareAuthCommandEnvironment(
-        { type: 'auth.login' },
-        {
-          PATH: '/bin',
-          cloudflare_auth_use_keyring: 'false',
-        },
-      ),
+      cloudflareAuthEnvironment({
+        PATH: '/bin',
+        cloudflare_auth_use_keyring: 'false',
+      }),
     ).toEqual({ PATH: '/bin', CLOUDFLARE_AUTH_USE_KEYRING: 'true' });
   });
 });

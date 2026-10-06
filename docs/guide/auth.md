@@ -92,7 +92,7 @@ Email/password is enabled by default. To add social providers:
 }
 ```
 
-Use `auth.providers` when you want to enable social providers explicitly. Provider credentials come from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`.
+Provider credentials come from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`.
 
 See the full provider list in the [config reference](../reference/config.md#auth).
 

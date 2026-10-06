@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { getContentType } from '@void/edge';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
 import { extname, join, relative } from 'pathslash';
@@ -148,6 +149,10 @@ export function resolveSpaFallbackChain(
   };
 }
 
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
 const PROGRESS_CHUNK = 50;
 
 /**
@@ -184,62 +189,15 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
 }
 
 /**
- * Map of common asset file extensions → content type. Mirrors
- * `packages/dispatch/src/static.ts`'s MIME_TYPES table so the value the CLI
- * declares for the R2 PUT signature matches what dispatch will serve later
- * (dispatch reads `obj.httpMetadata?.contentType` first, falling back to
- * path-based inference). Keeping the tables aligned avoids a needless
- * mismatch where R2-stored content-type and serve-time content-type
- * disagree on the same asset.
- */
-const ASSET_MIME_TYPES: Record<string, string> = {
-  html: 'text/html; charset=utf-8',
-  htm: 'text/html; charset=utf-8',
-  css: 'text/css; charset=utf-8',
-  js: 'text/javascript; charset=utf-8',
-  mjs: 'text/javascript; charset=utf-8',
-  json: 'application/json; charset=utf-8',
-  xml: 'application/xml; charset=utf-8',
-  svg: 'image/svg+xml; charset=utf-8',
-  txt: 'text/plain; charset=utf-8',
-  csv: 'text/csv; charset=utf-8',
-  md: 'text/markdown; charset=utf-8',
-  markdown: 'text/markdown; charset=utf-8',
-  yaml: 'text/yaml; charset=utf-8',
-  yml: 'text/yaml; charset=utf-8',
-  toml: 'application/toml',
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  ico: 'image/x-icon',
-  webp: 'image/webp',
-  avif: 'image/avif',
-  woff: 'font/woff',
-  woff2: 'font/woff2',
-  ttf: 'font/ttf',
-  otf: 'font/otf',
-  eot: 'application/vnd.ms-fontobject',
-  pdf: 'application/pdf',
-  wasm: 'application/wasm',
-  webmanifest: 'application/manifest+json; charset=utf-8',
-  map: 'application/json; charset=utf-8',
-  mp4: 'video/mp4',
-  webm: 'video/webm',
-  mp3: 'audio/mpeg',
-  ogg: 'audio/ogg',
-};
-
-/**
  * Resolve the content-type to declare on a direct-to-R2 PUT for `path`.
  * The value is part of the signed Content-Type header on the presigned
  * URL — if the bytes are uploaded with a different content-type, R2
- * rejects the PUT (signature mismatch). Defaults to
+ * rejects the PUT (signature mismatch). Uses the same table dispatch serves
+ * assets with, so R2-stored and serve-time content types agree. Defaults to
  * `application/octet-stream` for unknown extensions.
  */
 export function getAssetContentType(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
-  return ASSET_MIME_TYPES[ext] ?? 'application/octet-stream';
+  return getContentType(path);
 }
 
 /**
@@ -336,18 +294,6 @@ function checkWorkerJsAsset(relativePath: string, assetsIgnoreFilePresent: boole
 }
 
 /**
- * Asset manifest entry — v2 shape. Carries both hashes:
- *   - `blake3`: 32 hex chars; the canonical content-addressed storage key
- *     (`assets/${projectId}/${blake3}`). Compatible with Cloudflare's
- *     Workers Static Assets upload API.
- *   - `md5`: 32 hex chars; the wire-level upload-integrity primitive used
- *     by R2's `Content-MD5` (RFC 1864) enforcement on direct PUTs.
- *
- * The `hash` field is a deprecated v1 alias kept equal to `blake3` so
- * existing CLI/test code that reads `entry.hash` keeps working for one
- * release. Remove in a follow-up PR after consumers migrate to `blake3`.
- */
-/**
  * Collect all files in a directory, compute hashes, and return both the
  * manifest (for preflight) and the raw file map (for selective packaging).
  *
@@ -375,10 +321,8 @@ export async function collectAndHashAssets(
     for (const filePath of files) {
       processed++;
       await tickProgress(processed, files.length, onProgress, 'Hashing assets');
+      // `collectAssetFiles` already skipped ignored paths.
       const relativePath = '/' + toSlash(relative(dir, filePath));
-      if (isIgnored(relativePath)) {
-        continue;
-      }
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       // Single disk read per file; both hashes are derived from the same buffer.
       const content = readFileSync(filePath);
@@ -387,9 +331,7 @@ export async function collectAndHashAssets(
         blake3,
         md5,
         size: content.length,
-        // Deprecated v1 alias — kept equal to blake3 for one release so any
-        // consumer still reading `entry.hash` keeps working. Remove in a
-        // follow-up PR.
+        // Deprecated v1 alias of `blake3` for consumers still reading `entry.hash`.
         hash: blake3,
       };
       assetFiles.set(relativePath, content);
@@ -397,11 +339,10 @@ export async function collectAndHashAssets(
   } catch (err) {
     // Only swallow directory-not-found errors; re-throw everything else
     // (e.g. _worker.js safety guard)
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-      // Directory doesn't exist — no assets
-    } else {
+    if (!isNotFoundError(err)) {
       throw err;
     }
+    // Directory doesn't exist — no assets
   }
 
   return { assetManifest, assetFiles };
@@ -497,6 +438,54 @@ export function detectNonSpaFallbackWarning(
   );
 }
 
+/** Add the database, KV, R2, and AI bindings shared by Void and framework manifests. */
+function applyResourceBindings(
+  manifest: DeployManifest,
+  bindings: InferredBindings,
+  migrationCount: number,
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
+  bindingNames: PackageOptions['bindingNames'],
+): void {
+  if (needsApplicationDatabase(bindings, migrationCount)) {
+    if (dialect !== 'sqlite') {
+      manifest.bindings.hyperdrive = ['HYPERDRIVE'];
+    } else {
+      manifest.bindings.d1 = [bindingNames?.d1 ?? 'DB'];
+    }
+  }
+  if (bindings.needsKV) {
+    manifest.bindings.kv = [bindingNames?.kv ?? 'KV'];
+  }
+  if (bindings.needsR2) {
+    manifest.bindings.r2 = [bindingNames?.r2 ?? 'STORAGE'];
+  }
+  if (bindings.needsAI) {
+    manifest.bindings.ai = true;
+  }
+}
+
+/** Describe bundled migrations; SQLite migrations also carry their plan bundle. */
+function toMigrationsManifest(
+  migrations: Array<MigrationFile>,
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
+): NonNullable<DeployManifest['migrations']> {
+  const planBundle = dialect === 'sqlite' ? buildMigrationPlanBundle(migrations) : undefined;
+  return {
+    dialect,
+    ...(planBundle
+      ? {
+          classifierVersion: planBundle.classifierVersion,
+          migrationListHash: planBundle.migrationListHash,
+          protocolVersion: planBundle.protocolVersion,
+          stability: planBundle.plans.some((plan) => plan.stability === 'legacy')
+            ? 'legacy'
+            : 'stable',
+        }
+      : {}),
+    pending: migrations.length,
+  };
+}
+
 /**
  * Build a Void-app deploy manifest from the inferred bindings + per-feature
  * inputs. Pure shape transformation: reads no files, has no I/O.
@@ -557,22 +546,13 @@ export function buildVoidManifest(opts: {
   if (bindings.needsAuth) {
     manifest.auth = true;
   }
-  if (needsApplicationDatabase(bindings, migrations?.length ?? 0)) {
-    if (resolvedDialect !== 'sqlite') {
-      manifest.bindings.hyperdrive = ['HYPERDRIVE'];
-    } else {
-      manifest.bindings.d1 = [options?.bindingNames?.d1 ?? 'DB'];
-    }
-  }
-  if (bindings.needsKV) {
-    manifest.bindings.kv = [options?.bindingNames?.kv ?? 'KV'];
-  }
-  if (bindings.needsR2) {
-    manifest.bindings.r2 = [options?.bindingNames?.r2 ?? 'STORAGE'];
-  }
-  if (bindings.needsAI) {
-    manifest.bindings.ai = true;
-  }
+  applyResourceBindings(
+    manifest,
+    bindings,
+    migrations?.length ?? 0,
+    resolvedDialect,
+    options?.bindingNames,
+  );
   if (bindings.needsSandbox) {
     if (!options?.sandbox) {
       throw new Error('deploy: Sandbox bindings require sandbox package options.');
@@ -587,22 +567,7 @@ export function buildVoidManifest(opts: {
   }
 
   if (migrations && migrations.length > 0) {
-    const planBundle =
-      resolvedDialect === 'sqlite' ? buildMigrationPlanBundle(migrations) : undefined;
-    manifest.migrations = {
-      dialect: resolvedDialect,
-      ...(planBundle
-        ? {
-            classifierVersion: planBundle.classifierVersion,
-            migrationListHash: planBundle.migrationListHash,
-            protocolVersion: planBundle.protocolVersion,
-            stability: planBundle.plans.some((plan) => plan.stability === 'legacy')
-              ? 'legacy'
-              : 'stable',
-          }
-        : {}),
-      pending: migrations.length,
-    };
+    manifest.migrations = toMigrationsManifest(migrations, resolvedDialect);
   }
 
   if (schedules && schedules.length > 0) {
@@ -651,10 +616,6 @@ export function buildVoidManifest(opts: {
   // platform-level SPA switch and append a synthetic catch-all rule so user
   // fallbacks are evaluated first and the SPA default only fires when none
   // matched.
-  //
-  // The non-SPA-fallbacks mismatch warning that used to live here moved to
-  // the callers (see `detectNonSpaFallbackWarning`); this function stays
-  // I/O-free per its documented contract.
   let resolvedAssetConfig = assetConfig;
   let resolvedFallbackRules = fallbackRules;
   if (assetConfig?.not_found_handling === 'single-page-application') {
@@ -721,7 +682,7 @@ export function collectWorkerFiles(workerDir: string): Map<string, Buffer> {
   try {
     workerPaths = collectFiles(workerDir);
   } catch (err) {
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (isNotFoundError(err)) {
       return out;
     }
     throw err;
@@ -809,42 +770,19 @@ export function buildFrameworkManifest(opts: {
   const dialect = opts.dialect ?? 'sqlite';
 
   const manifest: DeployManifest = { version: 3, assetManifestVersion: 2, bindings: {} };
-  if (needsApplicationDatabase(opts.bindings, opts.migrations?.length ?? 0)) {
-    if (dialect !== 'sqlite') {
-      manifest.bindings.hyperdrive = ['HYPERDRIVE'];
-    } else {
-      manifest.bindings.d1 = [po?.bindingNames?.d1 ?? 'DB'];
-    }
-  }
-  if (opts.bindings.needsKV) {
-    manifest.bindings.kv = [po?.bindingNames?.kv ?? 'KV'];
-  }
-  if (opts.bindings.needsR2) {
-    manifest.bindings.r2 = [po?.bindingNames?.r2 ?? 'STORAGE'];
-  }
-  if (opts.bindings.needsAI) {
-    manifest.bindings.ai = true;
-  }
+  applyResourceBindings(
+    manifest,
+    opts.bindings,
+    opts.migrations?.length ?? 0,
+    dialect,
+    po?.bindingNames,
+  );
   if (opts.bindings.needsLive) {
     throw new Error(FRAMEWORK_LIVE_UNSUPPORTED_MESSAGE);
   }
 
   if (opts.migrations && opts.migrations.length > 0) {
-    const planBundle = dialect === 'sqlite' ? buildMigrationPlanBundle(opts.migrations) : undefined;
-    manifest.migrations = {
-      dialect,
-      ...(planBundle
-        ? {
-            classifierVersion: planBundle.classifierVersion,
-            migrationListHash: planBundle.migrationListHash,
-            protocolVersion: planBundle.protocolVersion,
-            stability: planBundle.plans.some((plan) => plan.stability === 'legacy')
-              ? 'legacy'
-              : 'stable',
-          }
-        : {}),
-      pending: opts.migrations.length,
-    };
+    manifest.migrations = toMigrationsManifest(opts.migrations, dialect);
   }
 
   if (opts.schedules && opts.schedules.length > 0) {

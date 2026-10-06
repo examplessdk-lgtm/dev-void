@@ -17,32 +17,28 @@ function usableToken(token: string): boolean {
   }
 }
 
-function rememberOriginToken(origin: string, token: string): void {
-  let entries: Record<string, unknown> = {};
-  if (process.env.VOID_ACCESS_CREDENTIALS) {
-    const parsed = JSON.parse(process.env.VOID_ACCESS_CREDENTIALS) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(
-        'platform: VOID_ACCESS_CREDENTIALS must contain an origin-keyed JSON object.',
-      );
-    }
-    entries = parsed as Record<string, unknown>;
+function readOriginCredentials(raw: string): Record<string, unknown> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('platform: VOID_ACCESS_CREDENTIALS must contain an origin-keyed JSON object.');
   }
+  return parsed as Record<string, unknown>;
+}
+
+function rememberOriginToken(origin: string, token: string): void {
+  const raw = process.env.VOID_ACCESS_CREDENTIALS;
   process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-    ...entries,
+    ...(raw ? readOriginCredentials(raw) : {}),
     [origin]: { CF_ACCESS_TOKEN: token },
   });
 }
 
 function forgetOriginToken(origin: string): void {
-  if (!process.env.VOID_ACCESS_CREDENTIALS) {
+  const raw = process.env.VOID_ACCESS_CREDENTIALS;
+  if (!raw) {
     return;
   }
-  const parsed = JSON.parse(process.env.VOID_ACCESS_CREDENTIALS) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('platform: VOID_ACCESS_CREDENTIALS must contain an origin-keyed JSON object.');
-  }
-  const entries = { ...(parsed as Record<string, unknown>) };
+  const entries = { ...readOriginCredentials(raw) };
   delete entries[origin];
   process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify(entries);
 }

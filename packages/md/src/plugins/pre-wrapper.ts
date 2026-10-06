@@ -10,7 +10,7 @@ type FenceRender = (
   self: Renderer,
 ) => string | Promise<string>;
 
-export function extractLang(info: string): string {
+function extractLang(info: string): string {
   return (
     /^[a-zA-Z0-9-_]+/
       .exec(info)?.[0]

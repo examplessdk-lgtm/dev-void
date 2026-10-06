@@ -94,26 +94,10 @@ export function stubCustomerCf(
   const routingRuleStates = new Map<string, Map<string, Record<string, unknown>>>();
   const rulesFor = (zoneId: string) => {
     if (!routingRuleStates.has(zoneId)) {
-      routingRuleStates.set(
-        zoneId,
-        new Map(
-          (config.routingRules ?? []).map((rule, index) => {
-            const id = rule.id ?? `foreign-rule-${index}`;
-            return [
-              id,
-              {
-                id,
-                name: rule.name ?? null,
-                enabled: rule.enabled,
-                matchers: rule.addresses.map((value) => ({ type: 'literal', field: 'to', value })),
-                actions: [{ type: 'worker', value: [rule.workerName ?? 'foreign-ingress'] }],
-              },
-            ];
-          }),
-        ),
-      );
+      routingRuleStates.set(zoneId, new Map());
     }
-    // Status tests may introduce a foreign rule after setup to model drift.
+    // Seeds configured rules on first access; status tests may also add a
+    // foreign rule after setup to model drift.
     for (const [index, rule] of (config.routingRules ?? []).entries()) {
       const id = rule.id ?? `foreign-rule-${index}`;
       if (!routingRuleStates.get(zoneId)!.has(id)) {
@@ -498,14 +482,6 @@ export function stubCustomerCf(
 
 export function callsByTag(calls: Array<RecordedCall>, tag: StubFailTag): Array<RecordedCall> {
   return calls.filter((call) => call.tag === tag);
-}
-
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function tags(calls: Array<RecordedCall>): Array<StubFailTag> {
-  return calls.map((call) => call.tag);
 }
 
 async function sha256Hex(value: string): Promise<string> {

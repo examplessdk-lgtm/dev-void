@@ -11,7 +11,7 @@ import {
 } from '@astryxdesign/core/Table';
 import { useRequest, useView } from 'react-fate';
 import { UserDetailView, userDetailRequest } from '../../fate/views.ts';
-import { useDetailTitle, type AdminPageProps } from '../page-utils.ts';
+import { type AdminPageProps } from '../page-utils.ts';
 import {
   formatLimit,
   formatNumber,
@@ -31,7 +31,6 @@ export function UserDetailPage({ path, platformName, username }: AdminPageProps)
     throw new Error('User data is unavailable.');
   }
   const { user, projects, deploysToday, usage, tz, plans, limits } = pageData;
-  useDetailTitle(pageData.user.login, platformName);
 
   return (
     <Layout platformName={platformName} title={user.login} username={username}>

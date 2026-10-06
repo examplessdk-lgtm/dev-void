@@ -38,6 +38,13 @@ export type MarkdownOptions = Readonly<{
   shiki?: CompileOptions['shiki'];
 }>;
 
+function stripPageSuffix(file: string): string {
+  return file
+    .replace(/\.md$/, '')
+    .replace(/\/index$/, '')
+    .replace(/^index$/, '');
+}
+
 function hasMdFilesWithScript(dir: string): boolean {
   try {
     for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
@@ -100,24 +107,15 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
         const { body, clientCode } = extractScript(content);
         const result = extractMetadata(body);
 
-        const componentId =
-          file
-            .replace(/\.md$/, '')
-            .replace(/\/index$/, '')
-            .replace(/^index$/, '') || 'index';
+        const routeName = stripPageSuffix(file);
+        const componentId = routeName || 'index';
 
         if (clientCode) {
           clientScripts.set(componentId, clientCode);
         }
 
-        const routePath =
-          '/' +
-          file
-            .replace(/\.md$/, '')
-            .replace(/\/index$/, '')
-            .replace(/^index$/, '');
         return {
-          path: routePath || '/',
+          path: '/' + routeName,
           title: result.title,
           frontmatter: result.frontmatter,
           headings: result.headings,
@@ -142,9 +140,6 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
         clientEntryId: MD_CLIENT_ENTRY_ID,
         getClientScripts(): Map<string, string> {
           return clientScripts;
-        },
-        getClientScriptIds(): Set<string> {
-          return new Set(clientScripts.keys());
         },
       },
 
@@ -328,8 +323,7 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
 
           const pagesPrefix = pagesDir + '/';
           if (_id.startsWith(pagesPrefix) && clientCode) {
-            const rel = _id.slice(pagesPrefix.length).replace(/\.md$/, '');
-            const componentId = rel.replace(/\/index$/, '').replace(/^index$/, '') || 'index';
+            const componentId = stripPageSuffix(_id.slice(pagesPrefix.length)) || 'index';
             clientScripts.set(componentId, clientCode);
           }
           for (const imp of islandImports) {

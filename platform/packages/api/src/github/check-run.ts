@@ -15,12 +15,6 @@ import { GITHUB_API_BASE, GITHUB_API_VERSION, getInstallationToken } from './ins
  * executor-agnostic (plain args only) so both build executors can call it.
  */
 
-/**
- * A completed check-run's terminal conclusion. The container path uses
- * success/failure/cancelled; the github_actions path additionally maps GitHub's
- * `workflow_run.conclusion === 'timed_out'` faithfully. All four are valid
- * GitHub Checks conclusions.
- */
 // GitHub's full terminal set. The container path uses success/failure/cancelled
 // and the Actions path maps `workflow_run.conclusion === 'timed_out'` faithfully.
 //
@@ -82,8 +76,7 @@ export const VOID_BUILD_CHECK_RUN_NAME = 'Void Build';
 
 // Same retry shape as `getBranchHeadComparisonStatus` (compare): up to 2 extra
 // attempts with a short fixed delay on transient 5xx/network/token-mint. A 4xx
-// is definitive and returns immediately. Named for check-runs rather than
-// "compare" — same values (2 / 250).
+// is definitive and returns immediately.
 const CHECK_RUN_RETRY_ATTEMPTS = 2;
 const CHECK_RUN_RETRY_DELAY_MS = 250;
 
@@ -105,7 +98,7 @@ function errInfo(err: unknown): { name?: string; message: string } {
 }
 
 // area:'github' distinguishes from the deploy-pipeline logger (area:'deploy').
-// Mirrors the Feature-A warn shape; `phase` differentiates create vs complete.
+// `phase` differentiates create vs complete.
 function logFailure(
   phase: 'check-run-create' | 'check-run-complete',
   reason: FailureReason,
@@ -211,10 +204,7 @@ export async function createCheckRun(
         }
         return String(data.id);
       }
-      // Non-success: return null WITHOUT retrying the POST (it is not idempotent —
-      // see the function doc). 4xx is definitive (no access / bad ref); a 5xx or
-      // network failure is AMBIGUOUS (the run may have been created), so a retry
-      // risks a duplicate. Either way the create is single-shot.
+      // Never retry the POST (not idempotent — see the function doc).
       const errBody = (await res.text().catch(() => '<unreadable>')).slice(0, 500);
       logFailure('check-run-create', res.status < 500 ? 'http-4xx' : 'http-5xx', {
         installationId,
@@ -227,8 +217,6 @@ export async function createCheckRun(
       });
       return null;
     } catch (err) {
-      // Network failure on the POST is ambiguous (the run may have been created) —
-      // do NOT retry (would risk a duplicate). Single-shot create.
       logFailure('check-run-create', 'network-error', {
         installationId,
         repoFullName,
@@ -331,10 +319,9 @@ export async function completeCheckRun(
       const errBody = (await res.text().catch(() => '<unreadable>')).slice(0, 500);
       if (res.status < 500) {
         if (res.status === 422 && includeText) {
-          // GitHub 422-rejected a body carrying `output.text` — see the
-          // function doc: strip the text and retry once. `includeText` gates
-          // this to a single fire, and `attempt` is rewound so the fallback
-          // body gets a full attempt even when the 422 landed on the last one.
+          // `includeText` gates this to a single fire, and `attempt` is rewound
+          // so the fallback body gets a full attempt even when the 422 landed
+          // on the last one.
           logFailure('check-run-complete', 'text-rejected-retry', {
             installationId,
             repoFullName,

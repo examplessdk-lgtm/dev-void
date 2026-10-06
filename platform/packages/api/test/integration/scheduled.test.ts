@@ -153,7 +153,6 @@ describe('scheduled()', () => {
 
     await scheduled(mockController, makeBindings(env), mockCtx);
 
-    // Should have userId backfilled
     const routing = JSON.parse((await env.ROUTING.get(proj.slug))!);
     expect(routing.userId).toBe(id);
   });
@@ -169,7 +168,6 @@ describe('scheduled()', () => {
 
     await scheduled(mockController, makeBindings(env), mockCtx);
 
-    // Should preserve existing userId
     const routing = JSON.parse((await env.ROUTING.get(proj.slug))!);
     expect(routing.userId).toBe('existing-user-id');
   });
@@ -181,7 +179,6 @@ describe('scheduled()', () => {
       await env.ROUTING.put(proj.slug, JSON.stringify({ worker: 'test', projectId: proj.id }));
     }
 
-    // Should complete without errors across multiple batches
     await expect(scheduled(mockController, makeBindings(env), mockCtx)).resolves.toBeUndefined();
   });
 
@@ -321,8 +318,7 @@ describe('scheduled()', () => {
   // but the `started_at > maxAge` predicate does not prove the container is gone
   // (the DO may have been evicted / its alarm lost). The scheduled handler must
   // therefore best-effort issue a BuildManager cancelBuild for each reaped id so
-  // a still-alive orphan is actually stopped. This is the regression Codex asked
-  // for: the slot is not "safely reclaimed" until a stop attempt is made.
+  // a still-alive orphan is actually stopped.
   describe('stale container reaper', () => {
     function cancelSpyBindings(e: TestEnv): {
       bindings: ReturnType<typeof makeBindings>;
@@ -432,7 +428,6 @@ describe('scheduled()', () => {
   });
 
   it('isolates errors — one user failure does not block others', async () => {
-    // Create two users
     const { id: id1 } = await createTestUser(env.db, 'user1', 'github', undefined, 'free');
     const proj1 = await createTestProject(env.db, id1);
     await env.ROUTING.put(proj1.slug, JSON.stringify({ worker: 'test', projectId: proj1.id }));
@@ -476,7 +471,7 @@ describe('scheduled()', () => {
 
   // A DO mock that always reports `requestsSuspended: <latch>` on /rollover,
   // optionally also reporting a one-time rollover. Mirrors the real DO, which
-  // now returns the request latch on every response so the scheduler can
+  // returns the request latch on every response so the scheduler can
   // reconcile KV against it each pass.
   function makeRequestLatchMock(opts: {
     requestsSuspended: boolean;

@@ -13,6 +13,7 @@ import {
 } from './connection-schema.ts';
 import {
   credentialFor,
+  digest,
   EMAIL_OPERATION_RECOVERY_MIN_AGE_MS,
   EmailOperationError,
   emailInstallationId,
@@ -49,11 +50,6 @@ async function recipientConnection(db: DbOrTx, env: Bindings, row: Recipient) {
     .innerJoin(emailZoneConnections, eq(emailZoneConnections.id, emailDomainRoutes.connection_id))
     .where(eq(emailDomainRoutes.id, row.route_id))
     .limit(1);
-  const configured = env as Bindings & {
-    EMAIL_SHARED_ACCOUNT_ID?: string;
-    EMAIL_SHARED_ZONE_ID?: string;
-    EMAIL_SHARED_INGRESS_NAME?: string;
-  };
   const connection = resolved?.email_zone_connections;
   if (
     !connection ||
@@ -62,9 +58,9 @@ async function recipientConnection(db: DbOrTx, env: Bindings, row: Recipient) {
     row.installation_id !== emailInstallationId(env) ||
     connection.managed_by !== 'admin' ||
     connection.account_id !== env.CF_ACCOUNT_ID ||
-    connection.account_id !== configured.EMAIL_SHARED_ACCOUNT_ID ||
-    connection.zone_id !== configured.EMAIL_SHARED_ZONE_ID ||
-    connection.ingress_worker_name !== configured.EMAIL_SHARED_INGRESS_NAME
+    connection.account_id !== env.EMAIL_SHARED_ACCOUNT_ID ||
+    connection.zone_id !== env.EMAIL_SHARED_ZONE_ID ||
+    connection.ingress_worker_name !== env.EMAIL_SHARED_INGRESS_NAME
   ) {
     throw new EmailOperationError(
       'Shared recipient cleanup identity does not match this installation',
@@ -172,22 +168,14 @@ export async function inspectSharedEmailRecipientRecovery(
     eligibleAt,
     outcome,
   };
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(
-      JSON.stringify([
-        target,
-        row.route_id,
-        row.status,
-        row.lease_started_at,
-        project.slug,
-        project.status,
-      ]),
-    ),
-  );
-  const recoveryFence = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, '0'),
-  ).join('');
+  const recoveryFence = await digest([
+    target,
+    row.route_id,
+    row.status,
+    row.lease_started_at,
+    project.slug,
+    project.status,
+  ]);
   return { ...target, recoveryFence };
 }
 
@@ -296,17 +284,12 @@ async function sharedRoute(db: Db, env: Bindings) {
     return null;
   }
   const connection = row.email_zone_connections;
-  const configured = env as Bindings & {
-    EMAIL_SHARED_ACCOUNT_ID?: string;
-    EMAIL_SHARED_ZONE_ID?: string;
-    EMAIL_SHARED_INGRESS_NAME?: string;
-  };
   if (
     connection.installation_id !== emailInstallationId(env) ||
     connection.account_id !== env.CF_ACCOUNT_ID ||
-    connection.account_id !== configured.EMAIL_SHARED_ACCOUNT_ID ||
-    connection.zone_id !== configured.EMAIL_SHARED_ZONE_ID ||
-    connection.ingress_worker_name !== configured.EMAIL_SHARED_INGRESS_NAME ||
+    connection.account_id !== env.EMAIL_SHARED_ACCOUNT_ID ||
+    connection.zone_id !== env.EMAIL_SHARED_ZONE_ID ||
+    connection.ingress_worker_name !== env.EMAIL_SHARED_INGRESS_NAME ||
     connection.managed_by !== 'admin'
   ) {
     throw new EmailOperationError(
@@ -346,11 +329,7 @@ function ruleConflicts(rule: CfEmailRoutingRule, recipient: string) {
 }
 
 async function ownershipName(installation: string, projectId: string, recipient: string) {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(JSON.stringify([installation, projectId, recipient])),
-  );
-  return `void-shared-${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  return `void-shared-${await digest([installation, projectId, recipient])}`;
 }
 
 function failureReason(error: unknown) {
@@ -369,6 +348,15 @@ function failureReason(error: unknown) {
   return 'Cloudflare shared recipient routing could not be verified; retry reconciliation';
 }
 
+function currentClaim(row: Recipient) {
+  return and(
+    eq(emailSharedRecipients.id, row.id),
+    eq(emailSharedRecipients.attempt, row.attempt),
+    eq(emailSharedRecipients.status, 'reconciling'),
+    eq(emailSharedRecipients.removing, row.removing),
+  );
+}
+
 async function finish(
   db: Db,
   row: Recipient,
@@ -377,14 +365,7 @@ async function finish(
   const rows = await db
     .update(emailSharedRecipients)
     .set({ ...values, lease_started_at: null, observed_at: sql`now()`, updated_at: sql`now()` })
-    .where(
-      and(
-        eq(emailSharedRecipients.id, row.id),
-        eq(emailSharedRecipients.attempt, row.attempt),
-        eq(emailSharedRecipients.status, 'reconciling'),
-        eq(emailSharedRecipients.removing, row.removing),
-      ),
-    )
+    .where(currentClaim(row))
     .returning({ id: emailSharedRecipients.id });
   return rows.length === 1;
 }
@@ -399,14 +380,7 @@ async function renewClaim(
   const rows = await db
     .update(emailSharedRecipients)
     .set({ ...values, lease_started_at: sql`now()`, updated_at: sql`now()` })
-    .where(
-      and(
-        eq(emailSharedRecipients.id, row.id),
-        eq(emailSharedRecipients.attempt, row.attempt),
-        eq(emailSharedRecipients.status, 'reconciling'),
-        eq(emailSharedRecipients.removing, row.removing),
-      ),
-    )
+    .where(currentClaim(row))
     .returning({ id: emailSharedRecipients.id });
   return rows.length === 1;
 }

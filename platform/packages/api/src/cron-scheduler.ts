@@ -1,12 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { CronExpressionParser } from 'cron-parser';
+import type { CronSyncState as CronState } from './cron-scheduler-client.ts';
 import type { ApiEnv } from './env.ts';
-
-type CronState = Readonly<{
-  workerName: string;
-  schedules: ReadonlyArray<{ name: string; cron: string }>;
-  proxyToken?: string;
-}>;
 
 /**
  * Convert a CF/Quartz-style cron expression to Unix-style for cron-parser.
@@ -134,8 +129,6 @@ export function chunkMessages<T>(
 
 // Every code path that calls deleteDispatchScript on a user worker MUST also
 // call clearCronScheduler / syncCronScheduler from cron-scheduler-client.ts.
-// Audited callsites: deploy.ts post-routing, deploy.ts static-supersede,
-// provisioning/cleanup.ts, routes/projects.ts rollback.
 export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
   private state: CronState | null = null;
 
@@ -191,8 +184,6 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
     const state = await this.getState();
     const alarm = await this.ctx.storage.getAlarm();
     // Omit proxyToken from status response to avoid leaking secrets.
-    // The legacy `failures` storage key (left orphaned on older DOs) is
-    // intentionally not read or returned — it has no incrementer anymore.
     const { proxyToken: _, ...safeState } = state ?? {};
     return Response.json({ state: state ? safeState : null, nextAlarm: alarm });
   }
@@ -203,7 +194,7 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
       return;
     }
 
-    // State created before the proxyToken fix lacks auth credentials.
+    // State without a proxyToken has no auth credentials.
     // Skip invocation to avoid sending unauthenticated requests — the next
     // deploy will resync state with the token.
     if (!state.proxyToken) {
@@ -238,14 +229,8 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
       return;
     }
 
-    // Hand off to the cron-fires queue. Calling `env.DISPATCH.get(...).fetch(...)`
-    // directly from inside this DO is broken: workerd dispatches such calls
-    // with the calling DO class as the entrypoint name, which user workers do
-    // not export. Every dispatched fetch arrives at the user worker with
-    // `entrypoint: "CronScheduler"` and fails with `The entrypoint name
-    // CronScheduler was not found in this worker`. The queue handler runs as
-    // a fresh fetch event with no DO context, so the dispatch resolves to the
-    // user worker's default entrypoint as expected.
+    // Hand off to the cron-fires queue: this DO cannot dispatch to the user
+    // worker directly (see `CronFireMessage`).
     // The worker fans an expression out to every matching job. Deliver the
     // expression once, even when multiple named jobs share it.
     const expressions = [...new Set(matching.map((schedule) => schedule.cron))];
@@ -254,7 +239,7 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
         workerName: state.workerName,
         cron,
         scheduledTime: now,
-        ...(state.proxyToken !== undefined && { proxyToken: state.proxyToken }),
+        proxyToken: state.proxyToken,
       },
     }));
     const chunks = chunkMessages(messages, SEND_BATCH_CHUNK_SIZE);

@@ -46,7 +46,6 @@ export function getCurrentBillingPeriodStart(billingCycleStart: string | null | 
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth();
 
-  // Try current month first
   const lastDayThisMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
   const dayThisMonth = Math.min(anchorDay, lastDayThisMonth);
   const candidate = new Date(Date.UTC(year, month, dayThisMonth));
@@ -55,7 +54,6 @@ export function getCurrentBillingPeriodStart(billingCycleStart: string | null | 
     return candidate;
   }
 
-  // Fall back to previous month
   const lastDayPrevMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const dayPrevMonth = Math.min(anchorDay, lastDayPrevMonth);
   return new Date(Date.UTC(year, month - 1, dayPrevMonth));

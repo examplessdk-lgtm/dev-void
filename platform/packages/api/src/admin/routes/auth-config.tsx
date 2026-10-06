@@ -121,16 +121,7 @@ for (const action of ['enable', 'disable', 'link'] as const) {
   });
 }
 app.post('/admission', async (context) => {
-  const form = await context.req.parseBody({ all: true });
-  const connections = Array.isArray(form.connections)
-    ? form.connections.map(String)
-    : form.connections
-      ? [String(form.connections)]
-      : [];
-  const body = {
-    revision: Number(form.revision),
-    admission: { mode: String(form.mode), connections, access: form.access === 'true' },
-  };
+  const body = admissionFormBody(await context.req.parseBody({ all: true }));
   return executeAuditedMutation(
     context,
     operatorAuditIntent('config/auth/admission', body),
@@ -140,4 +131,17 @@ app.post('/admission', async (context) => {
     },
   );
 });
+
+export function admissionFormBody(form: Record<string, string | File | Array<string | File>>) {
+  const connections = Array.isArray(form.connections)
+    ? form.connections.map(String)
+    : form.connections
+      ? [String(form.connections)]
+      : [];
+  return {
+    revision: Number(form.revision),
+    admission: { mode: String(form.mode), connections, access: form.access === 'true' },
+  };
+}
+
 export default app;

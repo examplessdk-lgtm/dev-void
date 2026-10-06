@@ -24,7 +24,7 @@ Show migration status. Displays which migrations are applied or pending locally,
 
 ## `void db reset` {#void-db-reset}
 
-Drop the local D1 database and re-apply all migrations. Does not affect the remote database.
+Drop the development database and re-apply all migrations. D1 resets the local database; PostgreSQL and MySQL drop all tables in the `DATABASE_URL` database from `.env`. Does not affect the deployed database.
 
 ## `void db seed` {#void-db-seed}
 
@@ -79,10 +79,9 @@ Open [Drizzle Studio](https://orm.drizzle.team/docs/drizzle-kit-studio) for the 
 
 By default, targets the local database. Pass `--remote` to open Studio against the deployed database:
 
-- **PostgreSQL and MySQL projects**: fetch the stored connection string from the platform and open Studio against it. If the URL isn't stored yet, run `void db set-url` first.
+- **Hosted PostgreSQL and MySQL projects**: fetch the stored connection string from the platform and open Studio against it. If the URL isn't stored yet, run `void db set-url` first.
+- **Direct Cloudflare PostgreSQL and MySQL projects**: use `DATABASE_URL` from the current shell.
 - **D1 projects**: remote Studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.
-
-On direct Cloudflare PostgreSQL/MySQL targets, remote Studio uses `DATABASE_URL` from the current shell. Direct D1 Studio remains unsupported; use `void db execute --remote`.
 
 ## `void db rename-migrations` {#void-db-rename-migrations}
 

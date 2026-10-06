@@ -34,7 +34,7 @@ import {
   type PlatformProjectZeroTrustState,
 } from './platform-zero-trust-uninstall.ts';
 
-// Migration checkpoints must likewise be visible to the outer failure handler.
+// onManifestChange keeps migration checkpoints visible to the outer failure handler.
 export async function preparePlatformDatabaseSchema(
   manifest: PlatformInstallationManifest,
   runtime: PlatformRuntimeManifest,

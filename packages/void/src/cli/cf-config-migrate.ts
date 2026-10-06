@@ -5,14 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import type { MigrationFollowUp } from '@cloudflare/codemods';
 import { InputConfigSchema } from '@cloudflare/config';
+import { isRecord } from '@void/deploy-core';
 import { dirname, join } from 'pathslash';
 
 type JsonObject = Record<string, unknown>;
 
-function record(value: unknown): JsonObject | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as JsonObject)
-    : null;
+export function record(value: unknown): JsonObject | null {
+  return isRecord(value) ? value : null;
 }
 
 function empty(value: unknown): boolean {
@@ -95,7 +94,7 @@ function applyPreservationFlags(raw: JsonObject, worker: JsonObject): void {
 }
 
 function applyWorkflows(raw: JsonObject, worker: JsonObject): void {
-  if (raw.workflows === undefined || empty(raw.workflows)) {
+  if (empty(raw.workflows)) {
     return;
   }
   if (!Array.isArray(raw.workflows)) {
@@ -444,12 +443,10 @@ export function migrateBuiltWranglerConfig(
           class_name: className,
         };
       }
+      result.containers = containers;
     }
     if (Object.keys(exports).length > 0) {
       worker.exports = exports;
-    }
-    if (containers.length > 0) {
-      result.containers = containers;
     }
     return InputConfigSchema.parse(result);
   } finally {

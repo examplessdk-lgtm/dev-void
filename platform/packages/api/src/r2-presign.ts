@@ -63,10 +63,7 @@ function r2Endpoint(accountId: string, bucket: string, key: string): string {
  * standard alphabet with padding (not the URL-safe variant).
  */
 function hexToBase64(hex: string): string {
-  // Split the validation so the error tells the caller WHICH constraint
-  // failed. The combined check used to report `got ${hex.length}` even when
-  // the string was the right length but had non-hex characters, which is
-  // misleading during CLI debugging.
+  // Separate checks so the error says which constraint failed.
   if (hex.length !== 32) {
     throw new Error(`md5 must be 32 hex characters, got ${hex.length}`);
   }
@@ -75,13 +72,9 @@ function hexToBase64(hex: string): string {
       `md5 must be 32 hex characters, got non-hex characters: ${JSON.stringify(hex)}`,
     );
   }
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i++) {
-    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
   let bin = '';
-  for (let i = 0; i < bytes.length; i++) {
-    bin += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < 32; i += 2) {
+    bin += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
   }
   return btoa(bin);
 }

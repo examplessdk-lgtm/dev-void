@@ -43,10 +43,9 @@ type InstallationTokenScope = Readonly<{
  * installation. The token authenticates API calls (and tarball downloads)
  * scoped to the installation's repositories.
  *
- * With no `opts`, mints (and caches) an INSTALLATION-WIDE token — the historical
- * behavior every existing caller relies on. With `opts`, mints a repo/permission
- * SCOPED token. Scoped tokens are NEVER cached (and never served from the bare
- * installation-id cache): the cache is keyed by installation id only, so caching
+ * With no `opts`, mints (and caches) an INSTALLATION-WIDE token. With `opts`,
+ * mints a repo/permission SCOPED token. Scoped tokens are NEVER cached (and
+ * never served from the bare installation-id cache): the cache is keyed by installation id only, so caching
  * a scoped token there — or returning the wide cached token for a scoped
  * request — would leak the wrong scope to a different repo's build. Container
  * builds are infrequent, so minting fresh each time is the simpler correct
@@ -119,28 +118,6 @@ export function generateSourceTarballUrl(repoFullName: string, sha: string): str
 
 type CompareResponse = Readonly<{ status?: string }>;
 
-/**
- * Compare a commit against a branch head via the GitHub compare API, using an
- * installation token. Returns the comparison `status` of the BRANCH HEAD
- * relative to `baseSha` ('ahead' | 'behind' | 'identical' | 'diverged'), or null
- * when freshness cannot be confirmed (transient failure after retries, or a
- * definitive 4xx such as 404). Callers fail closed on null.
- *
- * Callers proceed ONLY on 'identical' (the branch head IS `baseSha`). Every other
- * status means `baseSha` is not the current head and must not deploy:
- *   - 'ahead'    = the branch head is ahead of `baseSha`, i.e. `baseSha` is stale.
- *   - 'behind'   = the branch head is behind `baseSha`, i.e. the branch head no
- *                  longer contains `baseSha` (a backward ref move / rollback /
- *                  force-push moved the branch off it), so `baseSha` is an
- *                  abandoned commit and must be REJECTED.
- *   - 'diverged' = `baseSha` is off the branch's history (force-pushed away).
- *
- * The webhook push path is fire-and-forget — GitHub does NOT auto-redeliver — so
- * a transient null would silently drop a deploy. Retry ONLY transient failures
- * (thrown fetch error or 5xx) up to 2 extra attempts with a short fixed delay; a
- * 404/other 4xx is definitive and returns null immediately. Shared with the OIDC
- * path (which maps null → 503), which benefits from the same retry.
- */
 const COMPARE_RETRY_ATTEMPTS = 2;
 const COMPARE_RETRY_DELAY_MS = 250;
 
@@ -172,6 +149,28 @@ function logCompareFailure(
   }
 }
 
+/**
+ * Compare a commit against a branch head via the GitHub compare API, using an
+ * installation token. Returns the comparison `status` of the BRANCH HEAD
+ * relative to `baseSha` ('ahead' | 'behind' | 'identical' | 'diverged'), or null
+ * when freshness cannot be confirmed (transient failure after retries, or a
+ * definitive 4xx such as 404). Callers fail closed on null.
+ *
+ * Callers proceed ONLY on 'identical' (the branch head IS `baseSha`). Every other
+ * status means `baseSha` is not the current head and must not deploy:
+ *   - 'ahead'    = the branch head is ahead of `baseSha`, i.e. `baseSha` is stale.
+ *   - 'behind'   = the branch head is behind `baseSha`, i.e. the branch head no
+ *                  longer contains `baseSha` (a backward ref move / rollback /
+ *                  force-push moved the branch off it), so `baseSha` is an
+ *                  abandoned commit and must be REJECTED.
+ *   - 'diverged' = `baseSha` is off the branch's history (force-pushed away).
+ *
+ * The webhook push path is fire-and-forget — GitHub does NOT auto-redeliver — so
+ * a transient null would silently drop a deploy. Retry ONLY transient failures
+ * (thrown fetch error or 5xx) up to 2 extra attempts with a short fixed delay; a
+ * 404/other 4xx is definitive and returns null immediately. Shared with the OIDC
+ * path (which maps null → 503), which benefits from the same retry.
+ */
 export async function getBranchHeadComparisonStatus(
   env: ApiEnv['Bindings'],
   installationId: string,
@@ -274,10 +273,8 @@ export async function getBranchHeadComparisonStatus(
  * re-verify current git state before cancelling an in-flight build: GitHub does
  * NOT guarantee webhook ordering, so a stale/out-of-order delete could arrive
  * AFTER the branch was recreated and a new valid build enqueued. Mirroring the
- * push path's freshness gate (and Vercel's model of re-evaluating deletion
- * against current facts rather than trusting a single event), the caller cancels
- * ONLY on a confirmed 'absent'; 'present' (recreated) and 'unknown'
- * (unconfirmed) both fail closed — the ≤65min deploy-token TTL + hourly reaper
+ * push path's freshness gate, the caller cancels ONLY on a confirmed 'absent';
+ * 'present' (recreated) and 'unknown' (unconfirmed) both fail closed — the ≤65min deploy-token TTL + hourly reaper
  * still bound the original exposure.
  *
  * Returns:

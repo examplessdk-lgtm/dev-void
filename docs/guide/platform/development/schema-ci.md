@@ -20,7 +20,7 @@ Review the generated SQL and migration journal before committing them. Released 
 
 `@void/platform` contains installation manifests, resource naming, discovery contracts, Worker configuration, and deployable bundles under the `./installer` export. Platform source lives in `platform/packages/`.
 
-Runtime artifacts include migration SQL, its journal, and a rollback compatibility manifest. Drizzle authoring snapshots remain in the source tree. Migrations are forward-only; compatibility edges in `platform/packages/api/drizzle/compatibility.json` must be tested against the earlier runtime before publication. The build verifies schema lineage and hashes the journal and SQL files.
+Runtime artifacts include migration SQL, its journal, and a rollback compatibility manifest. Drizzle authoring snapshots remain in the source tree.
 
 ## CI in a Fork
 

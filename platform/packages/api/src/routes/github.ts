@@ -7,6 +7,7 @@ import {
   createCodeChallenge,
   isValidCodeVerifier,
 } from '../auth/pkce.ts';
+import { isLocalhostRedirect } from '../auth/redirects.ts';
 import { capabilityMiddleware } from '../capabilities.ts';
 import { DEFAULT_DASHBOARD_URL, MEMBERSHIP_TTL_SECONDS } from '../constants.ts';
 import type { Db } from '../db.ts';
@@ -30,6 +31,7 @@ import {
   upsertGitHubInstallation,
   upsertGitHubInstallationMember,
 } from '../db.ts';
+import type { TerminatedBuild } from '../db/builds.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { listInstallationRepositories } from '../github/installation-repos.ts';
@@ -45,7 +47,6 @@ import { localhostRedirectResponse } from '../html-redirect.ts';
 import { authMiddleware } from '../middleware/auth.ts';
 import { githubConnections, githubInstallations, oauthAccounts, projects } from '../schema.ts';
 import type { Build, GitHubConnection, GitHubInstallation } from '../types.ts';
-import { isLocalhostRedirect } from './auth.ts';
 import { requireProjectRouteCapability } from './project-access.ts';
 
 const GITHUB_API_BASE = 'https://api.github.com';
@@ -129,7 +130,7 @@ type JoinCode = {
   // The moment GitHub access was PROVEN (the public callback ran). Compared
   // against the per-install revocation tombstone at /join/complete: a join_code
   // minted at or before a revocation is a stale replay from a removed member and
-  // is skipped (monotonic revocation, Task 14). A code without it is invalid.
+  // is skipped (monotonic revocation). A code without it is invalid.
   iat: number;
   exp: number;
 };
@@ -142,7 +143,7 @@ type JoinCode = {
  * and additionally names the specific `installationId` + `repoFullName` the CLI
  * already knows — the callback re-proves the caller can PERSONALLY reach that repo
  * under their own token. Carries NO Void user id — the connection bind is deferred
- * to the authenticated connect redemption (Task 8), keyed on the bearer-token
+ * to the authenticated connect redemption, keyed on the bearer-token
  * holder (RFC 0074 §"Threat L1").
  */
 type ConnectState = {
@@ -177,7 +178,7 @@ type ConnectGrant = {
   // The moment per-repo GitHub access was PROVEN (the connect-authorize callback
   // ran). Compared against the install's revocation tombstone inside the connect
   // gate's go-live transaction: a grant minted at or before a revocation is a
-  // stale replay from a removed member and is rejected (monotonic, Task 14).
+  // stale replay from a removed member and is rejected (monotonic revocation).
   // A grant without it is invalid.
   iat: number;
   exp: number;
@@ -219,29 +220,117 @@ async function verifyLinkPayload<T>(token: string, secret: string): Promise<T | 
   }
 }
 
-// The GitHub App user-OAuth callback URL for THIS environment, derived from the
-// request origin (no new env var). link-url sends it as redirect_uri on authorize;
-// link-callback MUST send the byte-identical value on the token exchange (GitHub
-// OAuth requires redirect_uri to match when present on authorize).
-function linkCallbackUrl(context: Context<ApiEnv>): string {
-  return new URL('/github/link-callback', new URL(context.req.url).origin).toString();
+type AppUserOAuthFlow = 'link' | 'join' | 'connect-authorize';
+
+const APP_USER_OAUTH_NOT_CONFIGURED = {
+  error: 'github_oauth_not_configured',
+  message: 'GitHub App user OAuth is not configured',
+} as const;
+
+// The GitHub App user-OAuth callback URL for a flow in THIS environment, derived
+// from the request origin (no new env var). The begin route sends it as
+// redirect_uri on authorize; the callback MUST send the byte-identical value on
+// the token exchange (GitHub OAuth requires redirect_uri to match when present on
+// authorize).
+function appUserOAuthCallbackUrl(context: Context<ApiEnv>, flow: AppUserOAuthFlow): string {
+  return new URL(`/github/${flow}-callback`, new URL(context.req.url).origin).toString();
 }
 
-// The GitHub App user-OAuth callback URL for the JOIN flow, derived from the
-// request origin (mirrors linkCallbackUrl — no new env var). join-url sends it as
-// redirect_uri on authorize; join-callback MUST send the byte-identical value on
-// the token exchange (GitHub OAuth requires redirect_uri to match when present).
-function joinCallbackUrl(context: Context<ApiEnv>): string {
-  return new URL('/github/join-callback', new URL(context.req.url).origin).toString();
+// The App user-authorization URL the CLI opens. GitHub Apps don't take an OAuth
+// `scope` param — the App's permissions govern, and `GET /user` works with any
+// user token.
+function appUserAuthorizeUrl(
+  context: Context<ApiEnv>,
+  flow: AppUserOAuthFlow,
+  signedState: string,
+): string {
+  return (
+    `https://github.com/login/oauth/authorize?client_id=${context.env.GITHUB_APP_CLIENT_ID}` +
+    `&redirect_uri=${encodeURIComponent(appUserOAuthCallbackUrl(context, flow))}` +
+    `&state=${encodeURIComponent(signedState)}`
+  );
 }
 
-// The GitHub App user-OAuth callback URL for the CONNECT-AUTHORIZE flow, derived
-// from the request origin (mirrors joinCallbackUrl — no new env var).
-// connect-authorize-url sends it as redirect_uri on authorize;
-// connect-authorize-callback MUST send the byte-identical value on the token
-// exchange (GitHub OAuth requires redirect_uri to match when present).
-function connectAuthorizeCallbackUrl(context: Context<ApiEnv>): string {
-  return new URL('/github/connect-authorize-callback', new URL(context.req.url).origin).toString();
+/** Read a begin route's `redirect` query, which must be a localhost URL. */
+function readLocalhostRedirectQuery(context: Context<ApiEnv>): string | Response {
+  const redirect = context.req.query('redirect');
+  if (!redirect) {
+    return context.json({ error: 'redirect parameter is required' }, 400);
+  }
+  let redirectUrl: URL;
+  try {
+    redirectUrl = new URL(redirect);
+  } catch {
+    return context.json({ error: 'redirect must be a localhost URL' }, 400);
+  }
+  if (!isLocalhostRedirect(redirectUrl)) {
+    return context.json({ error: 'redirect must be a localhost URL' }, 400);
+  }
+  return redirect;
+}
+
+/** Read a begin route's PKCE `code_challenge` query. */
+function readCodeChallengeQuery(context: Context<ApiEnv>): string | Response {
+  const codeChallenge = context.req.query('code_challenge');
+  const codeChallengeMethod = context.req.query('code_challenge_method');
+  if (!codeChallenge) {
+    return context.json({ error: 'code_challenge is required' }, 400);
+  }
+  // Method is optional, but if present it MUST be S256 (the only method we
+  // verify against at redemption) — mirror the CLI-login PKCE guard.
+  if (codeChallengeMethod !== undefined && codeChallengeMethod !== CLI_CODE_CHALLENGE_METHOD) {
+    return context.json({ error: 'code_challenge_method must be S256' }, 400);
+  }
+  return codeChallenge;
+}
+
+/**
+ * Verify a public callback's signed `state` for `purpose`. Trust is established
+ * only by that state; there is no session. The redirect is re-validated at use
+ * time — it is the only place the minted code is sent, so it must still be a
+ * localhost URL even though the begin route already checked it (defense in depth
+ * against a forged-but-valid state).
+ *
+ * A GitHub denial / missing `code` is bounced to the CLI's localhost listener
+ * instead of JSON on the API host, which never reaches the listener and would
+ * leave the CLI hanging until timeout.
+ */
+async function verifyCallbackState<T extends LinkState | JoinState | ConnectState>(
+  context: Context<ApiEnv>,
+  purpose: T['purpose'],
+  hasValidFields: (state: T) => boolean = () => true,
+): Promise<{ state: T; redirectUrl: URL; code: string } | Response> {
+  const code = context.req.query('code');
+  const stateParam = context.req.query('state');
+  if (!stateParam) {
+    return context.json({ error: 'missing state' }, 400);
+  }
+  const state = await verifyLinkPayload<T>(stateParam, context.env.JWT_SECRET);
+  if (
+    !state ||
+    state.purpose !== purpose ||
+    typeof state.exp !== 'number' ||
+    Date.now() >= state.exp ||
+    typeof state.redirect !== 'string' ||
+    typeof state.codeChallenge !== 'string' ||
+    !hasValidFields(state)
+  ) {
+    return context.json({ error: 'invalid state' }, 400);
+  }
+  let redirectUrl: URL;
+  try {
+    redirectUrl = new URL(state.redirect);
+  } catch {
+    return context.json({ error: 'invalid state' }, 400);
+  }
+  if (!isLocalhostRedirect(redirectUrl)) {
+    return context.json({ error: 'invalid state' }, 400);
+  }
+  if (!code) {
+    redirectUrl.searchParams.set('error', context.req.query('error') || 'github_oauth_failed');
+    return localhostRedirectResponse(redirectUrl.toString());
+  }
+  return { state, redirectUrl, code };
 }
 
 /**
@@ -408,38 +497,16 @@ export const githubRoutes = new Hono<ApiEnv>()
   // redirect + PKCE challenge and an expiry, but NO Void user id.
   .get('/link-url', authMiddleware, async (context) => {
     if (!isAppUserOAuthConfigured(context.env)) {
-      return context.json(
-        {
-          error: 'github_oauth_not_configured',
-          message: 'GitHub App user OAuth is not configured',
-        },
-        503,
-      );
+      return context.json(APP_USER_OAUTH_NOT_CONFIGURED, 503);
     }
 
-    const redirect = context.req.query('redirect');
-    const codeChallenge = context.req.query('code_challenge');
-    const codeChallengeMethod = context.req.query('code_challenge_method');
-
-    if (!redirect) {
-      return context.json({ error: 'redirect parameter is required' }, 400);
+    const redirect = readLocalhostRedirectQuery(context);
+    if (redirect instanceof Response) {
+      return redirect;
     }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(redirect);
-    } catch {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
-    if (!codeChallenge) {
-      return context.json({ error: 'code_challenge is required' }, 400);
-    }
-    // Method is optional, but if present it MUST be S256 (the only method we
-    // verify against in /complete) — mirror the CLI-login PKCE guard.
-    if (codeChallengeMethod !== undefined && codeChallengeMethod !== CLI_CODE_CHALLENGE_METHOD) {
-      return context.json({ error: 'code_challenge_method must be S256' }, 400);
+    const codeChallenge = readCodeChallengeQuery(context);
+    if (codeChallenge instanceof Response) {
+      return codeChallenge;
     }
 
     const state: LinkState = {
@@ -451,18 +518,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     };
     const signedState = await signLinkPayload(state, context.env.JWT_SECRET);
 
-    // The App user-authorization URL. GitHub Apps don't take an OAuth `scope`
-    // param — the App's permissions govern, and `GET /user` works with any
-    // user token. The callback URL is derived from THIS request's origin so it
-    // resolves correctly per environment (prod/staging/local) without a new env
-    // var — same host the CLI just hit to reach this route.
-    const callbackUrl = linkCallbackUrl(context);
-    const url =
-      `https://github.com/login/oauth/authorize?client_id=${context.env.GITHUB_APP_CLIENT_ID}` +
-      `&redirect_uri=${encodeURIComponent(callbackUrl)}` +
-      `&state=${encodeURIComponent(signedState)}`;
-
-    return context.json({ url });
+    return context.json({ url: appUserAuthorizeUrl(context, 'link', signedState) });
   })
 
   // Public link callback. GitHub redirects the browser here after the user
@@ -471,54 +527,22 @@ export const githubRoutes = new Hono<ApiEnv>()
   // which GitHub account authorized and hands a PKCE-bound `link_code` back to
   // the initiator's localhost.
   .get('/link-callback', async (context) => {
-    const code = context.req.query('code');
-    const stateParam = context.req.query('state');
-
-    if (!stateParam) {
-      return context.json({ error: 'missing state' }, 400);
+    const verified = await verifyCallbackState<LinkState>(context, 'link');
+    if (verified instanceof Response) {
+      return verified;
     }
-    const state = await verifyLinkPayload<LinkState>(stateParam, context.env.JWT_SECRET);
-    if (!state || state.purpose !== 'link') {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (typeof state.exp !== 'number' || Date.now() >= state.exp) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (typeof state.redirect !== 'string' || typeof state.codeChallenge !== 'string') {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(state.redirect);
-    } catch {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    // Re-validate the redirect at use time — it is the only place we send the
-    // link_code, so it must still be a localhost URL even though /link-url
-    // already checked it (defense in depth against a forged-but-valid state).
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-
-    if (!code) {
-      // GitHub denial / missing code. State + redirect are validated, so bounce the
-      // error to the CLI's localhost listener (instead of JSON on the API host, which
-      // never reaches the listener → `void github link` hangs until timeout). The
-      // merged CLI's describeError surfaces `?error=`.
-      redirectUrl.searchParams.set('error', context.req.query('error') || 'github_oauth_failed');
-      return localhostRedirectResponse(redirectUrl.toString());
-    }
+    const { state, redirectUrl, code } = verified;
 
     // Exchange the App user-OAuth code for the authorizing user's numeric GitHub
     // account id. Pure identity — NO installation. Null on any failure.
     const providerId = await exchangeCodeForUserAccountId(
       context.env,
       code,
-      linkCallbackUrl(context),
+      appUserOAuthCallbackUrl(context, 'link'),
     );
     if (providerId === null) {
-      // Exchange/identity failure. Same rationale as the missing-code branch:
-      // bounce to the CLI's localhost so the failure surfaces instead of hanging.
+      // Exchange/identity failure: bounce to the CLI's localhost so the failure
+      // surfaces instead of hanging.
       redirectUrl.searchParams.set('error', 'github_oauth_failed');
       return localhostRedirectResponse(redirectUrl.toString());
     }
@@ -615,38 +639,16 @@ export const githubRoutes = new Hono<ApiEnv>()
   // redirect + PKCE challenge and an expiry, but NO Void user id.
   .get('/join-url', authMiddleware, async (context) => {
     if (!isAppUserOAuthConfigured(context.env)) {
-      return context.json(
-        {
-          error: 'github_oauth_not_configured',
-          message: 'GitHub App user OAuth is not configured',
-        },
-        503,
-      );
+      return context.json(APP_USER_OAUTH_NOT_CONFIGURED, 503);
     }
 
-    const redirect = context.req.query('redirect');
-    const codeChallenge = context.req.query('code_challenge');
-    const codeChallengeMethod = context.req.query('code_challenge_method');
-
-    if (!redirect) {
-      return context.json({ error: 'redirect parameter is required' }, 400);
+    const redirect = readLocalhostRedirectQuery(context);
+    if (redirect instanceof Response) {
+      return redirect;
     }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(redirect);
-    } catch {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
-    if (!codeChallenge) {
-      return context.json({ error: 'code_challenge is required' }, 400);
-    }
-    // Method is optional, but if present it MUST be S256 (the only method we
-    // verify against in /complete) — mirror the CLI-login PKCE guard.
-    if (codeChallengeMethod !== undefined && codeChallengeMethod !== CLI_CODE_CHALLENGE_METHOD) {
-      return context.json({ error: 'code_challenge_method must be S256' }, 400);
+    const codeChallenge = readCodeChallengeQuery(context);
+    if (codeChallenge instanceof Response) {
+      return codeChallenge;
     }
 
     const state: JoinState = {
@@ -658,15 +660,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     };
     const signedState = await signLinkPayload(state, context.env.JWT_SECRET);
 
-    // The callback URL is derived from THIS request's origin so it resolves
-    // per environment without a new env var. GitHub Apps take no OAuth `scope`.
-    const callbackUrl = joinCallbackUrl(context);
-    const url =
-      `https://github.com/login/oauth/authorize?client_id=${context.env.GITHUB_APP_CLIENT_ID}` +
-      `&redirect_uri=${encodeURIComponent(callbackUrl)}` +
-      `&state=${encodeURIComponent(signedState)}`;
-
-    return context.json({ url });
+    return context.json({ url: appUserAuthorizeUrl(context, 'join', signedState) });
   })
 
   // Public join callback. GitHub redirects the browser here after the member
@@ -675,47 +669,17 @@ export const githubRoutes = new Hono<ApiEnv>()
   // the caller can access, intersects them with the ones Void tracks, and hands
   // a PKCE-bound `join_code` back to the initiator's localhost.
   .get('/join-callback', async (context) => {
-    const code = context.req.query('code');
-    const stateParam = context.req.query('state');
-
-    if (!stateParam) {
-      return context.json({ error: 'missing state' }, 400);
+    const verified = await verifyCallbackState<JoinState>(context, 'join');
+    if (verified instanceof Response) {
+      return verified;
     }
-    const state = await verifyLinkPayload<JoinState>(stateParam, context.env.JWT_SECRET);
-    if (!state || state.purpose !== 'join') {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (typeof state.exp !== 'number' || Date.now() >= state.exp) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (typeof state.redirect !== 'string' || typeof state.codeChallenge !== 'string') {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(state.redirect);
-    } catch {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    // Re-validate the redirect at use time — it is the only place we send the
-    // join_code, so it must still be a localhost URL (defense in depth).
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-
-    if (!code) {
-      // GitHub denial / missing code. State + redirect are validated, so bounce
-      // the error to the CLI's localhost listener rather than JSON on the API
-      // host (which would never reach the listener → `void github join` hangs).
-      redirectUrl.searchParams.set('error', context.req.query('error') || 'github_oauth_failed');
-      return localhostRedirectResponse(redirectUrl.toString());
-    }
+    const { state, redirectUrl, code } = verified;
 
     const db = context.get('db');
     // Stamp the proof-of-access moment BEFORE the GitHub proof so `iat` is a
     // CONSERVATIVE lower bound: any org removal recorded at/after this proof has
     // revoked_at >= iat, so the artifact is rejected even if GitHub's access
-    // propagation lag briefly let the proof still succeed (R4-2). DB-clock, to
+    // propagation lag briefly let the proof still succeed. DB-clock, to
     // match the DB-clock revocation tombstone.
     const proofIatMs = await getDbNowMs(db);
 
@@ -727,7 +691,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     const { installationIds, callerAccountId } = await listAuthorizedInstallationIds(
       context.env,
       code,
-      joinCallbackUrl(context),
+      appUserOAuthCallbackUrl(context, 'join'),
     );
     if (installationIds.size === 0) {
       redirectUrl.searchParams.set('error', 'github_oauth_failed');
@@ -771,7 +735,7 @@ export const githubRoutes = new Hono<ApiEnv>()
       codeChallenge: state.codeChallenge,
       codeChallengeMethod: CLI_CODE_CHALLENGE_METHOD,
       // Stamp the proof-of-access moment so /join/complete can compare it to the
-      // revocation tombstone (monotonic revocation, Task 14). Sampled PRE-proof
+      // revocation tombstone (monotonic revocation). Sampled PRE-proof
       // (above) as a conservative lower bound. `iat` is DB-clock (compared to the
       // DB-clock `revoked_at` tombstone — one clock domain); `exp` is Worker-clock
       // (compared to Worker `Date.now()` at redemption).
@@ -794,15 +758,9 @@ export const githubRoutes = new Hono<ApiEnv>()
   .post('/join/complete', authMiddleware, async (context) => {
     // Fail closed: JOIN is an org-share flow gated on App user OAuth. Reject a
     // pre-minted join_code redemption too when the config was removed, so the
-    // config is a true kill switch (R10-1) — the begin route (/join-url) already 503s.
+    // config is a true kill switch — the begin route (/join-url) already 503s.
     if (!isAppUserOAuthConfigured(context.env)) {
-      return context.json(
-        {
-          error: 'github_oauth_not_configured',
-          message: 'GitHub App user OAuth is not configured',
-        },
-        503,
-      );
+      return context.json(APP_USER_OAUTH_NOT_CONFIGURED, 503);
     }
     const body = await context.req
       .json<{ join_code?: unknown; code_verifier?: unknown }>()
@@ -846,7 +804,7 @@ export const githubRoutes = new Hono<ApiEnv>()
       // order shared by member_removed + the connect gate) so a concurrent
       // member_removed is serialized: its delete + tombstone is committed and
       // visible before we read the tombstones and upsert, so we never resurrect a
-      // membership it just revoked (F5). Install-only locking (no connections) →
+      // membership it just revoked. Install-only locking (no connections) →
       // it cannot deadlock with member_removed / teardown / the connect gate.
       for (const installationId of [...joinCode.installationIds].sort()) {
         await tx
@@ -855,16 +813,15 @@ export const githubRoutes = new Hono<ApiEnv>()
           .where(eq(githubInstallations.installation_id, installationId))
           .for('update');
       }
-      // Monotonic revocation (Task 14 / Task 19): batch-load the per-install
+      // Monotonic revocation: batch-load the per-install
       // revocation tombstones for the join_code's GITHUB ACCOUNT id (X) — the
       // durable identity carried in the artifact, which `member_removed` always
       // tombstones from the webhook payload even when no Void user existed yet.
       // A join_code minted AT OR BEFORE a revocation (iat <= revoked_at) is a
       // stale artifact a removed member is replaying — its installs are skipped
       // below so membership is never resurrected. Under the install-row lock
-      // above this is now race-safe, not
-      // merely best-effort; the connect route's in-tx recheck remains the deploy
-      // gate.
+      // above this is race-safe, not merely best-effort; the connect route's
+      // in-tx recheck remains the deploy gate.
       const revocations = await getInstallationRevocationsForAccount(
         tx,
         joinCode.installationIds,
@@ -914,7 +871,7 @@ export const githubRoutes = new Hono<ApiEnv>()
   // that they can personally reach that specific repo through that installation.
   // Possessing a shared installation id is not enough (per-repo confused-deputy
   // close, RFC 0074 §"Threat L1"). This mints a PKCE-bound `connect_grant`; the
-  // grant is REDEEMED at the authenticated connect route (Task 8).
+  // grant is REDEEMED at the authenticated connect route.
   // -------------------------------------------------------------------------
 
   // Begin the CONNECT-AUTHORIZE flow — return the GitHub App user-authorization
@@ -923,51 +880,29 @@ export const githubRoutes = new Hono<ApiEnv>()
   // redirect + PKCE challenge and an expiry, but NO Void user id.
   .get('/connect-authorize-url', authMiddleware, async (context) => {
     if (!isAppUserOAuthConfigured(context.env)) {
-      return context.json(
-        {
-          error: 'github_oauth_not_configured',
-          message: 'GitHub App user OAuth is not configured',
-        },
-        503,
-      );
+      return context.json(APP_USER_OAUTH_NOT_CONFIGURED, 503);
     }
 
-    const redirect = context.req.query('redirect');
+    const redirect = readLocalhostRedirectQuery(context);
+    if (redirect instanceof Response) {
+      return redirect;
+    }
     const installationId = context.req.query('installationId');
     const repoFullName = context.req.query('repoFullName');
-    const codeChallenge = context.req.query('code_challenge');
-    const codeChallengeMethod = context.req.query('code_challenge_method');
-
-    if (!redirect) {
-      return context.json({ error: 'redirect parameter is required' }, 400);
-    }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(redirect);
-    } catch {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'redirect must be a localhost URL' }, 400);
-    }
     if (!installationId) {
       return context.json({ error: 'installationId is required' }, 400);
     }
     if (!repoFullName) {
       return context.json({ error: 'repoFullName is required' }, 400);
     }
-    if (!codeChallenge) {
-      return context.json({ error: 'code_challenge is required' }, 400);
-    }
-    // Method is optional, but if present it MUST be S256 (the only method we
-    // verify against at redemption) — mirror the CLI-login PKCE guard.
-    if (codeChallengeMethod !== undefined && codeChallengeMethod !== CLI_CODE_CHALLENGE_METHOD) {
-      return context.json({ error: 'code_challenge_method must be S256' }, 400);
+    const codeChallenge = readCodeChallengeQuery(context);
+    if (codeChallenge instanceof Response) {
+      return codeChallenge;
     }
 
     // NO ownership/membership pre-check here — this route only kicks off the
     // per-repo authorize round-trip. The real gate is the per-repo verify in the
-    // callback plus the membership/ownership checks at redemption (Task 8).
+    // callback plus the membership/ownership checks at redemption.
     const state: ConnectState = {
       redirect,
       purpose: 'connect',
@@ -979,15 +914,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     };
     const signedState = await signLinkPayload(state, context.env.JWT_SECRET);
 
-    // The callback URL is derived from THIS request's origin so it resolves per
-    // environment without a new env var. GitHub Apps take no OAuth `scope`.
-    const callbackUrl = connectAuthorizeCallbackUrl(context);
-    const url =
-      `https://github.com/login/oauth/authorize?client_id=${context.env.GITHUB_APP_CLIENT_ID}` +
-      `&redirect_uri=${encodeURIComponent(callbackUrl)}` +
-      `&state=${encodeURIComponent(signedState)}`;
-
-    return context.json({ url });
+    return context.json({ url: appUserAuthorizeUrl(context, 'connect-authorize', signedState) });
   })
 
   // Public connect-authorize callback. GitHub redirects the browser here after
@@ -997,51 +924,20 @@ export const githubRoutes = new Hono<ApiEnv>()
   // own token and, on success, hands a PKCE-bound `connect_grant` back to the
   // initiator's localhost for the authenticated redemption to consume.
   .get('/connect-authorize-callback', async (context) => {
-    const code = context.req.query('code');
-    const stateParam = context.req.query('state');
-
-    if (!stateParam) {
-      return context.json({ error: 'missing state' }, 400);
+    const verified = await verifyCallbackState<ConnectState>(
+      context,
+      'connect',
+      (state) => typeof state.installationId === 'string' && typeof state.repoFullName === 'string',
+    );
+    if (verified instanceof Response) {
+      return verified;
     }
-    const state = await verifyLinkPayload<ConnectState>(stateParam, context.env.JWT_SECRET);
-    if (!state || state.purpose !== 'connect') {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (typeof state.exp !== 'number' || Date.now() >= state.exp) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    if (
-      typeof state.redirect !== 'string' ||
-      typeof state.codeChallenge !== 'string' ||
-      typeof state.installationId !== 'string' ||
-      typeof state.repoFullName !== 'string'
-    ) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(state.redirect);
-    } catch {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-    // Re-validate the redirect at use time — it is the only place we send the
-    // connect_grant, so it must still be a localhost URL (defense in depth).
-    if (!isLocalhostRedirect(redirectUrl)) {
-      return context.json({ error: 'invalid state' }, 400);
-    }
-
-    if (!code) {
-      // GitHub denial / missing code. State + redirect are validated, so bounce
-      // the error to the CLI's localhost listener rather than JSON on the API
-      // host (which would never reach the listener → the CLI hangs).
-      redirectUrl.searchParams.set('error', context.req.query('error') || 'github_oauth_failed');
-      return localhostRedirectResponse(redirectUrl.toString());
-    }
+    const { state, redirectUrl, code } = verified;
 
     // Stamp the proof-of-access moment BEFORE the GitHub proof so `iat` is a
     // CONSERVATIVE lower bound: any org removal recorded at/after this proof has
     // revoked_at >= iat, so the grant is rejected even if GitHub's access
-    // propagation lag briefly let the proof still succeed (R4-2). DB-clock, to
+    // propagation lag briefly let the proof still succeed. DB-clock, to
     // match the DB-clock revocation tombstone.
     const proofIatMs = await getDbNowMs(context.get('db'));
 
@@ -1054,7 +950,7 @@ export const githubRoutes = new Hono<ApiEnv>()
       code,
       state.installationId,
       state.repoFullName,
-      connectAuthorizeCallbackUrl(context),
+      appUserOAuthCallbackUrl(context, 'connect-authorize'),
     );
 
     // CONFUSED-DEPUTY CLOSE: a null repositoryId means the caller cannot reach
@@ -1070,7 +966,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     // repositoryId + the connecting user's github account id, and redirect it to
     // the initiator's localhost. This PUBLIC callback has NO bearer identity, so
     // it writes NO membership row — the connection bind is deferred to the
-    // authenticated redemption (Task 8), keyed on the bearer-token holder.
+    // authenticated redemption, keyed on the bearer-token holder.
     const grant: ConnectGrant = {
       purpose: 'connect',
       installationId: state.installationId,
@@ -1080,7 +976,7 @@ export const githubRoutes = new Hono<ApiEnv>()
       codeChallenge: state.codeChallenge,
       codeChallengeMethod: CLI_CODE_CHALLENGE_METHOD,
       // Stamp the proof-of-access moment so the connect gate can compare it to the
-      // revocation tombstone (monotonic revocation, Task 14). Sampled PRE-proof
+      // revocation tombstone (monotonic revocation). Sampled PRE-proof
       // (above) as a conservative lower bound. `iat` is DB-clock (compared to the
       // DB-clock `revoked_at` tombstone — one clock domain); `exp` is Worker-clock
       // (compared to Worker `Date.now()` at redemption).
@@ -1135,8 +1031,8 @@ export const githubRoutes = new Hono<ApiEnv>()
       if (typeof parsed.userId !== 'string' || parsed.userId === '') {
         return context.json({ error: 'invalid state' }, 400);
       }
-      // Older states minted before the ownership check carried no
-      // `githubAccountId`; reject them rather than binding unverifiably.
+      // A state without `githubAccountId` cannot prove ownership; reject it
+      // rather than binding unverifiably.
       if (typeof parsed.githubAccountId !== 'string' || parsed.githubAccountId === '') {
         return context.json({ error: 'invalid state' }, 400);
       }
@@ -1198,8 +1094,8 @@ export const githubRoutes = new Hono<ApiEnv>()
     //
     // Stamp the proof-of-access moment BEFORE the USER-access proof
     // (`authorizeInstallViaUserToken`) so `proofIatMs` is a CONSERVATIVE lower
-    // bound for the revocation-tombstone gates below (mirrors the connect gate,
-    // R4-2/R4-3). The `getInstallationToken` / `listInstallationRepositories`
+    // bound for the revocation-tombstone gates below (mirrors the connect gate).
+    // The `getInstallationToken` / `listInstallationRepositories`
     // calls above prove the install EXISTS, not the USER's access — the user
     // proof is `authorizeInstallViaUserToken`, so that is the access-proof
     // moment for revocation. DB-clock (matches the DB-clock `revoked_at`
@@ -1247,7 +1143,7 @@ export const githubRoutes = new Hono<ApiEnv>()
     // Visibility + tombstone gates under an INSTALL-row lock. member_removed and
     // the connect gate lock the SAME install row install-first, so a concurrent
     // revocation and this callback are serialized: whichever commits second sees
-    // the other's effect. This closes the CONCURRENT R4-3 interleaving (this
+    // the other's effect. This closes the CONCURRENT interleaving (this
     // proof succeeds, then member_removed clears+tombstones, then this grant
     // commits) before an organization membership is recorded. Install-only
     // locking (no connections) → install-first → cannot deadlock with
@@ -1426,12 +1322,10 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     // return the SAME opaque 404 the owner-miss returns — never reveal the
     // install exists to a non-member (privacy). Membership is TTL-honored.
     if (!isOwner) {
-      // A non-owner must be an ACTIVE MEMBER of this org-shared install; if not, return
-      // the SAME opaque 404 the owner-miss returns — never reveal the install exists to a
-      // non-member (privacy). These two 404 gates run BEFORE the OAuth kill-switch 503
-      // below so that a non-member is indistinguishable from a nonexistent install even
-      // when App user OAuth is unconfigured (R13-1: reaching a 503 rather than a 404 would
-      // otherwise leak that the install exists, since the missing-install 404 above already
+      // These two 404 gates run BEFORE the OAuth kill-switch 503 below so that a
+      // non-member is indistinguishable from a nonexistent install even when App
+      // user OAuth is unconfigured (reaching a 503 rather than a 404 would leak
+      // that the install exists, since the missing-install 404 above already
       // filtered nonexistent ids).
       const isMember = await hasActiveInstallationMembership(
         context.get('db'),
@@ -1452,10 +1346,10 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       }
       // Fail closed: the organization connect path depends on App user OAuth (the membership +
       // connect_grant were minted via it). Reject a pre-minted connect_grant redemption when
-      // the config was removed (R10-1). This runs LAST — only a caller ALREADY proven to be
-      // an active member of an Organization install reaches it, so the 503 no longer
-      // distinguishes an existing install from a nonexistent one (R13-1). Personal-account
-      // owners connect directly and skip this block.
+      // the config was removed. This runs LAST — only a caller ALREADY proven to be an
+      // active member of an Organization install reaches it, so the 503 does not
+      // distinguish an existing install from a nonexistent one. Personal-account owners
+      // connect directly and skip this block.
       if (!isAppUserOAuthConfigured(context.env)) {
         return context.json(
           {
@@ -1490,14 +1384,14 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     //   ORGANIZATION PARTICIPANT → installation visibility is not repository
     //     authority, so trusting the installation token here would be a
     //     confused-deputy. Instead we require a per-repo
-    //     `connect_grant` minted by /github/connect-authorize-callback (Task 7),
+    //     `connect_grant` minted by /github/connect-authorize-callback,
     //     which carries a `repositoryId` the member PROVED under their OWN token.
     //     We trust that id and SKIP the installation-token resolution entirely.
-    // The organization grant's proof-of-access moment (Task 14), captured here so the
+    // The organization grant's proof-of-access moment, captured here so the
     // go-live transaction below can compare it to the install's revocation
     // tombstone under the row lock. `undefined` on the owner path (no grant).
     let memberGrantIat: number | undefined;
-    // The member grant's GITHUB ACCOUNT id (X) — the tombstone key (Task 19). The
+    // The member grant's GITHUB ACCOUNT id (X) — the tombstone key. The
     // revocation tombstone is keyed on this durable identity, not the Void user
     // id, so a pre-removal grant replay is caught even after the member re-links.
     // `undefined` on the owner path (no grant → the tombstone check is skipped).
@@ -1568,10 +1462,9 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       // close, so we do NOT double-check it against the install token.
       repositoryId = grant.repositoryId;
       memberGrantIat = grant.iat;
-      // Task 19: the tombstone is keyed by the GitHub account id (X) the grant
-      // carries — the durable identity `member_removed` always tombstones. By
-      // Threat-L1 above this equals the caller's OWN linked id, so keying on it is
-      // equivalent-or-stronger than the old caller-user key.
+      // The tombstone is keyed by the GitHub account id (X) the grant carries —
+      // the durable identity `member_removed` always tombstones. By Threat-L1
+      // above this equals the caller's OWN linked id.
       memberGrantAccountId = grant.githubAccountId;
     }
 
@@ -1585,7 +1478,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
     const buildExecutor = body.buildExecutor;
     const workflowPath = body.workflowPath;
 
-    // Go-live under the installation-row lock (Task 14). member_removed AND the
+    // Go-live under the installation-row lock. member_removed AND the
     // teardown handlers (installation.deleted/suspend → status inactive;
     // installation_repositories removed → drop repo from the cached set) all lock
     // the SAME install row install-first, so this connect and any concurrent
@@ -1655,7 +1548,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         if (!(await hasActiveInstallationMembership(tx, installationId, caller))) {
           return { ok: false as const, status: 404 as const, error: 'installation not found' };
         }
-        // Task 19: key the tombstone check on the grant's GitHub account id (X),
+        // Key the tombstone check on the grant's GitHub account id (X),
         // the durable identity `member_removed` always tombstones. A non-owner
         // path always carries a grant (the member branch above set
         // memberGrantAccountId after Threat-L1); a missing one is fail-closed to
@@ -1676,8 +1569,8 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
       }
       // A concurrent installation.deleted/suspend that won the lock first marks the
       // row inactive; reject rather than create an orphan connection the teardown
-      // already passed (mirrors the pre-lock status gate at github.ts:1422, now on
-      // the locked row). Applies to owner AND member paths — status is
+      // already passed (the pre-lock status gate above, re-applied on the locked
+      // row). Applies to owner AND member paths — status is
       // authoritative and has no cache lag.
       if (lockedInstall.status !== 'active') {
         return { ok: false as const, status: 409 as const, error: 'installation is not active' };
@@ -1819,11 +1712,7 @@ export const githubProjectRoutes = new Hono<ApiEnv>()
         return { cancelled: [], updated: null, gone: true };
       }
 
-      const terminated: Array<{
-        id: string;
-        executor: Build['executor'];
-        instance_type: string | null;
-      }> = [];
+      const terminated: Array<TerminatedBuild> = [];
       if (newBranch !== undefined && newBranch !== current.branch) {
         terminated.push(
           ...(await terminateBuildsForProject(tx, projectId, {

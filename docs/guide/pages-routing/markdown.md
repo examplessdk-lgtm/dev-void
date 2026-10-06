@@ -401,7 +401,7 @@ Code blocks include a copy button.
 
 ### Line Numbers
 
-Enable per code block with `:line-numbers` or disable with `:no-line-numbers`:
+Enable per code block with `:line-numbers`:
 
 ````md
 ```ts :line-numbers
@@ -411,14 +411,6 @@ const b = 2;
 ````
 
 Start from a specific number with `:line-numbers=5`.
-
-### Snippet Imports
-
-Import code from external files:
-
-```md
-<<< ./path/to/file.ts
-```
 
 ### Emoji
 
@@ -455,16 +447,16 @@ Headings include permalink anchors. Use `[[toc]]` for a table of contents. Image
 ```ts
 voidMarkdown({
   shiki: {
-    themes: { light: 'github-light', dark: 'github-dark' }, // Shiki themes
-    langs: ['sql', 'graphql'], // additional languages
+    themes: { light: 'github-light', dark: 'github-dark' },
   },
 });
 ```
 
-| Option         | Type                             | Default                                          | Description                  |
-| -------------- | -------------------------------- | ------------------------------------------------ | ---------------------------- |
-| `shiki.themes` | `{ light: string; dark: string}` | `{ light: "github-light", dark: "github-dark" }` | Shiki color themes           |
-| `shiki.langs`  | `string[]`                       | Common web languages                             | Additional languages to load |
+| Option         | Type                             | Default                                          | Description        |
+| -------------- | -------------------------------- | ------------------------------------------------ | ------------------ |
+| `shiki.themes` | `{ light: string; dark: string}` | `{ light: "github-light", dark: "github-dark" }` | Shiki color themes |
+
+Code block languages load on demand from Shiki's bundled languages.
 
 ## Building a Sidebar
 

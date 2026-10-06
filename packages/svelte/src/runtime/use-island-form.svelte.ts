@@ -118,7 +118,7 @@ export function useIslandForm(defaults: Record<string, unknown>): UntypedIslandF
           recentlySuccessful = false;
         }, 2000);
         window.location.reload();
-      } else if (!response.ok) {
+      } else {
         const body = await readActionErrorBody(response);
         const actionError = new VoidActionError({
           body,

@@ -4,7 +4,7 @@ import { interpolateRouteParams } from './route-url.ts';
 export { FetchError };
 
 import type { RouteMap } from 'void/routes';
-type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
+export type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
 type DefaultMethod<P extends keyof RouteMap> = 'GET' extends MethodsOf<P> ? 'GET' : never;
 
 type RouteEntry<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] extends {
@@ -17,13 +17,13 @@ type RouteEntry<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][
 type OutputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>['output'];
 type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteEntry<P, M>['input'];
 
-type BodyOption<I> = 'body' extends keyof I
+export type BodyOption<I> = 'body' extends keyof I
   ? { body: I['body' & keyof I] }
   : { body?: Record<string, unknown> | BodyInit | null };
-type QueryOption<I> = 'query' extends keyof I
+export type QueryOption<I> = 'query' extends keyof I
   ? { query: I['query' & keyof I] }
   : { query?: Record<string, string> };
-type ParamsOption<I> = 'params' extends keyof I
+export type ParamsOption<I> = 'params' extends keyof I
   ? { params: I['params' & keyof I] }
   : { params?: Record<string, string> };
 

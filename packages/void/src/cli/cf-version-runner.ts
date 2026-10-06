@@ -9,18 +9,22 @@ import type {
   CloudflareOperation,
   CloudflareVersionActivationOptions,
 } from '@void/deploy-cloudflare';
+import { isRecord as record } from '@void/deploy-core';
 import { dirname, join } from 'pathslash';
 import type { CfBuildOutput } from './cf-build-output.ts';
 import { migrateBuiltWranglerConfig } from './cf-config-migrate.ts';
-import { uploadPinnedCloudflareVersion } from './cf-version-api.ts';
-
-type CfCommand = (
-  args: Array<string>,
-  options: { cwd: string; capture: boolean; timeoutMs?: number; maxOutputBytes?: number },
-) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
+import {
+  isSecretBindingType,
+  uploadPinnedCloudflareVersion,
+  type CfCommand,
+} from './cf-version-api.ts';
 
 function failed(message: string): CloudflareCommandResult {
   return { status: 1, stdout: '', stderr: message };
+}
+
+function commandFailed(result: CloudflareCommandResult): boolean {
+  return result.status !== 0 || Boolean(result.signal) || Boolean(result.error);
 }
 
 function parseJson(value: string): unknown {
@@ -29,10 +33,6 @@ function parseJson(value: string): unknown {
   } catch {
     return null;
   }
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function safePositional(value: unknown): value is string {
@@ -100,7 +100,7 @@ export async function pinActiveWorkerSecrets(options: {
   for (const [name, value] of Object.entries(env)) {
     if (
       record(value) &&
-      (value.type === 'secret' || value.type === 'inherit' || value.type === 'unsafe:inherit') &&
+      isSecretBindingType(value.type) &&
       !secretNames.has(name) &&
       !explicit.has(name)
     ) {
@@ -112,13 +112,7 @@ export async function pinActiveWorkerSecrets(options: {
       continue;
     }
     const current = env[name];
-    if (
-      current !== undefined &&
-      (!record(current) ||
-        (current.type !== 'secret' &&
-          current.type !== 'inherit' &&
-          current.type !== 'unsafe:inherit'))
-    ) {
+    if (current !== undefined && (!record(current) || !isSecretBindingType(current.type))) {
       return false;
     }
   }
@@ -170,13 +164,7 @@ export function createCfResourceVerifier(options: {
             },
           ),
         );
-        if (
-          found.status !== 0 ||
-          found.signal ||
-          found.error ||
-          !record(found.data) ||
-          found.data.name !== name
-        ) {
+        if (commandFailed(found) || !record(found.data) || found.data.name !== name) {
           return failed(
             `Cloudflare Queue ${name} is unavailable; refusing automatic provisioning.`,
           );
@@ -233,13 +221,7 @@ export function createCfResourceVerifier(options: {
         { cwd: directory, capture: true },
       );
       const body = result.data ?? parseJson(result.stdout);
-      if (
-        result.status !== 0 ||
-        result.signal ||
-        result.error ||
-        !record(body) ||
-        body[resource.response] !== name
-      ) {
+      if (commandFailed(result) || !record(body) || body[resource.response] !== name) {
         return failed(
           `Cloudflare ${resource.kind} ${name} is unavailable; refusing automatic provisioning.`,
         );
@@ -412,7 +394,7 @@ export function createCfVersionRunner(options: {
     return { ...result, data: result.data ?? parseJson(result.stdout) };
   };
   const uploadedResult = (result: CloudflareCommandResult): CloudflareCommandResult => {
-    if (result.status !== 0 || result.signal || result.error) {
+    if (commandFailed(result)) {
       return result;
     }
     if (record(result.data) && typeof result.data.versionId === 'string') {
@@ -444,6 +426,21 @@ export function createCfVersionRunner(options: {
     } catch {
       return failed('Cloudflare resources could not be verified before upload.');
     }
+  };
+  /** Return a failure when the upload target drifted or its resources are not verified. */
+  const checkUploadTarget = async (
+    operation: Extract<CloudflareOperation, { type: 'versions.upload' | 'worker.deploy' }>,
+    targetChanged: string,
+  ): Promise<CloudflareCommandResult | null> => {
+    if (
+      operation.workerName !== workerName ||
+      (operation.assetsDirectory !== undefined &&
+        operation.assetsDirectory !== output.assetsDirectory)
+    ) {
+      return failed(targetChanged);
+    }
+    const verified = await verifyResources(output.directory);
+    return commandFailed(verified) ? verified : null;
   };
 
   const uploadPinnedVersion = async (
@@ -485,7 +482,7 @@ export function createCfVersionRunner(options: {
   return async (operation, command) => {
     if (operation.type === 'deployments.status') {
       const result = await run(['workers', 'deployments', 'list', '--worker', workerName], true);
-      if (result.status !== 0 || result.signal || result.error) {
+      if (commandFailed(result)) {
         return result;
       }
       const body = result.data;
@@ -532,7 +529,7 @@ export function createCfVersionRunner(options: {
         };
       };
       const first = await readPage(1);
-      if (first.result.status !== 0 || first.result.signal || first.result.error) {
+      if (commandFailed(first.result)) {
         return first.result;
       }
       if (!first.versions) {
@@ -541,7 +538,7 @@ export function createCfVersionRunner(options: {
       const versions = [...first.versions];
       if (versions.length === pageSize) {
         const second = await readPage(2);
-        if (second.result.status !== 0 || second.result.signal || second.result.error) {
+        if (commandFailed(second.result)) {
           return second.result;
         }
         if (!second.versions) {
@@ -555,7 +552,7 @@ export function createCfVersionRunner(options: {
             let last = Math.max(...secondNumbers);
             for (let page = 3; page <= 1000 && second.versions.length === pageSize; page++) {
               const next = await readPage(page);
-              if (next.result.status !== 0 || next.result.signal || next.result.error) {
+              if (commandFailed(next.result)) {
                 return next.result;
               }
               if (!next.versions) {
@@ -607,7 +604,7 @@ export function createCfVersionRunner(options: {
           })
         : await run(args, true);
       const result = { ...called, data: called.data ?? parseJson(called.stdout) };
-      if (result.status !== 0 || result.signal || result.error) {
+      if (commandFailed(result)) {
         return result;
       }
       const version = result.data;
@@ -625,16 +622,12 @@ export function createCfVersionRunner(options: {
     }
 
     if (operation.type === 'versions.upload') {
-      if (
-        operation.workerName !== workerName ||
-        (operation.assetsDirectory !== undefined &&
-          operation.assetsDirectory !== output.assetsDirectory)
-      ) {
-        return failed('The Cloudflare version upload target changed.');
-      }
-      const verified = await verifyResources(output.directory);
-      if (verified.status !== 0 || verified.signal || verified.error) {
-        return verified;
+      const blocked = await checkUploadTarget(
+        operation,
+        'The Cloudflare version upload target changed.',
+      );
+      if (blocked) {
+        return blocked;
       }
       if (output.activeSecrets) {
         return uploadPinnedVersion(operation, false);
@@ -706,16 +699,12 @@ export function createCfVersionRunner(options: {
     }
 
     if (operation.type === 'worker.deploy') {
-      if (
-        operation.workerName !== workerName ||
-        (operation.assetsDirectory !== undefined &&
-          operation.assetsDirectory !== output.assetsDirectory)
-      ) {
-        return failed('The Cloudflare bootstrap target changed.');
-      }
-      const verified = await verifyResources(output.directory);
-      if (verified.status !== 0 || verified.signal || verified.error) {
-        return verified;
+      const blocked = await checkUploadTarget(
+        operation,
+        'The Cloudflare bootstrap target changed.',
+      );
+      if (blocked) {
+        return blocked;
       }
       if (output.activeSecrets) {
         return uploadPinnedVersion(operation, true);
@@ -798,7 +787,7 @@ export function createCfVersionRunner(options: {
         writeFileSync(workerPath, JSON.stringify(worker), { mode: 0o600 });
         await readBuildOutput(directory);
         const verified = await verifyResources(directory);
-        if (verified.status !== 0 || verified.signal || verified.error) {
+        if (commandFailed(verified)) {
           return verified;
         }
         return await run(
@@ -817,7 +806,7 @@ export function createCfVersionRunner(options: {
         return failed('The Cloudflare Queue consumer target changed.');
       }
       const queues = await run(['queues', 'list'], true);
-      if (queues.status !== 0 || queues.signal || queues.error) {
+      if (commandFailed(queues)) {
         return queues;
       }
       const allQueues = queues.data;
@@ -832,7 +821,7 @@ export function createCfVersionRunner(options: {
         ['queues', 'consumers', 'list', '--queue-id', queue.queue_id],
         true,
       );
-      if (consumers.status !== 0 || consumers.signal || consumers.error) {
+      if (commandFailed(consumers)) {
         return consumers;
       }
       const allConsumers = consumers.data;

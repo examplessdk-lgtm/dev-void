@@ -26,6 +26,7 @@ import { isAdminSuspended } from '../suspension.ts';
  *   - `POST /projects/:id/database`            provisionDatabase (PostgreSQL gate)
  *   - `POST /projects/:id/prerender-token`      mint binding-proxy credential
  *   - `GET  /projects/:id/deployments`         listDeployments (live-binding restore)
+ *   - `GET  /projects/:id/deployments/:d/events` deployment event stream
  *   - `GET  /projects/:id/secrets`             listSecrets (env.ts schema validation)
  *   - `POST /projects/:id/deploy/preflight`    asset preflight
  *   - `POST /projects/:id/deploy/upload-urls`  presigned R2 PUT URLs

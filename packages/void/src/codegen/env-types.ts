@@ -40,7 +40,7 @@ export type EnvTypesResult = {
  *   - `void/env`'s `ValidatedEnv` so `env.X` is typed
  *   - `void/handler`'s `CloudBindings` so `c.env.X` is typed
  *
- * Uses `typeof import("../env.ts").default` so TypeScript handles the
+ * Uses `typeof import(...)` on the env schema file so TypeScript handles the
  * inference — codegen never analyses types itself.
  *
  * @param envFileAbs Absolute path to the user's env schema file.

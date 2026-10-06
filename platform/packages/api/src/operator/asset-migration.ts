@@ -7,7 +7,7 @@ import {
   getContentType,
   KV_THRESHOLD,
 } from '../assets.ts';
-import { getActiveDeployment, getDeployment, getProject, type Db } from '../db.ts';
+import { getActiveDeployment, getDeployment, getProject } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { deployments, projects } from '../schema.ts';
 import { OperatorError, preview } from './common.ts';

@@ -1,30 +1,15 @@
 import { applyMySqlAuthMigrations } from './auth-migrations.ts';
 import {
   createVoidAuthRuntime,
+  resolveConnectionString,
   type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
 } from './better-auth-shared.ts';
 
-function resolveConnectionString(env: VoidAuthEnv): string {
-  const connectionString =
-    typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
-      ? env.DATABASE_URL
-      : typeof env.HYPERDRIVE?.connectionString === 'string' &&
-          env.HYPERDRIVE.connectionString.length > 0
-        ? env.HYPERDRIVE.connectionString
-        : undefined;
-  if (!connectionString) {
-    throw new Error(
-      'auth: Better Auth requires DATABASE_URL for local MySQL dev or HYPERDRIVE in production.',
-    );
-  }
-  return connectionString;
-}
-
 async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
   const { createPool } = await import('mysql2/promise');
-  const pool = createPool({ uri: resolveConnectionString(env), connectionLimit: 1 });
+  const pool = createPool({ uri: resolveConnectionString(env, 'MySQL'), connectionLimit: 1 });
   return {
     database: pool,
     async dispose() {
@@ -47,7 +32,7 @@ async function runMySqlAuthMigrations(
   }
 
   const { createConnection } = await import('mysql2/promise');
-  const connection = await createConnection(resolveConnectionString(env));
+  const connection = await createConnection(resolveConnectionString(env, 'MySQL'));
   try {
     await applyMySqlAuthMigrations(
       {

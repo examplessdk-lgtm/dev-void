@@ -14,19 +14,13 @@ import { resolveBindingNames, type VoidConfig } from '../config.ts';
 import { detectFramework } from '../plugin-inference.ts';
 import type { EmailHandlersScan } from '../router/email.ts';
 import { assertSandboxNamespaceConfig, resolveSandboxConfig } from '../sandbox/config.ts';
-import {
-  CloudflareAuthenticationError,
-  ensureCloudflareAuthentication,
-} from './cloudflare-auth.ts';
+import { ensureCloudflareAuthentication } from './cloudflare-auth.ts';
 import { classifyCloudflareDeployApp } from './cloudflare-deploy/classify.ts';
 import { approvedCloudflareIsrBinding, chooseCloudflareIsr } from './cloudflare-isr.ts';
 import { readCloudflareLink, type CloudflareLink } from './cloudflare-link.ts';
 import { resolveCloudflareWorkersDevSubdomain } from './cloudflare-readiness.ts';
 import { resolveEnvSchemaFactsDefault } from './deploy-artifact-validation.ts';
 import {
-  hashWranglerUploader,
-  hashCfUploader,
-  assertWranglerUploaderUnchanged,
   deepEqual,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
@@ -40,8 +34,12 @@ import {
   isWranglerNonInteractiveOrCI,
   prepareExistingCloudflareDeployWithAuth,
 } from './deploy-cloudflare-auth.ts';
-import { runCloudflareEmailStep } from './deploy-cloudflare-email.ts';
-import { discoverRootWranglerConfig } from './deploy-cloudflare-helpers.ts';
+import { hasVoidSendEmailBinding, runCloudflareEmailStep } from './deploy-cloudflare-email.ts';
+import {
+  createCloudflareUploaderPins,
+  discoverRootWranglerConfig,
+  logCloudflareAuthFailure,
+} from './deploy-cloudflare-helpers.ts';
 import { log, getErrorMessage } from './deploy-helpers.ts';
 import {
   resolveWranglerMigrationPattern,
@@ -106,10 +104,6 @@ export async function prepareCloudflareDeploySource(
     return null;
   }
 
-  // Load the provision module ONCE, dynamically, so the sync deploy helpers can
-  // reach its transport/drift/scrub primitives without a static import that would
-  // make every managed `void deploy` eagerly load the provision lifecycle. Awaited
-  // here BEFORE any sync helper that calls `requireProvisionModule()`.
   // 1. App-class narrowing — reject every artifact shape the current native
   // verifier cannot prove safe before any account, provision, or build op.
   let application: ApplicationAnalysis;
@@ -258,34 +252,11 @@ export async function preflightCloudflareWorker(input: {
   }
 
   // Pin the bundled uploader before the first authenticated command, including
-  // first-run account discovery. Every later credentialed invocation checks the
-  // same baseline so project code can never swap the executable under the session.
-  const hashUploader = deps.hashWranglerUploader ?? hashWranglerUploader;
-  const wranglerUploaderHashBefore = hashUploader(root);
-  const cfUploaderHashBefore =
-    deps.activateVersion || deps.runWrangler ? undefined : hashCfUploader();
-  const cfUploaderIsPinned = (): boolean => {
-    const matched = cfUploaderHashBefore !== undefined && cfUploaderHashBefore === hashCfUploader();
-    if (!matched) {
-      log.error('deploy: refusing to run a changed cf uploader with Cloudflare credentials.');
-    }
-    return matched;
-  };
-  const assertUploaderStillPinned = (): boolean => {
-    const check = assertWranglerUploaderUnchanged(wranglerUploaderHashBefore, hashUploader(root));
-    if (check.ok) {
-      return true;
-    }
-    log.error(
-      [
-        'deploy: refusing to run the Cloudflare uploader with your Cloudflare credentials.',
-        check.reason,
-      ]
-        .filter(Boolean)
-        .join('\n'),
-    );
-    return false;
-  };
+  // first-run account discovery.
+  const { cfUploaderIsPinned, assertUploaderStillPinned } = createCloudflareUploaderPins(
+    root,
+    deps,
+  );
 
   // 3b. Pin the account. On an interactive first deploy Void authenticates,
   // selects the account, and persists it without exposing Wrangler as a user step.
@@ -299,16 +270,13 @@ export async function preflightCloudflareWorker(input: {
       accountId = await chooseCloudflareDeployAccount({
         persist: !(options.reuseExistingWorker || initialCloudflareLink),
         beforeWranglerRun: assertUploaderStillPinned,
-        configPath: configPath,
-        root: root,
+        configPath,
+        root,
         runWrangler: accountRunner,
       });
       rootConfig = parseRootWranglerConfig(configPath);
     } catch (error) {
-      if (error instanceof CloudflareAuthenticationError && error.reason === 'uploader-changed') {
-        return exit(1);
-      }
-      log.error(`deploy: ${getErrorMessage(error)}`);
+      logCloudflareAuthFailure(error);
       return exit(1);
     }
   }
@@ -343,9 +311,9 @@ export async function preflightCloudflareWorker(input: {
       return exit(1);
     }
     const email = await runCloudflareEmailStep({
-      root: root,
-      configPath: configPath,
-      voidConfig: voidConfig,
+      root,
+      configPath,
+      voidConfig,
       rootConfig,
       handlers: emailHandlers,
       workerName,
@@ -388,11 +356,7 @@ export async function preflightCloudflareWorker(input: {
     const staleAddresses = Array.isArray(rootConfig.addresses)
       ? (rootConfig.addresses as Array<unknown>).filter((a): a is string => typeof a === 'string')
       : [];
-    const staleBinding =
-      Array.isArray(rootConfig.send_email) &&
-      (rootConfig.send_email as Array<{ name?: unknown } | null>).some(
-        (e) => e?.name === SEND_EMAIL_BINDING,
-      );
+    const staleBinding = hasVoidSendEmailBinding(rootConfig);
     if (staleAddresses.length > 0 || staleBinding) {
       log.warn(
         [
@@ -416,7 +380,7 @@ export async function preflightCloudflareWorker(input: {
   let schemaResult: EnvSchemaProbeResult;
   try {
     schemaResult = await (deps.resolveSchemaFacts ?? resolveEnvSchemaFactsDefault)(
-      { root: root },
+      { root },
       schemaProbeEnv,
     );
   } catch (err) {
@@ -462,10 +426,7 @@ export async function preflightCloudflareWorker(input: {
       configPath: existsSync(configPath) ? configPath : undefined,
     });
   } catch (error) {
-    if (error instanceof CloudflareAuthenticationError && error.reason === 'uploader-changed') {
-      return exit(1);
-    }
-    log.error(`deploy: ${getErrorMessage(error)}`);
+    logCloudflareAuthFailure(error);
     return exit(1);
   }
 
@@ -488,8 +449,8 @@ export async function preflightCloudflareWorker(input: {
     approvedHandoffKv = approvedCloudflareIsrBinding(voidConfig, rootConfig);
     existingWorker = await prepareExistingCloudflareDeployWithAuth(
       {
-        root: root,
-        configPath: configPath,
+        root,
+        configPath,
         accountId,
         reuse: options.reuseExistingWorker,
         pinnedLink: initialCloudflareLink,
@@ -596,6 +557,16 @@ export async function preflightCloudflareWorker(input: {
     cliLog.info('cloudflare_sandbox_available');
   }
 
+  // Whether the root config's D1 migrations_dir differs from the source-derived directory.
+  const d1MigrationsDirDiffers = (): boolean =>
+    desired.d1 != null &&
+    readStoredResourceName(
+      parseRootWranglerConfig(configPath),
+      'd1_databases',
+      desired.d1.binding,
+      'migrations_dir',
+    ) !== desired.d1.migrationsDir;
+
   // 4. Ensure every inferred resource exists. Missing id-bearing bindings trigger this
   // immediately; queues are probed below and trigger it when absent. `--provision` remains a
   // backwards-compatible force switch, but normal local and CI deploys need no extra command.
@@ -673,15 +644,7 @@ export async function preflightCloudflareWorker(input: {
       );
       return exit(1);
     }
-    if (
-      desired.d1 &&
-      readStoredResourceName(
-        parseRootWranglerConfig(configPath),
-        'd1_databases',
-        desired.d1.binding,
-        'migrations_dir',
-      ) !== desired.d1.migrationsDir
-    ) {
+    if (desired.d1 && d1MigrationsDirDiffers()) {
       log.error(
         `deploy: provisioning did not set migrations_dir for D1 binding ${desired.d1.binding}. Retry \`void deploy --platform cloudflare\`.`,
       );
@@ -693,17 +656,9 @@ export async function preflightCloudflareWorker(input: {
     configPath,
     desired,
   );
-  const d1NeedsConfigReconciliation =
-    // A handoff applies no migrations, so preserve the existing local migration settings.
-    // Reconciling migrations_dir must not send an already-bound database to the provisioner.
-    !existingWorker &&
-    desired.d1 != null &&
-    readStoredResourceName(
-      parseRootWranglerConfig(configPath),
-      'd1_databases',
-      desired.d1.binding,
-      'migrations_dir',
-    ) !== desired.d1.migrationsDir;
+  // A handoff applies no migrations, so preserve the existing local migration settings.
+  // Reconciling migrations_dir must not send an already-bound database to the provisioner.
+  const d1NeedsConfigReconciliation = !existingWorker && d1MigrationsDirDiffers();
   if (options.provision || initiallyMissing.length > 0 || d1NeedsConfigReconciliation) {
     await provisionAndVerify();
   } else {
@@ -754,7 +709,7 @@ export async function preflightCloudflareWorker(input: {
     const absentQueues: Array<string> = [];
     for (const name of desired.queues) {
       const info = await Promise.resolve(
-        runWrangler({ type: 'queues.info', name, configPath: configPath }, { capture: true }),
+        runWrangler({ type: 'queues.info', name, configPath }, { capture: true }),
       );
       if (provisionModule.isQueueConfirmedAbsent(info, name)) {
         absentQueues.push(name);
@@ -803,7 +758,7 @@ export async function preflightCloudflareWorker(input: {
           }
         : {}),
     },
-    { configPath: configPath },
+    { configPath },
   );
 
   // 6. Pin the id-bearing binding IDENTITIES across the build, mirroring the account_id pin.
@@ -857,11 +812,7 @@ export async function preflightCloudflareWorker(input: {
     voidConfig,
     root,
     preBuildRootConfig,
-    {
-      needsSandbox: needsSandbox,
-      needsLive: needsLive,
-      analysis: source.analysis,
-    },
+    { needsSandbox, needsLive, analysis: source.analysis },
   );
   return {
     apiBaseUrl,

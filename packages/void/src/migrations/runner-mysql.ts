@@ -1,3 +1,4 @@
+import type { Connection } from 'mysql2/promise';
 import { collectMigrations } from './collect.ts';
 
 export type MySqlClient = {
@@ -23,19 +24,23 @@ export async function readMySqlAppliedMigrations(client: MySqlClient): Promise<A
   }
 }
 
+function toMySqlClient(connection: Connection): MySqlClient {
+  return {
+    async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
+      sql: string,
+      params?: Array<unknown>,
+    ): Promise<T> {
+      const [rows] = await connection.query(sql, params);
+      return (Array.isArray(rows) ? rows : []) as T;
+    },
+  };
+}
+
 export async function getMySqlAppliedMigrations(url: string): Promise<Array<string>> {
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection(url);
   try {
-    return await readMySqlAppliedMigrations({
-      async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
-        sql: string,
-        params?: Array<unknown>,
-      ): Promise<T> {
-        const [rows] = await connection.query(sql, params);
-        return (Array.isArray(rows) ? rows : []) as T;
-      },
-    });
+    return await readMySqlAppliedMigrations(toMySqlClient(connection));
   } finally {
     await connection.end();
   }
@@ -81,18 +86,7 @@ export async function runMySqlMigrations(
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection({ uri: url, multipleStatements: true });
   try {
-    return await applyMySqlMigrations(
-      {
-        async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
-          sql: string,
-          params?: Array<unknown>,
-        ): Promise<T> {
-          const [rows] = await connection.query(sql, params);
-          return (Array.isArray(rows) ? rows : []) as T;
-        },
-      },
-      migrations,
-    );
+    return await applyMySqlMigrations(toMySqlClient(connection), migrations);
   } finally {
     await connection.end();
   }

@@ -8,7 +8,7 @@ export type HeadDescriptor = {
   bodyAttrs?: Record<string, string>;
 };
 
-/** Extended head config with template support (used in void.json). */
+/** Project-level head config with template support. */
 export type HeadConfig = HeadDescriptor & {
   /** Title template — `%s` is replaced with the page title. */
   titleTemplate?: string;
@@ -31,22 +31,19 @@ export function resolveHead(
     return undefined;
   }
 
+  const layers = [configHead, middlewareHead, pageHead];
   const result: HeadDescriptor = {};
 
-  // --- title ---
   const title = pageHead?.title ?? middlewareHead?.title ?? configHead?.title;
   if (title !== undefined) {
     const template = configHead?.titleTemplate;
     result.title = template ? template.replace('%s', title) : title;
   }
 
-  // --- meta (dedup by name/property, page wins) ---
-  const metaMap = new Map<
-    string,
-    { name?: string; property?: string; content?: string; charset?: string }
-  >();
-  const metaOrder: Array<string> = [];
-  for (const layer of [configHead, middlewareHead, pageHead]) {
+  // Meta entries dedupe by charset/property/name; later layers win but keep
+  // the first position (Map.set on an existing key preserves insertion order).
+  const metaMap = new Map<string, NonNullable<HeadDescriptor['meta']>[number]>();
+  for (const layer of layers) {
     if (!layer?.meta) {
       continue;
     }
@@ -56,65 +53,33 @@ export function resolveHead(
         : entry.property
           ? `property:${entry.property}`
           : `name:${entry.name ?? ''}`;
-      if (!metaMap.has(key)) {
-        metaOrder.push(key);
-      }
       metaMap.set(key, entry);
     }
   }
   if (metaMap.size > 0) {
-    result.meta = metaOrder.map((key) => metaMap.get(key)!);
+    result.meta = [...metaMap.values()];
   }
 
-  // --- link (concatenated) ---
-  const links: HeadDescriptor['link'] = [];
-  for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.link) {
-      links.push(...layer.link);
-    }
-  }
+  const links = layers.flatMap((layer) => layer?.link ?? []);
   if (links.length > 0) {
     result.link = links;
   }
 
-  // --- script (concatenated) ---
-  const scripts: HeadDescriptor['script'] = [];
-  for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.script) {
-      scripts.push(...layer.script);
-    }
-  }
+  const scripts = layers.flatMap((layer) => layer?.script ?? []);
   if (scripts.length > 0) {
     result.script = scripts;
   }
 
-  // --- htmlAttrs (shallow merge, page wins) ---
-  const htmlAttrs: Record<string, string> = {};
-  let hasHtmlAttrs = false;
-  for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.htmlAttrs) {
-      Object.assign(htmlAttrs, layer.htmlAttrs);
-      hasHtmlAttrs = true;
-    }
-  }
-  if (hasHtmlAttrs) {
+  const htmlAttrs = mergeAttrs(layers, 'htmlAttrs');
+  if (htmlAttrs) {
     result.htmlAttrs = htmlAttrs;
   }
 
-  // --- bodyAttrs (shallow merge, page wins) ---
-  const bodyAttrs: Record<string, string> = {};
-  let hasBodyAttrs = false;
-  for (const layer of [configHead, middlewareHead, pageHead]) {
-    if (layer?.bodyAttrs) {
-      Object.assign(bodyAttrs, layer.bodyAttrs);
-      hasBodyAttrs = true;
-    }
-  }
-  if (hasBodyAttrs) {
+  const bodyAttrs = mergeAttrs(layers, 'bodyAttrs');
+  if (bodyAttrs) {
     result.bodyAttrs = bodyAttrs;
   }
 
-  // Return undefined if nothing was set
   if (
     result.title === undefined &&
     !result.meta &&
@@ -129,12 +94,34 @@ export function resolveHead(
   return result;
 }
 
+/** Shallow-merge an attribute map across layers; undefined when no layer sets it. */
+function mergeAttrs(
+  layers: ReadonlyArray<HeadDescriptor | undefined>,
+  key: 'htmlAttrs' | 'bodyAttrs',
+): Record<string, string> | undefined {
+  let merged: Record<string, string> | undefined;
+  for (const layer of layers) {
+    const attrs = layer?.[key];
+    if (attrs) {
+      merged = Object.assign(merged ?? {}, attrs);
+    }
+  }
+  return merged;
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function serializeAttrs(attrs: Record<string, string | undefined>): string {
+  return Object.entries(attrs)
+    .filter(([, value]) => value != null)
+    .map(([key, value]) => `${key}="${escapeHtml(value!)}"`)
+    .join(' ');
 }
 
 /** Serialize a HeadDescriptor to HTML tags for injection into `<head>`. */
@@ -166,21 +153,14 @@ export function renderHeadToString(head: HeadDescriptor): string {
 
   if (head.link) {
     for (const entry of head.link) {
-      const attrs = Object.entries(entry)
-        .filter(([, value]) => value != null)
-        .map(([key, value]) => `${key}="${escapeHtml(value!)}"`)
-        .join(' ');
-      parts.push(`<link ${attrs}>`);
+      parts.push(`<link ${serializeAttrs(entry)}>`);
     }
   }
 
   if (head.script) {
     for (const entry of head.script) {
       const { innerHTML, ...rest } = entry;
-      const attrs = Object.entries(rest)
-        .filter(([, value]) => value != null)
-        .map(([key, value]) => `${key}="${escapeHtml(value!)}"`)
-        .join(' ');
+      const attrs = serializeAttrs(rest);
       if (innerHTML) {
         parts.push(`<script${attrs ? ' ' + attrs : ''}>${innerHTML}</script>`);
       } else if (attrs) {
@@ -194,22 +174,12 @@ export function renderHeadToString(head: HeadDescriptor): string {
 
 /** Serialize htmlAttrs to an attribute string (includes leading space). */
 export function renderHtmlAttrs(head: HeadDescriptor): string {
-  if (!head.htmlAttrs) {
-    return '';
-  }
-  const attrs = Object.entries(head.htmlAttrs)
-    .map(([key, value]) => `${key}="${escapeHtml(value)}"`)
-    .join(' ');
+  const attrs = head.htmlAttrs ? serializeAttrs(head.htmlAttrs) : '';
   return attrs ? ' ' + attrs : '';
 }
 
 /** Serialize bodyAttrs to an attribute string (includes leading space). */
 export function renderBodyAttrs(head: HeadDescriptor): string {
-  if (!head.bodyAttrs) {
-    return '';
-  }
-  const attrs = Object.entries(head.bodyAttrs)
-    .map(([key, value]) => `${key}="${escapeHtml(value)}"`)
-    .join(' ');
+  const attrs = head.bodyAttrs ? serializeAttrs(head.bodyAttrs) : '';
   return attrs ? ' ' + attrs : '';
 }

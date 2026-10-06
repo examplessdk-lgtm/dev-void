@@ -109,7 +109,8 @@ describe('fixture cleanup after an unread deploy stream', () => {
   });
 
   postgres('starts the next test only after that deploy finished', async () => {
-    // Without the harness drain, beforeEach(clearTables) fails here with 40P01.
+    // The harness drains the unread deploy before beforeEach(clearTables), which
+    // would otherwise deadlock with it (40P01).
     expect(await env.db.select().from(deployments)).toEqual([]);
   });
 });

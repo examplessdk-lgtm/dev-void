@@ -161,7 +161,6 @@ export function applyHeaderRules(
     return response;
   }
 
-  // Clone response to modify headers
   const newResponse = new Response(response.body, response);
   // Fallback for a Clear-Site-Data rule that sanitizes to nothing: last-match-wins
   // means such a rule discards an earlier rule's value, so we fall back to the

@@ -17,14 +17,7 @@ import {
   type CloudflareAuthSecretFailureReason,
   type DeployWranglerRunResult,
 } from './deploy-types.ts';
-// The provision module pulls in the whole-provision cross-process lock
-// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
-// `process.reallyExit` and installs exit handlers the moment it is imported. An
-// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
-// must not pay that side effect. Keep ONLY erasable `import type` at module scope
-// and load the runtime values with a DYNAMIC `import()` inside the fork
-// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
-// deploy) never evaluates the provision lifecycle.
+// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet, ProvisionDriftEntry } from './provision.ts';
 
 /** Human labels for a drifted resource kind, used in guidance messages. */
@@ -438,7 +431,7 @@ export async function computeDesiredCloudflareResources(
     expectedCrons,
     needsEmail: bindings.needsEmail === true || hasEmailHandlers(emailHandlers),
     emailHandlers,
-    // Mirror index.ts's emission signal EXACTLY (line 658): the sandbox container is emitted when
+    // Mirror index.ts's emission signal EXACTLY: the sandbox container is emitted when
     // `void.config.ts` enables it OR the source imports `void/sandbox` (the import-walk signal). Using
     // `isSandboxEnabled` alone would miss an import-only sandbox app (e.g. kitchen-sink) and the
     // container pin would then FALSE-POSITIVE a legitimate build.

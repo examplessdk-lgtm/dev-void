@@ -10,8 +10,8 @@ import {
   domains,
   builds,
 } from '../schema.ts';
-import type { Build, Resource } from '../types.ts';
-import { terminateBuildsForProject } from './builds.ts';
+import type { Resource } from '../types.ts';
+import { terminateBuildsForProject, type TerminatedBuild } from './builds.ts';
 import { type Db, type DbOrTx } from './client.ts';
 
 // --- Resources ---
@@ -121,12 +121,7 @@ export async function deleteProjectCascade(
   projectId: string,
   processedResourceCfIds: ReadonlySet<string> = new Set(),
 ): Promise<{
-  cancelledBuilds: ReadonlyArray<{
-    id: string;
-    executor: Build['executor'];
-    status: Build['status'];
-    instance_type: string | null;
-  }>;
+  cancelledBuilds: ReadonlyArray<TerminatedBuild>;
   deletedResources: ReadonlyArray<Resource>;
 }> {
   return await db.transaction(async (tx) => {

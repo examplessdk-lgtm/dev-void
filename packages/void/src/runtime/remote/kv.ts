@@ -1,8 +1,8 @@
-import type { ProxyClient } from './client.ts';
+import { bytesToBase64, type ProxyClient } from './client.ts';
 
 /**
  * KVNamespace implementation backed by the remote proxy.
- * Used during local development when `remote: true` is set in void.json.
+ * Used during local development when `remote: true` is set in void.config.ts.
  */
 export class ProxyKVNamespace {
   private normalizeGetOptions(
@@ -115,38 +115,9 @@ export class ProxyKVNamespace {
     let isBase64 = false;
     if (typeof value === 'string') {
       serializedValue = value;
-    } else if (value instanceof ArrayBuffer) {
-      // Base64-encode binary data for JSON transport
-      const bytes = new Uint8Array(value);
-      let binary = '';
-      for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-      }
-      serializedValue = btoa(binary);
-      isBase64 = true;
     } else {
-      // ReadableStream — read it all and base64-encode
-      const reader = (value as ReadableStream).getReader();
-      const chunks: Array<Uint8Array> = [];
-      while (true) {
-        const { done, value: chunk } = await reader.read();
-        if (done) {
-          break;
-        }
-        chunks.push(chunk);
-      }
-      const total = chunks.reduce((sum, c) => sum + c.length, 0);
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      let binary = '';
-      for (const byte of merged) {
-        binary += String.fromCharCode(byte);
-      }
-      serializedValue = btoa(binary);
+      const buffer = value instanceof ArrayBuffer ? value : await new Response(value).arrayBuffer();
+      serializedValue = bytesToBase64(new Uint8Array(buffer));
       isBase64 = true;
     }
 

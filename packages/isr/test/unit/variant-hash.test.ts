@@ -71,10 +71,7 @@ describe('ISR variant token hashing', () => {
 
   it('splitIsrCacheKey returns the (opaque) variant token, not a URL', () => {
     const fullKey = isrCacheKey('p', 'd', 'h', '/x', 'https://h/foo');
-    const tail = fullKey.slice(isrCacheVariantPrefix('p', 'd', 'h', '/x').length);
-    // Reconstruct the part that splitIsrCacheKey actually consumes (the
-    // suffix after the deployment+host prefix), then call it on that form.
-    void tail;
+    // splitIsrCacheKey consumes the suffix after the deployment+host prefix.
     const split = splitIsrCacheKey(fullKey.slice(`p/isr/v3/d/h/`.length));
     expect(split.variantToken).toMatch(/^[0-9a-f]+$/);
     expect(split.variantToken).not.toContain('https://');

@@ -1,5 +1,3 @@
-export type IconOption = string | { dark: string; light: string };
-
 export type FooterLink = Readonly<{
   link: string;
   text: string;

@@ -7,8 +7,6 @@ import {
   type MigrationPlanHashInput,
 } from '@void/deploy-core';
 
-export { canonicalSql, isSingleStatement, MIGRATION_CLASSIFIER_VERSION } from '@void/deploy-core';
-
 export type ServerMigrationPlan = {
   name: string;
   dialect: 'sqlite';

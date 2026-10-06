@@ -20,7 +20,6 @@ import {
   upsertGitHubInstallation,
 } from '../../src/db.ts';
 import type { ApiEnv } from '../../src/env.ts';
-import { authMiddleware } from '../../src/middleware/auth.ts';
 import { githubRoutes } from '../../src/routes/github.ts';
 import { githubInstallations, oauthAccounts } from '../../src/schema.ts';
 import {
@@ -197,7 +196,6 @@ async function countOAuthRows(db: Db, providerId: string): Promise<number> {
 }
 
 describe('GET /github/link-url', () => {
-  // Case 1
   it('returns a signed link url with purpose:link, the challenge, future exp, and no userId', async () => {
     const user = await createTestUser(env.db);
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -227,7 +225,6 @@ describe('GET /github/link-url', () => {
     expect('userId' in state).toBe(false);
   });
 
-  // Case 2
   it('rejects a non-localhost redirect', async () => {
     const user = await createTestUser(env.db);
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -244,7 +241,6 @@ describe('GET /github/link-url', () => {
     expect(res.status).toBe(400);
   });
 
-  // Case 3
   it('fails closed (non-2xx, configured-error code) when App user OAuth is unset', async () => {
     const user = await createTestUser(env.db);
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -275,7 +271,6 @@ describe('GET /github/link-url', () => {
 });
 
 describe('GET /github/link-callback', () => {
-  // Case 4
   it('redirects to localhost with a link_code and binds NOTHING', async () => {
     const challenge = await createCodeChallenge(CODE_VERIFIER);
     const providerId = '900000001';
@@ -300,7 +295,6 @@ describe('GET /github/link-callback', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(0);
   });
 
-  // Case 5
   it('rejects a forged/altered state (bad signature)', async () => {
     mockUserOAuth({ providerId: '900000002' });
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -329,7 +323,6 @@ describe('GET /github/link-callback', () => {
     expect(res.status).toBe(400);
   });
 
-  // Case 6
   it('rejects an expired state', async () => {
     mockUserOAuth({ providerId: '900000003' });
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -450,7 +443,6 @@ describe('GET /github/link-callback', () => {
 });
 
 describe('POST /github/link/complete', () => {
-  // Case 7
   it('binds the identity to the authed caller and returns linked', async () => {
     const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -478,7 +470,6 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(1);
   });
 
-  // Case 8
   it('is idempotent for the same caller (already_linked, still one row)', async () => {
     const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -517,7 +508,6 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(1);
   });
 
-  // Case 9
   it('rejects a PKCE mismatch with invalid_verifier and binds nothing', async () => {
     const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -541,7 +531,6 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(0);
   });
 
-  // Case 10
   it('rejects an expired link_code', async () => {
     const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
     const challenge = await createCodeChallenge(CODE_VERIFIER);
@@ -570,7 +559,6 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(0);
   });
 
-  // Case 11
   it('returns 409 when the provider id is already linked to another user', async () => {
     const userB = await createTestUser(env.db, 'bob', 'github', '900000014');
     const userA = await createTestUser(env.db, 'alice', 'google', 'google-alice');
@@ -599,10 +587,10 @@ describe('POST /github/link/complete', () => {
     expect(owner?.id).toBe(userB.id);
   });
 
-  // Case 12 — Threat-L1 regression (the crux). A link_code minted in a callback
-  // (for providerId P) is completed by a DIFFERENT authed user than the one who
-  // would phish the flow. The bind follows the COMPLETING bearer token, never a
-  // state/initiator notion — so an attacker can only ever link their own id.
+  // A link_code minted in a callback (for providerId P) is completed by a
+  // DIFFERENT authed user than the one who would phish the flow. The bind follows
+  // the COMPLETING bearer token, never a state/initiator notion — so an attacker
+  // can only ever link their own id.
   it('binds the link_code to the COMPLETING token-holder, not the flow initiator', async () => {
     // Two distinct Void accounts, both logged in via a non-github provider so
     // neither has a github oauth row yet.
@@ -639,7 +627,7 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(1);
   });
 
-  // Case 13 — F1: the caller already has a DIFFERENT github identity. RFC 0074
+  // The caller already has a DIFFERENT github identity. RFC 0074
   // allows one github identity per Void account, so this is github_already_linked
   // (a DISTINCT 409 code from the other-user github_identity_conflict).
   it('returns 409 github_already_linked when the caller already linked a different github id', async () => {
@@ -670,7 +658,7 @@ describe('POST /github/link/complete', () => {
     expect(await countOAuthRows(env.db, providerId)).toBe(0);
   });
 
-  // Case 14 — F2: a successful link backfills the caller's pre-existing,
+  // A successful link backfills the caller's pre-existing,
   // unowned installation (created before sign-in). A google user who links
   // should then see/connect that installation.
   it('backfills pre-existing unowned installations to the completing user on link', async () => {

@@ -91,7 +91,7 @@ New platform resources use deterministic `void-<installation-name>-<role>` names
 | Workers                                   | 5, plus one per app using workers.dev | API/control plane, proxy, tail ingestion, dispatch, email gateway, and test-origin forwarders |
 | KV namespaces                             |                                     3 | Routing, ISR cache, and static asset storage                                                  |
 | R2 buckets                                |                                     1 | Static and deployment assets                                                                  |
-| Queues                                    |                                     2 | Usage events and cron firing                                                                  |
+| Queues                                    |                                     3 | Usage events, cron firing, and deployments                                                    |
 | Workers for Platforms dispatch namespaces |                                     1 | User application Workers                                                                      |
 | Hyperdrive configurations                 |                                     1 | External platform PostgreSQL                                                                  |
 | AI Gateways                               |                                     1 | Installation-isolated AI routing and metering                                                 |

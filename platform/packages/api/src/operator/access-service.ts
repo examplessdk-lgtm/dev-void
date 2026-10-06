@@ -258,12 +258,7 @@ export async function sendOperatorInvitations(
   if (
     !input.length ||
     input.length > 100 ||
-    input.some(
-      (email) =>
-        typeof email !== 'string' ||
-        email.length > 320 ||
-        !/^[^\s@,]+@[^\s@,]+$/.test(email.trim()),
-    )
+    input.some((email) => email.length > 320 || !/^[^\s@,]+@[^\s@,]+$/.test(email.trim()))
   ) {
     throw new OperatorError(
       400,

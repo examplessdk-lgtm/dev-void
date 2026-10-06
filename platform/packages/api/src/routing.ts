@@ -198,8 +198,8 @@ export async function applyRoutingSuspension(
  * entries — each project's slug route plus EVERY `domain:<host>` route the
  * project has. This is the single source of truth for which KV keys carry a
  * project's suspension; dispatch enforces `routing.suspended` on all of them,
- * so suspending only the slug (the historical behaviour) left custom domains
- * serving past the cap, and unsuspending only the slug left them 429'd.
+ * so suspending only the slug would leave custom domains serving past the cap,
+ * and unsuspending only the slug would leave them 429'd.
  *
  * We deliberately do NOT filter to `status === 'active'`. `tryActivateDomain`
  * writes the `domain:<host>` KV route BEFORE flipping the DB row to `active`

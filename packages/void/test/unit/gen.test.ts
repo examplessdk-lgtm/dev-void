@@ -745,13 +745,12 @@ describe('gen migration', () => {
   });
 
   it('refuses to scaffold when _journal.json is missing but meta/*_snapshot.json is present', async () => {
-    // Regression: `_journal.json` deleted in isolation (e.g. bad merge /
-    // manual cleanup) while `meta/*_snapshot.json` lingers on disk is the
-    // exact "partial drizzle-kit state" `assertJournalCoherence` rejects
-    // across the rest of the CLI. Before this gate, `gen migration` fell
-    // through to the bare-legacy write path — the new .sql file showed up
-    // on disk and every subsequent `void db status`/`migrate`/`deploy`
-    // then rejected the project. `gen migration` must refuse up front,
+    // `_journal.json` deleted in isolation (e.g. bad merge / manual
+    // cleanup) while `meta/*_snapshot.json` lingers on disk is the exact
+    // "partial drizzle-kit state" `assertJournalCoherence` rejects across
+    // the rest of the CLI. Writing a new .sql file here would leave a
+    // project every later `void db status`/`migrate`/`deploy` rejects.
+    // `gen migration` must refuse up front,
     // BEFORE writing any .sql file, with the same partial-state error the
     // rest of the CLI emits.
     const migrationsDir = join(TMP, 'db', 'migrations');
@@ -788,12 +787,12 @@ describe('gen migration', () => {
   });
 
   it('refuses on an empty-entries journal when meta/*_snapshot.json is present', async () => {
-    // Regression: a journal with `entries: []` is only "bare-legacy
-    // placeholder" when there are NO accompanying drizzle artifacts. When
-    // a `meta/<tag>_snapshot.json` is also on disk, the project is in the
+    // A journal with `entries: []` is only "bare-legacy placeholder" when
+    // there are NO accompanying drizzle artifacts. When a
+    // `meta/<tag>_snapshot.json` is also on disk, the project is in the
     // same partial drizzle-kit shape `assertJournalCoherence` treats as
-    // drizzle-managed. Falling through here used to write a new .sql file
-    // that every subsequent `void db status`/`migrate`/`deploy` rejected.
+    // drizzle-managed; a new .sql file here would be rejected by every
+    // later `void db status`/`migrate`/`deploy`.
     // Refuse BEFORE writing any .sql file so there's nothing to roll back.
     const migrationsDir = join(TMP, 'db', 'migrations');
     mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
@@ -913,7 +912,7 @@ describe('gen migration', () => {
   });
 
   it('refuses when the journal dialect disagrees with the void.json dialect', async () => {
-    // Round 40: once a journal exists on disk, its `dialect` field is
+    // Once a journal exists on disk, its `dialect` field is
     // authoritative. Drizzle-kit chains every snapshot in `meta/` off
     // that dialect, so if a user flips `void.json`'s `database` field
     // to `pg` without dropping `db/migrations/`, running `void gen
@@ -997,8 +996,7 @@ describe('gen migration', () => {
   it('proceeds when the journal dialect matches the void.json dialect (postgresql)', async () => {
     // Positive case: when both sides agree on postgresql, `runMigration`
     // passes the journal-derived dialect through to `writeDrizzleConfig`
-    // and the spawn proceeds normally. This locks in the no-regression
-    // path for the Round 40 cross-check.
+    // and the spawn proceeds normally.
     seedSchema();
     const migrationsDir = join(TMP, 'db', 'migrations');
     mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
@@ -1311,16 +1309,12 @@ describe('gen migration', () => {
   });
 
   it('surfaces partial-drizzle state before bundled-mode guard when migrations.js is present but _journal.json is missing', async () => {
-    // Regression: when `migrations.js` survives
-    // a bad merge but `_journal.json` is missing, the bundled-mode guard
-    // used to fire first and tell the user to "delete migrations.js".
-    // Following that advice strips the last drizzle artifact and leaves the
-    // project in bare-legacy mode with orphan SQL files on the next run —
-    // exactly the cleanup spiral round 16's `assertJournalCoherence` was
-    // built to prevent. The coherence check must run BEFORE the bundled
-    // guard so the user gets the partial-state error (restore the journal
-    // OR delete every drizzle artifact) instead of the misleading bundled
-    // advice.
+    // When `migrations.js` survives a bad merge but `_journal.json` is
+    // missing, telling the user to "delete migrations.js" would strip the
+    // last drizzle artifact and leave orphan SQL files in bare-legacy mode.
+    // The coherence check must run BEFORE the bundled guard so the user
+    // gets the partial-state error (restore the journal OR delete every
+    // drizzle artifact) instead of the misleading bundled advice.
     const migrationsDir = join(TMP, 'db', 'migrations');
     mkdirSync(migrationsDir, { recursive: true });
     // No `_journal.json` on disk, but the bundled `migrations.js` is still
@@ -1409,14 +1403,11 @@ describe('gen migration', () => {
   });
 
   it('does not clone the previous snapshot in-process (drizzle-kit is the source of truth)', async () => {
-    // Regression for the P1 Codex finding: an earlier in-process
-    // implementation read `meta/<prevPrefix>_snapshot.json` and wrote
-    // a shallow clone (with a re-issued id chain) as the new snapshot.
-    // That left the new journal entry pointing at a stale schema
-    // state: if the user had edited `db/schema.ts` to match their
-    // hand-written DDL, the next `void db generate` would diff the
-    // current schema against the stale clone and re-emit the same
-    // change. The fix delegates the entire write to
+    // Cloning `meta/<prevPrefix>_snapshot.json` in-process would leave
+    // the new journal entry pointing at a stale schema state: if the user
+    // had edited `db/schema.ts` to match their hand-written DDL, the next
+    // `void db generate` would diff against the stale clone and re-emit
+    // the same change. The whole write goes through
     // `drizzle-kit generate --custom --name <name>`, which recompiles
     // the current schema into a fresh snapshot.
     //
@@ -1760,7 +1751,7 @@ describe('gen migration', () => {
     expect(snapshotFiles).toEqual(['20200101000000_snapshot.json']);
   });
 
-  // Round 38: Yarn Berry PnP guard — under PnP, `node_modules` does not
+  // Yarn Berry PnP guard — under PnP, `node_modules` does not
   // exist and dependencies resolve through `.pnp.cjs`. `runMigration`
   // must inject the PnP loaders into the spawned child's NODE_OPTIONS
   // so `drizzle-kit generate --custom` can resolve user imports like
@@ -1910,7 +1901,7 @@ describe('gen migration', () => {
     });
 
     it('walks ancestors to find `.pnp.cjs` (workspace-root PnP, project is a subpackage)', async () => {
-      // Round 39: Yarn PnP monorepos keep `.pnp.cjs` at the workspace
+      // Yarn PnP monorepos keep `.pnp.cjs` at the workspace
       // root, not in each subpackage. The helper walks ancestors so
       // this common shape works. Set up a nested "subpackage" under
       // TMP and place `.pnp.cjs` one directory up from the project

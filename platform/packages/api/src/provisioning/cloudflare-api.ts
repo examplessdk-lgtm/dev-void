@@ -244,11 +244,8 @@ export type QueueConsumerInfo = Readonly<{
   consumer_id: string;
   // CF Queues API asymmetry: POST/PUT bodies use `script_name`, but
   // GET /queues/{id}/consumers returns the subscribed worker under
-  // `script`. Using `script_name` for reads returns `undefined` for
-  // every consumer, so a legitimate same-script re-deploy falls
-  // through to the "different owner" branch and reports
-  // `ownerScript: 'unknown'` — which the post-ba41cef conflict path
-  // then treats as a fatal deploy failure on every subsequent deploy.
+  // `script`. Reading `script_name` would return `undefined` for every
+  // consumer and misreport a same-script re-deploy as an ownership conflict.
   script: string;
   type: string;
   settings: QueueConsumerSettings;
@@ -344,7 +341,6 @@ export async function addQueueConsumer(
     ...(settings && { settings }),
   };
 
-  // Fast path: try to create the consumer directly
   try {
     await cfFetch(consumersUrl, apiToken, {
       method: 'POST',

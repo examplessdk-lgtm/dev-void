@@ -1,14 +1,14 @@
+import { platformProjectHostname, readPlatformApplication } from '@void/platform';
+import type { ApiEnv } from '../env.ts';
+import type { Project } from '../types.ts';
 import { isCfAssetPlainText } from './migrations.ts';
 
 // Cap on the number of presign requests in a single batch. Presigning is
 // CPU-light (one HMAC chain per call) but unbounded fanout still costs
-// memory and lets a malformed CLI burn server CPU without bound. 5000
-// matches the largest realistic dist/ asset count we've observed (memora
-// repro: 570; design doc 0068's TBD ceiling). Asset manifests on the
+// memory and lets a malformed CLI burn server CPU without bound. 5000 is
+// well above the largest realistic dist/ asset count. Asset manifests on the
 // JSON-mode deploy share the same cap for symmetry.
 export const MAX_UPLOAD_URLS_BATCH = 5000;
-
-export const DEFAULT_DISPATCH_NAMESPACE = 'void-users';
 
 export const DEFAULT_TAIL_SERVICE_NAME = 'void-tail';
 
@@ -28,7 +28,7 @@ export const MAX_WORKER_FILE_BYTES = 32 * 1024 * 1024;
  * For a 32 MiB module the fast path drops peak residency from
  * roughly `raw + bin + decoded ≈ 86 + 64 + 32 = 182 MiB` to
  * `raw + decoded ≈ 86 + 32 = 118 MiB`, which fits under the 128 MiB
- * isolate cap with margin. The fallback path matches the previous behaviour.
+ * isolate cap with margin.
  */
 export function decodeBase64ToBytes(raw: string): Uint8Array {
   const fromBase64 = (Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array })
@@ -42,6 +42,18 @@ export function decodeBase64ToBytes(raw: string): Uint8Array {
     out[i] = bin.charCodeAt(i);
   }
   return out;
+}
+
+/** Public URLs for a project: active custom domains first, then the platform hostname. */
+export function projectPublicUrls(
+  env: ApiEnv['Bindings'],
+  project: Project,
+  domains: ReadonlyArray<Readonly<{ hostname: string; status: string }>>,
+): Array<string> {
+  return [
+    ...domains.filter((domain) => domain.status === 'active').map((d) => `https://${d.hostname}`),
+    `https://${platformProjectHostname(project, readPlatformApplication(env))}`,
+  ];
 }
 
 export const CF_RETRY = { maxRetries: 3, delayMs: 1000 };

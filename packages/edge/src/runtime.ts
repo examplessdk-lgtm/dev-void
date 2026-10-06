@@ -37,13 +37,11 @@ export function createStaticEdgeHandler(config: StaticEdgeConfig): StaticEdgeHan
         if (!config.versionMetadataBinding) {
           return Response.json({ ready: true });
         }
-        const metadata = config.versionMetadataBinding
-          ? (env as unknown as Record<string, { id?: unknown } | undefined>)[
-              config.versionMetadataBinding
-            ]
-          : undefined;
+        const metadata = (env as unknown as Record<string, { id?: unknown } | undefined>)[
+          config.versionMetadataBinding
+        ];
         return Response.json(
-          { ready: true, ...(config.versionMetadataBinding ? { versionId: metadata?.id } : {}) },
+          { ready: true, versionId: metadata?.id },
           { headers: { 'cache-control': 'no-store' } },
         );
       }

@@ -2,11 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useFateClient } from 'react-fate';
-import { isTerminalBuildStatus } from '../../../build-status.ts';
 import type { Build } from '../../../types.ts';
 import { BuildLogsView, buildLogsRequest } from '../../fate/views.ts';
-
-export { isTerminalBuildStatus };
 
 type LogLine = { seq: number; line: string; stream: string };
 export function BuildLogs({ build }: { build: Build }) {

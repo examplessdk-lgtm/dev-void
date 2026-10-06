@@ -56,7 +56,7 @@ const GITHUB_APP_USER_OAUTH_ENV = {
 const CODE_VERIFIER = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ'; // 43 chars
 const WRONG_VERIFIER = 'ZYXWVUTSRQPONMLKJIHGFEDCBA0123456789._~-abcd'; // 44 chars, well-formed
 // The GitHub account id carried by the default `mintJoinCode` / `runJoinCallback`.
-// The revocation tombstone is keyed by THIS id (Task 19), not the joiner's Void
+// The revocation tombstone is keyed by THIS id, not the joiner's Void
 // user id, so the join-flow revocation tests record the tombstone against it.
 const JOIN_ACCOUNT_ID = '5551234';
 
@@ -69,8 +69,6 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  // clearTables now removes github_installation_members and github_installations
-  // (before the users they reference), so a single call resets the join tables.
   await clearTables(env.db);
 });
 
@@ -372,7 +370,7 @@ describe('GET /github/join-callback', () => {
     expect(await countAllMemberRows(env.db)).toBe(0);
   });
 
-  // R4-2: the join_code `iat` must be sampled (getDbNowMs) BEFORE the GitHub
+  // The join_code `iat` must be sampled (getDbNowMs) BEFORE the GitHub
   // access proof, so it is a conservative lower bound. A removal landing in the
   // proof→mint gap (dominated by GitHub access-propagation lag) then has
   // revoked_at >= iat and is rejected at /join/complete. This asserts the
@@ -653,8 +651,7 @@ describe('POST /github/join/complete', () => {
     expect(await countMemberRows(env.db, '700', other.id)).toBe(0);
   });
 
-  // THREAT L1 (the crux). A join_code minted in a callback is completed by an
-  // arbitrary authed user; the membership binds to the COMPLETING bearer token,
+  // A join_code minted in a callback is completed by an arbitrary authed user; the membership binds to the COMPLETING bearer token,
   // NEVER to anyone named in the state/join_code.
   it('binds the membership to the completing token-holder, not the flow initiator', async () => {
     const attacker = await createTestUser(env.db, 'attacker', 'google', 'google-attacker');
@@ -878,7 +875,7 @@ describe('POST /github/join/complete', () => {
     expect(res.status).toBe(401);
   });
 
-  // Task 3 integration: a successful join makes the install visible via the
+  // A successful join makes the install visible via the
   // owner-OR-member by-user lookup.
   it('makes the joined install visible via getGitHubInstallationsByUser', async () => {
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
@@ -907,7 +904,7 @@ describe('POST /github/join/complete', () => {
     expect(installs.map((i) => i.installation_id)).toContain('700');
   });
 
-  // Monotonic revocation (Task 14): a join_code minted BEFORE a recorded
+  // Monotonic revocation: a join_code minted BEFORE a recorded
   // revocation (iat <= revoked_at) is a stale artifact from a removed member — it
   // must NOT resurrect the membership. The install is silently skipped (not
   // counted).
@@ -1035,13 +1032,13 @@ describe('POST /github/join/complete', () => {
     expect(await countMemberRows(env.db, '700', joiner.id)).toBe(0);
   });
 
-  // F5 (Task 18): the tombstone-read + upsert loop now runs inside a transaction
+  // The tombstone-read + upsert loop runs inside a transaction
   // that locks the target install rows install-first. That serializes a concurrent
   // member_removed (not deterministically reproducible under PGlite's serialized
   // txns — hence no flaky race test), but the tombstone-skip RESULT must be
   // unchanged. Over a multi-install join_code, the revoked install is skipped and
   // the fresh one created in a SINGLE atomic commit, and `count` excludes the skip.
-  it('F5: under the tx-wrap, a multi-install join skips the revoked install and creates the fresh one', async () => {
+  it('under the tx-wrap, a multi-install join skips the revoked install and creates the fresh one', async () => {
     const joiner = await createTestUser(env.db, 'joiner', 'google', 'google-joiner');
     await seedInstall({ installationId: '700' });
     await seedInstall({ installationId: '701' });

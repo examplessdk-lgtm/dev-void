@@ -1,13 +1,9 @@
+import { isRecord } from './is-record.ts';
+
 export const MANIFEST_REDIRECT_RULE_STATUSES: ReadonlySet<number> = new Set([
   200, 301, 302, 303, 307, 308,
 ]);
 
-// Runtime shape validation for incoming deploy manifests. Downstream code
-// indexes deeply into the manifest (bindings.d1, queues[i].name,
-// websocket.classes, etc.) without re-guarding, so a malformed-but-JSON-valid
-// payload would otherwise crash with a 500 — sometimes after a deployment row
-// or CF resources were created. Everything the deploy pipeline reads must be
-// validated here BEFORE createDeployment runs.
 // Caps on user-supplied routing rule lists. Each rule compiles a regex per
 // request in dispatch (see `routing-rules.ts`), so an unbounded list lets a
 // 100k-entry manifest exhaust CPU on every request to the project. The limit
@@ -55,23 +51,27 @@ function validateRuleHost(
   return null;
 }
 
+/**
+ * Runtime shape validation for incoming deploy manifests. Downstream code
+ * indexes deeply into the manifest (bindings.d1, queues[i].name,
+ * websocket.classes, etc.) without re-guarding, so a malformed-but-JSON-valid
+ * payload would otherwise crash with a 500 — sometimes after a deployment row
+ * or CF resources were created. Everything the deploy pipeline reads must be
+ * validated here BEFORE createDeployment runs.
+ */
 export function validateManifestShape(parsed: unknown): string | null {
-  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     return 'invalid manifest shape: expected a JSON object';
   }
-  const manifest = parsed as Record<string, unknown>;
+  const manifest = parsed;
   if (manifest.emailProtocolVersion !== undefined && manifest.emailProtocolVersion !== 1) {
     return 'invalid manifest shape: emailProtocolVersion must be 1';
   }
 
-  if (
-    manifest.bindings == null ||
-    typeof manifest.bindings !== 'object' ||
-    Array.isArray(manifest.bindings)
-  ) {
+  if (!isRecord(manifest.bindings)) {
     return 'invalid manifest shape: bindings must be an object';
   }
-  const bindings = manifest.bindings as Record<string, unknown>;
+  const bindings = manifest.bindings;
   for (const key of ['d1', 'kv', 'r2', 'hyperdrive'] as const) {
     const bindingValue = bindings[key];
     if (bindingValue === undefined) {
@@ -87,10 +87,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return 'invalid manifest shape: queues must be an array';
     }
     for (const queue of manifest.queues) {
-      if (queue == null || typeof queue !== 'object' || Array.isArray(queue)) {
+      if (!isRecord(queue)) {
         return 'invalid manifest shape: queues entries must be objects';
       }
-      const queueObject = queue as Record<string, unknown>;
+      const queueObject = queue;
       if (typeof queueObject.name !== 'string' || typeof queueObject.bindingName !== 'string') {
         return 'invalid manifest shape: queues entries must have string name and bindingName';
       }
@@ -116,10 +116,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return 'invalid manifest shape: schedules must be an array';
     }
     for (const schedule of manifest.schedules) {
-      if (schedule == null || typeof schedule !== 'object' || Array.isArray(schedule)) {
+      if (!isRecord(schedule)) {
         return 'invalid manifest shape: schedules entries must be objects';
       }
-      const scheduleObject = schedule as Record<string, unknown>;
+      const scheduleObject = schedule;
       if (typeof scheduleObject.name !== 'string' || typeof scheduleObject.cron !== 'string') {
         return 'invalid manifest shape: schedules entries must have string name and cron';
       }
@@ -136,14 +136,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   }
 
   if (manifest.vars !== undefined) {
-    if (
-      manifest.vars == null ||
-      typeof manifest.vars !== 'object' ||
-      Array.isArray(manifest.vars)
-    ) {
+    if (!isRecord(manifest.vars)) {
       return 'invalid manifest shape: vars must be an object';
     }
-    for (const [k, v] of Object.entries(manifest.vars as Record<string, unknown>)) {
+    for (const [k, v] of Object.entries(manifest.vars)) {
       if (typeof v !== 'string') {
         return `invalid manifest shape: vars.${k} must be a string`;
       }
@@ -151,14 +147,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   }
 
   if (manifest.migrations !== undefined) {
-    if (
-      manifest.migrations == null ||
-      typeof manifest.migrations !== 'object' ||
-      Array.isArray(manifest.migrations)
-    ) {
+    if (!isRecord(manifest.migrations)) {
       return 'invalid manifest shape: migrations must be an object';
     }
-    const mig = manifest.migrations as Record<string, unknown>;
+    const mig = manifest.migrations;
     // `dialect` and `pending` are read unconditionally by the migration
     // dispatch path (`manifest.migrations.pending > 0`). A wrong-typed value
     // would reach the CF migration runner and crash mid-deploy.
@@ -231,14 +223,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   // here; the plan ceiling (`maxCpuMsPerRequest`) is enforced by the deploy
   // handler once the authenticated user's plan is in scope.
   if (manifest.limits !== undefined) {
-    if (
-      manifest.limits == null ||
-      typeof manifest.limits !== 'object' ||
-      Array.isArray(manifest.limits)
-    ) {
+    if (!isRecord(manifest.limits)) {
       return 'invalid manifest shape: limits must be an object';
     }
-    const limits = manifest.limits as Record<string, unknown>;
+    const limits = manifest.limits;
     if (limits.cpuMs !== undefined) {
       if (
         typeof limits.cpuMs !== 'number' ||
@@ -258,14 +246,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   }
 
   if (manifest.assetConfig !== undefined) {
-    if (
-      manifest.assetConfig == null ||
-      typeof manifest.assetConfig !== 'object' ||
-      Array.isArray(manifest.assetConfig)
-    ) {
+    if (!isRecord(manifest.assetConfig)) {
       return 'invalid manifest shape: assetConfig must be an object';
     }
-    const assetConfig = manifest.assetConfig as Record<string, unknown>;
+    const assetConfig = manifest.assetConfig;
     if (
       assetConfig.not_found_handling !== undefined &&
       !['none', 'single-page-application', '404-page'].includes(
@@ -287,16 +271,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   if (manifest.revalidate !== undefined) {
     if (typeof manifest.revalidate === 'number') {
       // ok
-    } else if (
-      manifest.revalidate == null ||
-      typeof manifest.revalidate !== 'object' ||
-      Array.isArray(manifest.revalidate)
-    ) {
+    } else if (!isRecord(manifest.revalidate)) {
       return 'invalid manifest shape: revalidate must be a number or object';
     } else {
-      for (const [pathname, value] of Object.entries(
-        manifest.revalidate as Record<string, unknown>,
-      )) {
+      for (const [pathname, value] of Object.entries(manifest.revalidate)) {
         if (typeof value !== 'number') {
           return `invalid manifest shape: revalidate.${pathname} must be a number`;
         }
@@ -309,10 +287,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return 'invalid manifest shape: headerRules must be an array';
     }
     for (const rule of manifest.headerRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
+      if (!isRecord(rule)) {
         return 'invalid manifest shape: headerRules entries must be objects';
       }
-      const ruleObject = rule as Record<string, unknown>;
+      const ruleObject = rule;
       if (typeof ruleObject.pattern !== 'string') {
         return 'invalid manifest shape: headerRules entries must have a string pattern';
       }
@@ -344,10 +322,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return `invalid manifest shape: redirectRules has ${manifest.redirectRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
     }
     for (const rule of manifest.redirectRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
+      if (!isRecord(rule)) {
         return 'invalid manifest shape: redirectRules entries must be objects';
       }
-      const ruleObject = rule as Record<string, unknown>;
+      const ruleObject = rule;
       if (
         typeof ruleObject.source !== 'string' ||
         typeof ruleObject.destination !== 'string' ||
@@ -355,8 +333,6 @@ export function validateManifestShape(parsed: unknown): string | null {
       ) {
         return 'invalid manifest shape: redirectRules entries must have string source, string destination, and numeric status';
       }
-      // `JSON.stringify` safely quotes and escapes the user-supplied source
-      // string in the error message (handles embedded quotes, newlines, etc).
       const sourceRef = JSON.stringify(ruleObject.source as string);
       if (!MANIFEST_REDIRECT_RULE_STATUSES.has(ruleObject.status)) {
         return `invalid manifest shape: redirectRules entry ${sourceRef} status must be one of ${[...MANIFEST_REDIRECT_RULE_STATUSES].join(', ')} (200 = rewrite, 3xx = redirect)`;
@@ -389,14 +365,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   // only enforces shape; semantic correctness (does the pattern match a
   // real route?) is the user's responsibility.
   if (manifest.revalidateQueryAllowlist !== undefined) {
-    if (
-      manifest.revalidateQueryAllowlist == null ||
-      typeof manifest.revalidateQueryAllowlist !== 'object' ||
-      Array.isArray(manifest.revalidateQueryAllowlist)
-    ) {
+    if (!isRecord(manifest.revalidateQueryAllowlist)) {
       return 'invalid manifest shape: revalidateQueryAllowlist must be an object';
     }
-    const entries = Object.entries(manifest.revalidateQueryAllowlist as Record<string, unknown>);
+    const entries = Object.entries(manifest.revalidateQueryAllowlist);
     if (entries.length > MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES) {
       return `invalid manifest shape: revalidateQueryAllowlist has ${entries.length} entries, exceeds the ${MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES} entry limit`;
     }
@@ -427,10 +399,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return `invalid manifest shape: pages has ${manifest.pages.length} entries, exceeds the ${MAX_PAGES} entry limit`;
     }
     for (const entry of manifest.pages as Array<unknown>) {
-      if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
+      if (!isRecord(entry)) {
         return 'invalid manifest shape: each pages entry must be an object';
       }
-      const e = entry as Record<string, unknown>;
+      const e = entry;
       if (typeof e.pattern !== 'string' || e.pattern === '') {
         return 'invalid manifest shape: pages entry pattern must be a string';
       }
@@ -445,16 +417,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   // baked revalidate) against the real request path. Same shape as the object
   // form of `revalidate`: a map of pattern → number.
   if (manifest.pathRevalidate !== undefined) {
-    if (
-      manifest.pathRevalidate == null ||
-      typeof manifest.pathRevalidate !== 'object' ||
-      Array.isArray(manifest.pathRevalidate)
-    ) {
+    if (!isRecord(manifest.pathRevalidate)) {
       return 'invalid manifest shape: pathRevalidate must be an object';
     }
-    for (const [pathname, value] of Object.entries(
-      manifest.pathRevalidate as Record<string, unknown>,
-    )) {
+    for (const [pathname, value] of Object.entries(manifest.pathRevalidate)) {
       if (typeof value !== 'number') {
         return `invalid manifest shape: pathRevalidate.${pathname} must be a number`;
       }
@@ -472,10 +438,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       return `invalid manifest shape: fallbackRules has ${manifest.fallbackRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
     }
     for (const rule of manifest.fallbackRules) {
-      if (rule == null || typeof rule !== 'object' || Array.isArray(rule)) {
+      if (!isRecord(rule)) {
         return 'invalid manifest shape: fallbackRules entries must be objects';
       }
-      const ruleObject = rule as Record<string, unknown>;
+      const ruleObject = rule;
       if (
         typeof ruleObject.source !== 'string' ||
         typeof ruleObject.destination !== 'string' ||
@@ -505,22 +471,18 @@ export function validateManifestShape(parsed: unknown): string | null {
   }
 
   if (manifest.websocket !== undefined) {
-    if (
-      manifest.websocket == null ||
-      typeof manifest.websocket !== 'object' ||
-      Array.isArray(manifest.websocket)
-    ) {
+    if (!isRecord(manifest.websocket)) {
       return 'invalid manifest shape: websocket must be an object';
     }
-    const websocket = manifest.websocket as Record<string, unknown>;
+    const websocket = manifest.websocket;
     if (!Array.isArray(websocket.routes)) {
       return 'invalid manifest shape: websocket.routes must be an array';
     }
     for (const route of websocket.routes) {
-      if (route == null || typeof route !== 'object' || Array.isArray(route)) {
+      if (!isRecord(route)) {
         return 'invalid manifest shape: websocket.routes entries must be objects';
       }
-      const routeObject = route as Record<string, unknown>;
+      const routeObject = route;
       if (typeof routeObject.className !== 'string') {
         return 'invalid manifest shape: websocket.routes entries must have a string className';
       }
@@ -539,10 +501,10 @@ export function validateManifestShape(parsed: unknown): string | null {
         return 'invalid manifest shape: websocket.migrations must be an array';
       }
       for (const migration of websocket.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
+        if (!isRecord(migration)) {
           return 'invalid manifest shape: websocket.migrations entries must be objects';
         }
-        const migrationObject = migration as Record<string, unknown>;
+        const migrationObject = migration;
         if (typeof migrationObject.tag !== 'string' || migrationObject.tag.length === 0) {
           return 'invalid manifest shape: websocket.migrations entries must have a non-empty string tag';
         }
@@ -569,14 +531,10 @@ export function validateManifestShape(parsed: unknown): string | null {
     if (manifest.type === 'static' || manifest.type === 'spa') {
       return 'sandbox is not supported for static/spa deployments';
     }
-    if (
-      manifest.sandbox == null ||
-      typeof manifest.sandbox !== 'object' ||
-      Array.isArray(manifest.sandbox)
-    ) {
+    if (!isRecord(manifest.sandbox)) {
       return 'invalid manifest shape: sandbox must be an object';
     }
-    const sandbox = manifest.sandbox as Record<string, unknown>;
+    const sandbox = manifest.sandbox;
     for (const key of ['bindingName', 'className', 'containerName', 'image']) {
       if (typeof sandbox[key] !== 'string' || sandbox[key].length === 0) {
         return `invalid manifest shape: sandbox.${key} must be a non-empty string`;
@@ -601,10 +559,10 @@ export function validateManifestShape(parsed: unknown): string | null {
         return 'invalid manifest shape: sandbox.migrations must be an array';
       }
       for (const migration of sandbox.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
+        if (!isRecord(migration)) {
           return 'invalid manifest shape: sandbox.migrations entries must be objects';
         }
-        const migrationObject = migration as Record<string, unknown>;
+        const migrationObject = migration;
         if (typeof migrationObject.tag !== 'string') {
           return 'invalid manifest shape: sandbox.migrations entries must have a string tag';
         }
@@ -627,14 +585,10 @@ export function validateManifestShape(parsed: unknown): string | null {
   }
 
   if (manifest.live !== undefined) {
-    if (
-      manifest.live == null ||
-      typeof manifest.live !== 'object' ||
-      Array.isArray(manifest.live)
-    ) {
+    if (!isRecord(manifest.live)) {
       return 'invalid manifest shape: live must be an object';
     }
-    const live = manifest.live as Record<string, unknown>;
+    const live = manifest.live;
     for (const key of ['bindingName', 'className']) {
       if (typeof live[key] !== 'string' || live[key].length === 0) {
         return `invalid manifest shape: live.${key} must be a non-empty string`;
@@ -651,10 +605,10 @@ export function validateManifestShape(parsed: unknown): string | null {
         return 'invalid manifest shape: live.migrations must be an array';
       }
       for (const migration of live.migrations) {
-        if (migration == null || typeof migration !== 'object' || Array.isArray(migration)) {
+        if (!isRecord(migration)) {
           return 'invalid manifest shape: live.migrations entries must be objects';
         }
-        const migrationObject = migration as Record<string, unknown>;
+        const migrationObject = migration;
         if (typeof migrationObject.tag !== 'string') {
           return 'invalid manifest shape: live.migrations entries must have a string tag';
         }
@@ -673,13 +627,7 @@ export function validateManifestShape(parsed: unknown): string | null {
 }
 
 function isLocalImageReference(image: string): boolean {
-  const lowerImage = image.toLowerCase();
   return (
-    image.startsWith('.') ||
-    image.startsWith('/') ||
-    lowerImage === 'dockerfile' ||
-    lowerImage.includes('dockerfile') ||
-    lowerImage.endsWith('/dockerfile') ||
-    lowerImage.endsWith('\\dockerfile')
+    image.startsWith('.') || image.startsWith('/') || image.toLowerCase().includes('dockerfile')
   );
 }

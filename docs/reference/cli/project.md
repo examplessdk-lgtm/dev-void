@@ -195,7 +195,7 @@ This command is hosted-only. Direct Cloudflare deploys are local operations and 
 
 ## `void project delete [name]` {#void-project-delete-name}
 
-Permanently delete a hosted Void project and all its resources (databases, KV namespaces, R2 buckets, deployments). Requires typing the project slug to confirm.
+Permanently delete a hosted Void project and all its resources (databases, KV namespaces, R2 buckets, deployments). Requires typing the project slug to confirm; `--force` (`-f`) skips the prompt.
 
 If `[name]` is omitted, uses the linked project.
 
@@ -211,4 +211,4 @@ Purge all cached pages for the linked project. The edge cache will clear within 
 
 If `--project` is provided, purges that project's cache instead of the linked project.
 
-This command is currently hosted-only. Direct Cloudflare cache purge fails closed with guidance.
+This command is hosted-only. For direct Cloudflare targets, redeploy or purge the configured ISR KV namespace yourself.

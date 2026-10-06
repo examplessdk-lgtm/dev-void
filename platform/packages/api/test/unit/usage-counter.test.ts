@@ -1,14 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vite-plus/test';
 
-// Mock cloudflare:workers since DurableObject base class isn't available in unit tests
 vi.mock('../../src/plans.ts', async () => {
   const { getPlanLimits } = await import('../../src/tiers.ts');
   return { resolvePlanLimits: vi.fn(async (_db: unknown, plan: string) => getPlanLimits(plan)) };
 });
-
-vi.mock('cloudflare:workers', () => ({
-  DurableObject: class {},
-}));
 
 // Mock db.ts so we can assert suspendUser / unsuspendUserIfReason calls without
 // touching Postgres. createDb returns a sentinel — the suspend helpers don't
@@ -616,7 +611,7 @@ describe('UsageCounter.handleRecord — sandbox', () => {
 
   it('is retry-safe when the sandbox-block KV write fails (latch not set until the block is written)', async () => {
     vi.mocked(getUser).mockResolvedValue({ id: 'u1', plan: 'solo' } as never);
-    // Regression: the sandbox latch is flipped only AFTER the block KV put + DB
+    // The sandbox latch is flipped only AFTER the block KV put + DB
     // suspend succeed. getState() caches and returns the same object on a queue
     // retry; flipping first then throwing on the put would make the retry skip the
     // (now-true) branch and persist `sandboxRuntimeSuspended: true` with NO
@@ -765,7 +760,7 @@ describe('UsageCounter.handleRollover — sandbox', () => {
   });
 
   it('is retry-safe when an ai-block delete fails mid-rollover (no short-circuit, no stranded keys)', async () => {
-    // Regression: the rollover runs all external cleanup BEFORE mutating the cached
+    // The rollover runs all external cleanup BEFORE mutating the cached
     // state. getState() caches and returns the same object on a retry, and the
     // rollover guard keys on billingPeriodStart — so mutating it before a throwing
     // delete would make the retry short-circuit as `rolled: false` and strand the
@@ -872,7 +867,7 @@ describe('UsageCounter.handleReevaluateSandbox', () => {
   });
 
   it('is retry-safe when an ai-block delete fails mid-cleanup (latch stays set until all keys gone)', async () => {
-    // Regression: the cleanup deletes the ai-block keys BEFORE flipping the cached
+    // The cleanup deletes the ai-block keys BEFORE flipping the cached
     // `aiSuspended` latch. getState() caches and returns the same object on the
     // retry, so flipping first then throwing mid-delete would make the retry skip
     // the (now-false) branch and persist `aiSuspended: false` with keys stranded.

@@ -48,14 +48,7 @@ import {
   type SelfHostSchemaFacts,
 } from './env-validation.ts';
 import { readGeneratedWranglerConfigFile } from './generated-wrangler-config.ts';
-// The provision module pulls in the whole-provision cross-process lock
-// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
-// `process.reallyExit` and installs exit handlers the moment it is imported. An
-// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
-// must not pay that side effect. Keep ONLY erasable `import type` at module scope
-// and load the runtime values with a DYNAMIC `import()` inside the fork
-// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
-// deploy) never evaluates the provision lifecycle.
+// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet } from './provision.ts';
 import { bindingEntriesForField } from './wrangler.ts';
 
@@ -89,9 +82,6 @@ async function validateEmittedVarsDefault(
   const { validateEmittedVarsViaSubprocess } = await import('./env-schema-probe.ts');
   return validateEmittedVarsViaSubprocess(input, env);
 }
-
-/** Re-export so existing importers (and tests) keep reading the type from deploy.ts. */
-export type { EmittedWorkerVarsResult };
 
 /**
  * Default {@link CloudflareDeployDeps.readEmittedWorkerVars} seam: read the REAL
@@ -212,11 +202,11 @@ export function verifyGeneratedDeployConfig(
     passthroughIdentitySnapshot?: Map<string, Map<string, Record<string, unknown>>>;
     /**
      * Raw pre-build root values ({@link snapshotPassthroughRawFields}) for the fields the ENTRY
-     * pin cannot cover: `unsafe` / `tail_consumers` / `streaming_tail_consumers`
-     * (whole-object-pinned), `durable_objects` (external-DO check), and `ai` (binding pin). An
-     * emitted value that diverges from its root pin — a whole-object field added/removed/rewritten,
-     * an external DO absent from root, or an `ai` binding that is neither the root's nor Void's own
-     * (and only when the source uses AI) — fails closed.
+     * pin cannot cover: the whole-object-pinned fields, `durable_objects` (external-DO check),
+     * `ai` (binding pin), and `migrations` (destructive-migration check). An emitted value that
+     * diverges from its root pin — a whole-object field added/removed/rewritten, an external DO
+     * absent from root, an `ai` binding that is neither the root's nor Void's own (and only when
+     * the source uses AI), or an injected destructive migration — fails closed.
      */
     passthroughRawFields?: Map<string, unknown>;
     /**
@@ -369,7 +359,8 @@ export function verifyGeneratedDeployConfig(
     // rejected. The pin is the pre-build snapshot of the SAME root config the CF plugin merges, so
     // a legitimately emitted binding's id equals what was captured; only an added / rewritten one
     // diverges.
-    for (const { field, binding, id } of collectConfigBindingIdentities(generated)) {
+    const generatedIdentities = collectConfigBindingIdentities(generated);
+    for (const { field, binding, id } of generatedIdentities) {
       const pinnedId = snapshot.get(bindingIdentityKey(field, binding));
       if (pinnedId === undefined) {
         return {
@@ -395,7 +386,7 @@ export function verifyGeneratedDeployConfig(
     // pinned id-binding is ever dropped; `bindingIdentitySnapshot` holds only bindings that had a real
     // id pre-build, so a placeholder/absent id is never asserted here.
     const emittedIdentityKeys = new Set<string>();
-    for (const { field, binding } of collectConfigBindingIdentities(generated)) {
+    for (const { field, binding } of generatedIdentities) {
       emittedIdentityKeys.add(bindingIdentityKey(field, binding));
     }
     for (const key of snapshot.keys()) {
@@ -937,7 +928,7 @@ export async function validateCloudflarePostBuildEnv(
     );
   }
   // DISCHARGE the context. Reuses the same `dischargeSelfHostEnvContext` the unit tests
-  // exercise — now fed the ground-truth vars + the real invalid-value set. It may spawn a
+  // exercise, fed the ground-truth vars + the real invalid-value set. It may spawn a
   // credentialed `wrangler secret list` (its own runner, via `createDefaultSecretListRunner`),
   // which runs the hashed uploader bundle — and the emitted-var validation above just ran project
   // code (env.ts) that could have overwritten it. Re-verify the uploader against the pre-build

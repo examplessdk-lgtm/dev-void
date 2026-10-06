@@ -419,21 +419,23 @@ function createBase64MultipartBody(parts: ReadonlyArray<AssetUploadPart>): {
   return { body: readable, contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-// Emit base64 of `bytes` to `writer` in bounded chunks so a large asset is
-// never rendered into a single mega-allocation. Chunks are aligned to 3 bytes
+const BASE64_CHUNK_BYTES = 48 * 1024; // 48 KiB raw → 64 KiB of base64 output
+
+// Encode `bytes` as base64 in bounded chunks so a large asset is never
+// rendered into a single mega-allocation. Chunks are aligned to 3 bytes
 // (base64's natural boundary) except for the final tail, which pads as usual.
+function* base64Chunks(bytes: Uint8Array): Generator<Uint8Array> {
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
+    yield textEncoder.encode(bytesToBase64(bytes.subarray(offset, offset + BASE64_CHUNK_BYTES)));
+  }
+}
+
 async function writeBase64Bytes(
   writer: WritableStreamDefaultWriter<Uint8Array>,
   bytes: Uint8Array,
 ): Promise<void> {
-  const STEP = 48 * 1024; // 48 KiB raw → 64 KiB of base64 output
-  let offset = 0;
-  while (offset + STEP < bytes.length) {
-    await writer.write(textEncoder.encode(bytesToBase64(bytes.subarray(offset, offset + STEP))));
-    offset += STEP;
-  }
-  if (offset < bytes.length) {
-    await writer.write(textEncoder.encode(bytesToBase64(bytes.subarray(offset))));
+  for (const chunk of base64Chunks(bytes)) {
+    await writer.write(chunk);
   }
 }
 
@@ -452,10 +454,8 @@ function digestToAssetHash(digest: Uint8Array): string {
 export function computeAssetHash(content: ArrayBuffer, filePath: string): string {
   const hasher = createHasher();
   const bytes = new Uint8Array(content);
-  // Align base64 chunks to three bytes so only the final chunk has padding.
-  // Avoid allocating a base64 string and encoded copy of the entire asset.
-  for (let offset = 0; offset < bytes.length; offset += 48 * 1024) {
-    hasher.update(textEncoder.encode(bytesToBase64(bytes.subarray(offset, offset + 48 * 1024))));
+  for (const chunk of base64Chunks(bytes)) {
+    hasher.update(chunk);
   }
   hasher.update(textEncoder.encode(extname(filePath).substring(1)));
   return digestToAssetHash(hasher.finalize());
@@ -484,8 +484,7 @@ export async function computeAssetStreamHashes(
     }, 2 * 60_000);
   });
   const update = (bytes: Uint8Array) => {
-    for (let offset = 0; offset < bytes.length; offset += 48 * 1024) {
-      const encoded = textEncoder.encode(bytesToBase64(bytes.subarray(offset, offset + 48 * 1024)));
+    for (const encoded of base64Chunks(bytes)) {
       for (const hasher of hashers.values()) {
         hasher.update(encoded);
       }
@@ -539,12 +538,6 @@ export async function computeAssetStreamHashes(
   };
 }
 
-/**
- * Determine content type from file path using the `mime` package (same as Wrangler).
- * Falls back to "application/null" for unknown extensions — a sentinel value that
- * signals CF to omit the Content-Type header. Matches Wrangler's behavior at
- * workers-sdk/packages/wrangler/src/assets.ts.
- */
 /** MIME types that are text-based and should include charset=utf-8. */
 const CHARSET_TYPES = new Set([
   'application/json',
@@ -553,6 +546,12 @@ const CHARSET_TYPES = new Set([
   'image/svg+xml',
 ]);
 
+/**
+ * Determine content type from file path using the `mime` package (same as Wrangler).
+ * Falls back to "application/null" for unknown extensions — a sentinel value that
+ * signals CF to omit the Content-Type header. Matches Wrangler's behavior at
+ * workers-sdk/packages/wrangler/src/assets.ts.
+ */
 export function getContentType(path: string): string {
   let contentType = mime.getType(path);
   if (contentType && !contentType.includes('charset')) {
@@ -595,27 +594,7 @@ export async function deleteUnreferencedAssets(
     return 0;
   }
 
-  let kvIndex = 0;
-  let kvError: unknown;
-  const deleteKvWorker = async (): Promise<void> => {
-    while (kvError === undefined && kvIndex < toDelete.length) {
-      const hash = toDelete[kvIndex++];
-      try {
-        await kv.delete(`assets/${projectId}/${hash}`);
-      } catch (error) {
-        kvError ??= error;
-      }
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, toDelete.length) },
-      deleteKvWorker,
-    ),
-  );
-  if (kvError !== undefined) {
-    throw kvError;
-  }
+  await runUntilFirstError(toDelete, (hash) => kv.delete(`assets/${projectId}/${hash}`));
 
   // A direct upload can overwrite an old content-addressed R2 key between
   // retention selection and deletion. Preserve recently uploaded objects so
@@ -625,38 +604,50 @@ export async function deleteUnreferencedAssets(
   const now = Date.now();
   const protectionMs = PENDING_UPLOAD_PROTECTION_SECONDS * 1000;
   const r2ToDelete: Array<string> = [];
-  let r2Index = 0;
-  let r2Error: unknown;
-  const inspectR2Worker = async (): Promise<void> => {
-    while (r2Error === undefined && r2Index < toDelete.length) {
-      const hash = toDelete[r2Index++];
-      const key = `assets/${projectId}/${hash}`;
+  await runUntilFirstError(toDelete, async (hash) => {
+    const key = `assets/${projectId}/${hash}`;
+    const object = await r2.head(key);
+    if (!object?.uploaded || now - object.uploaded.getTime() >= protectionMs) {
+      r2ToDelete.push(key);
+    }
+  });
+
+  for (let i = 0; i < r2ToDelete.length; i += R2_DELETE_BATCH) {
+    await r2.delete(r2ToDelete.slice(i, i + R2_DELETE_BATCH));
+  }
+  return r2ToDelete.length;
+}
+
+/**
+ * Run `fn` over `items` with bounded concurrency. After the first failure no
+ * new items start; in-flight calls settle before that failure is rethrown.
+ */
+async function runUntilFirstError<T>(
+  items: ReadonlyArray<T>,
+  fn: (item: T) => Promise<unknown>,
+): Promise<void> {
+  let index = 0;
+  let failed = false;
+  let firstError: unknown;
+  const worker = async (): Promise<void> => {
+    while (!failed && index < items.length) {
+      const item = items[index++];
       try {
-        const object = await r2.head(key);
-        if (object?.uploaded && now - object.uploaded.getTime() < protectionMs) {
-          continue;
-        }
-        r2ToDelete.push(key);
+        await fn(item);
       } catch (error) {
-        r2Error ??= error;
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
       }
     }
   };
   await Promise.all(
-    Array.from(
-      { length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, toDelete.length) },
-      inspectR2Worker,
-    ),
+    Array.from({ length: Math.min(STATIC_ASSET_UPLOAD_CONCURRENCY, items.length) }, worker),
   );
-  if (r2Error !== undefined) {
-    throw r2Error;
+  if (failed) {
+    throw firstError;
   }
-
-  // R2 supports batch delete up to 1000 keys at a time
-  for (let i = 0; i < r2ToDelete.length; i += 1000) {
-    await r2.delete(r2ToDelete.slice(i, i + 1000));
-  }
-  return r2ToDelete.length;
 }
 
 function workerBundlePrefix(projectId: string, deploymentId: string): string {

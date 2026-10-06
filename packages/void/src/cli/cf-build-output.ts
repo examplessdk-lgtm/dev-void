@@ -23,10 +23,8 @@ import {
 import { type ModuleType, OutputContainerSchema } from '@cloudflare/config';
 import ignore from 'ignore';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'pathslash';
-import { migrateBuiltWranglerConfig } from './cf-config-migrate.ts';
+import { migrateBuiltWranglerConfig, record } from './cf-config-migrate.ts';
 import { buildContainerImage } from './container-image.ts';
-
-type JsonObject = Record<string, unknown>;
 
 export interface CfBuildOutput {
   directory: string;
@@ -36,12 +34,6 @@ export interface CfBuildOutput {
     bindings: ReadonlyArray<{ name: string; type: 'secret_text' | 'secret_key' }>;
   };
   dispose(): Promise<void>;
-}
-
-function object(value: unknown): JsonObject | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as JsonObject)
-    : null;
 }
 
 // Match the additional modules emitted by the Cloudflare Vite plugin. A complete
@@ -64,27 +56,21 @@ const moduleTypes: Record<string, ModuleType> = {
   '.map': 'sourcemap',
 };
 
-function copyBundle(
-  source: string,
-  destination: string,
-): Record<string, { type: ModuleType }> | null {
+/** Whether `path` resolves strictly inside `directory`. */
+function isInside(directory: string, path: string): boolean {
+  const child = relative(directory, path);
+  return child !== '' && child !== '..' && !child.startsWith('../') && !isAbsolute(child);
+}
+
+function copyBundle(source: string, destination: string): Record<string, { type: ModuleType }> {
   const modules: Record<string, { type: ModuleType }> = {};
   for (const entry of readdirSync(source, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile() && !entry.isSymbolicLink()) {
       continue;
     }
     const absolute = join(entry.parentPath, entry.name);
-    if (entry.isSymbolicLink()) {
-      const target = realpathSync(absolute);
-      const targetRelative = relative(realpathSync(source), target).replace(/\\/g, '/');
-      if (
-        !targetRelative ||
-        targetRelative === '..' ||
-        targetRelative.startsWith('../') ||
-        isAbsolute(targetRelative)
-      ) {
-        throw new Error('The built Worker contains a symlink outside its output directory.');
-      }
+    if (entry.isSymbolicLink() && !isInside(realpathSync(source), realpathSync(absolute))) {
+      throw new Error('The built Worker contains a symlink outside its output directory.');
     }
     const name = relative(source, absolute);
     if (
@@ -124,7 +110,7 @@ export async function prepareCfBuildOutput(
   accountId: string,
 ): Promise<CfBuildOutput | null> {
   const source = resolve(workerDirectory);
-  const raw = object(JSON.parse(readFileSync(join(source, 'wrangler.json'), 'utf8')));
+  const raw = record(JSON.parse(readFileSync(join(source, 'wrangler.json'), 'utf8')));
   if (!raw) {
     return null;
   }
@@ -140,13 +126,7 @@ export async function prepareCfBuildOutput(
   }
   const entry = raw.main.replaceAll('\\', '/');
   const main = relative(source, resolve(source, entry));
-  if (
-    isAbsolute(entry) ||
-    /^[a-z]:/i.test(entry) ||
-    !main ||
-    main === '..' ||
-    main.startsWith('../')
-  ) {
+  if (isAbsolute(entry) || /^[a-z]:/i.test(entry) || !isInside(source, resolve(source, entry))) {
     throw new Error('The built Worker main entry must be inside its output directory.');
   }
   if (!existsSync(join(source, main))) {
@@ -155,21 +135,20 @@ export async function prepareCfBuildOutput(
     );
   }
 
-  const assets = object(raw.assets);
-  const assetsDirectory = assets?.directory;
+  const assetsDirectory = record(raw.assets)?.directory;
   if (assetsDirectory !== undefined && typeof assetsDirectory !== 'string') {
     return null;
   }
   const images: Array<{ dispose(): Promise<void> }> = [];
   const directory = mkdtempSync(join(tmpdir(), 'void-cf-deploy-'));
+  const dispose = async () => {
+    rmSync(directory, { recursive: true, force: true });
+    await Promise.all(images.map((image) => image.dispose()));
+  };
   try {
     const bundle = getWorkerBundleDir(directory);
     mkdirSync(bundle, { recursive: true });
     const modules = copyBundle(source, bundle);
-    if (!modules) {
-      rmSync(directory, { recursive: true, force: true });
-      return null;
-    }
     await writeRootConfig(directory, { accountId }, { isPreview: false, mode: 'production' });
     await writeWorkerConfig({
       root: directory,
@@ -203,8 +182,7 @@ export async function prepareCfBuildOutput(
     if (typeof assetsDirectory === 'string') {
       const assetPath = resolve(source, assetsDirectory);
       if (!existsSync(assetPath)) {
-        rmSync(directory, { recursive: true, force: true });
-        await Promise.all(images.map((image) => image.dispose()));
+        await dispose();
         return null;
       }
       await writeAssets({ root: directory, sourceDirectory: assetPath });
@@ -215,34 +193,25 @@ export async function prepareCfBuildOutput(
       ...(typeof assetsDirectory === 'string'
         ? { assetsDirectory: resolve(source, assetsDirectory) }
         : {}),
-      dispose: async () => {
-        rmSync(directory, { recursive: true, force: true });
-        await Promise.all(images.map((image) => image.dispose()));
-      },
+      dispose,
     };
   } catch (error) {
-    rmSync(directory, { recursive: true, force: true });
-    await Promise.all(images.map((image) => image.dispose()));
+    await dispose();
     throw error;
   }
 }
 
-/** Bundle Void's generated thin static Worker before handing it to cf as prebuilt output. */
-export async function prepareCfStaticBuildOutput(options: {
+/** Bundle a generated Worker entry with Vite, then hand the result to `prepareCfBuildOutput`. */
+async function prepareBundledBuildOutput(options: {
   projectRoot: string;
-  configPath: string;
-  assetsDirectory: string;
+  entry: string;
+  scratchPrefix: string;
+  config: Record<string, unknown>;
+  assets: Record<string, unknown>;
   accountId: string;
+  external?: Array<RegExp>;
 }): Promise<CfBuildOutput | null> {
-  const raw = object(JSON.parse(readFileSync(options.configPath, 'utf8')));
-  if (!raw || typeof raw.main !== 'string' || basename(raw.main) !== raw.main) {
-    return null;
-  }
-  const entry = join(dirname(options.configPath), raw.main);
-  if (!existsSync(entry)) {
-    return null;
-  }
-  const scratch = mkdtempSync(join(tmpdir(), 'void-cf-static-'));
+  const scratch = mkdtempSync(join(tmpdir(), options.scratchPrefix));
   try {
     const { build } = await import('vite');
     await build({
@@ -253,17 +222,14 @@ export async function prepareCfStaticBuildOutput(options: {
       build: {
         outDir: scratch,
         emptyOutDir: true,
-        lib: { entry, formats: ['es'], fileName: 'index' },
+        lib: { entry: options.entry, formats: ['es'], fileName: 'index' },
+        ...(options.external ? { rollupOptions: { external: options.external } } : {}),
         target: 'es2022',
       },
     });
     writeFileSync(
       join(scratch, 'wrangler.json'),
-      JSON.stringify({
-        ...raw,
-        main: 'index.js',
-        assets: { ...object(raw.assets), directory: resolve(options.assetsDirectory) },
-      }),
+      JSON.stringify({ ...options.config, main: 'index.js', assets: options.assets }),
       { mode: 0o600 },
     );
     return await prepareCfBuildOutput(scratch, options.accountId);
@@ -272,14 +238,39 @@ export async function prepareCfStaticBuildOutput(options: {
   }
 }
 
+/** Bundle Void's generated thin static Worker before handing it to cf as prebuilt output. */
+export async function prepareCfStaticBuildOutput(options: {
+  projectRoot: string;
+  configPath: string;
+  assetsDirectory: string;
+  accountId: string;
+}): Promise<CfBuildOutput | null> {
+  const raw = record(JSON.parse(readFileSync(options.configPath, 'utf8')));
+  if (!raw || typeof raw.main !== 'string' || basename(raw.main) !== raw.main) {
+    return null;
+  }
+  const entry = join(dirname(options.configPath), raw.main);
+  if (!existsSync(entry)) {
+    return null;
+  }
+  return prepareBundledBuildOutput({
+    projectRoot: options.projectRoot,
+    entry,
+    scratchPrefix: 'void-cf-static-',
+    config: raw,
+    assets: { ...record(raw.assets), directory: resolve(options.assetsDirectory) },
+    accountId: options.accountId,
+  });
+}
+
 /** Bundle an adapter-produced Worker and copy only its public framework assets. */
 export async function prepareCfFrameworkBuildOutput(options: {
   projectRoot: string;
   configPath: string;
   accountId: string;
 }): Promise<CfBuildOutput | null> {
-  const raw = object(JSON.parse(readFileSync(options.configPath, 'utf8')));
-  const assets = object(raw?.assets);
+  const raw = record(JSON.parse(readFileSync(options.configPath, 'utf8')));
+  const assets = record(raw?.assets);
   if (!raw || typeof raw.main !== 'string' || typeof assets?.directory !== 'string') {
     return null;
   }
@@ -290,7 +281,6 @@ export async function prepareCfFrameworkBuildOutput(options: {
     return null;
   }
 
-  const scratch = mkdtempSync(join(tmpdir(), 'void-cf-framework-'));
   const publicAssets = mkdtempSync(join(tmpdir(), 'void-cf-framework-assets-'));
   try {
     const ignored = ignore();
@@ -312,12 +302,7 @@ export async function prepareCfFrameworkBuildOutput(options: {
       mkdirSync(dirname(destination), { recursive: true });
       if (file.isSymbolicLink()) {
         const target = realpathSync(absolute);
-        const targetRelative = relative(realAssets, target);
-        if (
-          targetRelative === '..' ||
-          targetRelative.startsWith('../') ||
-          isAbsolute(targetRelative)
-        ) {
+        if (!isInside(realAssets, target)) {
           throw new Error('The framework assets contain a symlink outside the asset directory.');
         }
         copyFileSync(target, destination);
@@ -325,33 +310,17 @@ export async function prepareCfFrameworkBuildOutput(options: {
         copyFileSync(absolute, destination);
       }
     }
-    const { build } = await import('vite');
-    await build({
-      configFile: false,
-      root: options.projectRoot,
-      publicDir: false,
-      logLevel: 'error',
-      build: {
-        outDir: scratch,
-        emptyOutDir: true,
-        lib: { entry, formats: ['es'], fileName: 'index' },
-        rollupOptions: { external: [/^cloudflare:/, /^node:/] },
-        target: 'es2022',
-      },
+    const prepared = await prepareBundledBuildOutput({
+      projectRoot: options.projectRoot,
+      entry,
+      scratchPrefix: 'void-cf-framework-',
+      config: raw,
+      assets: { ...assets, directory: publicAssets },
+      accountId: options.accountId,
+      external: [/^cloudflare:/, /^node:/],
     });
-    writeFileSync(
-      join(scratch, 'wrangler.json'),
-      JSON.stringify({
-        ...raw,
-        main: 'index.js',
-        assets: { ...assets, directory: publicAssets },
-      }),
-      { mode: 0o600 },
-    );
-    const prepared = await prepareCfBuildOutput(scratch, options.accountId);
     return prepared ? { ...prepared, assetsDirectory: sourceAssets } : null;
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
     rmSync(publicAssets, { recursive: true, force: true });
   }
 }

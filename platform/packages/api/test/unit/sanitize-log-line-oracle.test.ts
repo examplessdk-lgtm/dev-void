@@ -7,12 +7,9 @@ import { renderCapturedLog } from './log-tail-helpers.ts';
  * Differential test: `renderCapturedLog` must render each captured log
  * line exactly as a real terminal would.
  *
- * The unit tests next door assert specific strings, which only ever confirm the
- * model I already had in mind — the previous split-and-keep-last-frame sanitizer
- * passed its own tests through four rounds of review while getting the semantics
- * wrong four different ways, because I wrote the code and its expectations from
- * the same wrong picture. This file removes me from that loop: xterm.js is the
- * same VT engine VS Code ships, and it decides what "correct" means.
+ * The unit tests next door assert specific strings, which only confirm the
+ * author's own model of terminal semantics. Here xterm.js (the VT engine VS Code
+ * ships) decides what "correct" means.
  *
  * Use the production fixed width. A terminal is a fixed-width grid and wraps at
  * its right margin; sharing one documented width prevents non-painting source
@@ -206,15 +203,15 @@ const CASES: Record<string, string> = {
   'ESC % G utf-8 designation': 'a\x1b%Gb',
   'ESC ( B then column move': 'abc\x1b(B\x1b[1GX',
 
-  // RIS. Dropped through the default branch, it resurrected content the
-  // terminal had explicitly cleared \u2014 the same class of bug as ignoring ECH.
+  // RIS. Dropping it would resurrect content the terminal had explicitly
+  // cleared, like ignoring ECH.
   'RIS clears the row': 'TOKEN\x1bc failed',
   'RIS then text': 'secret\x1bcvisible',
   'RIS resets the saved cursor': 'abcdef\x1b7\x1bcX\x1b8Y',
 
   // A WIDE write covers two columns, so the glyph it orphans may start at the
-  // second one. Clearing only at the cursor left a stray continuation marker
-  // that later reads as "inside a glyph" — found by the fuzz, not by review.
+  // second one. Clearing only at the cursor would leave a stray continuation
+  // marker that later reads as "inside a glyph".
   'wide write orphans a wide head one column on': ' 中\x1b[1G中\x1b[3GX',
   'wide write lands exactly on a wide glyph': '中中\x1b[1G中X',
   'wide write over a narrow then wide': 'a中\x1b[1G中\x1b[3GX',

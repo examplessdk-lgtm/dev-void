@@ -891,7 +891,7 @@ describe('routeInbound — action enaction', () => {
 });
 
 // -----------------------------------------------------------------------
-// HIGH H2 — two-phase validate-then-enact split.
+// Two-phase validate-then-enact split.
 //
 // Header construction (`new Headers(...)`) throws on CRLF / NUL. Under a
 // single-pass impl an earlier forward/reply would already have fired by

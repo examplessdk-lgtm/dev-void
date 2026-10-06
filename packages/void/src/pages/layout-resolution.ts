@@ -1,6 +1,6 @@
 import type { LayoutDefinition, NamedLayoutDefinition } from './types.ts';
 
-export type ResolvedLayoutEntry = {
+type ResolvedLayoutEntry = {
   id: string;
   definition: LayoutDefinition | NamedLayoutDefinition;
 };
@@ -11,7 +11,7 @@ function isNamedLayout(
   return 'name' in layout;
 }
 
-function toLayoutId(layout: LayoutDefinition | NamedLayoutDefinition): string {
+export function toLayoutId(layout: LayoutDefinition | NamedLayoutDefinition): string {
   if (isNamedLayout(layout)) {
     return layout.directory
       ? `${layout.directory}/_layouts/${layout.name}`
@@ -39,13 +39,11 @@ export function resolveLayoutChain(
 ): Array<LayoutDefinition> {
   const chain: Array<LayoutDefinition> = [];
 
-  // Check root layout
   const root = layouts.find((layout) => layout.directory === '');
   if (root) {
     chain.push(root);
   }
 
-  // Check each directory level
   for (const dir of resolveLayoutDirectories(componentId, componentPath)) {
     const layout = layouts.find((candidate) => candidate.directory === dir);
     if (layout) {
@@ -63,7 +61,6 @@ export function resolveNamedLayout(
   namedLayouts: Array<NamedLayoutDefinition>,
   componentPath?: string,
 ): NamedLayoutDefinition | null {
-  // Build dirs from closest to root
   const dirs = resolveLayoutDirectories(componentId, componentPath).reverse();
   dirs.push(''); // root last
   for (const directory of dirs) {
@@ -77,7 +74,7 @@ export function resolveNamedLayout(
   return null;
 }
 
-export function resolveEffectiveLayoutEntries(
+function resolveEffectiveLayoutEntries(
   page: { componentId: string; componentPath?: string; layout?: string | false },
   layouts: Array<LayoutDefinition>,
   namedLayouts: Array<NamedLayoutDefinition>,
@@ -114,10 +111,7 @@ export function resolveEffectiveLayoutEntries(
     definition: resolved,
   };
 
-  if (isExclusive) {
-    return [namedEntry];
-  }
-  if (defaultChain.length === 0) {
+  if (isExclusive || defaultChain.length === 0) {
     return [namedEntry];
   }
 

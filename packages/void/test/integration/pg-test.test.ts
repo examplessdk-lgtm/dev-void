@@ -30,7 +30,7 @@ describe('playground/pg-test', () => {
   let devChild: ReturnType<typeof spawn>;
   let devPort: number;
   let BASE: string;
-  let stderr = '';
+  let serverOutput = () => '';
 
   beforeAll(async () => {
     // 1. Start PGlite + TCP server
@@ -80,10 +80,7 @@ describe('playground/pg-test', () => {
       },
     );
 
-    devChild.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-    const serverOutput = collectServerOutput(devChild);
+    serverOutput = collectServerOutput(devChild);
 
     await waitForServer(BASE, 30_000, {
       isAlive: () => devChild.exitCode === null && devChild.signalCode === null,
@@ -107,8 +104,8 @@ describe('playground/pg-test', () => {
     } catch {
       // Ignore missing cleanup files between test runs.
     }
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
+    if (serverOutput().includes('error when starting dev server')) {
+      throw new Error(serverOutput());
     }
   });
 
@@ -148,13 +145,11 @@ describe('playground/pg-test', () => {
     const data = (await propsRes.json()) as PageData;
     const alice = data.props.users.find((u) => u.name === 'Alice');
     expect(alice).toBeTruthy();
-
-    // Create post via named action
-    expect(alice).toBeTruthy();
     if (!alice) {
       throw new Error('Expected Alice to exist before creating a post');
     }
 
+    // Create post via named action
     const createRes = await fetch(BASE + '/?create-post', {
       method: 'POST',
       headers: {
@@ -182,8 +177,6 @@ describe('playground/pg-test', () => {
     const propsRes = await fetch(BASE + '/', { headers: { 'X-VoidPages': 'true' } });
     const data = (await propsRes.json()) as PageData;
     const post = data.props.posts.find((p) => p.title === 'Hello World');
-    expect(post).toBeTruthy();
-
     expect(post).toBeTruthy();
     if (!post) {
       throw new Error('Expected Hello World post to exist before deleting it');

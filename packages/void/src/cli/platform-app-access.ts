@@ -7,15 +7,7 @@ import {
   type PlatformAppAccessSetup,
   type PlatformDeploymentManifest,
 } from '@void/platform';
-import {
-  type CANCEL_SYMBOL,
-  confirm,
-  isCancel,
-  log,
-  multiselect,
-  password,
-  select,
-} from '@voidzero-dev/vite-plus-prompts';
+import { confirm, log, multiselect, password, select } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
   PlatformAccessClient,
@@ -29,14 +21,7 @@ import {
 import { PlatformCloudflareApiError, PlatformCloudflareClient } from './platform-cloudflare.ts';
 import type { PlatformAuthSelection } from './platform-install-auth.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
-import { openPlatformSetupPage } from './platform-setup.ts';
-
-function answer<T>(value: T | typeof CANCEL_SYMBOL): T {
-  if (isCancel(value) || typeof value === 'symbol') {
-    throw new Error('platform: Cancelled.');
-  }
-  return value as T;
-}
+import { openPlatformSetupPage, platformPromptAnswer } from './platform-setup.ts';
 
 export async function selectInstallationAppAccess(
   authentication: PlatformAuthSelection,
@@ -80,7 +65,7 @@ export async function selectInstallationAppAccess(
       ? protectedPlatform
         ? 'platform'
         : 'public'
-      : answer(
+      : platformPromptAnswer(
           await select({
             message: 'Who should be able to access deployed apps?',
             initialValue: protectedPlatform ? 'platform' : 'public',
@@ -200,7 +185,7 @@ export async function prepareInstallationAppAccess(input: {
     }
     tokenPage();
     const value = String(
-      answer(
+      platformPromptAnswer(
         await password({
           message: 'App access API token (stored encrypted when app rules are needed):',
         }),
@@ -272,7 +257,7 @@ export async function prepareInstallationAppAccess(input: {
     if (
       reusable &&
       process.stdin.isTTY &&
-      answer(
+      platformPromptAnswer(
         await confirm({
           message: 'Reuse the setup token for ongoing app access management?',
           initialValue: true,
@@ -318,7 +303,7 @@ export async function prepareInstallationAppAccess(input: {
           `platform: Add an identity provider in Zero Trust for ${input.plan.account.name}, then resume.`,
         );
       }
-      identityProviderIds = answer(
+      identityProviderIds = platformPromptAnswer(
         await multiselect({
           message: 'App identity providers:',
           required: true,

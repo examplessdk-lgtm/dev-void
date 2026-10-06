@@ -233,7 +233,6 @@ export async function killChild(child: ReturnType<typeof spawn>): Promise<void> 
     if (process.platform === 'win32' && child.pid) {
       // On Windows, SIGTERM doesn't propagate to child processes.
       // Use taskkill /T to kill the entire process tree (e.g. workerd.exe).
-      // See: https://github.com/voidzero-dev/void/actions/runs/23939152784/job/69826006981?pr=63
       try {
         execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: 'ignore' });
       } catch {

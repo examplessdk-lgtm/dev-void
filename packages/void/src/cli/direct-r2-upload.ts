@@ -3,8 +3,7 @@ import type { CliLogger } from './log-file.ts';
 /**
  * Concurrency for direct-to-R2 PUTs from the CLI. Bounded to 10 so we don't
  * fan out unboundedly into the user's outbound bandwidth — empirically the
- * sweet spot for typical asset bundles on residential connections. Adjust
- * if real-world traffic patterns warrant a change.
+ * sweet spot for typical asset bundles on residential connections.
  */
 export const R2_PUT_CONCURRENCY = 10;
 

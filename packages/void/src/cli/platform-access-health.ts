@@ -6,11 +6,12 @@ import {
 } from '@void/platform';
 import {
   PlatformAccessClient,
+  platformAccessCreateRejected,
   platformAccessPublicDestinations,
   type PlatformAccessCheckpoint,
 } from './platform-access-provision.ts';
 import { parsePlatformAccessSetupSpec } from './platform-access-setup.ts';
-import { PlatformCloudflareApiError, PlatformCloudflareClient } from './platform-cloudflare.ts';
+import { PlatformCloudflareClient } from './platform-cloudflare.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
 
 /** These reserved endpoints require Void's probe token and cannot serve application traffic. */
@@ -205,12 +206,7 @@ export async function ensurePlatformAccessHealthChecks(input: {
         recorded.id = created.id;
         save();
       } catch (error) {
-        if (
-          error instanceof PlatformCloudflareApiError &&
-          error.status >= 400 &&
-          error.status < 500 &&
-          ![408, 409, 429].includes(error.status)
-        ) {
+        if (platformAccessCreateRejected(error)) {
           recorded.pending = false;
           save();
         }

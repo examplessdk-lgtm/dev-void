@@ -14,6 +14,7 @@ import attrs from 'markdown-it-attrs';
 import { full as emoji } from 'markdown-it-emoji';
 import footnote from 'markdown-it-footnote';
 import { createHighlighter, bundledLanguages, isSpecialLang, type BundledLanguage } from 'shiki';
+import { extractHeadings } from './metadata.ts';
 import { containerPlugin } from './plugins/containers.ts';
 import { gitHubAlertsPlugin } from './plugins/github-alerts.ts';
 import { imagePlugin } from './plugins/image.ts';
@@ -83,13 +84,9 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
         lang = 'text';
       }
     }
-    // `markdown-it-attrs` strips the `{1,3-5}` line-highlight ranges out of
-    // `token.info` at parse time (it treats `{…}` as an attribute block), so by
-    // render time only the language remains. The `stash_fence_info` core rule
-    // preserves the original info string on `token.meta.rawInfo` before that
-    // happens; fall back to `token.info` when it is absent (a fence with no
-    // curly meta). Without this, `transformerMetaHighlight` never sees the
-    // ranges and line highlighting silently no-ops.
+    // `markdown-it-attrs` strips `{1,3-5}` line-highlight ranges from
+    // `token.info`; `stash_fence_info` keeps the original so
+    // `transformerMetaHighlight` still sees them.
     const rawInfo = (token.meta as { rawInfo?: string } | null)?.rawInfo ?? token.info;
     return highlighter.codeToHtml(code, {
       lang,
@@ -153,26 +150,6 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   markdown.use(tocPlugin);
 
   return markdown;
-}
-
-function extractHeadings(tokens: ReadonlyArray<Token>): ReadonlyArray<Heading> {
-  const headings: Array<Heading> = [];
-  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
-    const token = tokens[tokenIndex];
-    if (token.type === 'heading_open') {
-      const depth = Number(token.tag.slice(1));
-      const slug = token.attrGet?.('id') ?? '';
-      const inline = tokens[tokenIndex + 1];
-      const text = (
-        inline?.children
-          ?.filter((child) => child.type === 'text' || child.type === 'code_inline')
-          .map((child) => child.content)
-          .join('') ?? ''
-      ).trim();
-      headings.push({ depth, slug, text });
-    }
-  }
-  return headings;
 }
 
 export async function compile(source: string, options?: CompileOptions): Promise<CompileResult> {

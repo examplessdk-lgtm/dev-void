@@ -116,9 +116,6 @@ export interface InboundTestHarness {
   clear(): void;
 }
 
-// Reserved key in the `routes` map that is not an address pattern:
-//   _default  — fallback handler (mirrors email/_default.ts)
-
 export interface InboundTestHarnessOptions {
   /**
    * Address pattern → handler. Pattern syntax matches the file-based
@@ -290,10 +287,7 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // `MAX_INBOUND_BYTES` is rejected from `rawSize` before its body is
     // read, then `buildEnvelope` refuses one with more than
     // `MAX_INBOUND_HEADERS` distinct names — each with a reject the handler
-    // never sees, because it is never invoked. The harness used to invoke it
-    // regardless, so a handler that forwards a 12 MiB message without
-    // calling `parseEmail()` recorded that forward here and had the message
-    // bounced at the router after deploy. Same order, same reasons, same
+    // never sees, because it is never invoked. Same order, same reasons, same
     // outcome: one reject, no handler call. Platform lane only — a worker on
     // your own Cloudflare account (`slug: null`) has no router in front of
     // it, so Cloudflare hands the handler everything it accepts.
@@ -308,11 +302,8 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // Production's `buildEnvelope` copies every wire header verbatim, so
     // `message.headers` and `message.raw` agree by construction. Start from
     // the bytes for the same reason: the harness's own synthetic MIME
-    // carries a generated `Message-ID`, and `replyEmail` reads exactly that
-    // header — rebuilding from `input` alone made a harness reply come out
-    // unthreaded while the same handler threaded in production. It also
-    // dropped the headers of a caller-supplied `raw:`, which are the exact
-    // wire bytes the caller asked to deliver.
+    // carries a generated `Message-ID` that `replyEmail` threads on, and a
+    // caller-supplied `raw:` carries the exact wire headers to deliver.
     //
     // A hand-rolled header split rather than postal-mime, so a deliberately
     // malformed `raw:` fixture still reaches the handler instead of
@@ -381,9 +372,8 @@ export function createInboundTestHarness(opts: InboundTestHarnessOptions): Inbou
     // Everything the proxy enforces — setReject is terminal, the 100-action
     // queue, the address checks (length and shape), the header-record check, the
     // per-reply and per-delivery byte bounds — therefore throws here at the
-    // same call, with the same error, as it does after deploy. A hand-rolled
-    // message that recorded every call passed handlers that fail on the
-    // 101st forward in production. The proxy also makes `raw` replayable,
+    // same call, with the same error, as it does after deploy. The proxy also
+    // makes `raw` replayable,
     // as the platform lane does.
     //
     // `Object.fromEntries` is what the platform router's `buildEnvelope`

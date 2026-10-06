@@ -2,8 +2,7 @@
  * Raw runtime env resolution — framework-internal only.
  *
  * This module is NOT exported in package.json, so it cannot be imported
- * via "void/..." subpaths. Only framework modules using relative imports
- * (isr.ts, ai.ts, env.ts) can access it.
+ * via "void/..." subpaths. Only framework modules can import it by relative path.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 

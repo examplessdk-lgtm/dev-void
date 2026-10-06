@@ -90,15 +90,13 @@ export async function renderFateListPage(
     email: 'Email',
     zeroTrust: 'Zero Trust',
   }[page];
-  const path = new URL(context.req.url).pathname + new URL(context.req.url).search;
+  const { pathname, search } = new URL(context.req.url);
+  const path = pathname + search;
   const props = {
     path,
     platformName: getPlatformDisplayName(context.env, context.req.url),
     username: context.get('user').login,
   };
-  if (page === 'authSettings' || page === 'authNew' || page === 'authEdit') {
-    context.header('Referrer-Policy', 'strict-origin');
-  }
   if (context.req.header('X-VoidPages') === 'true') {
     return renderAdminPage(context, page, title, props);
   }
@@ -155,7 +153,8 @@ export async function renderFateDetailPage(
   context: Context<ApiEnv>,
   page: 'userDetail' | 'projectDetail' | 'deploymentDetail' | 'buildDetail' | 'emailProject',
 ): Promise<Response> {
-  const path = new URL(context.req.url).pathname + new URL(context.req.url).search;
+  const { pathname, search } = new URL(context.req.url);
+  const path = pathname + search;
   const title =
     page === 'userDetail'
       ? 'User'

@@ -460,25 +460,18 @@ function parseOperation(value: unknown, index: number): ParsedControlOperation {
   throw liveResponseError('BAD_REQUEST', 'live: operation kind is invalid.', 400);
 }
 
+const INVALID_OPERATION_MESSAGES = {
+  BAD_REQUEST: 'live: invalid control operation.',
+  INVALID_SUBSCRIPTION_ID: 'live: invalid subscription id.',
+  INVALID_TOPIC: 'live: invalid topic.',
+} as const;
+
 function invalidOperation(
   index: number,
   kind: 'subscribe' | 'unsubscribe',
   id: unknown,
-  code: LiveControlErrorCode,
+  code: keyof typeof INVALID_OPERATION_MESSAGES,
 ): ParsedControlOperation {
-  const messages: Record<LiveControlErrorCode, string> = {
-    BAD_REQUEST: 'live: invalid control operation.',
-    CONNECTION_CLOSED: 'live: connection closed.',
-    CONNECTION_NOT_FOUND: 'live: connection not found.',
-    FORBIDDEN: 'Forbidden',
-    INVALID_SUBSCRIPTION_ID: 'live: invalid subscription id.',
-    INVALID_TOPIC: 'live: invalid topic.',
-    OWNER_MISMATCH: 'live: owner mismatch.',
-    SUBSCRIPTION_LIMIT: 'live: subscription limit reached.',
-    TOPIC_FULL: 'live: topic subscription limit reached.',
-    PAYLOAD_TOO_LARGE: 'live: payload too large.',
-    INTERNAL_ERROR: 'live: internal error.',
-  };
   return {
     ok: false,
     index,
@@ -486,7 +479,7 @@ function invalidOperation(
       ok: false,
       kind,
       id: typeof id === 'string' ? id : '',
-      error: { code, message: messages[code] },
+      error: { code, message: INVALID_OPERATION_MESSAGES[code] },
     },
   };
 }

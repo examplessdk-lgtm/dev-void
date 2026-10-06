@@ -1,16 +1,7 @@
 import { createHash } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
 import type { PlatformInstallationManifest } from '@void/platform';
-import {
-  type CANCEL_SYMBOL,
-  confirm,
-  isCancel,
-  log,
-  multiselect,
-  password,
-  select,
-  text,
-} from '@voidzero-dev/vite-plus-prompts';
+import { confirm, log, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { note, pc } from './output.ts';
 import {
@@ -22,7 +13,7 @@ import {
 } from './platform-access-provision.ts';
 import { PlatformCloudflareApiError, PlatformCloudflareClient } from './platform-cloudflare.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
-import { platformSetupLink } from './platform-setup.ts';
+import { platformPromptAnswer, platformSetupLink } from './platform-setup.ts';
 
 function accessSetupGuide(): string {
   return platformSetupLink({
@@ -66,9 +57,13 @@ export async function selectCompanyAccessPolicies(
       log.info(
         'No reusable Allow or Deny policies were found in this account. Create an Allow policy for your company, or refresh after saving one.',
       );
-      choices = [answer(await select({ message: 'Company Access policies:', options: actions }))];
+      choices = [
+        platformPromptAnswer(
+          await select({ message: 'Company Access policies:', options: actions }),
+        ),
+      ];
     } else {
-      choices = answer(
+      choices = platformPromptAnswer(
         await multiselect({
           message: 'Company Access policies (select all that apply):',
           options: [...options, ...actions],
@@ -99,7 +94,7 @@ export async function selectCompanyAccessPolicies(
           url: `https://dash.cloudflare.com/${encodeURIComponent(accountId)}`,
         }),
       );
-      const completed = answer(
+      const completed = platformPromptAnswer(
         await confirm({
           message: 'Have you saved the new policy?',
           initialValue: true,
@@ -286,12 +281,6 @@ export function parsePlatformAccessSetupSpec(input: unknown): PlatformAccessSetu
   return value as PlatformAccessSetupSpec;
 }
 
-function answer<T>(value: T | typeof CANCEL_SYMBOL): T {
-  if (isCancel(value) || typeof value === 'symbol') {
-    throw new Error('platform: Cancelled.');
-  }
-  return value;
-}
 function secretReference(name: string): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || !process.env[name]) {
     throw new Error('platform: Supply the referenced Access credential in the environment.');
@@ -379,7 +368,7 @@ export async function preparePlatformAccessSetup(input: {
       }
       return undefined;
     }
-    const mode = answer(
+    const mode = platformPromptAnswer(
       await select({
         message: 'Cloudflare Access setup:',
         options: [
@@ -412,7 +401,7 @@ export async function preparePlatformAccessSetup(input: {
       log.info(
         'Enter the account that owns your company’s Access configuration. This may differ from the account hosting Void.',
       );
-      spec.accountId = answer(
+      spec.accountId = platformPromptAnswer(
         await text({
           message: 'Cloudflare identity account ID:',
           initialValue: input.plan.account.id,
@@ -420,7 +409,7 @@ export async function preparePlatformAccessSetup(input: {
       );
       if (input.login) {
         log.info('Enter the ID of the Access application that provides company sign-in to Void.');
-        spec.loginApplicationId = answer(
+        spec.loginApplicationId = platformPromptAnswer(
           await text({ message: 'Existing Access OIDC application ID:' }),
         );
       }
@@ -428,7 +417,7 @@ export async function preparePlatformAccessSetup(input: {
         log.info(
           'Enter the ID of the Access application that protects the platform’s UI and APIs.',
         );
-        spec.protectionApplicationId = answer(
+        spec.protectionApplicationId = platformPromptAnswer(
           await text({ message: 'Existing Access protection application ID:' }),
         );
       }
@@ -462,7 +451,7 @@ export async function preparePlatformAccessSetup(input: {
       `Your current token lacks the required Access permissions for account ${accountId}. Create a token for that account using the permissions in the setup guide.`,
     );
     console.log(accessSetupGuide());
-    const token = answer(await password({ message: 'Access setup API token:' }));
+    const token = platformPromptAnswer(await password({ message: 'Access setup API token:' }));
     input.save({ accessManagementToken: token });
     management = new PlatformCloudflareClient(token, { apiBase: input.client.apiBaseUrl });
     client = new PlatformAccessClient(management, accountId);
@@ -478,7 +467,7 @@ export async function preparePlatformAccessSetup(input: {
   const identityProviderIds =
     spec.identityProviderIds ??
     (process.stdin.isTTY
-      ? answer(
+      ? platformPromptAnswer(
           await multiselect({
             message: 'Company identity providers:',
             required: true,
@@ -535,9 +524,15 @@ export async function preparePlatformAccessSetup(input: {
         'This lets the installer reach the protected platform during setup. Use a service token allowed by the existing Access application.',
       );
       serviceToken = {
-        id: answer(await text({ message: 'Existing admitted Access service token ID:' })),
-        clientId: answer(await password({ message: 'Access service token client ID:' })),
-        clientSecret: answer(await password({ message: 'Access service token client secret:' })),
+        id: platformPromptAnswer(
+          await text({ message: 'Existing admitted Access service token ID:' }),
+        ),
+        clientId: platformPromptAnswer(
+          await password({ message: 'Access service token client ID:' }),
+        ),
+        clientSecret: platformPromptAnswer(
+          await password({ message: 'Access service token client secret:' }),
+        ),
       };
       input.save({ accessExistingServiceTokenJson: JSON.stringify(serviceToken) });
     }
@@ -562,7 +557,9 @@ export async function preparePlatformAccessSetup(input: {
   if (!input.yes) {
     if (
       !process.stdin.isTTY ||
-      !answer(await confirm({ message: 'Apply this Access configuration?', initialValue: false }))
+      !platformPromptAnswer(
+        await confirm({ message: 'Apply this Access configuration?', initialValue: false }),
+      )
     ) {
       throw new Error('platform: Access setup changes require confirmation or --yes.');
     }
@@ -584,7 +581,9 @@ export async function preparePlatformAccessSetup(input: {
     : input.checkpoint.accessExistingLoginSecret;
   if (input.login && spec.mode === 'existing' && !loginClientSecret && process.stdin.isTTY) {
     log.info('Enter the client secret from the existing Access login application’s OIDC settings.');
-    loginClientSecret = answer(await password({ message: 'Existing Access OIDC client secret:' }));
+    loginClientSecret = platformPromptAnswer(
+      await password({ message: 'Existing Access OIDC client secret:' }),
+    );
     input.save({ accessExistingLoginSecret: loginClientSecret });
   }
   const result = await provisionPlatformAccess(

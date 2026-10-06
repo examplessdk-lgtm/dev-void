@@ -35,7 +35,7 @@ import {
   healthRequest,
 } from '../../fate/views.ts';
 import { DeploymentTable } from './DeploymentTable.tsx';
-import { formatDateTime } from './format.ts';
+import { formatDateTime, formatNumber } from './format.ts';
 import { Layout } from './Layout.tsx';
 import { ProjectsTable } from './ProjectsTable.tsx';
 import { ProjectUrlLink } from './ProjectUrlLink.tsx';
@@ -53,10 +53,6 @@ type DashboardProps = Readonly<{
   username?: string;
   healthCheckNames: ReadonlyArray<string>;
 }>;
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat('en-US').format(value);
-}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) {

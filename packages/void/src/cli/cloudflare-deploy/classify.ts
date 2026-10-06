@@ -1,5 +1,5 @@
 import { analyzeApplicationSync, type ApplicationAnalysis } from '../../application-analysis.ts';
-import { isNodeTarget, type VoidConfig } from '../../config.ts';
+import { type VoidConfig } from '../../config.ts';
 import { detectFramework } from '../../plugin-inference.ts';
 import { assertNoRootSourceConventionConflicts } from '../../project-paths.ts';
 import { validateSsrEntry } from '../../ssr/entry.ts';
@@ -17,7 +17,8 @@ export type CloudflareDeployAppClassification =
 
 /**
  * Narrow native Cloudflare deploys to app shapes whose emitted Worker artifact
- * the current verifier understands. This runs before any account operation.
+ * the current verifier understands. This runs before any account operation;
+ * `runCloudflareDeploy` has already rejected node/bun/deno targets.
  */
 export function classifyCloudflareDeployApp(
   root: string,
@@ -25,16 +26,6 @@ export function classifyCloudflareDeployApp(
   options: CloudflareDeployAppOptions,
   application?: ApplicationAnalysis,
 ): CloudflareDeployAppClassification {
-  if (isNodeTarget(voidConfig.target)) {
-    return unsupported(
-      [
-        `deploy: --platform cloudflare is not supported for the "${voidConfig.target}" target.`,
-        'This backend deploys Cloudflare Workers only. Deploy a node/bun/deno build with its',
-        'own host/runtime, or use the default Cloudflare target for --platform cloudflare.',
-      ].join('\n'),
-    );
-  }
-
   const framework = application?.framework ?? detectFramework(root);
   if (framework) {
     const preset = FRAMEWORK_PRESETS[framework.name];

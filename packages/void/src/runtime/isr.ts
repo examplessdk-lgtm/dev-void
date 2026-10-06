@@ -39,7 +39,7 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
     // Self-host — no platform proxy. Purge this worker's own ISR cache: KV
     // entries (global, authoritative) plus the caches.default edge variants.
     // When ISR_CACHE / deployment id are absent (e.g. local dev with no ISR
-    // binding), this stays a silent no-op — matching the previous behavior.
+    // binding), this is a silent no-op.
     const kv = rawEnv.ISR_CACHE as KVNamespace | undefined;
     const id = rawEnv.__VOID_ISR_DEPLOYMENT_ID as string | undefined;
     if (!kv || !id) {
@@ -108,8 +108,8 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
         return;
       }
       // No request host is guaranteed here (cron / queue handlers stamp the id
-      // WITHOUT a host — the F1 fix), so enumerate every registered host, union
-      // the request host when present. An empty host set is a silent no-op.
+      // without a host), so enumerate every registered host, union the request
+      // host when present. An empty host set is a silent no-op.
       const hosts = new Set(await listIsrHosts(kv, id));
       if (requestHost) {
         hosts.add(requestHost);

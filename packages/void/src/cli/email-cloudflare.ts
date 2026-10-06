@@ -14,7 +14,7 @@ import type { CloudflareOperation, CloudflareCommandResult } from '@void/deploy-
  * Both callers (`void deploy --platform cloudflare` step 3b-ii and `void email
  * setup|status --platform cloudflare`) borrow the session bearer through the deploy
  * runner's `runWranglerAuthToken` and gate the prompt on `isWranglerNonInteractiveOrCI`
- * (both in `cli/deploy.ts`), so the two never disagree.
+ * (both in `cli/deploy-cloudflare-auth.ts`), so the two never disagree.
  *
  * Rules that hold the whole thing together (0078 "The flow, by lane"):
  *

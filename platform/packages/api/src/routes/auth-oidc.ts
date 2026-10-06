@@ -397,8 +397,8 @@ app.post('/github-oidc', async (context) => {
   //
   // Guarded on `!build.check_run_id`: a repeated exchange for the SAME (project,
   // run, attempt) while the build is still active reuses the in-flight row
-  // (`result.outcome === 'reused'`), which — now that create is synchronous —
-  // already carries the check_run_id its creating exchange persisted. Creating
+  // (`result.outcome === 'reused'`), which already carries the check_run_id
+  // its creating exchange persisted. Creating
   // again would POST a SECOND "Void Build" run and overwrite the id, orphaning the
   // first `in_progress` forever. A reused build whose earlier create FAILED still
   // has a null id, so a retry is allowed and cannot duplicate.
@@ -465,4 +465,3 @@ app.post('/github-oidc', async (context) => {
 });
 
 export const oidcRoutes = app;
-export default app;

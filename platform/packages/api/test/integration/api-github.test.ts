@@ -18,7 +18,6 @@ import {
   createGitHubConnection,
   getBuild,
   getGitHubConnection,
-  getGitHubConnectionsByRepo,
   getGitHubInstallation,
   getInstallationRevocationAt,
   getProjectBuilds,
@@ -103,14 +102,14 @@ const app = new Hono<ApiEnv>()
     await next();
   })
   .route('/github', githubRoutes)
-  // Mounted so the F1 deploy-close test can drive the REAL member_removed webhook
+  // Mounted so the proof-id deploy-close test can drive the REAL member_removed webhook
   // end-to-end (webhook writes the tombstone) and then attempt the member connect
   // against the SAME app. No other test hits this route.
   .route('/webhooks', webhookRoutes)
   .use('/projects/*', authMiddleware)
   .route('/projects', githubProjectRoutes);
 
-// The webhook signature secret used by the F1 deploy-close end-to-end test.
+// The webhook signature secret used by the deploy-close end-to-end tests.
 const WEBHOOK_SECRET = 'test-webhook-secret';
 
 // Sign a webhook body the way GitHub does (HMAC-SHA256 hex, `sha256=` prefix).
@@ -213,8 +212,8 @@ async function mintInstallState(userId: string, githubAccountId: string): Promis
 const CONNECT_VERIFIER = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ'; // 43 chars
 
 // Forge a signed `connect_grant` the same `${btoa(json)}.${hmac(JWT_SECRET)}` way
-// the public connect-authorize callback (Task 7) mints it — used to drive the
-// member connect-redemption path (Task 8) and to forge wrong-repo / wrong-purpose
+// the public connect-authorize callback mints it — used to drive the
+// member connect-redemption path and to forge wrong-repo / wrong-purpose
 // / expired / mismatched-identity grants. Defaults produce a VALID grant whose
 // codeChallenge is S256(CONNECT_VERIFIER), so passing `codeVerifier:
 // CONNECT_VERIFIER` in the body satisfies PKCE.
@@ -242,7 +241,7 @@ async function mintConnectGrant(
       codeChallengeMethod: overrides.codeChallengeMethod ?? 'S256',
       // `iat` = the moment GitHub access was proven (the connect-authorize
       // callback). The connect gate rejects a grant whose iat <= the revocation
-      // tombstone. Default to "now" so existing (no-revocation) tests are inert.
+      // tombstone. Default to "now" so no-revocation tests are inert.
       iat: overrides.iat ?? Date.now(),
       exp: overrides.exp ?? Date.now() + 5 * 60 * 1000,
     }),
@@ -316,11 +315,10 @@ async function seedMemberScenario(opts: {
 }
 
 // POST a member connect-redemption request as the given member. The member
-// connect path is now gated on App user OAuth being configured (R10-1), so this
-// helper sends the CONFIGURED env — the redemption paths honor the kill switch,
-// and every existing member-connect test exercises the config-present case. The
-// dedicated R10-1 fail-closed test drives the UNCONFIGURED case inline with bare
-// `env`.
+// connect path is gated on App user OAuth being configured, so this helper
+// sends the CONFIGURED env — the redemption paths honor the kill switch, and
+// the member-connect tests exercise the config-present case. The dedicated
+// fail-closed test drives the UNCONFIGURED case inline with bare `env`.
 async function memberConnect(
   member: Awaited<ReturnType<typeof createTestUser>>,
   projectId: string,
@@ -914,7 +912,7 @@ describe('POST /projects/:id/github', () => {
         headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ installationId: '333', repoFullName: 'stranger/app' }),
       }),
-      // Non-owner path is gated on App user OAuth (R10-1); send the configured env
+      // Non-owner path is gated on App user OAuth; send the configured env
       // so this test reaches the membership gate (opaque 404), not the kill switch.
       { ...env, ...GITHUB_APP_ENV, ...GITHUB_APP_USER_OAUTH_ENV },
     );
@@ -1196,7 +1194,7 @@ describe('GitHub connection project-admin provenance', () => {
 
 // Org-shared installs (RFC 0074): a non-owner ORG MEMBER connects THEIR project
 // to a repo in an install owned by someone else, by redeeming a per-repo
-// `connect_grant` minted under the member's OWN GitHub token (Task 7). The grant's
+// `connect_grant` minted under the member's OWN GitHub token. The grant's
 // `repositoryId` is authoritative — the member path NEVER touches the installation
 // token or the install's cached repositories (the confused-deputy close).
 describe('POST /projects/:id/github — non-owner member connect grant', () => {
@@ -1219,22 +1217,19 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // R13-1 — the install-EXISTENCE ORACLE close. With App user OAuth UNCONFIGURED
-  // (the kill-switch / current prod state), a non-owner NON-member probing an
-  // EXISTING active Organization install must get the SAME opaque 404 a NONEXISTENT
-  // installationId returns — NOT a 503. Before the reorder the 503 fired BEFORE the
-  // membership check, so reaching 503-vs-404 leaked that the install existed. The
-  // membership 404 now runs BEFORE the OAuth 503, so the two are indistinguishable.
-  // (Under OAuth ON both already returned 404 — the oracle only ever existed on the
-  // OAuth-off path, and the reorder closes it purely by check order.)
-  it('R13-1 oracle-closed: non-member with App user OAuth unconfigured gets 404 (not 503), same as a nonexistent install', async () => {
+  // No install-EXISTENCE oracle. With App user OAuth UNCONFIGURED (the kill
+  // switch), a non-owner NON-member probing an EXISTING active Organization
+  // install must get the SAME opaque 404 a NONEXISTENT installationId returns —
+  // NOT a 503, which would leak that the install exists. The membership 404 runs
+  // BEFORE the OAuth 503, so the two are indistinguishable.
+  it('oracle-closed: non-member with App user OAuth unconfigured gets 404 (not 503), same as a nonexistent install', async () => {
     const { member, project } = await seedMemberScenario({
       installationId: '3050',
       memberGithubId: '5551234',
       seedMembership: false, // caller is NOT a member of the existing install
     });
 
-    // Existing install, non-member, OAuth OFF → opaque 404 (NOT the old 503).
+    // Existing install, non-member, OAuth OFF → opaque 404 (NOT 503).
     const existing = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'POST',
@@ -1246,8 +1241,8 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(existing.status).toBe(404);
     expect(((await existing.json()) as { error: string }).error).toBe('installation not found');
 
-    // Nonexistent install, SAME unset-OAuth env → identical opaque 404. The two are
-    // now indistinguishable, so the response leaks nothing about install existence.
+    // Nonexistent install, SAME unset-OAuth env → identical opaque 404, so the
+    // response leaks nothing about install existence.
     const nonexistent = await app.fetch(
       new Request(`http://localhost/projects/${project.id}/github`, {
         method: 'POST',
@@ -1350,11 +1345,11 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(persisted?.repository_id).toBe('424242');
   });
 
-  // Guard (d) — org-share connect is Organization-only, defense-in-depth. Even a
+  // Org-share connect is Organization-only, defense-in-depth. Even a
   // caller with an ACTIVE membership row + a VALID connect_grant for a personal
   // (account_type='User') install is rejected with the SAME opaque 404 the
   // non-member miss returns (never reveal the install exists / its type). A
-  // personal membership cannot be minted after guards a/b/c, but a pre-existing /
+  // personal membership cannot be minted by the join paths, but a pre-existing /
   // stale one must still be caught here — a personal install has no member_removed
   // revocation path.
   it('returns opaque 404 for a member connecting a personal (account_type=User) install', async () => {
@@ -1382,7 +1377,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // Owner regression (guard d must NOT touch the owner path). A PERSONAL-account
+  // The Organization-only guard must NOT touch the owner path. A PERSONAL-account
   // (account_type='User') OWNER connecting their OWN install still SUCCEEDS —
   // owners connect directly (no JOIN, no membership) and the Organization-only
   // guard lives inside `if (!isOwner)`, so the owner never reaches it.
@@ -1696,7 +1691,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // Monotonic revocation (Task 14): a member who kept a valid TTL membership row
+  // Monotonic revocation: a member who kept a valid TTL membership row
   // but whose grant was minted BEFORE a revocation tombstone (iat <= revoked_at)
   // is replaying a stale artifact from a removal — the in-tx recheck rejects it
   // with the FROZEN stable 'invalid connect grant', and NO connection is created.
@@ -1706,7 +1701,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
       memberGithubId: '5551234',
     });
     // The member was removed AFTER minting the grant: tombstone at now() keyed by
-    // the member's GitHub account id (Task 19), grant stamped a minute in the past.
+    // the member's GitHub account id, grant stamped a minute in the past.
     await recordInstallationRevocations(env.db, ['3015'], '5551234');
     const grant = await mintConnectGrant({
       installationId: '3015',
@@ -1756,21 +1751,20 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect((await getGitHubConnection(env.db, project.id))?.repository_id).toBe('987654');
   });
 
-  // F1 (Task 18) DEPLOY-CLOSE, end-to-end. The deferred-bind hole: V joins a shared
+  // DEPLOY-CLOSE, end-to-end. The deferred-bind hole: V joins a shared
   // install with X's browser proof (membership github_account_id = X) but V's Void
   // account is NOT oauth-linked to X. A member_removed(X) delivery is driven for
-  // REAL here — X has no oauth link, so ONLY the membership-proof-id route (F1)
+  // REAL here — X has no oauth link, so ONLY the membership-proof-id route
   // catches V, deletes the membership, and stamps a durable tombstone for
   // (install, V). V then escalates: oauth-links X (they control it) and regains
   // membership (a re-join), but replays a PRE-removal connect_grant (iat < the
-  // tombstone). Without F1 there would be no tombstone and V would connect + deploy;
-  // with F1 the connect gate's in-tx tombstone recheck rejects the stale grant.
-  it('F1 deploy-close: a proof-id sever tombstones (install, V) so a pre-removal grant cannot connect', async () => {
+  // tombstone). The connect gate's in-tx tombstone recheck rejects the stale grant.
+  it('deploy-close: a proof-id sever tombstones (install, V) so a pre-removal grant cannot connect', async () => {
     const ORG = '6100';
     const INSTALL = '6100i';
     const X = '6551234'; // the removed GitHub id V proved at join — NOT V's own id
 
-    const owner = await createTestUser(env.db, 'f1-owner', 'github', 'gh-owner-6100');
+    await createTestUser(env.db, 'f1-owner', 'github', 'gh-owner-6100');
     // V is a google-only account at join time — the deferred-bind case.
     const v = await createTestUser(env.db, 'f1-v', 'google', 'google-f1-v');
     await upsertGitHubInstallation(env.db, {
@@ -1790,14 +1784,14 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
       ttlSeconds: 3600,
     });
 
-    // Drive the REAL member_removed(X). X has no oauth link → only F1 catches V.
+    // Drive the REAL member_removed(X). X has no oauth link → only the proof-id route catches V.
     const webhookRes = await postWebhook('organization', {
       action: 'member_removed',
       organization: { id: Number(ORG) },
       membership: { user: { id: Number(X) } },
     });
     expect(webhookRes.status).toBe(200);
-    // F1 wrote the tombstone (keyed by the removed GitHub id X, Task 19) + deleted
+    // The webhook wrote the tombstone (keyed by the removed GitHub id X) + deleted
     // V's membership.
     expect(
       (await getTestGitHubInstallationMembers(env.db, INSTALL)).some((m) => m.user_id === v.id),
@@ -1838,11 +1832,10 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // Task 19 DEPLOY-CLOSE, end-to-end. The pre-mint hole: a soon-to-be-removed org
+  // DEPLOY-CLOSE, end-to-end. The pre-mint hole: a soon-to-be-removed org
   // member pre-mints a join_code + connect_grant carrying their GitHub id X while
   // still in the org, WITHOUT any Void user / membership / oauth-link. member_removed(X)
-  // then finds an EMPTY affected set — under the OLD user-keyed tombstone it wrote
-  // NOTHING, leaving a replay path. Now the tombstone is keyed by X (durable, known
+  // then finds an EMPTY affected set. The tombstone is keyed by X (durable, known
   // from the payload), so the REAL member_removed(X) below records (install, X)
   // even with nobody to sever. After removal the attacker binds a Void account V,
   // links X, and replays the two PRE-removal artifacts (iat < the tombstone):
@@ -1851,14 +1844,14 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
   //       creates NO connection.
   // Driving the real webhook + real redemptions proves the write-side String(X)
   // and the read-side join/grant githubAccountId are the SAME string form.
-  it('Task 19 deploy-close: a pre-mint (empty-affected-set) removal tombstones (install, X) and blocks BOTH replay gates', async () => {
+  it('deploy-close: a pre-mint (empty-affected-set) removal tombstones (install, X) and blocks BOTH replay gates', async () => {
     const ORG = '6200';
     const INSTALL = '6200i';
     const X = '6559999'; // the attacker's GitHub id — NO Void user exists at removal
 
     // The install exists (owned by someone else). X has no oauth link and no
     // membership row → member_removed(X) resolves an EMPTY affected-user set.
-    const owner = await createTestUser(env.db, 't19-owner', 'github', 'gh-owner-6200');
+    await createTestUser(env.db, 't19-owner', 'github', 'gh-owner-6200');
     await upsertGitHubInstallation(env.db, {
       installationId: INSTALL,
       userId: null,
@@ -1923,7 +1916,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
         headers: { Authorization: `Bearer ${v.jwt}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ join_code: preJoinCode, code_verifier: CONNECT_VERIFIER }),
       }),
-      // /join/complete is now gated on App user OAuth (R10-1); send the configured
+      // /join/complete is gated on App user OAuth; send the configured
       // env so this test exercises the tombstone-skip behavior, not the kill switch.
       { ...env, ...GITHUB_APP_ENV, ...GITHUB_APP_USER_OAUTH_ENV },
     );
@@ -1990,9 +1983,9 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect(await getGitHubConnection(env.db, project.id)).toBeNull();
   });
 
-  // Regression: with NO revocation recorded, a valid grant still connects (the
-  // tombstone gate is inert when there is no tombstone).
-  it('connects a member with a valid grant and no revocation (regression)', async () => {
+  // With NO revocation recorded, a valid grant still connects (the tombstone gate
+  // is inert when there is no tombstone).
+  it('connects a member with a valid grant and no revocation', async () => {
     const { member, project } = await seedMemberScenario({
       installationId: '3017',
       memberGithubId: '5551234',
@@ -2015,10 +2008,10 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect((await getGitHubConnection(env.db, project.id))?.repository_id).toBe('555111');
   });
 
-  // Regression: the OWNER path takes no membership/tombstone recheck. Even with a
-  // revocation recorded for the owner (which never happens in practice), the owner
-  // still connects — the in-tx recheck is gated on `!isOwner`.
-  it('OWNER path is unaffected by a revocation tombstone (regression)', async () => {
+  // The OWNER path takes no membership/tombstone recheck. Even with a revocation
+  // recorded for the owner (which never happens in practice), the owner still
+  // connects — the in-tx recheck is gated on `!isOwner`.
+  it('OWNER path is unaffected by a revocation tombstone', async () => {
     const owner = await createTestUser(env.db, 'owner-3018', 'github', 'gh-owner-3018');
     const project = await createTestProject(env.db, owner.id, 'owner-proj-3018');
     await upsertGitHubInstallation(env.db, {
@@ -2046,7 +2039,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
     expect((await getGitHubConnection(env.db, project.id))?.repository_id).toBe('42');
   });
 
-  // R10-1 — the App user-OAuth config is a TRUE kill switch: the pure signed-
+  // The App user-OAuth config is a TRUE kill switch: the pure signed-
   // artifact REDEMPTION paths (which make no live GitHub call) must also fail
   // closed when the config is removed, not just the BEGIN routes. A join_code /
   // connect_grant minted BEFORE the config disappeared must stop working
@@ -2057,9 +2050,9 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
   // membership is bound (the guard runs before the membership tx). With the config
   // present this same join_code would bind a membership, so the 503 + empty members
   // proves the redemption honors the kill switch.
-  it('R10-1 fail-closed: /join/complete with App user OAuth unconfigured returns 503 and creates no membership', async () => {
+  it('fail-closed: /join/complete with App user OAuth unconfigured returns 503 and creates no membership', async () => {
     const INSTALL = '7100i';
-    const owner = await createTestUser(env.db, 'r101-join-owner', 'github', 'gh-owner-7100');
+    await createTestUser(env.db, 'r101-join-owner', 'github', 'gh-owner-7100');
     await upsertGitHubInstallation(env.db, {
       installationId: INSTALL,
       userId: null,
@@ -2108,9 +2101,9 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
 
   // Member connect (non-owner, active membership + a VALID connect_grant) with
   // OAuth unconfigured → 503, and NO connection. The identical setup connects
-  // (200) with the config present (see the no-revocation regression above), so the
+  // (200) with the config present (see the no-revocation test above), so the
   // 503 + null connection proves the member redemption honors the kill switch.
-  it('R10-1 fail-closed: member connect with App user OAuth unconfigured returns 503 and creates no connection', async () => {
+  it('fail-closed: member connect with App user OAuth unconfigured returns 503 and creates no connection', async () => {
     const { member, project } = await seedMemberScenario({
       installationId: '7200',
       memberGithubId: '5551234',
@@ -2148,7 +2141,7 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
   // (who uses no user OAuth) never reaches it. With OAuth unconfigured the owner
   // still connects (200 + connection), proving the kill switch does not touch the
   // owner path.
-  it('R10-1: OWNER connect is UNGATED — succeeds with App user OAuth unconfigured', async () => {
+  it('OWNER connect is UNGATED — succeeds with App user OAuth unconfigured', async () => {
     const owner = await createTestUser(env.db, 'r101-owner', 'github', 'gh-owner-7300');
     const project = await createTestProject(env.db, owner.id, 'r101-owner-proj');
     await upsertGitHubInstallation(env.db, {
@@ -2175,14 +2168,14 @@ describe('POST /projects/:id/github — non-owner member connect grant', () => {
   });
 });
 
-// Task 15 — the connect gate re-derives ownership from the install row it locks
+// The connect gate re-derives ownership from the install row it locks
 // FOR UPDATE inside the go-live transaction, not the stale pre-tx snapshot. If a
 // personal install's owner pointer changes while a connect waits on that lock,
 // the pre-tx owner path is stale: repositoryId was resolved via the installation
 // token with NO member grant, so falling through to the member insert would be a
 // confused-deputy. The re-read fails closed (opaque 404) on the
 // `isOwner && !lockedIsOwner` transition.
-describe('POST /projects/:id/github — locked-row ownership re-derivation (Task 15)', () => {
+describe('POST /projects/:id/github — locked-row ownership re-derivation', () => {
   // Sequential fail-closed: a personal install with no linked owner (user_id
   // NULL) + a caller who is NOT a member fails closed with the opaque 404 and
   // creates no connection. Pre-tx isOwner is false (null !== caller), so the
@@ -2206,7 +2199,7 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
         headers: { Authorization: `Bearer ${caller.jwt}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ installationId: '3020', repoFullName: 'someone/app' }),
       }),
-      // Non-owner path is gated on App user OAuth (R10-1); send the configured env
+      // Non-owner path is gated on App user OAuth; send the configured env
       // so this test reaches the membership gate (opaque 404), not the kill switch.
       { ...env, ...GITHUB_APP_ENV, ...GITHUB_APP_USER_OAUTH_ENV },
     );
@@ -2274,7 +2267,7 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
   });
 });
 
-// Codex R9-1 — the go-live transaction re-reads the MUTABLE install gates
+// The go-live transaction re-reads the MUTABLE install gates
 // (status + repository_selection + repositories) on the row it locks FOR UPDATE,
 // not the stale pre-tx snapshot. A teardown handler (installation.deleted/suspend
 // marks status inactive; a repository-selection change de-scopes the repo) locks
@@ -2286,10 +2279,10 @@ describe('POST /projects/:id/github — locked-row ownership re-derivation (Task
 // the connect blocked on the lock) and the locked read observes it. The member
 // test proves the asymmetry: the coverage re-check is OWNER-only, so a member's
 // live-proved grant for a repo absent from the (lagging) cache still connects.
-describe('POST /projects/:id/github — post-lock status + coverage re-check (Codex R9-1)', () => {
+describe('POST /projects/:id/github — post-lock status + coverage re-check', () => {
   // POST-LOCK STATUS gate (owner, deterministic seam). Pre-tx read sees an ACTIVE
   // all-repos install; the live GET /repos side-effect flips status to 'deleted'
-  // (installation.deleted keeps the row but marks it inactive — the existing
+  // (installation.deleted keeps the row but marks it inactive — the
   // missing-row guard does NOT catch it). The locked read sees status='deleted'
   // and rejects with 409, so no orphan connection is planted into a torn-down
   // install. This exercises the LOCKED-row status gate, not the pre-tx one.
@@ -3392,7 +3385,7 @@ describe('GET /github/callback', () => {
     expect(res.status).toBe(503);
   });
 
-  // Regression: a Void user (A) must not be able to claim — and re-own — an
+  // A Void user (A) must not be able to claim — and re-own — an
   // installation that already belongs to another user (B) just by holding a
   // validly-signed state. Here the installation's GitHub account id is forced
   // to equal A's bound account id (a derivation gap / id collision), so the
@@ -3439,7 +3432,7 @@ describe('GET /github/callback', () => {
     expect(members).toHaveLength(0);
   });
 
-  // Regression: the primary account-ownership check rejects when the
+  // The primary account-ownership check rejects when the
   // installation's GitHub account does not match the caller's bound account id,
   // even for an installation that is not yet linked to anyone.
   it('rejects a callback whose installation account does not match the caller', async () => {
@@ -3483,11 +3476,11 @@ describe('GET /github/callback', () => {
     expect(persisted?.account_id).toBe('7777');
   });
 
-  // Regression: a reconnect / `setup_action=update` callback hits the EXISTING
-  // row (conflict path). The callback just refetched the LIVE membership, so it
+  // A reconnect / `setup_action=update` callback hits the EXISTING row
+  // (conflict path). The callback just refetched the LIVE membership, so it
   // passes `refreshMembership: true` — the fresh repo list / selection MUST be
-  // persisted. Before the fix, the conflict path dropped fresh membership and
-  // newly-added repos / a widen-to-`all` stayed rejected until the next webhook.
+  // persisted, or newly-added repos / a widen-to-`all` stay rejected until the
+  // next webhook.
   it('rolls fresh membership forward on a setup_action=update callback', async () => {
     const user = await createTestUser(env.db, 'reconnect', 'github', '7777');
 
@@ -3541,7 +3534,7 @@ describe('GET /github/callback', () => {
     expect(persisted?.repository_selection).toBe('selected');
   });
 
-  // Regression: an `all`-repository install must NOT enumerate or persist the
+  // An `all`-repository install must NOT enumerate or persist the
   // full repo list. Once page 1 reports `repository_selection: 'all'`, the
   // callback stops paginating — the cached array is never read for `all`
   // installs (every coverage check short-circuits on selection='all'; the
@@ -3655,7 +3648,7 @@ describe('GET /github/callback', () => {
     expect(await getGitHubInstallation(env.db, '5000')).toBeNull();
   });
 
-  // (c): regression preserved through the user-token path. An attacker
+  // (c): the user-token path cannot re-own a victim's install. An attacker
   // holding a victim's installation_id presents a `code`, but exchanging it
   // yields a user token whose installations do NOT include the victim's
   // installation_id. The user-token path fails, the org account id does not
@@ -3702,7 +3695,7 @@ describe('GET /github/callback', () => {
     expect(members).toHaveLength(0);
   });
 
-  // SECURITY (Task 4): a Void user (A) who is a real org co-member reaches an
+  // SECURITY: a Void user (A) who is a real org co-member reaches an
   // existing organization installation. On the PROVEN user-token path
   // (GET /user/installations lists installation 5000 → authorized:true, and the
   // code-holder id matches the signed state) the backstop GRANTS a cached
@@ -3754,7 +3747,7 @@ describe('GET /github/callback', () => {
     expect(persisted?.user_id).toBeNull();
   });
 
-  // Guard (c) — the install-callback membership backstop is Organization-only. A
+  // The install-callback membership backstop is Organization-only. A
   // DIFFERENT Void user (A) reaching an existing PERSONAL (account_type='User')
   // install owned by someone else (B), even on the PROVEN user-token path
   // (authResult.authorized), is a non-shareable collision — a personal install has
@@ -3807,7 +3800,7 @@ describe('GET /github/callback', () => {
     expect(persisted?.user_id).toBe(userB.id);
   });
 
-  // SECURITY (Task 4): repeated co-member joins are idempotent — the Task-2
+  // SECURITY: repeated co-member joins are idempotent — the membership upsert's
   // onConflict refreshes the existing row in place (exactly ONE row) and pushes
   // expires_at forward, rather than inserting duplicates.
   it('is idempotent across repeat token-path co-member joins: one refreshed membership row', async () => {
@@ -3875,8 +3868,7 @@ describe('GET /github/callback', () => {
   });
 
   // (d): personal install with NO code still succeeds via the account-id
-  // fallback (the App is not configured for user-auth-on-install). This is the
-  // behavior every existing callback test relies on — kept green here.
+  // fallback (the App is not configured for user-auth-on-install).
   it('links a personal install via the account-id fallback when no code is present', async () => {
     const user = await createTestUser(env.db, 'solo', 'github', '8888');
     mockInstallationRepos({ login: 'solo', id: 8888, type: 'User' });
@@ -4022,8 +4014,8 @@ describe('GET /github/callback', () => {
     expect(await getGitHubInstallation(env.db, '6200')).toBeNull();
   });
 
-  // R4-3 (concurrent variant) — the install callback's two org-shared grant
-  // points (owner re-adopt + membership backstop) now gate on the revocation
+  // The install callback's two org-shared grant
+  // points (owner re-adopt + membership backstop) gate on the revocation
   // tombstone under the install-row lock. The callback stamps its own DB-clock
   // proof `iat` INTERNALLY, so — unlike the connect-gate tests that set the
   // artifact `iat` — these tests control the gate deterministically from the

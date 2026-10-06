@@ -3,7 +3,6 @@ import type { Handler } from 'hono';
 import type { ApiEnv } from '../../env.ts';
 import { executeAuditedMutation, operatorAuditIntent } from '../../operator/audit.ts';
 import { backfillPlatformQueueTokens, systemHealth } from '../../operator/system-operations.ts';
-export type { HealthCheck, HealthResult } from '../../operator/system-operations.ts';
 import { getPlatformDisplayName } from '../../platform-identity.ts';
 import { renderDashboardFatePage, renderFateListPage } from '../fate/render.ts';
 import { readPlatformStatus } from '../platform-status.ts';
@@ -44,6 +43,4 @@ adminSystem.post('/backfill-queue-tokens', async (context) =>
   }),
 );
 
-export const dashboardHandler: Handler<ApiEnv> = async (context) => {
-  return renderDashboardFatePage(context);
-};
+export const dashboardHandler: Handler<ApiEnv> = (context) => renderDashboardFatePage(context);

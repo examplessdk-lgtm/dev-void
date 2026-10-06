@@ -13,10 +13,9 @@
  * Retired Sandbox identity and queue names remain reserved so older runtime
  * conventions cannot turn into ambiguous user bindings after an upgrade.
  *
- * Hoisted out of `routes/deploy.ts` so `PUT /projects/:id/secrets/:name`
- * can reject a reserved name before it is encrypted and persisted —
- * otherwise the stored row only fails at the next deploy, far from the
- * action that caused it.
+ * `PUT /projects/:id/secrets/:name` also checks this set so a reserved name
+ * is rejected before it is encrypted and persisted — otherwise the stored
+ * row only fails at the next deploy, far from the action that caused it.
  *
  * `SEND_EMAIL` is reserved even though user workers no longer receive a
  * per-worker `[[send_email]]` binding (the proxy holds the account-level

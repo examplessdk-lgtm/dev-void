@@ -12,7 +12,10 @@ import type { GitHubInstallationRepository } from '../schema.ts';
 import type { GitHubConnection, GitHubInstallation, GitHubInstallationMember } from '../types.ts';
 import { type TerminatedBuild, terminateBuildsForProject } from './builds.ts';
 import { type Db } from './client.ts';
-import { githubConnectionAuthorityClause } from './github-authority.ts';
+import {
+  githubConnectionAuthorityClause,
+  installationSelectionCoversRepoClause,
+} from './github-authority.ts';
 
 /**
  * Invalidate provenance that no longer names a project owner/admin. Membership
@@ -179,14 +182,7 @@ export async function getGitHubConnectionsByRepo(
         eq(githubConnections.repository_id, repositoryId),
         eq(githubInstallations.status, 'active'),
         githubConnectionAuthorityClause(),
-        or(
-          // "all repositories" install => every repo is granted.
-          eq(githubInstallations.repository_selection, 'all'),
-          // "selected" install => enforce the repo is in the cached set. The
-          // `repositories` jsonb stores `id` as a NUMBER; check membership by
-          // the immutable id (rename-safe).
-          sql`${githubInstallations.repositories} @> ${JSON.stringify([{ id: Number(repositoryId) }])}::jsonb`,
-        ),
+        installationSelectionCoversRepoClause(repositoryId),
       ),
     );
   return rows;
@@ -238,8 +234,7 @@ export async function updateGitHubConnectionRepoNamesByRepoId(
  * every repo (membership is not enforced — the `repositories` cache is
  * irrelevant), while a `selected` install requires the repo to be a member of
  * the cached set. An empty `repositories` array under `selected` therefore
- * means "no repos" and is correctly rejected — it is no longer overloaded to
- * mean "all".
+ * means "no repos" and is rejected.
  *
  * Returns ALL github_actions connections for the repo; a repo may back multiple
  * projects (only `project_id` is unique). The caller disambiguates by the
@@ -280,15 +275,7 @@ export async function getGitHubActionsConnectionsByRepo(
         eq(githubConnections.build_executor, 'github_actions'),
         eq(githubInstallations.status, 'active'),
         githubConnectionAuthorityClause(),
-        or(
-          // "all repositories" install => every repo is granted.
-          eq(githubInstallations.repository_selection, 'all'),
-          // "selected" install => enforce the repo is in the cached set. The
-          // `repositories` jsonb stores `id` as a NUMBER (see
-          // `GitHubInstallationRepository.id: number` and `normalizeRepositories`);
-          // check membership by the immutable id (rename-safe).
-          sql`${githubInstallations.repositories} @> ${JSON.stringify([{ id: Number(repositoryId) }])}::jsonb`,
-        ),
+        installationSelectionCoversRepoClause(repositoryId),
       ),
     );
   return rows;
@@ -762,7 +749,7 @@ export async function getDbNowMs(db: Db): Promise<number> {
  * `now()` (which freezes at TRANSACTION-START). `member_removed` writes this
  * AFTER a possibly lock-waiting `FOR UPDATE` on the org install rows, so an
  * artifact (join_code/connect_grant) minted DURING that tx window has
- * `iat < revoked_at` and is rejected — closing the R5-2 contention-amplified
+ * `iat < revoked_at` and is rejected — closing the contention-amplified
  * replay window that a tx-start `now()` would leave open. onConflict sets
  * `revoked_at` to `greatest(existing, excluded)`: a reordered/redelivered webhook
  * still carries a `clock_timestamp()` >= the earlier one, and `greatest(...)`

@@ -79,26 +79,7 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
     ? JSON.parse(target.applied_migrations)
     : [];
   const migrationDiff = currentMigrations.filter((m) => !targetMigrations.includes(m));
-
-  if (migrationDiff.length > 0) {
-    log.warn(
-      `The current database has ${formatCount(migrationDiff.length, 'migration')} applied after this deployment:`,
-    );
-    for (const m of migrationDiff) {
-      log.message(`  ${dim('•')} ${m}`);
-    }
-    log.message(
-      dim(
-        'Rolling back will NOT revert these migrations. The older code will run against the current schema.',
-      ),
-    );
-
-    const proceed = await confirm({ message: 'Proceed with rollback?' });
-    if (isCancel(proceed) || !proceed) {
-      cancel('Rollback cancelled.');
-      process.exit(0);
-    }
-  }
+  await confirmUnrevertedMigrations(migrationDiff, 'deployment');
 
   const s = createSpinner();
   s.start('Rolling back...');
@@ -191,34 +172,13 @@ async function runCloudflareRollback(root: string, deployId?: string): Promise<v
     log.warn(
       'Void migration metadata is unavailable for one of these versions. Database migrations are forward-only and will not be reverted.',
     );
-    const proceed = await confirm({ message: 'Proceed with rollback?' });
-    if (isCancel(proceed) || !proceed) {
-      cancel('Rollback cancelled.');
-      process.exit(0);
-    }
+    await confirmRollbackOrExit();
   } else {
     const targetSet = new Set(target.metadata.migrations);
     const migrationDiff = current.metadata.migrations.filter(
       (migration) => !targetSet.has(migration),
     );
-    if (migrationDiff.length > 0) {
-      log.warn(
-        `The current database has ${formatCount(migrationDiff.length, 'migration')} applied after this version:`,
-      );
-      for (const migration of migrationDiff) {
-        log.message(`  ${dim('•')} ${migration}`);
-      }
-      log.message(
-        dim(
-          'Rolling back will NOT revert these migrations. The older code will run against the current schema.',
-        ),
-      );
-      const proceed = await confirm({ message: 'Proceed with rollback?' });
-      if (isCancel(proceed) || !proceed) {
-        cancel('Rollback cancelled.');
-        process.exit(0);
-      }
-    }
+    await confirmUnrevertedMigrations(migrationDiff, 'version');
   }
 
   const spinner = createSpinner();
@@ -233,6 +193,36 @@ async function runCloudflareRollback(root: string, deployId?: string): Promise<v
   }
   log.success(`Rolled back to ${pc.bold(target.id)}`);
   outro(dim('Traffic is now serving the selected Cloudflare Worker Version.'));
+}
+
+async function confirmRollbackOrExit(): Promise<void> {
+  const proceed = await confirm({ message: 'Proceed with rollback?' });
+  if (isCancel(proceed) || !proceed) {
+    cancel('Rollback cancelled.');
+    process.exit(0);
+  }
+}
+
+/** List migrations the rollback will not revert and ask before continuing. */
+async function confirmUnrevertedMigrations(
+  migrationDiff: Array<string>,
+  noun: 'deployment' | 'version',
+): Promise<void> {
+  if (migrationDiff.length === 0) {
+    return;
+  }
+  log.warn(
+    `The current database has ${formatCount(migrationDiff.length, 'migration')} applied after this ${noun}:`,
+  );
+  for (const migration of migrationDiff) {
+    log.message(`  ${dim('•')} ${migration}`);
+  }
+  log.message(
+    dim(
+      'Rolling back will NOT revert these migrations. The older code will run against the current schema.',
+    ),
+  );
+  await confirmRollbackOrExit();
 }
 
 function formatAge(deployedAt: string | null): string {

@@ -43,7 +43,7 @@ import { invalidateGitHubConnectionAuthorizedBy } from './github.ts';
 
 export async function createProject(db: Db, userId: string, slug: string): Promise<Project> {
   const id = generateId('proj');
-  const row = await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
     const [created] = await tx.insert(projects).values({ id, user_id: userId, slug }).returning();
     await tx
       .insert(projectOwnershipPeriods)
@@ -56,7 +56,6 @@ export async function createProject(db: Db, userId: string, slug: string): Promi
       .onConflictDoNothing();
     return created;
   });
-  return row;
 }
 
 export async function getProject(db: Db, id: string): Promise<Project | null> {
@@ -146,6 +145,9 @@ export async function getAccessibleProjectBySlug(
 }
 
 // --- Project team membership and invitations ---
+
+const PROJECT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PENDING_PROJECT_INVITATIONS = 100;
 
 type ProjectMemberWithUser = Readonly<{ member: ProjectMember; user: User }>;
 
@@ -491,7 +493,7 @@ export async function getPendingProjectInvitations(
       ),
     )
     .orderBy(desc(projectInvitations.created_at))
-    .limit(100);
+    .limit(MAX_PENDING_PROJECT_INVITATIONS);
 }
 
 export async function getPendingProjectInvitationsByUserId(
@@ -532,7 +534,7 @@ async function requireLockedProjectInvitationCapacity(
         existingInvitationId ? ne(projectInvitations.id, existingInvitationId) : undefined,
       ),
     );
-  if ((pendingCount?.count ?? 0) >= 100) {
+  if ((pendingCount?.count ?? 0) >= MAX_PENDING_PROJECT_INVITATIONS) {
     throw new ProjectTeamMutationError('pending-invitation-limit');
   }
 }
@@ -557,7 +559,7 @@ export async function createOrRefreshProjectInvitation(
     throw new ProjectTeamMutationError('target-user-not-found');
   }
   const target = targets[0]!;
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + PROJECT_INVITATION_TTL_MS).toISOString();
 
   return db.transaction(async (tx) => {
     const project = await lockProject(tx, args.projectId);
@@ -646,7 +648,7 @@ export async function resendProjectInvitation(
   db: Db,
   args: { projectId: string; invitationId: string; actorUserId: string },
 ): Promise<Readonly<{ invitation: ProjectInvitation; target: User }>> {
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + PROJECT_INVITATION_TTL_MS).toISOString();
   return db.transaction(async (tx) => {
     const project = await lockProject(tx, args.projectId);
     await requireLockedMembersCapability(tx, project, args.actorUserId);

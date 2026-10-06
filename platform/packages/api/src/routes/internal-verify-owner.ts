@@ -12,9 +12,9 @@ import { isAdminSuspended } from '../suspension.ts';
 const app = new Hono<ApiEnv>();
 
 /**
- * Live deploy-capability verification called by the binding proxy. The legacy
- * verify-owner path is intentionally retained so old and new proxy revisions
- * can coexist during rollout; its semantics now include collaborators/admins.
+ * Live deploy-capability verification called by the binding proxy. The
+ * verify-owner path name is kept so old and new proxy revisions can coexist;
+ * it checks the deploy capability, which includes collaborators and admins.
  *
  * POST /internal/verify-owner/:projectId
  * Body: { "userId": "...", "proxyOrigin": "https://proxy.example.com", ... }

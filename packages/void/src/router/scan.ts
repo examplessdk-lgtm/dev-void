@@ -119,7 +119,6 @@ export async function scanRoutes(
       .filter((route) => isRouteEnabledForEnvironment(route, options?.environment));
   const routes = parsedRoutes
     .map((route) => ({ ...route, methods: detectHttpExports(join(routesDir, route.filePath)) }))
-    // Sort by specificity: static routes before dynamic params, catch-all last.
     .sort(compareRouteSpecificity);
 
   // Parse middleware, sorted by numeric prefix

@@ -34,6 +34,36 @@ async function requireEmailDestinationSettingsAccess(
   }
 }
 
+/** A provider tag queued for cleanup must never be adopted again. */
+async function isRetiredDestination(tx: DbOrTx, cfDestinationId: string): Promise<boolean> {
+  const [retired] = await tx
+    .select({ id: emailDestinationCleanups.cf_destination_id })
+    .from(emailDestinationCleanups)
+    .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
+    .limit(1);
+  return !!retired;
+}
+
+/** Locks the owner's `users` row FOR SHARE and compares its email to the snapshot. */
+async function ownerEmailMatches(tx: DbOrTx, ownerAudit: OwnerVerificationAudit): Promise<boolean> {
+  const [owner] = await tx
+    .select({ email: users.email })
+    .from(users)
+    .where(eq(users.id, ownerAudit.userId))
+    .for('share')
+    .limit(1);
+  return (owner?.email?.toLowerCase() ?? null) === ownerAudit.emailSnapshot.toLowerCase();
+}
+
+/** Number of projects whose consent rows still reference a provider tag. */
+async function countDestinationReferences(tx: DbOrTx, cfDestinationId: string): Promise<number> {
+  const [references] = await tx
+    .select({ n: countDistinct(emailDestinations.project_id) })
+    .from(emailDestinations)
+    .where(eq(emailDestinations.cf_destination_id, cfDestinationId));
+  return Number(references?.n ?? 0);
+}
+
 /**
  * RETURNING identifies the sole inserter so only it sends a verification email.
  * A missing row means it was concurrently deleted; callers must retry.
@@ -65,81 +95,42 @@ export async function tryCreateEmailDestination(
     verified_by_user_id: ownerAudit?.userId ?? null,
     verified_by_email_snapshot: ownerAudit?.emailSnapshot ?? null,
   };
-  const insertRow = async (via: DbOrTx): Promise<EmailDestination | undefined> => {
-    if (cfDestinationId) {
-      const [retired] = await via
-        .select({ id: emailDestinationCleanups.cf_destination_id })
-        .from(emailDestinationCleanups)
-        .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
-        .limit(1);
-      if (retired) {
-        return undefined;
-      }
+  const outcome = await db.transaction(async (tx) => {
+    await lockEmailPolicy(tx);
+    const [project] = await tx
+      .select({ status: projects.status, ownerUserId: projects.user_id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .for('update')
+      .limit(1);
+    if (!project || project.status === 'deleting') {
+      return 'project-unavailable' as const;
     }
-    const [row] = await via
+    await requireEmailDestinationSettingsAccess(tx, projectId, actorUserId);
+    if (
+      ownerAudit &&
+      (project.ownerUserId !== ownerAudit.userId || !(await ownerEmailMatches(tx, ownerAudit)))
+    ) {
+      return 'owner-email-changed' as const;
+    }
+    if (cfDestinationId && (await isRetiredDestination(tx, cfDestinationId))) {
+      return undefined;
+    }
+    const [row] = await tx
       .insert(emailDestinations)
       .values(values)
       .onConflictDoNothing({ target: [emailDestinations.project_id, emailDestinations.address] })
       .returning();
     return row;
-  };
-  let inserted: EmailDestination | undefined;
-  if (!ownerAudit) {
-    const outcome = await db.transaction(async (tx) => {
-      await lockEmailPolicy(tx);
-      const [project] = await tx
-        .select({ status: projects.status })
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .for('update')
-        .limit(1);
-      if (!project || project.status === 'deleting') {
-        return 'project-unavailable' as const;
-      }
-      await requireEmailDestinationSettingsAccess(tx, projectId, actorUserId);
-      return insertRow(tx);
-    });
-    if (outcome === 'project-unavailable') {
-      return { row: null, inserted: false };
-    }
-    inserted = outcome;
-  } else {
-    const outcome = await db.transaction(async (tx) => {
-      await lockEmailPolicy(tx);
-      const [project] = await tx
-        .select({ status: projects.status, ownerUserId: projects.user_id })
-        .from(projects)
-        .where(eq(projects.id, projectId))
-        .for('update')
-        .limit(1);
-      if (!project || project.status === 'deleting') {
-        return 'project-unavailable' as const;
-      }
-      await requireEmailDestinationSettingsAccess(tx, projectId, actorUserId);
-      if (project.ownerUserId !== ownerAudit.userId) {
-        return 'owner-email-changed' as const;
-      }
-      const [owner] = await tx
-        .select({ email: users.email })
-        .from(users)
-        .where(eq(users.id, ownerAudit.userId))
-        .for('share')
-        .limit(1);
-      if ((owner?.email?.toLowerCase() ?? null) !== ownerAudit.emailSnapshot.toLowerCase()) {
-        return 'owner-email-changed';
-      }
-      return insertRow(tx);
-    });
-    if (outcome === 'owner-email-changed') {
-      return { row: null, inserted: false, ownerEmailChanged: true };
-    }
-    if (outcome === 'project-unavailable') {
-      return { row: null, inserted: false };
-    }
-    inserted = outcome;
+  });
+  if (outcome === 'owner-email-changed') {
+    return { row: null, inserted: false, ownerEmailChanged: true };
   }
-  if (inserted) {
-    return { row: inserted, inserted: true };
+  if (outcome === 'project-unavailable') {
+    return { row: null, inserted: false };
+  }
+  if (outcome) {
+    return { row: outcome, inserted: true };
   }
   // A concurrent insert may have won, or cleanup retired the provider tag.
   // Return an existing project row if present; otherwise the caller retries.
@@ -328,15 +319,8 @@ export async function updateEmailDestinationStatus(
       .from(projects)
       .where(eq(projects.id, existing.project_id))
       .for('update');
-    if (cfDestinationId) {
-      const [retired] = await tx
-        .select({ id: emailDestinationCleanups.cf_destination_id })
-        .from(emailDestinationCleanups)
-        .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
-        .limit(1);
-      if (retired) {
-        return false;
-      }
+    if (cfDestinationId && (await isRetiredDestination(tx, cfDestinationId))) {
+      return false;
     }
     const updated = await tx
       .update(emailDestinations)
@@ -386,11 +370,7 @@ export async function deleteEmailDestination(
     if (!existing.cf_destination_id) {
       return null;
     }
-    const [references] = await tx
-      .select({ n: countDistinct(emailDestinations.project_id) })
-      .from(emailDestinations)
-      .where(eq(emailDestinations.cf_destination_id, existing.cf_destination_id));
-    if (Number(references?.n ?? 0) !== 0) {
+    if ((await countDestinationReferences(tx, existing.cf_destination_id)) !== 0) {
       return null;
     }
     await queueDestinationCleanupTx(tx, existing.cf_destination_id);
@@ -418,11 +398,7 @@ export async function deleteProjectEmailDestinations(
     await tx.delete(emailDestinations).where(eq(emailDestinations.project_id, projectId));
     const queued: Array<string> = [];
     for (const tag of new Set(rows.map((row) => row.cf_destination_id).filter(Boolean))) {
-      const [references] = await tx
-        .select({ n: countDistinct(emailDestinations.project_id) })
-        .from(emailDestinations)
-        .where(eq(emailDestinations.cf_destination_id, tag!));
-      if (Number(references?.n ?? 0) === 0) {
+      if ((await countDestinationReferences(tx, tag!)) === 0) {
         await queueDestinationCleanupTx(tx, tag!);
         queued.push(tag!);
       }
@@ -438,11 +414,7 @@ export async function queueUnreferencedEmailDestinationCleanup(
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await lockEmailPolicy(tx);
-    const [references] = await tx
-      .select({ n: countDistinct(emailDestinations.project_id) })
-      .from(emailDestinations)
-      .where(eq(emailDestinations.cf_destination_id, cfDestinationId));
-    if (Number(references?.n ?? 0) !== 0) {
+    if ((await countDestinationReferences(tx, cfDestinationId)) !== 0) {
       return false;
     }
     await queueDestinationCleanupTx(tx, cfDestinationId);
@@ -496,21 +468,10 @@ export async function promoteEmailDestinationWithOwnerAudit(
     if (project?.ownerUserId !== ownerAudit.userId) {
       return false;
     }
-    const [retired] = await tx
-      .select({ id: emailDestinationCleanups.cf_destination_id })
-      .from(emailDestinationCleanups)
-      .where(eq(emailDestinationCleanups.cf_destination_id, cfDestinationId))
-      .limit(1);
-    if (retired) {
-      return false;
-    }
-    const [owner] = await tx
-      .select({ email: users.email })
-      .from(users)
-      .where(eq(users.id, ownerAudit.userId))
-      .for('share')
-      .limit(1);
-    if ((owner?.email?.toLowerCase() ?? null) !== ownerAudit.emailSnapshot.toLowerCase()) {
+    if (
+      (await isRetiredDestination(tx, cfDestinationId)) ||
+      !(await ownerEmailMatches(tx, ownerAudit))
+    ) {
       return false;
     }
     const promoted = await tx

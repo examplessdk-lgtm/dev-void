@@ -3,10 +3,8 @@ import type { PageDefinition, PageScanResult } from './pages/types.ts';
 
 /**
  * Whether a resolved `revalidate` value represents an active ISR configuration.
- *
- * Mirrors the presence check used when writing the deploy manifest
- * (`packages/void/src/cli/package.ts`): `null`/`undefined`/`0`/`{}` are treated
- * as "no ISR", a positive number or a non-empty path map is treated as "ISR on".
+ * `null`/`undefined`/`0`/`{}` are treated as "no ISR", a positive number or a
+ * non-empty path map is treated as "ISR on".
  */
 export function hasRevalidate(r: unknown): boolean {
   if (r == null) {
@@ -22,7 +20,7 @@ export function hasRevalidate(r: unknown): boolean {
 }
 
 /**
- * Merge the app's `void.json` `routing.revalidate` config with per-page
+ * Merge the app's `routing.revalidate` config with per-page
  * `export const revalidate` rules discovered by the page scan, producing the
  * final revalidate map that gets baked into the deploy manifest (managed
  * `void deploy`) or the self-hosted worker build.
@@ -105,13 +103,13 @@ export function collectRevalidate(
  *     resolves the RAW per-path `routing.revalidate` OBJECT config (shipped as
  *     `manifest.pathRevalidate`) against the ACTUAL request path at the edge.
  *
- * Sources, in precedence order — SOURCE-SEPARATED, which preserves the plan-0077
- * catch-all shadowing fix (a no-export page must NOT inherit a SIBLING page's
- * per-page TTL — sibling exports never reach this function):
+ * Sources, in precedence order — SOURCE-SEPARATED, so a no-export page never
+ * inherits a SIBLING page's per-page TTL (sibling exports never reach this
+ * function):
  *   1. an explicit per-page `export const revalidate` is authoritative — a
  *      positive value turns ISR on; an explicit `0` opts the page OUT and is NOT
  *      overridden by the app-wide config;
- *   2. else a global-NUMBER `void.json` `routing.revalidate` (applies to every
+ *   2. else a global-NUMBER `routing.revalidate` (applies to every
  *      page: `> 0` on, `0` off);
  *   3. else (an OBJECT config, or none) → `undefined` (inherit-eligible).
  *
@@ -132,7 +130,7 @@ function resolvePageBuildTtl(
   if (page.revalidate != null) {
     return page.revalidate > 0 ? page.revalidate : 0;
   }
-  // 2. App-wide void.json `routing.revalidate` — global NUMBER only.
+  // 2. App-wide `routing.revalidate` — global NUMBER only.
   if (typeof revalidateConfig === 'number') {
     return revalidateConfig > 0 ? revalidateConfig : 0;
   }
@@ -163,11 +161,10 @@ function resolvePageBuildTtl(
 // Route-unaware by design: this table is built from `pageScan.pages` only, so a
 // broad catch-all page with a TTL can shadow a non-`/api` `routes/` handler at
 // dispatch and ISR-cache its response (the worker serves the route, but dispatch
-// resolves the page catch-all's TTL). PRE-EXISTING (a global-number
-// `routing.revalidate` already did this), bounded by dispatch `shouldBypassIsr`
-// (no cross-user auth leak) and `isApiPath` (`/api/*` excluded). Documented in
-// plan 0077 as a bounded known limitation; the eventual fix prepends `routes/`
-// patterns here as `revalidate: 0` opt-outs (with method/overlap caveats).
+// resolves the page catch-all's TTL). A global-number `routing.revalidate` has
+// the same effect. Bounded by dispatch `shouldBypassIsr` (no cross-user auth
+// leak) and `isApiPath` (`/api/*` excluded). See design doc 0077 for this known
+// limitation and the planned fix (prepend `routes/` patterns as `revalidate: 0`).
 export function collectPages(
   pageScan: PageScanResult | null,
   revalidateConfig?: number | Record<string, number> | undefined,

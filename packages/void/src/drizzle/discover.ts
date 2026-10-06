@@ -31,14 +31,11 @@ export function discoverSchema(
 }
 
 /**
- * Resolve the schema specifier for Drizzle Kit config.
+ * Resolve the root-relative schema specifier for Drizzle Kit config.
  * - File: `"./db/schema.ts"`
  * - Directory: `"./db/schema/*.ts"`
  */
-export function schemaSpecifier(location: SchemaLocation, root?: string): string {
-  if (!root) {
-    return location.type === 'file' ? './db/schema.ts' : './db/schema/*.ts';
-  }
+export function schemaSpecifier(location: SchemaLocation, root: string): string {
   const rel = relative(root, location.path);
   return location.type === 'file' ? `./${rel}` : `./${rel}/*.ts`;
 }

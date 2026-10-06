@@ -89,4 +89,4 @@ when using `--yes`. Recovery requires Cloudflare management/database authority,
 original recovery keys, and a successful browser provider test. Use
 `--client-secret-env <name>` for new or rotated credentials.
 
-For automation, supply `VOID_OPERATOR_TOKEN` with an explicit `VOID_API_URL` or `--connection`. Operator tokens are stored separately from application deployment credentials. The API checks your current administrator access on every request. See [Using Scripts](../../guide/platform/administration/operations.md#using-scripts) for an example.
+For automation, see [operator authentication](./platform.md#operator-authentication).

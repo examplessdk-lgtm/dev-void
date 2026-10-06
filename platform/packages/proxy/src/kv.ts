@@ -61,7 +61,6 @@ kv.post('/get', async (context) => {
       headers: { 'content-type': 'application/octet-stream' },
     });
   }
-  // Default: text
   return context.json(await cfRes.text());
 });
 

@@ -239,7 +239,7 @@ export async function scanPages(root: string, options?: PageScanOptions): Promis
       if (layoutsDirIdx === segments.length - 2) {
         namedLayouts.push({
           name: base,
-          directory: segments.slice(0, layoutsDirIdx).join('/') || '',
+          directory: segments.slice(0, layoutsDirIdx).join('/'),
           filePath: file,
           island,
         });
@@ -366,21 +366,11 @@ export async function scanPages(root: string, options?: PageScanOptions): Promis
     }
     const dir = dirname(page.componentPath);
     const segments = dir === '.' ? [] : dir.split('/');
-    let current = '';
-    // Check root layout
-    if (layouts.some((l) => l.directory === '' && l.island)) {
+    const ancestors = ['', ...segments.map((_, index) => segments.slice(0, index + 1).join('/'))];
+    if (layouts.some((l) => l.island && ancestors.includes(l.directory))) {
       throw new Error(
         `pages: Regular page '${page.componentPath}' is under an island layout. Add a .island suffix.`,
       );
-    }
-    // Check each directory level
-    for (const seg of segments) {
-      current = current ? `${current}/${seg}` : seg;
-      if (layouts.some((l) => l.directory === current && l.island)) {
-        throw new Error(
-          `pages: Regular page '${page.componentPath}' is under an island layout. Add a .island suffix.`,
-        );
-      }
     }
   }
 
@@ -415,6 +405,14 @@ function markdownFrontmatter(source: string): string | undefined {
   return body.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1];
 }
 
+/** Read a single-line `key: value` field, stripping surrounding quotes. */
+function frontmatterField(yaml: string, key: string): string | undefined {
+  return yaml
+    .match(new RegExp(`^${key}:\\s*(.+)$`, 'm'))?.[1]
+    ?.trim()
+    .replace(/^["']|["']$/g, '');
+}
+
 /** Extract title and description from YAML frontmatter in markdown source. */
 function extractFrontmatterMeta(
   source: string,
@@ -423,14 +421,8 @@ function extractFrontmatterMeta(
   if (yaml === undefined) {
     return undefined;
   }
-  const title = yaml
-    .match(/^title:\s*(.+)$/m)?.[1]
-    ?.trim()
-    .replace(/^["']|["']$/g, '');
-  const description = yaml
-    .match(/^description:\s*(.+)$/m)?.[1]
-    ?.trim()
-    .replace(/^["']|["']$/g, '');
+  const title = frontmatterField(yaml, 'title');
+  const description = frontmatterField(yaml, 'description');
   if (!title && !description) {
     return undefined;
   }
@@ -443,10 +435,7 @@ function extractFrontmatterLayout(source: string): string | false | undefined {
   if (yaml === undefined) {
     return undefined;
   }
-  const value = yaml
-    .match(/^layout:\s*(.+)$/m)?.[1]
-    ?.trim()
-    .replace(/^["']|["']$/g, '');
+  const value = frontmatterField(yaml, 'layout');
   if (!value) {
     return undefined;
   }

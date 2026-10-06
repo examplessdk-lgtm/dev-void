@@ -98,30 +98,15 @@ export async function readEmailEnvelope(
   if (!stream) {
     throw new Error('missing email envelope');
   }
-  const reader = stream.getReader();
   const limit = 4 + EMAIL_MAX_INBOUND_HEADER_BYTES + EMAIL_MAX_INBOUND_BYTES;
-  let bytes = new Uint8Array(1024);
-  let total = 0;
   const deadline = Date.now() + deadlineMs;
-  try {
+  const { bytes, total } = await withReader(stream, async (reader) => {
+    let bytes = new Uint8Array(1024);
+    let total = 0;
     for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        throw new Error('email envelope timeout');
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('email envelope timeout')), remaining);
-        }),
-      ]).finally(() => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      });
+      const chunk = await readBeforeDeadline(reader, deadline, 'email envelope timeout');
       if (chunk.done) {
-        break;
+        return { bytes, total };
       }
       const nextTotal = total + chunk.value.byteLength;
       if (nextTotal > limit) {
@@ -139,18 +124,7 @@ export async function readEmailEnvelope(
       bytes.set(chunk.value, total);
       total = nextTotal;
     }
-  } catch (error) {
-    // Cancellation is cleanup, not part of the protocol deadline. A hostile
-    // stream may never settle its underlying cancel algorithm.
-    void reader.cancel().catch(() => {});
-    throw error;
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // A non-standard stream may keep a read pending after cancellation.
-    }
-  }
+  });
   if (total < 4) {
     throw new Error('truncated email envelope');
   }
@@ -356,51 +330,34 @@ export async function readEmailActions(
   stream: ReadableStream<Uint8Array>,
   deadlineMs = 15_000,
 ): Promise<Array<EmailWireAction>> {
-  const reader = stream.getReader();
-  const actions: Array<EmailWireAction> = [];
-  let stash: Uint8Array = new Uint8Array(0);
-  let total = 0;
-  const deadline = Date.now() + deadlineMs;
-  async function readChunk() {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new Error('email response timeout');
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    return Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('email response timeout')), remaining);
-      }),
-    ]).finally(() => {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
-    });
-  }
-  async function exact(length: number): Promise<Uint8Array> {
-    const result = new Uint8Array(length);
-    let offset = 0;
-    while (offset < length) {
-      if (stash.byteLength === 0) {
-        const chunk = await readChunk();
-        if (chunk.done) {
-          throw new Error('truncated email response');
+  return withReader(stream, async (reader) => {
+    const actions: Array<EmailWireAction> = [];
+    let stash: Uint8Array = new Uint8Array(0);
+    let total = 0;
+    const deadline = Date.now() + deadlineMs;
+    const readChunk = () => readBeforeDeadline(reader, deadline, 'email response timeout');
+    async function exact(length: number): Promise<Uint8Array> {
+      const result = new Uint8Array(length);
+      let offset = 0;
+      while (offset < length) {
+        if (stash.byteLength === 0) {
+          const chunk = await readChunk();
+          if (chunk.done) {
+            throw new Error('truncated email response');
+          }
+          total += chunk.value.byteLength;
+          if (total > EMAIL_MAX_RESPONSE_BYTES) {
+            throw new Error('email response too large');
+          }
+          stash = chunk.value;
         }
-        total += chunk.value.byteLength;
-        if (total > EMAIL_MAX_RESPONSE_BYTES) {
-          throw new Error('email response too large');
-        }
-        stash = chunk.value;
+        const used = Math.min(stash.byteLength, length - offset);
+        result.set(stash.subarray(0, used), offset);
+        stash = stash.subarray(used);
+        offset += used;
       }
-      const used = Math.min(stash.byteLength, length - offset);
-      result.set(stash.subarray(0, used), offset);
-      stash = stash.subarray(used);
-      offset += used;
+      return result;
     }
-    return result;
-  }
-  try {
     for (;;) {
       const head = await exact(5);
       const length = new DataView(head.buffer).getUint32(0);
@@ -480,6 +437,38 @@ export async function readEmailActions(
         throw new Error('unknown email action');
       }
     }
+  });
+}
+
+async function readBeforeDeadline(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  deadline: number,
+  timeoutMessage: string,
+) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(timeoutMessage);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    reader.read(),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(timeoutMessage)), remaining);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+async function withReader<T>(
+  stream: ReadableStream<Uint8Array>,
+  read: (reader: ReadableStreamDefaultReader<Uint8Array>) => Promise<T>,
+): Promise<T> {
+  const reader = stream.getReader();
+  try {
+    return await read(reader);
   } catch (error) {
     // Cancellation is cleanup, not part of the protocol deadline. A hostile
     // stream may never settle its underlying cancel algorithm.

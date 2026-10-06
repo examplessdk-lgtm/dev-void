@@ -10,13 +10,6 @@ import {
   type MigrationPlanHashInput,
 } from '@void/deploy-core';
 
-export {
-  canonicalSql,
-  hasStandalonePragma,
-  isSingleStatement,
-  MIGRATION_CLASSIFIER_VERSION,
-  UNSPLIT_MULTI_STATEMENT_PRAGMA,
-} from '@void/deploy-core';
 export const DESTRUCTIVE_PRAGMA = '-- void:allow-destructive';
 
 export type MigrationExecutionPlan = {
@@ -49,7 +42,7 @@ export type MigrationPlanBundle = {
   plans: Array<MigrationExecutionPlan>;
 };
 
-export function sha256Hex(value: string): string {
+function sha256Hex(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
@@ -57,11 +50,12 @@ function hashPlan(plan: MigrationPlanHashInput): string {
   return sha256Hex(canonicalJson(getMigrationPlanHashInput(plan)));
 }
 
-export function computeMigrationListHash(plans: ReadonlyArray<MigrationExecutionPlan>): string {
+function computeMigrationListHash(plans: ReadonlyArray<MigrationExecutionPlan>): string {
   return sha256Hex(canonicalJson(plans.map((plan) => [plan.name, plan.sqlHash, plan.planHash])));
 }
 
-function getExecutableSql(sql: string): string {
+/** Blank out comments, strings and quoted identifiers, keeping offsets stable. */
+export function getExecutableSql(sql: string): string {
   let out = '';
   for (const segment of tokenizeSql(sql)) {
     if (segment.kind === 'sql') {

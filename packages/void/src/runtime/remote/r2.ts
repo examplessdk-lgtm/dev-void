@@ -1,9 +1,9 @@
-import type { ProxyClient } from './client.ts';
+import { bytesToBase64, type ProxyClient } from './client.ts';
 import { serializeR2Conditional } from './r2-conditions.ts';
 
 /**
  * R2Bucket implementation backed by the remote proxy.
- * Used during local development when `remote: true` is set in void.json.
+ * Used during local development when `remote: true` is set in void.config.ts.
  */
 export class ProxyR2Bucket {
   constructor(
@@ -64,30 +64,12 @@ export class ProxyR2Bucket {
     } else if (value === null) {
       textValue = '';
     } else if (value instanceof ArrayBuffer) {
-      base64 = arrayBufferToBase64(value);
+      base64 = bytesToBase64(new Uint8Array(value));
     } else if (ArrayBuffer.isView(value)) {
-      base64 = arrayBufferToBase64(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength);
-    } else if (value instanceof Blob) {
-      base64 = arrayBufferToBase64(await value.arrayBuffer());
+      base64 = bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
     } else {
-      // ReadableStream — read it all
-      const reader = value.getReader();
-      const chunks: Array<Uint8Array> = [];
-      while (true) {
-        const { done, value: chunk } = await reader.read();
-        if (done) {
-          break;
-        }
-        chunks.push(chunk);
-      }
-      const total = chunks.reduce((sum, c) => sum + c.length, 0);
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      base64 = arrayBufferToBase64(merged.buffer as ArrayBuffer);
+      // Blob or ReadableStream
+      base64 = bytesToBase64(new Uint8Array(await new Response(value).arrayBuffer()));
     }
 
     const body: Record<string, unknown> = {
@@ -190,19 +172,6 @@ export class ProxyR2Bucket {
   resumeMultipartUpload(): never {
     throw new Error('resumeMultipartUpload() is not supported with remote bindings');
   }
-}
-
-function arrayBufferToBase64(
-  buffer: ArrayBuffer,
-  byteOffset = 0,
-  byteLength = buffer.byteLength,
-): string {
-  const bytes = new Uint8Array(buffer, byteOffset, byteLength);
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
 }
 
 function makeR2Object(data: {

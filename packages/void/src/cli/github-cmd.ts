@@ -178,7 +178,7 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
 
   switch (args.subcommand) {
     case 'install':
-      return runInstall(root, client);
+      return runInstall(client);
     case 'installations':
       return runInstallations(client);
     case 'connect':
@@ -190,9 +190,9 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
     case 'disconnect':
       return runGithubDisconnect(root, client, args);
     case 'link':
-      return runGithubLink(root, client);
+      return runGithubLink(client);
     case 'join':
-      return runGithubJoin(root, client);
+      return runGithubJoin(client);
   }
 }
 
@@ -204,7 +204,7 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
  * `void github install` — print the GitHub App install URL and open it.
  *
  * If the account has no linked GitHub identity, the server returns a 403 with
- * the stable code `github_identity_required` (Task 3). Rather than telling the
+ * the stable code `github_identity_required`. Rather than telling the
  * user to `void account login` (which risks forking into a second account), we run
  * the link flow inline and retry the install URL exactly once.
  *
@@ -212,9 +212,8 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
  * starting a real localhost callback server / browser.
  */
 export async function runInstall(
-  root: string,
   client: PlatformClient,
-  linkIdentity: (root: string, client: PlatformClient) => Promise<void> = runGithubLink,
+  linkIdentity: (client: PlatformClient) => Promise<void> = runGithubLink,
 ): Promise<void> {
   let url: string;
   try {
@@ -226,7 +225,7 @@ export async function runInstall(
       err.code === 'github_identity_required'
     ) {
       log.message('Your Void account needs a linked GitHub identity. Starting the GitHub link…');
-      await linkIdentity(root, client);
+      await linkIdentity(client);
       try {
         ({ url } = await client.getGithubInstallUrl());
       } catch (retryErr) {
@@ -265,13 +264,10 @@ export async function runInstall(
  * identity. Drives the platform's 3-endpoint link flow with a localhost +
  * PKCE handshake, mirroring `void account login`.
  *
- * Exported so Task 5 can call it (e.g. when `github install` returns 403 for a
- * GitHub-less account, prompt to link and retry). The success path is
- * non-exiting so a caller can continue; only error paths exit/throw.
+ * The success path is non-exiting so a caller (`github install` after a 403
+ * for a GitHub-less account) can continue; only error paths exit/throw.
  */
-export async function runGithubLink(root: string, client: PlatformClient): Promise<void> {
-  void root; // Reserved for the signature Task 5 reuses; routing uses `client`.
-
+export async function runGithubLink(client: PlatformClient): Promise<void> {
   const verifier = createCodeVerifier();
   const challenge = createCodeChallenge(verifier);
   const state = randomBytes(32).toString('hex');
@@ -362,9 +358,7 @@ export async function performGithubJoin(client: PlatformClient): Promise<number>
   return count;
 }
 
-export async function runGithubJoin(root: string, client: PlatformClient): Promise<void> {
-  void root; // Signature parity with runGithubLink; routing uses `client`.
-
+export async function runGithubJoin(client: PlatformClient): Promise<void> {
   let count: number;
   try {
     count = await performGithubJoin(client);
@@ -410,11 +404,11 @@ async function runInstallations(client: PlatformClient): Promise<void> {
 /**
  * Per-repo connect authorization round-trip for a non-owner org member.
  *
- * When the connect route returns 403 `connect_authorization_required` (Task 8),
+ * When the connect route returns 403 `connect_authorization_required`,
  * the member has no proof they can access the specific repo under the shared
  * installation. This drives the same localhost + PKCE handshake as
  * {@link runGithubLink}/{@link runGithubJoin}, but against the platform's
- * connect-authorize route (Task 7): the callback mints and returns the grant IN
+ * connect-authorize route: the callback mints and returns the grant IN
  * the redirect URL (`?connect_grant=…`), so there is no separate `/complete`
  * POST — `finalize` just reads the grant out of the callback query. A
  * `?error=repo_not_accessible` callback is mapped to a friendly per-repo message
@@ -489,6 +483,53 @@ async function promptRepoFullName(root: string): Promise<string> {
   return (input as string).trim();
 }
 
+/**
+ * `--project` / `VOID_PROJECT`, then the linked project, then (TTY only) a
+ * picker. Exits with a `<command>:`-prefixed error when none resolves.
+ */
+async function resolveGithubProjectId(
+  root: string,
+  client: PlatformClient,
+  projectName: string,
+  command: string,
+  isTTY: boolean,
+): Promise<string> {
+  const requestedSlug = getRequestedProjectSlug({ projectSlug: projectName || undefined });
+  if (requestedSlug) {
+    const projects = await client.listProjects();
+    const resolved = resolveProjectBySlug(projects, requestedSlug);
+    if (!resolved) {
+      log.error(`${command}: No project found with slug '${requestedSlug}'.`);
+      process.exit(1);
+    }
+    return resolved.projectId;
+  }
+  const linked = readProjectConfig(root);
+  if (linked) {
+    return linked.projectId;
+  }
+  if (!isTTY) {
+    log.error(
+      `${command}: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with \`void project link\`.`,
+    );
+    process.exit(1);
+  }
+  const projects = await client.listProjects();
+  if (projects.length === 0) {
+    log.error('No projects found. Create one first with `void deploy`.');
+    process.exit(1);
+  }
+  const picked = await select({
+    message: 'Select a project:',
+    options: projects.map((p) => ({ value: p.id, label: p.slug })),
+  });
+  if (isCancel(picked)) {
+    cancel('Cancelled.');
+    process.exit(0);
+  }
+  return picked as string;
+}
+
 export async function runConnect(
   root: string,
   client: PlatformClient,
@@ -499,45 +540,7 @@ export async function runConnect(
   // -------------------------------------------------------------------------
   // 1. Resolve project
   // -------------------------------------------------------------------------
-  let projectId: string;
-
-  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const resolved = resolveProjectBySlug(projects, requestedSlug);
-    if (!resolved) {
-      log.error(`connect: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = resolved.projectId;
-  } else {
-    const linked = readProjectConfig(root);
-    if (linked) {
-      projectId = linked.projectId;
-    } else if (!isTTY) {
-      log.error(
-        'connect: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
-      );
-      process.exit(1);
-    } else {
-      // Prompt to pick from list
-      const projects = await client.listProjects();
-      if (projects.length === 0) {
-        log.error('No projects found. Create one first with `void deploy`.');
-        process.exit(1);
-      }
-      const picked = await select({
-        message: 'Select a project:',
-        options: projects.map((p) => ({ value: p.id, label: p.slug })),
-      });
-      if (isCancel(picked)) {
-        cancel('Cancelled.');
-        process.exit(0);
-      }
-      projectId = picked as string;
-    }
-  }
+  const projectId = await resolveGithubProjectId(root, client, args.projectName, 'connect', isTTY);
 
   // -------------------------------------------------------------------------
   // 2. Resolve installation
@@ -701,8 +704,8 @@ export async function runConnect(
   }
 
   // -------------------------------------------------------------------------
-  // 5. Executor (build backend). Non-interactive keeps the historical silent
-  //    default of `container`; TTY prompts so a first-time connect is explicit.
+  // 5. Executor (build backend). Non-interactive defaults to `container`;
+  //    TTY prompts so a first-time connect is explicit.
   // -------------------------------------------------------------------------
   let executor: 'container' | 'github_actions';
   if (args.executor !== undefined) {
@@ -858,46 +861,9 @@ export async function runGithubUpdate(
   }
 
   // -------------------------------------------------------------------------
-  // 1. Resolve project (identical resolution order to `connect`).
+  // 1. Resolve project
   // -------------------------------------------------------------------------
-  let projectId: string;
-
-  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const resolved = resolveProjectBySlug(projects, requestedSlug);
-    if (!resolved) {
-      log.error(`update: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = resolved.projectId;
-  } else {
-    const linked = readProjectConfig(root);
-    if (linked) {
-      projectId = linked.projectId;
-    } else if (!isTTY) {
-      log.error(
-        'update: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
-      );
-      process.exit(1);
-    } else {
-      const projects = await client.listProjects();
-      if (projects.length === 0) {
-        log.error('No projects found. Create one first with `void deploy`.');
-        process.exit(1);
-      }
-      const picked = await select({
-        message: 'Select a project:',
-        options: projects.map((p) => ({ value: p.id, label: p.slug })),
-      });
-      if (isCancel(picked)) {
-        cancel('Cancelled.');
-        process.exit(0);
-      }
-      projectId = picked as string;
-    }
-  }
+  const projectId = await resolveGithubProjectId(root, client, args.projectName, 'update', isTTY);
 
   // -------------------------------------------------------------------------
   // 2. Fetch the current connection. A missing connection (404) means the
@@ -1067,46 +1033,9 @@ export async function runStatus(
   const isTTY = process.stdin.isTTY === true;
 
   // -------------------------------------------------------------------------
-  // 1. Resolve project (identical resolution order to connect/update).
+  // 1. Resolve project
   // -------------------------------------------------------------------------
-  let projectId: string;
-
-  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const resolved = resolveProjectBySlug(projects, requestedSlug);
-    if (!resolved) {
-      log.error(`status: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = resolved.projectId;
-  } else {
-    const linked = readProjectConfig(root);
-    if (linked) {
-      projectId = linked.projectId;
-    } else if (!isTTY) {
-      log.error(
-        'status: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
-      );
-      process.exit(1);
-    } else {
-      const projects = await client.listProjects();
-      if (projects.length === 0) {
-        log.error('No projects found. Create one first with `void deploy`.');
-        process.exit(1);
-      }
-      const picked = await select({
-        message: 'Select a project:',
-        options: projects.map((p) => ({ value: p.id, label: p.slug })),
-      });
-      if (isCancel(picked)) {
-        cancel('Cancelled.');
-        process.exit(0);
-      }
-      projectId = picked as string;
-    }
-  }
+  const projectId = await resolveGithubProjectId(root, client, args.projectName, 'status', isTTY);
 
   // -------------------------------------------------------------------------
   // 2. Fetch and display the connection. A missing connection (404) means the
@@ -1150,46 +1079,15 @@ export async function runGithubDisconnect(
   const isTTY = process.stdin.isTTY === true;
 
   // -------------------------------------------------------------------------
-  // 1. Resolve project (identical resolution order to connect/update/status).
+  // 1. Resolve project
   // -------------------------------------------------------------------------
-  let projectId: string;
-
-  const requestedSlug = getRequestedProjectSlug({ projectSlug: args.projectName || undefined });
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const resolved = resolveProjectBySlug(projects, requestedSlug);
-    if (!resolved) {
-      log.error(`disconnect: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = resolved.projectId;
-  } else {
-    const linked = readProjectConfig(root);
-    if (linked) {
-      projectId = linked.projectId;
-    } else if (!isTTY) {
-      log.error(
-        'disconnect: No project specified. Pass a project name or --project <name>, set VOID_PROJECT, or link one with `void project link`.',
-      );
-      process.exit(1);
-    } else {
-      const projects = await client.listProjects();
-      if (projects.length === 0) {
-        log.error('No projects found. Create one first with `void deploy`.');
-        process.exit(1);
-      }
-      const picked = await select({
-        message: 'Select a project:',
-        options: projects.map((p) => ({ value: p.id, label: p.slug })),
-      });
-      if (isCancel(picked)) {
-        cancel('Cancelled.');
-        process.exit(0);
-      }
-      projectId = picked as string;
-    }
-  }
+  const projectId = await resolveGithubProjectId(
+    root,
+    client,
+    args.projectName,
+    'disconnect',
+    isTTY,
+  );
 
   // -------------------------------------------------------------------------
   // 2. Fetch the current connection. A 404 "connection not found" means the

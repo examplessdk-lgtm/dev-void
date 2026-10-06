@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { PlatformDeploymentManifest } from '@void/platform';
-import { log } from '@voidzero-dev/vite-plus-prompts';
+import { type CANCEL_SYMBOL, isCancel, log } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
 import { pc } from './output.ts';
 import type { PlatformManagementAccess } from './platform-auth.ts';
@@ -12,6 +12,14 @@ export type PlatformSetupPage = Readonly<{
   instructions: string;
   linkInTitle?: boolean;
 }>;
+
+/** Return a prompt answer, or stop the platform command when the prompt was cancelled. */
+export function platformPromptAnswer<T>(value: T | typeof CANCEL_SYMBOL): T {
+  if (isCancel(value) || typeof value === 'symbol') {
+    throw new Error('platform: Cancelled.');
+  }
+  return value;
+}
 
 export function platformSetupLink(
   page: Pick<PlatformSetupPage, 'title' | 'url'>,

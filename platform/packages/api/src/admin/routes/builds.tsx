@@ -10,14 +10,9 @@ const app = new Hono<ApiEnv>();
 
 // GET /admin/builds/:id/logs?since=N
 //
-// Backs the live-tail poller in the admin build page. Reads the build row for
-// its `executor` + `instance_type`, then:
-//   - container builds: front the BuildManager DO's READ-ONLY `GET /logs?since=N`
-//     (the DO that ran the build, chosen by `instance_type` via
-//     `buildManagerNamespace` — free → BUILD_MANAGER, `standard-4` →
-//     BUILD_MANAGER_LARGE). Relays the DO's `{ lines, lastSeq }` JSON verbatim.
-//   - non-container (github_actions) builds: there is no DO log store; return an
-//     empty page plus the external `logs_url` so the UI can link out. No DO call.
+// JSON log page. Container builds read the BuildManager DO that ran the build
+// (chosen by `instance_type`); github_actions builds have no DO log store and
+// return an empty page plus the external `logs_url`.
 app.get('/:id/logs', async (context) => {
   const raw = Number(context.req.query('since'));
   const since = Number.isSafeInteger(raw) && raw >= 0 ? raw : 0;
@@ -35,13 +30,8 @@ app.get('/:id/logs', async (context) => {
 
 // GET /admin/builds/:id
 //
-// Build detail page: metadata + (for container builds) a live log panel whose
-// React log panel polls the `/logs` endpoint above. github_actions builds get a
-// link out to their GitHub Actions run instead, since their logs live there.
-//
-// `?status=1` returns a tiny JSON `{ status, terminal }` probe used by the
-// log-panel poller to decide when to stop polling — it does NOT touch the DO
-// or the Task-3 logs endpoint.
+// Build detail page. `?status=1` instead returns a JSON `{ status, terminal }`
+// probe that reads only the build row.
 app.get('/:id', async (context) => {
   if (context.req.query('status') === undefined) {
     return renderFateDetailPage(context, 'buildDetail');

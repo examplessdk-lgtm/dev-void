@@ -1,5 +1,6 @@
 import { applySqliteAuthMigrations } from './auth-migrations.ts';
 import {
+  assertRuntimeDialect,
   createVoidAuthRuntime,
   type ResolvedDatabase,
   type VoidAuthEnv,
@@ -27,9 +28,7 @@ async function runSqliteAuthMigrations(
   if (!migrationSchema) {
     throw new Error('auth: Migration schema is unavailable.');
   }
-  if (runtime.dialect !== 'sqlite') {
-    throw new Error(`auth: Runtime mismatch. Expected sqlite, received '${runtime.dialect}'.`);
-  }
+  assertRuntimeDialect(runtime, 'sqlite');
   if (migrationSchema.dialect !== 'sqlite') {
     throw new Error(
       `auth: Runtime mismatch. Expected sqlite, received '${migrationSchema.dialect}'.`,

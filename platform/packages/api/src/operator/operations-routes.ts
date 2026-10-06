@@ -122,8 +122,7 @@ operationsRoutes.post('/system/sandbox-drain', async (context) => {
     throw new OperatorError(400, 'cursor must be a string.', 'invalid_argument');
   }
   const result = await drainManagedSandboxes(context.get('db'), context.env, preview, cursor);
-  const incomplete = !preview && (!('complete' in result) || !result.complete);
-  return context.json(result, incomplete ? 207 : 200);
+  return context.json(result, !preview && !result.complete ? 207 : 200);
 });
 
 operationsRoutes.get('/workers', async (context) =>

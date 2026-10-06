@@ -5,22 +5,12 @@ import { interpolateRouteParams } from './route-url.ts';
 export { FetchError as StreamError };
 
 import type { RouteMap } from 'void/routes';
-type MethodsOf<P extends keyof RouteMap> = keyof RouteMap[P] & string;
+import type { BodyOption, MethodsOf, ParamsOption, QueryOption } from './fetch.ts';
 type InputOf<P extends keyof RouteMap, M extends MethodsOf<P>> = RouteMap[P][M] extends {
   input: infer I;
 }
   ? I
   : {};
-
-type BodyOption<I> = 'body' extends keyof I
-  ? { body: I['body' & keyof I] }
-  : { body?: Record<string, unknown> | BodyInit | null };
-type QueryOption<I> = 'query' extends keyof I
-  ? { query: I['query' & keyof I] }
-  : { query?: Record<string, string> };
-type ParamsOption<I> = 'params' extends keyof I
-  ? { params: I['params' & keyof I] }
-  : { params?: Record<string, string> };
 
 type StreamOptions<P extends keyof RouteMap, M extends MethodsOf<P>> = BodyOption<InputOf<P, M>> &
   QueryOption<InputOf<P, M>> &
@@ -113,7 +103,6 @@ export async function* fetchStream<
 
       buffer += decoder.decode(value, { stream: true });
 
-      // Process complete lines
       const lines = buffer.split('\n');
       buffer = lines.pop()!; // Keep incomplete last line
 
@@ -137,48 +126,41 @@ export async function* fetchStream<
           if (data === '[DONE]') {
             return;
           }
-
-          // Try to parse as Workers AI JSON response
-          try {
-            const parsed = JSON.parse(data);
-            if (typeof parsed.response === 'string') {
-              yield parsed.response;
-              continue;
-            }
-            // Parsed JSON with non-string response (e.g. null + usage metadata) — skip
-            if ('response' in parsed) {
-              continue;
-            }
-          } catch {
-            // Not JSON — yield as plain text
+          const chunk = chunkText(data);
+          if (chunk !== undefined) {
+            yield chunk;
           }
-
-          yield data;
         }
       }
     }
 
-    // Process any remaining data in buffer
-    if (buffer.trim()) {
-      const trimmed = buffer.trim();
-      if (trimmed.startsWith('data: ')) {
-        const data = trimmed.slice(6);
-        terminal(data);
-        if (data !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(data);
-            if (typeof parsed.response === 'string') {
-              yield parsed.response;
-            } else if (!('response' in parsed)) {
-              yield data;
-            }
-          } catch {
-            yield data;
-          }
-        }
+    // The stream may end without a trailing newline.
+    const trimmed = buffer.trim();
+    if (trimmed.startsWith('data: ')) {
+      const data = trimmed.slice(6);
+      terminal(data);
+      const chunk = data === '[DONE]' ? undefined : chunkText(data);
+      if (chunk !== undefined) {
+        yield chunk;
       }
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+/** Workers AI frames carry text in `response`; other JSON with that key (e.g. usage metadata) is skipped. */
+function chunkText(data: string): string | undefined {
+  try {
+    const parsed = JSON.parse(data);
+    if (typeof parsed.response === 'string') {
+      return parsed.response;
+    }
+    if ('response' in parsed) {
+      return undefined;
+    }
+  } catch {
+    // Not JSON: plain text frame.
+  }
+  return data;
 }

@@ -41,13 +41,11 @@ type OutdatedBody = {
  * project-level authorization (404 / 403 / 410) for missing, foreign,
  * and deleting projects.
  *
- * The original direct-to-R2 PR removed the legacy multipart deploy
- * handler. Pre-direct-r2 CLIs (void@<0.7.0) used to send multipart
- * bodies to /deploy. After the multipart handler was removed, those
- * requests surfaced an opaque "invalid JSON body: Unexpected token '-'"
- * 400. The gate's content-type sniff has to fire before any JSON parse
- * so users see the upgrade message instead — but only on requests that
- * are otherwise authorized for the target project.
+ * Pre-direct-r2 CLIs (void@<0.7.0) send multipart bodies to /deploy, which
+ * has no multipart handler. The gate's content-type sniff fires before any
+ * JSON parse so those users see the upgrade message instead of an opaque
+ * "invalid JSON body" 400 — but only on requests that are otherwise
+ * authorized for the target project.
  */
 describe('cliVersionGate — deploy endpoints (passing the gate)', () => {
   it('rejects multipart POST /deploy with 426 cli_outdated (pre-direct-r2 CLI shape)', async () => {
@@ -121,11 +119,9 @@ describe('cliVersionGate — deploy endpoints (passing the gate)', () => {
   });
 
   it('rejects multipart POST /deploy/upload-urls with 426 (must run before body parsing)', async () => {
-    // Regression guard for round-3 finding 1: the in-tx version gate
-    // ran AFTER body parsing, so a stale CLI sending multipart got an
-    // opaque "invalid JSON body" 400 instead of the friendly 426
-    // upgrade message. The pre-parse gate at handler entry restores the
-    // multipart sniff for this endpoint.
+    // The gate runs at handler entry, before body parsing, so a stale CLI
+    // sending multipart gets the 426 upgrade message instead of an opaque
+    // "invalid JSON body" 400.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'mp-uu-app');
 
@@ -280,10 +276,9 @@ describe('cliVersionGate — defers to project authorization', () => {
     expect(res.status).toBe(410);
   });
 
-  // /preflight previously had no `status === 'deleting'` guard, so a stale CLI
-  // would get 426 on a deleting project (and a current CLI would proceed to
-  // body-parse a doomed deploy). Round 2 added the guard to mirror the other
-  // two endpoints.
+  // /preflight checks `status === 'deleting'` like the other two endpoints, so
+  // a stale CLI gets 410 rather than 426 and a current CLI never body-parses a
+  // doomed deploy.
   it('returns 410 (not 426) on /deploy/preflight when project is being deleted', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'pf-deleting-app');
@@ -305,16 +300,12 @@ describe('cliVersionGate — defers to project authorization', () => {
     expect(res.status).toBe(410);
   });
 
-  // Deterministic regression test for the FOR-SHARE in-tx status re-read.
-  // Round 2 added an in-tx status check on /upload-urls so a teardown that
-  // commits AFTER the unlocked early-out 410 read but BEFORE we acquire
-  // the share lock still surfaces as 410 rather than serving presigns
-  // for a doomed project. Without the in-tx re-read, a current-CLI
-  // request that races with `lockAndMarkDeleting` would receive
-  // presigned URLs against a being-deleted bucket.
+  // /upload-urls re-reads the project status under a FOR SHARE lock, so a
+  // teardown that commits AFTER the unlocked early-out 410 read but BEFORE
+  // the share lock still surfaces as 410 rather than serving presigned URLs
+  // against a being-deleted bucket.
   //
-  // Mechanism (mirrors api-migrations.test.ts:4451-4521): wrap
-  // env.db.transaction with a Proxy that pauses before delegating to
+  // Mechanism: wrap env.db.transaction with a Proxy that pauses before delegating to
   // the real implementation. Between handler entry's reads and the tx,
   // we directly UPDATE projects.status='deleting' through realDb (the
   // proxy doesn't intercept update()), then release the tx. The in-tx

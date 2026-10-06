@@ -313,8 +313,10 @@ export function resolvePlatformRuntime(
   }
   const manifestPath = join(directory, 'manifest.json');
   let manifestContents: Buffer;
+  let manifest: PlatformRuntimeManifest;
   try {
     manifestContents = readFileSync(manifestPath);
+    manifest = parsePlatformRuntimeManifest(JSON.parse(manifestContents.toString('utf8')));
   } catch (error) {
     throw new Error(
       `Void Platform deployment artifacts are missing or invalid at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -322,7 +324,7 @@ export function resolvePlatformRuntime(
   }
   return {
     directory,
-    manifest: readPlatformRuntimeManifest(directory),
+    manifest,
     manifestSha256: createHash('sha256').update(manifestContents).digest('hex'),
     source,
   };

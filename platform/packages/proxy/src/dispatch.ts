@@ -1,3 +1,4 @@
+import { hmacSign } from './hmac.ts';
 import type { Env } from './types.ts';
 
 type WorkerResolution = Readonly<{ workerName: string; deploymentId: string }>;
@@ -101,32 +102,4 @@ export async function dispatchToWorker(
           { status: 502 },
         );
   }
-}
-
-// --- HMAC signing (mirrors resolve.ts) ---
-
-const encoder = new TextEncoder();
-let cachedSignKey: CryptoKey | undefined;
-let cachedKeySecret: string | undefined;
-
-async function getSignKey(secret: string): Promise<CryptoKey> {
-  if (cachedSignKey && cachedKeySecret === secret) {
-    return cachedSignKey;
-  }
-  cachedSignKey = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  cachedKeySecret = secret;
-  return cachedSignKey;
-}
-
-async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await getSignKey(secret);
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-  const binary = String.fromCharCode(...new Uint8Array(sig));
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }

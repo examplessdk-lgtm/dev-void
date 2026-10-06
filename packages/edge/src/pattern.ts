@@ -23,13 +23,30 @@ const compileCache = new Map<string, CompiledPattern>();
 const REGEX_SPECIAL = /[.+?^${}()|[\]\\]/;
 const PARAM_CHAR = /[A-Za-z0-9_]/;
 
+/** LRU read: re-inserting a hit moves it to the most-recently-used end of Map order. */
+function lruGet<V>(cache: Map<string, V>, key: string): V | undefined {
+  const value = cache.get(key);
+  if (value !== undefined) {
+    cache.delete(key);
+    cache.set(key, value);
+  }
+  return value;
+}
+
+/** LRU write: evict the least-recently-used entry once the cache is full. */
+function lruSet<V>(cache: Map<string, V>, key: string, value: V): void {
+  if (cache.size >= MAX_CACHE) {
+    const first = cache.keys().next();
+    if (!first.done) {
+      cache.delete(first.value);
+    }
+  }
+  cache.set(key, value);
+}
+
 export function compilePattern(source: string): CompiledPattern {
-  const cached = compileCache.get(source);
+  const cached = lruGet(compileCache, source);
   if (cached) {
-    // LRU touch: re-inserting moves the entry to the most-recently-used end
-    // of Map iteration order, so eviction below removes the true LRU.
-    compileCache.delete(source);
-    compileCache.set(source, cached);
     return cached;
   }
 
@@ -50,12 +67,11 @@ export function compilePattern(source: string): CompiledPattern {
         index++;
         continue;
       }
+      paramNames.push(name);
       if (source[nameEnd] === '*') {
-        paramNames.push(name);
         pattern += `(?<${name}>.*)`;
         index = nameEnd + 1;
       } else {
-        paramNames.push(name);
         pattern += `(?<${name}>[^/]+)`;
         index = nameEnd;
       }
@@ -78,13 +94,7 @@ export function compilePattern(source: string): CompiledPattern {
   }
 
   const compiled: CompiledPattern = { regex: new RegExp(`^${pattern}$`), paramNames };
-  if (compileCache.size >= MAX_CACHE) {
-    const first = compileCache.keys().next();
-    if (!first.done) {
-      compileCache.delete(first.value);
-    }
-  }
-  compileCache.set(source, compiled);
+  lruSet(compileCache, source, compiled);
   return compiled;
 }
 
@@ -114,8 +124,7 @@ export function matchPatternCaptures(
 }
 
 /**
- * Match a pattern against a pathname (boolean form). Header-rule callers only
- * need a yes/no — they don't care about captures. Malformed patterns yield
+ * Match a pattern against a pathname (boolean form). Malformed patterns yield
  * `false` rather than throwing (see `matchPatternCaptures`).
  */
 export function matchPattern(pattern: string, pathname: string): boolean {
@@ -133,35 +142,21 @@ const literalRegexCache = new Map<string, RegExp>();
  * captures. Only `*` is special (matches any characters including `/`); every
  * other character (including `:`) is treated as a literal.
  *
- * This preserves the pre-`feat/rewrites` semantics of header rules,
- * `routing.revalidate` keys, and `routing.revalidateQueryAllowlist` keys —
- * those callers never had `:name` capture syntax and existing tenant configs
- * may include literal `:` (e.g. `/api/v1:health`, `:batchGet`-style URLs).
- *
- * The capture-aware `matchPattern` above continues to be used by routing
- * rules (`redirects`/`rewrites`/`fallbacks`) where `:name` capture syntax was
- * intentionally introduced (see design-doc 0064).
+ * Used for header rules and `routing.revalidateQueryAllowlist` keys, which
+ * never had `:name` capture syntax; existing tenant configs may include literal
+ * `:` (e.g. `/api/v1:health`, `:batchGet`-style URLs). Routing rules
+ * (`redirects`/`rewrites`/`fallbacks`) use the capture-aware `compilePattern`.
  */
 export function matchLiteralPattern(pattern: string, pathname: string): boolean {
-  let regex = literalRegexCache.get(pattern);
-  if (regex) {
-    // LRU touch — same scheme as the legacy header matcher.
-    literalRegexCache.delete(pattern);
-    literalRegexCache.set(pattern, regex);
-  } else {
+  let regex = lruGet(literalRegexCache, pattern);
+  if (!regex) {
     try {
       const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
       regex = new RegExp(`^${escaped}$`);
     } catch {
       return false;
     }
-    if (literalRegexCache.size >= MAX_CACHE) {
-      const first = literalRegexCache.keys().next();
-      if (!first.done) {
-        literalRegexCache.delete(first.value);
-      }
-    }
-    literalRegexCache.set(pattern, regex);
+    lruSet(literalRegexCache, pattern, regex);
   }
   try {
     return regex.test(pathname);
@@ -192,8 +187,7 @@ const segmentRegexCache = new Map<string, RegExp>();
  * from page routes on the deploy write side (`[slug]` → `/blog/:slug`,
  * `[...path]` → `/docs/:path{.+}`), so the `:name` here is a real route param
  * and MUST bind the same way the framework's own client route matcher
- * (`patternToRegex` in `pages/manifest.ts`) binds it — matching the write-side
- * matcher in `packages/api/src/routes/deploy.ts`.
+ * (`patternToRegex` in `pages/manifest.ts`) binds it.
  *
  * It is intentionally NOT used for user-authored header rules
  * (`applyHeaderRules`) or `revalidateQueryAllowlist` keys
@@ -206,12 +200,8 @@ const segmentRegexCache = new Map<string, RegExp>();
  * not be shared or they would cross-contaminate.
  */
 export function matchSegmentPattern(pattern: string, pathname: string): boolean {
-  let regex = segmentRegexCache.get(pattern);
-  if (regex) {
-    // LRU touch — same scheme as the literal matcher.
-    segmentRegexCache.delete(pattern);
-    segmentRegexCache.set(pattern, regex);
-  } else {
+  let regex = lruGet(segmentRegexCache, pattern);
+  if (!regex) {
     try {
       // Two private-use sentinels stand in for route params so the regex-special
       // escape step below can't touch the classes we swap in last:
@@ -232,13 +222,7 @@ export function matchSegmentPattern(pattern: string, pathname: string): boolean 
     } catch {
       return false;
     }
-    if (segmentRegexCache.size >= MAX_CACHE) {
-      const first = segmentRegexCache.keys().next();
-      if (!first.done) {
-        segmentRegexCache.delete(first.value);
-      }
-    }
-    segmentRegexCache.set(pattern, regex);
+    lruSet(segmentRegexCache, pattern, regex);
   }
   try {
     return regex.test(pathname);

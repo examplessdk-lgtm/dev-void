@@ -10,7 +10,7 @@ import type { DeployManifest } from './types.ts';
  *   rejects — ingest is where over-ceiling requests get a 400), otherwise
  *   pass it through verbatim.
  * - No override: fall back to the plan default `cpuMsPerRequest` (0 = no
- *   cpuMs key), byte-identical in shape to the historical inline expression.
+ *   cpuMs key).
  * - An override that is not a safe integer >= 1 is treated as absent and
  *   falls back to the plan default. A rollback replays a stored manifest,
  *   and a manifest stored before ingest validated `limits` can carry an

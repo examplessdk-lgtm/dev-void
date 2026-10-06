@@ -1,3 +1,4 @@
+import { hmacSign } from './hmac.ts';
 import type { Env } from './types.ts';
 
 export type ActionRecipient = {
@@ -31,18 +32,7 @@ async function sign(data: string, secret: string): Promise<string> {
   if (!secret) {
     throw new Error('Email signing key is not configured');
   }
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const bytes = new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(data)));
-  return btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+  return hmacSign(data, secret);
 }
 
 async function call<T>(

@@ -2,12 +2,7 @@ import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 import { resolvePagesDir } from 'void/pages';
 import { islandsPlugin } from './plugin-islands.ts';
-import { pagesPlugin } from './plugin-pages.ts';
-
-type PrefetchConfig = {
-  hoverDelay?: number;
-  cacheFor?: number | string | [string, string];
-};
+import { pagesPlugin, type PrefetchConfig } from './plugin-pages.ts';
 
 export type VoidReactOptions = Readonly<{
   react?: Parameters<typeof react>[0];

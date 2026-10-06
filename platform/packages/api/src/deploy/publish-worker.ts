@@ -17,9 +17,7 @@ import {
   getProject,
   updateDeploymentStatus,
   beginDeploymentCutover,
-  updateProjectType,
   getDomainsByProjectId,
-  setActiveDeployment,
   markDeploymentRetained,
   getRetainedDeploymentsExcluding,
   getProjectResources,
@@ -39,6 +37,7 @@ import { provisionBindings } from '../provisioning/provision.ts';
 import { deleteSandboxController, isManagedSandbox } from '../provisioning/sandbox-controller.ts';
 import { buildRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { REASON_REQUESTS_EXCEEDED } from '../suspension.ts';
+import type { PlanLimits } from '../tiers.ts';
 import {
   type DeployManifest,
   type DeployEvent,
@@ -48,20 +47,15 @@ import {
 } from '../types.ts';
 import { resolveProjectZeroTrustRouting } from '../zero-trust/routing.ts';
 import { clearIsrCache, serializePrerenderHeaders, packIsrValue } from './cache.ts';
+import { assertDeploymentCanProceed } from './guards.ts';
 import {
-  PROJECT_DELETING_ERROR_MESSAGE,
-  assertBoundBuildStillActive,
-  SUPERSEDED_BUILD_ERROR_MESSAGE,
-  assertDeploymentNotCanceled,
-  assertProjectNotDeleting,
-} from './guards.ts';
-import {
+  commitCutoverLive,
   requireActiveDeployAccess,
   cutoverIntentKey,
   cutoverReadyKey,
-  parseCutoverMarker,
   type CutoverMarker,
 } from './recovery.ts';
+import { projectPublicUrls } from './shared.ts';
 
 export async function publishWorkerDeployment(input: {
   currentStep: string;
@@ -98,22 +92,7 @@ export async function publishWorkerDeployment(input: {
   cronSchedulerWriteAttempted: boolean;
   readonly actor: ApiEnv['Variables']['user'];
   cutoverCommitted: boolean;
-  readonly planLimits: Readonly<{
-    requestsPerMonth: number;
-    cpuMsPerRequest: number;
-    maxCpuMsPerRequest: number;
-    subRequestsPerInvocation: number;
-    deploysPerDay: number;
-    d1StorageBytes: number;
-    r2StorageBytes: number;
-    kvStorageBytes: number;
-    aiNeuronsPerMonth: number;
-    retainedDeployments: number;
-    sandboxRuntimeSecondsPerMonth: number;
-    sandboxMaxConcurrentInstances: number;
-    concurrentBuilds: number;
-    buildTimeoutMinutes: number;
-  }>;
+  readonly planLimits: Readonly<PlanLimits>;
   readonly assetManifest: Record<string, AssetManifestEntry>;
   readonly dispatchNamespace: string;
   readonly deleteAssetHashesWithProjectFence: (
@@ -188,7 +167,7 @@ export async function publishWorkerDeployment(input: {
     emit({ event: 'queue_setup', queues: queueNames });
   }
   const dispatchWorkerName = context.env.DISPATCH_WORKER_NAME ?? 'void-dispatch';
-  const queueProxyToken = workerBindings.find((b) => b.name === '__VOID_PROXY_TOKEN')?.text;
+  const proxyToken = workerBindings.find((b) => b.name === '__VOID_PROXY_TOKEN')?.text;
   const queueConflicts: Array<{ queue: string; ownerScript: string }> = [];
   const projectResources = await getProjectResources(context.get('db'), projectId);
   await withProjectCutoverFence(deployment.id, async () => {
@@ -259,7 +238,7 @@ export async function publishWorkerDeployment(input: {
           workerName: workerName,
           projectId: projectId,
           queueName: outcome.q.name,
-          proxyToken: queueProxyToken,
+          proxyToken,
         }),
       );
     }
@@ -282,14 +261,12 @@ export async function publishWorkerDeployment(input: {
       }
     }
   });
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
   const hasCrons = manifest.schedules && manifest.schedules.length > 0;
 
   await clearIsrCache(context.env.ISR_CACHE, projectId, deployment.id);
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
   input.currentStep = 'prerender';
   if (
@@ -307,8 +284,7 @@ export async function publishWorkerDeployment(input: {
       await updateDeploymentStatus(context.get('db'), deployment.id, 'prerendering');
       input.currentStatus = 'prerendering';
     }
-    await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-    await assertProjectNotDeleting(context.get('db'), projectId);
+    await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
     const application = readPlatformApplication(context.env);
 
     await uploadPool(manifest.prerender, 3, async (pathname) => {
@@ -356,8 +332,7 @@ export async function publishWorkerDeployment(input: {
             // `c` (createdAt) + `t` (ttl) are REQUIRED by dispatch's
             // `readIsrCache` — it returns null (permanent cold miss)
             // without them. `satisfies IsrCacheMetadata` makes any field
-            // drift a typecheck error (this once wrote `context`, silently
-            // making every warmed entry unreadable).
+            // drift a typecheck error.
             metadata: {
               s: response.status,
               c: Date.now(),
@@ -372,13 +347,11 @@ export async function publishWorkerDeployment(input: {
     });
     emit({ event: 'prerender_done' });
   }
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
 
   // Routing switch
   await snapshotCronState();
-  await assertDeploymentNotCanceled(context.get('db'), deployment.id);
-  await assertProjectNotDeleting(context.get('db'), projectId);
+  await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   markPhase('routing_switch');
   await withProjectCutoverFence(deployment.id, async (txDb, currentOwner) => {
     const dispatchLimits = computeDispatchLimits(
@@ -422,13 +395,10 @@ export async function publishWorkerDeployment(input: {
     markPhase('cron_sync');
     input.cronSchedulerWriteAttempted = true;
     if (hasCrons) {
-      const cronProxyToken = workerBindings.find(
-        (binding) => binding.name === '__VOID_PROXY_TOKEN',
-      )?.text;
       await syncCronScheduler(context.env, projectId, {
         workerName: workerName,
         schedules: manifest.schedules!,
-        proxyToken: cronProxyToken,
+        proxyToken,
       });
     } else {
       await clearCronScheduler(context.env, projectId);
@@ -443,45 +413,13 @@ export async function publishWorkerDeployment(input: {
     to: 'live',
     reason: 'wfp_deploy',
   });
-  await context.get('db').transaction(async (tx) => {
-    await tx.execute(drizzleSql`SELECT id FROM projects WHERE id = ${projectId} FOR UPDATE`);
-    const lockedProject = await getProject(tx, projectId);
-    if (!lockedProject || lockedProject.status === 'deleting') {
-      throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
-    }
-    await requireActiveDeployAccess(tx, projectId, actor.id);
-    const [intent, ready] = await Promise.all([
-      context.env.ROUTING.get(cutoverIntentKey(deployment.id)).then(parseCutoverMarker),
-      context.env.ROUTING.get(cutoverReadyKey(deployment.id)).then(parseCutoverMarker),
-    ]);
-    if (
-      intent?.ownerId !== cutoverOwnerId ||
-      ready?.ownerId !== cutoverOwnerId ||
-      intent.projectId !== projectId ||
-      ready.projectId !== projectId
-    ) {
-      throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
-    }
-    await assertDeploymentNotCanceled(tx, deployment.id);
-    // Re-check the bound build under a row lock before going live. The
-    // up-front guard can pass and then a newer GitHub Actions run
-    // supersede (cancel) this build while we spent minutes building and
-    // uploading; without this re-check a superseded runner would still
-    // go live with stale code. See `assertBoundBuildStillActive`.
-    await assertBoundBuildStillActive(tx, deployBuild, projectId);
-    // Asset GC takes this same project lock and protects hashes from
-    // every nonterminal deployment. Serving placement was persisted
-    // before cutover began, so no storage scan belongs here.
-    await updateDeploymentStatus(tx, deployment.id, 'live', undefined, {
-      force: true,
-    });
-    await updateProjectType(
-      tx,
-      projectId,
-      manifest.type ?? (manifest.framework ? 'framework' : 'void'),
-    );
-    await setActiveDeployment(tx, projectId, deployment.id);
-    await markDeploymentRetained(tx, deployment.id, true);
+  await commitCutoverLive(context.get('db'), context.env.ROUTING, {
+    projectId,
+    actorId: actor.id,
+    deploymentId: deployment.id,
+    cutoverOwnerId,
+    deployBuild,
+    projectType: manifest.type ?? (manifest.framework ? 'framework' : 'void'),
   });
   input.cutoverCommitted = true;
   input.currentStatus = 'live';
@@ -693,21 +631,12 @@ export async function publishWorkerDeployment(input: {
     }
   }
 
-  const application = readPlatformApplication(context.env);
-  const activeDomains = projectDomains.filter((d) => d.status === 'active');
-  const fullUrl =
-    activeDomains.length > 0
-      ? `https://${activeDomains[0].hostname}`
-      : `https://${platformProjectHostname(project, application)}`;
-
+  const urls = projectPublicUrls(context.env, project, projectDomains);
   emit({
     event: 'done',
     deployment: deployment.id,
-    url: fullUrl,
-    urls: [
-      ...activeDomains.map((d) => `https://${d.hostname}`),
-      `https://${platformProjectHostname(project, application)}`,
-    ],
+    url: urls[0]!,
+    urls,
     assets: deployedAssetCount,
     workers: workerFiles.length,
     ...(migrationsApplied > 0 && { migrations: migrationsApplied }),

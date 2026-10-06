@@ -187,11 +187,6 @@ async function serializeProxyValue(
   return value;
 }
 
-function formFileName(value: File | Blob, fallback: string): string {
-  const name = fileNameFromBlob(value);
-  return name ?? fallback;
-}
-
 async function serializeFormData(form: FormData): Promise<SerializedProviderBody> {
   const entries: Array<{ name: string; value: string | SerializedFileInput }> = [];
   for (const [name, value] of form.entries()) {
@@ -204,7 +199,7 @@ async function serializeFormData(form: FormData): Promise<SerializedProviderBody
       value: {
         [VOID_FILE_MARKER]: true,
         data: arrayBufferToBase64(await value.arrayBuffer()),
-        name: formFileName(value, name),
+        name: fileNameFromBlob(value) ?? name,
         type: value.type || undefined,
       },
     });
@@ -364,7 +359,7 @@ function isUnsafeProviderPath(path: string): boolean {
 }
 
 /**
- * Build a real outgoing HTTP body for the user's own AI Gateway (P3 self-host).
+ * Build a real outgoing HTTP body for the user's own AI Gateway (self-host).
  *
  * Unlike `serializeProviderBody`/`providerRequestBody` (which build the proxy
  * envelope decoded on the proxy side), this emits an actual `BodyInit` +
@@ -450,93 +445,16 @@ async function providerRequestBody(
   };
 }
 
-function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBackend {
+type ProxySend = (action: string, payload: Record<string, unknown>) => Promise<Response>;
+
+/** Backend for the Void platform proxy, reached by service binding or HTTPS. */
+function makeProxyBackend(send: ProxySend, runtimeEnv: RuntimeEnv): AiBackend {
   async function proxyFetch(
     action: string,
-    body: Record<string, unknown>,
+    payload: Record<string, unknown>,
     options: { throwOnError?: boolean } = {},
   ): Promise<Response> {
-    const res = await proxy.fetch(`https://ai-proxy/ai/${action}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action, ...body }),
-    });
-    const limit = await limitFromResponse(res, 'ai');
-    if (limit) {
-      throw limit;
-    }
-    if (options.throwOnError !== false && !res.ok) {
-      const text = await res.text();
-      throw new Error(`ai: Proxy request failed with ${res.status}: '${text}'.`);
-    }
-    return res;
-  }
-
-  return {
-    async run(model, inputs, options) {
-      const projectId = runtimeEnv.__PROJECT_ID;
-      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
-
-      const res = await proxyFetch('run', { model, inputs, options, projectId, aiToken });
-      if (hasStreamFlag(inputs) && inputs.stream) {
-        return res.body;
-      }
-      return readProxyResult(res);
-    },
-    async image(model, inputs, options) {
-      const projectId = runtimeEnv.__PROJECT_ID;
-      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
-      const { runOptions } = splitImageOptions(options);
-
-      return proxyFetch('run', { model, inputs, options: runOptions, projectId, aiToken });
-    },
-    async providerFetch(provider, path, init, options) {
-      const projectId = runtimeEnv.__PROJECT_ID;
-      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
-      return proxyFetch(
-        'provider',
-        {
-          ...(await providerRequestBody(provider, path, init, options, runtimeEnv)),
-          projectId,
-          aiToken,
-        },
-        { throwOnError: false },
-      );
-    },
-    async models(params) {
-      const projectId = runtimeEnv.__PROJECT_ID;
-      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
-      const res = await proxyFetch('models', { inputs: params, projectId, aiToken });
-      return res.json();
-    },
-    async toMarkdown(items, options) {
-      const projectId = runtimeEnv.__PROJECT_ID;
-      const aiToken = runtimeEnv.__VOID_PROXY_TOKEN;
-      const res = await proxyFetch('toMarkdown', { inputs: items, options, projectId, aiToken });
-      return res.json();
-    },
-  };
-}
-
-function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEnv): AiBackend {
-  const base = getProxyUrl(runtimeEnv);
-  const headers = {
-    'content-type': 'application/json',
-    authorization: `Bearer ${token}`,
-    ...cfAccessHeaders(runtimeEnv, base),
-  };
-
-  async function proxyFetch(
-    action: string,
-    body: Record<string, unknown>,
-    options: { throwOnError?: boolean } = {},
-  ): Promise<Response> {
-    const res = await fetch(`${base}/${action}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ action, ...body, projectId }),
-      redirect: 'manual',
-    });
+    const res = await send(action, payload);
     const limit = await limitFromResponse(res, 'ai');
     if (limit) {
       throw limit;
@@ -577,6 +495,43 @@ function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEn
       return res.json();
     },
   };
+}
+
+function makeServiceBindingBackend(proxy: Fetcher, runtimeEnv: RuntimeEnv): AiBackend {
+  return makeProxyBackend(
+    (action, payload) =>
+      proxy.fetch(`https://ai-proxy/ai/${action}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          ...payload,
+          projectId: runtimeEnv.__PROJECT_ID,
+          aiToken: runtimeEnv.__VOID_PROXY_TOKEN,
+        }),
+      }),
+    runtimeEnv,
+  );
+}
+
+function makeHttpBackend(token: string, projectId: string, runtimeEnv: RuntimeEnv): AiBackend {
+  const base = getProxyUrl(runtimeEnv);
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${token}`,
+    ...cfAccessHeaders(runtimeEnv, base),
+  };
+
+  return makeProxyBackend(
+    (action, payload) =>
+      fetch(`${base}/${action}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action, ...payload, projectId }),
+        redirect: 'manual',
+      }),
+    runtimeEnv,
+  );
 }
 
 function makeDirectBackend(
@@ -668,7 +623,6 @@ function makeDirectBackend(
   };
 }
 
-// Lazy-init backend on first access
 let _backend: AiBackend | undefined;
 function backend(): AiBackend {
   return (_backend ??= resolveBackend());
@@ -687,7 +641,7 @@ export type VoidAi = {
     options?: Parameters<Ai['toMarkdown']>[1],
   ): Promise<Array<Awaited<ReturnType<Ai['toMarkdown']>>>>;
   toMarkdown(...args: Parameters<Ai['toMarkdown']>): Promise<Awaited<ReturnType<Ai['toMarkdown']>>>;
-  /** Workers AI inference (existing) */
+  /** Workers AI inference. */
   run<Name extends keyof AiModels>(
     model: Name,
     inputs: AiModels[Name]['inputs'],

@@ -59,8 +59,6 @@ Cloudflare emails the recipient with a verification link. Once they click it and
 void email destinations
 ```
 
-The project owner’s email is added automatically, but still needs verification as described in [Setup](#setup).
-
 ::: warning When this is the right fit
 The shared sender suits team alerts, project notifications, and replies to inbound mail.
 

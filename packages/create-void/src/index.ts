@@ -11,7 +11,6 @@ const pm = detectPM();
 async function main() {
   console.log();
 
-  // 1. Get app name from argv or prompt
   let appName = process.argv[2];
 
   if (!appName) {
@@ -32,7 +31,6 @@ async function main() {
     appName = name;
   }
 
-  // 2. Validate target dir
   const targetDir = resolve(appName);
 
   if (existsSync(targetDir)) {
@@ -49,7 +47,6 @@ async function main() {
     readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
   ) as { version: string };
 
-  // 4. Scaffold: create dir, write package.json, install void, run init, install starter deps
   mkdirSync(targetDir, { recursive: true });
 
   const pkg = {
@@ -68,13 +65,13 @@ async function main() {
   writePnpmBuildPolicy(targetDir, pm);
 
   p.log.step('Installing Void...');
-  await run([...pmInstall(pm)], targetDir);
+  await run(pmInstall(pm), targetDir);
 
   p.log.step('Scaffolding starter...');
   await run([...pmExec(pm), 'void', 'init'], targetDir);
 
   p.log.step('Installing starter dependencies...');
-  await run([...pmInstall(pm)], targetDir);
+  await run(pmInstall(pm), targetDir);
 
   p.log.success(`Created ${pc.bold(appName)}`);
   p.outro(`cd ${appName} && ${pm === 'npm' ? 'npm run' : pm} dev`);

@@ -43,10 +43,11 @@ export function readCfSessionCredential(
     return null;
   }
   const token = auth.readAuthCredentials()?.oauth_token;
-  if (typeof token === 'string' && token.length > 0) {
-    persistCfKeyringPreference(root);
+  if (typeof token !== 'string' || token.length === 0) {
+    return null;
   }
-  return typeof token === 'string' && token.length > 0 ? token : null;
+  persistCfKeyringPreference(root);
+  return token;
 }
 
 /** Keep subsequent cf logins on the encrypted profile adopted by Void. */

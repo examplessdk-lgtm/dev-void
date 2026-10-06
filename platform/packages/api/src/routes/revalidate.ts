@@ -1,6 +1,5 @@
 import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import type { Db } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { runRevalidate } from '../revalidate-core.ts';
 import { requireProjectRouteCapability } from './project-access.ts';

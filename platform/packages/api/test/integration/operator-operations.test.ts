@@ -941,7 +941,7 @@ describe('operator installation-aware system and worker operations', () => {
     expect(response.status).toBe(207);
     const result = (await response.json()) as { events: Array<{ status: string }> };
     expect(result).toMatchObject({ ok: false, partial: true, environment: 'staging' });
-    expect(result.events.map((event: { status: string }) => event.status)).toEqual([
+    expect(result.events.map((event) => event.status)).toEqual([
       'success',
       'success',
       'failed',
@@ -972,9 +972,7 @@ describe('operator installation-aware system and worker operations', () => {
     );
     const response = await req('/system/backfill-queue-tokens', { dryRun: true });
     expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      deployments: Array<{ project_id: string; status: string }>;
-    };
+    const body = await response.json();
     expect(body).toMatchObject({ dryRun: true, wouldUpdate: 1, updated: 0 });
     expect(JSON.stringify(body)).not.toContain('private-token');
     expect(put).not.toHaveBeenCalled();

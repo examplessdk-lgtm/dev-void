@@ -14,14 +14,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 // the two files in parallel workers, so sharing that path is a cross-file race.
 process.env.VOID_BUILD_WORK_DIR = join(tmpdir(), `void-source-download-${process.pid}`);
 
-// The source download used to run with NO deadline of any kind. Build
-// `bld_33gs31a2x6qj` (voidzero.dev) spent its whole 16m52s inside it: the stream
-// degraded to short bursts separated by dead minutes, delivered ~4.4 MB of a
-// 20.8 MB archive, and only failed at the very end. Container telemetry showed
-// 2.5s of CPU, memory flat at the agent's own 145 MB, and disk grown by 5.4 MB —
-// against 2137 MB / 968 MB for the SAME repo twelve hours earlier. Node's undici
-// defaults could not catch it: `bodyTimeout` resets on every chunk, so a trickle
-// defeats it.
+// The source download needs its own deadlines: a GitHub tarball stream can
+// degrade to short bursts separated by dead minutes, and undici's `bodyTimeout`
+// resets on every chunk, so a trickle defeats it.
 //
 // These tests pin the retry POLICY, which is the part that has to be right:
 // what retries, what does not, that a retry starts from an empty tree, and that
@@ -90,8 +85,8 @@ describe('build-agent source download bounds', () => {
         attempts++;
         if (attempts === 1) {
           // A dead stream: never delivers a byte, never settles on its own.
-          // FAIL-WITHOUT-FIX: with no stall guard this promise hangs forever and
-          // the test times out — which is exactly what the container did.
+          // If broken: with no stall guard this promise hangs forever and
+          // the test times out.
           return new Promise((_resolve, reject) => {
             options?.signal?.addEventListener('abort', () => reject(new Error('stream aborted')));
           });
@@ -168,8 +163,7 @@ describe('build-agent source download bounds', () => {
   });
 
   it('retries a body stream that errors mid-transfer', async () => {
-    // The incident's stream died exactly this way: bytes flowed, then the socket
-    // errored. `pipeline` rejects with the raw stream error, not an abort.
+    // Bytes flow, then the socket errors. `pipeline` rejects with the raw stream error, not an abort.
     let attempts = 0;
 
     await agent.downloadSource({
@@ -260,8 +254,8 @@ describe('build-agent source download bounds', () => {
       },
     });
 
-    // A stalled attempt leaves a half-extracted archive behind. Without the reset,
-    // the next `tar` unpacks on top of it and the build runs against a mix.
+    // A stalled attempt leaves a half-extracted archive behind; the reset keeps the
+    // next `tar` from unpacking on top of it.
     expect(order).toEqual(['reset', 'reset', 'extract']);
   });
 
@@ -332,9 +326,8 @@ describe('build-agent source download bounds', () => {
       },
     });
 
-    // Before this, the agent logged one line before the fetch and the next only
-    // after extraction — so 17 minutes of stall looked identical to a busy build
-    // in both the live tail and the check-run tail.
+    // Periodic progress lines keep a stall distinguishable from a busy build in
+    // both the live tail and the check-run tail.
     const progress = lines().filter((line) => line.startsWith('downloading source:'));
     expect(progress.length).toBeGreaterThanOrEqual(2);
     expect(progress[0]).toMatch(/downloading source: [\d.]+ (B|KB|MB) in \d+m?s \(.+\/s\)/);
@@ -367,7 +360,7 @@ describe('build-agent source download bounds', () => {
       }),
     ).rejects.toThrow(/budget/);
 
-    // FAIL-WITHOUT-FIX: with the deadline checked only before the reset, the first
+    // If broken: with the deadline checked only before the reset, the first
     // attempt runs after the budget is gone and the download "succeeds" late.
     expect(attempts).toBe(0);
   });
@@ -425,7 +418,7 @@ describe('build-agent source download bounds', () => {
       ),
     ).toBe(45_000);
     // Quota left: a routine reset riding along on an ordinary error is NOT a
-    // delay. FAIL-WITHOUT-FIX: this returns an hour and kills the retry.
+    // delay. If broken: this returns an hour and kills the retry.
     expect(
       agent.parseRetryAfterMs(
         new Headers({
@@ -596,7 +589,7 @@ describe('build-agent source download bounds', () => {
     // decodes the whole chunk instead of the sliced prefix, it finds the marker,
     // classifies the 403 as a secondary rate limit, and retries — so this asserts
     // the bound behaviourally instead of asserting the fixture's own size.
-    // FAIL-WITHOUT-FIX: `decode(value)` makes calls 2 and the delay 60s.
+    // If broken: `decode(value)` makes calls 2 and the delay 60s.
     const filler = 'x'.repeat(agent.ERROR_BODY_SNIFF_BYTES * 4);
     const payload = `${filler}You have exceeded a secondary rate limit.`;
     let calls = 0;
@@ -670,7 +663,7 @@ describe('build-agent source download bounds', () => {
     });
 
     expect(calls).toBe(2);
-    // FAIL-WITHOUT-FIX: the fixed 50ms backoff.
+    // Not the configured 50ms backoff.
     expect(slept).toEqual([agent.SECONDARY_RATE_LIMIT_DELAY_MS]);
   });
 
@@ -744,7 +737,7 @@ describe('build-agent source download bounds', () => {
     });
 
     expect(calls).toBe(2);
-    // FAIL-WITHOUT-FIX: 50ms.
+    // If broken: 50ms.
     expect(slept).toEqual([agent.SECONDARY_RATE_LIMIT_DELAY_MS]);
   });
 
@@ -786,7 +779,7 @@ describe('build-agent source download bounds', () => {
       },
     });
 
-    // FAIL-WITHOUT-FIX: the 5xx body is thrown past, never released.
+    // If broken: the 5xx body is thrown past, never released.
     expect(cancelled).toEqual(['503']);
   });
 
@@ -827,7 +820,7 @@ describe('build-agent source download bounds', () => {
     });
 
     expect(calls).toBe(2);
-    // FAIL-WITHOUT-FIX: the stalled sniff aborts and this is the 50ms backoff.
+    // If broken: the stalled sniff aborts and this is the 50ms backoff.
     expect(slept).toEqual([1000]);
   });
 
@@ -844,14 +837,14 @@ describe('build-agent source download bounds', () => {
 
 // The unit tests above pin the retry POLICY with `extract` injected. This one runs
 // the REAL wiring — real `fetch`, real `Readable.fromWeb`, the real metering
-// pipeline stage, a real `tar` child, and the real WORK_DIR reset — against the
-// exact shape of the incident: a server that hands over a few KB and then simply
-// stops writing without closing the socket.
+// pipeline stage, a real `tar` child, and the real WORK_DIR reset — against a
+// server that hands over a few KB and then simply stops writing without closing
+// the socket.
 //
 // That combination is what has to work. A stall guard that never reaches the
 // stream, or an abort that leaves `pipeline` hanging or crashes the process with
 // an unhandled 'error', would pass every injected-dep test above and still let a
-// build sit for 17 minutes.
+// build hang.
 describe('build-agent source download, real stream + tar', () => {
   const WORK_DIR = process.env.VOID_BUILD_WORK_DIR!;
   const fixtureRoot = join(tmpdir(), 'void-source-download-fixture');
@@ -894,7 +887,7 @@ describe('build-agent source download, real stream + tar', () => {
       if (requests === 1) {
         res.write(archive.subarray(0, TRUNCATE_AT));
         if (firstResponse === 'stall') {
-          // The incident: some bytes, then silence. No FIN, no error — the socket
+          // Some bytes, then silence. No FIN, no error — the socket
           // just goes quiet, which is precisely what undici's chunk-resetting
           // `bodyTimeout` cannot see.
           return;
@@ -1109,7 +1102,7 @@ describe('build-agent extractTarball child lifecycle', () => {
       (err: Error) => err,
     );
 
-    // FAIL-WITHOUT-FIX: `.catch(reject)` settles here, while the child still runs.
+    // If broken: `.catch(reject)` settles here, while the child still runs.
     expect(await settled(promise)).toBe(null);
     expect(child.signals).toEqual(['SIGTERM']);
 
@@ -1183,7 +1176,7 @@ describe('build-agent extractTarball child lifecycle', () => {
         }),
     });
 
-    // FAIL-WITHOUT-FIX: the old settlement gives ['reset', 'reset', 'close'] —
+    // If broken: early settlement gives ['reset', 'reset', 'close'] —
     // WORK_DIR wiped under a live extraction.
     expect(order).toEqual(['reset', 'close', 'reset', 'close']);
   });

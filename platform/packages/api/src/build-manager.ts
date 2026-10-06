@@ -6,7 +6,7 @@ import {
   deployTokenTtlSecondsForBuildMinutes,
   signDeployToken,
 } from './auth/deploy-token.ts';
-import { isTerminalBuildStatus } from './build-status.ts';
+import { TERMINAL_STATUSES, isTerminalBuildStatus } from './build-status.ts';
 import { type BuildConfig, type BuildLogLine, isContainerCapacityError } from './build-types.ts';
 import { SITE_DOMAIN } from './constants.ts';
 import {
@@ -33,6 +33,7 @@ import {
   getBranchHeadComparisonStatus,
   getInstallationToken,
 } from './github/installation-token.ts';
+import type { Build } from './types.ts';
 
 /** DO storage keys for the build config captured at `startBuild()`. */
 const STORAGE_KEY_CONFIG = 'buildConfig';
@@ -42,9 +43,6 @@ const STORAGE_KEY_AGENT_TOKEN = 'agentToken';
 const STORAGE_KEY_CHECK_RUN = 'checkRunId';
 /** DO storage key proving whether the container can still produce log lines. */
 const STORAGE_KEY_LOG_DRAIN = 'logDrainState';
-
-/** Build statuses past which no further transition should occur. */
-const TERMINAL_STATUSES: ReadonlyArray<StoredBuildStatus> = ['complete', 'failed', 'cancelled'];
 
 // Hard cap on rows retained in the DO SQLite `logs` table. A verbose/chatty build
 // (huge installer/compiler output) would otherwise grow the table without bound
@@ -82,7 +80,7 @@ export const CHECK_RUN_OUTPUT_TEXT_MAX_BYTES = 65535;
 const POLL_SECONDS = 1;
 
 // Hard ceiling on a single `GET /logs?since=N` pull. The pull runs from a
-// scheduled callback AND — since the teardown drain — from `forceStopContainer`,
+// scheduled callback AND from `forceStopContainer`,
 // i.e. directly in front of the SIGTERM/SIGKILL that a cancel/timeout depends on.
 // A wedged agent that accepts the TCP connection but never responds would
 // otherwise stall the alarm chain, or (far worse) stall cancellation itself and
@@ -146,8 +144,8 @@ export const LOG_SINK_OP_PAYLOAD_BYTES = 1024;
  * Sized at MAX_STORED_LOG_LINES because that is the DO's retained window: rows
  * ingested past it within the same callback are deleted by that same batch's
  * eviction statement, so a larger budget could only buy work whose result is
- * immediately discarded. An unsubscribed build of short lines therefore keeps
- * today's behaviour (a full agent ring drains in one callback); a subscribed or
+ * immediately discarded. An unsubscribed build of short lines therefore drains
+ * a full agent ring in one callback; a subscribed or
  * chatty one spends the same budget proportionally faster, which is exactly the
  * cost it imposes.
  *
@@ -189,7 +187,7 @@ export const LOG_TERMINAL_DRAIN_RETRY_WINDOW_MS = 7000;
 // relation live in separate processes (the agent is plain JS copied into the image
 // and cannot import from `src/`), so build-manager.test.ts asserts it.
 //
-// Deliberately UNCONDITIONAL, and reviewed as such. It is true that nothing tells
+// Deliberately UNCONDITIONAL. Nothing tells
 // the DO whether the agent has entered its drain phase, so a build still installing
 // at its deadline gets this grace too. Gating it on an explicit "draining"
 // signal from the agent would need a new agent->DO protocol message on the exact
@@ -933,7 +931,8 @@ async function renderTerminalGroups(groups: Array<TerminalRenderGroup>): Promise
     return false;
   };
   const ris = term.parser.registerEscHandler({ final: 'c' }, clearCapturedHistory);
-  const ed3 = term.parser.registerCsiHandler({ final: 'J' }, (params) => {
+  // ED 3 / DECSED 3 erase the active buffer's scrollback.
+  const clearActiveHistoryOnErase3 = (params: ReadonlyArray<number | Array<number>>): boolean => {
     if (params[0] === 3) {
       if (term.buffer.active.type === 'alternate') {
         alternateLines.length = 0;
@@ -942,17 +941,12 @@ async function renderTerminalGroups(groups: Array<TerminalRenderGroup>): Promise
       }
     }
     return false;
-  });
-  const decsed3 = term.parser.registerCsiHandler({ prefix: '?', final: 'J' }, (params) => {
-    if (params[0] === 3) {
-      if (term.buffer.active.type === 'alternate') {
-        alternateLines.length = 0;
-      } else {
-        normalLines.length = 0;
-      }
-    }
-    return false;
-  });
+  };
+  const ed3 = term.parser.registerCsiHandler({ final: 'J' }, clearActiveHistoryOnErase3);
+  const decsed3 = term.parser.registerCsiHandler(
+    { prefix: '?', final: 'J' },
+    clearActiveHistoryOnErase3,
+  );
   try {
     for (const group of groups) {
       for (const line of group.lines) {
@@ -1154,14 +1148,7 @@ export async function formatLogTailMarkdown(
   return rendered;
 }
 
-type StoredBuildStatus =
-  | 'queued'
-  | 'starting'
-  | 'building'
-  | 'deploying'
-  | 'complete'
-  | 'failed'
-  | 'cancelled';
+type StoredBuildStatus = Build['status'];
 
 /** Stored build config plus the live status we track inside the DO. */
 type ManagerState = BuildConfig & { status: StoredBuildStatus };
@@ -1190,7 +1177,7 @@ type ContainerPortSurface = {
  * enforces a wall-clock timeout, and writes every status transition back to
  * Postgres via Hyperdrive.
  *
- * The container runs the real `void deploy` CLI (see PR 8's build agent) with a
+ * The container runs the real `void deploy` CLI (see container/build-agent.mjs) with a
  * short-lived project-scoped `VOID_TOKEN`, so the platform's deploy endpoint is
  * unchanged. This DO never dispatches to user workers — DO→container,
  * DO→Hyperdrive, and DO→`api.github.com` are all allowed here.
@@ -1213,9 +1200,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
   // finalizers (onStop/onError/enforceTimeout) are SEPARATE invocations with no
   // access to startBuild's local variable. This field survives create→terminal within
   // the build's lifetime (the DO is actively running the container), so finalize can
-  // still PATCH the run. Strictly additive: consulted only behind explicitId/DO/PG,
-  // and lost on eviction leaves behavior identical to today (no-op). The DO is keyed
-  // per build, so there is no cross-build staleness.
+  // still PATCH the run. Consulted only behind explicitId/DO/PG, and losing it on
+  // eviction is a no-op. The DO is keyed per build, so there is no cross-build
+  // staleness.
   private activeCheckRunId: string | null = null;
 
   // Cursor for the DO→container log pull-loop: the highest agent `seq` already
@@ -1403,6 +1390,38 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     }
   }
 
+  /**
+   * Terminalize a build that a pre-launch recheck rejected. Nothing has been
+   * started, so there is no container to tear down.
+   *
+   * Finalizes a check run created on a PRIOR attempt (a capacity requeue re-runs
+   * startBuild on the same build id; the persisted `builds.check_run_id` survives
+   * the requeue) and no-ops on a first attempt. CAS-aware: the awaits before this
+   * release the DO input gate, so a concurrent terminalizer
+   * (terminateBuildsForProject commits an out-of-band terminal status, then the
+   * cancelBuild RPC) can win the row with a DIFFERENT status. PATCH `status` only
+   * when THIS site won the CAS; on a loss finalize to the recorded outcome so
+   * GitHub never contradicts the authoritative DB row.
+   */
+  private async terminateBeforeLaunch(
+    config: BuildConfig,
+    status: 'failed' | 'cancelled',
+    error: string,
+  ): Promise<void> {
+    const won = await markBuildTerminalIfActive(this.db(), config.buildId, status, {
+      error,
+      completedAt: new Date().toISOString(),
+    });
+    await this.setStatus(status);
+    await this.markLogDrainComplete();
+    await this.broadcast({ type: 'status', status });
+    if (won) {
+      await this.finalizeCheckRunToStatus(config, status);
+    } else {
+      await this.finalizeCheckRunToRecordedOutcome(config);
+    }
+  }
+
   private async runStartBuild(config: BuildConfig): Promise<void> {
     const launch: BuildLaunch = {
       controller: new AbortController(),
@@ -1462,28 +1481,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         const row = await getBuild(this.db(), config.buildId);
         const ageMs = row?.created_at ? Date.now() - new Date(row.created_at).getTime() : 0;
         if (ageMs > FRESHNESS_VERIFY_MAX_AGE_MS) {
-          const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'failed', {
-            error: 'could not verify branch head is current before timeout',
-            completedAt: new Date().toISOString(),
-          });
-          await this.setStatus('failed');
-          await this.markLogDrainComplete();
-          await this.broadcast({ type: 'status', status: 'failed' });
-          // Finalize a run created on a PRIOR attempt (a capacity requeue re-runs
-          // startBuild on the same build id; the persisted `builds.check_run_id`
-          // survives the requeue). No-ops on a first attempt (no run yet).
-          // CAS-aware (mirrors the catch site below + the 6 terminal sites): the
-          // awaits above (getBranchHeadComparisonStatus) release the DO input gate,
-          // so a concurrent terminalizer (terminateBuildsForProject commits an
-          // out-of-band terminal status, then the cancelBuild RPC) can win the row
-          // with a DIFFERENT status. PATCH 'failure' only when THIS site won the CAS;
-          // on a loss finalize to the recorded outcome so GitHub never contradicts
-          // the authoritative DB row.
-          if (won) {
-            await this.finalizeCheckRunToStatus(config, 'failed');
-          } else {
-            await this.finalizeCheckRunToRecordedOutcome(config);
-          }
+          await this.terminateBeforeLaunch(
+            config,
+            'failed',
+            'could not verify branch head is current before timeout',
+          );
         } else {
           await requeueBuildIfStarting(this.db(), config.buildId);
         }
@@ -1493,21 +1495,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       if (headComparison !== 'identical') {
         // ahead/behind/diverged → the commit is no longer the branch head (superseded
         // or rolled back / force-pushed away). Cancel; do NOT mint or start.
-        const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'cancelled', {
-          error: 'commit is no longer the branch head',
-          completedAt: new Date().toISOString(),
-        });
-        await this.setStatus('cancelled');
-        await this.markLogDrainComplete();
-        await this.broadcast({ type: 'status', status: 'cancelled' });
-        // Finalize a run created on a PRIOR attempt (see the aged-out branch above).
-        // CAS-aware (see the aged-out branch): on a lost CAS finalize to the recorded
-        // outcome so GitHub never contradicts the authoritative DB row.
-        if (won) {
-          await this.finalizeCheckRunToStatus(config, 'cancelled');
-        } else {
-          await this.finalizeCheckRunToRecordedOutcome(config);
-        }
+        await this.terminateBeforeLaunch(
+          config,
+          'cancelled',
+          'commit is no longer the branch head',
+        );
         await this.pokeScheduler();
         return;
       }
@@ -1534,21 +1526,11 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         config.repositoryId,
       );
       if (!covered) {
-        const won = await markBuildTerminalIfActive(this.db(), config.buildId, 'cancelled', {
-          error: 'github repository authorization is no longer valid; reconnect the repository',
-          completedAt: new Date().toISOString(),
-        });
-        await this.setStatus('cancelled');
-        await this.markLogDrainComplete();
-        await this.broadcast({ type: 'status', status: 'cancelled' });
-        // Finalize a run created on a PRIOR attempt (see the aged-out branch above).
-        // CAS-aware (see the aged-out branch): on a lost CAS finalize to the recorded
-        // outcome so GitHub never contradicts the authoritative DB row.
-        if (won) {
-          await this.finalizeCheckRunToStatus(config, 'cancelled');
-        } else {
-          await this.finalizeCheckRunToRecordedOutcome(config);
-        }
+        await this.terminateBeforeLaunch(
+          config,
+          'cancelled',
+          'github repository authorization is no longer valid; reconnect the repository',
+        );
         await this.pokeScheduler();
         return;
       }
@@ -1715,9 +1697,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         repositoryIds: [config.repositoryId],
         permissions: { contents: 'read' },
       });
-      // The installation-token fetch is the longest pre-launch await and was the
-      // original orphan window: cancellation observed no live container, returned,
-      // and this continuation launched afterward. The generation fence closes it.
+      // The installation-token fetch is the longest pre-launch await: a cancellation
+      // can observe no live container and return while it is pending. The generation
+      // fence keeps this continuation from launching afterward.
       if (!this.launchIsCurrent(launch)) {
         await this.pokeScheduler();
         return;
@@ -1901,7 +1883,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // already freed).
       //
       // Runs BEFORE the teardown, like enforceTimeout/cancelBuild: `builds.status`
-      // is the deploy token's authority, and `forceStopContainer` now drains logs
+      // is the deploy token's authority, and `forceStopContainer` drains logs
       // for up to 2x LOG_DRAIN_BUDGET_MS before it signals (it joins an in-flight
       // drain, then takes its own). While the row is still
       // `starting`/`building` a runner already at final publish passes both
@@ -1948,9 +1930,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
             // the marker is the ONLY explanation emitted — this catch claims the
             // marker synchronously, before any await, so an external cancel
             // arriving after it finds the claim taken and stays silent. The check
-            // run below finalizes from the RECORDED outcome, so leaving the local
-            // reason in produced a check that says "cancelled" over a log tail
-            // that says the build failed to start.
+            // run below finalizes from the RECORDED outcome; asserting the local
+            // reason could put a "cancelled" check over a log tail that says the
+            // build failed to start.
             terminal?.won === true ? `build failed: ${message}` : 'build terminated out of band',
             ownsMarker,
             terminalError === undefined,
@@ -2069,7 +2051,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     }
     // Embed the stored log tail as the run's `output.text` — BEST-EFFORT: a
     // SQLite read failure must not block the completion PATCH (the run
-    // completes without `text`, exactly the pre-tail body).
+    // completes without `text`).
     let text: string | undefined;
     try {
       text = (await this.readLogTailMarkdown()) ?? undefined;
@@ -2166,11 +2148,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    *   - the write commits late  -> row terminal -> finalize, no re-arm
    *   - the write genuinely died -> row stays ACTIVE -> the hourly stale reaper marks
    *     it `failed` (STALE_CONTAINER_BUILD_MAX_AGE_MINUTES) -> the next pass finalizes
-   * The second branch is why the reaper is a real backstop here. An earlier comment on
-   * this path claimed a failed write was "left to the reaper exactly as before"; the
-   * reaper terminalizes the ROW but never completes a CHECK RUN — it calls
-   * `cancelBuild`, which early-outs on the terminal status. Without this pass that
-   * check run had no completer at all.
+   * The reaper terminalizes the ROW but never completes a CHECK RUN — it calls
+   * `cancelBuild`, which early-outs on the terminal status — so this pass is that
+   * check run's only completer.
    */
   async reconcileTerminalWrite(): Promise<void> {
     const config = await this.getConfig();
@@ -2203,7 +2183,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // RECONCILE_RETRY_SECONDS forever. Nothing is left to report against.
       return;
     }
-    if (TERMINAL_STATUSES.includes(row.status as StoredBuildStatus)) {
+    if (TERMINAL_STATUSES.includes(row.status)) {
       // Reuse BOTH authoritative fields from the bounded read. Omitting the id
       // makes finalizeCheckRun issue a second, unbounded getBuild after an eviction
       // or cache miss — exactly where a stalled Hyperdrive read would orphan the
@@ -2356,7 +2336,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         // The deployment link is BEST-EFFORT and must run inside this try. The
         // lookup is a Hyperdrive/Postgres read that can throw on a transient
         // error AFTER `void deploy` already exited 0; if it threw outside the
-        // try (as it used to), `onStop` would reject before `setStatus` and the
+        // try, `onStop` would reject before `setStatus` and the
         // `finally`, leaving the build row ACTIVE with no scheduler poke — the
         // deploy live but the concurrency slot pinned until the 75m idle reaper.
         // Swallow the lookup error and finalize 'complete' with a null link
@@ -2415,9 +2395,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
           // `reason` is carried too, not just the code. It is the ONE bit that
           // separates "the agent decided to exit" (`exit`) from "the runtime killed
           // the container" (`runtime_signal`), and the two need completely different
-          // investigations. The DB row has always recorded it; the check run — the
-          // only surface most people ever see — did not, so a failure whose log tail
-          // was also lost read as `Build exited with code 1.` and nothing more.
+          // investigations, and the check run is the only surface most people see.
           await this.finalizeCheckRun(config, 'failure', {
             detailsUrl: this.projectUrl(config),
             title: 'Void build failed',
@@ -2554,7 +2532,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
 
   /**
    * Force the container down on a timeout/cancel path. `stop()` only sends a
-   * SIGTERM — which the agent (PID 1) now handles cooperatively — but a wedged or
+   * SIGTERM — which the agent (PID 1) handles cooperatively — but a wedged or
    * adversarial child (e.g. a `postinstall` that blocks uninterruptibly or
    * ignores SIGTERM) can survive it, and `@cloudflare/containers` never escalates
    * to SIGKILL on its own. So follow the best-effort SIGTERM with `destroy()`
@@ -2611,7 +2589,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     const container = this.rawContainer();
     // The single-flight owns the WHOLE first-caller policy: scheduled-pull join,
     // fresh drain, liveness recheck, and signals. Consulting it only after the
-    // drain let a second cancellation enter while the first was blocked in
+    // drain would let a second cancellation enter while the first was blocked in
     // stop()/destroy(), start a late pull, and ingest after the first caller's
     // final marker/check-run completion. It also matters that `drainFirst=false`
     // wins when it is first: a later peer must not reopen a pull while the token
@@ -2709,8 +2687,8 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // that observed the already-terminal local status can drain and `destroy()`
     // while the claiming caller is still awaiting Hyperdrive; that caller then
     // arrives here with `running === false`. Gating the marker on a live container
-    // meant NOBODY ingested one — the peer had no claim and the owner had no
-    // container — and the build's log just stopped. Ingesting is DO-local
+    // would mean NOBODY ingests one — the peer has no claim and the owner has no
+    // container — and the build's log just stops. Ingesting is DO-local
     // (SQLite + broadcast), so it needs no container at all.
     if (markerAuthoritative && producerStopped && this.containerTornDown) {
       try {
@@ -2750,8 +2728,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * build. `stop()` ultimately triggers onStop, which sees the terminal status
    * set here and won't clobber it.
    *
-   * Public + named so the base scheduler can resolve it as a callback. Takes the
-   * scheduler's `(payload, schedule)` args (unused here).
+   * Public + named so the base scheduler can resolve it as a callback.
    */
   async enforceTimeout(): Promise<void> {
     this.abortActiveLaunch();
@@ -2827,7 +2804,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // deploy token's authority: `middleware/auth.ts` honors a build-bound token for
     // as long as the row is in ACTIVE_BUILD_STATUSES, and `routes/deploy.ts`
     // re-checks the same set inside its go-live transaction. `forceStopContainer`
-    // now spends up to 2x LOG_DRAIN_BUDGET_MS draining logs before it even signals,
+    // spends up to 2x LOG_DRAIN_BUDGET_MS draining logs before it even signals,
     // and every millisecond of that is a window in which a `void deploy` sitting at
     // its go-live step can still publish — writing routing KV, committing the
     // deployment 'live' — only to be recorded `failed`/'build timed out' immediately
@@ -2837,8 +2814,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // The write still must NOT gate the teardown. `markBuildTerminalIfActive` has no
     // internal try/catch, so its throw is captured here and rethrown only after
     // `forceStopContainer` and `pokeScheduler` have run — otherwise a Hyperdrive
-    // blip would leave a timed-out container alive with a pinned fleet slot, which
-    // is the failure the previous ordering was protecting against. A throw is only
+    // blip would leave a timed-out container alive with a pinned fleet slot. A throw is only
     // half of it: `revokeBuildRow` bounds the write so one that PENDS lands in that
     // same catch instead of stranding the container (TERMINAL_WRITE_TIMEOUT_MS).
     let terminal: { won: boolean } | null = null;
@@ -2930,9 +2906,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // UNCONDITIONAL, like enforceTimeout and the startBuild catch. Peer exclusion is
     // the claim flag itself, never `shouldTerminalize`: `onError` is a terminal
     // transition that deliberately does NOT stop the container and never reserves the
-    // marker, so a cancel arriving after it saw `shouldTerminalize === false`, skipped
-    // the claim, and SIGKILLed a LIVE container with `markerAuthoritative` false —
-    // the log just stopped, which is the exact failure the marker exists to end. A DO
+    // marker, so a cancel arriving after it would see `shouldTerminalize === false`,
+    // skip the claim, and SIGKILL a LIVE container with `markerAuthoritative` false —
+    // the log would just stop, which is the exact failure the marker exists to end. A DO
     // evicted between a peer's `setStatus(terminal)` and its `forceStopContainer`
     // reaches the same state with no `onError` involved: durable terminal status, and
     // a restarted instance whose claim flag is back to false.
@@ -2950,7 +2926,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     }
     // Revoke in Postgres BEFORE the teardown, for the same reason as
     // `enforceTimeout`: `builds.status` is the deploy token's authority, and
-    // `forceStopContainer` now drains logs for up to 2x LOG_DRAIN_BUDGET_MS before it
+    // `forceStopContainer` drains logs for up to 2x LOG_DRAIN_BUDGET_MS before it
     // signals — a window in which a superseded `void deploy` at its go-live step
     // would still pass both `middleware/auth.ts` and the go-live transaction's
     // re-check and publish stale code.
@@ -2995,8 +2971,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
           TERMINAL_WRITE_TIMEOUT_MS,
           `build ${config.buildId}: authoritative terminal read did not settle within ${TERMINAL_WRITE_TIMEOUT_MS}ms`,
         );
-        authoritativeRowIsTerminal =
-          row === null || TERMINAL_STATUSES.includes(row.status as StoredBuildStatus);
+        authoritativeRowIsTerminal = row === null || TERMINAL_STATUSES.includes(row.status);
         needsTerminalReconciliation = !authoritativeRowIsTerminal;
         if (row !== null && authoritativeRowIsTerminal) {
           authoritativeTerminalRow = row;
@@ -3016,9 +2991,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // external cancel path (`cancelContainerBuildDos`: push-supersede,
       // disconnect, branch-delete, project-delete) commits the terminal row
       // BEFORE invoking this RPC by design, so `revokeBuildRow` always returns
-      // false there. Gating on `won` suppressed the only marker those builds
-      // would ever get, and the agent's own post-SIGTERM line can't be pulled —
-      // so their logs just stopped, with nothing saying why.
+      // false there. Gating on `won` would suppress the only marker those builds
+      // ever get, and the agent's own post-SIGTERM line can't be pulled — so
+      // their logs would just stop, with nothing saying why.
       await this.forceStopContainer(
         // See enforceTimeout: a lost or unknown revocation can belong to another
         // terminal writer. A recovered terminal row likewise owns an earlier
@@ -3222,7 +3197,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * the newest CHECK_RUN_LOG_TAIL_LINES rows (read newest-first, rendered
    * chronologically) plus the total captured count, so the omission marker can
    * say when earlier lines exist. Null when nothing was captured — the
-   * completion PATCH then omits `text` (body identical to the pre-tail one).
+   * completion PATCH then omits `text`.
    */
   private async readLogTailMarkdown(): Promise<string | null> {
     this.ensureLogTable();
@@ -3287,17 +3262,10 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * override `alarm()` (the base owns the single DO alarm).
    *
    * Self-terminating: returns WITHOUT re-arming once the build is gone or terminal
-   * so the loop stops at completion. CRITICALLY, this uses a NON-STARTING fetch —
-   * `this.container.getTcpPort(port).fetch(url)` — NOT `this.containerFetch(...)`.
-   * `containerFetch` AUTO-STARTS a stopped container (its own internal
-   * `container.running` re-check happens AFTER an `await getState()`, container.js:847),
-   * so even with the `container.running` guard below a build that exits in the
-   * guard→fetch TOCTOU window could be RESURRECTED — rerunning install/build/`void
-   * deploy`. The raw port fetch is `containerFetch` MINUS that auto-start branch:
-   * identical on a running/healthy container, but it FAILS (caught + swallowed)
-   * instead of restarting an exited one, so a poll can never resurrect a finished
-   * build. The `container.running` guard is kept purely as a cheap early-out for
-   * the common already-exited case (it avoids a 1s busy-retry; onStop finalizes).
+   * so the loop stops at completion. The pull uses a NON-STARTING port fetch (see
+   * `runLogPull`), so a poll can never resurrect a finished build. The
+   * `container.running` guard is purely a cheap early-out for the common
+   * already-exited case (it avoids a 1s busy-retry; onStop finalizes).
    * A transient fetch failure is swallowed and the loop re-arms to retry next tick.
    */
   async pollLogs(): Promise<void> {
@@ -3326,7 +3294,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // the loop is taking the NORMAL branch below, pulling and re-arming until
       // the cursor catches up. That path is self-sufficient.
       //
-      // Nor is it the cancel/timeout drain any more: `forceStopContainer` now
+      // Nor is it the cancel/timeout drain: `forceStopContainer`
       // pulls synchronously in front of its own SIGTERM, which covers all three
       // teardown sites (cancelBuild / enforceTimeout / the startBuild catch)
       // without depending on an alarm landing in a sub-millisecond window.
@@ -3403,9 +3371,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
    * carry lines written after it was issued, and on the teardown path there is no
    * later poll to collect them. That is why teardown ALWAYS awaits this gate and,
    * when its caller permits a new agent request, THEN takes its own fresh snapshot
-   * — see the comment there. Do not "simplify" it back into a bare
-   * `pullLogsOnce`; that traded duplicate-but-complete for
-   * deduplicated-but-truncated.
+   * — see the comment there. A bare join would be deduplicated but truncated.
    */
   private pullLogsOnce(
     container: Pick<ContainerPortSurface, 'getTcpPort'>,
@@ -3442,7 +3408,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
       // a response (MAX_LOG_RESPONSE_BYTES / _LINES) so an oversized backlog can
       // never blow the per-request timeout, but at POLL_SECONDS per page a deep
       // backlog would make no useful progress for long stretches. Productive
-      // pagination now resets the agent's idle deadline; batching still reduces
+      // pagination resets the agent's idle deadline; batching still reduces
       // callback churn and acknowledgement latency.
       //
       // ONE deadline for the whole drain, not one per page. Without it, fresh
@@ -3505,9 +3471,9 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
         // empty request closes that loop immediately (and safely picks up lines
         // recorded between the two snapshots).
         //
-        // `hasMore` is absent on an agent from before paging; one page per tick is
-        // exactly the old behaviour, so preserve it. Also stop if the cursor did
-        // not move, or an empty page claiming more would spin.
+        // `hasMore` is absent on an older agent without paging; keep one page per
+        // tick for it. Also stop if the cursor did not move, or an empty page
+        // claiming more would spin.
         if (!moved || body.hasMore === undefined) {
           return true;
         }
@@ -3559,8 +3525,7 @@ export class BuildManager extends Container<ApiEnv['Bindings']> {
     // runner publish stale code. On a CAS-miss, tear down via cancelBuild — its
     // own `markBuildTerminalIfActive` CAS no-ops against the already-terminal row
     // (NO clobber) and best-effort stop()s the orphaned container + pokes the
-    // scheduler. Never write `cancelled` directly here (that reintroduces the
-    // unguarded-write bug class).
+    // scheduler. Never write `cancelled` directly here.
     const moved = await markBuildProgressIfActive(this.db(), config.buildId, body.status);
     if (!moved) {
       await this.cancelBuild('build superseded');

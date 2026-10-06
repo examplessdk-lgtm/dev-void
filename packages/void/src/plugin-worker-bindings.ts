@@ -33,6 +33,34 @@ import {
   selectNativeVersionMetadataBinding,
 } from './shared/version-metadata.ts';
 
+type DurableObjectBinding = { name: string; class_name: string };
+type DurableObjectMigration = {
+  tag?: string;
+  new_classes?: Array<string>;
+  new_sqlite_classes?: Array<string>;
+};
+
+/** Durable Object bindings already in the patch, else in the resolved config. */
+function currentDurableObjectBindings(
+  result: Record<string, unknown>,
+  resolved: WorkerConfig,
+): Array<DurableObjectBinding> {
+  const current = (result.durable_objects ??
+    (resolved as Record<string, unknown>).durable_objects) as
+    | { bindings?: Array<DurableObjectBinding> }
+    | undefined;
+  return current?.bindings ?? [];
+}
+
+/** Migrations already in the patch, else in the resolved config. */
+function currentMigrations(
+  result: Record<string, unknown>,
+  resolved: WorkerConfig,
+): Array<DurableObjectMigration> {
+  const current = result.migrations ?? (resolved as Record<string, unknown>).migrations;
+  return Array.isArray(current) ? (current as Array<DurableObjectMigration>) : [];
+}
+
 export function mergeWorkerBindings(
   resolved: WorkerConfig,
   input: {
@@ -169,11 +197,10 @@ export function mergeWorkerBindings(
   // Cloudflare destination uses the owner's remote Workers AI binding during
   // dev because Workers AI has no local simulator. Managed and unsaved dev
   // projects continue through the Void HTTPS proxy below.
-  // An explicit root binding keeps its name and staging choice. Direct dev
-  // only adds `remote: true`, which is required because there is no local AI
-  // simulator. Builds never override the user's root binding.
+  // An explicit root binding keeps its name and staging choice; direct dev
+  // only adds `remote: true`. Builds never override the user's root binding.
   const resolvedAi = (resolved as { ai?: unknown }).ai;
-  const resultAi = (result as { ai?: unknown }).ai;
+  const resultAi = result.ai;
   const aiBindingName = resolveWorkersAiBindingName(resolvedAi, bindingNames?.ai);
   if (
     viteCommand === 'serve' &&
@@ -185,9 +212,7 @@ export function mergeWorkerBindings(
     'binding' in resolvedAi &&
     typeof resolvedAi.binding === 'string'
   ) {
-    // Preserve an explicit binding name and staging choice while selecting
-    // its only supported local mode.
-    (result as Record<string, unknown>).ai = { ...resolvedAi, remote: true };
+    result.ai = { ...resolvedAi, remote: true };
   } else if (
     shouldBindWorkersAi(
       viteCommand,
@@ -197,14 +222,14 @@ export function mergeWorkerBindings(
       directCloudflareDestination,
     )
   ) {
-    (result as Record<string, unknown>).ai = {
+    result.ai = {
       binding: aiBindingName,
       ...(viteCommand === 'serve' && { remote: true }),
     };
   }
 
   // AI binding name / Gateway id → runtime vars (harmless in serve; only read
-  // by the P3 direct backend). The default binding needs no extra variable.
+  // by the direct backend). The default binding needs no extra variable.
   if (aiBindingName !== 'AI' || config.ai?.gateway) {
     const vars = (result.vars as Record<string, string>) ?? {};
     if (aiBindingName !== 'AI') {
@@ -216,10 +241,10 @@ export function mergeWorkerBindings(
     result.vars = vars;
   }
 
-  // Email — no send binding is emitted on purpose. Outbound mail routes
-  // through __VOID_PROXY/email/send (the proxy worker holds the
-  // platform-level send_email binding), so `bindings.needsEmail` only gates
-  // the dev-inbox plugin and the deploy manifest flag.
+  // Email — this patch never adds a send binding. On a Void platform,
+  // outbound mail routes through __VOID_PROXY/email/send (the proxy worker
+  // holds the platform-level send_email binding); native Cloudflare deploys
+  // use the root `SEND_EMAIL` binding handled below.
   //
   // Dev only: name the assets binding so `sendEmail` can loop back into the
   // Vite dev server and reach the `/__void/inbox` buffer, which lives in the
@@ -286,7 +311,7 @@ export function mergeWorkerBindings(
 
   // Queues — add producer + consumer bindings for local dev
   if (queues.length > 0) {
-    (result as Record<string, unknown>).queues = {
+    result.queues = {
       producers: queues.map((q) => ({ queue: q.name, binding: q.bindingName })),
       consumers: queues.map((q) => ({
         queue: q.name,
@@ -299,15 +324,9 @@ export function mergeWorkerBindings(
   }
 
   if (environmentWebsocketRoutes.length > 0) {
-    type DurableObjectBindingsConfig = {
-      durable_objects?: {
-        bindings?: Array<{ name: string; class_name: string }>;
-      };
-    };
     const existingDurableObjectBindings =
-      ((resolved as DurableObjectBindingsConfig).durable_objects?.bindings as
-        | Array<{ name: string; class_name: string }>
-        | undefined) ?? [];
+      (resolved as { durable_objects?: { bindings?: Array<DurableObjectBinding> } }).durable_objects
+        ?.bindings ?? [];
     for (const route of environmentWebsocketRoutes) {
       const conflict = existingDurableObjectBindings.find(
         (binding) => binding.name === route.bindingName && binding.class_name !== route.className,
@@ -329,32 +348,25 @@ export function mergeWorkerBindings(
       }));
 
     if (missingDurableObjectBindings.length > 0) {
-      (result as Record<string, unknown>).durable_objects = {
+      result.durable_objects = {
         bindings: [...existingDurableObjectBindings, ...missingDurableObjectBindings],
       };
     }
 
-    const currentMigrations = (resolved as Record<string, unknown>).migrations;
+    const resolvedMigrations = (resolved as Record<string, unknown>).migrations;
     const planned = appendSqliteClassMigration(
-      Array.isArray(currentMigrations) ? currentMigrations : [],
+      Array.isArray(resolvedMigrations) ? resolvedMigrations : [],
       environmentWebsocketRoutes.map((route) => route.className),
       'void-ws-v1',
       existingDurableObjectBindings.map((binding) => binding.class_name),
     );
     if (planned.added) {
-      (result as Record<string, unknown>).migrations = planned.migrations;
+      result.migrations = planned.migrations;
     }
   }
 
   if (durableObjects.length > 0) {
-    const currentDurableObjects =
-      ((result as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined) ??
-      ((resolved as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined);
-    const existingBindings = currentDurableObjects?.bindings ?? [];
+    const existingBindings = currentDurableObjectBindings(result, resolved);
     for (const module of durableObjects) {
       const conflict = existingBindings.find(
         (binding) => binding.name === module.bindingName && binding.class_name !== module.className,
@@ -369,20 +381,12 @@ export function mergeWorkerBindings(
       .filter((module) => !existingBindings.some((binding) => binding.name === module.bindingName))
       .map((module) => ({ name: module.bindingName, class_name: module.className }));
     if (additions.length > 0) {
-      (result as Record<string, unknown>).durable_objects = {
+      result.durable_objects = {
         bindings: [...existingBindings, ...additions],
       };
     }
 
-    const currentMigrations =
-      (result as Record<string, unknown>).migrations ??
-      (resolved as Record<string, unknown>).migrations;
-    const existingMigrations = Array.isArray(currentMigrations)
-      ? (currentMigrations as Array<{
-          tag?: string;
-          new_sqlite_classes?: Array<string>;
-        }>)
-      : [];
+    const existingMigrations = currentMigrations(result, resolved);
     for (const module of durableObjects) {
       const tagConflict = existingMigrations.find(
         (migration) =>
@@ -409,28 +413,15 @@ export function mergeWorkerBindings(
         new_sqlite_classes: [module.className],
       }));
     if (migrationAdditions.length > 0) {
-      (result as Record<string, unknown>).migrations = [
-        ...existingMigrations,
-        ...migrationAdditions,
-      ];
+      result.migrations = [...existingMigrations, ...migrationAdditions];
     }
   }
 
   if (bindings.needsSandbox && sandboxConfig) {
     assertSandboxNamespaceConfig({ ...resolved, ...result }, sandboxConfig);
-    const currentDurableObjects =
-      ((result as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined) ??
-      ((resolved as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined);
-    const existingDurableObjectBindings =
-      (currentDurableObjects?.bindings as
-        | Array<{ name: string; class_name: string }>
-        | undefined) ?? [];
+    const existingDurableObjectBindings = currentDurableObjectBindings(result, resolved);
     if (!existingDurableObjectBindings.some((binding) => binding.name === sandboxConfig.binding)) {
-      (result as Record<string, unknown>).durable_objects = {
+      result.durable_objects = {
         bindings: [
           ...existingDurableObjectBindings,
           {
@@ -442,14 +433,12 @@ export function mergeWorkerBindings(
     }
 
     const existingContainers =
-      ((result as Record<string, unknown>).containers as
-        | Array<{ class_name?: string }>
-        | undefined) ??
+      (result.containers as Array<{ class_name?: string }> | undefined) ??
       ((resolved as Record<string, unknown>).containers as
         | Array<{ class_name?: string }>
         | undefined) ??
       [];
-    (result as Record<string, unknown>).containers = [
+    result.containers = [
       ...existingContainers.filter((container) => container.class_name !== sandboxConfig.className),
       sandboxContainerConfig(sandboxConfig),
     ];
@@ -457,18 +446,9 @@ export function mergeWorkerBindings(
     // patch already contains every existing Container, so emit the list once.
     (resolved as Record<string, unknown>).containers = [];
 
-    const currentMigrations =
-      (result as Record<string, unknown>).migrations ??
-      (resolved as Record<string, unknown>).migrations;
-    const existingMigrations = Array.isArray(currentMigrations)
-      ? (currentMigrations as Array<{
-          tag?: string;
-          new_classes?: Array<string>;
-          new_sqlite_classes?: Array<string>;
-        }>)
-      : [];
+    const existingMigrations = currentMigrations(result, resolved);
     if (!hasSandboxSqliteMigration(existingMigrations, sandboxConfig.className)) {
-      (result as Record<string, unknown>).migrations = [
+      result.migrations = [
         ...existingMigrations,
         {
           tag: SANDBOX_MIGRATION_TAG,
@@ -479,19 +459,9 @@ export function mergeWorkerBindings(
   }
 
   if (shouldEmitLive() && liveConfig) {
-    const currentDurableObjects =
-      ((result as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined) ??
-      ((resolved as Record<string, unknown>).durable_objects as
-        | { bindings?: Array<{ name: string; class_name: string }> }
-        | undefined);
-    const existingDurableObjectBindings =
-      (currentDurableObjects?.bindings as
-        | Array<{ name: string; class_name: string }>
-        | undefined) ?? [];
+    const existingDurableObjectBindings = currentDurableObjectBindings(result, resolved);
     if (!existingDurableObjectBindings.some((binding) => binding.name === liveConfig.bindingName)) {
-      (result as Record<string, unknown>).durable_objects = {
+      result.durable_objects = {
         bindings: [
           ...existingDurableObjectBindings,
           {
@@ -502,18 +472,9 @@ export function mergeWorkerBindings(
       };
     }
 
-    const currentMigrations =
-      (result as Record<string, unknown>).migrations ??
-      (resolved as Record<string, unknown>).migrations;
-    const existingMigrations = Array.isArray(currentMigrations)
-      ? (currentMigrations as Array<{
-          tag?: string;
-          new_classes?: Array<string>;
-          new_sqlite_classes?: Array<string>;
-        }>)
-      : [];
+    const existingMigrations = currentMigrations(result, resolved);
     if (!hasDurableObjectSqliteMigration(existingMigrations, liveConfig.className)) {
-      (result as Record<string, unknown>).migrations = [
+      result.migrations = [
         ...existingMigrations,
         {
           tag: nextDurableObjectMigrationTag(existingMigrations, LIVE_MIGRATION_TAG),
@@ -523,7 +484,7 @@ export function mergeWorkerBindings(
     }
   }
 
-  // AI — in local dev, inject VC credentials for HTTPS proxy path.
+  // AI — in local dev, inject Void credentials for the HTTPS proxy path.
   // In production, the platform adds a __VOID_PROXY service binding instead.
   if (viteCommand === 'serve' && bindings.needsAI && !directCloudflareDestination) {
     const credentials = readVoidDevCredentials(root);

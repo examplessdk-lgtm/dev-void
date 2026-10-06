@@ -519,15 +519,13 @@ describe('GET /projects/:id/migrations', () => {
   });
 
   it('surfaces a non-missing-table D1 failure on _void_migrations as 500', async () => {
-    // A real regression would be: CF API token expired, quota hit,
-    // "database is locked", … the GET endpoint used to bury all errors
-    // in a bare `catch {}` and return `{ applied: [] }`, which looks
-    // identical to "nothing has been applied yet" and causes callers
-    // to re-run migrations or make other catastrophic decisions. The
-    // narrow-catch fix must surface everything that isn't a plain
-    // missing-table error.
+    // CF API token expired, quota hit, "database is locked", … must not be
+    // reported as `{ applied: [] }`, which looks identical to "nothing has
+    // been applied yet" and causes callers to re-run migrations or make
+    // other catastrophic decisions. GET surfaces everything that isn't a
+    // plain missing-table error.
     //
-    // Note: GET reads `_migrations` first (torn-read fix). The legacy read
+    // Note: GET reads `_migrations` first (torn-read safety). The legacy read
     // returns "no such table" here (mock has no legacyRows), which is
     // swallowed. The _void_migrations read then fires and its auth error
     // must surface as a 500, not get papered over as an empty response.
@@ -567,8 +565,6 @@ describe('GET /projects/:id/migrations', () => {
     // _migrations can only disappear AFTER its rows were copied into
     // _void_migrations, so the earlier read always captures a consistent
     // snapshot.
-    //
-    // This test pins the read order so the regression is impossible.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'd1-mig-read-order');
     await insertD1Resource(env.db, project.id);
@@ -1210,7 +1206,7 @@ describe('POST /projects/:id/migrations/apply', () => {
     // Attack: the pragma appears inside a string literal, not as a SQL
     // comment. A raw `sql.includes('-- void:allow-destructive')` check
     // authorizes the request even though the literal is just data, not a
-    // directive. The fix tokenizes strings/comments and only honors the
+    // directive. The route tokenizes strings/comments and only honors the
     // pragma when it's a real comment.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'destructive-literal-attack');
@@ -3976,7 +3972,7 @@ describe('POST /projects/:id/migrations/rename', () => {
 
     // Pre-seed x.sql in D1 as if a separate /apply had added it. We
     // skip the actual /apply call to keep the test focused on the audit
-    // log lineage bug — the rename classifier only cares about D1's
+    // log lineage — the rename classifier only cares about D1's
     // tracking rows existing for `from`.
     state.trackingRows.set('x.sql', '2024-01-03T00:00:00Z');
 
@@ -4210,8 +4206,8 @@ describe('POST /projects/:id/migrations/rename', () => {
       .set({ applied_migrations: JSON.stringify(['001_create_users.sql']) })
       .where(eq(deployments.id, activeDeployment.id));
 
-    // Retained deployment still has the OLD name — under R8 this would
-    // Retained reference alone is not corroboration — ignored.
+    // Retained deployment still has the OLD name. A retained reference alone
+    // is not corroboration — ignored.
     const retainedDeployment = await createTestDeployment(env.db, project.id, 'failed');
     await env.db
       .update(deployments)
@@ -5337,8 +5333,8 @@ describe('POST /projects/:id/migrations/rename', () => {
       })
       .where(eq(deployments.id, depB.id));
 
-    // Pre-seed KV slug entry with `hasCrons: false` — this is the
-    // "stale KV" state the bug exploited. Any real deploy would have
+    // Pre-seed KV slug entry with `hasCrons: false` — a "stale KV" state.
+    // Any real deploy would have
     // written `hasCrons: true` (matching pg), but a partial failure
     // could leave KV inconsistent. A manifest-driven reconciliation
     // must ignore this and still clear the DO.
@@ -5841,7 +5837,7 @@ describe('POST /projects/:id/migrations/rename', () => {
       .where(eq(deployments.id, depB.id));
 
     // Pre-seed an ISR entry representing a page warmed by the currently-active
-    // deployment. Rollback no longer needs to delete it.
+    // deployment. Rollback does not delete it.
     const isrKey = `${project.id}/isr/v2/${depA.id}/page1`;
     await env.ISR_CACHE.put(isrKey, 'previous-deployment-html');
 

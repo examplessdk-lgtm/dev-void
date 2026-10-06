@@ -59,7 +59,6 @@ import {
 import { setTestDb } from './setup.ts';
 
 const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
-const enc = new TextEncoder();
 
 const SQLITE_MIGRATIONS = {
   dialect: 'sqlite',
@@ -152,15 +151,9 @@ function injectLostGoLiveCommitAcknowledgement(projectId: string): {
 
 /**
  * Build a JSON-mode (direct-to-R2) deploy request body that mirrors the
- * shape the production CLI sends after the legacy multipart path was removed.
- * Pre-uploads each asset's bytes into `env.STATIC_ASSETS_R2` under the
- * `assets/${projectId}/${blake3}` key so the JSON-mode handler's parallel
- * R2.head verification finds them.
- *
- * Mirrors the prior `buildDeployForm` API: pass `manifest` overrides,
- * `workers`, `assets`. `migrations` is accepted for backward compat but
- * ignored — the JSON-mode wire shape carries no migration SQL parts (the
- * SQL is bundled into the worker via the framework's migration handler).
+ * shape the production CLI sends. Pre-uploads each asset's bytes into
+ * `env.STATIC_ASSETS_R2` under the `assets/${projectId}/${blake3}` key so the
+ * JSON-mode handler's parallel R2.head verification finds them.
  */
 async function buildDeployRequest(
   env: TestEnv,
@@ -172,14 +165,8 @@ async function buildDeployRequest(
     assets?: Record<string, string | Uint8Array>;
     /** Carried through for tests that pass an explicit assetManifest body field. */
     assetManifest?: Record<string, { hash: string; size: number }>;
-    /** When 'true', appended to the JSON body (mirrors the legacy preflight FormData field). */
+    /** When 'true', appended to the JSON body. */
     preflight?: 'true' | null;
-    /** Optional metadata fields that mirror the prior multipart text parts. */
-    source?: string;
-    commit?: string;
-    repositoryUrl?: string;
-    commitUrl?: string;
-    gitRef?: string;
     /** Skip the default `index.js` worker module. */
     omitDefaultWorker?: boolean;
   },
@@ -195,8 +182,8 @@ async function buildDeployRequest(
   const manifestType = (manifest as { type?: unknown }).type;
   const isStaticManifest = manifestType === 'spa' || manifestType === 'static';
 
-  // Default worker file for non-static manifests so callers can keep the
-  // simple `buildDeployRequest()` shape they used to use with `buildDeployForm()`.
+  // Default worker file for non-static manifests so callers can use the
+  // simple `buildDeployRequest()` shape.
   const workers =
     opts?.workers ??
     (isStaticManifest || opts?.omitDefaultWorker
@@ -235,7 +222,7 @@ async function buildDeployRequest(
   // Allow callers to provide an explicit assetManifest (for dedupe/preflight
   // tests). When provided, override the auto-generated entries — but pre-upload
   // happens above based on `opts.assets`, so callers passing both must keep
-  // them aligned (matches the prior FormData behavior).
+  // them aligned.
   const declaredAssetManifest: Record<string, { blake3: string; md5: string; size: number }> = {};
   if (opts?.assetManifest) {
     for (const [path, entry] of Object.entries(opts.assetManifest)) {
@@ -253,11 +240,11 @@ async function buildDeployRequest(
   const body: Record<string, unknown> = {
     manifest,
     assetManifest: finalAssetManifest,
-    source: opts?.source ?? null,
-    commit: opts?.commit ?? null,
-    repositoryUrl: opts?.repositoryUrl ?? null,
-    commitUrl: opts?.commitUrl ?? null,
-    gitRef: opts?.gitRef ?? null,
+    source: null,
+    commit: null,
+    repositoryUrl: null,
+    commitUrl: null,
+    gitRef: null,
     preflight: opts?.preflight ?? null,
   };
   if (workerFiles) {
@@ -293,7 +280,6 @@ type DoneEvent = DeployEvent & {
 type ErrorEvent = DeployEvent & { message?: string; step?: string };
 type MigrationStartEvent = DeployEvent & { pending: number };
 type MigrationEvent = DeployEvent & { name: string };
-type AssetUploadEvent = DeployEvent & { total: number; new: number; cached: number };
 
 function isDeployEvent(value: unknown): value is DeployEvent {
   return (
@@ -310,29 +296,6 @@ function requireEvent<T extends DeployEvent>(events: Array<unknown>, name: strin
   );
   expect(event).toBeDefined();
   return event!;
-}
-
-// Round 7 fix: validator regression tests used to `toEqual` the full error
-// string, so any wording tweak would cascade through dozens of tests. Assert
-// only the shape-validator prefix + a stable fragment (field name / enum key)
-// so future rewords stay local to the validator source.
-async function expectInvalidManifestShape(res: Response, fragment: string | RegExp): Promise<void> {
-  // Deploy route now always returns 200 + NDJSON; shape-validation failures
-  // surface as an `event: 'error'` row in the stream.
-  expect(res.status).toBe(200);
-  const events = parseDeployStream(await res.text()) as Array<{
-    event: string;
-    message?: string;
-  }>;
-  const err = events.find((e) => e.event === 'error');
-  expect(err).toBeDefined();
-  const msg = err!.message ?? '';
-  expect(msg).toMatch(/^invalid manifest shape: /);
-  if (typeof fragment === 'string') {
-    expect(msg).toContain(fragment);
-  } else {
-    expect(msg).toMatch(fragment);
-  }
 }
 
 function mockSetTimeout() {
@@ -1203,14 +1166,11 @@ describe('POST /projects/:id/deploy', () => {
   });
 
   it('static deploy clears CronScheduler DO when previous PG manifest had schedules even if KV hasCrons is missing', async () => {
-    // The static-only deploy path at deploy.ts:2346 used to gate /clear on
-    // KV's `hasCrons` flag. `routing.ts:33` only writes that flag when true,
-    // so KV entries from older code paths or pre-`hasCrons` deploys have it
-    // missing — and the cron DO would silently keep firing against a script
-    // we just deleted. PG's previous live manifest is the authoritative
-    // source: same precedent as the rollback path in `routes/projects.ts`
-    // and `api-migrations.test.ts`'s 'rollback cron reconciliation is
-    // driven by the pg manifest, not stale ROUTING KV' test.
+    // KV's `hasCrons` flag is only written when true, so KV entries from
+    // older code paths or pre-`hasCrons` deploys have it missing. Gating the
+    // static-only deploy's /clear on it would leave the cron DO firing
+    // against a script we just deleted. PG's previous live manifest is the
+    // authoritative source, as on the rollback path in `routes/projects.ts`.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'static-from-cron');
     mockCfApi();
@@ -1235,7 +1195,7 @@ describe('POST /projects/:id/deploy', () => {
       .where(eq(projects.id, project.id));
 
     // …but the KV routing entry pre-dates the `hasCrons` flag, so it's
-    // missing — exactly the stale-KV case this fix exists to handle.
+    // missing.
     await env.ROUTING.put(project.slug, JSON.stringify({ workerName: `user-${project.slug}` }));
 
     const cronDoFetches: Array<{ url: string }> = [];
@@ -1252,11 +1212,10 @@ describe('POST /projects/:id/deploy', () => {
     const testEnv = { ...env, CRON_SCHEDULER: cronSchedulerMock };
 
     // Static deploy: no worker files, manifest.type='spa' to take the
-    // streaming-static branch that hits deploy.ts:2346.
+    // static branch.
     const res = await app.fetch(
       await buildStaticDeployRequest(env, project.id, user.jwt, {
         type: 'spa',
-        streamed: true,
         assets: { 'index.html': '<html>static</html>' },
       }),
       testEnv,
@@ -1269,12 +1228,10 @@ describe('POST /projects/:id/deploy', () => {
   });
 
   it('pre-routing failure does not disable previous deployment crons', async () => {
-    // Regression: cron sync used to run BEFORE the routing switch. If a
-    // step between cron-sync and routing-switch (ISR clear, prerender, …)
-    // threw, the failure-cleanup path would `/clear` the DO — wiping the
-    // still-live previous deployment's crons even though routing never
-    // moved. Cron sync now runs AFTER the routing switch, so a pre-cutover
-    // failure must NOT touch the cron DO at all.
+    // Cron sync runs AFTER the routing switch. A failure before cutover (ISR
+    // clear, prerender, …) must NOT touch the cron DO, or the failure-cleanup
+    // `/clear` would wipe the still-live previous deployment's crons even
+    // though routing never moved.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'cron-pre-fail');
     mockCfApi();
@@ -3544,12 +3501,7 @@ describe('Deploy serialization (concurrent deploy guard)', () => {
   });
 });
 
-/**
- * JSON-mode equivalent of the prior `buildStaticDeployForm` helper.
- * In direct-to-R2 the platform always uses the streamed/declared-manifest
- * code path for static deploys, so the legacy `streamed` flag is now a
- * no-op (kept in the signature for API compatibility).
- */
+/** Build a JSON-mode static (SPA or 404-page) deploy request with no worker. */
 async function buildStaticDeployRequest(
   env: TestEnv,
   projectId: string,
@@ -3557,8 +3509,6 @@ async function buildStaticDeployRequest(
   opts: {
     type: 'spa' | 'static';
     assets?: Record<string, string | Uint8Array>;
-    /** Legacy multipart-only flag; kept for signature compatibility, no effect. */
-    streamed?: boolean;
   },
 ): Promise<Request> {
   const assetConfig =
@@ -4682,12 +4632,11 @@ describe('failed deploy compensation provenance', () => {
   });
 });
 
-// Regression tests for the connection-lost fix: the deploy handler constructs
-// a TransformStream and returns `new Response(readable, ...)` BEFORE multipart
-// parsing / asset uploads begin, so CF edge / intermediaries see the 200 + NDJSON
-// content-type within milliseconds instead of blocking for 30–60s of sequential
-// KV/R2 puts. See packages/api/src/routes/deploy.ts (around the IIFE at line
-// ~1028 and the `return new Response(readable)` at line ~2349).
+// The deploy handler constructs a TransformStream and returns
+// `new Response(readable, ...)` BEFORE parsing / asset uploads begin, so CF
+// edge / intermediaries see the 200 + NDJSON content-type within milliseconds
+// instead of blocking for 30–60s of sequential KV/R2 puts and dropping the
+// connection.
 describe('POST /projects/:id/deploy (streaming response headers / heartbeat)', () => {
   it('returns application/x-ndjson and streams events incrementally (start first, done last)', async () => {
     const user = await createTestUser(env.db);
@@ -4695,8 +4644,8 @@ describe('POST /projects/:id/deploy (streaming response headers / heartbeat)', (
     mockCfApi();
 
     // Build a deploy with a decent number of asset parts so parse + streamed
-    // KV puts take non-trivial time — this is what the fix rescues from
-    // blocking the response headers. Each asset hashes to a unique key via
+    // KV puts take non-trivial time — long enough to block the response
+    // headers if they were not flushed first. Each asset hashes to a unique key via
     // path-prefixed BLAKE3, so 40 parts means 40 KV puts.
     const assets: Record<string, string> = {};
     for (let i = 0; i < 40; i++) {
@@ -4707,13 +4656,12 @@ describe('POST /projects/:id/deploy (streaming response headers / heartbeat)', (
     const res = await app.fetch(
       await buildStaticDeployRequest(env, project.id, user.jwt, {
         type: 'spa',
-        streamed: true,
         assets,
       }),
       env,
     );
 
-    // Structural guard: the deploy route now always answers with NDJSON,
+    // Structural guard: the deploy route always answers with NDJSON,
     // including 4xx-like validation failures.
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/x-ndjson');
@@ -4774,10 +4722,6 @@ describe('POST /projects/:id/deploy (streaming response headers / heartbeat)', (
     expect(doneEvent.assets).toBe(41);
     expect(doneEvent.workers).toBe(0);
   });
-
-  // Heartbeat timing under JSON-mode is dominated by R2.head + PGlite;
-  // the dedicated heartbeat coverage lived against the multipart streaming
-  // path that no longer exists. Removed alongside the multipart removal.
 });
 
 describe('Deploy with prerendering', () => {
@@ -5138,10 +5082,9 @@ describe('Deploy with prerendering', () => {
   it('warms prerender paths matched by a hyphenated whole-segment revalidate key', async () => {
     // Write-side parity for the segment-anchored matcher: a route param key with
     // a `-` (`pages/blog/[post-id].vue` → `/blog/:post-id`) must resolve a
-    // positive TTL so prerender warming runs — the old `[A-Za-z0-9_]+` param
-    // class failed to anchor `:post-id`, so `resolvePathTtl` returned 0 and
-    // warming was silently skipped. It must still anchor to ONE segment
-    // (`/blog/a/b` must NOT match).
+    // positive TTL so prerender warming runs (a `[A-Za-z0-9_]+` param class
+    // would fail to anchor `:post-id` and silently skip warming). It must
+    // still anchor to ONE segment (`/blog/a/b` must NOT match).
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'prerender-hyphen');
 
@@ -5181,7 +5124,7 @@ describe('Deploy with prerendering', () => {
       .where(eq(deployments.project_id, project.id));
     expect(deployment).toBeDefined();
 
-    // /blog/hello should have an ISR entry (the fix).
+    // /blog/hello should have an ISR entry.
     const { value: helloValue } = await env.ISR_CACHE.getWithMetadata(
       `${project.id}/isr/v3/${deployment!.id}/${project.slug}.void.app/blog/hello`,
       'arrayBuffer',
@@ -5200,9 +5143,9 @@ describe('Deploy with prerendering', () => {
     // Write-side parity for the segment-anchored matcher's NAMED CATCH-ALL rule:
     // a named catch-all page (`pages/docs/[...path].vue`) serializes to the
     // revalidate key `/docs/:path{.+}`. NESTED paths under it (`/docs/guide/setup`)
-    // must resolve a positive TTL so prerender warming runs — before the `{.+}`
-    // rule the `:[^/]+` param class swallowed `path{.+}` whole, compiling to
-    // `^/docs/[^/]+$`, so nested paths got TTL 0 and warming was silently skipped.
+    // must resolve a positive TTL so prerender warming runs (a plain `:[^/]+`
+    // param class would swallow `path{.+}` whole, compile to `^/docs/[^/]+$`,
+    // and silently skip warming nested paths).
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'prerender-catchall');
 
@@ -5340,8 +5283,7 @@ describe('Deploy with prerendering', () => {
   it('prewarms a pages-only manifest (ISR TTLs live only in manifest.pages, no flat revalidate)', async () => {
     // Route-awareness parity: a manifest whose ISR config lives ONLY in the
     // ordered `pages` table (no flat `manifest.revalidate` map) must still
-    // prewarm. Before the fix the gate required `manifest.revalidate`, so a
-    // pages-only manifest skipped prerender warming entirely.
+    // prewarm; the gate must not require `manifest.revalidate`.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'prewarm-pages-only');
 
@@ -5394,10 +5336,10 @@ describe('Deploy with prerendering', () => {
   it('does not prewarm a specific non-ISR page shadowed under a flat catch-all (first-match)', async () => {
     // First-match parity: `/specific` (a page with NO per-page TTL) must WIN
     // over the later catch-all `/:path{.+}` (revalidate 3600) — mirroring
-    // dispatch's `resolvePageTtl`. Before the fix, prewarm used the flat
-    // `resolvePathTtl(manifest.revalidate, …)` which never saw the pages table,
-    // so `/specific` fell through to the catch-all and was warmed with TTL 3600
-    // — a misleading cache entry for a page the framework renders dynamically.
+    // dispatch's `resolvePageTtl`. A flat `manifest.revalidate` lookup would
+    // never see the pages table, so `/specific` would fall through to the
+    // catch-all and be warmed with TTL 3600 — a misleading cache entry for a
+    // page the framework renders dynamically.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'prewarm-shadow');
 
@@ -5486,13 +5428,11 @@ describe('asset_hashes storage', () => {
   });
 
   it('persists asset_hashes on a failed deployment when the failure is past asset upload', async () => {
-    // Repro of the recappi deadlock: first-ever deploy fails at migrations
-    // AFTER assets were accepted by CF. Pre-fix, the late `asset_hashes`
-    // write at the end of the pipeline never ran, so the next deploy had
-    // no corroboration source and the session-dedupe guard locked the
-    // project out permanently. With the fix, asset_hashes is persisted as
-    // soon as CF accepts the bytes, so the deployment row left behind by
-    // a migration failure is a valid corroboration baseline for retries.
+    // A first-ever deploy fails at migrations AFTER assets were accepted by
+    // CF. asset_hashes is persisted as soon as CF accepts the bytes, so the
+    // deployment row left behind is a valid corroboration baseline for
+    // retries; without it the session-dedupe guard would lock the project
+    // out permanently.
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'first-deploy-migrate-fail');
     mockCfApi({ createD1: () => cfSuccess({ uuid: 'd1-recovery-uuid', name: 'fail-db' }) });
@@ -5567,10 +5507,8 @@ describe('asset_hashes storage', () => {
   });
 
   // Contract: in JSON-mode, the CLI always sends the FULL assetManifest
-  // (new uploads + preflight-skipped carry-forwards). The handler used to
-  // perform a server-side fill-in from the prior live manifest; that loop
-  // was unreachable and has been removed. This test pins the contract:
-  // every path the CLI declared must end up in the persisted asset_hashes,
+  // (new uploads + preflight-skipped carry-forwards); the server does not
+  // fill in paths from the prior live manifest. Every path the CLI declared must end up in the persisted asset_hashes,
   // regardless of whether each entry was a new upload or a preflight skip.
   it('JSON-mode deploy with preflight=true preserves preflight-skipped paths in saved manifest', async () => {
     const user = await createTestUser(env.db);
@@ -5854,12 +5792,6 @@ describe('POST /projects/:id/deploy/preflight', () => {
     expect(await response.json()).toMatchObject({ error: 'project_requires_normalization' });
     expect((await getProject(env.db, project.id))?.active_deployment_id).toBeNull();
   });
-
-  // Removed: "merges previous asset manifest when preflight flag is set on
-  // deploy" tested platform-side delta-merge behaviour from the multipart
-  // path. Direct-to-R2 deploys put the merge responsibility on the CLI —
-  // the request body declares the final desired manifest and the CLI
-  // omits unchanged paths via preflight on its own.
 
   it('includes observability metadata in worker upload', async () => {
     const user = await createTestUser(env.db);

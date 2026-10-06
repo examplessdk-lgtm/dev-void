@@ -258,8 +258,7 @@ body {
 .void-admin-auth-intro p,
 .void-admin-auth-section-header p,
 .void-admin-auth-method-type,
-.void-admin-auth-note,
-.void-admin-auth-company-policy p {
+.void-admin-auth-note {
   color: var(--color-text-secondary);
 }
 .void-admin-auth-settings .astryx-card {
@@ -357,24 +356,6 @@ body {
   font-size: var(--text-supporting-size);
 }
 .void-admin-auth-add-methods {
-  display: grid;
-  gap: var(--spacing-3);
-}
-.void-admin-auth-policy {
-  display: grid;
-  justify-items: start;
-  gap: var(--spacing-5);
-}
-.void-admin-auth-company-policy {
-  display: grid;
-  gap: var(--spacing-3);
-  width: 100%;
-  padding: var(--spacing-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-element);
-  box-sizing: border-box;
-}
-.void-admin-auth-checkboxes {
   display: grid;
   gap: var(--spacing-3);
 }
@@ -749,10 +730,6 @@ body {
   }
   .void-admin-content button {
     cursor: pointer;
-  }
-  .void-admin-content .danger,
-  .void-admin-content .danger-sm {
-    color: var(--color-error);
   }
   .void-admin-content tr.build-active {
     background: var(--color-warning-muted);

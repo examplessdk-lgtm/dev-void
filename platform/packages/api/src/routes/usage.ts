@@ -189,6 +189,17 @@ function getRequestsDataset(env: { REQUESTS_DATASET?: string; PLATFORM_ENV?: str
   return env.PLATFORM_ENV === 'staging' ? 'void_requests_staging' : 'void_requests';
 }
 
+export function queryAnalyticsEngine(accountId: string, apiToken: string, query: string) {
+  return fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      'Content-Type': 'text/plain',
+    },
+    body: query,
+  });
+}
+
 async function queryProjectUsage(
   accountId: string,
   apiToken: string,
@@ -196,7 +207,7 @@ async function queryProjectUsage(
   projectId: string,
   since: Date,
 ): Promise<{ requests: number; bandwidthBytes: number }> {
-  const sinceStr = since.toISOString().replace('T', ' ').slice(0, 19);
+  const sinceStr = formatAnalyticsDate(since);
   const query = `
     SELECT
       SUM(_sample_interval * double1) as requests,
@@ -206,17 +217,7 @@ async function queryProjectUsage(
       AND timestamp >= toDateTime('${sinceStr}')
   `;
 
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'text/plain',
-      },
-      body: query,
-    },
-  );
+  const response = await queryAnalyticsEngine(accountId, apiToken, query);
 
   if (!response.ok) {
     throw new Error(`Usage query failed with HTTP ${response.status}`);
@@ -324,17 +325,7 @@ async function queryBatchProjectUsageWindows(
     GROUP BY blob1
   `;
 
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'text/plain',
-        },
-        body: query,
-      },
-    );
+    const response = await queryAnalyticsEngine(accountId, apiToken, query);
     if (!response.ok) {
       if (failOnError) {
         throw new Error(`Usage query failed with HTTP ${response.status}`);
@@ -389,7 +380,7 @@ async function queryTopProjectTraffic(
     return [];
   }
 
-  const sinceStr = since.toISOString().replace('T', ' ').slice(0, 19);
+  const sinceStr = formatAnalyticsDate(since);
   const query = `
     SELECT
       blob1,
@@ -405,17 +396,7 @@ async function queryTopProjectTraffic(
     LIMIT ${limit}
   `;
 
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        'Content-Type': 'text/plain',
-      },
-      body: query,
-    },
-  );
+  const response = await queryAnalyticsEngine(accountId, apiToken, query);
 
   if (!response.ok) {
     return [];
@@ -499,17 +480,7 @@ async function queryProjectRequestOverview(
 
   let json: { data: ReadonlyArray<ProjectRequestOverviewRow> };
   try {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          'Content-Type': 'text/plain',
-        },
-        body: query,
-      },
-    );
+    const response = await queryAnalyticsEngine(accountId, apiToken, query);
 
     if (!response.ok) {
       return overview;

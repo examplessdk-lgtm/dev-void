@@ -10,7 +10,7 @@ React Pages playground for Void's typed WebSocket support.
 ## Run
 
 ```sh
-pnpm -C framework/playground/websockets dev
+vp run --filter ./playground/websockets dev
 ```
 
 Then open the local app and try:

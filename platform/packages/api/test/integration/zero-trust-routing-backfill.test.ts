@@ -277,8 +277,8 @@ describe('legacy routing owner backfill', () => {
         protectNewProjects: true,
         existingProjects: 'public',
       });
-      // Configuration now republishes authoritative ownership. Seed legacy
-      // entries explicitly so this scheduled run still exercises the backfill.
+      // Configuration republishes authoritative ownership. Seed legacy
+      // entries explicitly so this scheduled run exercises the backfill.
       for (const key of [project.slug, domainKey]) {
         const legacy = JSON.parse((await env.ROUTING.get(key))!);
         delete legacy.userId;

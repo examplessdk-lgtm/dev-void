@@ -53,7 +53,6 @@ export async function promptAndCreateProject(
   client: PlatformClient,
   options: { link?: boolean } = {},
 ): Promise<ProjectConfig> {
-  // promptProjectSlug exits the process on Ctrl+C, so it never returns undefined.
   const project = await createProjectWithSlugRetry(
     client,
     inferDefaultSlug(root),

@@ -18,25 +18,17 @@ import {
   createEmailProviderDeadline,
 } from './email-provider-deadline.ts';
 import {
-  MAX_MIME_BYTES,
+  bytesToStream,
   classifySendRawRecipient,
   parseSendRawResult,
   readMimeFromAddrSpec,
   readSenderDomain,
   recordInboundDelivery,
   requestSendRaw,
+  sanitizeForLog as sanitize,
 } from './email.ts';
 import type { Env as ProxyEnv } from './types.ts';
 type Env = Omit<ProxyEnv, 'JWT_SECRET'>;
-
-// Built via new RegExp to dodge oxlint no-control-regex rule.
-// oxlint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = new RegExp('[\\u0000-\\u001f\\u007f]+', 'g');
-
-/** Bound log and rejection text before stripping control characters. */
-function sanitize(value: string, maxLen: number): string {
-  return value.slice(0, maxLen).replace(CONTROL_CHARS_RE, ' ');
-}
 
 /** Render unknown tenant values by kind without coercing large arrays or objects. */
 function describeUntrusted(value: unknown, maxLen: number): string {
@@ -484,7 +476,7 @@ function createRelayedMessage(envelope: EmailEnvelope): {
     to: envelope.to,
     rawSize: envelope.rawSize,
     headers: new Headers(envelope.headers),
-    raw: envelopeRawStream(envelope.raw),
+    raw: bytesToStream(envelope.raw),
     setReject(r: string) {
       reason = r;
     },
@@ -514,7 +506,7 @@ async function prepareRelayedReply(
       throw new Error('shared email binding is unavailable');
     }
     return async (to) => {
-      const result = await binding.send(new EmailMessage(from, to, envelopeRawStream(raw)));
+      const result = await binding.send(new EmailMessage(from, to, bytesToStream(raw)));
       return result?.messageId;
     };
   }
@@ -571,15 +563,6 @@ async function prepareRelayedReply(
     }
     return result.messageId;
   };
-}
-
-function envelopeRawStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
 }
 
 async function logRecv(
@@ -704,7 +687,7 @@ async function readStreamToBytes(stream: ReadableStream<Uint8Array>): Promise<Ui
  * `forward` / `reply` carry pre-constructed `Headers` objects so the
  * enaction loop can't throw on header construction after another
  * forward/reply already fired. See `validateActions` below for why
- * validation is split from enaction (HIGH H2).
+ * validation is split from enaction.
  */
 type SanitizedAction =
   | { type: 'reject'; reason: string }
@@ -796,7 +779,7 @@ async function validateActions(
         return null;
       }
       // Check who the reply claims to be before asking the API to admit it.
-      if (!(await isPermittedReplySender(action.from, replySender))) {
+      if (!isPermittedReplySender(action.from, replySender)) {
         console.error(
           `[email-router] reply dropped: sender not owned by project "${sanitize(replySender.slug, 64)}" (from=${logAddress(action.from)})`,
         );
@@ -987,14 +970,8 @@ async function enactSanitized(
             relayedReply!(to, providerDeadline.remainingMs()),
           );
         } else {
-          const stream = new ReadableStream<Uint8Array>({
-            start(controller) {
-              controller.enqueue(action.raw);
-              controller.close();
-            },
-          });
           await providerDeadline.run(() =>
-            message.reply(new EmailMessage(action.from, to, stream) as never),
+            message.reply(new EmailMessage(action.from, to, bytesToStream(action.raw)) as never),
           );
         }
       }

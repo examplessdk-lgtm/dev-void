@@ -1,6 +1,6 @@
 /**
- * Char-by-char SQL tokenizer shared by the destructive-SQL guard
- * (projects.ts) and the single-statement classifier (remote-runner.ts).
+ * Char-by-char SQL tokenizer shared by the migration classifier, the
+ * destructive-SQL guard, and the remote migration runner.
  *
  * Walks the input and yields contiguous segments. `sql` runs are
  * emitted as `{ kind: 'sql', start, end }` so callers can `sql.slice`
@@ -16,12 +16,12 @@
  *                          `]` closes the identifier (SQLite semantics;
  *                          differs from MS SQL)
  *
- * Not handled — intentional, both current callers target SQLite only:
+ * Not handled — intentional, every caller targets SQLite only:
  *   - Postgres `$tag$ ... $tag$` dollar-quoting
  *   - Postgres `E'...'` extended string literals
  *
- * Adding a new quoting form anywhere should land here so both callers
- * stay in lockstep.
+ * Adding a new quoting form anywhere should land here so every caller
+ * stays in lockstep.
  */
 
 export type SqlSegment =

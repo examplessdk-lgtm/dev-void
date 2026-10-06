@@ -41,8 +41,10 @@ import {
   resolveBootstrapGitHubId,
   type PlatformDatabaseLifecycleLock,
 } from './platform-installer.ts';
-import { resolvePlatformInstallDatabaseUrl } from './platform-lifecycle.ts';
-import { assertNoninteractivePlatformMutationAcknowledged } from './platform-lifecycle.ts';
+import {
+  assertNoninteractivePlatformMutationAcknowledged,
+  resolvePlatformInstallDatabaseUrl,
+} from './platform-lifecycle.ts';
 import {
   createPlatformInstallPlan,
   formatPlatformInstallPlan,

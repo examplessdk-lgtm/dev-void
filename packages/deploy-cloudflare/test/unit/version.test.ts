@@ -1880,15 +1880,8 @@ describe('Cloudflare version activation', () => {
       const without = readCloudflareTriggerConfig(configPath);
       expect(without).not.toHaveProperty('addresses');
       expect(await applied(without)).not.toHaveProperty('addresses');
-      // A rollback replays the TARGET snapshot only: the version being left never lends its
-      // addresses to the trigger config, so a rollback from an email-enabled version to one
-      // recorded without `addresses` skips the plan and leaves the rules where they are —
-      // routed to a Worker that no longer exports `email()`. That is the one shape both an
-      // absent key and a pre-`addresses` (legacy) snapshot share, and it is not `[]`: a
-      // snapshot carrying `[]` would make every rollback to it a destructive plan (wrangler's
-      // default-No y/n in a TTY, a UserError in CI), which `stabilizeCloudflareVersionTriggers`
-      // reports as `triggers-failed` and the caller compensates by restoring the version it
-      // just left. Encoding "handlers removed" as `[]` is therefore a product call, not a fix.
+      // A rollback replays the target snapshot only; the version being left never lends its
+      // addresses, so a target without `addresses` skips the plan instead of sending `[]`.
       let rollbackConfig: Record<string, unknown> | undefined;
       await deployCloudflareVersionTriggers({
         runWrangler: operationFixture(async (args) => {

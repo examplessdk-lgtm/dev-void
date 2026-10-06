@@ -428,19 +428,19 @@ async function runManagedDeploy(
 
       // Check for known framework after static overrides.
       const detected = detectFramework(root);
+      // Detect git commit before build (only when not skipping build). Same scrub as
+      // `getGitCommit`: these git children can reach repo-configured hooks/credential helpers.
+      const gitMetadata = collectGitDeployMetadata(
+        root,
+        options?.skipBuild ? null : getGitCommit(root),
+        process.env,
+        buildEnv(),
+      );
       if (!preset && detected) {
         cliLog.info('framework_detected', {
           name: detected.name,
           class: detected.class,
         });
-        const gitMetadata = collectGitDeployMetadata(
-          root,
-          options?.skipBuild ? null : getGitCommit(root),
-          process.env,
-          // Same scrub as `getGitCommit` right above: these git children can
-          // reach repo-configured hooks/credential helpers.
-          buildEnv(),
-        );
         const fwPreset = FRAMEWORK_PRESETS[detected.name];
         if (detected.class === 'b' || detected.class === 'c') {
           if (!fwPreset) {
@@ -485,14 +485,6 @@ async function runManagedDeploy(
         preset = detectPreset(root, { spa: options?.spa, strictBackend: true });
       }
       // appType === "void" or "framework" without a detected framework → full deploy.
-
-      // Detect git commit before build (only when not skipping build)
-      const gitMetadata = collectGitDeployMetadata(
-        root,
-        options?.skipBuild ? null : getGitCommit(root),
-        process.env,
-        buildEnv(),
-      );
 
       if (preset) {
         preset = {
@@ -554,15 +546,9 @@ async function runManagedDeploy(
 
 export {
   type RunDeployOptions,
-  type BindingIdentitySnapshot,
   type DeployWranglerRunResult,
   type DeployWranglerRun,
   type CloudflareDeployDeps,
-  type RequiredAuthColumn,
-  type RequiredAuthTable,
-  type PrerenderSourceInputs,
-  type NonPageBackendInputs,
-  type ApplyDeployEventResult,
 } from './deploy-types.ts';
 
 export { loadProvisionModule } from './deploy-provision.ts';
@@ -588,19 +574,12 @@ export {
 
 export { verifyGeneratedDeployConfig } from './deploy-artifact-validation.ts';
 
-export {
-  CloudflareAuthSecretError,
-  formatCloudflareSandboxUnavailable,
-  deriveWorkerName,
-  computeDesiredCloudflareResources,
-} from './deploy-resources.ts';
+export { deriveWorkerName, computeDesiredCloudflareResources } from './deploy-resources.ts';
 
 export {
   assertMigrationsProduceAuthSchema,
   validateAuthMigrationSchema,
-  assertRemoteMigrationsDeployable,
   compareWranglerMigrationPaths,
-  resolveWranglerMigrationPattern,
   checkWranglerMigrationApplySet,
 } from './deploy-migrations.ts';
 
@@ -617,10 +596,7 @@ export {
   formatCloudflareActivationError,
 } from './deploy-cloudflare.ts';
 
-export {
-  prepareCloudflareFrameworkArtifact,
-  resolveCloudflareVoidStaticPreset,
-} from './deploy-cloudflare-static.ts';
+export { prepareCloudflareFrameworkArtifact } from './deploy-cloudflare-static.ts';
 
 export {
   applyDeployEvent,
@@ -652,4 +628,3 @@ export {
   resolveWorkerDirName,
 } from './deploy-helpers.ts';
 export type { EmittedWorkerVarsResult } from './env-validation.ts';
-export { resolveAssetConfig } from '../asset-routing.ts';

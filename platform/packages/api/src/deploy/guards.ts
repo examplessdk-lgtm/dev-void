@@ -21,16 +21,6 @@ export async function assertDeploymentNotCanceled(db: Db, deploymentId: string):
   }
 }
 
-// Race guard against concurrent project teardown (design-doc 0067 §7).
-// Teardown takes a project-row lock and flips `projects.status='deleting'`
-// before tearing down CF state. A concurrent deploy that has already passed
-// `assertDeploymentNotCanceled` could still race the route flip and recreate
-// routing for a deleted project. Calling this alongside every cancellation
-// check (and re-checking under FOR UPDATE at the final commit) closes that
-// window. The atomic precheck-and-claim transaction below holds the same
-// FOR UPDATE lock teardown uses, serializing the two flows.
-export const PROJECT_DELETING_ERROR_MESSAGE = 'project deletion in progress';
-
 /**
  * Sentinel error thrown by the atomic precheck-and-claim transaction to
  * signal "another deploy is already in flight". The route handler catches
@@ -45,6 +35,16 @@ export class ConcurrentDeployError extends Error {
   }
 }
 
+// Race guard against concurrent project teardown (design-doc 0067 §7).
+// Teardown takes a project-row lock and flips `projects.status='deleting'`
+// before tearing down CF state. A concurrent deploy that has already passed
+// `assertDeploymentNotCanceled` could still race the route flip and recreate
+// routing for a deleted project. Calling this alongside every cancellation
+// check (and re-checking under FOR UPDATE at the final commit) closes that
+// window. The atomic precheck-and-claim transaction holds the same
+// FOR UPDATE lock teardown uses, serializing the two flows.
+export const PROJECT_DELETING_ERROR_MESSAGE = 'project deletion in progress';
+
 export async function assertProjectNotDeleting(db: Db, projectId: string): Promise<void> {
   const project = await getProject(db, projectId);
   // Fail closed: a missing project row is treated the same as `status='deleting'`.
@@ -56,6 +56,16 @@ export async function assertProjectNotDeleting(db: Db, projectId: string): Promi
   if (!project || project.status === 'deleting') {
     throw new Error(PROJECT_DELETING_ERROR_MESSAGE);
   }
+}
+
+/** Abort a running deploy step once the deployment is canceled or its project is being deleted. */
+export async function assertDeploymentCanProceed(
+  db: Db,
+  deploymentId: string,
+  projectId: string,
+): Promise<void> {
+  await assertDeploymentNotCanceled(db, deploymentId);
+  await assertProjectNotDeleting(db, projectId);
 }
 
 // Sentinel thrown by the final-publish transaction when the deploy token's
@@ -96,10 +106,11 @@ export async function assertBoundBuildStillActive(
     .where(eq(builds.id, deployBuild))
     .for('update')
     .limit(1);
-  if (!boundBuild || !ACTIVE_BUILD_STATUSES.includes(boundBuild.status)) {
-    throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
-  }
-  if (boundBuild.project_id !== projectId) {
+  if (
+    !boundBuild ||
+    !ACTIVE_BUILD_STATUSES.includes(boundBuild.status) ||
+    boundBuild.project_id !== projectId
+  ) {
     throw new Error(SUPERSEDED_BUILD_ERROR_MESSAGE);
   }
 }

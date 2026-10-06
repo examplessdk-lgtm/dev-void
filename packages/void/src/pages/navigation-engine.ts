@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 
-import { createActionErrorFromResponse } from './action-result.ts';
+import { createActionErrorFromResponse, isAbortError } from './action-result.ts';
 import { initClientHead, applyClientHead } from './head-client.ts';
 import type { HeadDescriptor } from './head.ts';
 import { PrefetchCache, parseCacheFor } from './prefetch.ts';
@@ -21,6 +21,8 @@ type DeferredWindow = Window & {
 };
 
 type PageFetchOptions = RequestInit & { headers: Record<string, string> };
+
+type StaticPageDataResult = { pageData: PageData; resolvedDeferred: boolean };
 
 export type VisitOptions = {
   method?: string;
@@ -190,15 +192,6 @@ function parsePageDataFromHtml(html: string): PageData | null {
   }
 }
 
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'name' in error &&
-    (error as { name?: unknown }).name === 'AbortError'
-  );
-}
-
 function abortError(): DOMException {
   return new DOMException('Navigation aborted', 'AbortError');
 }
@@ -240,7 +233,6 @@ export async function createPageNavigationEngine(
   } = config;
 
   const _prefetchCache = new PrefetchCache();
-  const _staticPageDataCacheKeys = new Set<string>();
   let _nextNavigationId = 0;
   let _pendingResource: PageNavigationResource | null = null;
   let _committedResource: PageNavigationResource | null = null;
@@ -251,10 +243,6 @@ export async function createPageNavigationEngine(
   let initialScrollPosition: { x: number; y: number } | null = null;
   const initialUrl = window.location.pathname + window.location.search + window.location.hash;
   const scrollRestoration = createScrollRestoration();
-
-  function getPageDataCacheKey(url: string, method = 'GET'): string {
-    return `${method}:${url}`;
-  }
 
   async function resolveComponent(id: string): Promise<unknown> {
     const loader = components[id];
@@ -284,7 +272,6 @@ export async function createPageNavigationEngine(
       'props' in pageData &&
       typeof pageData.props === 'object' &&
       pageData.props !== null &&
-      typeof pageData.component === 'string' &&
       pageData.component === matchedId &&
       !routeMeta[pageData.component]?.island &&
       Boolean(components[pageData.component])
@@ -299,7 +286,8 @@ export async function createPageNavigationEngine(
     private preservedSource: DeferredRegistry | null = null;
     private preservedKeys: Set<string> | null = null;
 
-    setupPending(pageData: PageData): void {
+    /** Create a deferred ref per key; `resolved` payloads already carry the values inline. */
+    setup(pageData: PageData, resolved = false): void {
       this.props = pageData.props;
       this.keyRefs = {};
       this.groups = {};
@@ -310,26 +298,9 @@ export async function createPageNavigationEngine(
 
       for (const [key, group] of Object.entries(pageData.deferredKeys) as Array<[string, string]>) {
         const ref = adapter.createDeferred();
-        this.keyRefs[key] = ref;
-        this.props[key] = ref;
-        (this.groups[group] ??= []).push(key);
-      }
-    }
-
-    setupResolved(pageData: PageData): void {
-      this.props = pageData.props;
-      this.keyRefs = {};
-      this.groups = {};
-
-      if (!pageData.deferredKeys) {
-        return;
-      }
-
-      for (const [key, group] of Object.entries(pageData.deferredKeys) as Array<[string, string]>) {
-        const ref = adapter.createDeferred();
-        const updated = adapter.resolveDeferred(ref, pageData.props[key]);
-        this.keyRefs[key] = updated;
-        this.props[key] = updated;
+        const value = resolved ? adapter.resolveDeferred(ref, pageData.props[key]) : ref;
+        this.keyRefs[key] = value;
+        this.props[key] = value;
         (this.groups[group] ??= []).push(key);
       }
     }
@@ -475,15 +446,18 @@ export async function createPageNavigationEngine(
   const _resourceDeferredRegistries = new WeakMap<PageNavigationResource, DeferredRegistry>();
   const _preservedDeferredResources = new WeakMap<DeferredRegistry, PageNavigationResource>();
 
+  /** Route id for a non-island page that static page data can serve, or null. */
+  function matchStaticPageId(fetchUrl: string): string | null {
+    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
+    return matchedId && !routeMeta[matchedId]?.island && components[matchedId] ? matchedId : null;
+  }
+
   async function loadStaticPageDataFile(
     fetchUrl: string,
     signal?: AbortSignal,
-  ): Promise<{
-    pageData: PageData;
-    resolvedDeferred: boolean;
-  } | null> {
-    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
-    if (!matchedId || routeMeta[matchedId]?.island || !components[matchedId]) {
+  ): Promise<StaticPageDataResult | null> {
+    const matchedId = matchStaticPageId(fetchUrl);
+    if (!matchedId) {
       return null;
     }
 
@@ -512,16 +486,13 @@ export async function createPageNavigationEngine(
     response: Response,
     signal?: AbortSignal,
     verifyPageResponse = false,
-  ): Promise<{
-    pageData: PageData;
-    resolvedDeferred: boolean;
-  } | null> {
+  ): Promise<StaticPageDataResult | null> {
     if (!response.ok) {
       return null;
     }
 
-    const matchedId = matchRoute(fetchUrl || window.location.pathname + window.location.search);
-    if (!matchedId || routeMeta[matchedId]?.island || !components[matchedId]) {
+    const matchedId = matchStaticPageId(fetchUrl);
+    if (!matchedId) {
       return null;
     }
 
@@ -553,6 +524,51 @@ export async function createPageNavigationEngine(
     return { pageData, resolvedDeferred: false };
   }
 
+  /** Fetch page data for the prefetch cache; null means "fall back to a full page load". */
+  function fetchPrefetchPageData(url: string): Promise<unknown> {
+    const headers = {
+      'X-VoidPages': 'true',
+      Accept: 'application/json',
+      Purpose: 'prefetch',
+    };
+    return (
+      STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH
+        ? loadStaticPageDataFile(url).then((result) => result?.pageData)
+        : Promise.resolve(undefined)
+    ).then((pageData) => {
+      if (pageData !== undefined) {
+        return pageData;
+      }
+      return fetchPageResponse(url, { method: 'GET', headers }).then(async (r) => {
+        if (!r || r.redirected) {
+          return null;
+        }
+        if (!r.headers.get('X-VoidPages')) {
+          return (
+            (await loadStaticPageData(url, r, undefined, !STATIC_PAGE_DATA_FAST_PATH))?.pageData ??
+            null
+          );
+        }
+        return r.json();
+      });
+    });
+  }
+
+  function restoreScroll(scrollPosition: VisitOptions['_scrollPosition'], hash: string): void {
+    if (scrollPosition) {
+      window.scrollTo(scrollPosition.x, scrollPosition.y);
+      return;
+    }
+    if (hash) {
+      const el = document.getElementById(hash.slice(1));
+      if (el) {
+        el.scrollIntoView();
+        return;
+      }
+    }
+    window.scrollTo(0, 0);
+  }
+
   const deferredWindow = window as DeferredWindow;
   deferredWindow.__resolveDeferred = (group: string, data: unknown) =>
     _htmlDeferredRegistry?.resolve(group, data, undefined);
@@ -570,18 +586,7 @@ export async function createPageNavigationEngine(
       scrollRestoration.writeHistory(effectiveFetchUrl + hash, !!options.replace);
     }
     scrollRestoration.commit();
-    if (options._scrollPosition) {
-      window.scrollTo(options._scrollPosition.x, options._scrollPosition.y);
-      return;
-    }
-    if (hash) {
-      const el = document.getElementById(hash.slice(1));
-      if (el) {
-        el.scrollIntoView();
-        return;
-      }
-    }
-    window.scrollTo(0, 0);
+    restoreScroll(options._scrollPosition, hash);
   }
 
   async function loadNavigationShell(
@@ -596,7 +601,6 @@ export async function createPageNavigationEngine(
   ): Promise<PageNavigationResult | undefined> {
     if (method !== 'GET') {
       _prefetchCache.flushAll();
-      _staticPageDataCacheKeys.clear();
     }
 
     const headers: Record<string, string> = {
@@ -626,34 +630,9 @@ export async function createPageNavigationEngine(
       }
       // Deferred initialization and adapters mutate props; retain the cached wire payload.
       pageData = clonePageData(cachedPageData as PageData);
-      deferredRegistry.setupResolved(pageData);
+      deferredRegistry.setup(pageData, true);
       if (!_prefetchCache.isFresh(cacheEntry)) {
-        const bgHeaders = {
-          'X-VoidPages': 'true',
-          Accept: 'application/json',
-          Purpose: 'prefetch',
-        };
-        const bgFetch = (
-          STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH && method === 'GET'
-            ? loadStaticPageDataFile(fetchUrl).then((result) => result?.pageData)
-            : Promise.resolve(undefined)
-        ).then((pageData) => {
-          if (pageData !== undefined) {
-            return pageData;
-          }
-          return fetchPageResponse(fetchUrl, { method, headers: bgHeaders }).then(async (r) => {
-            if (!r || r.redirected) {
-              return null;
-            }
-            if (!r.headers.get('X-VoidPages')) {
-              return (
-                (await loadStaticPageData(fetchUrl, r, undefined, !STATIC_PAGE_DATA_FAST_PATH))
-                  ?.pageData ?? null
-              );
-            }
-            return r.json();
-          });
-        });
+        const bgFetch = fetchPrefetchPageData(fetchUrl);
         // Drop the stale entry so the revalidated data lands (set() won't overwrite a usable one).
         _prefetchCache.flush(fetchUrl, method);
         _prefetchCache.set(fetchUrl, method, bgFetch, PREFETCH_DEFAULT_CACHE_FOR);
@@ -663,18 +642,13 @@ export async function createPageNavigationEngine(
         const staticPageData = await loadStaticPageDataFile(fetchUrl, signal);
         if (staticPageData) {
           pageData = staticPageData.pageData;
-          _staticPageDataCacheKeys.add(getPageDataCacheKey(fetchUrl, method));
           _prefetchCache.set(
             fetchUrl,
             method,
             Promise.resolve(clonePageData(pageData)),
             PREFETCH_DEFAULT_CACHE_FOR,
           );
-          if (staticPageData.resolvedDeferred) {
-            deferredRegistry.setupResolved(pageData);
-          } else {
-            deferredRegistry.setupPending(pageData);
-          }
+          deferredRegistry.setup(pageData, staticPageData.resolvedDeferred);
         }
       }
 
@@ -729,11 +703,7 @@ export async function createPageNavigationEngine(
           );
           if (staticPageData) {
             pageData = staticPageData.pageData;
-            if (staticPageData.resolvedDeferred) {
-              deferredRegistry.setupResolved(pageData);
-            } else {
-              deferredRegistry.setupPending(pageData);
-            }
+            deferredRegistry.setup(pageData, staticPageData.resolvedDeferred);
           } else {
             window.location.href = url;
             return undefined;
@@ -765,7 +735,7 @@ export async function createPageNavigationEngine(
 
             if (firstLine) {
               pageData = JSON.parse(line) as PageData;
-              deferredRegistry.setupPending(pageData);
+              deferredRegistry.setup(pageData);
               firstLine = false;
             } else {
               const msg = JSON.parse(line);
@@ -806,7 +776,7 @@ export async function createPageNavigationEngine(
         })();
       } else {
         pageData = (await response!.json()) as PageData;
-        deferredRegistry.setupPending(pageData);
+        deferredRegistry.setup(pageData);
       }
 
       if (
@@ -916,25 +886,11 @@ export async function createPageNavigationEngine(
       }
       scrollRestoration.commit();
 
-      const doScroll = () => {
-        if (options.preserveScroll) {
-          return;
+      requestAnimationFrame(() => {
+        if (!options.preserveScroll) {
+          restoreScroll(options._scrollPosition, commitTarget.hash);
         }
-        if (options._scrollPosition) {
-          window.scrollTo(options._scrollPosition.x, options._scrollPosition.y);
-        } else if (commitTarget.hash) {
-          const el = document.getElementById(commitTarget.hash.slice(1));
-          if (el) {
-            el.scrollIntoView();
-          } else {
-            window.scrollTo(0, 0);
-          }
-        } else {
-          window.scrollTo(0, 0);
-        }
-      };
-
-      requestAnimationFrame(doScroll);
+      });
     };
   }
 
@@ -961,7 +917,7 @@ export async function createPageNavigationEngine(
   }
 
   const initialDeferredRegistry = new DeferredRegistry();
-  initialDeferredRegistry.setupPending(initialPageData);
+  initialDeferredRegistry.setup(initialPageData);
   _committedDeferredRegistry = initialDeferredRegistry;
   _htmlDeferredRegistry = initialDeferredRegistry;
 
@@ -1031,6 +987,10 @@ export async function createPageNavigationEngine(
       );
 
       let commitResource: () => Promise<void> = async () => {};
+      const stop = () => {
+        controller.abort(abortError());
+        deferredRegistry.dispose();
+      };
       const resource: PageNavigationResource = {
         id,
         url,
@@ -1040,17 +1000,11 @@ export async function createPageNavigationEngine(
         options,
         immediate: false,
         shell,
-        abort() {
-          controller.abort(abortError());
-          deferredRegistry.dispose();
-        },
+        abort: stop,
         commit() {
           return commitResource();
         },
-        dispose() {
-          controller.abort(abortError());
-          deferredRegistry.dispose();
-        },
+        dispose: stop,
       };
       _resourceDeferredRegistries.set(resource, deferredRegistry);
       commitResource = makeCommit(
@@ -1104,46 +1058,17 @@ export async function createPageNavigationEngine(
         return existing.response;
       }
       const ttl = options.cacheFor ? parseCacheFor(options.cacheFor) : PREFETCH_DEFAULT_CACHE_FOR;
-      const headers = {
-        'X-VoidPages': 'true',
-        Accept: 'application/json',
-        Purpose: 'prefetch',
-      };
-      const fetchPromise = (
-        STATIC_PAGE_DATA_ENABLED && STATIC_PAGE_DATA_FAST_PATH && method === 'GET'
-          ? loadStaticPageDataFile(prefetchUrl).then((result) => result?.pageData)
-          : Promise.resolve(undefined)
-      ).then((pageData) => {
-        if (pageData !== undefined) {
-          return pageData;
-        }
-        return fetchPageResponse(prefetchUrl, { method, headers }).then((r) => {
-          if (!r || r.redirected) {
-            return null;
-          }
-          if (!r.headers.get('X-VoidPages')) {
-            if (method !== 'GET') {
-              return null;
-            }
-            return loadStaticPageData(prefetchUrl, r, undefined, !STATIC_PAGE_DATA_FAST_PATH).then(
-              (result) => result?.pageData ?? null,
-            );
-          }
-          return r.json();
-        });
-      });
+      const fetchPromise = fetchPrefetchPageData(prefetchUrl);
       _prefetchCache.set(prefetchUrl, method, fetchPromise, ttl);
       return fetchPromise;
     },
 
     flush(url, method = 'GET') {
       _prefetchCache.flush(url, method);
-      _staticPageDataCacheKeys.delete(getPageDataCacheKey(url, method));
     },
 
     flushAll() {
       _prefetchCache.flushAll();
-      _staticPageDataCacheKeys.clear();
     },
 
     setPopStateHandler(handler) {

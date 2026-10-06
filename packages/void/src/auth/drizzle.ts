@@ -16,6 +16,13 @@ import {
 type AuthIdStrategy = 'serial' | 'text' | 'uuid';
 const DEFAULT_TABLE_ORDER = Number.MAX_SAFE_INTEGER;
 
+function compareTableOrder(
+  [, left]: [string, { order?: number }],
+  [, right]: [string, { order?: number }],
+): number {
+  return (left.order ?? DEFAULT_TABLE_ORDER) - (right.order ?? DEFAULT_TABLE_ORDER);
+}
+
 export type VoidAuthMigrationField = {
   type: DBFieldAttribute['type'];
   required: boolean;
@@ -245,8 +252,6 @@ function createColumnBuilder(
         return field.bigint
           ? `bigint(${JSON.stringify(fieldName)}, { mode: "number" })`
           : `integer(${JSON.stringify(fieldName)})`;
-      case 'string':
-        return `text(${JSON.stringify(fieldName)})`;
       default:
         return `text(${JSON.stringify(fieldName)})`;
     }
@@ -271,8 +276,6 @@ function createColumnBuilder(
       return `integer(${JSON.stringify(fieldName)}, { mode: "timestamp_ms" })`;
     case 'number':
       return `integer(${JSON.stringify(fieldName)})`;
-    case 'string':
-      return `text(${JSON.stringify(fieldName)})`;
     default:
       return `text(${JSON.stringify(fieldName)})`;
   }
@@ -381,15 +384,11 @@ function collectCoreImports(
         continue;
       }
       if (field.type === 'boolean') {
-        imports.add(
-          dialect === 'postgresql' ? 'boolean' : dialect === 'mysql' ? 'boolean' : 'integer',
-        );
+        imports.add(dialect === 'sqlite' ? 'integer' : 'boolean');
         continue;
       }
       if (field.type === 'date') {
-        imports.add(
-          dialect === 'postgresql' ? 'timestamp' : dialect === 'mysql' ? 'timestamp' : 'integer',
-        );
+        imports.add(dialect === 'sqlite' ? 'integer' : 'timestamp');
         continue;
       }
       if (field.type === 'number') {
@@ -413,10 +412,7 @@ export function generateVoidAuthDrizzleSchema(
   const migrationSchema = resolveVoidAuthMigrationSchema(runtime, env);
   const idStrategy = resolveIdStrategy(options);
   const defaultToVariable = new Map<string, string>();
-  const entries = Object.entries(schema).sort(
-    ([, left], [, right]) =>
-      (left.order ?? DEFAULT_TABLE_ORDER) - (right.order ?? DEFAULT_TABLE_ORDER),
-  );
+  const entries = Object.entries(schema).sort(compareTableOrder);
 
   for (const [defaultModelName] of entries) {
     defaultToVariable.set(defaultModelName, `${sanitizeIdentifier(defaultModelName)}Table`);
@@ -469,25 +465,21 @@ export function generateVoidAuthDrizzleSchema(
     ];
     const indexedFields = fieldEntries.filter(([, field]) => field.index && !field.unique);
 
-    if (indexedFields.length > 0) {
-      lines.push(
-        `export const ${variableName} = ${tableFactory}(${JSON.stringify(table.modelName)}, {`,
-        ...renderedFields,
-        `}, (table) => [`,
-        ...indexedFields.map(([defaultFieldName, field]) => {
-          const actualFieldName = resolveFieldName(defaultFieldName, field);
-          return `  index(${JSON.stringify(`${table.modelName}_${actualFieldName}_idx`)}).on(table[${JSON.stringify(actualFieldName)}]),`;
-        }),
-        `]);`,
-      );
-    } else {
-      lines.push(
-        `export const ${variableName} = ${tableFactory}(${JSON.stringify(table.modelName)}, {`,
-        ...renderedFields,
-        `});`,
-      );
-    }
-    lines.push('');
+    lines.push(
+      `export const ${variableName} = ${tableFactory}(${JSON.stringify(table.modelName)}, {`,
+      ...renderedFields,
+      ...(indexedFields.length > 0
+        ? [
+            `}, (table) => [`,
+            ...indexedFields.map(([defaultFieldName, field]) => {
+              const actualFieldName = resolveFieldName(defaultFieldName, field);
+              return `  index(${JSON.stringify(`${table.modelName}_${actualFieldName}_idx`)}).on(table[${JSON.stringify(actualFieldName)}]),`;
+            }),
+            `]);`,
+          ]
+        : [`});`]),
+      '',
+    );
   }
 
   lines.push('export const schema = {');
@@ -530,10 +522,7 @@ export function resolveVoidAuthMigrationSchema(
     dialect: runtime.dialect,
     idStrategy: resolveIdStrategy(options),
     tables: Object.entries(schema)
-      .sort(
-        ([, left], [, right]) =>
-          (left.order ?? DEFAULT_TABLE_ORDER) - (right.order ?? DEFAULT_TABLE_ORDER),
-      )
+      .sort(compareTableOrder)
       .map(([name, table]) => ({
         name,
         order: table.order ?? DEFAULT_TABLE_ORDER,

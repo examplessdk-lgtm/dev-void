@@ -13,9 +13,10 @@ import ignore from 'ignore';
 import mime from 'mime';
 import { extname, join, relative } from 'pathslash';
 import type { CfBuildOutput } from './cf-build-output.ts';
+import { record as object } from './cf-config-migrate.ts';
 
 type Json = Record<string, unknown>;
-type ContainerCommand = (
+export type CfCommand = (
   args: Array<string>,
   options: { cwd: string; capture: boolean; timeoutMs?: number; maxOutputBytes?: number },
 ) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
@@ -30,8 +31,15 @@ class CloudflareApiError extends Error {
   }
 }
 
-function object(value: unknown): Json | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : null;
+/** Worker binding types whose value comes from a secret rather than the build output. */
+export function isSecretBindingType(type: unknown): boolean {
+  return type === 'secret' || type === 'inherit' || type === 'unsafe:inherit';
+}
+
+function assertUploaderUnchanged(verifyUploader: () => boolean): void {
+  if (!verifyUploader()) {
+    throw new Error('The Cloudflare uploader changed during deployment.');
+  }
 }
 
 function requiredString(value: unknown, label: string): string {
@@ -86,7 +94,7 @@ function bindingsFromOutput(
       continue;
     }
     if (inherited.has(name)) {
-      if (value && !['secret', 'inherit', 'unsafe:inherit'].includes(String(value.type))) {
+      if (value && !isSecretBindingType(value.type)) {
         throw new Error(`Cloudflare secret ${name} conflicts with a Worker binding.`);
       }
       bindings.push({ name, type: 'inherit', version_id: activeSecrets.versionId });
@@ -389,9 +397,7 @@ async function apiResult(
   verifyUploader: () => boolean,
   timeout = 120_000,
 ): Promise<Json> {
-  if (!verifyUploader()) {
-    throw new Error('The Cloudflare uploader changed during deployment.');
-  }
+  assertUploaderUnchanged(verifyUploader);
   const form = body instanceof FormData;
   const response = await fetch(url, {
     method,
@@ -418,6 +424,24 @@ async function apiResult(
 }
 
 type ContainerPlan = { name: string; className: string; images: Json; settings: Json };
+
+/** Durable Object namespace bindings that point at this Worker's own class. */
+function localNamespaceBindings(
+  bindings: Array<unknown>,
+  className: string,
+  workerName: string,
+): Array<Json> {
+  return bindings
+    .map(object)
+    .filter(
+      (binding): binding is Json =>
+        binding?.type === 'durable_object_namespace' &&
+        binding.class_name === className &&
+        (binding.script_name === undefined || binding.script_name === workerName) &&
+        binding.environment === undefined &&
+        binding.dispatch_namespace === undefined,
+    );
+}
 
 function assertContainerApplicationIdentity(
   application: Json,
@@ -479,18 +503,10 @@ async function preflightContainerApplications(
   verifyUploader: () => boolean,
 ): Promise<void> {
   for (const plan of plans) {
-    const matches = bindings
-      .map(object)
-      .filter(
-        (binding) =>
-          binding?.type === 'durable_object_namespace' &&
-          binding.class_name === plan.className &&
-          (binding.script_name === undefined || binding.script_name === workerName) &&
-          binding.environment === undefined &&
-          binding.dispatch_namespace === undefined &&
-          binding.namespace_id !== undefined,
-      );
-    const namespaces = new Set(matches.map((binding) => binding!.namespace_id));
+    const matches = localNamespaceBindings(bindings, plan.className, workerName).filter(
+      (binding) => binding.namespace_id !== undefined,
+    );
+    const namespaces = new Set(matches.map((binding) => binding.namespace_id));
     if (namespaces.size > 1) {
       throw new Error(`Cloudflare Container ${plan.name} active namespace was ambiguous.`);
     }
@@ -617,9 +633,7 @@ async function dockerImageDigest(
   timeout: number,
   verifyUploader: () => boolean,
 ): Promise<string> {
-  if (!verifyUploader()) {
-    throw new Error('The Cloudflare uploader changed during deployment.');
-  }
+  assertUploaderUnchanged(verifyUploader);
   const stdout = await new Promise<string>((resolve, reject) => {
     execFile(
       process.env.WRANGLER_DOCKER_BIN ?? 'docker',
@@ -659,7 +673,7 @@ async function prepareContainerMetadata(options: {
   accountId: string;
   token: string;
   verifyUploader: () => boolean;
-  runCf?: ContainerCommand;
+  runCf?: CfCommand;
 }): Promise<Array<Json>> {
   if (options.plans.length === 0) {
     return [];
@@ -815,17 +829,8 @@ async function ensureContainerApplications(options: {
     );
   }
   for (const plan of options.plans) {
-    const matches = versionBindings
-      .map(object)
-      .filter(
-        (binding) =>
-          binding?.type === 'durable_object_namespace' &&
-          binding.class_name === plan.className &&
-          (binding.script_name === undefined || binding.script_name === options.workerName) &&
-          binding.environment === undefined &&
-          binding.dispatch_namespace === undefined,
-      );
-    const namespaces = new Set(matches.map((binding) => binding!.namespace_id));
+    const matches = localNamespaceBindings(versionBindings, plan.className, options.workerName);
+    const namespaces = new Set(matches.map((binding) => binding.namespace_id));
     if (matches.length === 0 || namespaces.size !== 1) {
       throw new Error(
         `Cloudflare Container ${plan.name} has no unambiguous uploaded local namespace.`,
@@ -978,7 +983,7 @@ export async function uploadPinnedCloudflareVersion(options: {
   secretsFilePath?: string;
   atomic: boolean;
   verifyUploader: () => boolean;
-  runCf?: ContainerCommand;
+  runCf?: CfCommand;
 }): Promise<{ id: string; urls: Array<string> }> {
   const activeSecrets = options.output.activeSecrets;
   if (!activeSecrets) {
@@ -1041,10 +1046,11 @@ export async function uploadPinnedCloudflareVersion(options: {
   );
   const exports = exportsFromOutput(config.exports, bindings);
   const containerPlans = containerPlansFromOutput(built.containers, exports, bindings);
+  const accountUrl = `${options.apiBaseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(options.accountId)}`;
   // The scripts uploader normally carries forward remote vars. Preserve only
   // those implicit bindings from the live version, never the inactive upload.
   const active = await apiResult(
-    `${options.apiBaseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(options.accountId)}/workers/workers/${encodeURIComponent(options.workerName)}/versions/${encodeURIComponent(activeSecrets.versionId)}`,
+    `${accountUrl}/workers/workers/${encodeURIComponent(options.workerName)}/versions/${encodeURIComponent(activeSecrets.versionId)}`,
     options.token,
     'GET',
     undefined,
@@ -1096,7 +1102,6 @@ export async function uploadPinnedCloudflareVersion(options: {
       ).toString('base64'),
     });
   }
-  const accountUrl = `${options.apiBaseUrl.replace(/\/$/, '')}/accounts/${encodeURIComponent(options.accountId)}`;
   await preflightWorkflowExports({
     exports,
     accountUrl,

@@ -57,7 +57,7 @@ const COLUMN_TYPES = new Set(['string', 'text', 'datetime', 'integer', 'boolean'
 
 const VALID_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 
-// Generated-file name validators (hoisted once); *_HYPHENS variant also allows hyphens (cron/queue/middleware).
+// *_HYPHENS variant also allows hyphens (cron/queue/middleware).
 const NAME_RE = /^[a-z_][a-z0-9_]*$/;
 const NAME_WITH_HYPHENS_RE = /^[a-z_][a-z0-9_-]*$/;
 
@@ -141,20 +141,25 @@ function parseRouteArgs(args: Array<string>): GenArgs {
   return { subcommand: 'route', path: cleanPath, methods };
 }
 
-function parseMiddlewareArgs(args: Array<string>): GenArgs {
+/** Shared parser for the single-name generators whose names may contain hyphens. */
+function parseHyphenatedNameArgs(
+  args: Array<string>,
+  subcommand: 'middleware' | 'cron' | 'queue',
+  label: string,
+): GenArgs {
   const [name, extra] = args;
   if (!name) {
-    throw new Error('gen: Usage: void gen middleware <name>.');
+    throw new Error(`gen: Usage: void gen ${subcommand} <name>.`);
   }
   if (extra) {
     throw new Error(`gen: Unexpected argument '${extra}'.`);
   }
   if (!NAME_WITH_HYPHENS_RE.test(name)) {
     throw new Error(
-      'gen: Middleware name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
+      `gen: ${label} name must be lowercase alphanumeric with underscores or hyphens and no leading digits.`,
     );
   }
-  return { subcommand: 'middleware', name };
+  return { subcommand, name };
 }
 
 function parseSsrArgs(args: Array<string>): GenArgs {
@@ -182,38 +187,6 @@ function parseSsrArgs(args: Array<string>): GenArgs {
   return { subcommand: 'ssr', framework: frameworks[0] };
 }
 
-function parseCronArgs(args: Array<string>): GenArgs {
-  const [name, extra] = args;
-  if (!name) {
-    throw new Error('gen: Usage: void gen cron <name>.');
-  }
-  if (extra) {
-    throw new Error(`gen: Unexpected argument '${extra}'.`);
-  }
-  if (!NAME_WITH_HYPHENS_RE.test(name)) {
-    throw new Error(
-      'gen: Cron name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
-    );
-  }
-  return { subcommand: 'cron', name };
-}
-
-function parseQueueArgs(args: Array<string>): GenArgs {
-  const [name, extra] = args;
-  if (!name) {
-    throw new Error('gen: Usage: void gen queue <name>.');
-  }
-  if (extra) {
-    throw new Error(`gen: Unexpected argument '${extra}'.`);
-  }
-  if (!NAME_WITH_HYPHENS_RE.test(name)) {
-    throw new Error(
-      'gen: Queue name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
-    );
-  }
-  return { subcommand: 'queue', name };
-}
-
 export function parseGenArgs(args: Array<string>): GenArgs {
   const [subcommand, ...rest] = args;
 
@@ -227,16 +200,16 @@ export function parseGenArgs(args: Array<string>): GenArgs {
     return parseRouteArgs(rest);
   }
   if (subcommand === 'middleware') {
-    return parseMiddlewareArgs(rest);
+    return parseHyphenatedNameArgs(rest, 'middleware', 'Middleware');
   }
   if (subcommand === 'ssr') {
     return parseSsrArgs(rest);
   }
   if (subcommand === 'cron') {
-    return parseCronArgs(rest);
+    return parseHyphenatedNameArgs(rest, 'cron', 'Cron');
   }
   if (subcommand === 'queue') {
-    return parseQueueArgs(rest);
+    return parseHyphenatedNameArgs(rest, 'queue', 'Queue');
   }
 
   throw new Error('gen: Usage: void gen <model|migration|route|middleware|ssr|cron|queue>.');

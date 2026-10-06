@@ -65,7 +65,6 @@ describe('named-layouts integration', () => {
     const res = await fetch(`${DEV_BASE}/landing`);
     expect(res.status).toBe(200);
     const html = await res.text();
-    // Root is the only default layout; named layout replaces innermost → root replaced
     expect(html).toContain('data-layout="landing"');
     expect(html).not.toContain('data-layout="root"');
     expect(html).toContain('data-page="landing"');

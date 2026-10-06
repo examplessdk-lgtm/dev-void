@@ -1,6 +1,6 @@
-import { platformProjectHostname, readPlatformApplication } from '@void/platform';
 import { eq, sql } from 'drizzle-orm';
 import { deleteWorkerBundle } from './assets.ts';
+import { DEFAULT_DISPATCH_NAMESPACE } from './constants.ts';
 import {
   cancelDeployment,
   getDeployment,
@@ -9,6 +9,7 @@ import {
   updateDeploymentStatus,
   type Db,
 } from './db.ts';
+import { projectPublicUrls } from './deploy/shared.ts';
 import type { ApiEnv } from './env.ts';
 import { deleteSandboxController } from './provisioning/sandbox-controller.ts';
 import { settleDeploymentForSandboxDrain } from './routes/deploy.ts';
@@ -25,13 +26,7 @@ async function committedEvent(
   project: Project,
   deployment: Deployment,
 ): Promise<DeployEvent> {
-  const domains = (await getDomainsByProjectId(db, project.id)).filter(
-    (domain) => domain.status === 'active',
-  );
-  const urls = [
-    ...domains.map((domain) => `https://${domain.hostname}`),
-    `https://${platformProjectHostname(project, readPlatformApplication(env))}`,
-  ];
+  const urls = projectPublicUrls(env, project, await getDomainsByProjectId(db, project.id));
   const manifest = deployment.manifest ? (JSON.parse(deployment.manifest) as DeployManifest) : null;
   return {
     event: 'done',
@@ -132,7 +127,7 @@ export async function settleExpiredDeployment(
       // The manifest is committed before upload; null/static manifests cannot
       // have uploaded a Worker and need no dispatch provider permissions.
       if (manifest && manifest.type !== 'static' && manifest.type !== 'spa') {
-        const namespace = env.DISPATCH_NAMESPACE ?? 'void-users';
+        const namespace = env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
         const workerName = `user-${project.slug}-${deployment.id}`;
         const response = await fetch(
           `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/workers/dispatch/namespaces/${namespace}/scripts/${workerName}`,

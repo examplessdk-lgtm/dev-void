@@ -35,7 +35,7 @@ const SQLITE_INTERNAL_TABLES = new Set([
   '__drizzle_migrations',
 ]);
 
-export function projectUsesVitePlus(startDir: string = process.cwd()): boolean {
+function projectUsesVitePlus(startDir: string = process.cwd()): boolean {
   const nearest = readNearestPackageJson(startDir);
   return nearest ? hasPackageDependency(nearest.packageJson, 'vite-plus') : false;
 }
@@ -260,7 +260,6 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
   try {
     upgradeTrackingTable(db);
 
-    // Create tracking table if it doesn't exist
     db.exec(`
       CREATE TABLE IF NOT EXISTS _void_migrations (
         name TEXT PRIMARY KEY,

@@ -1,3 +1,5 @@
+import { isApiPath } from './request-type.ts';
+
 const DEFAULT_FONT_STACK =
   'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 
@@ -108,7 +110,7 @@ export function shouldServeHtmlErrorPage(request: Request): boolean {
   }
 
   const url = new URL(request.url);
-  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+  if (isApiPath(url.pathname)) {
     return false;
   }
   if (/\/[^/]+\.[^/]+$/.test(url.pathname)) {

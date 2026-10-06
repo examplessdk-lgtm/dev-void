@@ -2,7 +2,14 @@
 // Native Cloudflare email events use the same proxy, then enact its actions on
 // the original message before returning.
 
-import { EMAIL_MAX_RESPONSE_BYTES } from '@void/platform/email-protocol';
+import {
+  EMAIL_MAX_ACTIONS,
+  EMAIL_MAX_INBOUND_BYTES,
+  EMAIL_MAX_INBOUND_HEADERS,
+  EMAIL_MAX_METADATA_BYTES,
+  EMAIL_MAX_REPLY_BYTES,
+  EMAIL_MAX_RESPONSE_BYTES,
+} from '@void/platform/email-protocol';
 import type { Email as PostalMimeEmail } from 'postal-mime';
 import { getRawRuntimeEnv } from '../env-raw.ts';
 import { buildMime, MimeError, normalizeEmail, validateAddressParts } from './mime.ts';
@@ -15,22 +22,22 @@ const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
 
 // SDK limits give handlers early errors. The gateway independently validates
 // untrusted tenant responses before admitting any action.
-const MAX_ACTIONS = 100;
+const MAX_ACTIONS = EMAIL_MAX_ACTIONS;
 const MAX_ACTION_ADDRESS_LENGTH = 320;
-const MAX_ACTION_METADATA_BYTES = 8 * 1024;
+const MAX_ACTION_METADATA_BYTES = EMAIL_MAX_METADATA_BYTES;
 
-/** Bounds on a forward's headers, shared with the handler test harness. */
-export const MAX_FORWARD_HEADERS: number = 32;
-export const MAX_FORWARD_HEADER_LENGTH: number = 1024;
+/** Bounds on a forward's headers. */
+const MAX_FORWARD_HEADERS = 32;
+const MAX_FORWARD_HEADER_LENGTH = 1024;
 
 /** Maximum normalized SMTP rejection reason length. */
-export const MAX_REJECT_REASON_LENGTH: number = 1000;
+const MAX_REJECT_REASON_LENGTH = 1000;
 
 /** Inbound admission limits also applied by the handler test harness. */
-export const MAX_INBOUND_BYTES: number = 10 * 1024 * 1024;
-export const MAX_INBOUND_HEADERS: number = 1024;
+export const MAX_INBOUND_BYTES: number = EMAIL_MAX_INBOUND_BYTES;
+export const MAX_INBOUND_HEADERS: number = EMAIL_MAX_INBOUND_HEADERS;
 
-const MAX_REPLY_BYTES = 5 * 1024 * 1024;
+const MAX_REPLY_BYTES = EMAIL_MAX_REPLY_BYTES;
 const EMAIL_STREAM_DEADLINE_MS = 15_000;
 const EMAIL_ACTION_TERMINAL_BYTES = 5;
 const actionEncoder = new TextEncoder();
@@ -143,18 +150,15 @@ export async function parseEmail(message: ForwardableEmailMessage): Promise<Pars
   const { default: PostalMime } = await import('postal-mime');
   const cached = proxyRawCache.get(message);
   try {
-    // Acquire inside the guard. On an own-account deploy the generated
+    // Acquire inside the guard: on an own-account deploy the generated
     // handler wraps Cloudflare's native one-shot `raw`, so a mid-delivery
-    // stream failure rejects here — above the `try` it escaped as the bare
-    // stream error, past the `ParseEmailError` this function advertises.
+    // stream failure must also surface as `ParseEmailError`.
     const source = cached ? await cached.read() : message.raw;
     return await PostalMime.parse(source);
   } catch (cause) {
     // postal-mime is lenient — binary garbage, truncated parts and bad
     // header bytes all parse. What it does reject is a nesting bomb (>256
     // levels), and a one-shot `raw` stream can fail on a real CF message.
-    // Both used to escape as a bare Error carrying parser internals, which
-    // left `PARSE_FAILED` declared in the code union but never constructed.
     throw new ParseEmailError(
       'PARSE_FAILED',
       `parseEmail: could not parse the message body. ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -332,10 +336,9 @@ function assertForwardHeadersWithinBounds(headers: Record<string, string>): void
  * The reason goes into the SMTP reply to the connecting client, and a
  * handler may build it from the inbound message: a remote sender's CRLF is
  * then a line injected into that reply, and a multi-megabyte reason is a
- * transient-heap amplifier. The router already refuses both, but on your
- * own account `enactEmailActions` handed the recorded string to the native
- * `setReject()` untouched, so the same handler injected there and was
- * clean here. NORMALIZED rather than refused, unlike the forward bounds
+ * transient-heap amplifier. The router already refuses both; normalizing at
+ * record time covers the native `setReject()` replay on your own account
+ * too. NORMALIZED rather than refused, unlike the forward bounds
  * above: a reject is the handler's terminal decision, and throwing out of
  * it would drop that decision and bounce the message as a dispatch error
  * (see the `MAX_ACTIONS` note in `setReject`). Slice FIRST, then replace: a
@@ -422,7 +425,7 @@ async function readStreamToBytes(
   return out;
 }
 
-function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+export function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
       controller.enqueue(bytes);
@@ -654,9 +657,9 @@ export function createMessageProxy(
       }
       // Same rule as `forward(to)` above, for the hand-built reply form:
       // `replyEmail()` already goes through `normalizeEmail`, but a caller
-      // who passes `{ from, to, raw }` bypasses it, and a malformed address
-      // here used to be refused only by Cloudflare's native `reply()` — after
-      // every earlier action had fired. Both are bare addresses.
+      // who passes `{ from, to, raw }` bypasses it, and otherwise only
+      // Cloudflare's native `reply()` would refuse a malformed address —
+      // after every earlier action had fired. Both are bare addresses.
       validateAddressParts('from', reply.from);
       validateAddressParts('to', reply.to);
       pendingReplies++;
@@ -793,7 +796,7 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
   // the token list into `Math.max` throws `RangeError` past ~123k arguments
   // (measured on workerd), and `split(/\s+/)` materializes every token before
   // `.some()` looks at the first — over 30 bytes of heap each, so 10 MiB of
-  // two-character ids (3.5M tokens, inside MAX_MESSAGE_BYTES) measured 134 MB
+  // two-character ids (3.5M tokens, inside MAX_INBOUND_BYTES) measured 134 MB
   // and terminates a 128 MB isolate before the predicate can answer. This
   // guard exists to stop a hostile header making the app's reply throw, so it
   // must be neither the thing that throws nor the thing that runs out of
@@ -801,10 +804,9 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
   //
   // A run ends only at SP or HTAB. That is the whitespace `foldHeader` folds
   // at (§3.2.2 FWS), and a threading value is emitted verbatim, so treating
-  // the rest of `\s` (NBSP, FF, VT …) as a break passed a value the folder
-  // then could not break, and `buildMime` rejected the over-long line — the
-  // throw this predicate exists to prevent. Counting through them is the
-  // strict direction: it can only refuse a value, never pass one that fails.
+  // the rest of `\s` (NBSP, FF, VT …) as a break would pass a value the
+  // folder cannot break. Counting through them is the strict direction: it
+  // can only refuse a value, never pass one that fails.
   const budget = 998 - (name.length + 2);
   let run = 0;
   for (let i = 0; i < value.length; i++) {
@@ -841,7 +843,7 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
  * Whether `value` carries a C0 control other than HTAB, or DEL. The
  * sibling of `fitsHeaderLine` for the other way a remote-controlled id can
  * be unrepresentable: a threading value is emitted verbatim, so a control
- * inside it reached the reply's `In-Reply-To` / `References` line raw —
+ * inside it would reach the reply's `In-Reply-To` / `References` line raw —
  * `\x01` and DEL pass a WHATWG `Headers`, which refuses only CR, LF and
  * NUL — and an RFC 5322 §3.6.4 `msg-id` is `dot-atom-text`, which admits no
  * control at all. HTAB is not one here: it is the whitespace that separates
@@ -952,7 +954,7 @@ export interface ReplyEmailOptions {
  * replacements below cost 66 bytes of heap per match, so at this size they
  * cost at most 135 KB, and the reply's own `Subject` line is at most ~20 KB
  * — 4096 code units x 3 UTF-8 octets, base64'd in 45-octet encoded-words
- * with their framing — against a `MAX_MESSAGE_BYTES` of 10 MiB, so the
+ * with their framing — against a `MAX_MESSAGE_BYTES` of 5 MiB, so the
  * subject alone can never push the reply over the limit.
  */
 const MAX_REPLY_SUBJECT_CHARS = 4096;
@@ -1021,13 +1023,11 @@ function prefixReplySubject(original: string): string {
  * `header_size_limit` discards header bytes past 100 KiB. A message-id is
  * tens of characters, so 8 KiB carries a chain over a hundred replies deep
  * with every id intact — an order of magnitude past any conversation — and
- * a value this size, folded and encoded, is at most ~25 KB of a 10 MiB
+ * a value this size, folded and encoded, is at most ~25 KB of a 5 MiB
  * reply, so the chain alone can never push the reply over the limit.
  * Unbounded, it could: the inbound header can be the whole 10 MiB message,
- * and 10 MiB of short ids passes the line guard — every id folds — yet
- * `foldHeader`'s continuations put the rendered reply over
- * `MAX_MESSAGE_BYTES`, and `buildMime` threw (measured: 10,777,129 bytes
- * from a 10,485,557-character chain) for a reply the guide promises is sent.
+ * and short ids pass the line guard — every id folds — yet `foldHeader`'s
+ * continuations would put the rendered reply over `MAX_MESSAGE_BYTES`.
  *
  * Past the bound the NEWEST ids are kept, whole, and the parent's id still
  * ends the chain. That is what a mail client threads on: it links the reply
@@ -1091,7 +1091,7 @@ function decodeRfc2047(value: string): string {
     // One encoded-word at a time. `replace` with a callback collects every
     // match — result array, captures and all — before the callback runs
     // once, so a 10 MiB subject of tiny encoded-words (750k of them, inside
-    // MAX_MESSAGE_BYTES) needed 138 MB on the reply path and terminated a
+    // MAX_INBOUND_BYTES) needed 138 MB on the reply path and terminated a
     // 128 MB isolate. `matchAll` is lazy: the same path needs 35 MB, and what
     // is kept is the decoded output.
     const parts: Array<string> = [];
@@ -1136,13 +1136,10 @@ function quotedPrintableDecode(qp: string): Uint8Array {
   //
   // Decode straight into a typed array. The payload regex in `decodeRfc2047`
   // accepts whitespace, so an unfolded 10 MiB `Subject` is ONE encoded-word
-  // and this loop sees every character of it. Pushing each byte onto an
-  // `Array<number>` first held one boxed element per character — measured
-  // at 200 MB of heap for 10 MiB of plain Q text (330 MB on the whole reply
-  // path) — and terminated a 128 MB isolate before `buildMime`'s size
-  // projection could refuse the subject. Every input character yields at
-  // most one output byte, so `qp.length` is the exact upper bound and the
-  // decode holds nothing but the output.
+  // and this loop sees every character of it. An `Array<number>` would hold
+  // one boxed element per character (about 200 MB for 10 MiB of Q text). Every
+  // input character yields at most one output byte, so `qp.length` is the
+  // exact upper bound and the decode holds nothing but the output.
   const out = new Uint8Array(qp.length);
   let kept = 0;
   for (let i = 0; i < qp.length; i++) {
@@ -1150,11 +1147,9 @@ function quotedPrintableDecode(qp: string): Uint8Array {
     if (ch === 0x5f /* _ */) {
       out[kept++] = 0x20;
     } else if (ch === 0x3d /* = */ && i + 2 < qp.length) {
-      // Both characters must be hex. `parseInt('0G', 16)` is 0, not NaN,
-      // so a finiteness check accepted any pair that merely STARTED with
-      // a hex digit and synthesised a single-nibble byte from it — `=0G`
-      // became NUL. A malformed escape stays literal, which is what
-      // RFC 2045 §6.7 asks of a robust decoder and what postal-mime does.
+      // Both characters must be hex: `parseInt('0G', 16)` is 0, not NaN. A
+      // malformed escape stays literal, which is what RFC 2045 §6.7 asks of a
+      // robust decoder and what postal-mime does.
       const hex = qp.slice(i + 1, i + 3);
       if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
         out[kept++] = parseInt(hex, 16);

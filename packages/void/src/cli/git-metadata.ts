@@ -112,7 +112,7 @@ export function collectGitDeployMetadata(
    * `git rev-parse` can invoke repo-configured hooks and credential helpers, so
    * the CF Access service-token pair must stay out of them — exactly what
    * `getGitCommit` does for its own git children right beside this call.
-   * Defaults to `process.env`, which is what these children inherited before.
+   * Defaults to `process.env`.
    */
   childEnv: NodeJS.ProcessEnv = process.env,
 ): GitDeployMetadata {

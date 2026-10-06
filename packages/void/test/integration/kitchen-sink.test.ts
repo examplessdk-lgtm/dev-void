@@ -46,9 +46,8 @@ describe('playground/kitchen-sink', () => {
     PORT = await getPort();
     BASE = `http://127.0.0.1:${PORT}`;
 
-    // Build first — deterministic, all deps resolved at build time.
-    // Eliminates the dev-mode dep optimization cascade that caused
-    // flaky CI failures (server crashes, hydration timeouts).
+    // Build first so every dependency is resolved before the server starts;
+    // dev-mode dependency optimization makes browser checks unreliable.
     const pg = join(ROOT, 'playground/kitchen-sink');
     rmSync(join(pg, 'dist'), { recursive: true, force: true });
     execSync('vp run --filter ./playground/kitchen-sink build', {
@@ -307,7 +306,6 @@ describe('playground/kitchen-sink', () => {
       let found = false;
       while (Date.now() - start < 15_000) {
         await new Promise((resolve) => setTimeout(resolve, 1_000));
-        // SPA-reload the page to re-run the loader
         await page.goto(`${BASE}/queues`);
         await waitForHydration(page);
         const text = await page.textContent('body');
@@ -518,7 +516,6 @@ describe('playground/kitchen-sink', () => {
     expect(await res.text()).toContain('Not Found');
   });
 
-  // API prefix returns 404 text (not HTML)
   it('returns 404 for unknown API routes', async () => {
     const res = await fetch(`${BASE}/api/nonexistent`);
     expect(res.status).toBe(404);
@@ -535,8 +532,6 @@ describe('playground/kitchen-sink', () => {
     expect(res.status).toBe(301);
     expect(res.headers.get('location')).toContain('/wp-content');
   });
-
-  // Cron: skipped — __scheduled endpoint is only available via wrangler, not Vite dev/preview
 });
 
 // Preview runs the built worker in miniflare with no Cloudflare credentials.

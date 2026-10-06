@@ -35,8 +35,7 @@ export type ResolvedAsset = Readonly<{
  *
  * Known limitation: a file whose name contains a literal `%` (e.g. `logo%20.svg`,
  * requested as `logo%2520.svg`) is not resolved — the path encoder leaves `%`
- * as-is, so the round-trip can't reproduce the double-escaped request. Such
- * names 404'd before this change too, so this is not a regression.
+ * as-is, so the round-trip can't reproduce the double-escaped request.
  */
 export function safeDecodePathname(pathname: string): string {
   let decoded: string;

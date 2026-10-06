@@ -9,32 +9,18 @@ import {
   writeSync,
 } from 'node:fs';
 import { join } from 'pathslash';
+import type { ViteDevServer } from 'vite';
 import { voidWarn } from './log.ts';
 
-/**
- * Persist the dev-trigger token at `<root>/.void/dev-trigger-token` so
- * every voidPlugin() invocation against the same project reads the same
- * value. This matters because `@cloudflare/vite-plugin` spawns a
- * worker-environment child Vite that re-imports vite.config.ts and calls
- * voidPlugin() again — without persistence the parent and child would
- * generate different UUIDs, the dispatch file would embed one and the
- * hint plugin would print the other, and curls would land on
- * `unauthorized`.
- *
- * The file persists across dev sessions by design — it lives under `.void/`
- * (gitignored), and `cleanupWrapper` in `void deploy` explicitly preserves
- * it across its own wipe so saved curl scripts keep working between deploys.
- * The token is local to the project and only honored by a worker bound to
- * localhost; treat it like the rest of `.void/` — disposable scratch state,
- * safe to remove manually if desired.
- *
- * The file is owner-only (0600). It is the one credential the dev-inbox
- * routes accept, and loopback is reachable by every account on the host,
- * so a default-umask 0644 file would hand any other local user the raw MIME,
- * the DELETE, and the capture endpoint. A file persisted by an earlier
- * release is tightened in place, never rotated. Windows has no group/other
- * bits — `mode` and `chmod` only toggle write there — so it is left alone.
- */
+/** Run `fn` shortly after Vite prints "ready" so dev messages stay visible. */
+export function afterServerReady(server: ViteDevServer, fn: () => void): void {
+  if (server.httpServer) {
+    server.httpServer.once('listening', () => setTimeout(fn, 100));
+  } else {
+    fn();
+  }
+}
+
 /**
  * Best-effort detection of `vite build` (and `vite preview`) so we can skip
  * dev-only side effects — writing the dev-trigger token and the dispatch
@@ -51,6 +37,26 @@ export function isViteBuildOrPreview(): boolean {
 
 const DEV_TRIGGER_TOKEN_FILE_MODE = 0o600;
 
+/**
+ * Persist the dev-trigger token at `<root>/.void/dev-trigger-token` so
+ * every voidPlugin() invocation against the same project reads the same
+ * value. This matters because `@cloudflare/vite-plugin` spawns a
+ * worker-environment child Vite that re-imports vite.config.ts and calls
+ * voidPlugin() again — without persistence the parent and child would
+ * generate different UUIDs, the dispatch file would embed one and the
+ * hint plugin would print the other, and curls would land on
+ * `unauthorized`.
+ *
+ * The file persists across dev sessions and deploys so saved curl scripts
+ * keep working. It lives under `.void/` (gitignored) and is safe to remove.
+ *
+ * The file is owner-only (0600). It is the one credential the dev-inbox
+ * routes accept, and loopback is reachable by every account on the host,
+ * so a default-umask 0644 file would hand any other local user the raw MIME,
+ * the DELETE, and the capture endpoint. A file persisted by an earlier
+ * release is tightened in place, never rotated. Windows has no group/other
+ * bits — `mode` and `chmod` only toggle write there — so it is left alone.
+ */
 export function getOrCreateDevTriggerToken(root: string): string {
   const tokenPath = join(root, '.void', 'dev-trigger-token');
   const readExisting = (): string | undefined => {

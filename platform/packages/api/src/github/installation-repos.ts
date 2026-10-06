@@ -24,9 +24,8 @@ export type InstallationRepositories = Readonly<{
 }>;
 
 /**
- * List the repositories an installation can access. Mirrors the standard
- * GitHub API request shape used elsewhere (`auth/github-preview.ts`,
- * `github/installation-token.ts`), authenticating with the installation token.
+ * List the repositories an installation can access, authenticating with the
+ * installation token.
  *
  * Paginates `GET /installation/repositories` (100 per page) so `selected`
  * installs with >100 repos don't get a truncated cache. Also returns the
@@ -73,15 +72,11 @@ export async function listInstallationRepositories(
       // every repo — anything else is the safe `'selected'` default.
       repositorySelection = data.repository_selection === 'all' ? 'all' : 'selected';
       owner = data.repositories[0]?.owner;
-      // `all` grants every repo, so the cached `repositories` array is NEVER
-      // read for an `all` install — every coverage check short-circuits on
-      // `repository_selection = 'all'` (installationCoversRepo[InTx],
-      // get*ConnectionsByRepo in db.ts) and the connect route resolves ids LIVE
-      // via `GET /repos/:full_name` (resolveRepositoryId). Stop after page 1:
-      // enumerating + persisting the full set for a large org would burn many
-      // GitHub round trips and bloat the JSONB column for a never-read array.
-      // `owner` is already captured above; return an empty `repositories` (what
-      // the webhook path also stores for `all`, where GitHub omits the list).
+      // The cached `repositories` array is never read for an `all` install —
+      // coverage checks short-circuit on `repository_selection = 'all'` and the
+      // connect route resolves ids live. Stop after page 1 rather than
+      // enumerating a large org, and return an empty `repositories` (what the
+      // webhook path also stores for `all`, where GitHub omits the list).
       if (repositorySelection === 'all') {
         break;
       }

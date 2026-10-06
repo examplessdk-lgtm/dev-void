@@ -14,8 +14,6 @@ List production secret names for the saved target. Secret values are never print
 
 ## `void secret put` {#void-secret-put}
 
-On hosted projects, secret writes and deletes return a retryable conflict while a deployment or rollback is in progress. Wait for that operation to finish and retry; the rejected operation leaves the stored secret unchanged.
-
 ```
 void secret put <name> [--project <name>]
 void secret put <name=value> [--project <name>]
@@ -27,7 +25,7 @@ Value input modes:
 - prompt (TTY): `void secret put API_KEY` (masked input)
 - stdin: `echo -n "abcd" | void secret put API_KEY`
 
-On a direct Cloudflare target, the value is sent to Cloudflare over stdin and stored as an encrypted Worker secret.
+On a direct Cloudflare target, the value is stored as an encrypted Worker secret.
 
 ## `void secret sync` {#void-secret-sync}
 
@@ -50,6 +48,8 @@ void secret delete <name> [--project <name>]
 ```
 
 Secret commands use the platform saved in `.void/project.json`. Hosted project resolution follows the same order as deploy (`--project`, env var, linked project). Direct Cloudflare targets reject `--project` and use the pinned root Cloudflare config.
+
+On hosted projects, secret writes and deletes return a retryable conflict while a deployment or rollback is in progress. Wait for that operation to finish and retry; the rejected operation leaves the stored secret unchanged.
 
 ## Env Schema {#env-schema}
 

@@ -175,11 +175,10 @@ export function connectLiveStream(
     resubscribeOnNextOpen = true;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      resubscribeOnNextOpen = false;
       if (closed || (!options.keepOpen && subscriptions.size === 0)) {
-        resubscribeOnNextOpen = false;
         return;
       }
-      resubscribeOnNextOpen = false;
       void openSource(true).catch((error) => {
         if (!closed) {
           reportError(error);
@@ -258,14 +257,7 @@ export function connectLiveStream(
         operations = [
           ...[...subscriptions.values()]
             .filter((subscription) => !pendingIds.has(subscription.id))
-            .map((subscription): LiveControlOperation => ({
-              kind: 'subscribe',
-              id: subscription.id,
-              topic: subscription.topic,
-              ...(subscription.lastEventId !== undefined && {
-                lastEventId: subscription.lastEventId,
-              }),
-            })),
+            .map(subscribeOperation),
           ...operations,
         ];
       }
@@ -313,14 +305,7 @@ export function connectLiveStream(
       return;
     }
     await Promise.all(
-      activeSubscriptions.map((subscription) =>
-        enqueue({
-          kind: 'subscribe',
-          id: subscription.id,
-          topic: subscription.topic,
-          ...(subscription.lastEventId !== undefined && { lastEventId: subscription.lastEventId }),
-        }),
-      ),
+      activeSubscriptions.map((subscription) => enqueue(subscribeOperation(subscription))),
     );
   }
 
@@ -354,12 +339,7 @@ export function connectLiveStream(
       };
       subscriptions.set(subscription.id, subscription);
       try {
-        await enqueue({
-          kind: 'subscribe',
-          id: subscription.id,
-          topic: subscription.topic,
-          ...(subscription.lastEventId !== undefined && { lastEventId: subscription.lastEventId }),
-        });
+        await enqueue(subscribeOperation(subscription));
       } catch (error) {
         if (subscriptionVersions.get(subscription.id) === version) {
           if (previousSubscription) {
@@ -421,5 +401,14 @@ export function connectLiveStream(
       source = null;
       openPromise = null;
     },
+  };
+}
+
+function subscribeOperation(subscription: Subscription): LiveControlOperation {
+  return {
+    kind: 'subscribe',
+    id: subscription.id,
+    topic: subscription.topic,
+    ...(subscription.lastEventId !== undefined && { lastEventId: subscription.lastEventId }),
   };
 }

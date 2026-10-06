@@ -194,8 +194,7 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 1 — a per-page `export const revalidate` is authoritative and wins over
-  // ANY void.json routing.revalidate config (number or object).
+  // A per-page `export const revalidate` wins over any routing.revalidate config.
   it('per-page export wins over config', () => {
     const scan = makeScan([makePage('/p', 120)]);
     expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p', revalidate: 120 }]);
@@ -230,9 +229,8 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 2 — REGRESSION GUARD (the must-fix): a global-number config must turn
-  // ISR ON for EVERY no-export page. Before this fix, such pages baked no TTL and
-  // dispatch's resolvePageTtl returned 0 → page ISR silently OFF for the whole site.
+  // A global-number config turns ISR on for every no-export page; otherwise
+  // dispatch's resolvePageTtl would return 0 and disable page ISR site-wide.
   it('a global-number config applies to every no-export page', () => {
     const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
     expect(collectPages(scan, 3600)).toEqual([
@@ -241,11 +239,9 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 3 — an OBJECT (per-path) config bakes NO per-page TTL: those pages are
-  // INHERIT-eligible (absent revalidate). A page can straddle several object
-  // entries (incl. a per-path `0`), so it can't collapse to one build-time TTL —
-  // the raw config ships as `manifest.pathRevalidate` and dispatch resolves it
-  // against the ACTUAL request path. Absent revalidate = "ask the edge per-path".
+  // An object (per-path) config bakes no per-page TTL. A page can straddle
+  // several entries, so the raw config ships as `manifest.pathRevalidate` and
+  // dispatch resolves it against the actual request path.
   it('an object config bakes no per-page TTL (pages are inherit-eligible)', () => {
     const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
     expect(collectPages(scan, { '/blog/*': 3600 })).toEqual([
@@ -254,11 +250,8 @@ describe('collectPages', () => {
     ]);
   });
 
-  // A per-path `0` opt-out inside an object config is exactly why baking is unsafe:
-  // a build-time collapse would miss `/blog/private: 0` and over-cache it. Instead
-  // the page bakes no TTL (inherit) and dispatch resolves the per-path config
-  // against the real path, so `/blog/private` correctly resolves 0 at the edge and
-  // `/blog/other` resolves 3600 — a per-path fidelity build-time baking can't give.
+  // A per-path `0` inside an object config is why baking is unsafe: a build-time
+  // collapse would over-cache `/blog/private`.
   it('leaves an object-config page inherit-eligible so a per-path 0 opt-out is honored at the edge', () => {
     const scan = makeScan([makePage('/blog/:slug')]);
     expect(collectPages(scan, { '/blog/private': 0, '/blog/*': 3600 })).toEqual([
@@ -266,9 +259,7 @@ describe('collectPages', () => {
     ]);
   });
 
-  // Test 4 — SHADOWING PRESERVED (plan 0077): a specific no-export page under a
-  // SIBLING catch-all that HAS an export must NOT inherit the sibling's per-page
-  // TTL. It stays 0 — the table never folds a sibling's per-page export in.
+  // A no-export page never inherits a sibling catch-all's per-page export.
   it('a no-export page does not inherit a sibling catch-all export', () => {
     const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
     expect(collectPages(scan)).toEqual([

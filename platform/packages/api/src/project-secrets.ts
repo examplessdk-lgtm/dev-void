@@ -289,10 +289,6 @@ function buildWorkerSecretUrl(
   return secretName ? `${base}/${encodeURIComponent(secretName)}` : base;
 }
 
-export function getVersionedWorkerName(slug: string, deploymentId: string): string {
-  return `user-${slug}-${deploymentId}`;
-}
-
 export async function putWorkerSecret(
   env: WorkerSecretBindings,
   dispatchNamespace: string,

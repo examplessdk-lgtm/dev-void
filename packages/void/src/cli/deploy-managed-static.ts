@@ -7,14 +7,13 @@ import { buildEnv } from '../shared/untrusted-env.ts';
 import { PlatformClient } from './client.ts';
 import { log } from './deploy-helpers.ts';
 import {
-  warnRedundantForceOn3xx,
+  mergeAndLintRoutingRules,
   streamDirectR2Deploy,
   warnUnpublishedRouting,
 } from './deploy-managed-events.ts';
 import { formatDeploySummary, printDeploySuccess } from './deploy-summary.ts';
 import { MANAGED_DEPLOY_BUILD_ENV } from './deploy-transport.ts';
 import { type GitDeployMetadata } from './git-metadata.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
 import { createSpinner, formatCount, note } from './output.ts';
 import { collectAndHashAssets, buildVoidManifest, buildStaticManifest } from './package.ts';
@@ -30,8 +29,7 @@ import type { DeployManifest, DevRedirectRule, HeaderRule } from './types.ts';
  *
  * `pages` is a Void pages-mode concept. In framework mode (Class-A frameworks
  * routed through `runFullDeploy`) we must NOT emit it — the framework owns its
- * own routing/ISR — so `isFrameworkMode` suppresses the table. (plan 0077
- * Global Constraint: "`pages` is Void-pages-mode only; leave frameworks alone".)
+ * own routing/ISR — so `isFrameworkMode` suppresses the table.
  */
 export function assembleVoidManifest(
   pageScan: PageScanResult | null,
@@ -107,12 +105,7 @@ export async function runStaticDeploy(
   }
 
   if (routing) {
-    const merged = mergeRoutingRules({ dir: preset.outputDir, routing });
-    warnRedundantForceOn3xx(merged.redundantForceOn3xx);
-    lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-    lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
-    lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-    lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+    const merged = mergeAndLintRoutingRules(preset.outputDir, routing);
     headerRules = merged.headerRules;
     redirectRules = merged.redirectRules;
     fallbackRules = merged.fallbackRules;
@@ -123,8 +116,7 @@ export async function runStaticDeploy(
 
   // Preflight: hash assets and check which ones changed.
   // `assetFiles` carries the in-memory buffer cache so the upload step
-  // (direct-to-R2 or legacy multipart) consumes the same bytes that were
-  // hashed — eliminates the chain double-read flagged in design doc 0068.
+  // consumes the same bytes that were hashed.
   s.start('Checking for changes...');
   cliLog?.info('preflight_start', { dir: preset.outputDir });
   const { assetManifest, assetFiles } = await collectAndHashAssets(preset.outputDir, onProgress);

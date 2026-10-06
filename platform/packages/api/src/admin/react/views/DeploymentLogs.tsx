@@ -101,25 +101,36 @@ export function DeploymentLogs({ deploymentId }: { deploymentId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [tailing, setTailing] = useState(false);
 
-  const loadLogs = useCallback(async () => {
-    setEntries(null);
-    setError(null);
-    try {
+  const fetchEntries = useCallback(
+    async (range: string, limit: number): Promise<Array<LogEntry> | null> => {
       const { deploymentLogs: ref } = await fate.request(
-        deploymentLogsRequest(deploymentId, since, count),
+        deploymentLogsRequest(deploymentId, range, limit),
         { mode: 'network-only' },
       );
       if (!ref) {
-        throw new Error('Deployment logs are unavailable.');
+        return null;
       }
       const { data } = (await fate.readView(DeploymentLogsView, ref)) as unknown as {
         data: { data: Array<LogEntry> };
       };
-      setEntries(data.data);
+      return data.data;
+    },
+    [deploymentId, fate],
+  );
+
+  const loadLogs = useCallback(async () => {
+    setEntries(null);
+    setError(null);
+    try {
+      const loaded = await fetchEntries(since, count);
+      if (!loaded) {
+        throw new Error('Deployment logs are unavailable.');
+      }
+      setEntries(loaded);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [deploymentId, since, count, fate]);
+  }, [fetchEntries, since, count]);
 
   useEffect(() => {
     void loadLogs();
@@ -133,20 +144,11 @@ export function DeploymentLogs({ deploymentId }: { deploymentId: string }) {
     const seen = new Set<string>();
     const poll = async () => {
       try {
-        const { deploymentLogs: ref } = await fate.request(
-          deploymentLogsRequest(deploymentId, '1m', 50),
-          { mode: 'network-only' },
-        );
-        if (!ref) {
+        const latest = await fetchEntries('1m', 50);
+        if (!latest || !active) {
           return;
         }
-        const { data } = (await fate.readView(DeploymentLogsView, ref)) as unknown as {
-          data: { data: Array<LogEntry> };
-        };
-        if (!active) {
-          return;
-        }
-        const fresh = data.data.filter((entry) => {
+        const fresh = latest.filter((entry) => {
           const key = `${entry.timestamp}:${entry.url}:${entry.status}`;
           if (seen.has(key)) {
             return false;
@@ -167,7 +169,7 @@ export function DeploymentLogs({ deploymentId }: { deploymentId: string }) {
       active = false;
       clearInterval(timer);
     };
-  }, [deploymentId, tailing, fate]);
+  }, [fetchEntries, tailing]);
 
   const query = filter.toLowerCase().trim();
   const visible = (entries ?? []).filter(
@@ -221,7 +223,6 @@ export function DeploymentLogs({ deploymentId }: { deploymentId: string }) {
         <Button
           type="button"
           id="live-tail-btn"
-          data-base-path={`/admin/deployments/${deploymentId}`}
           style={{ marginLeft: 'auto' }}
           label={tailing ? 'Stop Tail' : 'Live Tail'}
           variant={tailing ? 'destructive' : 'secondary'}
