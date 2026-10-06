@@ -434,7 +434,7 @@ describe('proxy token rotation', () => {
     expect(await job(fx.projectId)).toBeUndefined();
   });
 
-  it('turns old tokens off on the proxy metadata routes', async () => {
+  it('keeps the proxy metadata routes on the proxy credential through a rotation', async () => {
     const cf = cfApi();
     const fx = await setupProject(cf);
     await env.db.insert(resources).values({
@@ -475,7 +475,7 @@ describe('proxy token rotation', () => {
       [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(JWT_SECRET, route, fx.projectId),
     });
 
-    expect(await statuses(legacy)).toEqual([200, 200, 200]);
+    expect(await statuses(proxy)).toEqual([200, 200, 200]);
 
     await request(fx.projectId);
     await advance(fx.projectId, { waitMs: 60_000 });
@@ -487,7 +487,7 @@ describe('proxy token rotation', () => {
     expect((await job(fx.projectId))!.payload.phase).toBe('settle');
     expect(await floor(fx.projectId)).toEqual({ gen: 1 });
 
-    expect(await statuses(legacy)).toEqual([403, 403, 403]);
+    expect(await statuses(legacy)).toEqual([401, 401, 401]);
     expect(await statuses(proxy)).toEqual([200, 200, 200]);
 
     for (let index = 0; index < 4 && (await job(fx.projectId)); index++) {
@@ -495,8 +495,8 @@ describe('proxy token rotation', () => {
     }
     expect(await job(fx.projectId)).toBeUndefined();
     expect(await issued(fx.projectId)).toBe(2);
-    expect(await statuses(tenant(1))).toEqual([403, 403, 403]);
-    expect(await statuses(tenant(2))).toEqual([200, 200, 200]);
+    expect(await statuses(tenant(1))).toEqual([401, 401, 401]);
+    expect(await statuses(tenant(2))).toEqual([401, 401, 401]);
     expect(await statuses(proxy)).toEqual([200, 200, 200]);
   });
 

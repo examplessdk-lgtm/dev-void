@@ -44,9 +44,7 @@ export async function checkTenantProxyToken(
 /**
  * Authenticates the proxy on an internal metadata route. The proxy signs
  * `x-void-proxy-internal` with its own key, bound to the route and project.
- * A request without that header is checked like a tenant project token in
- * `x-void-internal`, so a token below the project's accept floor is refused
- * here as it is at the proxy.
+ * Tenant project tokens are not accepted here.
  *
  * Returns null when the call may proceed, else the error response.
  */
@@ -56,23 +54,13 @@ export async function requireProxyInternalAuth(
   projectId: string,
 ): Promise<Response | null> {
   const proxyAuth = context.req.header(PROXY_INTERNAL_AUTH_HEADER);
-  const token = context.req.header('x-void-internal');
-  if (!proxyAuth && !token) {
+  if (!proxyAuth) {
     return context.json({ error: 'missing internal auth' }, 401);
   }
-  if (!isProjectId(projectId)) {
-    return context.json({ error: 'invalid internal auth' }, 403);
-  }
-  if (proxyAuth) {
-    return (await verifyProxyInternalAuth(context.env.JWT_SECRET, route, projectId, proxyAuth))
-      ? null
-      : context.json({ error: 'invalid internal auth' }, 403);
-  }
-  const tokenCheck = await checkTenantProxyToken(context.env, projectId, token ?? '');
-  if (tokenCheck === 'unavailable') {
-    return context.json({ error: 'project token state unavailable' }, 503);
-  }
-  if (tokenCheck === 'invalid') {
+  if (
+    !isProjectId(projectId) ||
+    !(await verifyProxyInternalAuth(context.env.JWT_SECRET, route, projectId, proxyAuth))
+  ) {
     return context.json({ error: 'invalid internal auth' }, 403);
   }
   return null;

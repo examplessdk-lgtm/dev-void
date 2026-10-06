@@ -145,9 +145,9 @@ HMAC. See [Platform Development](../../../docs/guide/platform/development/runtim
 - `POST /internal/verify-owner/:projectId` — legacy URL that live-checks the caller's project deploy capability
 
 `resolve-resource`, `resolve-worker` and `verify-prerender-build` authenticate
-the proxy with its own key (`x-void-proxy-internal`); a request without it is
-checked like a project token. `revalidate` checks the project token forwarded
-by the proxy against the project's accept floor (see the proxy README).
+the proxy with its own key (`x-void-proxy-internal`) and do not accept project
+tokens. `revalidate` checks the project token forwarded by the proxy against
+the project's accept floor (see the proxy README).
 
 ### Operator API
 

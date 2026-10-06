@@ -32,8 +32,6 @@ export async function resolveResource(
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      // Legacy header for an API that predates the proxy credential.
-      'x-void-internal': await hmacSign(projectId, jwtSecret),
       [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
         jwtSecret,
         'resolve-resource',
@@ -107,8 +105,6 @@ export async function verifyPrerenderAuthority(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        // Legacy header for an API that predates the proxy credential.
-        'x-void-internal': await hmacSign(projectId, jwtSecret),
         [PROXY_INTERNAL_AUTH_HEADER]: await deriveProxyInternalAuth(
           jwtSecret,
           'verify-prerender-build',
