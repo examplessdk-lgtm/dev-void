@@ -92,3 +92,7 @@ void project team revoke <invitation-id>
 ```
 
 A non-owner member can leave with `void project team leave`. The owner cannot leave; an installation administrator must [transfer ownership](./platform/administration/projects.md#transferring-project-ownership) first.
+
+When a collaborator or admin is removed, leaves, or is changed to reader, the platform replaces the credentials the project's Workers use to call platform services such as AI, email, and remote bindings. The old credentials stop working once every Worker of the project has the new ones, usually within about 10 minutes, later while a deploy is running. If the replacement cannot finish, the old credentials keep working until it does, and owners and admins see a warning in `void project status` and `void project team list`. WebSocket connections reconnect once.
+
+Code the removed person deployed keeps running until you replace it. If you no longer trust it, deploy code you trust; the platform replaces the credentials again after that deploy. Earlier deployments kept for rollback also receive the new credentials; Durable Object alarms in them may keep running with those credentials.
