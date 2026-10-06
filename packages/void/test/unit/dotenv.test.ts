@@ -7,6 +7,7 @@ import {
   parseDotenv,
   parseDotenvFile,
   parseDotenvLine,
+  scanWranglerDotenvKeys,
 } from '../../src/shared/dotenv.ts';
 
 /**
@@ -200,5 +201,36 @@ describe('expandDotenv — security', () => {
         process.env.VOID_DOTENV_EXPAND_TEST = previous;
       }
     }
+  });
+});
+
+describe('scanWranglerDotenvKeys', () => {
+  it('reads keys the way Wrangler does, including export and colon forms', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'void-dotenv-scan-'));
+    const file = join(dir, '.env');
+    writeFileSync(
+      file,
+      [
+        '# COMMENTED=1',
+        'PLAIN=ok',
+        'export EXPORTED=x',
+        'COLON: a@b.c',
+        'VALUE=has__VOID_inside',
+        'MULTI="line one',
+        'INSIDE_QUOTES=no"',
+        '',
+      ].join('\n'),
+    );
+    expect([...scanWranglerDotenvKeys(file)]).toEqual([
+      'PLAIN',
+      'EXPORTED',
+      'COLON',
+      'VALUE',
+      'MULTI',
+    ]);
+  });
+
+  it('returns an empty set for a missing file', () => {
+    expect(scanWranglerDotenvKeys('/definitely/not/a/real/path/.env').size).toBe(0);
   });
 });

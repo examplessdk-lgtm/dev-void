@@ -381,6 +381,29 @@ describe('envSchemaPlugin reserved __VOID_ names', () => {
       );
     }
 
+    // Wrangler loads these forms into the dev Worker too.
+    it.each([
+      ['export __VOID_PROXY_TOKEN=x', '__VOID_PROXY_TOKEN'],
+      ['__VOID_EMAIL_FROM: a@b.c', '__VOID_EMAIL_FROM'],
+    ])(`rejects the Wrangler-only line %s in .env (${command})`, async (line, key) => {
+      const root = createTempRoot();
+      writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${line}\n`);
+
+      await expect(runConfigFor(root, command)).rejects.toThrow(
+        `.env defines names reserved for Void: ${key}.`,
+      );
+    });
+
+    it(`ignores __VOID_ in a comment or a value (${command})`, async () => {
+      const root = createTempRoot();
+      writeFileSync(
+        join(root, '.env'),
+        '# __VOID_X=1\nAPI_URL=http://localhost/__VOID_X\nNOTE: __VOID_Y=2\n',
+      );
+
+      await expect(runConfigFor(root, command)).resolves.toBeUndefined();
+    });
+
     it(`accepts a normal .env and a reserved name set only in the shell (${command})`, async () => {
       const root = createTempRoot();
       writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');

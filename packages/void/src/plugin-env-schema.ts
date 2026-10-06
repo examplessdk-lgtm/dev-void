@@ -7,7 +7,7 @@ import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
 import { afterServerReady } from './plugin-dev-config.ts';
 import { loadEnvPublic } from './plugin-env-client-guard.ts';
-import { parseDotenvFile } from './shared/dotenv.ts';
+import { scanWranglerDotenvKeys } from './shared/dotenv.ts';
 import {
   findLegacyEnvFiles,
   findReservedEnvKeys,
@@ -220,9 +220,11 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       }
       // Every mode (serve, build, preview), with or without env.ts. Only the
       // file is read: a shell value never reaches the dev Worker unless
-      // env.ts declares it, which is checked below.
+      // env.ts declares it, which is checked below. Keys are read with
+      // Wrangler's grammar (`export K=v`, `K: v`), since Wrangler is what
+      // loads this file into the dev Worker.
       const reservedInDotenv = findReservedEnvKeys(
-        Object.keys(parseDotenvFile(join(root, LOCAL_ENV_FILE), { expand: false })),
+        scanWranglerDotenvKeys(join(root, LOCAL_ENV_FILE)),
       );
       if (reservedInDotenv.length > 0) {
         throw new Error(reservedEnvKeysMessage('.env', reservedInDotenv));

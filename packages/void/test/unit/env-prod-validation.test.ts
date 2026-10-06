@@ -217,6 +217,28 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     }
   });
 
+  it('rejects reserved names written as export K=v or K: v in .env', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    writeDotenv(
+      root,
+      '.env',
+      'API_URL=http://localhost\nexport __VOID_PROXY_TOKEN=x\n__VOID_EMAIL_FROM: a@b.c\n',
+    );
+
+    await expect(validateProdEnv(root, { productionOnly: false })).rejects.toThrow(
+      '.env defines names reserved for Void: __VOID_PROXY_TOKEN, __VOID_EMAIL_FROM.',
+    );
+  });
+
+  it('ignores __VOID_ in a .env comment or value', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    writeDotenv(root, '.env', '# __VOID_X=1\nAPI_URL=http://localhost/__VOID_X\n');
+
+    await expect(validateProdEnv(root, { productionOnly: false })).resolves.toMatchObject({
+      hasSchema: false,
+    });
+  });
+
   it('does not read .env names during production validation', async () => {
     const root = createTempProject({ withEnvTs: false });
     writeDotenv(root, '.env', '__VOID_PROXY_TOKEN=x\n');

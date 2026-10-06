@@ -17,7 +17,7 @@ import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';
 import type { EnvValidationReport } from '../runtime/env-public.ts';
-import { parseDotenvFile } from '../shared/dotenv.ts';
+import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import {
   findLegacyEnvFiles,
   findReservedEnvKeys,
@@ -121,9 +121,7 @@ export async function validateProdEnv(
   // Production validation never reads .env; the build itself reports it.
   const reservedInDotenv = options.productionOnly
     ? []
-    : findReservedEnvKeys(
-        Object.keys(parseDotenvFile(join(root, LOCAL_ENV_FILE), { expand: false })),
-      );
+    : findReservedEnvKeys(scanWranglerDotenvKeys(join(root, LOCAL_ENV_FILE)));
   if (reservedInDotenv.length > 0) {
     throw new Error(`env: ${reservedEnvKeysMessage('.env', reservedInDotenv)}`);
   }

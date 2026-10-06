@@ -214,10 +214,11 @@ function expandValue(value: string, resolve: (key: string) => string): string {
 }
 
 /**
- * Wrangler 4.131's bundled `dotenv` LINE regex (verbatim), used ONLY to detect the
- * declared KEYS wrangler would load — including the OPTIONAL `export ` prefix, the `KEY: val`
- * form, and single/double/backtick quoting — so a transport-redirect / config-override fence
- * sees exactly what wrangler's per-command dotenv reload would. We read keys, never values.
+ * Wrangler's bundled `dotenv` LINE regex (verbatim; checked against wrangler 4.147), used
+ * ONLY to detect the declared KEYS wrangler would load — including the OPTIONAL `export `
+ * prefix, the `KEY: val` form, and single/double/backtick quoting — so a transport-redirect /
+ * config-override fence and the reserved `__VOID_` name check see exactly what wrangler's
+ * dotenv load would. We read keys, never values.
  */
 const WRANGLER_DOTENV_LINE =
   /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;

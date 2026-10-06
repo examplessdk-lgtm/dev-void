@@ -126,6 +126,19 @@ describe('void env check (subprocess)', () => {
     expect(stdout).toContain('.env defines names reserved for Void: __VOID_PROXY_TOKEN.');
     expect(stdout).toContain('x-void-dev-trigger');
   });
+
+  it('rejects reserved names written as export K=v or K: v in .env', () => {
+    const root = createProject('{ STRIPE_KEY: string() }');
+    writeFileSync(
+      join(root, '.env'),
+      'STRIPE_KEY=sk_dev\nexport __VOID_PROXY_TOKEN=x\n__VOID_EMAIL_FROM: a@b.c\n',
+    );
+    const { stdout, status } = runVoid(root, ['env', 'check']);
+    expect(status).toBe(1);
+    // The CLI wraps long lines, so check each name on its own.
+    expect(stdout).toContain('.env defines names reserved for Void: __VOID_PROXY_TOKEN,');
+    expect(stdout).toContain('__VOID_EMAIL_FROM.');
+  });
 });
 
 describe('void env types (subprocess)', () => {
