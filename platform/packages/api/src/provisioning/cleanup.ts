@@ -121,6 +121,19 @@ async function ignoreMissingProviderObject(operation: () => Promise<void>): Prom
   }
 }
 
+// Kinds the scheduled retry runner executes. Rows of any other kind stay in the
+// table untouched, so a job kind added by a newer platform version survives a
+// rollback and never fills the retry batch.
+const RETRYABLE_CLEANUP_JOB_KINDS = [
+  'cf-resource',
+  'worker',
+  'worker-bundle',
+  'project-assets',
+  'routing-key',
+  'cron',
+  'custom-hostname',
+] as const satisfies ReadonlyArray<ProjectCleanupJobInput['kind']>;
+
 async function executeCleanupJob(
   env: ApiEnv['Bindings'],
   job: ProjectCleanupJobInput,
@@ -172,6 +185,8 @@ async function executeCleanupJob(
         ),
       );
       return;
+    default:
+      throw new Error(`unknown cleanup job kind: ${String((job as { kind: string }).kind)}`);
   }
 }
 
@@ -750,7 +765,12 @@ export async function reconcileProjectCleanupJobs(db: Db, env: ApiEnv['Bindings'
   const due = await db
     .select()
     .from(projectCleanupJobs)
-    .where(lte(projectCleanupJobs.next_attempt_at, drizzleSql`now()`))
+    .where(
+      and(
+        lte(projectCleanupJobs.next_attempt_at, drizzleSql`now()`),
+        inArray(projectCleanupJobs.kind, [...RETRYABLE_CLEANUP_JOB_KINDS]),
+      ),
+    )
     .orderBy(asc(projectCleanupJobs.created_at), asc(projectCleanupJobs.target))
     .limit(50);
   let next = 0;

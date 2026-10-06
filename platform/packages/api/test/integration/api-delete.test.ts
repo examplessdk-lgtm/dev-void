@@ -12,6 +12,7 @@ import {
 import * as db from '../../src/db.ts';
 import app, { FAST_CRON, scheduled } from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
+import { reconcileProjectCleanupJobs } from '../../src/provisioning/cleanup.ts';
 import {
   resources,
   projects,
@@ -470,6 +471,34 @@ describe('DELETE /projects/:id', () => {
       SELECT target FROM project_cleanup_jobs WHERE target = ${`cf-resource:${project.id}:d1:d1-race-retry`}
     `);
     expect(finished.rows).toEqual([]);
+  });
+
+  it('leaves cleanup jobs of an unknown kind unclaimed while running known jobs', async () => {
+    await env.db.execute(sql`
+      INSERT INTO project_cleanup_jobs (target, project_id, kind, payload, next_attempt_at)
+      VALUES ('unknown:1', 'proj_unknown', 'something-else', '{}'::jsonb, now() - interval '1 minute')
+    `);
+    await env.ROUTING.put('cleanup-filter-test', 'x');
+    await env.db.execute(sql`
+      INSERT INTO project_cleanup_jobs (target, project_id, kind, payload, next_attempt_at)
+      VALUES (
+        'routing-key:proj_unknown:cleanup-filter-test',
+        'proj_unknown',
+        'routing-key',
+        '{"key":"cleanup-filter-test"}'::jsonb,
+        now() - interval '1 minute'
+      )
+    `);
+
+    await reconcileProjectCleanupJobs(env.db, env as unknown as Parameters<typeof scheduled>[1]);
+
+    expect(await env.ROUTING.get('cleanup-filter-test')).toBeNull();
+    const remaining = await env.db.execute<{
+      target: string;
+      attempts: number;
+      last_error: string | null;
+    }>(sql`SELECT target, attempts, last_error FROM project_cleanup_jobs ORDER BY target`);
+    expect(remaining.rows).toEqual([{ target: 'unknown:1', attempts: 0, last_error: null }]);
   });
 
   it('treats an already-deleted CF resource as successfully cleaned up', async () => {
