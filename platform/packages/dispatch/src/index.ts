@@ -98,6 +98,8 @@ type QueueRoutingEntry = Readonly<{
   // without a matching `x-void-internal` header with 401. Absent on entries
   // written by older API versions.
   proxyToken?: string;
+  // Second token to try when the Worker rejects `proxyToken`.
+  proxyTokenFallback?: string;
 }>;
 
 const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
@@ -1919,7 +1921,9 @@ export default {
       batch.retryAll();
       return;
     }
-    const { workerName, queueName, proxyToken } = JSON.parse(routingRaw) as QueueRoutingEntry;
+    const { workerName, queueName, proxyToken, proxyTokenFallback } = JSON.parse(
+      routingRaw,
+    ) as QueueRoutingEntry;
 
     // Serialize batch for relay
     const messages = Array.from(batch.messages, (message) => ({
@@ -1932,27 +1936,39 @@ export default {
     const worker = env.DISPATCH.get(workerName);
     try {
       const body = JSON.stringify({ queue: queueName, messages });
-      const queueHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (proxyToken) {
-        queueHeaders['x-void-internal'] = proxyToken;
-      }
-      let res = await worker.fetch(
-        new Request('https://internal/__void/queue', {
-          method: 'POST',
-          headers: queueHeaders,
-          body,
-        }),
-      );
-      // Legacy: fall back for workers deployed before the /__void/ migration.
-      // TODO: remove once all deployed workers use /__void/* paths.
-      if (res.status === 404) {
-        res = await worker.fetch(
-          new Request('https://internal/__queue', {
+      const relay = async (token: string | undefined): Promise<Response> => {
+        const queueHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) {
+          queueHeaders['x-void-internal'] = token;
+        }
+        const res = await worker.fetch(
+          new Request('https://internal/__void/queue', {
             method: 'POST',
             headers: queueHeaders,
             body,
           }),
         );
+        // Legacy: fall back for workers deployed before the /__void/ migration.
+        // TODO: remove once all deployed workers use /__void/* paths.
+        if (res.status === 404) {
+          return worker.fetch(
+            new Request('https://internal/__queue', {
+              method: 'POST',
+              headers: queueHeaders,
+              body,
+            }),
+          );
+        }
+        return res;
+      };
+
+      let res = await relay(proxyToken);
+      // While a token rotation is in progress the Worker may hold either
+      // token. Its reject comes before any queue handler runs, so a second
+      // attempt with the other token cannot deliver the batch twice.
+      if (proxyTokenFallback && (await isQueueTokenRejection(res))) {
+        await res.body?.cancel();
+        res = await relay(proxyTokenFallback);
       }
 
       if (!res.ok) {
@@ -2024,6 +2040,23 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+/** The generated queue route's reject for a token it does not hold. */
+async function isQueueTokenRejection(res: Response): Promise<boolean> {
+  if (res.status !== 401) {
+    return false;
+  }
+  try {
+    const data: unknown = await res.clone().json();
+    return (
+      typeof data === 'object' &&
+      data !== null &&
+      (data as { error?: unknown }).error === 'unauthorized'
+    );
+  } catch {
+    return false;
+  }
+}
 
 class StaticAssetReadError extends Error {
   constructor(cause: unknown) {

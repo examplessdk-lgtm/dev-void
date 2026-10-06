@@ -15,6 +15,8 @@ export type CronFireMessage = Readonly<{
   cron: string;
   scheduledTime: number;
   proxyToken?: string;
+  /** Second token to try when the Worker rejects `proxyToken`. */
+  proxyTokenFallback?: string;
 }>;
 
 type InvokeOutcome = Readonly<{
@@ -24,7 +26,26 @@ type InvokeOutcome = Readonly<{
   bodySnippet?: string;
   /** True only when the worker script no longer exists. */
   unreachable?: boolean;
+  /** True when the worker refused the token before running the cron handler. */
+  tokenRejected?: boolean;
 }>;
+
+/** The generated cron route's reject for a token it does not hold. */
+function isTokenRejection(status: number, text: string): boolean {
+  if (status !== 401 && status !== 403) {
+    return false;
+  }
+  try {
+    const data: unknown = JSON.parse(text);
+    return (
+      typeof data === 'object' &&
+      data !== null &&
+      (data as { error?: unknown }).error === 'unauthorized'
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Cloudflare's WfP dispatch surfaces a missing-worker error as a thrown
@@ -40,10 +61,11 @@ function isWorkerNotFoundError(err: unknown): boolean {
 async function invokeWorker(
   env: ApiEnv['Bindings'],
   message: CronFireMessage,
+  token: string | undefined,
 ): Promise<InvokeOutcome> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (message.proxyToken) {
-    headers['x-void-internal'] = message.proxyToken;
+  if (token) {
+    headers['x-void-internal'] = token;
   }
   const body = JSON.stringify({ cron: message.cron, scheduledTime: message.scheduledTime });
 
@@ -80,6 +102,7 @@ async function invokeWorker(
       responseReceived: true,
       status: res.status,
       bodySnippet: text.slice(0, 200),
+      tokenRejected: isTokenRejection(res.status, text),
     };
   }
   // Fully consume the response body so the dispatch subrequest finalizes cleanly,
@@ -103,7 +126,13 @@ export async function processCronFiresBatch(
 ): Promise<void> {
   await Promise.allSettled(
     batch.messages.map(async (msg) => {
-      const outcome = await invokeWorker(env, msg.body);
+      let outcome = await invokeWorker(env, msg.body, msg.body.proxyToken);
+      // While a token rotation is in progress the worker may hold either
+      // token. Its reject comes before the cron handler runs, so a second
+      // attempt with the other token cannot run the handler twice.
+      if (outcome.tokenRejected && msg.body.proxyTokenFallback) {
+        outcome = await invokeWorker(env, msg.body, msg.body.proxyTokenFallback);
+      }
 
       // A Response came back — the user worker's handler ran (or the runtime
       // made a routing decision, e.g. 404 on missing handler). Either way the
@@ -113,11 +142,11 @@ export async function processCronFiresBatch(
       if (outcome.responseReceived) {
         const status = outcome.status;
         if (status === 401 || status === 403) {
-          // Auth drift between CronScheduler's stored proxyToken and the
-          // user worker's baked __VOID_PROXY_TOKEN. Retrying would yield
-          // the same 401 (same token in, same status out), so we ack; the
-          // next deploy's /sync resyncs the token. Logged with a stable
-          // greppable marker so ops can alert on this.
+          // Auth drift: the user worker's baked __VOID_PROXY_TOKEN matches
+          // neither the stored proxyToken nor its fallback, if any. Retrying
+          // would yield the same 401 (same token in, same status out), so we
+          // ack; the next deploy's /sync resyncs the token. Logged with a
+          // stable greppable marker so ops can alert on this.
           console.error(
             `[cron-fires] AUTH_DRIFT non-delivery for ${msg.body.workerName} (cron ${msg.body.cron}): status=${status} body=${outcome.bodySnippet ?? ''}; acking — next deploy will resync token`,
           );

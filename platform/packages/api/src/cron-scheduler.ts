@@ -183,8 +183,8 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
   private async handleStatus(): Promise<Response> {
     const state = await this.getState();
     const alarm = await this.ctx.storage.getAlarm();
-    // Omit proxyToken from status response to avoid leaking secrets.
-    const { proxyToken: _, ...safeState } = state ?? {};
+    // Omit the proxy tokens from the status response to avoid leaking secrets.
+    const { proxyToken: _, proxyTokenFallback: __, ...safeState } = state ?? {};
     return Response.json({ state: state ? safeState : null, nextAlarm: alarm });
   }
 
@@ -240,6 +240,7 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
         cron,
         scheduledTime: now,
         proxyToken: state.proxyToken,
+        ...(state.proxyTokenFallback ? { proxyTokenFallback: state.proxyTokenFallback } : {}),
       },
     }));
     const chunks = chunkMessages(messages, SEND_BATCH_CHUNK_SIZE);
