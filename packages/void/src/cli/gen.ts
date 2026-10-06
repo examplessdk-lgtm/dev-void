@@ -106,16 +106,17 @@ type ColumnSpec = {
 
 function drizzleColumnDef(col: ColumnSpec): string {
   const { name, type } = col;
+  const notNull = col.nullable ? '' : '.notNull()';
   switch (type) {
     case 'string':
     case 'text':
-      return `  ${name}: text("${name}").notNull(),`;
+      return `  ${name}: text("${name}")${notNull},`;
     case 'integer':
-      return `  ${name}: integer("${name}").notNull(),`;
+      return `  ${name}: integer("${name}")${notNull},`;
     case 'boolean':
-      return `  ${name}: integer("${name}", { mode: "boolean" }).notNull().default(false),`;
+      return `  ${name}: integer("${name}", { mode: "boolean" })${notNull}.default(false),`;
     case 'real':
-      return `  ${name}: real("${name}").notNull(),`;
+      return `  ${name}: real("${name}")${notNull},`;
     default:
       return `  ${name}: text("${name}"),`;
   }
@@ -147,16 +148,17 @@ function drizzleImportsForColumns(columns: Array<ColumnSpec>): Array<string> {
 
 function drizzleColumnDefPg(col: ColumnSpec): string {
   const { name, type } = col;
+  const notNull = col.nullable ? '' : '.notNull()';
   switch (type) {
     case 'string':
     case 'text':
-      return `  ${name}: text("${name}").notNull(),`;
+      return `  ${name}: text("${name}")${notNull},`;
     case 'integer':
-      return `  ${name}: integer("${name}").notNull(),`;
+      return `  ${name}: integer("${name}")${notNull},`;
     case 'boolean':
-      return `  ${name}: boolean("${name}").notNull().default(false),`;
+      return `  ${name}: boolean("${name}")${notNull}.default(false),`;
     case 'real':
-      return `  ${name}: doublePrecision("${name}").notNull(),`;
+      return `  ${name}: doublePrecision("${name}")${notNull},`;
     default:
       return `  ${name}: text("${name}"),`;
   }
@@ -188,16 +190,17 @@ function drizzleImportsForColumnsPg(columns: Array<ColumnSpec>): Array<string> {
 
 function drizzleColumnDefMySql(col: ColumnSpec): string {
   const { name, type } = col;
+  const notNull = col.nullable ? '' : '.notNull()';
   switch (type) {
     case 'string':
     case 'text':
-      return `  ${name}: text("${name}").notNull(),`;
+      return `  ${name}: text("${name}")${notNull},`;
     case 'integer':
-      return `  ${name}: int("${name}").notNull(),`;
+      return `  ${name}: int("${name}")${notNull},`;
     case 'boolean':
-      return `  ${name}: boolean("${name}").notNull().default(false),`;
+      return `  ${name}: boolean("${name}")${notNull}.default(false),`;
     case 'real':
-      return `  ${name}: double("${name}").notNull(),`;
+      return `  ${name}: double("${name}")${notNull},`;
     default:
       return `  ${name}: text("${name}"),`;
   }

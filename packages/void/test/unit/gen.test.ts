@@ -258,6 +258,76 @@ describe('gen model', () => {
     expect(schema).toContain('e: real("e").notNull()');
   });
 
+  it.each([
+    {
+      dialect: 'sqlite',
+      database: undefined,
+      required: [
+        'title: text("title").notNull(),',
+        'flag: integer("flag", { mode: "boolean" }).notNull().default(false),',
+      ],
+      nullable: [
+        'bio: text("bio"),',
+        'views: integer("views"),',
+        'score: real("score"),',
+        'hidden: integer("hidden", { mode: "boolean" }).default(false),',
+      ],
+    },
+    {
+      dialect: 'postgresql',
+      database: 'pg',
+      required: [
+        'title: text("title").notNull(),',
+        'flag: boolean("flag").notNull().default(false),',
+      ],
+      nullable: [
+        'bio: text("bio"),',
+        'views: integer("views"),',
+        'score: doublePrecision("score"),',
+        'hidden: boolean("hidden").default(false),',
+      ],
+    },
+    {
+      dialect: 'mysql',
+      database: 'mysql',
+      required: [
+        'title: text("title").notNull(),',
+        'flag: boolean("flag").notNull().default(false),',
+      ],
+      nullable: [
+        'bio: text("bio"),',
+        'views: int("views"),',
+        'score: double("score"),',
+        'hidden: boolean("hidden").default(false),',
+      ],
+    },
+  ])(
+    'omits .notNull() only for nullable columns ($dialect)',
+    async ({ database, required, nullable }) => {
+      writePkg({ valibot: '^1.0.0' });
+      if (database) {
+        writeFileSync(join(TMP, 'void.json'), JSON.stringify({ database }));
+      }
+      await runGenCommand(TMP, {
+        subcommand: 'model',
+        name: 'posts',
+        columns: [
+          { name: 'title', type: 'string', nullable: false },
+          { name: 'flag', type: 'boolean', nullable: false },
+          { name: 'bio', type: 'text', nullable: true },
+          { name: 'views', type: 'integer', nullable: true },
+          { name: 'score', type: 'real', nullable: true },
+          { name: 'hidden', type: 'boolean', nullable: true },
+        ],
+      });
+
+      const schema = read('db/schema/posts.ts');
+      for (const line of [...required, ...nullable]) {
+        expect(schema).toContain(`  ${line}\n`);
+      }
+    },
+  );
+
   it('creates barrel export in db/schema.ts', async () => {
     writePkg({ valibot: '^1.0.0' });
     await runGenCommand(TMP, {
