@@ -141,7 +141,13 @@ HMAC. See [Platform Development](../../../docs/guide/platform/development/runtim
 - `POST /internal/revalidate/:projectId`
 - `POST /internal/resolve-resource/:projectId`
 - `POST /internal/resolve-worker/:projectId` — resolve the active deployment's versioned worker; static active deployments report that no worker exists
+- `POST /internal/verify-prerender-build/:projectId` — live-check that a prerender JWT's user, build, and deploy credential are still active
 - `POST /internal/verify-owner/:projectId` — legacy URL that live-checks the caller's project deploy capability
+
+`resolve-resource`, `resolve-worker` and `verify-prerender-build` authenticate
+the proxy with its own key (`x-void-proxy-internal`); a request without it is
+checked like a project token. `revalidate` checks the project token forwarded
+by the proxy against the project's accept floor (see the proxy README).
 
 ### Operator API
 
