@@ -204,6 +204,11 @@ export type ProjectMemberResponse = {
   };
 };
 
+export type ProjectMemberListResponse = {
+  members: Array<ProjectMemberResponse>;
+  warnings?: Array<string>;
+};
+
 export type ProjectInvitationResponse = {
   id: string;
   target_email?: string;
@@ -320,6 +325,7 @@ export type DeploymentResponse = {
 export type DeploymentListResponse = {
   deployments: Array<DeploymentResponse>;
   activeDeploymentId: string | null;
+  warnings?: Array<string>;
 };
 
 export type SecretResponse = {
@@ -937,15 +943,15 @@ export class PlatformClient {
     return res.json();
   }
 
-  async listProjectMembers(projectId: string): Promise<Array<ProjectMemberResponse>> {
+  async listProjectMembers(projectId: string): Promise<ProjectMemberListResponse> {
     const res = await this.request(`${this.baseUrl}/projects/${projectId}/members`, {
       headers: { ...this.authHeaders },
     });
     if (!res.ok) {
       await throwPlatformApiError('Failed to list project members', res, 'read');
     }
-    const body = (await res.json()) as { members: Array<ProjectMemberResponse> };
-    return body.members;
+    const body = (await res.json()) as ProjectMemberListResponse;
+    return { members: body.members, ...(body.warnings ? { warnings: body.warnings } : {}) };
   }
 
   async listProjectInvitations(projectId: string): Promise<Array<ProjectInvitationResponse>> {

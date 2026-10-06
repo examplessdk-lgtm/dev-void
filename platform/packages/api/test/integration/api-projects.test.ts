@@ -18,6 +18,10 @@ import {
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
+import {
+  proxyTokenRotationStuckWarning,
+  proxyTokenRotationTarget,
+} from '../../src/proxy-token-rotation.ts';
 import { deriveProxyInternalAuth, deriveProxyToken } from '../../src/proxy-token.ts';
 import { users } from '../../src/schema.ts';
 import {
@@ -31,6 +35,7 @@ import {
   projectDeployCredentials,
   platformLoginConnections,
   platformSettings,
+  projectCleanupJobs,
 } from '../../src/schema.ts';
 import {
   createTestBuild,
@@ -2270,6 +2275,76 @@ describe('GET /projects/:id/deployments', () => {
       vars: { TOKEN: 'plaintext' },
       ssr: true,
     });
+  });
+
+  it('warns only owners and admins about a stuck credential rotation', async () => {
+    const owner = await createTestUser(env.db, 'stuck-owner');
+    const project = await createTestProject(env.db, owner.id, 'stuck-project');
+    const members: Record<'reader' | 'collaborator' | 'admin', string> = {
+      reader: '',
+      collaborator: '',
+      admin: '',
+    };
+    for (const role of ['reader', 'collaborator', 'admin'] as const) {
+      const user = await createTestUser(env.db, `stuck-${role}`);
+      await env.db.insert(projectMembers).values({
+        project_id: project.id,
+        user_id: user.id,
+        role,
+        added_by_user_id: owner.id,
+      });
+      members[role] = user.jwt;
+    }
+    const build = await createTestBuild(env.db, {
+      projectId: project.id,
+      userId: owner.id,
+      status: 'building',
+    });
+    const deployToken = await signDeployToken(
+      { projectId: project.id, userId: owner.id, login: owner.login, buildId: build.id },
+      env.JWT_SECRET,
+    );
+    await createDeployment(env.db, project.id, JSON.stringify({ version: 3, bindings: {} }));
+
+    const listAs = async (jwt: string) => {
+      const response = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/deployments`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain('cf boom');
+      expect(text).not.toContain('user-x-dep');
+      expect(text).not.toContain('mock-proxy-token');
+      return JSON.parse(text) as { deployments: Array<unknown>; warnings?: Array<string> };
+    };
+
+    expect(await listAs(owner.jwt)).not.toHaveProperty('warnings');
+
+    await env.db.insert(projectCleanupJobs).values({
+      target: proxyTokenRotationTarget(project.id),
+      project_id: project.id,
+      kind: 'proxy-token-rotation',
+      payload: { phase: 'patch', reason: 'member-removed' },
+      attempts: 3,
+      last_error: 'cf boom user-x-dep',
+    });
+    expect(await listAs(owner.jwt)).not.toHaveProperty('warnings');
+
+    await env.db
+      .update(projectCleanupJobs)
+      .set({ attempts: 4 })
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(project.id)));
+    for (const jwt of [owner.jwt, members.admin]) {
+      const body = await listAs(jwt);
+      expect(body.warnings).toEqual([proxyTokenRotationStuckWarning(project.id)]);
+      expect(body.deployments).toHaveLength(1);
+    }
+    for (const jwt of [members.reader, members.collaborator, deployToken]) {
+      expect(await listAs(jwt)).not.toHaveProperty('warnings');
+    }
   });
 });
 

@@ -89,6 +89,7 @@ import {
 import { isManagedSandbox, verifySandboxController } from '../provisioning/sandbox-controller.ts';
 import {
   proxyTokenCopies,
+  proxyTokenRotationWarnings,
   requestRotationIfReplacingUntrustedCode,
 } from '../proxy-token-rotation.ts';
 import { EMAIL_RESERVED_SLUGS } from '../reserved-slugs.ts';
@@ -981,9 +982,16 @@ const app = new Hono<ApiEnv>()
             manifest: sanitizeDeploymentManifest(deployment.manifest),
           }))
         : deployments;
+    const warnings = await proxyTokenRotationWarnings(
+      context.get('db'),
+      project.id,
+      access.role,
+      !!context.get('deployScope'),
+    );
     return context.json({
       deployments: sanitized,
       activeDeploymentId: project.active_deployment_id,
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   })
 

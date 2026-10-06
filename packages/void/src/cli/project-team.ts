@@ -6,7 +6,7 @@ import {
   type ProjectInvitationResponse,
   type ProjectMemberResponse,
 } from './client.ts';
-import { printSuccess, formatCount, note } from './output.ts';
+import { printSuccess, formatCount, note, sanitizeTerminalText } from './output.ts';
 import { parsePlatformErrorBody, platformErrorMessage } from './platform-errors.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
@@ -149,7 +149,10 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
     'projectSlug' in args ? args.projectSlug : '',
   );
   if (args.action === 'list') {
-    const members = await client.listProjectMembers(projectId);
+    const { members, warnings } = await client.listProjectMembers(projectId);
+    for (const warning of warnings ?? []) {
+      log.warn(sanitizeTerminalText(warning));
+    }
     note(memberLines(members), 'Project Team');
     outro(formatCount(members.length, 'member'));
     return;

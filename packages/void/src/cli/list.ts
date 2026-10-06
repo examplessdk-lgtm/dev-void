@@ -1,7 +1,7 @@
 import { outro, log } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient, type DeploymentResponse } from './client.ts';
-import { dim, ensureUtc, formatCount, pc, tablePrefix } from './output.ts';
+import { dim, ensureUtc, formatCount, pc, sanitizeTerminalText, tablePrefix } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { resolveProjectBySlug } from './resolve-project.ts';
 
@@ -90,7 +90,10 @@ async function showDeployments(
   projectId: string,
   slug: string,
 ): Promise<void> {
-  const { deployments, activeDeploymentId } = await client.listDeployments(projectId);
+  const { deployments, activeDeploymentId, warnings } = await client.listDeployments(projectId);
+  for (const warning of warnings ?? []) {
+    log.warn(sanitizeTerminalText(warning));
+  }
 
   if (deployments.length === 0) {
     outro(`No deployments for ${slug}.`);

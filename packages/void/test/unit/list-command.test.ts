@@ -163,4 +163,60 @@ describe('runListCommand', () => {
     expect(rowFor('dep-global')).toMatch(/\b120s\b/);
     expect(rowFor('dep-none')).not.toMatch(/rule|\d+s\b/);
   });
+
+  it('prints platform warnings before the deployment table', async () => {
+    setIsolatedHome();
+    mockGetToken.mockReturnValue('test-token');
+    const root = mkdtempSync(join(tmpdir(), 'void-list-'));
+    tempHomes.push(root);
+    mkdirSync(join(root, '.void'), { recursive: true });
+    writeFileSync(
+      join(root, '.void', 'project.json'),
+      JSON.stringify({ projectId: 'proj-1', slug: 'demo' }),
+    );
+    const body = (warnings?: Array<string>) => ({
+      deployments: [
+        {
+          id: 'dep-live',
+          status: 'live',
+          source: 'cli',
+          commit: null,
+          manifest: JSON.stringify({ type: 'ssr' }),
+          error_message: null,
+          retained: true,
+          applied_migrations: null,
+          created_at: '2026-01-01T00:00:00Z',
+          deployed_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+      activeDeploymentId: 'dep-live',
+      ...(warnings ? { warnings } : {}),
+    });
+
+    const run = async (warnings?: Array<string>) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json(body(warnings))),
+      );
+      const capture = captureOutput();
+      const runListCommand = await importRunListCommand();
+      const { log } = await import('@voidzero-dev/vite-plus-prompts');
+      const warnedAt: Array<number> = [];
+      const warn = vi.spyOn(log, 'warn').mockImplementation(() => {
+        warnedAt.push(capture.output().length);
+      });
+      await runListCommand(root);
+      const out = capture.output();
+      capture.restore();
+      return { warn, warnedAt, tableAt: out.indexOf('dep-live') };
+    };
+
+    const warned = await run(['stuck \u001b[31mred']);
+    expect(warned.warn).toHaveBeenCalledTimes(1);
+    expect(warned.warn).toHaveBeenCalledWith('stuck  [31mred');
+    expect(warned.tableAt).toBeGreaterThan(warned.warnedAt[0]!);
+
+    const quiet = await run();
+    expect(quiet.warn).not.toHaveBeenCalled();
+  });
 });

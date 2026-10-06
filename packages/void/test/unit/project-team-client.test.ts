@@ -39,10 +39,20 @@ describe('PlatformClient project teams', () => {
     fetchMock.mockResolvedValueOnce(json({ members: [member] }));
     fetchMock.mockResolvedValueOnce(json({ invitations: [invitation] }));
 
-    await expect(client().listProjectMembers(projectId)).resolves.toEqual([member]);
+    await expect(client().listProjectMembers(projectId)).resolves.toEqual({ members: [member] });
     await expect(client().listProjectInvitations(projectId)).resolves.toEqual([invitation]);
     expect(request(0)[0]).toBe(`${apiUrl}/projects/${projectId}/members`);
     expect(request(1)[0]).toBe(`${apiUrl}/projects/${projectId}/invitations`);
+  });
+
+  it('passes member list warnings through', async () => {
+    const member = { user: { id: 'user_1', login: 'alex' }, role: 'owner' };
+    fetchMock.mockResolvedValueOnce(json({ members: [member], warnings: ['stuck'] }));
+
+    await expect(client().listProjectMembers(projectId)).resolves.toEqual({
+      members: [member],
+      warnings: ['stuck'],
+    });
   });
 
   it('invites only by email and role', async () => {

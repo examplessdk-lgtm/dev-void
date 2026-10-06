@@ -23,7 +23,7 @@ import {
 } from './proxy-token-rotation-request.ts';
 import { deriveProxyToken, proxyTokenStateKey, serializeProxyTokenState } from './proxy-token.ts';
 import { deployments, projectCleanupJobs, projects } from './schema.ts';
-import type { DeployManifest, Project } from './types.ts';
+import type { DeployManifest, Project, ProjectRole } from './types.ts';
 
 export {
   PROXY_TOKEN_ROTATION_JOB_KIND,
@@ -43,6 +43,9 @@ export {
 
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
 export const PROXY_TOKEN_ROTATION_WAIT_MS = 120_000;
+
+/** Failed steps in a row after which project owners and admins see a warning. */
+export const PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS = 4;
 
 /** Cloudflare API calls and wall-clock time one rotation run may still spend. */
 export type RotationBudget = { cfCallsRemaining: number; readonly deadline: number };
@@ -851,4 +854,39 @@ export async function reconcileProxyTokenRotations(
     }
   }
   return summary;
+}
+
+// --- Owner warning ---
+
+export function proxyTokenRotationStuckWarning(projectId: string): string {
+  return (
+    "Replacing this project's platform credentials keeps failing. Until it finishes, older " +
+    'credentials still work, including any a removed member may still hold. The platform keeps ' +
+    'retrying. If this warning stays, ask your platform administrator to run ' +
+    `\`void platform system rotate-proxy-tokens --plan --project ${projectId}\`.`
+  );
+}
+
+/**
+ * Warnings for project owners and admins when the project's rotation keeps
+ * failing. Other roles and deploy tokens always get none, so they cannot tell
+ * whether a rotation is stuck. Busy steps, waits and budget cut-offs do not
+ * raise `attempts`, so a long queue of rotations does not warn.
+ */
+export async function proxyTokenRotationWarnings(
+  db: DbOrTx,
+  projectId: string,
+  role: ProjectRole,
+  deployScoped: boolean,
+): Promise<ReadonlyArray<string>> {
+  if (deployScoped || !hasProjectCapability(role, 'members')) {
+    return [];
+  }
+  const [job] = await db
+    .select({ attempts: projectCleanupJobs.attempts })
+    .from(projectCleanupJobs)
+    .where(and(jobTarget(projectId), eq(projectCleanupJobs.kind, PROXY_TOKEN_ROTATION_JOB_KIND)));
+  return job && job.attempts >= PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS
+    ? [proxyTokenRotationStuckWarning(projectId)]
+    : [];
 }

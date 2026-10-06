@@ -18,6 +18,7 @@ import { sendProjectInvitationEmail } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
 import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { PROJECT_PERMISSION_MESSAGES } from '../project-access.ts';
+import { proxyTokenRotationWarnings } from '../proxy-token-rotation.ts';
 import type {
   ProjectInvitation,
   ProjectInvitationStatus,
@@ -215,6 +216,12 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
       return access;
     }
     const members = await getProjectMembers(context.get('db'), projectId);
+    const warnings = await proxyTokenRotationWarnings(
+      context.get('db'),
+      projectId,
+      access.role,
+      !!context.get('deployScope'),
+    );
     return context.json({
       members: [
         {
@@ -224,6 +231,7 @@ export const projectTeamRoutes = new Hono<ApiEnv>()
         },
         ...members.map(({ member, user }) => memberJson(member, user)),
       ],
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   })
 
