@@ -63,7 +63,7 @@ import { isValidEmailDomain, MAX_DOMAIN_LENGTH } from './email/domain-name.ts';
 import emailIngressResolution from './email/ingress-resolution.ts';
 import { repairEmailRecipientPolicyMirror } from './email/settings.ts';
 import { reconcileSharedEmailRecipients } from './email/shared-recipient-service.ts';
-import type { ApiEnv } from './env.ts';
+import { isDevBypass, type ApiEnv } from './env.ts';
 import { ErrorAlertMonitor } from './error-alert-monitor.ts';
 import { cancelContainerBuildDos } from './github/cancel-builds.ts';
 import { authMiddleware } from './middleware/auth.ts';
@@ -94,6 +94,7 @@ import {
 } from './provisioning/cloudflare-api.ts';
 import { reconcileEmailDestinationCleanups } from './provisioning/email-destination-cleanup.ts';
 import { retrySandboxControllerCleanup } from './provisioning/sandbox-controller.ts';
+import { reconcileProxyTokenRotations } from './proxy-token-rotation.ts';
 import { oidcRoutes } from './routes/auth-oidc.ts';
 import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
@@ -666,6 +667,14 @@ async function scheduled(
     if (zeroTrustProgressed) {
       return;
     }
+  }
+
+  // Proxy token rotations, bounded per tick so deploys keep their share of the
+  // Cloudflare API rate limit.
+  if (!isDevBypass(env) && env.CF_API_TOKEN) {
+    await reconcileProxyTokenRotations(db, env, { maxCfCalls: 100, maxMs: 25_000 }).catch((error) =>
+      console.error('[scheduled] proxy token rotation failed:', error),
+    );
   }
 
   if (capabilities.email) {

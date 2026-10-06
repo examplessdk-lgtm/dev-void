@@ -1,8 +1,12 @@
 import { eq, sql } from 'drizzle-orm';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vite-plus/test';
-import { scheduled } from '../../src/index.ts';
+import { FAST_CRON, scheduled } from '../../src/index.ts';
 import { transferOperatorProjectOwner } from '../../src/operator/tenant-service.ts';
-import { builds, domains, projects } from '../../src/schema.ts';
+import {
+  proxyTokenRotationTarget,
+  requestProxyTokenRotation,
+} from '../../src/proxy-token-rotation.ts';
+import { builds, domains, projectCleanupJobs, projects } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
@@ -11,6 +15,20 @@ import {
   createTestProject,
   type TestEnv,
 } from './helpers.ts';
+
+const zeroTrust = vi.hoisted(() => ({ progressed: false }));
+vi.mock('../../src/zero-trust/installation.ts', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/zero-trust/installation.ts')>();
+  return {
+    ...original,
+    resumePlatformZeroTrustOperation: (
+      ...args: Parameters<typeof original.resumePlatformZeroTrustOperation>
+    ) =>
+      zeroTrust.progressed
+        ? Promise.resolve(true)
+        : original.resumePlatformZeroTrustOperation(...args),
+  };
+});
 
 let env: TestEnv;
 
@@ -68,6 +86,7 @@ beforeEach(async () => {
   // seeded first so the FK to projects/users doesn't block clearTables.
   await env.db.delete(builds);
   await clearTables(env.db);
+  zeroTrust.progressed = false;
 });
 
 describe('scheduled()', () => {
@@ -686,5 +705,54 @@ describe('scheduled()', () => {
       userId: newOwner.id,
       projectSlugs: { [project.id]: project.slug },
     });
+  });
+});
+
+describe('scheduled() proxy token rotations', () => {
+  const fastController = { cron: FAST_CRON, scheduledTime: Date.now() } as ScheduledController;
+
+  async function dueRotation(): Promise<string> {
+    const { id } = await createTestUser(env.db, 'rotation-owner');
+    const project = await createTestProject(env.db, id);
+    await requestProxyTokenRotation(env.db, project.id, 'operator', 'operator');
+    return project.id;
+  }
+
+  async function rotationState(projectId: string) {
+    const [project] = await env.db
+      .select({ gen: projects.proxy_token_gen })
+      .from(projects)
+      .where(eq(projects.id, projectId));
+    const [job] = await env.db
+      .select({ payload: projectCleanupJobs.payload })
+      .from(projectCleanupJobs)
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(projectId)));
+    return { gen: project!.gen, phase: job?.payload.phase };
+  }
+
+  it.each([
+    ['fast', fastController],
+    ['hourly', mockController],
+  ])('advances a due rotation on the %s cron', async (_tier, controller) => {
+    const projectId = await dueRotation();
+    await scheduled(controller, makeBindings(env), mockCtx);
+    // START and COPIES run; the rotation then waits for KV copies to spread.
+    expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'patch' });
+  });
+
+  it('leaves rotations to the next tick when a Zero Trust batch used this one', async () => {
+    const projectId = await dueRotation();
+    zeroTrust.progressed = true;
+    await scheduled(fastController, makeBindings(env), mockCtx);
+    expect(await rotationState(projectId)).toEqual({ gen: 0, phase: 'requested' });
+  });
+
+  it.each([
+    ['during installer staging', { PLATFORM_TRAFFIC_STATE: 'staging' }],
+    ['under the development auth bypass', { DEV_AUTH_BYPASS: 'true' }],
+  ])('does not rotate %s', async (_case, overrides) => {
+    const projectId = await dueRotation();
+    await scheduled(mockController, { ...makeBindings(env), ...overrides }, mockCtx);
+    expect(await rotationState(projectId)).toEqual({ gen: 0, phase: 'requested' });
   });
 });
