@@ -20,11 +20,16 @@ import {
   type PlatformConnection,
 } from './platform-registry.ts';
 
+function normalizePlatformInputUrl(input: string): string {
+  const value = input.trim();
+  return normalizePlatformApiUrl(value.includes('://') ? value : `https://${value}`);
+}
+
 export async function discoverPlatform(
   input: string,
   fetcher: typeof fetch = fetch,
 ): Promise<PlatformDiscoveryDocument> {
-  const apiUrl = normalizePlatformApiUrl(input);
+  const apiUrl = normalizePlatformInputUrl(input);
   ensureCloudflaredToken(apiUrl);
   const request = () =>
     fetcher(`${apiUrl}/.well-known/void-platform`, {
@@ -47,13 +52,13 @@ export async function promptPlatformUrl(): Promise<string> {
   }
   const value = await text({
     message: 'Void platform API URL:',
-    placeholder: 'https://platform.example.com',
+    placeholder: 'platform.example.com',
     validate: (input) => {
       if (!input) {
         return 'Enter a platform URL.';
       }
       try {
-        normalizePlatformApiUrl(input);
+        normalizePlatformInputUrl(input);
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       }

@@ -125,7 +125,8 @@ function operatorHelpTree(): HelpTree {
 
 const HELP_TREE: HelpTree = {
   connect: {
-    summary: 'Connect this project to Cloudflare or an existing Void platform.',
+    summary:
+      'Connect this project to Cloudflare or an existing Void platform. Platform hostnames default to HTTPS.',
     usage: ['void connect [url] [--platform <cloudflare|void>] [--no-login]'],
     options: [
       { command: '--platform <cloudflare|void>', description: 'Choose the deployment destination' },
@@ -133,7 +134,7 @@ const HELP_TREE: HelpTree = {
     ],
     examples: [
       { command: 'void connect', description: 'Choose a destination and sign in' },
-      { command: 'void connect https://platform.example.com', description: 'Join a Void platform' },
+      { command: 'void connect platform.example.com', description: 'Join a Void platform' },
       {
         command: 'void connect --platform cloudflare',
         description: 'Sign in and select a Cloudflare account',

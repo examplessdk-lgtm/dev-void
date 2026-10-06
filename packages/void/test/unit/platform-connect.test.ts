@@ -234,14 +234,41 @@ describe('platform discovery', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-  it('accepts a valid document from its declared origin', async () => {
-    const response = new Response(JSON.stringify(document));
+  it.each([
+    ['https://api.example.com', 'https://api.example.com'],
+    ['api.example.com', 'https://api.example.com'],
+    [' api.example.com/ ', 'https://api.example.com'],
+    ['api.example.com:8443', 'https://api.example.com:8443'],
+    ['http://localhost:8787', 'http://localhost:8787'],
+  ])('discovers %s at %s', async (input, apiUrl) => {
+    const response = new Response(JSON.stringify({ ...document, apiUrl }));
     Object.defineProperty(response, 'url', {
-      value: 'https://api.example.com/.well-known/void-platform',
+      value: `${apiUrl}/.well-known/void-platform`,
     });
-    await expect(
-      discoverPlatform('https://api.example.com', async () => response),
-    ).resolves.toMatchObject({ displayName: 'Example' });
+    const request = vi.fn(async () => response);
+
+    await expect(discoverPlatform(input, request)).resolves.toMatchObject({
+      apiUrl,
+      displayName: 'Example',
+    });
+    expect(request).toHaveBeenCalledWith(
+      `${apiUrl}/.well-known/void-platform`,
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  it.each([
+    'http://api.example.com',
+    'ftp://api.example.com',
+    'user@api.example.com',
+    'api.example.com/api',
+    'api.example.com?token=value',
+    'api.example.com#fragment',
+  ])('rejects invalid platform input %s before making a request', async (input) => {
+    const request = vi.fn();
+
+    await expect(discoverPlatform(input, request)).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('requires a proxy origin even for former hosted discovery documents', async () => {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { parseConnectArgs } from '../../src/cli/connect-args.ts';
 import { runConnectCommand } from '../../src/cli/connect.ts';
+import { promptPlatformUrl } from '../../src/cli/platform-cmd.ts';
 import { getActivePlatformConnection } from '../../src/cli/platform-registry.ts';
 
 const mocks = vi.hoisted(() => ({
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   client: vi.fn(),
   whoami: vi.fn(),
   select: vi.fn(),
+  text: vi.fn(),
 }));
 vi.mock('../../src/cli/cloudflare-connect.ts', () => ({ connectCloudflare: mocks.cloudflare }));
 vi.mock('../../src/cli/auth.ts', () => ({ readPlatformToken: mocks.token }));
@@ -34,7 +36,7 @@ vi.mock('../../src/cli/client.ts', () => ({
 vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
   log: { success: vi.fn(), info: vi.fn() },
   select: mocks.select,
-  text: vi.fn(),
+  text: mocks.text,
   isCancel: (value: unknown) => typeof value === 'symbol',
 }));
 
@@ -98,6 +100,22 @@ describe('connect arguments', () => {
 });
 
 describe('connect workflow', () => {
+  it('accepts a bare hostname in the interactive platform prompt', async () => {
+    const stdin = vi
+      .spyOn(process, 'stdin', 'get')
+      .mockReturnValue({ isTTY: true } as typeof process.stdin);
+    mocks.text.mockImplementationOnce(async ({ validate }) => {
+      expect(validate('platform.example.com')).toBeUndefined();
+      expect(validate('http://platform.example.com')).toContain('HTTPS');
+      return 'platform.example.com';
+    });
+    try {
+      await expect(promptPlatformUrl()).resolves.toBe('platform.example.com');
+    } finally {
+      stdin.mockRestore();
+    }
+  });
+
   it('authenticates to the discovered origin and saves the project destination', async () => {
     await runConnectCommand(root, parseConnectArgs([discovery.apiUrl]), true);
     expect(mocks.login).toHaveBeenCalledWith(root, discovery);
