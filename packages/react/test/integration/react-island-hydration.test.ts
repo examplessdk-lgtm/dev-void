@@ -44,6 +44,9 @@ export default function Counter() {
   const server = await createServer({
     root,
     configFile: false,
+    // Default cacheDir is packages/react/node_modules/.vite, which the
+    // navigation-fallback suite also uses with a different config.
+    cacheDir: join(root, '.vite'),
     logLevel: 'silent',
     plugins: [...islandsPlugin(pages)],
     server: { port: 0, host: '127.0.0.1' },
