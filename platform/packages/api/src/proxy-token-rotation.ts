@@ -17,6 +17,9 @@ export const PROXY_TOKEN_ROTATION_JOB_KIND = 'proxy-token-rotation';
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
 export const PROXY_TOKEN_ROTATION_WAIT_MS = 120_000;
 
+/** Cloudflare API calls and wall-clock time one rotation run may still spend. */
+export type RotationBudget = { cfCallsRemaining: number; readonly deadline: number };
+
 /** Primary key of a project's rotation row in `project_cleanup_jobs`. */
 export function proxyTokenRotationTarget(projectId: string): string {
   return `${PROXY_TOKEN_ROTATION_JOB_KIND}:${projectId}`;
