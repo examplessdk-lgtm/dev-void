@@ -160,6 +160,7 @@ describe('state table', () => {
     { raw: null, accepted: [0, 1, 5], rejected: [], send: [0], issue: 0 },
     { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [], send: [0], issue: 0 },
     { raw: '{"gen":1}', accepted: [1, 2], rejected: [0], send: [1, 0], issue: 1 },
+    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1], send: [2, 1], issue: 2 },
     { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2], send: [3, 2], issue: 3 },
   ])('floor $raw', async ({ raw, accepted, rejected, send, issue }) => {
     const { routing } = kvStub(raw === null ? {} : { [proxyTokenStateKey(PROJECT)]: raw });

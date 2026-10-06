@@ -57,9 +57,10 @@ The ROUTING key `proxy-token:{projectId}` holds the project's accept floor,
 least `N`. A missing key means floor 0, so the legacy token is accepted. The
 `projectId` must be a generated project id, and the MAC is checked before the
 floor is read, so an invalid token never reads KV. A floor that cannot be read
-or does not parse fails closed with 503 `project token state unavailable`. Each isolate caches a floor for 15 seconds
-and reads KV with `cacheTtl: 30`, so with KV propagation a raised floor rejects
-older tokens everywhere within about 105 seconds.
+or does not parse fails closed with 503 `project token state unavailable`. Each
+isolate caches a floor for 15 seconds and reads KV with `cacheTtl: 30`, so with
+KV propagation a raised floor rejects older tokens everywhere within about 105
+seconds.
 
 Service-binding auth and `/email/verify-receipt` use this check. `/revalidate`
 forwards the token, and the API checks it against the same floor.
