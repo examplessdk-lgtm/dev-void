@@ -1408,6 +1408,32 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     expect(await job(team.projectId)).toBeUndefined();
   });
 
+  it("rotates when the code's author is suspended by an admin", async () => {
+    cfApi();
+    const team = await setupTeam();
+    await deploy(team.projectId, team.collaborator.jwt);
+    const replace = async () => {
+      const next = await createDeployment(env.db, team.projectId, JSON.stringify(MANIFEST));
+      return env.db.transaction((tx) =>
+        requestRotationIfReplacingUntrustedCode(tx, team.projectId, next.id),
+      );
+    };
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, team.collaborator.id));
+    expect(await replace()).toBe(false);
+    expect(await job(team.projectId)).toBeUndefined();
+
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'admin_suspended' })
+      .where(eq(users.id, team.collaborator.id));
+    expect(await replace()).toBe(true);
+    expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
+  });
+
   it('does not rotate when a failed deploy leaves the code in place', async () => {
     cfApi();
     const team = await setupTeam();

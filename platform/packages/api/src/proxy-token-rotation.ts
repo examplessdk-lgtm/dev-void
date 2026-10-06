@@ -22,7 +22,8 @@ import {
   type ProxyTokenRotationReason,
 } from './proxy-token-rotation-request.ts';
 import { deriveProxyToken, proxyTokenStateKey, serializeProxyTokenState } from './proxy-token.ts';
-import { deployments, projectCleanupJobs, projects } from './schema.ts';
+import { deployments, projectCleanupJobs, projects, users } from './schema.ts';
+import { isAdminSuspended } from './suspension.ts';
 import type { DeployManifest, Project, ProjectRole } from './types.ts';
 
 export {
@@ -197,7 +198,8 @@ export async function requestBulkProxyTokenRotations(
  * new token, so a rotation protects only once that code stops running. Call in
  * the cutover transaction (project lock held) right before the active
  * deployment changes: when the code being replaced was deployed by such a user,
- * this requests one more generation. Owner suspension does not count.
+ * this requests one more generation. Owner suspension does not count; a
+ * collaborator or admin suspended by an admin does.
  */
 export async function requestRotationIfReplacingUntrustedCode(
   tx: DbOrTx,
@@ -208,16 +210,23 @@ export async function requestRotationIfReplacingUntrustedCode(
     .select({
       deploymentId: projects.active_deployment_id,
       initiatedBy: deployments.initiated_by_user_id,
+      authorSuspendedReason: users.suspended_reason,
     })
     .from(projects)
     .innerJoin(deployments, eq(deployments.id, projects.active_deployment_id))
+    .leftJoin(users, eq(users.id, deployments.initiated_by_user_id))
     .where(eq(projects.id, projectId))
     .limit(1);
   if (!current?.initiatedBy || current.deploymentId === nextDeploymentId) {
     return false;
   }
   const role = await projectRoleForUser(tx, projectId, current.initiatedBy);
-  if (role && hasProjectCapability(role, 'deploy')) {
+  if (
+    role === 'owner' ||
+    (role &&
+      hasProjectCapability(role, 'deploy') &&
+      !isAdminSuspended(current.authorSuspendedReason))
+  ) {
     return false;
   }
   await requestProxyTokenRotation(tx, projectId, 'untrusted-deploy-replaced', 'member');
