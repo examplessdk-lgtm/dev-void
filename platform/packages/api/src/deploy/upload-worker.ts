@@ -24,6 +24,7 @@ import {
   provisionSandboxController,
   sandboxControllerWorkerName,
 } from '../provisioning/sandbox-controller.ts';
+import { issueProxyToken } from '../proxy-token.ts';
 import { RESERVED_BINDING_NAMES } from '../reserved-bindings.ts';
 import { deployments } from '../schema.ts';
 import { type DeployManifest, type DeployEvent, type Deployment, type Project } from '../types.ts';
@@ -113,10 +114,10 @@ export async function uploadDeploymentWorker(input: {
     context.env.CF_API_TOKEN,
     projectId,
     manifest,
-    context.env.JWT_SECRET,
     context.env.VOID_PROXY_SERVICE ?? 'void-proxy',
     {
       projectSlug: project.slug,
+      proxyToken: await issueProxyToken(context.env.ROUTING, context.env.JWT_SECRET, projectId),
       emailSenderDomain: context.env.EMAIL_SENDER_DOMAIN,
       deploymentId: deployment.id,
     },

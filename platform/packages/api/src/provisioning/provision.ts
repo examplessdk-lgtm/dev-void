@@ -1,5 +1,4 @@
 import { createDeployIntent } from '@void/deploy-core';
-import { hmacSignState } from '../auth/hmac.ts';
 import { getProjectResources, createResource, type Db } from '../db.ts';
 import { getProjectQueueName } from '../naming.ts';
 import type { DeployManifest, Resource } from '../types.ts';
@@ -36,7 +35,6 @@ export async function provisionBindings(
   apiToken: string,
   projectId: string,
   manifest: DeployManifest,
-  jwtSecret: string,
   aiProxyService: string,
   /**
    * Per-project platform identity injected into every worker. Grouped into
@@ -47,6 +45,8 @@ export async function provisionBindings(
   platform: {
     /** Project slug. Framework reads it as `__VOID_PROJECT_SLUG`. */
     projectSlug: string;
+    /** Token the Worker presents to the proxy. Framework reads it as `__VOID_PROXY_TOKEN`. */
+    proxyToken: string;
     /** Immutable deployment identity for signed inbound email receipts. */
     deploymentId?: string;
     /**
@@ -165,10 +165,9 @@ export async function provisionBindings(
   // Always inject proxy bindings — used by AI, revalidation, email, and future
   // platform features. The AI-specific usage limit check stays in the proxy
   // (/ai/* middleware).
-  const proxyToken = await hmacSignState(projectId, jwtSecret);
   bindings.push({ type: 'service', name: '__VOID_PROXY', service: aiProxyService });
   bindings.push({ type: 'plain_text', name: '__PROJECT_ID', text: projectId });
-  bindings.push({ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: proxyToken });
+  bindings.push({ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: platform.proxyToken });
   // Project slug — the SINGLE producer of `__VOID_PROJECT_SLUG`. `void/email`
   // needs it on every worker to default an outbound `from` to
   // `<slug>+noreply@<domain>`, and the sandbox runtime reads the same name.
