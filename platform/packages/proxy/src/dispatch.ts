@@ -1,7 +1,14 @@
+import { ProxyTokenStateError } from '@voidcloud/api/proxy-token';
 import { hmacSign } from './hmac.ts';
+import { tenantSendTokens } from './proxy-token.ts';
 import type { Env } from './types.ts';
 
-type WorkerResolution = Readonly<{ workerName: string; deploymentId: string }>;
+type WorkerResolution = Readonly<{
+  workerName: string;
+  deploymentId: string;
+  /** Generation of the token the platform issues to this project's Workers. */
+  proxyTokenGen?: number;
+}>;
 
 type DispatchOptions = Readonly<{
   /** Read-only operations may retry through their REST fallback after a transport failure. */
@@ -35,11 +42,35 @@ async function resolveWorker(
     throw new Error(`worker resolution failed with status ${res.status}`);
   }
 
-  const data = await res.json<Partial<WorkerResolution>>();
+  const data = await res.json<Partial<Record<keyof WorkerResolution, unknown>>>();
   if (typeof data.workerName !== 'string' || typeof data.deploymentId !== 'string') {
     throw new Error('worker resolution returned an invalid response');
   }
-  return { workerName: data.workerName, deploymentId: data.deploymentId };
+  const resolution = { workerName: data.workerName, deploymentId: data.deploymentId };
+  return isGeneration(data.proxyTokenGen)
+    ? { ...resolution, proxyTokenGen: data.proxyTokenGen }
+    : resolution;
+}
+
+function isGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** The binding handler's reject for a token it does not hold, sent before any handler runs. */
+async function isTokenRejection(res: Response): Promise<boolean> {
+  if (res.status !== 403) {
+    return false;
+  }
+  try {
+    const data = await res.clone().json();
+    return (
+      typeof data === 'object' &&
+      data !== null &&
+      (data as { error?: unknown }).error === 'unauthorized'
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -68,7 +99,19 @@ export async function dispatchToWorker(
     return null;
   }
 
-  const proxyToken = await hmacSign(projectId, env.JWT_SECRET);
+  let tokens: ReadonlyArray<string>;
+  try {
+    tokens = await tenantSendTokens(env, projectId, resolution.proxyTokenGen);
+  } catch (error) {
+    if (!(error instanceof ProxyTokenStateError)) {
+      throw error;
+    }
+    console.error('[proxy-token] state unavailable', { projectId, error });
+    return options.fallbackOnDispatchError
+      ? null
+      : Response.json({ error: 'project token state unavailable' }, { status: 502 });
+  }
+
   let worker: Fetcher;
   try {
     worker = env.DISPATCH.get(resolution.workerName);
@@ -76,15 +119,26 @@ export async function dispatchToWorker(
     return null;
   }
 
-  try {
-    const res = await worker.fetch(`https://worker/__void${path}`, {
+  const payload = JSON.stringify(body);
+  const send = (token: string) =>
+    worker.fetch(`https://worker/__void${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-void-internal': proxyToken,
+        'x-void-internal': token,
       },
-      body: JSON.stringify(body),
+      body: payload,
     });
+
+  try {
+    let res = await send(tokens[0]);
+    // While a token rotation is in progress the Worker may still hold the
+    // previous token. Its reject comes before any handler runs, so a second
+    // attempt cannot repeat a write.
+    if (tokens.length > 1 && (await isTokenRejection(res))) {
+      await res.body?.cancel();
+      res = await send(tokens[1]);
+    }
 
     // 404 means old deploy without /__void handler → fall back
     if (res.status === 404) {

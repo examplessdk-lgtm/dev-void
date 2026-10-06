@@ -1,6 +1,10 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
+import { deriveProxyToken } from '@voidcloud/api/proxy-token';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import { createBindingHandler } from '../../../../../packages/void/src/runtime/remote/binding-handler.ts';
+import { dispatchToWorker } from '../../src/dispatch.ts';
 import worker from '../../src/index.ts';
+import { clearProxyTokenStateCache } from '../../src/proxy-token.ts';
+import type { Env } from '../../src/types.ts';
 
 const JWT_SECRET = 'test-secret-key';
 
@@ -158,6 +162,8 @@ describe('WfP dispatch path', () => {
   beforeAll(async () => {
     token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
+
+  beforeEach(clearProxyTokenStateCache);
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -609,8 +615,257 @@ describe('WfP dispatch path', () => {
         env,
       );
 
-      expect(capturedHeaders['x-void-internal']).toBeDefined();
-      expect(capturedHeaders['x-void-internal'].length).toBeGreaterThan(0);
+      expect(capturedHeaders['x-void-internal']).toBe(token);
+    });
+  });
+});
+
+describe('proxy token generations', () => {
+  const PROJECT_ID = 'proj_000000000001';
+  const KV_BODY = { binding: 'CACHE', key: 'greeting', type: 'text' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  beforeEach(clearProxyTokenStateCache);
+
+  function tok(gen: number): Promise<string> {
+    return deriveProxyToken(JWT_SECRET, PROJECT_ID, gen);
+  }
+
+  type Sent = { token: string | null; body: unknown };
+
+  /**
+   * `resolution` is the resolve-worker response body. `floor` is the raw
+   * ROUTING value of the project's accept floor. `respond` answers each
+   * dispatched request; by default a real binding handler holding `held`.
+   */
+  function setup(
+    options: Readonly<{
+      resolution?: Record<string, unknown>;
+      floor?: string | null;
+      held?: string;
+      respond?: (token: string | null) => Response | Promise<Response>;
+    }>,
+  ) {
+    const sent: Array<Sent> = [];
+    const handler = createBindingHandler({
+      CACHE: { get: vi.fn(async () => 'hello') },
+      __VOID_PROXY_TOKEN: options.held,
+    });
+    const routingGet = vi.fn(async (key: string) =>
+      key === `proxy-token:${PROJECT_ID}` ? (options.floor ?? null) : null,
+    );
+    const env = {
+      JWT_SECRET,
+      ROUTING: { get: routingGet },
+      API: {
+        fetch: vi.fn(async () =>
+          Response.json(
+            options.resolution ?? { workerName: 'user-my-app', deploymentId: 'dpl_active' },
+          ),
+        ),
+      },
+      DISPATCH: {
+        get: vi.fn(() => ({
+          fetch: vi.fn(async (url: string, init: RequestInit) => {
+            const sentToken = new Headers(init.headers).get('x-void-internal');
+            sent.push({ token: sentToken, body: JSON.parse(init.body as string) });
+            if (options.respond) {
+              return options.respond(sentToken);
+            }
+            const target = new URL(url);
+            target.pathname = target.pathname.replace(/^\/__void/, '');
+            return handler.fetch(new Request(target, init));
+          }),
+        })),
+      },
+    } as unknown as Env;
+    const floorReads = () =>
+      routingGet.mock.calls.filter(([key]) => key.startsWith('proxy-token:')).length;
+    return { env, sent, floorReads };
+  }
+
+  it('sends the legacy token once when there is no issued generation and no floor', async () => {
+    const legacy = await tok(0);
+    const { env, sent } = setup({ held: legacy });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(await res?.json()).toBe('hello');
+    expect(sent.map((s) => s.token)).toEqual([legacy]);
+  });
+
+  it('sends the floor token, then the previous one, when there is no issued generation', async () => {
+    const { env, sent } = setup({ floor: '{"gen":2}', held: await tok(1) });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
+  });
+
+  it('sends one request when the Worker holds the floor token', async () => {
+    const { env, sent } = setup({ floor: '{"gen":1}', held: await tok(1) });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual([await tok(1)]);
+  });
+
+  it('retries generation 1 with the legacy token and the same body', async () => {
+    const legacy = await tok(0);
+    const { env, sent, floorReads } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      held: legacy,
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(await res?.json()).toBe('hello');
+    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
+    expect(sent[1].body).toEqual(sent[0].body);
+    expect(sent[0].body).toEqual(KV_BODY);
+    expect(floorReads()).toBe(0);
+  });
+
+  it.each([
+    { held: 1, tokens: [2, 1] },
+    { held: 2, tokens: [2] },
+  ])('sends issued generation 2 to a Worker holding $held', async ({ held, tokens }) => {
+    const { env, sent, floorReads } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
+      held: await tok(held),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual(await Promise.all(tokens.map(tok)));
+    expect(floorReads()).toBe(0);
+  });
+
+  it('does not retry a 403 with another error', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () => Response.json({ error: 'forbidden' }, { status: 403 }),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(await res?.json()).toEqual({ error: 'forbidden' });
+    expect(sent).toHaveLength(1);
+  });
+
+  it('does not retry a 403 whose body is not JSON', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () => new Response('denied', { status: 403 }),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(await res?.text()).toBe('denied');
+    expect(sent).toHaveLength(1);
+  });
+
+  it('returns the second reject when the Worker holds neither token', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
+      held: await tok(0),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(await res?.json()).toEqual({ error: 'unauthorized' });
+    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
+  });
+
+  it('does not retry after a thrown fetch', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () => {
+        throw new Error('response lost after write');
+      },
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/put', KV_BODY);
+
+    expect(res?.status).toBe(502);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('returns null for a 404', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () => new Response('Not Found', { status: 404 }),
+    });
+
+    expect(await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY)).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it.each([-1, '1', 1.5])('reads the floor when the issued generation is %j', async (gen) => {
+    const { env, sent, floorReads } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: gen },
+      floor: '{"gen":2}',
+      held: await tok(2),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2)]);
+    expect(floorReads()).toBe(1);
+  });
+
+  describe('when the floor cannot be read', () => {
+    function failingSetup() {
+      const ctx = setup({ held: 'unused' });
+      vi.mocked(ctx.env.ROUTING.get).mockRejectedValue(new Error('KV unavailable'));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      return ctx;
+    }
+
+    it('fails a write with 502 without dispatching', async () => {
+      const ctx = failingSetup();
+
+      const res = await dispatchToWorker(ctx.env, PROJECT_ID, '/kv/put', KV_BODY);
+
+      expect(res?.status).toBe(502);
+      expect(await res?.json()).toEqual({ error: 'project token state unavailable' });
+      expect(ctx.env.DISPATCH.get).not.toHaveBeenCalled();
+      expect(ctx.sent).toHaveLength(0);
+    });
+
+    it('lets a read fall back to the REST path', async () => {
+      const ctx = failingSetup();
+
+      const res = await dispatchToWorker(ctx.env, PROJECT_ID, '/kv/get', KV_BODY, {
+        fallbackOnDispatchError: true,
+      });
+
+      expect(res).toBeNull();
+      expect(ctx.sent).toHaveLength(0);
+    });
+
+    it('does not need the floor when the issued generation is known', async () => {
+      const ctx = setup({
+        resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+        held: await tok(1),
+      });
+      vi.mocked(ctx.env.ROUTING.get).mockRejectedValue(new Error('KV unavailable'));
+
+      const res = await dispatchToWorker(ctx.env, PROJECT_ID, '/kv/get', KV_BODY);
+
+      expect(res?.status).toBe(200);
+      expect(ctx.sent.map((s) => s.token)).toEqual([await tok(1)]);
     });
   });
 });
