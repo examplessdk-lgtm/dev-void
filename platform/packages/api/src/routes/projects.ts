@@ -744,7 +744,7 @@ const app = new Hono<ApiEnv>()
 
     const userId = context.get('user').id;
     try {
-      // `void platform uninstall --delete-resources` holds this lock across its last
+      // `void platform uninstall --purge-resources` holds this lock across its last
       // check for projects and records the uninstall before releasing it, so a
       // project either commits before that check or is refused here.
       const project = await context.get('db').transaction(async (tx) => {

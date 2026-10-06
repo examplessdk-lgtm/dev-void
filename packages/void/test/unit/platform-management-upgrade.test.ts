@@ -660,7 +660,7 @@ describe('installed platform upgrade', () => {
         deleteZone: null,
         plan,
         purgeData: true,
-        deleteResources: false,
+        purgeResources: false,
         selector: state.manifest!.id,
         subcommand: 'uninstall',
         yes: true,

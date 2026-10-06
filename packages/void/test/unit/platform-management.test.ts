@@ -331,7 +331,7 @@ const uninstallArgs = {
   selector: '',
   plan: false,
   purgeData: false,
-  deleteResources: false,
+  purgeResources: false,
   deleteZone: null,
   yes: true,
 };

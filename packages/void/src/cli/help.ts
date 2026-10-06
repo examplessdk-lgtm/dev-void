@@ -581,7 +581,7 @@ const HELP_TREE: HelpTree = {
             description: 'Delete installer-owned data even when it contains apps',
           },
           {
-            command: '--delete-resources',
+            command: '--purge-resources',
             description:
               'Delete every resource the installation created (includes --purge-data); keeps zones, adopted resources, and PostgreSQL',
           },

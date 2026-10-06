@@ -267,7 +267,7 @@ describe('platform uninstall check against the API database', () => {
   });
 
   it.runIf(Boolean(process.env.VOID_TEST_DATABASE_URL))(
-    'keeps a project created during the delete-resources final check from committing after it',
+    'keeps a project created during the purge-resources final check from committing after it',
     async () => {
       const owner = await createTestUser(env.db, 'racing-creator');
       const platform = bindings();

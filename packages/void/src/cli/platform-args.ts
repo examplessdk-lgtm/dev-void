@@ -116,7 +116,7 @@ export type PlatformArgs =
       plan: boolean;
       purgeData: boolean;
       /** Delete every resource the installation created; implies purgeData. */
-      deleteResources: boolean;
+      purgeResources: boolean;
       deleteZone: boolean | null;
       yes: boolean;
     };
@@ -337,7 +337,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     const parsed = parseSelector(
       rest.filter(
         (arg) =>
-          !['--purge-data', '--delete-resources', '--delete-zone', '--keep-zone'].includes(arg),
+          !['--purge-data', '--purge-resources', '--delete-zone', '--keep-zone'].includes(arg),
       ),
       subcommand,
       { allowYes: true },
@@ -349,8 +349,8 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
       subcommand,
       selector: parsed.selector,
       plan: parsed.plan,
-      purgeData: rest.includes('--purge-data') || rest.includes('--delete-resources'),
-      deleteResources: rest.includes('--delete-resources'),
+      purgeData: rest.includes('--purge-data') || rest.includes('--purge-resources'),
+      purgeResources: rest.includes('--purge-resources'),
       yes: parsed.yes,
       deleteZone: rest.includes('--delete-zone')
         ? true

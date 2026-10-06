@@ -101,7 +101,7 @@ void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-pa
 void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
 void platform disable [id] [--plan] [--yes]
 void platform enable [id] [--runtime <path>] [--plan] [--yes]
-void platform uninstall [id] [--plan] [--purge-data | --delete-resources] [--keep-zone] [--yes]
+void platform uninstall [id] [--plan] [--purge-data | --purge-resources] [--keep-zone] [--yes]
 ```
 
 `discover --installation` limits recovery and endpoint verification to one installation in a shared Cloudflare account.
@@ -139,6 +139,6 @@ An upgrade completes after the new Workers pass health checks. If rollout fails,
 
 Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are retained for manual review.
 
-`--delete-resources` includes `--purge-data` and also deletes every other resource the installation created, including Workers, Queues, R2, AI Gateway, the platform DNS record, routes, custom domains, and installer-created Access resources. It removes only the Email Routing rules that send mail to the platform email gateway, and keeps zones, adopted resources, external PostgreSQL, other Email Routing settings, and API tokens. A route, custom domain, DNS record, or Access resource that no longer matches the installation's record is kept and listed. It refuses before any change while projects remain or when the credential cannot make the planned deletions. Rerun the same command to continue after an interruption, or after a plain or `--purge-data` uninstall stopped.
+`--purge-resources` includes `--purge-data` and also deletes every other resource the installation created, including Workers, Queues, R2, AI Gateway, the platform DNS record, routes, custom domains, and installer-created Access resources. It removes only the Email Routing rules that send mail to the platform email gateway, and keeps zones, adopted resources, external PostgreSQL, other Email Routing settings, and API tokens. A route, custom domain, DNS record, or Access resource that no longer matches the installation's record is kept and listed. It refuses before any change while projects remain or when the credential cannot make the planned deletions. Rerun the same command to continue after an interruption, or after a plain or `--purge-data` uninstall stopped.
 
 See [Disable and Uninstall](../../guide/platform/installation/uninstall.md#remove-retained-resources) for the full removal policy and the cleanup order.

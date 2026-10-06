@@ -275,7 +275,7 @@ export async function readPlatformProjectZeroTrustState(
   }
 }
 
-/** Read project slugs for a --delete-resources plan, which holds no lifecycle lock. */
+/** Read project slugs for a --purge-resources plan, which holds no lifecycle lock. */
 export async function readPlatformProjectSlugs(
   databaseUrl: string,
   installationId: string,
