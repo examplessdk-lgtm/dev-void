@@ -65,13 +65,37 @@ function isGeneration(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** The binding handler's reject for a token it does not hold, sent before any handler runs. */
+/** The binding handler's reject is `{"error":"unauthorized"}`; anything larger is not it. */
+const TOKEN_REJECTION_MAX_BYTES = 256;
+
+/**
+ * The binding handler's reject for a token it does not hold, sent before any handler runs.
+ * The tenant Worker controls this response, so only a small prefix is ever read and the
+ * returned response still streams unbuffered.
+ */
 async function isTokenRejection(res: Response): Promise<boolean> {
-  if (res.status !== 403) {
+  if (res.status !== 403 || !res.body) {
     return false;
   }
+  if (Number(res.headers.get('content-length')) > TOKEN_REJECTION_MAX_BYTES) {
+    return false;
+  }
+  const reader = res.clone().body!.getReader();
+  const chunks: Array<Uint8Array> = [];
+  let size = 0;
   try {
-    const data = await res.clone().json();
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      size += chunk.value.byteLength;
+      if (size > TOKEN_REJECTION_MAX_BYTES) {
+        return false;
+      }
+      chunks.push(chunk.value);
+    }
+    const data: unknown = JSON.parse(await new Blob(chunks).text());
     return (
       typeof data === 'object' &&
       data !== null &&
@@ -79,6 +103,8 @@ async function isTokenRejection(res: Response): Promise<boolean> {
     );
   } catch {
     return false;
+  } finally {
+    void reader.cancel().catch(() => {});
   }
 }
 

@@ -791,6 +791,65 @@ describe('proxy token generations', () => {
     expect(sent).toHaveLength(1);
   });
 
+  it('retries a reject that is streamed without a declared length', async () => {
+    const legacy = await tok(0);
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: (token) =>
+        token === legacy
+          ? Response.json('hello')
+          : new Response(new Blob(['{"error":"unauthorized"}']).stream(), { status: 403 }),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
+  });
+
+  it('does not read a 403 that declares a large body', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () =>
+        new Response('{"error":"unauthorized"}', {
+          status: 403,
+          headers: { 'content-length': String(64 * 1024 * 1024) },
+        }),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('stops reading a streamed 403 once it outgrows a reject', async () => {
+    let pulls = 0;
+    const chunk = new TextEncoder().encode(' '.repeat(64));
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      respond: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulls++;
+              controller.enqueue(chunk);
+            },
+          }),
+          { status: 403 },
+        ),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(sent).toHaveLength(1);
+    expect(pulls).toBeLessThan(16);
+    const reader = res!.body!.getReader();
+    expect((await reader.read()).value).toEqual(chunk);
+    await reader.cancel();
+  });
+
   it('returns the second reject when the Worker holds neither token', async () => {
     const { env, sent } = setup({
       resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
