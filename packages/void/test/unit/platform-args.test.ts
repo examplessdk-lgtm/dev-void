@@ -172,26 +172,26 @@ describe('platform args', () => {
       selector: '',
       plan: false,
       purgeData: true,
-      purgeAll: false,
+      deleteResources: false,
       deleteZone: false,
       yes: false,
     });
     expect(() => parsePlatformArgs(['uninstall', '--delete-zone', '--keep-zone'])).toThrow();
   });
 
-  it('treats --purge-all as a purge of data and every other created resource', () => {
-    expect(parsePlatformArgs(['uninstall', 'team', '--purge-all', '--plan'])).toEqual({
+  it('treats --delete-resources as a purge of data and every other created resource', () => {
+    expect(parsePlatformArgs(['uninstall', 'team', '--delete-resources', '--plan'])).toEqual({
       subcommand: 'uninstall',
       selector: 'team',
       plan: true,
       purgeData: true,
-      purgeAll: true,
+      deleteResources: true,
       deleteZone: null,
       yes: false,
     });
-    expect(parsePlatformArgs(['uninstall', '--purge-data', '--purge-all'])).toMatchObject({
+    expect(parsePlatformArgs(['uninstall', '--purge-data', '--delete-resources'])).toMatchObject({
       purgeData: true,
-      purgeAll: true,
+      deleteResources: true,
     });
   });
 

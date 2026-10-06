@@ -78,7 +78,7 @@ const emailDeployment = createPlatformDeploymentManifest({
 });
 const INSTALLATION_ID = 'example-a1b2c3d4';
 const FINGERPRINT = '2026-09-14T00:00:00.000Z';
-const RESUME = `void platform uninstall ${INSTALLATION_ID} --purge-all`;
+const RESUME = `void platform uninstall ${INSTALLATION_ID} --delete-resources`;
 // The installer records its intent right before it creates the AI Gateway.
 const AI_GATEWAY_INTENT_AT = '2026-09-14T00:00:01.000Z';
 
@@ -560,12 +560,12 @@ function cloudflare(manifest: PlatformInstallationManifest) {
   return fake;
 }
 
-const purgeAllArgs = {
+const deleteResourcesArgs = {
   subcommand: 'uninstall' as const,
   selector: '',
   plan: false,
   purgeData: true,
-  purgeAll: true,
+  deleteResources: true,
   deleteZone: null,
   yes: true,
 };
@@ -637,17 +637,17 @@ const FULL_ORDER = [
   `DELETE kv-namespace ${names.routingKv}`,
 ];
 
-describe('uninstall --purge-all', () => {
+describe('uninstall --delete-resources', () => {
   it('plans every deletion in order and every kept resource, using only reads', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = cloudflare(manifest);
 
-    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, dependencies());
 
     const plan = noteText('Uninstall plan');
     expectInOrder(plan, [
-      'Delete every resource this installation created (--purge-all), in this order:',
+      'Delete every resource this installation created (--delete-resources), in this order:',
       `1. worker-custom-domain: api.example.com (domain-1) -> ${names.apiWorker}`,
       `1. worker-route: *.apps.example.com/* (route-1) -> ${names.dispatchWorker}`,
       `1. worker-route: *.apps.example.com (route-2) -> ${names.dispatchWorker}`,
@@ -693,7 +693,7 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(manifest);
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).toEqual(FULL_ORDER);
     expect(fake.calls.indexOf('PUT disabled')).toBeLessThan(fake.calls.indexOf(FULL_ORDER[0]!));
@@ -751,7 +751,7 @@ describe('uninstall --purge-all', () => {
       }).listQueueConsumers(account, queue)),
     ];
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(fake.live.consumers.get('cron-id')).toEqual([]);
     expect(fake.live.consumers.get('usage-id')).toEqual([
@@ -768,15 +768,15 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE queue ${names.usageQueue}`, new Error('temporary failure'));
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'temporary failure',
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('temporary failure');
     const stopped = listInstallationManifests()[0]!;
     expect(stopped.status).toBe('failed');
     expect(fake.live.workers.has(names.apiWorker)).toBe(false);
     expect(fake.live.workers.has(names.tailWorker)).toBe(true);
 
-    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, stopped, deleteResourcesArgs, dependencies());
 
     // The failed DELETE is retried once; nothing else is sent twice.
     const sent = deletes(fake);
@@ -795,12 +795,17 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'temporary failure',
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('temporary failure');
     expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
 
-    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    await uninstallPlatform(
+      fake,
+      listInstallationManifests()[0]!,
+      deleteResourcesArgs,
+      dependencies(),
+    );
     expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
@@ -810,16 +815,16 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'temporary failure',
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('temporary failure');
     fake.live.buckets.set(names.assetsBucket, {
       fingerprint: '2026-10-01T00:00:00.000Z',
       objects: new Map([['someone-else.txt', 'x']]),
     });
 
     await expect(
-      uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies()),
+      uninstallPlatform(fake, listInstallationManifests()[0]!, deleteResourcesArgs, dependencies()),
     ).rejects.toThrow(`Refusing to delete R2 bucket ${names.assetsBucket}`);
     expect(fake.live.buckets.get(names.assetsBucket)?.objects.has('someone-else.txt')).toBe(true);
   });
@@ -837,9 +842,9 @@ describe('uninstall --purge-all', () => {
       ),
     );
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'belongs to another installation',
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('belongs to another installation');
     expect(changes(fake)).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('installed');
   });
@@ -852,9 +857,9 @@ describe('uninstall --purge-all', () => {
     // A later, unrelated stop makes the run resume.
     fake.live.foreignTailProducer = true;
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      `Cloudflare refused to delete worker ${names.tailWorker}`,
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(`Cloudflare refused to delete worker ${names.tailWorker}`);
     const stopped = listInstallationManifests()[0]!;
     expect(
       stopped.resources.find((resource) => resource.key === 'worker-route:route-2')?.state,
@@ -862,7 +867,7 @@ describe('uninstall --purge-all', () => {
     expect(deletes(fake)).toContain(`DELETE worker ${names.apiWorker}`);
 
     fake.live.foreignTailProducer = false;
-    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, stopped, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain('DELETE worker-route route-2');
     expect(fake.live.routes).toEqual([
@@ -880,7 +885,7 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.live.domains[0]!.service = 'someone-else';
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain('DELETE worker-custom-domain domain-1');
     expect(fake.live.domains).toHaveLength(1);
@@ -899,7 +904,7 @@ describe('uninstall --purge-all', () => {
         .filter((entry) => entry.name === name)
         .map((entry) => ({ ...entry, content: '192.0.2.1', proxied: false, type: 'A' }));
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain('DELETE dns-record *.apps.example.com');
     expect(fake.live.dns).toHaveLength(1);
@@ -919,7 +924,7 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain('DELETE access application access-app');
     expect(deletes(fake)).toContain('DELETE access service-token access-token');
@@ -943,13 +948,13 @@ describe('uninstall --purge-all', () => {
     );
     fake.live.catchAll = { enabled: true, workerName: gateway };
 
-    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, dependencies());
     expect(noteText('Uninstall plan')).toContain(
       `4. Email Routing rules in zone mail-zone that send mail to ${gateway}, and its catch-all rule if it does (reset to drop mail, disabled)`,
     );
     expect(changes(fake)).toEqual([]);
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expectInOrder(changes(fake).join('\n'), [
       'DELETE access service-token access-token',
@@ -971,7 +976,7 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.live.catchAll = { enabled: true, workerName: 'someone-else' };
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(fake.calls).not.toContain('RESET email-catch-all mail-zone');
     expect(fake.live.catchAll).toEqual({ enabled: true, workerName: 'someone-else' });
@@ -986,7 +991,9 @@ describe('uninstall --purge-all', () => {
       throw new PlatformCloudflareApiError('Authentication error', 403);
     };
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(
       'Add Zone → Email Routing Rules → Edit for account account and zone example.com and Email Routing zone mail-zone, then rerun. No Cloudflare resource was changed.',
     );
     expect(changes(fake)).toEqual([]);
@@ -997,21 +1004,26 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(manifest);
 
-    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(fake.calls.filter((call) => /email-(rule|catch-all)/.test(call))).toEqual([]);
     expect(noteText('Uninstall plan')).not.toContain('Email Routing Rules');
   });
 
-  it('finishes with --purge-all what a stopped --purge-data uninstall kept', async () => {
+  it('finishes with --delete-resources what a stopped --purge-data uninstall kept', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = cloudflare(manifest);
 
     // The namespace still holds an application Worker, so --purge-data stops.
     await expect(
-      uninstallPlatform(fake, manifest, { ...purgeAllArgs, purgeAll: false }, dependencies()),
+      uninstallPlatform(
+        fake,
+        manifest,
+        { ...deleteResourcesArgs, deleteResources: false },
+        dependencies(),
+      ),
     ).rejects.toThrow('Namespace has scripts.');
     const stopped = listInstallationManifests()[0]!;
     expect(stopped.status).toBe('failed');
@@ -1019,7 +1031,7 @@ describe('uninstall --purge-all', () => {
       'retained',
     );
 
-    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, stopped, deleteResourcesArgs, dependencies());
 
     expect(new Set(deletes(fake))).toEqual(new Set(FULL_ORDER));
     const final = listInstallationManifests()[0]!;
@@ -1031,7 +1043,7 @@ describe('uninstall --purge-all', () => {
     ).toEqual(['customer-kv:retained', 'zone:retained']);
   });
 
-  it('finishes with --purge-all what a stopped plain uninstall kept, including routing KV', async () => {
+  it('finishes with --delete-resources what a stopped plain uninstall kept, including routing KV', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = cloudflare(manifest);
@@ -1045,7 +1057,7 @@ describe('uninstall --purge-all', () => {
       }
       return putKvValue(account, namespace, key, value);
     };
-    const plain = { ...purgeAllArgs, purgeAll: false, purgeData: false };
+    const plain = { ...deleteResourcesArgs, deleteResources: false, purgeData: false };
 
     await expect(uninstallPlatform(fake, manifest, plain, dependencies())).rejects.toThrow(
       'checkpoint write failed',
@@ -1057,7 +1069,7 @@ describe('uninstall --purge-all', () => {
     );
     expect(deletes(fake)).toEqual([]);
 
-    await uninstallPlatform(fake, stopped, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, stopped, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).toEqual(FULL_ORDER);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
@@ -1081,7 +1093,7 @@ describe('uninstall --purge-all', () => {
       uninstallPlatform(
         fake,
         manifest,
-        { ...purgeAllArgs, purgeAll: false, purgeData: false },
+        { ...deleteResourcesArgs, deleteResources: false, purgeData: false },
         dependencies(),
       ),
     ).rejects.toThrow('checkpoint write failed');
@@ -1099,9 +1111,9 @@ describe('uninstall --purge-all', () => {
     );
     const before = changes(fake).length;
 
-    await expect(uninstallPlatform(fake, stopped, purgeAllArgs, dependencies())).rejects.toThrow(
-      'belongs to another installation',
-    );
+    await expect(
+      uninstallPlatform(fake, stopped, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('belongs to another installation');
     expect(changes(fake).slice(before)).toEqual([]);
     const final = listInstallationManifests()[0]!;
     expect(final.status).toBe('failed');
@@ -1111,19 +1123,19 @@ describe('uninstall --purge-all', () => {
     );
   });
 
-  it('lists an Access resource an earlier --purge-all kept with the other kept resources, not as connected', async () => {
+  it('lists an Access resource an earlier --delete-resources kept with the other kept resources, not as connected', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = cloudflare(manifest);
     fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
     // A later, unrelated stop makes the run resume.
     fake.live.foreignTailProducer = true;
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      `Cloudflare refused to delete worker ${names.tailWorker}`,
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(`Cloudflare refused to delete worker ${names.tailWorker}`);
     const stopped = listInstallationManifests()[0]!;
 
-    await uninstallPlatform(fake, stopped, { ...purgeAllArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, stopped, { ...deleteResourcesArgs, plan: true }, dependencies());
 
     const plan = noteText('Uninstall plan');
     const kept = `created application: void-${INSTALLATION_ID}-login-0123456789abcdef (access-app, account account), kept because its live name "renamed" is not the name this installation recorded`;
@@ -1145,18 +1157,18 @@ describe('uninstall --purge-all', () => {
     await uninstallPlatform(
       fake,
       manifest,
-      { ...purgeAllArgs, purgeAll: false, purgeData: false },
+      { ...deleteResourcesArgs, deleteResources: false, purgeData: false },
       dependencies(),
     );
     const finished = listInstallationManifests()[0]!;
     expect(finished.status).toBe('uninstalled');
     const before = changes(fake).length;
 
-    await uninstallPlatform(fake, finished, { ...purgeAllArgs, plan: true }, dependencies());
-    expect(noteText('Uninstall plan')).toContain('--purge-all finds no resource');
-    await expect(uninstallPlatform(fake, finished, purgeAllArgs, dependencies())).rejects.toThrow(
-      'Invalid installation transition: uninstalled -> uninstalling.',
-    );
+    await uninstallPlatform(fake, finished, { ...deleteResourcesArgs, plan: true }, dependencies());
+    expect(noteText('Uninstall plan')).toContain('--delete-resources finds no resource');
+    await expect(
+      uninstallPlatform(fake, finished, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('Invalid installation transition: uninstalled -> uninstalling.');
 
     expect(changes(fake).slice(before)).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
@@ -1169,9 +1181,12 @@ describe('uninstall --purge-all', () => {
     fake.live.foreignWorkers.add('customer-worker');
     fake.live.serviceBindings.push({ from: 'customer-worker', to: names.proxyWorker as string });
 
-    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
-      (caught: unknown) => caught as Error,
-    );
+    const error = await uninstallPlatform(
+      fake,
+      manifest,
+      deleteResourcesArgs,
+      dependencies(),
+    ).catch((caught: unknown) => caught as Error);
     expect(error?.message).toContain(
       `Cloudflare refused to delete worker ${names.proxyWorker}: Cloudflare API error: Cannot delete service`,
     );
@@ -1185,7 +1200,12 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('failed');
 
     fake.live.serviceBindings.pop();
-    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    await uninstallPlatform(
+      fake,
+      listInstallationManifests()[0]!,
+      deleteResourcesArgs,
+      dependencies(),
+    );
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
@@ -1210,9 +1230,9 @@ describe('uninstall --purge-all', () => {
       return deleteResource(...args);
     };
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      `worker ${names.apiWorker} belongs to another installation`,
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(`worker ${names.apiWorker} belongs to another installation`);
     expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
     expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
   });
@@ -1228,9 +1248,12 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(recorded);
 
-    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
-      (caught: unknown) => caught as Error,
-    );
+    const error = await uninstallPlatform(
+      fake,
+      manifest,
+      deleteResourcesArgs,
+      dependencies(),
+    ).catch((caught: unknown) => caught as Error);
     expect(error?.message).toContain(
       `Workers outside this installation still use it: ${names.apiWorker}.`,
     );
@@ -1246,9 +1269,12 @@ describe('uninstall --purge-all', () => {
       throw new PlatformCloudflareApiError('Authentication error (code 10000)', 403);
     };
 
-    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
-      (caught: unknown) => caught as Error,
-    );
+    const error = await uninstallPlatform(
+      fake,
+      manifest,
+      deleteResourcesArgs,
+      dependencies(),
+    ).catch((caught: unknown) => caught as Error);
     expect(error?.message).toContain(`Cloudflare refused to delete worker ${names.proxyWorker}`);
     expect(fake.calls.some((call) => call.includes('force'))).toBe(false);
     expect(fake.live.workers.has(names.proxyWorker)).toBe(true);
@@ -1260,9 +1286,12 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.live.foreignTailProducer = true;
 
-    const error = await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies()).catch(
-      (caught: unknown) => caught as Error,
-    );
+    const error = await uninstallPlatform(
+      fake,
+      manifest,
+      deleteResourcesArgs,
+      dependencies(),
+    ).catch((caught: unknown) => caught as Error);
     expect(error?.message).toContain(
       `Cloudflare refused to delete worker ${names.tailWorker}: Cloudflare API error: Cannot delete this Worker as it is a Tail Worker consumer for other Workers. (code 100109)`,
     );
@@ -1275,7 +1304,12 @@ describe('uninstall --purge-all', () => {
     expect(listInstallationManifests()[0]?.status).toBe('failed');
 
     fake.live.foreignTailProducer = false;
-    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    await uninstallPlatform(
+      fake,
+      listInstallationManifests()[0]!,
+      deleteResourcesArgs,
+      dependencies(),
+    );
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
@@ -1285,24 +1319,24 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     const withProjects = dependencies({ readProjects: async () => ['blog', 'shop'] });
     const message = [
-      'platform: Refusing --purge-all while the platform still has 2 projects.',
-      "--purge-all deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
+      'platform: Refusing --delete-resources while the platform still has 2 projects.',
+      "--delete-resources deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
       'Delete each project first with `void project delete <name>`, then retry:',
       '  blog',
       '  shop',
     ].join('\n');
 
     await expect(
-      uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, withProjects),
+      uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, withProjects),
     ).rejects.toThrow(message);
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, withProjects)).rejects.toThrow(
-      message,
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, withProjects),
+    ).rejects.toThrow(message);
     await expect(
       uninstallPlatform(
         fake,
         manifest,
-        purgeAllArgs,
+        deleteResourcesArgs,
         dependencies({
           readProjects: async () => {
             throw new Error('connection refused');
@@ -1334,14 +1368,14 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     const oauth = dependencies({ credential: { source: 'oauth', aiGatewayToken: true } });
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, oauth)).rejects.toThrow(
+    await expect(uninstallPlatform(fake, manifest, deleteResourcesArgs, oauth)).rejects.toThrow(
       'Browser login is missing: Zone → DNS → Edit, Account → Access: Apps and Policies → Edit, Account → Access: Service Tokens → Edit. No Cloudflare resource was changed.',
     );
     expect(changes(fake)).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('installed');
 
     // The plan still prints and warns instead of failing.
-    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, oauth);
+    await uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, oauth);
     expect(noteText('Uninstall plan')).toContain('Delete every resource');
     expect(String(vi.mocked(log.warn).mock.calls.at(-1)?.[0])).toContain(
       'Set CLOUDFLARE_API_TOKEN',
@@ -1356,8 +1390,10 @@ describe('uninstall --purge-all', () => {
       throw new PlatformCloudflareApiError('Authentication error', 403);
     };
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'cannot read every resource --purge-all would delete. Add Zone → DNS → Edit for account account and zone example.com, then rerun. No Cloudflare resource was changed.',
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(
+      'cannot read every resource --delete-resources would delete. Add Zone → DNS → Edit for account account and zone example.com, then rerun. No Cloudflare resource was changed.',
     );
     expect(changes(fake)).toEqual([]);
   });
@@ -1367,8 +1403,8 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(manifest);
 
-    await uninstallPlatform(fake, manifest, { ...purgeAllArgs, plan: true }, dependencies());
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, { ...deleteResourcesArgs, plan: true }, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(fake.calls.filter((call) => /dispatch-(namespace|script)/.test(call))).toEqual([]);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
@@ -1385,7 +1421,7 @@ describe('uninstall --purge-all', () => {
     persist(manifest);
     const fake = cloudflare(manifest);
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(fake.live.access.has('access-token')).toBe(false);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
@@ -1409,7 +1445,9 @@ describe('uninstall --purge-all', () => {
       return getAccessResource(account, kind, id);
     };
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow(
       'Add Account → Access: Service Tokens → Edit for accounts account and identity and zone example.com, then rerun.',
     );
     expect(changes(fake)).toEqual([]);
@@ -1422,7 +1460,7 @@ describe('uninstall --purge-all', () => {
     // Someone deleted the original gateway and made a new one with the same id.
     fake.live.aiGateways[0]!.createdAt = '2026-10-01T00:00:00.000Z';
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain(`DELETE ai-gateway ${names.aiGateway}`);
     expect(fake.live.aiGateways.map((gateway) => gateway.id)).toEqual([names.aiGateway]);
@@ -1442,7 +1480,7 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     delete fake.live.aiGateways[0]!.createdAt;
 
-    await uninstallPlatform(fake, manifest, purgeAllArgs, dependencies());
+    await uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies());
 
     expect(deletes(fake)).not.toContain(`DELETE ai-gateway ${names.aiGateway}`);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
@@ -1457,7 +1495,7 @@ describe('uninstall --purge-all', () => {
     const readProjects = async () => (++reads > 2 ? ['late-project'] : []);
 
     await expect(
-      uninstallPlatform(fake, manifest, purgeAllArgs, dependencies({ readProjects })),
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies({ readProjects })),
     ).rejects.toThrow(
       `platform: Stopped before deleting the application Workers in dispatch namespace ${names.dispatchNamespace} because a project was created while this uninstall ran: late-project.`,
     );
@@ -1478,12 +1516,17 @@ describe('uninstall --purge-all', () => {
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
 
-    await expect(uninstallPlatform(fake, manifest, purgeAllArgs, dependencies())).rejects.toThrow(
-      'temporary failure',
-    );
+    await expect(
+      uninstallPlatform(fake, manifest, deleteResourcesArgs, dependencies()),
+    ).rejects.toThrow('temporary failure');
     expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
 
-    await uninstallPlatform(fake, listInstallationManifests()[0]!, purgeAllArgs, dependencies());
+    await uninstallPlatform(
+      fake,
+      listInstallationManifests()[0]!,
+      deleteResourcesArgs,
+      dependencies(),
+    );
     expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });

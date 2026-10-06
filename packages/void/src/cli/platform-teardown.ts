@@ -12,7 +12,7 @@ import {
 import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
 
 /**
- * `void platform uninstall --purge-all` deletes every Cloudflare resource the
+ * `void platform uninstall --delete-resources` deletes every Cloudflare resource the
  * installation created, in an order Cloudflare accepts:
  *
  *   traffic (routes, custom domains, DNS) -> Access -> Email Routing rules
@@ -31,13 +31,13 @@ import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
  * stopped. The routing KV namespace holds that checkpoint, so uninstall
  * deletes it last.
  *
- * An uninstall without --purge-all records what it leaves as retained. If it
- * stopped before it finished, --purge-all considers those resources again.
+ * An uninstall without --delete-resources records what it leaves as retained. If it
+ * stopped before it finished, --delete-resources considers those resources again.
  */
 
-export const PURGE_ALL_STEP_PREFIX = 'uninstall:purge-all:';
+export const DELETE_RESOURCES_STEP_PREFIX = 'uninstall:delete-resources:';
 
-export type PurgeAllClient = Pick<
+export type DeleteResourcesClient = Pick<
   PlatformCloudflareClient,
   | 'deleteAccessResource'
   | 'deleteDispatchNamespaceScript'
@@ -67,7 +67,7 @@ export type PurgeAllClient = Pick<
   | 'resetEmailRoutingCatchAll'
 >;
 
-export type PurgeAllCredential = Readonly<{
+export type DeleteResourcesCredential = Readonly<{
   source: 'environment' | 'saved' | 'oauth';
   /** The runtime token is available for AI Gateway calls. */
   aiGatewayToken: boolean;
@@ -123,16 +123,16 @@ export function isPlatformTailWorker(
   );
 }
 
-export function purgeAllResumeCommand(manifest: PlatformInstallationManifest): string {
-  return `void platform uninstall ${manifest.id} --purge-all`;
+export function deleteResourcesResumeCommand(manifest: PlatformInstallationManifest): string {
+  return `void platform uninstall ${manifest.id} --delete-resources`;
 }
 
 function accessStepKey(access: AccessResource): string {
-  return `${PURGE_ALL_STEP_PREFIX}access:${access.key}`;
+  return `${DELETE_RESOURCES_STEP_PREFIX}access:${access.key}`;
 }
 
-/** Access resources that --purge-all already deleted. */
-export function isPurgedAccessResource(
+/** Access resources that --delete-resources already deleted. */
+export function isDeletedAccessResource(
   manifest: PlatformInstallationManifest,
   access: AccessResource,
 ): boolean {
@@ -140,7 +140,7 @@ export function isPurgedAccessResource(
 }
 
 function hasStep(manifest: PlatformInstallationManifest, key: string): boolean {
-  return manifest.steps.some((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${key}`);
+  return manifest.steps.some((step) => step.key === `${DELETE_RESOURCES_STEP_PREFIX}${key}`);
 }
 
 function keptStepKey(key: string): string {
@@ -148,16 +148,16 @@ function keptStepKey(key: string): string {
 }
 
 /**
- * Why --purge-all kept a resource it was going to delete, for example because
+ * Why --delete-resources kept a resource it was going to delete, for example because
  * a route now serves another Worker; null when it did not keep it. Access
  * resources use the key `access:<key>`.
  */
-export function purgeAllKeptReason(
+export function deleteResourcesKeptReason(
   manifest: PlatformInstallationManifest,
   key: string,
 ): string | null {
   return (
-    manifest.steps.find((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${keptStepKey(key)}`)
+    manifest.steps.find((step) => step.key === `${DELETE_RESOURCES_STEP_PREFIX}${keptStepKey(key)}`)
       ?.resultHash ?? null
   );
 }
@@ -168,12 +168,12 @@ function isReopenable(manifest: PlatformInstallationManifest): boolean {
 }
 
 /**
- * A resource the installation created that --purge-all may still delete: one
+ * A resource the installation created that --delete-resources may still delete: one
  * that is ready, or one that an uninstall which stopped before it finished
- * recorded as retained. Resources --purge-all itself kept, and earlier
+ * recorded as retained. Resources --delete-resources itself kept, and earlier
  * versions of a resource kept when it was replaced, are never reconsidered.
  */
-export function isPurgeAllCandidate(
+export function isDeleteResourcesCandidate(
   manifest: PlatformInstallationManifest,
   resource: InstallationResource,
 ): boolean {
@@ -183,7 +183,7 @@ export function isPurgeAllCandidate(
       (resource.state === 'retained' &&
         isReopenable(manifest) &&
         !resource.key.startsWith('retained:') &&
-        purgeAllKeptReason(manifest, resource.key) === null))
+        deleteResourcesKeptReason(manifest, resource.key) === null))
   );
 }
 
@@ -198,7 +198,7 @@ function usableZone(manifest: PlatformInstallationManifest): InstallationResourc
 
 /**
  * A recorded resource whose live configuration no longer matches the
- * installation's record. --purge-all keeps such a DNS record and continues.
+ * installation's record. --delete-resources keeps such a DNS record and continues.
  */
 export class PlatformResourceChangedError extends Error {
   constructor(
@@ -218,11 +218,12 @@ function emailRoutingZone(manifest: PlatformInstallationManifest): string | null
     : null;
 }
 
-/** Everything --purge-all will delete, in deletion order. */
-function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> {
+/** Everything --delete-resources will delete, in deletion order. */
+function deleteResourcesTargets(manifest: PlatformInstallationManifest): Array<Target> {
   const resources = manifest.resources;
   const routing = resources.find((resource) => resource.key === 'routing-kv');
-  const candidate = (resource: InstallationResource) => isPurgeAllCandidate(manifest, resource);
+  const candidate = (resource: InstallationResource) =>
+    isDeleteResourcesCandidate(manifest, resource);
   // Without the remote checkpoint nothing can be proven, so nothing is deleted.
   if (!routing || (routing.state !== 'ready' && !candidate(routing))) {
     return [];
@@ -235,7 +236,7 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
       (resource.kind !== 'worker-route' && resource.kind !== 'worker-custom-domain') ||
       (resource.state !== 'ready' && resource.state !== 'retained') ||
       (resource.kind === 'worker-route' && !zone) ||
-      purgeAllKeptReason(manifest, resource.key) !== null
+      deleteResourcesKeptReason(manifest, resource.key) !== null
     ) {
       continue;
     }
@@ -253,8 +254,8 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
   const access = (manifest.authenticationResources ?? []).filter(
     (entry) =>
       entry.ownership === 'created' &&
-      !isPurgedAccessResource(manifest, entry) &&
-      purgeAllKeptReason(manifest, `access:${entry.key}`) === null,
+      !isDeletedAccessResource(manifest, entry) &&
+      deleteResourcesKeptReason(manifest, `access:${entry.key}`) === null,
   );
   // An application can admit the service token, so delete applications first.
   for (const kind of ['application', 'service-token'] as const) {
@@ -313,20 +314,22 @@ function purgeAllTargets(manifest: PlatformInstallationManifest): Array<Target> 
   return targets;
 }
 
-/** Whether --purge-all removes, or has removed, the rules that send mail to the gateway Worker. */
-export function purgeAllHandlesEmailRouting(manifest: PlatformInstallationManifest): boolean {
+/** Whether --delete-resources removes, or has removed, the rules that send mail to the gateway Worker. */
+export function deleteResourcesHandlesEmailRouting(
+  manifest: PlatformInstallationManifest,
+): boolean {
   return (
     hasStep(manifest, 'email-routing') ||
-    purgeAllTargets(manifest).some((target) => target.phase === 'email')
+    deleteResourcesTargets(manifest).some((target) => target.phase === 'email')
   );
 }
 
-/** Manifest resources that --purge-all leaves in the account. */
-export function purgeAllKeptResources(
+/** Manifest resources that --delete-resources leaves in the account. */
+export function deleteResourcesKeptResources(
   manifest: PlatformInstallationManifest,
 ): Array<InstallationResource> {
   const targets = new Set(
-    purgeAllTargets(manifest).flatMap((target) =>
+    deleteResourcesTargets(manifest).flatMap((target) =>
       'resource' in target ? [target.resource.key] : [],
     ),
   );
@@ -340,9 +343,9 @@ function resourceLabel(resource: InstallationResource): string {
   return `${resource.kind}: ${resource.name} (${resource.id})`;
 }
 
-/** Plan lines for --purge-all: what is deleted, in order, then what is kept. */
-export function describePurgeAllPlan(manifest: PlatformInstallationManifest): Array<string> {
-  const targets = purgeAllTargets(manifest);
+/** Plan lines for --delete-resources: what is deleted, in order, then what is kept. */
+export function describeDeleteResourcesPlan(manifest: PlatformInstallationManifest): Array<string> {
+  const targets = deleteResourcesTargets(manifest);
   const lines: Array<string> = [];
   let step = 0;
   let previous: Target['phase'] | null = null;
@@ -394,12 +397,15 @@ export function describePurgeAllPlan(manifest: PlatformInstallationManifest): Ar
     }
   }
   return lines.length
-    ? ['Delete every resource this installation created (--purge-all), in this order:', ...lines]
-    : ['--purge-all finds no resource it can prove this installation created.'];
+    ? [
+        'Delete every resource this installation created (--delete-resources), in this order:',
+        ...lines,
+      ]
+    : ['--delete-resources finds no resource it can prove this installation created.'];
 }
 
-/** Lines naming what --purge-all never removes. */
-export function purgeAllAlwaysKept(): Array<string> {
+/** Lines naming what --delete-resources never removes. */
+export function deleteResourcesAlwaysKept(): Array<string> {
   return [
     '  The external PostgreSQL database and its data.',
     '  Analytics Engine datasets; Cloudflare has no API to delete them.',
@@ -408,9 +414,9 @@ export function purgeAllAlwaysKept(): Array<string> {
   ];
 }
 
-/** Token permissions --purge-all needs for this manifest. */
-export function purgeAllPermissions(manifest: PlatformInstallationManifest): Array<string> {
-  const targets = purgeAllTargets(manifest);
+/** Token permissions --delete-resources needs for this manifest. */
+export function deleteResourcesPermissions(manifest: PlatformInstallationManifest): Array<string> {
+  const targets = deleteResourcesTargets(manifest);
   const needed = new Set<string>();
   for (const target of targets) {
     if (target.phase === 'access') {
@@ -461,12 +467,12 @@ function deniedStatus(error: unknown): boolean {
  * token. For a token, read probes catch a missing account or zone grant; a
  * read cannot prove Edit, so the plan names the full permission list too.
  */
-export async function checkPurgeAllCredentials(
-  client: PurgeAllClient,
+export async function checkDeleteResourcesCredentials(
+  client: DeleteResourcesClient,
   manifest: PlatformInstallationManifest,
-  credential: PurgeAllCredential,
+  credential: DeleteResourcesCredential,
 ): Promise<void> {
-  const targets = purgeAllTargets(manifest);
+  const targets = deleteResourcesTargets(manifest);
   const resources = targets.flatMap((target) => ('resource' in target ? [target.resource] : []));
   const access = targets.flatMap((target) => ('access' in target ? [target.access] : []));
   const has = (kind: InstallationResource['kind']) =>
@@ -489,7 +495,7 @@ export async function checkPurgeAllCredentials(
     ];
     if (browserMissing.length) {
       throw new Error(
-        `platform: Cloudflare browser login cannot delete every resource --purge-all plans. Set CLOUDFLARE_API_TOKEN to a token with ${purgeAllPermissions(manifest).join(', ')}, scoped to ${scope}, then rerun. Browser login is missing: ${browserMissing.join(', ')}. No Cloudflare resource was changed.`,
+        `platform: Cloudflare browser login cannot delete every resource --delete-resources plans. Set CLOUDFLARE_API_TOKEN to a token with ${deleteResourcesPermissions(manifest).join(', ')}, scoped to ${scope}, then rerun. Browser login is missing: ${browserMissing.join(', ')}. No Cloudflare resource was changed.`,
       );
     }
   }
@@ -550,7 +556,7 @@ export async function checkPurgeAllCredentials(
   }
   if (missing.size) {
     throw new Error(
-      `platform: The Cloudflare credential cannot read every resource --purge-all would delete. Add ${[...missing].join(', ')} for ${scope}, then rerun. No Cloudflare resource was changed.`,
+      `platform: The Cloudflare credential cannot read every resource --delete-resources would delete. Add ${[...missing].join(', ')} for ${scope}, then rerun. No Cloudflare resource was changed.`,
     );
   }
 }
@@ -582,7 +588,7 @@ export async function readPlatformProjectSlugsConnection(
 
 /**
  * Projects own Workers, storage, and domains that only the running platform
- * can delete. --purge-all deletes the platform, so it refuses before any
+ * can delete. --delete-resources deletes the platform, so it refuses before any
  * change while a project remains.
  */
 export async function assertNoPlatformProjects(
@@ -600,14 +606,14 @@ export async function assertNoPlatformProjects(
       '',
     );
     throw new Error(
-      `platform: Refusing --purge-all because the project list could not be read from the platform database: ${reason}\nMake the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry.`,
+      `platform: Refusing --delete-resources because the project list could not be read from the platform database: ${reason}\nMake the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry.`,
     );
   }
   if (slugs.length) {
     throw new Error(
       [
-        `platform: Refusing --purge-all while the platform still has ${slugs.length === 1 ? '1 project' : `${slugs.length} projects`}.`,
-        "--purge-all deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
+        `platform: Refusing --delete-resources while the platform still has ${slugs.length === 1 ? '1 project' : `${slugs.length} projects`}.`,
+        "--delete-resources deletes the platform, and only the running platform can delete each project's Workers, storage, and domains.",
         'Delete each project first with `void project delete <name>`, then retry:',
         ...slugs.slice(0, LISTED_PROJECTS).map((slug) => `  ${slug}`),
         ...(slugs.length > LISTED_PROJECTS
@@ -618,8 +624,8 @@ export async function assertNoPlatformProjects(
   }
 }
 
-export type PurgeAllContext = Readonly<{
-  client: PurgeAllClient;
+export type DeleteResourcesContext = Readonly<{
+  client: DeleteResourcesClient;
   /** Save progress locally, in PostgreSQL, and in routing KV. */
   checkpoint: (manifest: PlatformInstallationManifest) => Promise<void>;
   /** Live ownership proof for these keys; returns the keys that no longer exist. */
@@ -671,7 +677,7 @@ function ownershipRefusal(
   reason: string,
 ): Error {
   return new Error(
-    `platform: Refusing to delete ${description} because ${reason}. It may no longer belong to this installation. Delete or fix it in the Cloudflare dashboard if it is yours, then rerun: ${purgeAllResumeCommand(manifest)}`,
+    `platform: Refusing to delete ${description} because ${reason}. It may no longer belong to this installation. Delete or fix it in the Cloudflare dashboard if it is yours, then rerun: ${deleteResourcesResumeCommand(manifest)}`,
   );
 }
 
@@ -685,7 +691,7 @@ function cloudflareRefusal(
     return error;
   }
   return new Error(
-    `platform: Cloudflare refused to delete ${description}: ${error.message}\n${hint}\nProgress is saved. Rerun: ${purgeAllResumeCommand(manifest)}`,
+    `platform: Cloudflare refused to delete ${description}: ${error.message}\n${hint}\nProgress is saved. Rerun: ${deleteResourcesResumeCommand(manifest)}`,
     { cause: error },
   );
 }
@@ -694,8 +700,8 @@ function cloudflareRefusal(
  * Delete every target in order. Returns the manifest with each deleted
  * resource recorded; routing KV is left for the caller to delete last.
  */
-export async function runPurgeAllTeardown(
-  context: PurgeAllContext,
+export async function runDeleteResourcesTeardown(
+  context: DeleteResourcesContext,
   initial: PlatformInstallationManifest,
 ): Promise<PlatformInstallationManifest> {
   const { client } = context;
@@ -716,7 +722,7 @@ export async function runPurgeAllTeardown(
     await save(
       recordInstallationStep(
         next,
-        { completedAt: now, key: `${PURGE_ALL_STEP_PREFIX}${key}`, resultHash },
+        { completedAt: now, key: `${DELETE_RESOURCES_STEP_PREFIX}${key}`, resultHash },
         now,
       ),
     );
@@ -743,7 +749,7 @@ export async function runPurgeAllTeardown(
    * Cloudflare has no conditional DELETE: Workers and dispatch namespaces are
    * addressed by name, and a route or custom domain can be changed in place.
    * Something replaced between this proof and the DELETE can still be removed.
-   * That one-request window is accepted because --purge-all is opt-in and its
+   * That one-request window is accepted because --delete-resources is opt-in and its
    * plan lists every resource first. A forced Worker DELETE has the same
    * window between reading its dependents and the DELETE.
    */
@@ -790,7 +796,9 @@ export async function runPurgeAllTeardown(
   const workerTarget = (name: string) =>
     next.resources.find(
       (resource) =>
-        resource.kind === 'worker' && resource.name === name && isPurgeAllCandidate(next, resource),
+        resource.kind === 'worker' &&
+        resource.name === name &&
+        isDeleteResourcesCandidate(next, resource),
     );
   const workerHint =
     'A Worker this installation did not create may still use it, for example by sending it logs as a tail Worker or through a service binding. Remove that link in the Cloudflare dashboard.';
@@ -848,7 +856,7 @@ export async function runPurgeAllTeardown(
     await markDeleted(resource.key);
   };
 
-  for (const target of purgeAllTargets(initial)) {
+  for (const target of deleteResourcesTargets(initial)) {
     if (target.phase === 'access') {
       const { access } = target;
       const live = await client.getAccessResource(access.accountId, access.kind, access.id);
@@ -879,15 +887,15 @@ export async function runPurgeAllTeardown(
     if (
       !current ||
       current.state === 'deleted' ||
-      purgeAllKeptReason(next, current.key) !== null ||
-      (target.phase !== 'traffic' && !isPurgeAllCandidate(next, current))
+      deleteResourcesKeptReason(next, current.key) !== null ||
+      (target.phase !== 'traffic' && !isDeleteResourcesCandidate(next, current))
     ) {
       continue;
     }
     switch (target.phase) {
       case 'traffic': {
         const worker = next.resources.find((resource) => resource.key === target.worker.key);
-        if (!worker || !isPurgeAllCandidate(next, worker) || !(await prove(worker))) {
+        if (!worker || !isDeleteResourcesCandidate(next, worker) || !(await prove(worker))) {
           // The Worker it served is gone, so the attachment cannot be proven.
           break;
         }
@@ -999,7 +1007,7 @@ export async function runPurgeAllTeardown(
         const projects = await context.readProjects();
         if (projects.length) {
           throw new Error(
-            `platform: Stopped before deleting the application Workers in dispatch namespace ${current.name} because ${projects.length === 1 ? 'a project was' : 'projects were'} created while this uninstall ran: ${projects.join(', ')}. Nothing in the namespace was deleted. --purge-all refuses while the platform database lists a project. Remove each one from the "projects" table once you have dealt with its Cloudflare resources, then rerun: ${purgeAllResumeCommand(next)}`,
+            `platform: Stopped before deleting the application Workers in dispatch namespace ${current.name} because ${projects.length === 1 ? 'a project was' : 'projects were'} created while this uninstall ran: ${projects.join(', ')}. Nothing in the namespace was deleted. --delete-resources refuses while the platform database lists a project. Remove each one from the "projects" table once you have dealt with its Cloudflare resources, then rerun: ${deleteResourcesResumeCommand(next)}`,
           );
         }
         for (const script of await client.listDispatchNamespaceScripts(accountId, current.name)) {
@@ -1083,7 +1091,9 @@ export async function runPurgeAllTeardown(
       await recordStep(markerStep, generation);
       await client.deleteR2Object(accountId, bucket.name, PLATFORM_R2_OWNERSHIP_MARKER_KEY);
     } else {
-      const saved = next.steps.find((step) => step.key === `${PURGE_ALL_STEP_PREFIX}${markerStep}`);
+      const saved = next.steps.find(
+        (step) => step.key === `${DELETE_RESOURCES_STEP_PREFIX}${markerStep}`,
+      );
       const generation = await context.bucketGeneration(next, bucket);
       if (generation === null) {
         await markDeleted(bucket.key);

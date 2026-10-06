@@ -33,7 +33,7 @@ void platform uninstall [id] --plan
 void platform uninstall [id]
 ```
 
-Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and lists the resources left for you to review. `--plan` shows the same list before any change. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, and zones are always retained. Email Routing settings are retained; `--purge-all` removes only the rules that send mail to the platform. DNS records, routes, custom domains, and Cloudflare Access resources are retained unless you use `--purge-all`.
+Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and lists the resources left for you to review. `--plan` shows the same list before any change. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, and zones are always retained. Email Routing settings are retained; `--delete-resources` removes only the rules that send mail to the platform. DNS records, routes, custom domains, and Cloudflare Access resources are retained unless you use `--delete-resources`.
 
 When uninstall finishes, the record of what was kept stays at `~/.void/platforms/<account-id>/<installation-id>.json`. Without `--purge-data`, the encrypted credentials file `<installation-id>.recovery.enc` next to it is kept too. Delete both once you have finished the manual cleanup below.
 
@@ -43,37 +43,37 @@ To also remove eligible data resources owned by the installer:
 void platform uninstall [id] --purge-data
 ```
 
-Even with `--purge-data`, Void retains Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, Access resources, adopted resources, external PostgreSQL, and zones. Review those in the Cloudflare dashboard if you want to remove them, or use `--purge-all`.
+Even with `--purge-data`, Void retains Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, Access resources, adopted resources, external PostgreSQL, and zones. Review those in the Cloudflare dashboard if you want to remove them, or use `--delete-resources`.
 
 ### Remove everything Void created
 
 To delete every Cloudflare resource the installation created:
 
 ```sh
-void platform uninstall [id] --purge-all --plan
-void platform uninstall [id] --purge-all
+void platform uninstall [id] --delete-resources --plan
+void platform uninstall [id] --delete-resources
 ```
 
-`--purge-all` includes `--purge-data`. It also deletes the platform Workers, Queues, the application Workers left in the dispatch namespace, the R2 bucket and its objects, the AI Gateway, the platform DNS record, Worker routes and custom domains, and the Access applications and service tokens the installer created. The plan lists each resource in deletion order, and everything that stays. If Cloudflare shows that the AI Gateway was created after installation, for example because it was deleted and created again under the same name, it is kept and listed.
+`--delete-resources` includes `--purge-data`. It also deletes the platform Workers, Queues, the application Workers left in the dispatch namespace, the R2 bucket and its objects, the AI Gateway, the platform DNS record, Worker routes and custom domains, and the Access applications and service tokens the installer created. The plan lists each resource in deletion order, and everything that stays. If Cloudflare shows that the AI Gateway was created after installation, for example because it was deleted and created again under the same name, it is kept and listed.
 
 If the platform sends email, it first deletes the Email Routing rules in the sender domain's zone that send mail to the platform email gateway Worker, and resets such a catch-all rule to drop mail. It leaves Email Routing enabled and keeps the sender domain's MX, SPF, and DKIM records.
 
 It never removes zones, adopted resources, external PostgreSQL, other Email Routing settings, Analytics Engine datasets, Access policies or identity providers you chose, or API tokens. Revoke the API tokens you created for the platform afterward.
 
-Before it changes anything, `--purge-all` stops if:
+Before it changes anything, `--delete-resources` stops if:
 
 - projects remain. Delete each one with `void project delete <name>` first.
 - the credential cannot make every planned deletion. Browser login cannot delete DNS records or Access resources, so set `CLOUDFLARE_API_TOKEN` to a token with the permissions the plan lists. If you connected Access from a separate identity account, the token also needs the Access permissions in that account. If the platform sends email, it also needs **Zone → Email Routing Rules → Edit** for the sender domain's zone.
 
-If a route, custom domain, DNS record, or Access resource no longer matches what the installation recorded, for example a route that now sends traffic to another Worker, it is kept and listed with the reason, and uninstall continues. Do not run `--purge-all` while someone else is changing the platform's Workers, routes, or custom domains: a change made after Void checks a resource and before it deletes it is not detected.
+If a route, custom domain, DNS record, or Access resource no longer matches what the installation recorded, for example a route that now sends traffic to another Worker, it is kept and listed with the reason, and uninstall continues. Do not run `--delete-resources` while someone else is changing the platform's Workers, routes, or custom domains: a change made after Void checks a resource and before it deletes it is not detected.
 
 If Cloudflare refuses a deletion, for example because a Worker you created yourself still sends logs to the platform tail Worker, uninstall stops and names the resource. Fix it, then rerun the same command to continue.
 
-If a plain or `--purge-data` uninstall stopped before it finished, rerun it with `--purge-all` to also delete what it kept. Once an uninstall finishes, use the manual steps below instead.
+If a plain or `--purge-data` uninstall stopped before it finished, rerun it with `--delete-resources` to also delete what it kept. Once an uninstall finishes, use the manual steps below instead.
 
 ### Remove retained resources
 
-After an uninstall without `--purge-all`, Cloudflare refuses to delete a resource while a platform Worker still uses it. In the Cloudflare dashboard, remove what is left in this order, skipping anything already gone:
+After an uninstall without `--delete-resources`, Cloudflare refuses to delete a resource while a platform Worker still uses it. In the Cloudflare dashboard, remove what is left in this order, skipping anything already gone:
 
 1. Delete the platform DNS record, Worker routes, and custom domains.
 2. If the platform sends email, open **Email Routing** for the sender domain's zone. Delete the routing rules and any catch-all rule that send mail to the platform email gateway Worker. Then remove the sender subdomain from Email Routing, or disable Email Routing if you enabled it only for the platform.
