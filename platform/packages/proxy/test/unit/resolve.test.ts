@@ -1,7 +1,10 @@
+import { deriveProxyInternalAuth, deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { describe, it, expect, vi, beforeEach } from 'vite-plus/test';
+import { hmacSign } from '../../src/hmac.ts';
 import {
   resolveResource,
   clearResolveCache,
+  verifyPrerenderAuthority,
   verifyProjectDeployAccess,
 } from '../../src/resolve.ts';
 
@@ -62,16 +65,39 @@ describe('resolveResource', () => {
     expect((api.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
-  it('includes HMAC token in x-void-internal header', async () => {
+  it('authenticates with the proxy credential and the legacy header', async () => {
     const api = createMockApi({ 'proj_000000000001:d1:DB': 'd1-uuid-123' });
     await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
 
-    const call = (api.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    const init = call[1] as RequestInit;
-    const headers = init.headers as Record<string, string>;
-    expect(headers['x-void-internal']).toBeDefined();
-    expect(typeof headers['x-void-internal']).toBe('string');
-    expect(headers['x-void-internal'].length).toBeGreaterThan(0);
+    const [, init] = (api.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['x-void-proxy-internal']).toBe(
+      await deriveProxyInternalAuth(JWT_SECRET, 'resolve-resource', 'proj_000000000001'),
+    );
+    expect(headers['x-void-internal']).toBe(
+      await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 0),
+    );
+  });
+});
+
+describe('verifyPrerenderAuthority', () => {
+  it('authenticates with the proxy credential and the legacy header', async () => {
+    const api = { fetch: vi.fn(async () => Response.json({ ok: true })) } as unknown as Fetcher;
+    await expect(
+      verifyPrerenderAuthority(api, JWT_SECRET, 'proj_000000000001', 'user_1', {
+        buildId: 'bld_1',
+      }),
+    ).resolves.toBe(true);
+
+    const [url, init] = (api.fetch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(url).toBe('https://api/internal/verify-prerender-build/proj_000000000001');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['x-void-proxy-internal']).toBe(
+      await deriveProxyInternalAuth(JWT_SECRET, 'verify-prerender-build', 'proj_000000000001'),
+    );
+    expect(headers['x-void-internal']).toBe(
+      await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 0),
+    );
   });
 });
 
@@ -94,9 +120,14 @@ describe('verifyProjectDeployAccess', () => {
       userId: 'user_1',
       proxyOrigin: 'https://proxy.example.com',
     });
-    expect(
-      ((init as RequestInit).headers as Record<string, string>)['x-void-internal'],
-    ).toBeTruthy();
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['x-void-internal']).toBe(
+      await hmacSign(
+        'void-proxy-owner-v2\nproj_000000000001\nhttps://proxy.example.com',
+        JWT_SECRET,
+      ),
+    );
+    expect(headers['x-void-proxy-internal']).toBeUndefined();
 
     const missing = { fetch: vi.fn() } as unknown as Fetcher;
     await expect(

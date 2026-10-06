@@ -1,14 +1,13 @@
 import { Hono } from 'hono';
-import { hmacVerifyState } from '../auth/hmac.ts';
 import { getResourceByBinding } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
-import { isProjectId } from '../id.ts';
+import { requireProxyInternalAuth } from '../internal-proxy-auth.ts';
 
 const app = new Hono<ApiEnv>();
 
 /**
  * Internal resource resolution endpoint — called by the proxy via service binding.
- * Authenticated via HMAC token in X-Void-Internal header (no JWT/userId).
+ * Authenticated by the proxy's own credential (see requireProxyInternalAuth), no JWT/userId.
  *
  * POST /internal/resolve-resource/:projectId
  * Body: { "type": "d1" | "kv" | "r2" | "queue", "binding": "DB" }
@@ -17,15 +16,9 @@ const app = new Hono<ApiEnv>();
 app.post('/:projectId', async (context) => {
   const projectId = context.req.param('projectId');
 
-  const token = context.req.header('x-void-internal');
-  if (!token) {
-    return context.json({ error: 'missing internal auth' }, 401);
-  }
-  if (
-    !isProjectId(projectId) ||
-    !(await hmacVerifyState(projectId, token, context.env.JWT_SECRET))
-  ) {
-    return context.json({ error: 'invalid internal auth' }, 403);
+  const denied = await requireProxyInternalAuth(context, 'resolve-resource', projectId);
+  if (denied) {
+    return denied;
   }
 
   const { type, binding } = await context.req.json<{

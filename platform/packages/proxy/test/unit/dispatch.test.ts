@@ -1,4 +1,4 @@
-import { deriveProxyToken } from '@voidcloud/api/proxy-token';
+import { deriveProxyInternalAuth, deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import { createBindingHandler } from '../../../../../packages/void/src/runtime/remote/binding-handler.ts';
 import { dispatchToWorker } from '../../src/dispatch.ts';
@@ -616,6 +616,23 @@ describe('WfP dispatch path', () => {
       );
 
       expect(capturedHeaders['x-void-internal']).toBe(token);
+      expect(capturedHeaders['x-void-proxy-internal']).toBeUndefined();
+    });
+
+    it('authenticates worker resolution with the proxy credential and the legacy header', async () => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () =>
+        Response.json({ results: [], success: true, meta: {} }),
+      );
+
+      await dispatchToWorker(env as unknown as Env, 'proj_000000000001', '/d1/query', {});
+
+      const [url, init] = env.API.fetch.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe('https://api/internal/resolve-worker/proj_000000000001');
+      const headers = init.headers as Record<string, string>;
+      expect(headers['x-void-proxy-internal']).toBe(
+        await deriveProxyInternalAuth(JWT_SECRET, 'resolve-worker', 'proj_000000000001'),
+      );
+      expect(headers['x-void-internal']).toBe(token);
     });
   });
 });

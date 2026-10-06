@@ -1,8 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { hmacSignState } from '../../src/auth/hmac.ts';
 import { setActiveDeployment } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import { deriveProxyInternalAuth } from '../../src/proxy-token.ts';
 import { projects } from '../../src/schema.ts';
 import {
   clearTables,
@@ -29,11 +29,11 @@ beforeEach(async () => {
 });
 
 async function resolveWorker(projectId: string): Promise<Response> {
-  const token = await hmacSignState(projectId, env.JWT_SECRET);
+  const auth = await deriveProxyInternalAuth(env.JWT_SECRET, 'resolve-worker', projectId);
   return app.fetch(
     new Request(`http://localhost/internal/resolve-worker/${projectId}`, {
       method: 'POST',
-      headers: { 'x-void-internal': token },
+      headers: { 'x-void-proxy-internal': auth },
     }),
     env,
   );
