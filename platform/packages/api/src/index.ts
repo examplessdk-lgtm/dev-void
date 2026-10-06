@@ -606,7 +606,7 @@ app.get('/admin', (context) => context.redirect(`/admin/${new URL(context.req.ur
 app.use('/admin/*', adminAuthMiddleware);
 app.use('/admin/*', adminCsrfMiddleware);
 app.post('/admin/fate', adminFateHandler);
-app.get('/admin/', adminAuthMiddleware, dashboardHandler);
+app.get('/admin/', dashboardHandler);
 app.route('/admin/users', adminUsers);
 app.route('/admin/projects', adminProjects);
 app.route('/admin/email', adminEmail);

@@ -32,6 +32,7 @@ import {
 import {
   setupEnv,
   teardownEnv,
+  captureQueries,
   clearTables,
   createTestUser,
   createTestProject,
@@ -267,6 +268,28 @@ describe('auth middleware', () => {
     const admin = await createTestUser(env.db, 'admin', 'github', undefined, 'free', 'admin');
     const res = await req('/admin/', admin.adminJwt);
     expect(res.status).toBe(200);
+  });
+
+  test.each(['/admin/', '/admin/users', '/admin/not-a-page'])(
+    'protects %s for signed-out and non-admin users',
+    async (path) => {
+      const signedOut = await req(path);
+      expect(signedOut.status).toBe(302);
+      expect(signedOut.headers.get('Location')).toBe('/admin/login');
+      const user = await createTestUser(env.db, 'regular');
+      expect((await req(path, user.adminJwt)).status).toBe(403);
+    },
+  );
+
+  test('checks admin auth once for the dashboard', async () => {
+    const admin = await createTestUser(env.db, 'admin', 'github', undefined, 'free', 'admin');
+    const { result, queries } = await captureQueries(env.db, async () =>
+      req('/admin/', admin.adminJwt),
+    );
+    expect(result.status).toBe(200);
+    expect(
+      queries.filter((query) => query.includes('from "users" where "users"."id"')),
+    ).toHaveLength(1);
   });
 
   test.each([
