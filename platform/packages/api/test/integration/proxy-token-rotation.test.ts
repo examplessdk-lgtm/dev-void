@@ -12,6 +12,7 @@ import {
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import {
   createDeployment,
+  deleteUser,
   markDeploymentRetained,
   setActiveDeployment,
   updateDeploymentStatus,
@@ -26,6 +27,7 @@ import {
   reconcileProxyTokenRotations,
   requestBulkProxyTokenRotations,
   requestProxyTokenRotation,
+  requestRotationIfReplacingUntrustedCode,
   type ProjectRotationOutcome,
   type ProxyTokenRotationEnv,
   type ProxyTokenRotationReason,
@@ -37,7 +39,14 @@ import {
   proxyTokenStateKey,
   type ProxyInternalRoute,
 } from '../../src/proxy-token.ts';
-import { projectCleanupJobs, projects, resources } from '../../src/schema.ts';
+import {
+  deployments,
+  projectCleanupJobs,
+  projectMembers,
+  projects,
+  resources,
+  users,
+} from '../../src/schema.ts';
 import {
   captureQueries,
   capturedQueryCount,
@@ -45,11 +54,13 @@ import {
   cfSuccess,
   clearTables,
   createCronSchedulerMock,
+  createTestDeployment,
   createTestProject,
   createTestUser,
   JWT_SECRET,
   MemoryKVNamespace,
   mockCfApi,
+  readAllEvents,
   setupEnv,
   teardownEnv,
   type CfApiMocks,
@@ -1124,4 +1135,309 @@ describe('proxy token rotation', () => {
       expect(scriptToken(cf, fx.worker(fx.active))).toBe(await tok(fx.projectId, 1));
     },
   );
+});
+
+describe('rotation after code from a user who lost deploy access is replaced', () => {
+  type Team = Readonly<{
+    projectId: string;
+    owner: Awaited<ReturnType<typeof createTestUser>>;
+    collaborator: Awaited<ReturnType<typeof createTestUser>>;
+    worker: (deploymentId: string) => string;
+  }>;
+
+  let deployCount = 0;
+
+  async function setupTeam(): Promise<Team> {
+    const owner = await createTestUser(env.db);
+    const collaborator = await createTestUser(env.db);
+    // Keep earlier Workers for rollback and for the walk.
+    await env.db.update(users).set({ plan: 'pro' }).where(eq(users.id, owner.id));
+    const { id: projectId, slug } = await createTestProject(env.db, owner.id);
+    await env.db.insert(projectMembers).values({
+      project_id: projectId,
+      user_id: collaborator.id,
+      role: 'collaborator',
+      added_by_user_id: owner.id,
+    });
+    return {
+      projectId,
+      owner,
+      collaborator,
+      worker: (deploymentId) => getProjectDeploymentWorkerName(slug, deploymentId),
+    };
+  }
+
+  /** A Worker deploy through the API; returns the deployment id from the `done` event. */
+  async function deploy(projectId: string, jwt: string): Promise<string> {
+    const code = `export default { fetch() { return new Response('${++deployCount}'); } }`;
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${projectId}/deploy`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          manifest: { version: 3, assetManifestVersion: 2, bindings: {} },
+          assetManifest: {},
+          workerFiles: { 'index.js': btoa(code) },
+        }),
+      }),
+      testEnv,
+    );
+    expect(response.status).toBe(200);
+    const events = (await readAllEvents(response)) as Array<{
+      event: string;
+      deployment?: string;
+      message?: string;
+    }>;
+    const done = events.find((event) => event.event === 'done');
+    expect(done, JSON.stringify(events.at(-1))).toBeDefined();
+    return done!.deployment!;
+  }
+
+  async function rollback(projectId: string, jwt: string, deploymentId: string): Promise<void> {
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${projectId}/rollback`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deploymentId }),
+      }),
+      testEnv,
+    );
+    expect(response.status).toBe(200);
+  }
+
+  async function removeCollaborator(team: Team): Promise<void> {
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${team.projectId}/members/${team.collaborator.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${team.owner.jwt}` },
+      }),
+      testEnv,
+    );
+    expect(response.status).toBe(204);
+  }
+
+  /** Runs the job past every wait until it is gone. */
+  async function finish(projectId: string): Promise<ProjectRotationOutcome> {
+    await shiftBack(projectId);
+    const outcome = await advance(projectId);
+    expect(await job(projectId)).toBeUndefined();
+    return outcome;
+  }
+
+  async function expectWorkersOn(
+    cf: MockCfApiHandle,
+    team: Team,
+    deploymentIds: ReadonlyArray<string>,
+    gen: number,
+  ): Promise<void> {
+    const token = await tok(team.projectId, gen);
+    for (const id of deploymentIds) {
+      expect(scriptToken(cf, team.worker(id))).toBe(token);
+    }
+  }
+
+  it("rotates again when the owner replaces a removed collaborator's code", async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+    expect((await job(team.projectId))!.payload.reason).toBe('member-removed');
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
+
+    const trusted = await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'untrusted-deploy-replaced',
+    });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    expect(await issued(team.projectId)).toBe(2);
+    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
+
+    // The code being replaced now is the owner's: nothing more to rotate.
+    await deploy(team.projectId, team.owner.jwt);
+    expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('runs one more generation when the replacement lands after START', async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+    await advance(team.projectId, { waitMs: 60_000 });
+    expect((await job(team.projectId))!.payload.phase).toBe('patch');
+
+    const trusted = await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload.again).toBe('1');
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
+  });
+
+  it('needs no extra generation when the replacement lands before START', async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+
+    const trusted = await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'member-removed',
+    });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
+    await expectWorkersOn(cf, team, [untrusted, trusted], 1);
+  });
+
+  it('rotates when the next deploy finishes an interrupted cutover over the code', async () => {
+    cfApi();
+    const team = await setupTeam();
+    await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 1 });
+
+    // The owner's deploy stopped after the cutover became ready.
+    const interrupted = await createTestDeployment(env.db, team.projectId, 'pending');
+    await env.db
+      .update(deployments)
+      .set({
+        status: 'cutover',
+        manifest: JSON.stringify({ version: 3, type: 'static', bindings: {} }),
+      })
+      .where(eq(deployments.id, interrupted.id));
+    const marker = JSON.stringify({
+      projectId: team.projectId,
+      ownerId: 'interrupted-owner',
+      buildId: null,
+    });
+    await routing.put(`cutover-intent:${interrupted.id}`, marker);
+    await routing.put(`cutover-ready:${interrupted.id}`, marker);
+
+    await deploy(team.projectId, team.owner.jwt);
+    const [recovered] = await env.db
+      .select({ status: deployments.status })
+      .from(deployments)
+      .where(eq(deployments.id, interrupted.id));
+    expect(recovered!.status).toBe('live');
+    expect((await job(team.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'untrusted-deploy-replaced',
+    });
+  });
+
+  it('rotates on a rollback away from the code, not on a rollback to it', async () => {
+    cfApi();
+    const team = await setupTeam();
+    const trusted = await deploy(team.projectId, team.owner.jwt);
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+    await finish(team.projectId);
+
+    await rollback(team.projectId, team.owner.jwt, trusted);
+    expect((await job(team.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'untrusted-deploy-replaced',
+    });
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+
+    await rollback(team.projectId, team.owner.jwt, untrusted);
+    expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it("rotates when the code's author was changed to reader", async () => {
+    cfApi();
+    const team = await setupTeam();
+    await deploy(team.projectId, team.collaborator.jwt);
+    const changed = await app.fetch(
+      new Request(`http://localhost/projects/${team.projectId}/members/${team.collaborator.id}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${team.owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader' }),
+      }),
+      testEnv,
+    );
+    expect(changed.status).toBe(200);
+    await finish(team.projectId);
+
+    await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
+  });
+
+  it("rotates when the code's author account was deleted", async () => {
+    cfApi();
+    const team = await setupTeam();
+    await deploy(team.projectId, team.collaborator.jwt);
+    await deleteUser(env.db, team.collaborator.id);
+    expect((await job(team.projectId))!.payload.reason).toBe('user-deleted');
+    await finish(team.projectId);
+
+    await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
+  });
+
+  it('does not rotate for code with no recorded author', async () => {
+    cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await env.db
+      .update(deployments)
+      .set({ initiated_by_user_id: null })
+      .where(eq(deployments.id, untrusted));
+    await removeCollaborator(team);
+    await finish(team.projectId);
+
+    await deploy(team.projectId, team.owner.jwt);
+    expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('does not treat a suspended owner as lost deploy access', async () => {
+    cfApi();
+    const team = await setupTeam();
+    await deploy(team.projectId, team.collaborator.jwt);
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'admin_suspended' })
+      .where(eq(users.id, team.owner.id));
+    const next = await createDeployment(env.db, team.projectId, JSON.stringify(MANIFEST));
+
+    const requested = await env.db.transaction((tx) =>
+      requestRotationIfReplacingUntrustedCode(tx, team.projectId, next.id),
+    );
+    expect(requested).toBe(false);
+    expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('does not rotate when a failed deploy leaves the code in place', async () => {
+    cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    await removeCollaborator(team);
+    await finish(team.projectId);
+
+    hooks.kvPut = (key) => {
+      if (key.startsWith('cutover-ready:')) {
+        throw new Error('injected post-routing failure');
+      }
+    };
+    const response = await app.fetch(
+      new Request(`http://localhost/projects/${team.projectId}/deploy`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${team.owner.jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          manifest: { version: 3, assetManifestVersion: 2, bindings: {} },
+          assetManifest: {},
+          workerFiles: {
+            'index.js': btoa("export default { fetch() { return new Response('x'); } }"),
+          },
+        }),
+      }),
+      testEnv,
+    );
+    const events = (await readAllEvents(response)) as Array<{ event: string }>;
+    expect(events.at(-1)).toMatchObject({ event: 'error' });
+    const [project] = await env.db
+      .select({ active: projects.active_deployment_id })
+      .from(projects)
+      .where(eq(projects.id, team.projectId));
+    expect(project!.active).toBe(untrusted);
+    expect(await job(team.projectId)).toBeUndefined();
+  });
 });

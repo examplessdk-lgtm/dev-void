@@ -15,6 +15,7 @@ import {
 } from '../../src/db.ts';
 import {
   projectAccessEvents,
+  projectCleanupJobs,
   projectInvitations,
   projectMembers,
   projectOwnershipPeriods,
@@ -135,6 +136,32 @@ describe('project team lifecycle', () => {
       .where(eq(projectAccessEvents.project_id, project.id));
     expect(events.map((event) => event.action)).toEqual(['invited', 'accepted']);
     expect(events.every((event) => event.subject_user_id === member.id)).toBe(true);
+  });
+
+  it('rotates the proxy token of every project the deleted user could deploy to', async () => {
+    const owner = await createTestUser(env.db, 'rotation-owner');
+    const member = await createTestUser(env.db, 'rotation-member');
+    const collaborated = await createProject(env.db, owner.id, 'rotation-collaborator');
+    const read = await createProject(env.db, owner.id, 'rotation-reader');
+    const administered = await createProject(env.db, owner.id, 'rotation-admin');
+    await env.db.insert(projectMembers).values([
+      { project_id: collaborated.id, user_id: member.id, role: 'collaborator' },
+      { project_id: read.id, user_id: member.id, role: 'reader' },
+      { project_id: administered.id, user_id: member.id, role: 'admin' },
+    ]);
+
+    await deleteUser(env.db, member.id);
+
+    const jobs = await env.db.select().from(projectCleanupJobs);
+    expect(jobs.map((job) => job.project_id).sort()).toEqual(
+      [collaborated.id, administered.id].sort(),
+    );
+    for (const job of jobs) {
+      expect(job).toMatchObject({
+        kind: 'proxy-token-rotation',
+        payload: { phase: 'requested', reason: 'user-deleted' },
+      });
+    }
   });
 
   it('atomically discovers and locks pending-invitation projects before user deletion', async () => {

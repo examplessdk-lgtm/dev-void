@@ -12,14 +12,17 @@ import {
 import { createGitHubConnection, getBuild, upsertGitHubInstallation } from '../../src/db.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
+import { proxyTokenRotationTarget } from '../../src/proxy-token-rotation.ts';
 import {
   projectAccessEvents,
+  projectCleanupJobs,
   projectInvitations,
   projectMembers,
   projects,
   users,
 } from '../../src/schema.ts';
 import {
+  captureQueries,
   createTestBuild,
   clearTables,
   createTestProject,
@@ -1174,5 +1177,112 @@ describe('project team API', () => {
       message: expect.stringMatching(/owner already has full access.*Manage other members/),
     });
     expect(await env.db.select().from(projectMembers)).toEqual([]);
+  });
+});
+
+describe('proxy token rotation on member changes', () => {
+  async function rotationJob(projectId: string) {
+    const [job] = await env.db
+      .select()
+      .from(projectCleanupJobs)
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(projectId)));
+    return job;
+  }
+
+  async function projectWithMember(role: 'reader' | 'collaborator' | 'admin') {
+    const owner = await createTestUser(env.db, 'rotation-owner');
+    const member = await createTestUser(env.db, `rotation-${role}`);
+    const project = await createTestProject(env.db, owner.id);
+    await env.db.insert(projectMembers).values({
+      project_id: project.id,
+      user_id: member.id,
+      role,
+      added_by_user_id: owner.id,
+    });
+    return { owner, member, project };
+  }
+
+  function change(
+    projectId: string,
+    jwt: string,
+    userId: string,
+    next: 'reader' | 'collaborator' | 'admin' | null,
+  ): Promise<Response> {
+    return Promise.resolve(
+      app.fetch(
+        request(
+          `/projects/${projectId}/members/${userId}`,
+          jwt,
+          next ? { method: 'PATCH', body: { role: next } } : { method: 'DELETE' },
+        ),
+        env,
+      ),
+    );
+  }
+
+  it.each([
+    { role: 'collaborator', next: null, reason: 'member-removed' },
+    { role: 'admin', next: null, reason: 'member-removed' },
+    { role: 'collaborator', next: 'reader', reason: 'member-role-changed' },
+    { role: 'admin', next: 'reader', reason: 'member-role-changed' },
+  ] as const)('requests a rotation when $role -> $next', async ({ role, next, reason }) => {
+    const { owner, member, project } = await projectWithMember(role);
+    const response = await change(project.id, owner.jwt, member.id, next);
+    expect(response.ok).toBe(true);
+    expect(await rotationJob(project.id)).toMatchObject({
+      kind: 'proxy-token-rotation',
+      project_id: project.id,
+      payload: { phase: 'requested', reason },
+    });
+  });
+
+  it.each([
+    { role: 'reader', next: null },
+    { role: 'reader', next: 'collaborator' },
+    { role: 'collaborator', next: 'admin' },
+  ] as const)('requests nothing when $role -> $next', async ({ role, next }) => {
+    const { owner, member, project } = await projectWithMember(role);
+    const response = await change(project.id, owner.jwt, member.id, next);
+    expect(response.ok).toBe(true);
+    expect(await rotationJob(project.id)).toBeUndefined();
+  });
+
+  it.each([
+    { role: 'collaborator', rotates: true },
+    { role: 'reader', rotates: false },
+  ] as const)('requests a rotation when a $role leaves: $rotates', async ({ role, rotates }) => {
+    const { member, project } = await projectWithMember(role);
+    const response = await app.fetch(
+      request(`/projects/${project.id}/leave`, member.jwt, { method: 'POST' }),
+      env,
+    );
+    expect(response.status).toBe(204);
+    const job = await rotationJob(project.id);
+    if (rotates) {
+      expect(job?.payload).toEqual({ phase: 'requested', reason: 'member-removed' });
+    } else {
+      expect(job).toBeUndefined();
+    }
+  });
+
+  it('requests nothing when the member change fails', async () => {
+    const { owner, member, project } = await projectWithMember('admin');
+    const conflict = await change(project.id, member.jwt, owner.id, null);
+    expect(conflict.status).toBe(409);
+    expect(await rotationJob(project.id)).toBeUndefined();
+  });
+
+  it('writes the request under the project lock', async () => {
+    const { owner, member, project } = await projectWithMember('collaborator');
+    const { result, queries } = await captureQueries(env.db, () =>
+      change(project.id, owner.jwt, member.id, null),
+    );
+    expect(result.status).toBe(204);
+    const lockAt = queries.findIndex((query) => /from "projects".* for update/i.test(query));
+    const insertAt = queries.findIndex((query) =>
+      /insert into "project_cleanup_jobs"/i.test(query),
+    );
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(insertAt).toBeGreaterThan(lockAt);
   });
 });
