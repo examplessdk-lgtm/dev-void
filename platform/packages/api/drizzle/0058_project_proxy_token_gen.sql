@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ADD COLUMN "proxy_token_gen" integer DEFAULT 0 NOT NULL;

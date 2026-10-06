@@ -28,7 +28,7 @@ import app from '../../src/index.ts';
 import { writePlanCatalog } from '../../src/plans.ts';
 import * as projectAccess from '../../src/project-access.ts';
 import * as projectIngress from '../../src/project-ingress.ts';
-import { deriveProxyToken, proxyTokenStateKey } from '../../src/proxy-token.ts';
+import { deriveProxyToken } from '../../src/proxy-token.ts';
 import { validateManifestShape } from '../../src/routes/deploy.ts';
 import {
   builds,
@@ -2006,10 +2006,10 @@ describe('POST /projects/:id/deploy', () => {
     });
   });
 
-  it('issues the proxy token for the project accept floor', async () => {
+  it('issues the proxy token for the project generation', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'queue-kv-floor-app');
-    await env.ROUTING.put(proxyTokenStateKey(project.id), JSON.stringify({ gen: 1 }));
+    await env.db.update(projects).set({ proxy_token_gen: 1 }).where(eq(projects.id, project.id));
     const fetchMock = mockCfApi();
 
     const res = await app.fetch(

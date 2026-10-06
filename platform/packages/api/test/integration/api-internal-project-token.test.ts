@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -17,6 +18,7 @@ import {
   deriveProxyToken,
   type ProxyInternalRoute,
 } from '../../src/proxy-token.ts';
+import { projects } from '../../src/schema.ts';
 import {
   clearTables,
   createTestDeployment,
@@ -167,6 +169,7 @@ describe('per-project token checks', () => {
     expect(await worker.json()).toEqual({
       workerName: `user-${project.slug}-${deployment.id}`,
       deploymentId: deployment.id,
+      proxyTokenGen: 0,
     });
 
     const prerender = await internalRequest('verify-prerender-build', project.id, token, {
@@ -286,6 +289,7 @@ describe('proxy credential on the metadata routes', () => {
       'resolve-worker': {
         workerName: `user-${project.slug}-${deployment.id}`,
         deploymentId: deployment.id,
+        proxyTokenGen: 0,
       },
       'resolve-resource': { cf_id: 'cf-kv-id' },
       'verify-prerender-build': { ok: true },
@@ -318,6 +322,25 @@ describe('proxy credential on the metadata routes', () => {
       expect(floorReads(get)).toEqual([]);
     },
   );
+
+  it('reports the issued proxy token generation from /internal/resolve-worker', async () => {
+    const { project } = await liveProject();
+    await env.db.update(projects).set({ proxy_token_gen: 3 }).where(eq(projects.id, project.id));
+    const response = await internalRequest(
+      'resolve-worker',
+      project.id,
+      {
+        'x-void-proxy-internal': await deriveProxyInternalAuth(
+          JWT_SECRET,
+          'resolve-worker',
+          project.id,
+        ),
+      },
+      {},
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ proxyTokenGen: 3 });
+  });
 
   it.each(routes)(
     'rejects a proxy credential made for another route at /internal/%s',

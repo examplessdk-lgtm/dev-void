@@ -187,3 +187,36 @@ it('allows upgrading the 0.21.3 through 0.21.9 schema after adding project Zero 
     expect(compatibility.rollbackSafeFrom).toContainEqual({ platformVersion, schemaDigest });
   }
 });
+
+// 0.25.0 and 0.26.0 ignore projects.proxy_token_gen, so they can run on the 0058 schema.
+it('allows upgrading the 0.25.0 and 0.26.0 schema after adding the proxy token generation', () => {
+  const root = resolve(import.meta.dirname, '../../drizzle');
+  const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8')) as {
+    entries: Array<{ tag: string; idx: number; when: number }>;
+  };
+  const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8')) as {
+    lineage: string;
+    rollbackSafeFrom: Array<{ platformVersion: string; schemaDigest: string }>;
+  };
+  expect(journal.entries.at(-1)?.tag).toBe('0058_project_proxy_token_gen');
+  const previous = journal.entries.filter((entry) => entry.idx < 58);
+  expect(previous.at(-1)?.tag).toBe('0057_github_authority_constraints');
+  const schemaDigest = platformDatabaseSchemaDigest(
+    compatibility.lineage,
+    previous.map((entry) => ({
+      index: entry.idx,
+      tag: entry.tag,
+      timestampMillis: entry.when,
+      sha256: createHash('sha256')
+        .update(readFileSync(resolve(root, `${entry.tag}.sql`)))
+        .digest('hex'),
+    })),
+  );
+  expect(schemaDigest).toBe('7581930465664b7c578518bea54f36a83d20fcc47d9528183419033930d7ff4a');
+  expect(
+    compatibility.rollbackSafeFrom.filter((entry) => entry.schemaDigest === schemaDigest),
+  ).toEqual([
+    { platformVersion: '0.25.0', schemaDigest },
+    { platformVersion: '0.26.0', schemaDigest },
+  ]);
+});

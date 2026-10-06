@@ -7,7 +7,6 @@ import {
   deriveProxyInternalAuth,
   deriveProxyToken,
   isAcceptedGeneration,
-  issueProxyToken,
   LEGACY_PROXY_TOKEN_STATE,
   parseProxyTokenState,
   PROXY_INTERNAL_AUTH_HEADER,
@@ -156,12 +155,12 @@ describe('parseProxyTokenState', () => {
 
 describe('state table', () => {
   it.each([
-    { raw: null, accepted: [0, 1, 5], rejected: [], issue: 0 },
-    { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [], issue: 0 },
-    { raw: '{"gen":1}', accepted: [1, 2], rejected: [0], issue: 1 },
-    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1], issue: 2 },
-    { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2], issue: 3 },
-  ])('floor $raw', async ({ raw, accepted, rejected, issue }) => {
+    { raw: null, accepted: [0, 1, 5], rejected: [] },
+    { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [] },
+    { raw: '{"gen":1}', accepted: [1, 2], rejected: [0] },
+    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1] },
+    { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2] },
+  ])('floor $raw', async ({ raw, accepted, rejected }) => {
     const { routing } = kvStub(raw === null ? {} : { [proxyTokenStateKey(PROJECT)]: raw });
     const state = await readProxyTokenState(routing, PROJECT);
     for (const gen of accepted) {
@@ -172,15 +171,11 @@ describe('state table', () => {
       expect(isAcceptedGeneration(state, gen)).toBe(false);
       expect(await verify(await deriveProxyToken(SECRET, PROJECT, gen), state).result).toBe(false);
     }
-    expect(await issueProxyToken(routing, SECRET, PROJECT)).toBe(
-      await deriveProxyToken(SECRET, PROJECT, issue),
-    );
   });
 
   it('fails closed on a malformed floor', async () => {
     const { routing } = kvStub({ [proxyTokenStateKey(PROJECT)]: '{"gen":"x"}' });
     await expect(readProxyTokenState(routing, PROJECT)).rejects.toThrow(ProxyTokenStateError);
-    await expect(issueProxyToken(routing, SECRET, PROJECT)).rejects.toThrow(ProxyTokenStateError);
   });
 });
 
