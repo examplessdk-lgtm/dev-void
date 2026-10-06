@@ -7,6 +7,7 @@ import {
   verifyDeployToken,
   verifyPrerenderToken,
 } from '../../src/auth/deploy-token.ts';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import { revokeConnectionSessions } from '../../src/auth/sessions.ts';
 import {
   createDeployment,
@@ -3249,7 +3250,10 @@ describe('POST /projects/:id/rollback', () => {
       await markDeploymentRetained(env.db, d2.id, true);
       await setActiveDeployment(env.db, project.id, d2.id);
 
-      const heldToken = await deriveProxyToken(env.JWT_SECRET, project.id, held);
+      const heldToken =
+        held === 0
+          ? await hmacSignState(project.id, env.JWT_SECRET)
+          : await deriveProxyToken(env.JWT_SECRET, project.id, held);
       mockCfApi({
         listWorkerBindings: () =>
           cfSuccess([{ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: heldToken }]),

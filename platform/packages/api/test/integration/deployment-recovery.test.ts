@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vite-plus/test';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import { getDeployment, getProject, type Db } from '../../src/db.ts';
 import { replayDeploymentCutover } from '../../src/deploy/recovery.ts';
 import { settleExpiredDeployment } from '../../src/deployment-recovery.ts';
@@ -325,7 +326,10 @@ test.each([
       cf_id: '25832cb0ce3d4f60b1e538911a4629f4',
       binding_name: 'emails',
     });
-    const heldToken = await deriveProxyToken(env.JWT_SECRET, project.id, held);
+    const heldToken =
+      held === 0
+        ? await hmacSignState(project.id, env.JWT_SECRET)
+        : await deriveProxyToken(env.JWT_SECRET, project.id, held);
     mockCfApi({
       listWorkerBindings: () =>
         cfSuccess([{ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: heldToken }]),

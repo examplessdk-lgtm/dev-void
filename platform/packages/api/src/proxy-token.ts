@@ -3,17 +3,15 @@ import { isProjectId } from './id.ts';
 /**
  * Tenant proxy tokens.
  *
- * A tenant Worker authenticates to the platform with `__VOID_PROXY_TOKEN`.
- * Two forms exist:
- *
- * - legacy (generation 0): base64url(HMAC-SHA256(JWT_SECRET, projectId)),
- *   43 characters, the bytes `hmacSignState` produces;
- * - `v2.<gen>.<mac>`: the MAC is HMAC-SHA256 under a key derived from
- *   JWT_SECRET with HKDF, over the project id and the generation.
+ * A tenant Worker authenticates to the platform with `__VOID_PROXY_TOKEN`,
+ * `v2.<gen>.<mac>` with `gen >= 1`: the MAC is HMAC-SHA256 under a key
+ * derived from JWT_SECRET with HKDF, over the project id and the generation.
+ * The original token, an HMAC of the project id under JWT_SECRET itself, is
+ * never accepted.
  *
  * ROUTING `proxy-token:<projectId>` holds the accept floor `{"gen": F}`. A
- * token is accepted when its MAC is valid and its generation is at least F.
- * A missing key is floor 0, which accepts the legacy token.
+ * token is accepted when its MAC is valid and its generation is at least
+ * max(F, 1). A missing key is floor 0: no floor.
  *
  * Every check runs `isProjectId` and the syntax check before any crypto, and
  * the MAC before any KV read, so a forged token never costs a KV read.
@@ -25,10 +23,10 @@ export function proxyTokenStateKey(projectId: string): string {
   return `${PROXY_TOKEN_STATE_KEY_PREFIX}${projectId}`;
 }
 
-/** Accept floor. Generation 0 accepts the legacy token. */
+/** Accept floor. Generation 0 is no floor: every generation from 1 is accepted. */
 export type ProxyTokenState = Readonly<{ gen: number }>;
 
-export const LEGACY_PROXY_TOKEN_STATE: ProxyTokenState = Object.freeze({ gen: 0 });
+export const NO_PROXY_TOKEN_FLOOR: ProxyTokenState = Object.freeze({ gen: 0 });
 
 /** KV `cacheTtl` for floor reads on request paths (the KV minimum). */
 export const PROXY_TOKEN_KV_CACHE_TTL_SECONDS = 30;
@@ -55,7 +53,7 @@ function isStateGeneration(gen: unknown): gen is number {
 /** Missing state is floor 0. Anything other than `{"gen": <safe integer >= 0>}` throws. */
 export function parseProxyTokenState(raw: string | null | undefined): ProxyTokenState {
   if (raw === null || raw === undefined) {
-    return LEGACY_PROXY_TOKEN_STATE;
+    return NO_PROXY_TOKEN_FLOOR;
   }
   let value: unknown;
   try {
@@ -81,31 +79,25 @@ export function serializeProxyTokenState(state: ProxyTokenState): string {
 }
 
 export function isAcceptedGeneration(state: ProxyTokenState, gen: number): boolean {
-  return gen >= state.gen;
+  return gen >= Math.max(state.gen, 1);
 }
 
 /**
  * Generations a sender tries, in order, for the issued generation: the
  * current one, then the one before it while Workers may still hold it.
- * Generation 2 also tries the legacy token last: a Worker deploy moves a
- * project from 0 to 1 and queues a rotation to 2 for its older Workers, which
- * hold the legacy token until that rotation patches them.
+ * Empty for generation 0: nothing has been issued.
  */
 export function sendGenerations(issueGen: number): ReadonlyArray<number> {
   if (!Number.isSafeInteger(issueGen) || issueGen < 0) {
     throw new RangeError(`invalid proxy token generation: ${issueGen}`);
   }
-  if (issueGen === 0) {
-    return [0];
-  }
-  return issueGen === 2 ? [2, 1, 0] : [issueGen, issueGen - 1];
+  return [issueGen, issueGen - 1].filter((gen) => gen >= 1);
 }
 
 // --- Keys ---
 
 const encoder = new TextEncoder();
 
-const legacyKeys = new Map<string, Promise<CryptoKey>>();
 const proxyTokenKeys = new Map<string, Promise<CryptoKey>>();
 const proxyInternalKeys = new Map<string, Promise<CryptoKey>>();
 
@@ -121,18 +113,6 @@ function cachedKey(
     key.catch(() => cache.delete(secret));
   }
   return key;
-}
-
-function legacyKey(secret: string): Promise<CryptoKey> {
-  return cachedKey(legacyKeys, secret, () =>
-    crypto.subtle.importKey(
-      'raw',
-      encoder.encode(secret),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign', 'verify'],
-    ),
-  );
 }
 
 async function hkdfHmacKey(secret: string, salt: string, info: string): Promise<CryptoKey> {
@@ -192,7 +172,7 @@ function proxyTokenMessage(projectId: string, gen: number): string {
 
 // --- Tenant tokens ---
 
-/** Generation 0 is the legacy token. */
+/** `gen` must be a safe integer of at least 1. */
 export async function deriveProxyToken(
   jwtSecret: string,
   projectId: string,
@@ -201,11 +181,8 @@ export async function deriveProxyToken(
   if (!isProjectId(projectId)) {
     throw new Error('invalid project id');
   }
-  if (!Number.isSafeInteger(gen) || gen < 0) {
+  if (!Number.isSafeInteger(gen) || gen < 1) {
     throw new RangeError(`invalid proxy token generation: ${gen}`);
-  }
-  if (gen === 0) {
-    return sign(legacyKey(jwtSecret), projectId);
   }
   return `v2.${gen}.${await sign(proxyTokenKey(jwtSecret), proxyTokenMessage(projectId, gen))}`;
 }
@@ -218,9 +195,6 @@ export async function proxyTokenGeneration(
 ): Promise<number | null> {
   if (!isProjectId(projectId)) {
     return null;
-  }
-  if (MAC.test(token)) {
-    return (await verify(legacyKey(jwtSecret), projectId, token)) ? 0 : null;
   }
   const match = V2_TOKEN.exec(token);
   if (!match) {

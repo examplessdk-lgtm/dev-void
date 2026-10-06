@@ -110,7 +110,8 @@ async function isTokenRejection(res: Response): Promise<boolean> {
  * The user worker handles it via native D1/KV/R2 bindings at the `/__void/*` route.
  *
  * Returns the Response if successful, or null if the worker doesn't support /__void
- * (404 = old deploy without the handler → caller should fall back to REST API).
+ * (404 = old deploy without the handler → caller should fall back to REST API), or when
+ * no token has been issued for the project yet.
  */
 export async function dispatchToWorker(
   env: Env,
@@ -142,6 +143,12 @@ export async function dispatchToWorker(
     return options.fallbackOnDispatchError
       ? null
       : Response.json({ error: 'project token state unavailable' }, { status: 502 });
+  }
+  if (tokens.length === 0) {
+    // The Worker can only hold the original token, which is no longer sent.
+    // Every caller here is already authorized for the project.
+    console.warn('[proxy-token] no token to send', { projectId });
+    return null;
   }
 
   let worker: Fetcher;

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // `cloudflare:email` is a workerd built-in with no npm shim. The root
@@ -29,30 +30,6 @@ const JWT_SECRET = 'test-secret-key';
 const EMAIL_SIGNING_SECRET = 'test-email-signing-key-independent';
 const PROD_DOMAIN = 'mail.void.cloud';
 const STAGING_DOMAIN = 'mail.voidcloud.dev';
-
-// --- HMAC helper (mirrors the worker's project token signing) ---
-
-function base64urlEncode(data: Uint8Array): string {
-  let binary = '';
-  for (const byte of data) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function signHmac(data: string, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  return base64urlEncode(
-    new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(data))),
-  );
-}
 
 // --- Mock env ---
 
@@ -193,7 +170,7 @@ async function sendBody(overrides: Record<string, unknown> = {}) {
   const from = typeof overrides.from === 'string' ? overrides.from : DEFAULT_FROM;
   return {
     projectId: 'proj_000000000001',
-    aiToken: await signHmac('proj_000000000001', JWT_SECRET),
+    aiToken: await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 1),
     from,
     recipients: ['dev@example.com'],
     mimeBase64: mimeBase64(mimeFor(from)),

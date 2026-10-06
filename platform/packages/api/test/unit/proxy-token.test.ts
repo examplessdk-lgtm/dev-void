@@ -7,7 +7,7 @@ import {
   deriveProxyInternalAuth,
   deriveProxyToken,
   isAcceptedGeneration,
-  LEGACY_PROXY_TOKEN_STATE,
+  NO_PROXY_TOKEN_FLOOR,
   parseProxyTokenState,
   PROXY_INTERNAL_AUTH_HEADER,
   PROXY_TOKEN_ISOLATE_TTL_MS,
@@ -28,7 +28,8 @@ const SECRET = 'test-secret-key';
 const PROJECT = 'proj_000000000001';
 const OTHER_PROJECT = 'proj_000000000002';
 
-const TOK_0 = 'ZMRzpVRsaOJSG_unVlA0oqSaz2kApOohvao_XGR8Q0c';
+/** The original project token, HMAC-SHA256(JWT_SECRET, projectId). Never accepted. */
+const LEGACY = 'ZMRzpVRsaOJSG_unVlA0oqSaz2kApOohvao_XGR8Q0c';
 const TOK_1 = 'v2.1.3W5_i2g79pUCXyzxWPQWmTqscSNtC_2vuHC84z775Y8';
 const TOK_2 = 'v2.2.Vx_qycCHPx2BoYvQrbQ7JrhbONKU7f0jNK23B0YUhOs';
 const INTERNAL: Record<ProxyInternalRoute, string> = {
@@ -43,9 +44,6 @@ function base64url(bytes: Uint8Array): string {
 }
 
 function nodeTok(gen: number, projectId = PROJECT): string {
-  if (gen === 0) {
-    return base64url(createHmac('sha256', SECRET).update(projectId).digest());
-  }
   const key = Buffer.from(hkdfSync('sha256', SECRET, 'void-proxy-token', 'v2', 32));
   const mac = createHmac('sha256', key).update(`void-proxy-token:v2:${projectId}:${gen}`).digest();
   return `v2.${gen}.${base64url(mac)}`;
@@ -70,7 +68,7 @@ function throwingKv() {
   return { routing: { get } as unknown as Pick<KVNamespace, 'get'>, get };
 }
 
-function verify(token: string, state: ProxyTokenState | Error = LEGACY_PROXY_TOKEN_STATE) {
+function verify(token: string, state: ProxyTokenState | Error = NO_PROXY_TOKEN_FLOOR) {
   const readState = vi.fn(async () => {
     if (state instanceof Error) {
       throw state;
@@ -89,18 +87,12 @@ afterEach(() => {
 
 describe('vectors', () => {
   it.each([
-    [0, TOK_0],
     [1, TOK_1],
     [2, TOK_2],
   ])('derives tok(%i)', async (gen, expected) => {
     const token = await deriveProxyToken(SECRET, PROJECT, gen);
     expect(token).toBe(expected);
     expect(token).toBe(nodeTok(gen));
-  });
-
-  it('keeps the legacy token byte-identical to hmacSignState', async () => {
-    expect(await deriveProxyToken(SECRET, PROJECT, 0)).toBe(await hmacSignState(PROJECT, SECRET));
-    expect(TOK_0).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it.each(ROUTES)('derives the internal value for %s', async (route) => {
@@ -110,7 +102,7 @@ describe('vectors', () => {
   });
 
   it('keeps internal values distinct from each other and from tenant tokens', () => {
-    const values = [...Object.values(INTERNAL), TOK_0, TOK_1.slice('v2.1.'.length)];
+    const values = [...Object.values(INTERNAL), LEGACY, TOK_1.slice('v2.1.'.length)];
     expect(new Set(values).size).toBe(values.length);
   });
 
@@ -156,11 +148,11 @@ describe('parseProxyTokenState', () => {
 
 describe('state table', () => {
   it.each([
-    { raw: null, accepted: [0, 1, 5], rejected: [], send: [0] },
-    { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [], send: [0] },
-    { raw: '{"gen":1}', accepted: [1, 2], rejected: [0], send: [1, 0] },
-    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1], send: [2, 1, 0] },
-    { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2], send: [3, 2] },
+    { raw: null, accepted: [1, 5], rejected: [], send: [] },
+    { raw: '{"gen":0}', accepted: [1, 5], rejected: [], send: [] },
+    { raw: '{"gen":1}', accepted: [1, 2], rejected: [], send: [1] },
+    { raw: '{"gen":2}', accepted: [2, 3], rejected: [1], send: [2, 1] },
+    { raw: '{"gen":3}', accepted: [3, 4], rejected: [1, 2], send: [3, 2] },
   ])('floor $raw', async ({ raw, accepted, rejected, send }) => {
     const { routing } = kvStub(raw === null ? {} : { [proxyTokenStateKey(PROJECT)]: raw });
     const state = await readProxyTokenState(routing, PROJECT);
@@ -172,6 +164,10 @@ describe('state table', () => {
       expect(isAcceptedGeneration(state, gen)).toBe(false);
       expect(await verify(await deriveProxyToken(SECRET, PROJECT, gen), state).result).toBe(false);
     }
+    expect(isAcceptedGeneration(state, 0)).toBe(false);
+    const { result, readState } = verify(LEGACY, state);
+    expect(await result).toBe(false);
+    expect(readState).not.toHaveBeenCalled();
     expect(sendGenerations(state.gen)).toEqual(send);
   });
 
@@ -180,18 +176,19 @@ describe('state table', () => {
     await expect(readProxyTokenState(routing, PROJECT)).rejects.toThrow(ProxyTokenStateError);
   });
 
-  it('sends the issued generation, then the one before it', () => {
-    expect(sendGenerations(0)).toEqual([0]);
-    expect(sendGenerations(1)).toEqual([1, 0]);
-    expect(sendGenerations(2)).toEqual([2, 1, 0]);
-    expect(sendGenerations(5)).toEqual([5, 4]);
+  it('sends the issued generation, then the one before it, never generation 0', () => {
+    expect(sendGenerations(0)).toEqual([]);
+    expect(sendGenerations(1)).toEqual([1]);
+    expect(sendGenerations(4)).toEqual([4, 3]);
   });
 });
 
 describe('verifyProxyToken', () => {
-  it('accepts legacy and v2 tokens when no floor is set', async () => {
-    expect(await verify(TOK_0).result).toBe(true);
+  it('accepts v2 tokens and rejects the original token when no floor is set', async () => {
     expect(await verify(TOK_1).result).toBe(true);
+    const { result, readState } = verify(LEGACY);
+    expect(await result).toBe(false);
+    expect(readState).not.toHaveBeenCalled();
   });
 
   it('accepts generations at or above the floor only', async () => {
@@ -199,7 +196,7 @@ describe('verifyProxyToken', () => {
     expect(await verify(TOK_2, { gen: 2 }).result).toBe(true);
     expect(await verify(await deriveProxyToken(SECRET, PROJECT, 3), { gen: 2 }).result).toBe(true);
     expect(await verify(TOK_1, { gen: 2 }).result).toBe(false);
-    expect(await verify(TOK_0, { gen: 2 }).result).toBe(false);
+    expect(await verify(LEGACY, { gen: 2 }).result).toBe(false);
     expect(warn).toHaveBeenCalledWith('[proxy-token] rejected generation', {
       projectId: PROJECT,
       gen: 1,
@@ -210,7 +207,7 @@ describe('verifyProxyToken', () => {
 
   it("rejects another project's token", async () => {
     expect(await verify(await deriveProxyToken(SECRET, OTHER_PROJECT, 1)).result).toBe(false);
-    expect(await verify(await deriveProxyToken(SECRET, OTHER_PROJECT, 0)).result).toBe(false);
+    expect(await verify(await hmacSignState(OTHER_PROJECT, SECRET)).result).toBe(false);
   });
 
   it('rejects a MAC relabelled with another generation', async () => {
@@ -232,10 +229,10 @@ describe('verifyProxyToken', () => {
   it.each([
     ['leading zero generation', `v2.01.${TOK_1.slice('v2.1.'.length)}`],
     ['leading zero and short MAC', 'v2.01.x'],
-    ['42-char MAC', TOK_0.slice(0, 42)],
-    ['44-char MAC', `${TOK_0}A`],
-    ['trailing padding', `${TOK_0}=`],
-    ['standard base64 alphabet', `+${TOK_0.slice(1)}`],
+    ['42-char MAC', LEGACY.slice(0, 42)],
+    ['44-char MAC', `${LEGACY}A`],
+    ['trailing padding', `${LEGACY}=`],
+    ['standard base64 alphabet', `+${LEGACY.slice(1)}`],
     ['empty token', ''],
     ['unsafe generation', `v2.9999999999999999.${TOK_1.slice('v2.1.'.length)}`],
   ])('rejects a malformed token (%s) without reading the floor', async (_name, token) => {
@@ -257,7 +254,7 @@ describe('verifyProxyToken', () => {
     // The JWT signature is the legacy MAC over this string.
     expect(await hmacSignState(projectId, SECRET)).toBe(signature);
     expect(await proxyTokenGeneration(SECRET, projectId, signature)).toBeNull();
-    const readState = vi.fn(async () => LEGACY_PROXY_TOKEN_STATE);
+    const readState = vi.fn(async () => NO_PROXY_TOKEN_FLOOR);
     expect(
       await verifyProxyToken({ jwtSecret: SECRET, projectId, token: signature, readState }),
     ).toBe(false);
@@ -267,15 +264,22 @@ describe('verifyProxyToken', () => {
 
 describe('proxyTokenGeneration', () => {
   it('returns the generation of a valid token', async () => {
-    expect(await proxyTokenGeneration(SECRET, PROJECT, TOK_0)).toBe(0);
     expect(await proxyTokenGeneration(SECRET, PROJECT, TOK_2)).toBe(2);
     expect(await proxyTokenGeneration('other-secret', PROJECT, TOK_2)).toBeNull();
+  });
+
+  it('returns null for the original token without computing a MAC', async () => {
+    expect(await hmacSignState(PROJECT, SECRET)).toBe(LEGACY);
+    const verifyMac = vi.spyOn(crypto.subtle, 'verify');
+    expect(await proxyTokenGeneration(SECRET, PROJECT, LEGACY)).toBeNull();
+    expect(verifyMac).not.toHaveBeenCalled();
   });
 });
 
 describe('deriveProxyToken', () => {
   it.each([
     ['a non-project id', 'proj_1', 1],
+    ['generation 0', PROJECT, 0],
     ['a negative generation', PROJECT, -1],
     ['a fractional generation', PROJECT, 1.5],
   ])('throws for %s', async (_name, projectId, gen) => {
@@ -414,7 +418,7 @@ describe('verifyProxyInternalAuth', () => {
     ['44 chars', `${INTERNAL['resolve-worker']}A`],
     ['a v2 token shape', 'v2.1.x'],
     ['a tenant token', TOK_1],
-    ['the legacy token', TOK_0],
+    ['the original token', LEGACY],
     ['empty', ''],
   ])('rejects %s without throwing', async (_name, value) => {
     await expect(verifyProxyInternalAuth(SECRET, 'resolve-worker', PROJECT, value)).resolves.toBe(

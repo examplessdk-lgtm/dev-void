@@ -10,8 +10,8 @@ import {
   afterEach,
   vi,
 } from 'vite-plus/test';
-import { hmacSignState } from '../../src/auth/hmac.ts';
 import app from '../../src/index.ts';
+import { deriveProxyToken } from '../../src/proxy-token.ts';
 import { domains, projectMembers } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -1368,7 +1368,7 @@ describe('POST /internal/revalidate/:id', () => {
     );
     await env.ISR_CACHE.put(isrKey(project.id, oldDeployment.id, 'example.com', 'about'), 'old');
 
-    const token = await hmacSignState(project.id, env.JWT_SECRET);
+    const token = await deriveProxyToken(env.JWT_SECRET, project.id, 1);
     const res = await app.fetch(
       new Request(`http://localhost/internal/revalidate/${project.id}`, {
         method: 'POST',

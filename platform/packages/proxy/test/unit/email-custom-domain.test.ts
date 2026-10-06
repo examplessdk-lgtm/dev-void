@@ -1,5 +1,6 @@
 /** Custom-domain sends use SQL admission and a customer-account send_raw credential. */
 
+import { deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // `cloudflare:email` is a workerd built-in with no npm shim — same mock as
@@ -26,7 +27,7 @@ const CUSTOM_FROM = `support@${CUSTOM_DOMAIN}`;
 /** Dummy fixture value for the leased credential — not a real token. */
 const LEASED = 'leased-credential-fixture-value';
 
-// --- HMAC helper (mirrors the worker's project token signing) ---
+// --- HMAC helper ---
 
 function base64urlEncode(data: Uint8Array): string {
   let binary = '';
@@ -166,7 +167,7 @@ async function postSend(
 async function sendBody(overrides: Record<string, unknown> = {}) {
   return {
     projectId: 'proj_000000000001',
-    aiToken: await signHmac('proj_000000000001', JWT_SECRET),
+    aiToken: await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 1),
     from: CUSTOM_FROM,
     recipients: ['dev@example.com'],
     mimeBase64: mimeBase64(),

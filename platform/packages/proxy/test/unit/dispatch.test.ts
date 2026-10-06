@@ -2,34 +2,12 @@ import { deriveProxyInternalAuth, deriveProxyToken } from '@voidcloud/api/proxy-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import { createBindingHandler } from '../../../../../packages/void/src/runtime/remote/binding-handler.ts';
 import { dispatchToWorker } from '../../src/dispatch.ts';
+import { hmacSign } from '../../src/hmac.ts';
 import worker from '../../src/index.ts';
 import { clearProxyTokenStateCache } from '../../src/proxy-token.ts';
 import type { Env } from '../../src/types.ts';
 
 const JWT_SECRET = 'test-secret-key';
-
-// --- HMAC helper ---
-
-function base64urlEncode(data: Uint8Array): string {
-  let binary = '';
-  for (const byte of data) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function signAiToken(projectId: string, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(projectId)));
-  return base64urlEncode(sig);
-}
 
 // --- Mock factories ---
 
@@ -42,7 +20,7 @@ function createMockApi(workerNames: Record<string, string> = {}) {
         const projectId = match[1];
         const workerName = workerNames[projectId];
         if (workerName) {
-          return Response.json({ workerName, deploymentId: 'dpl_active' });
+          return Response.json({ workerName, deploymentId: 'dpl_active', proxyTokenGen: 1 });
         }
         return Response.json({ error: 'not found' }, { status: 404 });
       }
@@ -160,7 +138,7 @@ describe('WfP dispatch path', () => {
   let token: string;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_000000000001', JWT_SECRET);
+    token = await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 1);
   });
 
   beforeEach(clearProxyTokenStateCache);
@@ -372,7 +350,11 @@ describe('WfP dispatch path', () => {
       env.API.fetch = vi.fn(async (url: string) => {
         const path = new URL(url).pathname;
         return path.includes('/internal/resolve-worker/')
-          ? Response.json({ workerName: 'user-my-app', deploymentId: 'dpl_active' })
+          ? Response.json({
+              workerName: 'user-my-app',
+              deploymentId: 'dpl_active',
+              proxyTokenGen: 1,
+            })
           : Response.json({ cf_id: 'kv-namespace' });
       }) as unknown as typeof env.API.fetch;
       const restFetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('from-rest'));
@@ -525,7 +507,11 @@ describe('WfP dispatch path', () => {
       env.API.fetch = vi.fn(async (url: string, init?: RequestInit) => {
         const path = new URL(url).pathname;
         if (path.includes('/internal/resolve-worker/')) {
-          return Response.json({ workerName: 'user-my-app', deploymentId: 'dpl_active' });
+          return Response.json({
+            workerName: 'user-my-app',
+            deploymentId: 'dpl_active',
+            proxyTokenGen: 1,
+          });
         }
         const body = JSON.parse(init?.body as string) as { type?: string; binding?: string };
         if (body.type === 'd1' && body.binding === 'DB') {
@@ -563,6 +549,7 @@ describe('WfP dispatch path', () => {
         return Response.json({
           workerName,
           deploymentId: workerName?.split('-').at(-1),
+          proxyTokenGen: 1,
         });
       }) as unknown as typeof env.API.fetch;
 
@@ -650,6 +637,11 @@ describe('proxy token generations', () => {
     return deriveProxyToken(JWT_SECRET, PROJECT_ID, gen);
   }
 
+  /** The original project token, which a never-rotated Worker still holds. */
+  function legacyToken(): Promise<string> {
+    return hmacSign(PROJECT_ID, JWT_SECRET);
+  }
+
   type Sent = { token: string | null; body: unknown };
 
   /**
@@ -703,15 +695,20 @@ describe('proxy token generations', () => {
     return { env, sent, floorReads };
   }
 
-  it('sends the legacy token once when there is no issued generation and no floor', async () => {
-    const legacy = await tok(0);
-    const { env, sent } = setup({ held: legacy });
+  it.each([
+    [
+      'issued generation 0',
+      { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 0 },
+    ],
+    ['no issued generation and no floor', undefined],
+  ])('falls back without dispatching for %s', async (_name, resolution) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env, sent } = setup({ resolution, held: await legacyToken() });
 
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(200);
-    expect(await res?.json()).toBe('hello');
-    expect(sent.map((s) => s.token)).toEqual([legacy]);
+    expect(await dispatchToWorker(env, PROJECT_ID, '/kv/put', KV_BODY)).toBeNull();
+    expect(env.DISPATCH.get).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith('[proxy-token] no token to send', { projectId: PROJECT_ID });
   });
 
   it('sends the floor token, then the previous one, when there is no issued generation', async () => {
@@ -732,25 +729,36 @@ describe('proxy token generations', () => {
     expect(sent.map((s) => s.token)).toEqual([await tok(1)]);
   });
 
-  it('retries generation 1 with the legacy token and the same body', async () => {
-    const legacy = await tok(0);
+  it('sends only generation 1 to a Worker that still holds the original token', async () => {
     const { env, sent, floorReads } = setup({
       resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      held: legacy,
+      held: await legacyToken(),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(await res?.json()).toEqual({ error: 'unauthorized' });
+    expect(sent.map((s) => s.token)).toEqual([await tok(1)]);
+    expect(floorReads()).toBe(0);
+  });
+
+  it('retries issued generation 2 with generation 1 and the same body', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
+      held: await tok(1),
     });
 
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
 
     expect(res?.status).toBe(200);
     expect(await res?.json()).toBe('hello');
-    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
     expect(sent[1].body).toEqual(sent[0].body);
     expect(sent[0].body).toEqual(KV_BODY);
-    expect(floorReads()).toBe(0);
   });
 
   it.each([
-    { held: 0, tokens: [2, 1, 0] },
     { held: 1, tokens: [2, 1] },
     { held: 2, tokens: [2] },
   ])('sends issued generation 2 to a Worker holding $held', async ({ held, tokens }) => {
@@ -793,11 +801,11 @@ describe('proxy token generations', () => {
   });
 
   it('retries a reject that is streamed without a declared length', async () => {
-    const legacy = await tok(0);
+    const previous = await tok(1);
     const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
       respond: (token) =>
-        token === legacy
+        token === previous
           ? Response.json('hello')
           : new Response(new Blob(['{"error":"unauthorized"}']).stream(), { status: 403 }),
     });
@@ -805,7 +813,7 @@ describe('proxy token generations', () => {
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
 
     expect(res?.status).toBe(200);
-    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2), previous]);
   });
 
   it('does not read a 403 that declares a large body', async () => {
@@ -853,15 +861,15 @@ describe('proxy token generations', () => {
 
   it('returns the last reject when the Worker holds none of the tokens', async () => {
     const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 3 },
-      held: await tok(1),
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
+      held: await legacyToken(),
     });
 
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
 
     expect(res?.status).toBe(403);
     expect(await res?.json()).toEqual({ error: 'unauthorized' });
-    expect(sent.map((s) => s.token)).toEqual([await tok(3), await tok(2)]);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
   });
 
   it('does not retry after a thrown fetch', async () => {

@@ -56,9 +56,9 @@ async function signJwt(
   return `${header}.${body}.${base64urlEncode(sig)}`;
 }
 
-// --- HMAC helper (mirrors the worker's project token signing) ---
+// --- HMAC helper (the original project token, which is no longer accepted) ---
 
-async function signAiToken(projectId: string, secret: string): Promise<string> {
+async function signLegacyToken(projectId: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     'raw',
@@ -194,7 +194,7 @@ describe('proxy worker', () => {
       'proj_000000000099',
       'proj_000000000000',
     ]) {
-      aiTokens[pid] = await signAiToken(pid, JWT_SECRET);
+      aiTokens[pid] = await deriveProxyToken(JWT_SECRET, pid, 1);
     }
   });
 
@@ -518,7 +518,7 @@ describe('proxy worker', () => {
       recipient: 'support@example.com',
       expiresAt: Date.now() + 30_000,
     };
-    const projectToken = await signAiToken(claims.projectId, JWT_SECRET);
+    const projectToken = await deriveProxyToken(JWT_SECRET, claims.projectId, 1);
     const call = async (receiptKey: string, auth = projectToken, env = createEnv()) =>
       worker.fetch(
         post(
@@ -534,8 +534,12 @@ describe('proxy worker', () => {
     });
     expect(await (await call(JWT_SECRET)).json()).toEqual({ valid: false });
     expect(
-      (await call(EMAIL_SIGNING_SECRET, await signAiToken(claims.projectId, EMAIL_SIGNING_SECRET)))
-        .status,
+      (
+        await call(
+          EMAIL_SIGNING_SECRET,
+          await deriveProxyToken(EMAIL_SIGNING_SECRET, claims.projectId, 1),
+        )
+      ).status,
     ).toBe(403);
     const missing = { ...createEnv(), EMAIL_SIGNING_SECRET: '' };
     expect((await call(JWT_SECRET, projectToken, missing)).status).toBe(503);
@@ -555,7 +559,7 @@ describe('proxy worker', () => {
         post(
           '/email/verify-receipt',
           { ...claims, receipt: await signEmailReceipt(claims, EMAIL_SIGNING_SECRET) },
-          { 'x-void-internal': await signAiToken(projectId, JWT_SECRET) },
+          { 'x-void-internal': await signLegacyToken(projectId, JWT_SECRET) },
         ),
         createEnv(),
       );
@@ -1093,7 +1097,7 @@ describe('proxy worker', () => {
     it('rejects a login JWT split into projectId and aiToken', async () => {
       const [header, body, signature] = validToken.split('.');
       // The JWT signature is the same HMAC a project token would carry for this string.
-      expect(await signAiToken(`${header}.${body}`, JWT_SECRET)).toBe(signature);
+      expect(await signLegacyToken(`${header}.${body}`, JWT_SECRET)).toBe(signature);
       const env = createEnv();
       const res = await worker.fetch(
         post('/ai/run', {
@@ -1117,7 +1121,7 @@ describe('proxy worker', () => {
           model: 'test-model',
           inputs: {},
           projectId: 'proj_1',
-          aiToken: await signAiToken('proj_1', JWT_SECRET),
+          aiToken: await signLegacyToken('proj_1', JWT_SECRET),
         }),
         env,
       );
@@ -1153,32 +1157,101 @@ describe('proxy worker', () => {
       vi.restoreAllMocks();
     });
 
-    it('accepts the legacy and v2 tokens while no floor is set', async () => {
-      for (const gen of [0, 1]) {
-        clearProxyTokenStateCache();
-        const env = createEnv();
-        const res = await aiRun(env, await deriveProxyToken(JWT_SECRET, projectId, gen));
-        expect(res.status).toBe(200);
-        expect(env.AI.run).toHaveBeenCalledOnce();
-      }
+    it('accepts a v2 token and rejects the original token while no floor is set', async () => {
+      const accepted = createEnv();
+      expect((await aiRun(accepted, await deriveProxyToken(JWT_SECRET, projectId, 1))).status).toBe(
+        200,
+      );
+      expect(accepted.AI.run).toHaveBeenCalledOnce();
+
+      const env = createEnv();
+      const res = await aiRun(env, await signLegacyToken(projectId, JWT_SECRET));
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(env.AI.run).not.toHaveBeenCalled();
+      expect(floorReads(env)).toBe(0);
     });
 
-    it('accepts generations at or above the floor and rejects the legacy token', async () => {
-      for (const gen of [1, 2]) {
+    it('accepts generations at or above the floor only', async () => {
+      for (const gen of [2, 3]) {
         clearProxyTokenStateCache();
         const res = await aiRun(
-          createEnv({}, { [floorKey]: '{"gen":1}' }),
+          createEnv({}, { [floorKey]: '{"gen":2}' }),
           await deriveProxyToken(JWT_SECRET, projectId, gen),
         );
         expect(res.status).toBe(200);
       }
 
       clearProxyTokenStateCache();
-      const env = createEnv({}, { [floorKey]: '{"gen":1}' });
-      const res = await aiRun(env, aiTokens[projectId]);
+      const env = createEnv({}, { [floorKey]: '{"gen":2}' });
+      const res = await aiRun(env, await deriveProxyToken(JWT_SECRET, projectId, 1));
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: 'invalid project token' });
       expect(env.AI.run).not.toHaveBeenCalled();
+    });
+
+    it('rejects the original token on a binding route before any lookup', async () => {
+      const env = createEnv();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const api = vi.fn(createMockApi().fetch);
+      env.API = { fetch: api };
+      const res = await worker.fetch(
+        post('/d1/query', {
+          binding: 'DB',
+          sql: 'SELECT 1',
+          method: 'all',
+          projectId,
+          aiToken: await signLegacyToken(projectId, JWT_SECRET),
+        }),
+        env,
+      );
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(api).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the REST API for a user when no token has been issued', async () => {
+      const api = createMockApi(async (input, init) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url.includes('/internal/verify-owner/')) {
+          return Response.json({ ok: true });
+        }
+        if (url.includes('/internal/resolve-worker/')) {
+          return Response.json({
+            workerName: 'user-my-app',
+            deploymentId: 'dpl_active',
+            proxyTokenGen: 0,
+          });
+        }
+        if (url.includes('/internal/resolve-resource/')) {
+          return Response.json({ cf_id: 'd1-uuid-abc' });
+        }
+        throw new Error(`unexpected API request: ${url}`);
+      });
+      const env = createEnv(undefined, undefined, api);
+      const rest = vi.fn(async () =>
+        Response.json({
+          success: true,
+          result: [{ results: [{ id: 1 }], success: true, meta: {} }],
+        }),
+      );
+      vi.stubGlobal('fetch', rest);
+
+      const res = await worker.fetch(
+        post(
+          '/d1/query',
+          { binding: 'DB', sql: 'SELECT 1', method: 'all', projectId },
+          { authorization: `Bearer ${validToken}` },
+        ),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(env.DISPATCH.get).not.toHaveBeenCalled();
+      expect(rest).toHaveBeenCalledOnce();
+      expect(console.warn).toHaveBeenCalledWith('[proxy-token] no token to send', { projectId });
     });
 
     it('rejects a wrong MAC without reading the floor', async () => {
@@ -1229,16 +1302,24 @@ describe('proxy worker', () => {
         );
       }
 
-      it('accepts a token at the floor and rejects the legacy token below it', async () => {
-        const accepted = await verifyReceipt(createEnv(undefined, { [floorKey]: '{"gen":1}' }), {
+      it('accepts a v2 token and rejects the original token', async () => {
+        const accepted = await verifyReceipt(createEnv(), {
           'x-void-internal': await deriveProxyToken(JWT_SECRET, projectId, 1),
         });
         expect(accepted.status).toBe(200);
         expect(await accepted.json()).toEqual({ valid: true, receiptId: claims.receiptId });
 
         clearProxyTokenStateCache();
-        const rejected = await verifyReceipt(createEnv(undefined, { [floorKey]: '{"gen":1}' }), {
-          'x-void-internal': aiTokens[projectId],
+        const rejected = await verifyReceipt(createEnv(), {
+          'x-void-internal': await signLegacyToken(projectId, JWT_SECRET),
+        });
+        expect(rejected.status).toBe(403);
+        expect(await rejected.json()).toEqual({ valid: false });
+      });
+
+      it('rejects a token below the floor', async () => {
+        const rejected = await verifyReceipt(createEnv(undefined, { [floorKey]: '{"gen":2}' }), {
+          'x-void-internal': await deriveProxyToken(JWT_SECRET, projectId, 1),
         });
         expect(rejected.status).toBe(403);
         expect(await rejected.json()).toEqual({ valid: false });

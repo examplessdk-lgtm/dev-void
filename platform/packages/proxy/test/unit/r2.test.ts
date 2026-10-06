@@ -1,31 +1,9 @@
+import { deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import worker from '../../src/index.ts';
 import { clearProxyTokenStateCache } from '../../src/proxy-token.ts';
 
 const JWT_SECRET = 'test-secret-key';
-
-// --- HMAC helper ---
-
-function base64urlEncode(data: Uint8Array): string {
-  let binary = '';
-  for (const byte of data) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function signAiToken(projectId: string, secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(projectId)));
-  return base64urlEncode(sig);
-}
 
 // --- Mock factories ---
 
@@ -87,7 +65,7 @@ describe('R2 proxy endpoints', () => {
   const originalFetch = globalThis.fetch;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_000000000001', JWT_SECRET);
+    token = await deriveProxyToken(JWT_SECRET, 'proj_000000000001', 1);
   });
 
   beforeEach(clearProxyTokenStateCache);
@@ -184,7 +162,7 @@ describe('R2 proxy endpoints', () => {
     it('does not replay a conditional write through REST when an old worker returns 404', async () => {
       const env = createEnv();
       env.API.fetch = vi.fn(async () =>
-        Response.json({ workerName: 'old-worker', deploymentId: 'old' }),
+        Response.json({ workerName: 'old-worker', deploymentId: 'old', proxyTokenGen: 1 }),
       );
       const dispatchFetch = vi.fn(async () => new Response('Not Found', { status: 404 }));
       env.DISPATCH.get = vi.fn(() => ({ fetch: dispatchFetch })) as never;

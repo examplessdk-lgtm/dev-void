@@ -44,7 +44,8 @@ export async function verifyTenantProxyToken(
 /**
  * Tokens to present to a tenant Worker, in order. Without the issued
  * generation, sends for the cached floor, which throws `ProxyTokenStateError`
- * when the floor cannot be read.
+ * when the floor cannot be read. Empty when generation 0 is all there is:
+ * no token has been issued for the project yet.
  */
 export async function tenantSendTokens(
   env: Pick<Env, 'ROUTING' | 'JWT_SECRET'>,

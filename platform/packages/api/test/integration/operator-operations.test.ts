@@ -10,6 +10,7 @@ import {
   test,
   vi,
 } from 'vite-plus/test';
+import { hmacSignState } from '../../src/auth/hmac.ts';
 import { getDeployment } from '../../src/db.ts';
 import { app } from '../../src/index.ts';
 import { getProjectDeploymentWorkerName } from '../../src/naming.ts';
@@ -1461,7 +1462,9 @@ describe('operator installation-aware system and worker operations', () => {
 
 describe('proxy token rotation', () => {
   const rotationTarget = (projectId: string) => `proxy-token-rotation:${projectId}`;
-  const tok = (projectId: string, gen: number) => deriveProxyToken(JWT_SECRET, projectId, gen);
+  // Workers on generation 0 hold the original token.
+  const tok = (projectId: string, gen: number) =>
+    gen === 0 ? hmacSignState(projectId, JWT_SECRET) : deriveProxyToken(JWT_SECRET, projectId, gen);
 
   /** Cloudflare mock whose script bindings come from seeded scripts; a missing script is a 404. */
   function cloudflare() {

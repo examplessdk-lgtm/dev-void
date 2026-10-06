@@ -235,7 +235,7 @@ async function setupProject(
   if (options.type) {
     await env.db.update(projects).set({ type: options.type }).where(eq(projects.id, projectId));
   }
-  const legacy = await tok(projectId, 0);
+  const legacy = await hmacSignState(projectId, JWT_SECRET);
   const worker = (deploymentId: string) => getProjectDeploymentWorkerName(slug, deploymentId);
   const retained: Array<string> = [];
   for (let index = 0; index < (options.retained ?? 2); index++) {
@@ -1080,6 +1080,21 @@ describe('proxy token rotation', () => {
     expect(await job(fx.projectId)).toBeUndefined();
     expect(events).toEqual([]);
     expect(await floor(fx.projectId)).toBeNull();
+  });
+
+  it('moves Workers on the legacy token to generation 1 through a bulk request', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf);
+    expect(await floor(fx.projectId)).toBeNull();
+
+    expect(await requestBulkProxyTokenRotations(env.db, 'legacy')).toBe(1);
+    expect(await advance(fx.projectId)).toEqual({ status: 'done', gen: 1 });
+
+    const token = await tok(fx.projectId, 1);
+    for (const id of [...fx.retained, fx.active]) {
+      expect(scriptToken(cf, fx.worker(id))).toBe(token);
+    }
+    expect(await floor(fx.projectId)).toEqual({ gen: 1 });
   });
 
   it('raises the floor of a project without deployments', async () => {

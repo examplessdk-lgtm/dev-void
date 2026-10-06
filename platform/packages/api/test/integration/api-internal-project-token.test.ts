@@ -127,7 +127,7 @@ describe('per-project token checks', () => {
     const project = await createTestProject(env.db, user.id);
     const { response, run } = await proxyRequest(
       project.id,
-      await hmacSignState(project.id, JWT_SECRET),
+      await deriveProxyToken(JWT_SECRET, project.id, 1),
     );
     expect(response.status).toBe(200);
     expect(run).toHaveBeenCalledOnce();
@@ -163,7 +163,7 @@ describe('per-project token checks', () => {
     await createResource(env.db, project.id, 'kv', 'cf-kv-id', 'CACHE');
     await env.ROUTING.put(project.slug, JSON.stringify({ version: deployment.id }));
     mockCfApi();
-    const token = await hmacSignState(project.id, JWT_SECRET);
+    const token = await deriveProxyToken(JWT_SECRET, project.id, 1);
     const proxyAuth = async (route: ProxyInternalRoute) => ({
       'x-void-proxy-internal': await deriveProxyInternalAuth(JWT_SECRET, route, project.id),
     });
@@ -244,31 +244,16 @@ describe('project token generations', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('accepts the legacy and v2 tokens at /internal/revalidate while no floor is set', async () => {
+  it('accepts a v2 token and rejects the legacy token at /internal/revalidate while no floor is set', async () => {
     const project = await liveProject();
-    for (const gen of [0, 1]) {
-      const response = await internalRequest(
-        'revalidate',
-        project.id,
-        await deriveProxyToken(JWT_SECRET, project.id, gen),
-        { paths: ['/about'] },
-      );
-      expect(response.status).toBe(200);
-    }
-  });
+    const accepted = await internalRequest(
+      'revalidate',
+      project.id,
+      await deriveProxyToken(JWT_SECRET, project.id, 1),
+      { paths: ['/about'] },
+    );
+    expect(accepted.status).toBe(200);
 
-  it('applies the floor at /internal/revalidate', async () => {
-    const project = await liveProject();
-    await setFloor(project.id, '{"gen":1}');
-    for (const gen of [1, 2]) {
-      const response = await internalRequest(
-        'revalidate',
-        project.id,
-        await deriveProxyToken(JWT_SECRET, project.id, gen),
-        { paths: ['/about'] },
-      );
-      expect(response.status).toBe(200);
-    }
     const legacy = await internalRequest(
       'revalidate',
       project.id,
@@ -279,13 +264,35 @@ describe('project token generations', () => {
     expect(await legacy.json()).toEqual({ error: 'invalid internal auth' });
   });
 
+  it('applies the floor at /internal/revalidate', async () => {
+    const project = await liveProject();
+    await setFloor(project.id, '{"gen":2}');
+    for (const gen of [2, 3]) {
+      const response = await internalRequest(
+        'revalidate',
+        project.id,
+        await deriveProxyToken(JWT_SECRET, project.id, gen),
+        { paths: ['/about'] },
+      );
+      expect(response.status).toBe(200);
+    }
+    const below = await internalRequest(
+      'revalidate',
+      project.id,
+      await deriveProxyToken(JWT_SECRET, project.id, 1),
+      { paths: ['/about'] },
+    );
+    expect(below.status).toBe(403);
+    expect(await below.json()).toEqual({ error: 'invalid internal auth' });
+  });
+
   it('fails closed at /internal/revalidate when the floor is malformed', async () => {
     const project = await liveProject();
     await setFloor(project.id, 'not json');
     const response = await internalRequest(
       'revalidate',
       project.id,
-      await hmacSignState(project.id, JWT_SECRET),
+      await deriveProxyToken(JWT_SECRET, project.id, 1),
       { paths: ['/about'] },
     );
     expect(response.status).toBe(503);
