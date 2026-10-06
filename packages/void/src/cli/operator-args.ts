@@ -365,6 +365,15 @@ export const operatorCommands: Array<OperatorCommand> = [
     method: 'POST',
   },
   {
+    group: 'system',
+    action: 'rotate-proxy-tokens',
+    description: 'Rotate project proxy tokens on tenant Workers',
+    path: '/system/rotate-proxy-tokens',
+    values: { project: 'Project ID' },
+    booleans: ['all'],
+    method: 'POST',
+  },
+  {
     group: 'email',
     action: 'policy',
     description: 'Show the recipient policy for the shared sender',

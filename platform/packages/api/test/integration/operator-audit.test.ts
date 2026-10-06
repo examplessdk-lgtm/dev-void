@@ -412,3 +412,25 @@ test('records only the project and registered user IDs for ownership transfer', 
     'must-not-be-audited',
   );
 });
+
+test('records the project scope of a proxy token rotation and nothing for its preview', async () => {
+  const owner = await createTestUser(env.db, 'audit-rotation-owner');
+  const project = await createTestProject(env.db, owner.id, 'audit-rotation-project');
+
+  expect(
+    (await request('/system/rotate-proxy-tokens', { dryRun: true, project: project.id })).status,
+  ).toBe(200);
+  expect(await env.db.select().from(operatorEvents)).toHaveLength(0);
+
+  expect((await request('/system/rotate-proxy-tokens', { project: project.id })).status).toBe(207);
+  expect((await request('/system/rotate-proxy-tokens', { all: true })).status).toBe(207);
+
+  const events = await env.db.select().from(operatorEvents);
+  expect(events.map((event) => [event.action, JSON.parse(event.target), event.status])).toEqual(
+    expect.arrayContaining([
+      ['system/rotate-proxy-tokens', { projects: project.id }, 'success'],
+      ['system/rotate-proxy-tokens', { projects: 'all' }, 'success'],
+    ]),
+  );
+  expect(events).toHaveLength(2);
+});

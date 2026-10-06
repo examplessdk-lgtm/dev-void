@@ -111,7 +111,9 @@ function operatorHelpTree(): HelpTree {
                                     ? entry.action === 'domain-remove'
                                       ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
                                       : 'Read a scoped Cloudflare API token from stdin'
-                                    : 'Read a full API session from stdin for explicit operator session exchange',
+                                    : flag === 'all'
+                                      ? 'Cover every project, not only those still on their original credentials'
+                                      : 'Read a full API session from stdin for explicit operator session exchange',
                   })),
                 ],
               },

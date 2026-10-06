@@ -372,6 +372,33 @@ describe('operator argument and help coverage', () => {
       parseOperatorArgs(['deployment', 'migrate-assets', 'id', '--plan', '--yes']),
     ).toThrow('--plan and --yes cannot be combined');
   });
+  it('routes proxy token rotation with its project scope in the body', () => {
+    expect(
+      parsePlatformArgs([
+        'system',
+        'rotate-proxy-tokens',
+        '--project',
+        'proj_000000000001',
+        '--plan',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/system/rotate-proxy-tokens',
+      body: { project: 'proj_000000000001' },
+      plan: true,
+    });
+    const all = parseOperatorArgs(['system', 'rotate-proxy-tokens', '--all', '--yes']);
+    expect(all).toMatchObject({ method: 'POST', yes: true });
+    expect(all.body.all).toBe(true);
+    expect(parseOperatorArgs(['system', 'rotate-proxy-tokens', '--yes']).body).toEqual({});
+    expect(() => parseOperatorArgs(['system', 'rotate-proxy-tokens', '--dry-run'])).toThrow(
+      '--dry-run requires a value',
+    );
+    expect(() => parseOperatorArgs(['system', 'sandbox-drain', '--all'])).toThrow(
+      "Unknown flag '--all'",
+    );
+    expect(hasHelpPage(['platform', 'system', 'rotate-proxy-tokens'])).toBe(true);
+  });
   it('routes asset migration inventory with bounded pagination and nested help', () => {
     expect(
       parsePlatformArgs(['system', 'asset-migrations', '--page', '2', '--limit', '100']),

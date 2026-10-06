@@ -141,6 +141,15 @@ describe('rendered help advertises the flags the parser honours', () => {
     expect(page).toContain('--project <name>');
   });
 
+  it('lists proxy token rotation under platform system with its scope flags', () => {
+    expect(render(['platform', 'system'])).toContain('rotate-proxy-tokens');
+    const page = render(['platform', 'system', 'rotate-proxy-tokens']);
+    expect(page).toContain('--project <value>');
+    expect(page).toContain('--all');
+    expect(page).toContain('Cover every project');
+    expect(page).toContain('--plan');
+  });
+
   it('still shows --project on the email subcommands that take only that', () => {
     for (const sub of ['usage', 'destinations', 'allow', 'disallow']) {
       const page = render(['email', sub]);
