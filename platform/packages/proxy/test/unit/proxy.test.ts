@@ -1,7 +1,9 @@
 import { signEmailReceipt } from '@void/platform/email-protocol';
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
+import { deriveProxyToken } from '@voidcloud/api/proxy-token';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import worker from '../../src/index.ts';
 import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
+import { clearProxyTokenStateCache } from '../../src/proxy-token.ts';
 import { readRequestJson } from '../../src/request-body.ts';
 
 const JWT_SECRET = 'test-secret-key';
@@ -176,6 +178,8 @@ function post(path: string, body: unknown, headers?: Record<string, string>): Re
 describe('proxy worker', () => {
   let validToken: string;
   const aiTokens: Record<string, string> = {};
+
+  beforeEach(clearProxyTokenStateCache);
 
   afterEach(() => {
     vi.useRealTimers();
@@ -1121,6 +1125,140 @@ describe('proxy worker', () => {
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: 'invalid project token' });
       expect(env.AI.run).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('project token generations', () => {
+    const projectId = 'proj_000000000001';
+    const floorKey = `proxy-token:${projectId}`;
+
+    function floorReads(env: ReturnType<typeof createEnv>): number {
+      return env.ROUTING.get.mock.calls.filter((call) => String(call[0]).startsWith('proxy-token:'))
+        .length;
+    }
+
+    function aiRun(env: ReturnType<typeof createEnv>, aiToken: string) {
+      return worker.fetch(
+        post('/ai/run', { model: 'test-model', inputs: {}, projectId, aiToken }),
+        env,
+      );
+    }
+
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('accepts the legacy and v2 tokens while no floor is set', async () => {
+      for (const gen of [0, 1]) {
+        clearProxyTokenStateCache();
+        const env = createEnv();
+        const res = await aiRun(env, await deriveProxyToken(JWT_SECRET, projectId, gen));
+        expect(res.status).toBe(200);
+        expect(env.AI.run).toHaveBeenCalledOnce();
+      }
+    });
+
+    it('accepts generations at or above the floor and rejects the legacy token', async () => {
+      for (const gen of [1, 2]) {
+        clearProxyTokenStateCache();
+        const res = await aiRun(
+          createEnv({}, { [floorKey]: '{"gen":1}' }),
+          await deriveProxyToken(JWT_SECRET, projectId, gen),
+        );
+        expect(res.status).toBe(200);
+      }
+
+      clearProxyTokenStateCache();
+      const env = createEnv({}, { [floorKey]: '{"gen":1}' });
+      const res = await aiRun(env, aiTokens[projectId]);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(env.AI.run).not.toHaveBeenCalled();
+    });
+
+    it('rejects a wrong MAC without reading the floor', async () => {
+      const other = await deriveProxyToken(JWT_SECRET, 'proj_000000000042', 1);
+      const env = createEnv();
+      const res = await aiRun(env, other);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(floorReads(env)).toBe(0);
+    });
+
+    it('fails closed with 503 when the floor is malformed', async () => {
+      const env = createEnv({}, { [floorKey]: 'not json' });
+      const res = await aiRun(env, aiTokens[projectId]);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'project token state unavailable' });
+      expect(env.AI.run).not.toHaveBeenCalled();
+    });
+
+    it('reads the floor once for repeated calls in the same isolate', async () => {
+      const env = createEnv();
+      expect((await aiRun(env, aiTokens[projectId])).status).toBe(200);
+      expect((await aiRun(env, aiTokens[projectId])).status).toBe(200);
+      expect(floorReads(env)).toBe(1);
+    });
+
+    describe('/email/verify-receipt', () => {
+      const claims = {
+        version: 1 as const,
+        receiptId: 'a'.repeat(64),
+        projectId,
+        deploymentId: 'deploy_1',
+        recipient: 'support@example.com',
+        expiresAt: Date.now() + 60_000,
+      };
+
+      async function verifyReceipt(
+        env: ReturnType<typeof createEnv>,
+        headers: Record<string, string>,
+      ) {
+        return worker.fetch(
+          post(
+            '/email/verify-receipt',
+            { ...claims, receipt: await signEmailReceipt(claims, EMAIL_SIGNING_SECRET) },
+            headers,
+          ),
+          env,
+        );
+      }
+
+      it('accepts a token at the floor and rejects the legacy token below it', async () => {
+        const accepted = await verifyReceipt(createEnv(undefined, { [floorKey]: '{"gen":1}' }), {
+          'x-void-internal': await deriveProxyToken(JWT_SECRET, projectId, 1),
+        });
+        expect(accepted.status).toBe(200);
+        expect(await accepted.json()).toEqual({ valid: true, receiptId: claims.receiptId });
+
+        clearProxyTokenStateCache();
+        const rejected = await verifyReceipt(createEnv(undefined, { [floorKey]: '{"gen":1}' }), {
+          'x-void-internal': aiTokens[projectId],
+        });
+        expect(rejected.status).toBe(403);
+        expect(await rejected.json()).toEqual({ valid: false });
+      });
+
+      it('fails closed with 503 when the floor cannot be read', async () => {
+        const env = createEnv();
+        env.ROUTING.get.mockRejectedValue(new Error('kv unavailable'));
+        const res = await verifyReceipt(env, { 'x-void-internal': aiTokens[projectId] });
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ valid: false });
+      });
+
+      it('rejects a missing token without reading the floor', async () => {
+        const env = createEnv();
+        const res = await verifyReceipt(env, {});
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ valid: false });
+        expect(floorReads(env)).toBe(0);
+      });
     });
   });
 

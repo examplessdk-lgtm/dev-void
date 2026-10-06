@@ -1,15 +1,16 @@
 import { Hono } from 'hono';
-import { hmacVerifyState } from '../auth/hmac.ts';
 import { getProject } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import { isProjectId } from '../id.ts';
+import { checkTenantProxyToken } from '../internal-proxy-auth.ts';
 import { runRevalidate } from '../revalidate-core.ts';
 
 const app = new Hono<ApiEnv>();
 
 /**
  * Internal revalidation endpoint — called by the proxy via service binding.
- * Authenticated via HMAC token in X-Void-Internal header (no JWT/userId).
+ * Authenticated by the tenant project token the proxy forwards in the
+ * X-Void-Internal header (no JWT/userId).
  */
 app.post('/:id', async (context) => {
   const projectId = context.req.param('id');
@@ -18,10 +19,14 @@ app.post('/:id', async (context) => {
   if (!token) {
     return context.json({ error: 'missing internal auth' }, 401);
   }
-  if (
-    !isProjectId(projectId) ||
-    !(await hmacVerifyState(projectId, token, context.env.JWT_SECRET))
-  ) {
+  if (!isProjectId(projectId)) {
+    return context.json({ error: 'invalid internal auth' }, 403);
+  }
+  const tokenCheck = await checkTenantProxyToken(context.env, projectId, token);
+  if (tokenCheck === 'unavailable') {
+    return context.json({ error: 'project token state unavailable' }, 503);
+  }
+  if (tokenCheck === 'invalid') {
     return context.json({ error: 'invalid internal auth' }, 403);
   }
 

@@ -9,10 +9,10 @@ import { asString } from './body.ts';
 import { proxyCapabilityEnabled } from './capabilities.ts';
 import { d1 } from './d1.ts';
 import { email } from './email.ts';
-import { hmacSign } from './hmac.ts';
 import { guardHumanStream } from './human-stream.ts';
 import { kv } from './kv.ts';
 import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from './platform-lifecycle.ts';
+import { verifyTenantProxyToken } from './proxy-token.ts';
 import { r2 } from './r2.ts';
 import { readRequestJson, requestBodyMaxBytes, RequestBodyError } from './request-body.ts';
 import { verifyPrerenderAuthority, verifyProjectDeployAccess } from './resolve.ts';
@@ -98,12 +98,16 @@ app.post('/email/verify-receipt', async (context) => {
   ) {
     return context.json({ valid: false }, 400);
   }
-  if (
-    !isProjectId(input.projectId) ||
-    context.req.header('x-void-internal') !==
-      (await hmacSign(input.projectId, context.env.JWT_SECRET))
-  ) {
+  if (!isProjectId(input.projectId)) {
     return context.json({ valid: false }, 403);
+  }
+  const tokenCheck = await verifyTenantProxyToken(
+    context.env,
+    input.projectId,
+    context.req.header('x-void-internal') ?? '',
+  );
+  if (tokenCheck !== 'ok') {
+    return context.json({ valid: false }, tokenCheck === 'unavailable' ? 503 : 403);
   }
   if (!context.env.EMAIL_SIGNING_SECRET) {
     return context.json({ valid: false }, 503);
@@ -229,16 +233,20 @@ app.post('/*', async (context, next) => {
     }
     context.set('projectId', projectId);
   } else {
-    // Service binding path (production) — verify HMAC-signed project token
+    // Service binding path (production) — verify the project token
     const projectId = asString(body.projectId);
     const aiToken = asString(body.aiToken);
     if (!projectId || !aiToken) {
       return context.json({ error: 'projectId and aiToken required' }, 400);
     }
-    if (
-      !isProjectId(projectId) ||
-      !(await verifyHmac(projectId, aiToken, context.env.JWT_SECRET))
-    ) {
+    if (!isProjectId(projectId)) {
+      return context.json({ error: 'invalid project token' }, 403);
+    }
+    const tokenCheck = await verifyTenantProxyToken(context.env, projectId, aiToken);
+    if (tokenCheck === 'unavailable') {
+      return context.json({ error: 'project token state unavailable' }, 503);
+    }
+    if (tokenCheck === 'invalid') {
       return context.json({ error: 'invalid project token' }, 403);
     }
     context.set('projectId', projectId);
@@ -301,7 +309,7 @@ app.route('/email', email);
 
 export default { fetch: app.fetch };
 
-// --- HMAC verification ---
+// --- JWT verification ---
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -323,18 +331,6 @@ async function getVerifyKey(secret: string): Promise<CryptoKey> {
   cachedKeySecret = secret;
   return cachedVerifyKey;
 }
-
-async function verifyHmac(data: string, signature: string, secret: string): Promise<boolean> {
-  try {
-    const key = await getVerifyKey(secret);
-    const sigBytes = base64urlDecode(signature);
-    return crypto.subtle.verify('HMAC', key, sigBytes.buffer as ArrayBuffer, encoder.encode(data));
-  } catch {
-    return false;
-  }
-}
-
-// --- JWT verification ---
 
 function base64urlDecode(str: string): Uint8Array {
   const padded = str.replace(/-/g, '+').replace(/_/g, '/');

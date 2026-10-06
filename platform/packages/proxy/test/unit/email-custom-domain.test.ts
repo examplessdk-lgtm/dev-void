@@ -16,6 +16,7 @@ vi.mock('cloudflare:email', () => ({
 
 const worker = (await import('../../src/index.ts')).default;
 const { requestSendRaw } = await import('../../src/email.ts');
+const { clearProxyTokenStateCache } = await import('../../src/proxy-token.ts');
 
 const JWT_SECRET = 'test-secret-key';
 const EMAIL_SIGNING_SECRET = 'test-email-signing-key-independent';
@@ -207,6 +208,7 @@ function stubCloudflare(handler?: (call: { url: string; init: RequestInit }) => 
 }
 
 beforeEach(() => {
+  clearProxyTokenStateCache();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
