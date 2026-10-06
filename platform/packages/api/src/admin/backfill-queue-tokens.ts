@@ -1,4 +1,3 @@
-import { hmacSignState } from '../auth/hmac.ts';
 import {
   getDispatchWorkerProxyToken,
   type ProxyTokenLookup,
@@ -8,7 +7,6 @@ export type BackfillQueueTokensOptions = Readonly<{
   accountId: string;
   apiToken: string;
   dispatchNamespace: string;
-  jwtSecret: string;
   /** Validate every candidate without writing to KV. */
   dryRun?: boolean;
   /**
@@ -52,9 +50,8 @@ type QueueRoutingEntry = Readonly<{
  * Iterate every `queue:*` KV entry and stamp `proxyToken` on any entry
  * written before the dispatch relay started forwarding
  * `x-void-internal`. The stamped token is read from the target worker's
- * `__VOID_PROXY_TOKEN` binding so it survives `JWT_SECRET` rotation —
- * a freshly `hmacSignState(projectId, currentSecret)` value would 401
- * any worker deployed before the rotation.
+ * `__VOID_PROXY_TOKEN` binding: the worker accepts only the value it
+ * holds. A worker without that binding is skipped; it needs a redeploy.
  *
  * Concurrency-safe-ish: each entry is re-read immediately before the
  * put; if the value changed we skip the write so a concurrent deploy
@@ -123,12 +120,10 @@ export async function backfillQueueTokens(
         );
         errored++;
         continue;
-      } else if (entry.projectId) {
-        // lookup.kind === 'missing' — legacy worker, no baked binding.
-        // Fall back to re-derivation. Only safe while JWT_SECRET has
-        // not rotated since this worker was deployed.
-        proxyToken = await hmacSignState(entry.projectId, opts.jwtSecret);
       } else {
+        console.warn(
+          `[backfill-queue-tokens] worker "${entry.workerName}" has no __VOID_PROXY_TOKEN binding. Skipping "${name}" — redeploy the project.`,
+        );
         skipped++;
         continue;
       }

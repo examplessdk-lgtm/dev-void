@@ -1,5 +1,4 @@
 import { sql as drizzleSql } from 'drizzle-orm';
-import { hmacSignState } from '../auth/hmac.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import { clearCronScheduler, syncCronScheduler } from '../cron-scheduler-client.ts';
 import {
@@ -172,11 +171,11 @@ export function resolvePersistedDeploymentType(
   return manifest.assetConfig?.not_found_handling === 'single-page-application' ? 'spa' : 'static';
 }
 
+/** The Worker's own token, or `undefined` when it has no token binding. */
 async function resolveCutoverProxyToken(
   env: ApiEnv['Bindings'],
   workerName: string,
-  projectId: string,
-): Promise<string> {
+): Promise<string | undefined> {
   const lookup = await getDispatchWorkerProxyToken(
     env.CF_ACCOUNT_ID,
     env.CF_API_TOKEN,
@@ -189,7 +188,10 @@ async function resolveCutoverProxyToken(
   if (lookup.kind === 'error') {
     throw lookup.error;
   }
-  return hmacSignState(projectId, env.JWT_SECRET);
+  console.warn(
+    `[cutover] worker "${workerName}" has no __VOID_PROXY_TOKEN binding; its cron and queue relays get no token. Redeploy the project.`,
+  );
+  return undefined;
 }
 
 /** Make every persisted custom-domain key match one authoritative route. */
@@ -340,7 +342,7 @@ export async function replayDeploymentCutover(
     ? await proxyTokenCopies(
         env.JWT_SECRET,
         project,
-        await resolveCutoverProxyToken(env, workerName, project.id),
+        await resolveCutoverProxyToken(env, workerName),
       )
     : {};
 

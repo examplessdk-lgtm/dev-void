@@ -247,7 +247,6 @@ export async function backfillPlatformQueueTokens(env: ApiEnv['Bindings'], dryRu
     accountId: env.CF_ACCOUNT_ID,
     apiToken: env.CF_API_TOKEN,
     dispatchNamespace: env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE,
-    jwtSecret: env.JWT_SECRET,
     dryRun,
   });
 }

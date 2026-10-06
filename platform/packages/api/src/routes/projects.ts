@@ -4,7 +4,6 @@ import { PLATFORM_HEALTH_HOSTNAME_LABEL } from '@void/platform';
 import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { deployTokenTtlSecondsForBuildMinutes, signPrerenderToken } from '../auth/deploy-token.ts';
-import { hmacSignState } from '../auth/hmac.ts';
 import { buildManagerNamespace } from '../build-namespace.ts';
 import { isTerminalBuildStatus } from '../build-status.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
@@ -356,17 +355,13 @@ function sortProjectList(a: ProjectListItem, b: ProjectListItem): number {
  * Resolve the proxy token to use when re-targeting routing/cron at a
  * historical deployment.
  *
- * Preferred path: fetch the EXACT `__VOID_PROXY_TOKEN` plain_text
- * binding baked into the target worker. Rotating `JWT_SECRET` after
- * that worker was deployed would make a fresh `hmacSignState` value
- * mismatch the worker and 401 every /__void/queue and /__void/scheduled
- * relay.
+ * Fetch the EXACT `__VOID_PROXY_TOKEN` plain_text binding baked into the
+ * target worker: the /__void/queue and /__void/scheduled relays only work
+ * with the value that worker holds.
  *
- * Legacy workers (deployed before the binding was introduced) report
- * `{kind: "missing"}`. Falling back to the current-secret derivation is
- * safe only if `JWT_SECRET` has not rotated since the worker was
- * deployed; the warning surfaces the risk to operators so they can
- * redeploy instead of relying on the fallback.
+ * A worker without that binding returns `undefined`: no token value it
+ * accepts can be derived, so its cron and queue copies carry no token and
+ * the project needs a redeploy.
  *
  * Transient CF API failures MUST propagate. A silent null that becomes
  * a fallback can write a mismatched token into KV that will 401 the
@@ -375,8 +370,7 @@ function sortProjectList(a: ProjectListItem, b: ProjectListItem): number {
 async function resolveRollbackProxyToken(
   env: ApiEnv['Bindings'],
   workerName: string,
-  projectId: string,
-): Promise<string> {
+): Promise<string | undefined> {
   const dispatchNamespace = env.DISPATCH_NAMESPACE ?? DEFAULT_DISPATCH_NAMESPACE;
   const lookup = await getDispatchWorkerProxyToken(
     env.CF_ACCOUNT_ID,
@@ -392,11 +386,10 @@ async function resolveRollbackProxyToken(
       `rollback: could not read __VOID_PROXY_TOKEN from worker "${workerName}": ${lookup.error.message}`,
     );
   }
-  // lookup.kind === 'missing' — legacy worker.
   console.warn(
-    `[rollback] worker "${workerName}" has no __VOID_PROXY_TOKEN binding; falling back to current-secret derivation. If JWT_SECRET has rotated since this deployment was live, you must redeploy the project instead.`,
+    `[rollback] worker "${workerName}" has no __VOID_PROXY_TOKEN binding; its cron and queue relays get no token. Redeploy the project.`,
   );
-  return hmacSignState(projectId, env.JWT_SECRET);
+  return undefined;
 }
 
 /**
@@ -1537,7 +1530,7 @@ const app = new Hono<ApiEnv>()
               ? await proxyTokenCopies(
                   context.env.JWT_SECRET,
                   lockedProject,
-                  await resolveRollbackProxyToken(context.env, workerName, projectId),
+                  await resolveRollbackProxyToken(context.env, workerName),
                 )
               : {};
 

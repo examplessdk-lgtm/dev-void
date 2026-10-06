@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vite-plus/test';
 import { backfillQueueTokens } from '../../src/admin/backfill-queue-tokens.ts';
-import { hmacSignState } from '../../src/auth/hmac.ts';
 import type { ProxyTokenLookup } from '../../src/provisioning/cloudflare-api.ts';
 
 function createMockKV(initial: Record<string, string> = {}) {
@@ -40,7 +39,6 @@ function createMockKV(initial: Record<string, string> = {}) {
   } as unknown as KVNamespace & { store: Map<string, string> };
 }
 
-const JWT_SECRET = 'test-jwt-secret';
 const ACCOUNT = 'acc_test';
 const TOKEN = 'token_test';
 const NAMESPACE = 'void-users';
@@ -54,7 +52,6 @@ function makeOpts(overrides: FetchTokenOptions = {}) {
     accountId: ACCOUNT,
     apiToken: TOKEN,
     dispatchNamespace: NAMESPACE,
-    jwtSecret: JWT_SECRET,
     fetchToken:
       overrides.fetchToken ??
       (async (workerName: string): Promise<ProxyTokenLookup> => ({
@@ -81,24 +78,28 @@ describe('backfillQueueTokens', () => {
     expect(patched.proxyToken).toBe('baked-token-for-user-a-dpl_1');
   });
 
-  it('falls back to hmacSignState re-derivation when the worker has no baked token', async () => {
-    const kv = createMockKV({
-      'queue:proj-legacy-emails': JSON.stringify({
+  it('skips an entry whose worker has no baked token and leaves KV unchanged', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const original = JSON.stringify({
         workerName: 'user-legacy',
         projectId: 'proj_legacy',
         queueName: 'emails',
-      }),
-    });
+      });
+      const kv = createMockKV({ 'queue:proj-legacy-emails': original });
 
-    const result = await backfillQueueTokens(
-      kv,
-      makeOpts({ fetchToken: async () => ({ kind: 'missing' }) }),
-    );
+      const result = await backfillQueueTokens(
+        kv,
+        makeOpts({ fetchToken: async () => ({ kind: 'missing' }) }),
+      );
 
-    expect(result).toEqual({ scanned: 1, updated: 1, skipped: 0, raced: 0, errored: 0 });
-    const expected = await hmacSignState('proj_legacy', JWT_SECRET);
-    const patched = JSON.parse(kv.store.get('queue:proj-legacy-emails')!);
-    expect(patched.proxyToken).toBe(expected);
+      expect(result).toEqual({ scanned: 1, updated: 0, skipped: 1, raced: 0, errored: 0 });
+      expect(kv.store.get('queue:proj-legacy-emails')).toBe(original);
+      expect(kv.put).not.toHaveBeenCalled();
+      expect(warnSpy.mock.calls.flat().join(' ')).toMatch(/user-legacy/);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('skips entries that already have a proxyToken', async () => {

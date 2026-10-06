@@ -409,8 +409,8 @@ export type ProxyTokenLookup =
  * Returns a typed result so callers can distinguish:
  *   - `found`: use the baked token as-is.
  *   - `missing`: bindings list returned but no `__VOID_PROXY_TOKEN` —
- *     a legacy worker. Callers may fall back to re-derivation with a
- *     visible warning.
+ *     a legacy worker. Callers must not re-derive a token; the Worker
+ *     needs a redeploy.
  *   - `error`: CF API failure (rate limit, transport, auth, 5xx).
  *     Callers MUST NOT fall back silently — a transient error must
  *     not end up writing a mismatched token that 401s after a

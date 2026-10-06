@@ -375,3 +375,72 @@ test.each([
     expect(sync.proxyTokenFallback).toBe(expected.proxyTokenFallback);
   },
 );
+
+test('compensates an expired cutover to a committed Worker without a token binding and writes no token', async () => {
+  await env.db.update(projects).set({ proxy_token_gen: 1 }).where(eq(projects.id, project.id));
+  const committed = await createTestDeployment(env.db, project.id);
+  await env.db
+    .update(deployments)
+    .set({
+      manifest: JSON.stringify({
+        version: 3,
+        type: 'void',
+        bindings: {},
+        schedules: [{ cron: '*/5 * * * *', filePath: 'crons/tick.ts' }],
+        queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+      }),
+    })
+    .where(eq(deployments.id, committed.id));
+  await env.db.insert(resources).values({
+    id: 'resource-missing-token-queue',
+    project_id: project.id,
+    type: 'queue',
+    cf_id: '25832cb0ce3d4f60b1e538911a4629f4',
+    binding_name: 'emails',
+  });
+  const candidate = await createTestDeployment(env.db, project.id, 'uploading');
+  await env.db
+    .update(deployments)
+    .set({ status: 'cutover' })
+    .where(eq(deployments.id, candidate.id));
+  await env.ROUTING.put(
+    `cutover-intent:${candidate.id}`,
+    JSON.stringify({ projectId: project.id, ownerId: 'expired-owner', buildId: null }),
+  );
+  await env.ROUTING.put(project.slug, JSON.stringify({ deploymentId: candidate.id }));
+  mockCfApi({ listWorkerBindings: () => cfSuccess([]) });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const syncBodies: Array<string> = [];
+  const originalGet = env.CRON_SCHEDULER.get.bind(env.CRON_SCHEDULER);
+  vi.spyOn(env.CRON_SCHEDULER, 'get').mockImplementation((id) => {
+    const stub = originalGet(id);
+    return {
+      ...stub,
+      fetch: async (request: Request) => {
+        if (new URL(request.url).pathname === '/sync') {
+          syncBodies.push(await request.text());
+        }
+        return new Response('{}', { status: 200 });
+      },
+    } as unknown as DurableObjectStub;
+  });
+
+  expect(await settle(candidate.id)).toMatchObject({ terminal: true, event: { event: 'error' } });
+
+  const workerName = `user-${project.slug}-${committed.id}`;
+  expect(await env.ROUTING.get(project.slug, 'json')).toMatchObject({ workerName });
+  expect(await env.ROUTING.get(`queue:${project.id.replaceAll('_', '-')}-emails`, 'json')).toEqual({
+    workerName,
+    projectId: project.id,
+    queueName: 'emails',
+  });
+  expect(syncBodies).toHaveLength(1);
+  const sync = JSON.parse(syncBodies[0]!) as Record<string, unknown>;
+  expect(sync.workerName).toBe(workerName);
+  expect(sync).not.toHaveProperty('proxyToken');
+  expect(sync).not.toHaveProperty('proxyTokenFallback');
+  expect(warn.mock.calls.flat().join(' ')).toContain(
+    `worker "${workerName}" has no __VOID_PROXY_TOKEN binding`,
+  );
+  expect(await getDeployment(env.db, candidate.id)).toMatchObject({ status: 'failed' });
+});
