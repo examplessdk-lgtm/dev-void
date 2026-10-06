@@ -123,11 +123,11 @@ async function deleteRowContaining(page: Page, needle: string) {
       row.textContent?.includes(needleText),
     );
     if (!row) {
-      throw new Error(`Row containing "" not found`);
+      throw new Error(`Row containing "${needleText}" not found`);
     }
     const button = row.querySelector('button');
     if (!button) {
-      throw new Error(`No button in row containing ""`);
+      throw new Error(`No button in row containing "${needleText}"`);
     }
     button.click();
   }, needle);
