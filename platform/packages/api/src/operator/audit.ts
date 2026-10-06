@@ -3,6 +3,7 @@ import { count, desc, eq } from 'drizzle-orm';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { AuthenticationConfigurationError } from '../auth/configuration.ts';
 import type { ApiEnv } from '../env.ts';
+import { isProjectId } from '../id.ts';
 import { operatorEvents } from '../schema.ts';
 import { dryRun, OperatorError, pagination, readBody } from './common.ts';
 
@@ -271,6 +272,9 @@ function auditTarget(
   }
   if (segments[0] === 'system' && segments[1] === 'sandbox-drain') {
     return JSON.stringify({ applications: 'managed-sandbox-containers' });
+  }
+  if (segments[0] === 'system' && segments[1] === 'rotate-proxy-tokens') {
+    return JSON.stringify({ projects: isProjectId(body.project) ? body.project : 'all' });
   }
   if (segments[0] === 'workers') {
     const environment = boundedString(body.environment ?? platformEnvironment, 512) ?? 'production';

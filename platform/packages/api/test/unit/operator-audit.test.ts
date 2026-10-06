@@ -81,6 +81,17 @@ describe('operator audit intent normalization', () => {
         action: 'system/sandbox-drain',
         target: { applications: 'managed-sandbox-containers' },
       },
+      { action: 'system/rotate-proxy-tokens', target: { projects: 'all' } },
+      {
+        action: 'system/rotate-proxy-tokens',
+        body: { all: true },
+        target: { projects: 'all' },
+      },
+      {
+        action: 'system/rotate-proxy-tokens',
+        body: { project: 'proj_000000000001', credential: 'secret' },
+        target: { projects: 'proj_000000000001' },
+      },
       {
         action: 'workers/api/rollback',
         body: { environment: 'staging', versionId: 'ver_1' },

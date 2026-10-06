@@ -12,27 +12,35 @@ import {
 } from 'vite-plus/test';
 import { getDeployment } from '../../src/db.ts';
 import { app } from '../../src/index.ts';
+import { getProjectDeploymentWorkerName } from '../../src/naming.ts';
 import { loadSandboxDeploymentPageProjection } from '../../src/operator/sandbox-operations.ts';
+import { deriveProxyToken } from '../../src/proxy-token.ts';
 import { databaseTimestampMs } from '../../src/routes/deploy.ts';
 import { readSandboxDrainCheckpoint } from '../../src/sandbox-drain.ts';
 import {
   deployments,
   operatorEvents,
   platformEvents,
+  projectCleanupJobs,
+  projects,
   resources,
   sandboxDrainCheckpoints,
 } from '../../src/schema.ts';
 import { BUILD_INSTANCE_LARGE } from '../../src/tiers.ts';
 import {
+  cfError,
+  cfSuccess,
   createTestBuild,
   clearTables,
   createOperatorToken,
   createTestDeployment,
   createTestProject,
   createTestUser,
+  JWT_SECRET,
   mockCfApi,
   setupEnv,
   teardownEnv,
+  type MockCfApiHandle,
   type TestEnv,
 } from './helpers.ts';
 
@@ -1447,6 +1455,366 @@ describe('operator installation-aware system and worker operations', () => {
     expect(secondBody).toMatchObject({ processed: 1, complete: false });
     expect(secondBody.checkpoint.phase).toBe('resources');
     expect(secondBody.checkpoint.cursor.id).toBeUndefined();
+    expect(cf).not.toHaveBeenCalled();
+  });
+});
+
+describe('proxy token rotation', () => {
+  const rotationTarget = (projectId: string) => `proxy-token-rotation:${projectId}`;
+  const tok = (projectId: string, gen: number) => deriveProxyToken(JWT_SECRET, projectId, gen);
+
+  /** Cloudflare mock whose script bindings come from seeded scripts; a missing script is a 404. */
+  function cloudflare() {
+    const cf: MockCfApiHandle = mockCfApi({
+      listWorkerBindings: (url) => {
+        const name = decodeURIComponent(/\/scripts\/([^/?#]+)/.exec(url)?.[1] ?? '');
+        const script = cf.state.hostScripts.get(name);
+        return script
+          ? cfSuccess(script.bindings)
+          : cfError('workers.api.error.script_not_found', 404, 10007);
+      },
+    });
+    return cf;
+  }
+  const patchCount = (cf: MockCfApiHandle) =>
+    cf.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')
+      .length;
+
+  /** A project, optionally with an active Worker (plus a retained one) holding tok(gen). */
+  async function rotationProject(
+    cf: MockCfApiHandle,
+    slug: string,
+    options: Readonly<{ gen?: number; workers?: boolean }> = {},
+  ) {
+    const project = await createTestProject(env.db, ownerId, slug);
+    const gen = options.gen ?? 0;
+    await env.db.update(projects).set({ proxy_token_gen: gen }).where(eq(projects.id, project.id));
+    const workers: Array<string> = [];
+    if (options.workers) {
+      const retained = await createTestDeployment(env.db, project.id, 'live');
+      const active = await createTestDeployment(env.db, project.id, 'live');
+      await env.db
+        .update(deployments)
+        .set({ retained: true })
+        .where(eq(deployments.id, retained.id));
+      for (const id of [retained.id, active.id]) {
+        const scriptName = getProjectDeploymentWorkerName(slug, id);
+        cf.seedHostScript({
+          scriptName,
+          bindings: [
+            { type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: await tok(project.id, gen) },
+            { type: 'secret_text', name: 'API_KEY' },
+          ],
+        });
+        workers.push(scriptName);
+      }
+    }
+    return { ...project, workers };
+  }
+
+  async function rotationJob(projectId: string) {
+    const [row] = await env.db
+      .select()
+      .from(projectCleanupJobs)
+      .where(eq(projectCleanupJobs.target, rotationTarget(projectId)));
+    return row;
+  }
+
+  async function issued(projectId: string) {
+    const [row] = await env.db
+      .select({ gen: projects.proxy_token_gen })
+      .from(projects)
+      .where(eq(projects.id, projectId));
+    return row!.gen;
+  }
+
+  const scriptToken = (cf: MockCfApiHandle, script: string) =>
+    cf.state.hostScripts.get(script)?.bindings.find((b) => b.name === '__VOID_PROXY_TOKEN')?.text;
+
+  /** Moves every rotation wait an hour back and makes the jobs due. */
+  async function endWaits() {
+    const shifted = (field: string) => sql`CASE WHEN payload->>${field} IS NOT NULL
+      THEN jsonb_build_object(${field}::text, to_char(((payload->>${field})::timestamptz
+        - interval '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+      ELSE '{}'::jsonb END`;
+    await env.db.execute(sql`UPDATE project_cleanup_jobs
+      SET next_attempt_at = now(),
+        payload = payload || ${shifted('waitUntil')} || ${shifted('lastPatchAt')}
+      WHERE kind = 'proxy-token-rotation'`);
+  }
+
+  /** Reruns the default (legacy) apply past each wait until nothing is left. */
+  async function applyUntilComplete() {
+    for (let run = 0; run < 6; run++) {
+      await endWaits();
+      const response = await req('/system/rotate-proxy-tokens', {});
+      const body = (await response.json()) as { complete: boolean };
+      if (body.complete) {
+        expect(response.status).toBe(200);
+        return body;
+      }
+      expect(response.status).toBe(207);
+    }
+    throw new Error('Rotation did not complete within six runs.');
+  }
+
+  test('previews every project without writing anything or returning a token', async () => {
+    const cf = cloudflare();
+    const withWorkers = await rotationProject(cf, 'rotate-plan-workers', { workers: true });
+    const empty = await rotationProject(cf, 'rotate-plan-empty');
+    const rotated = await rotationProject(cf, 'rotate-plan-rotated', { gen: 1 });
+
+    const legacy = await req('/system/rotate-proxy-tokens', { dryRun: true });
+    expect(legacy.status).toBe(200);
+    const text = await legacy.text();
+    expect(JSON.parse(text)).toEqual({
+      summary: { legacy: 2, wouldQueue: 2, pending: 0, failed: 0 },
+      projects: [],
+      dryRun: true,
+      action: 'system.rotate-proxy-tokens',
+      target: { projects: 'all' },
+    });
+    const all = await req('/system/rotate-proxy-tokens', { dryRun: true, all: true });
+    expect(await all.json()).toMatchObject({
+      summary: { legacy: 2, wouldQueue: 3 },
+      target: { projects: 'all' },
+    });
+
+    const project = await req('/system/rotate-proxy-tokens', {
+      dryRun: true,
+      project: withWorkers.id,
+    });
+    expect(project.status).toBe(200);
+    const projectText = await project.text();
+    expect(JSON.parse(projectText)).toEqual({
+      projectId: withWorkers.id,
+      slug: 'rotate-plan-workers',
+      gen: 0,
+      job: null,
+      workers: withWorkers.workers,
+      dryRun: true,
+      action: 'system.rotate-proxy-tokens',
+      target: { projects: withWorkers.id },
+    });
+
+    for (const body of [text, projectText]) {
+      expect(body).not.toContain('mock-proxy-token');
+      for (const id of [withWorkers.id, empty.id, rotated.id]) {
+        expect(body).not.toContain(await tok(id, 0));
+        expect(body).not.toContain(await tok(id, 1));
+      }
+    }
+    expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
+    expect((await env.ROUTING.list({ prefix: 'proxy-token:' })).keys).toEqual([]);
+    expect(patchCount(cf)).toBe(0);
+    expect(await env.db.select().from(operatorEvents)).toEqual([]);
+  });
+
+  test('rotates every legacy project in bounded runs, then every project with --all', async () => {
+    const cf = cloudflare();
+    const withWorkers = await rotationProject(cf, 'rotate-bulk-workers', { workers: true });
+    const empty = await rotationProject(cf, 'rotate-bulk-empty');
+    const rotated = await rotationProject(cf, 'rotate-bulk-rotated', { gen: 1 });
+
+    const first = await req('/system/rotate-proxy-tokens', {});
+    expect(first.status).toBe(207);
+    expect(await first.json()).toMatchObject({
+      ok: true,
+      complete: false,
+      queued: 2,
+      pending: 2,
+      failed: 0,
+      failures: [],
+    });
+    expect(await rotationJob(rotated.id)).toBeUndefined();
+
+    expect(await applyUntilComplete()).toMatchObject({
+      ok: true,
+      complete: true,
+      queued: 0,
+      pending: 0,
+      failed: 0,
+      retryAfterSeconds: null,
+    });
+    for (const project of [withWorkers, empty]) {
+      expect(await issued(project.id)).toBe(1);
+      expect(await env.ROUTING.get(`proxy-token:${project.id}`, 'json')).toEqual({ gen: 1 });
+    }
+    for (const worker of withWorkers.workers) {
+      expect(scriptToken(cf, worker)).toBe(await tok(withWorkers.id, 1));
+    }
+    expect(await issued(rotated.id)).toBe(1);
+
+    const all = await req('/system/rotate-proxy-tokens', { all: true });
+    expect(await all.json()).toMatchObject({ queued: 3, complete: false });
+    await applyUntilComplete();
+    for (const project of [withWorkers, empty, rotated]) {
+      expect(await issued(project.id)).toBe(2);
+    }
+
+    const rerun = await req('/system/rotate-proxy-tokens', {});
+    expect(rerun.status).toBe(200);
+    expect(await rerun.json()).toMatchObject({ queued: 0, complete: true });
+    expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
+  });
+
+  test('shows a project rotation in progress', async () => {
+    const cf = cloudflare();
+    const project = await rotationProject(cf, 'rotate-progress', { workers: true });
+
+    const apply = await req('/system/rotate-proxy-tokens', { project: project.id });
+    expect(apply.status).toBe(207);
+    expect(await apply.json()).toMatchObject({
+      ok: true,
+      complete: false,
+      queued: 1,
+      pending: 1,
+      failed: 0,
+    });
+
+    const plan = await req('/system/rotate-proxy-tokens', { dryRun: true, project: project.id });
+    const body = (await plan.json()) as { job: { waitUntil: string } };
+    expect(body).toMatchObject({
+      projectId: project.id,
+      gen: 1,
+      job: {
+        phase: 'patch',
+        reason: 'operator',
+        again: false,
+        attempts: 0,
+        lastError: null,
+      },
+      workers: project.workers,
+      dryRun: true,
+      action: 'system.rotate-proxy-tokens',
+      target: { projects: project.id },
+    });
+    expect(Date.parse(body.job.waitUntil)).toBeGreaterThan(Date.now());
+    expect(patchCount(cf)).toBe(0);
+
+    const bulk = await req('/system/rotate-proxy-tokens', { dryRun: true });
+    expect(await bulk.json()).toMatchObject({
+      summary: { legacy: 0, wouldQueue: 0, pending: 1, failed: 0 },
+      projects: [{ projectId: project.id, slug: 'rotate-progress', phase: 'patch' }],
+    });
+  });
+
+  test.each(['patch', 'revoke', 'settle'])(
+    'rotates once more when --project lands on a job in %s',
+    async (phase) => {
+      const cf = cloudflare();
+      const project = await rotationProject(cf, `rotate-again-${phase}`, { workers: true });
+      await req('/system/rotate-proxy-tokens', { project: project.id });
+      while ((await rotationJob(project.id))!.payload.phase !== phase) {
+        await endWaits();
+        await req('/system/rotate-proxy-tokens', {});
+      }
+
+      await req('/system/rotate-proxy-tokens', { project: project.id });
+      expect((await rotationJob(project.id))!.payload.again).toBe('1');
+
+      await applyUntilComplete();
+      expect(await issued(project.id)).toBe(2);
+      for (const worker of project.workers) {
+        expect(scriptToken(cf, worker)).toBe(await tok(project.id, 2));
+      }
+    },
+  );
+
+  test('does not add a generation for a job that has not started', async () => {
+    const cf = cloudflare();
+    const project = await rotationProject(cf, 'rotate-requested', { workers: true });
+    await env.db.insert(projectCleanupJobs).values({
+      target: rotationTarget(project.id),
+      project_id: project.id,
+      kind: 'proxy-token-rotation',
+      payload: { phase: 'requested', reason: 'member-removed' },
+      next_attempt_at: sql`now() + interval '1 hour'`,
+    });
+
+    await req('/system/rotate-proxy-tokens', { project: project.id });
+    const job = await rotationJob(project.id);
+    expect(job!.payload).toMatchObject({ phase: 'patch', reason: 'member-removed' });
+    expect(job!.payload.again).toBeUndefined();
+
+    await applyUntilComplete();
+    expect(await issued(project.id)).toBe(1);
+  });
+
+  test('flags a running rotation with --all but not with the legacy rerun', async () => {
+    const cf = cloudflare();
+    const project = await rotationProject(cf, 'rotate-flag', { workers: true });
+    await req('/system/rotate-proxy-tokens', { project: project.id });
+
+    const legacy = await req('/system/rotate-proxy-tokens', {});
+    expect(await legacy.json()).toMatchObject({ queued: 0, pending: 1 });
+    expect((await rotationJob(project.id))!.payload.again).toBeUndefined();
+
+    const all = await req('/system/rotate-proxy-tokens', { all: true });
+    expect(await all.json()).toMatchObject({ queued: 1 });
+    expect((await rotationJob(project.id))!.payload.again).toBe('1');
+  });
+
+  test('reports a rotation that keeps failing', async () => {
+    const cf = cloudflare();
+    const project = await rotationProject(cf, 'rotate-failing', { workers: true });
+    cf.state.hostScripts.delete(project.workers[1]!);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await req('/system/rotate-proxy-tokens', { project: project.id });
+    await endWaits();
+    const failed = await req('/system/rotate-proxy-tokens', {});
+    expect(failed.status).toBe(207);
+    expect(await failed.json()).toMatchObject({
+      ok: false,
+      complete: false,
+      pending: 0,
+      failed: 1,
+      failures: [
+        {
+          projectId: project.id,
+          slug: 'rotate-failing',
+          phase: 'patch',
+          error: expect.stringContaining('not found'),
+        },
+      ],
+    });
+    const plan = await req('/system/rotate-proxy-tokens', { dryRun: true, project: project.id });
+    expect(await plan.json()).toMatchObject({
+      job: { phase: 'patch', attempts: 1, lastError: expect.stringContaining('not found') },
+    });
+    expect(await env.ROUTING.get(`proxy-token:${project.id}`)).toBeNull();
+  });
+
+  test('rejects invalid scopes and platforms without Cloudflare access', async () => {
+    const cf = cloudflare();
+    for (const body of [
+      { project: 'not-a-project' },
+      { project: 42 },
+      { all: 'yes' },
+      { project: 'proj_000000000000', all: true },
+    ]) {
+      for (const dryRun of [true, false]) {
+        const response = await req('/system/rotate-proxy-tokens', { ...body, dryRun });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: 'invalid_argument' });
+      }
+    }
+    const unknown = await req('/system/rotate-proxy-tokens', {
+      project: 'proj_zzzzzzzzzzzz',
+      dryRun: true,
+    });
+    expect(unknown.status).toBe(404);
+
+    await rotationProject(cf, 'rotate-unavailable');
+    for (const extraEnv of [{ DEV_AUTH_BYPASS: 'true' }, { CF_API_TOKEN: '' }]) {
+      for (const dryRun of [true, false]) {
+        const response = await req('/system/rotate-proxy-tokens', { dryRun }, extraEnv);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ error: 'rotation_unavailable' });
+      }
+    }
+    expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
     expect(cf).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   listOperatorDeployments,
   requestDeploymentCancellation,
 } from './deployment-operations.ts';
+import { rotateProxyTokens } from './proxy-token-operations.ts';
 import { drainManagedSandboxes } from './sandbox-operations.ts';
 import {
   backfillPlatformQueueTokens,
@@ -123,6 +124,16 @@ operationsRoutes.post('/system/sandbox-drain', async (context) => {
   }
   const result = await drainManagedSandboxes(context.get('db'), context.env, preview, cursor);
   return context.json(result, !preview && !result.complete ? 207 : 200);
+});
+operationsRoutes.post('/system/rotate-proxy-tokens', async (context) => {
+  const body = await readBody(context);
+  const preview = dryRun(body);
+  const result = await rotateProxyTokens(context.get('db'), context.env, {
+    dryRun: preview,
+    project: body.project,
+    all: body.all,
+  });
+  return context.json(result, !preview && 'complete' in result && !result.complete ? 207 : 200);
 });
 
 operationsRoutes.get('/workers', async (context) =>
