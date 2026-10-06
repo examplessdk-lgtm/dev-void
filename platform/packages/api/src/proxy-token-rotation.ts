@@ -37,10 +37,12 @@ export {
  * Proxy token generations per project.
  *
  * `projects.proxy_token_gen` is the highest generation the platform has issued
- * for the project (0 = the legacy token). Deploys bake the token for that
- * generation into the Worker, and the proxy sends it. A Worker deploy moves 0
- * to 1 (`issueProjectProxyToken`); after that only a rotation raises it. The
- * KV accept floor (`proxy-token:<projectId>`) never exceeds it.
+ * for the project. 0 means nothing has been issued yet: the project's Workers
+ * still hold the legacy token, which is no longer accepted, and the proxy
+ * sends nothing. From 1 up, deploys bake the token for that generation into
+ * the Worker and the proxy sends it. A Worker deploy moves 0 to 1
+ * (`issueProjectProxyToken`); after that only a rotation raises it. The KV
+ * accept floor (`proxy-token:<projectId>`) never exceeds it.
  */
 
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
@@ -139,8 +141,10 @@ export async function proxyTokenCopies(
 // deployment is in flight (the same fence as deploys, rollback and secret
 // writes). A wait is stored in the payload as `waitUntil`, taken from
 // `clock_timestamp()` after the step's last outside write, so a kick of
-// `next_attempt_at` never cuts it short. Until the floor rises both tokens are
-// accepted, so a failed or unfinished rotation never breaks a tenant.
+// `next_attempt_at` never cuts it short. When the old generation is 1 or
+// higher, both tokens are accepted until the floor rises, so a failed or
+// unfinished rotation never breaks a tenant. The legacy token (generation 0)
+// is never accepted.
 
 export type ProxyTokenRotationPhase = 'requested' | 'copies' | 'patch' | 'revoke' | 'settle';
 
