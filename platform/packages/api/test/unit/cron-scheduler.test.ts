@@ -246,6 +246,73 @@ describe('CronScheduler.alarm', () => {
     );
   }
 
+  it('copies proxyTokenFallback into each message when present', async () => {
+    const ctx = makeStubCtx({
+      state: {
+        workerName: 'user-foo',
+        schedules: [
+          { name: 'every', cron: '* * * * *' },
+          { name: 'fives', cron: '*/5 * * * *' },
+        ],
+        proxyToken: 'old-tok',
+        proxyTokenFallback: 'new-tok',
+      },
+    });
+    const sendBatch = vi.fn(async (_batch?: unknown) => {});
+    const scheduler = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch } });
+
+    await scheduler.alarm({
+      scheduledTime: Date.UTC(2026, 0, 1),
+      isRetry: false,
+      retryCount: 0,
+    });
+
+    const messages = sendBatch.mock.calls[0][0] as Array<{ body: Record<string, unknown> }>;
+    expect(messages).toHaveLength(2);
+    for (const message of messages) {
+      expect(message.body.proxyToken).toBe('old-tok');
+      expect(message.body.proxyTokenFallback).toBe('new-tok');
+    }
+  });
+
+  it('leaves proxyTokenFallback out of messages when the state has none', async () => {
+    const ctx = makeStubCtx({
+      state: {
+        workerName: 'user-foo',
+        schedules: [{ name: 'every', cron: '* * * * *' }],
+        proxyToken: 'tok',
+      },
+    });
+    const sendBatch = vi.fn(async (_batch?: unknown) => {});
+    const scheduler = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch } });
+
+    await scheduler.alarm();
+
+    const messages = sendBatch.mock.calls[0][0] as Array<{ body: Record<string, unknown> }>;
+    expect(messages[0].body.proxyToken).toBe('tok');
+    expect(messages[0].body).not.toHaveProperty('proxyTokenFallback');
+  });
+
+  it('omits both proxy tokens from /status', async () => {
+    const ctx = makeStubCtx({
+      state: {
+        workerName: 'user-foo',
+        schedules: [{ name: 'every', cron: '* * * * *' }],
+        proxyToken: 'old-tok',
+        proxyTokenFallback: 'new-tok',
+      },
+    });
+    const scheduler = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch: async () => {} } });
+
+    const res = await scheduler.fetch(new Request('https://do/status'));
+    const body = await res.json<{ state: Record<string, unknown> }>();
+
+    expect(body.state).toEqual({
+      workerName: 'user-foo',
+      schedules: [{ name: 'every', cron: '* * * * *' }],
+    });
+  });
+
   it('throws when ALL sendBatch chunks fail (DO alarm framework will retry)', async () => {
     // At-most-once contract: when no fires were enqueued, throwing surfaces
     // the failure to the DO runtime so it retries with backoff. Safe because

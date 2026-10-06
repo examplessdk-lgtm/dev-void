@@ -4555,6 +4555,112 @@ describe('queue relay', () => {
     }
   });
 
+  describe('fallback token', () => {
+    const rotatingRouting = JSON.stringify({
+      workerName: 'user-app',
+      projectId: 'proj-1',
+      queueName: 'emails',
+      proxyToken: 'old',
+      proxyTokenFallback: 'new',
+    });
+    const unauthorized = () => Response.json({ error: 'unauthorized' }, { status: 401 });
+
+    function setup(routingRaw: string, respond: (token: string | null) => Promise<Response>) {
+      const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+      const { env, workerFetch } = createQueueEnv({ routingRaw });
+      const seen: Array<{ token: string | null; body: string }> = [];
+      workerFetch.mockImplementation(async (req: Request) => {
+        const token = req.headers.get('x-void-internal');
+        seen.push({ token, body: await req.clone().text() });
+        return respond(token);
+      });
+      return { batch, env, seen };
+    }
+
+    it('relays once more with the fallback when the Worker rejects the token', async () => {
+      const { batch, env, seen } = setup(rotatingRouting, async (token) =>
+        token === 'new' ? Response.json({ ok: true }) : unauthorized(),
+      );
+
+      await app.queue(batch, env);
+
+      expect(seen.map((call) => call.token)).toEqual(['old', 'new']);
+      expect(seen[1].body).toBe(seen[0].body);
+      expect(batch.ackAll).toHaveBeenCalledOnce();
+      expect(batch.retryAll).not.toHaveBeenCalled();
+    });
+
+    it('retries the batch without a second relay when there is no fallback', async () => {
+      const routing = JSON.stringify({
+        workerName: 'user-app',
+        projectId: 'proj-1',
+        queueName: 'emails',
+        proxyToken: 'old',
+      });
+      const { batch, env, seen } = setup(routing, async () => unauthorized());
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        await app.queue(batch, env);
+      } finally {
+        errSpy.mockRestore();
+      }
+
+      expect(seen).toHaveLength(1);
+      expect(batch.retryAll).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['a 401 with another body', () => Response.json({ error: 'expired' }, { status: 401 })],
+      ['a 401 with a non-JSON body', () => new Response('unauthorized', { status: 401 })],
+      ['a 403 unauthorized', () => Response.json({ error: 'unauthorized' }, { status: 403 })],
+      ['a 500', () => new Response('boom', { status: 500 })],
+    ])('does not relay again after %s', async (_label, response) => {
+      const { batch, env, seen } = setup(rotatingRouting, async () => response());
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        await app.queue(batch, env);
+      } finally {
+        errSpy.mockRestore();
+      }
+
+      expect(seen).toHaveLength(1);
+      expect(batch.retryAll).toHaveBeenCalledOnce();
+    });
+
+    it('does not relay again after a thrown fetch', async () => {
+      const { batch, env, seen } = setup(rotatingRouting, async () => {
+        throw new Error('connection reset');
+      });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        await app.queue(batch, env);
+      } finally {
+        errSpy.mockRestore();
+      }
+
+      expect(seen).toHaveLength(1);
+      expect(batch.retryAll).toHaveBeenCalledOnce();
+    });
+
+    it('retries the batch after two relays when both tokens are rejected', async () => {
+      const { batch, env, seen } = setup(rotatingRouting, async () => unauthorized());
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        await app.queue(batch, env);
+      } finally {
+        errSpy.mockRestore();
+      }
+
+      expect(seen.map((call) => call.token)).toEqual(['old', 'new']);
+      expect(batch.retryAll).toHaveBeenCalledOnce();
+      expect(batch.ackAll).not.toHaveBeenCalled();
+    });
+  });
+
   it('forwards x-void-internal on legacy /__queue fallback too', async () => {
     const routing = JSON.stringify({
       workerName: 'user-app',
