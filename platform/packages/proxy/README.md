@@ -24,11 +24,11 @@ Deployed user worker            Proxy                       Downstream
 
 Project requests use these authentication paths:
 
-| Path            | When               | Auth                                                                                                         |
-| --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
-| Service binding | Deployed Void apps | Project token (`aiToken`), checked against the project's accept floor; see [Project tokens](#project-tokens) |
-| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`                                                                            |
-| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT                                                                    |
+| Path            | When               | Auth                                                                                                                          |
+| --------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Service binding | Deployed Void apps | `v2.<gen>.<mac>` project token (`aiToken`), checked against the project's accept floor; see [Project tokens](#project-tokens) |
+| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`                                                                                             |
+| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT                                                                                     |
 
 Project-scoped POST routes require `projectId` in the JSON body. The public
 `GET /health` route has no project body, and `/email/verify-receipt` checks a
@@ -45,22 +45,19 @@ seconds; non-email routes return 413 for oversized bodies and 408 for timeouts.
 ### Project tokens
 
 Each deployed Worker holds its project token in the `__VOID_PROXY_TOKEN`
-binding. Both forms are derived from `JWT_SECRET`:
-
-| Form             | Generation | Value                                                                                                                                                 |
-| ---------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Legacy           | 0          | base64url `HMAC-SHA256(JWT_SECRET, projectId)`                                                                                                        |
-| `v2.<gen>.<mac>` | `<gen>`    | `<mac>` = base64url `HMAC-SHA256(K, "void-proxy-token:v2:" + projectId + ":" + gen)`, `K` = HKDF of `JWT_SECRET` (salt `void-proxy-token`, info `v2`) |
+binding: `v2.<gen>.<mac>` with `gen >= 1`, where `<mac>` = base64url
+`HMAC-SHA256(K, "void-proxy-token:v2:" + projectId + ":" + gen)` and `K` =
+HKDF of `JWT_SECRET` (salt `void-proxy-token`, info `v2`). Legacy tokens
+(base64url `HMAC-SHA256(JWT_SECRET, projectId)`) are rejected.
 
 The ROUTING key `proxy-token:{projectId}` holds the project's accept floor,
 `{"gen": N}`. A token is accepted when its MAC is valid and its generation is at
-least `N`. A missing key means floor 0, so the legacy token is accepted. The
-`projectId` must be a generated project id, and the MAC is checked before the
-floor is read, so an invalid token never reads KV. A floor that cannot be read
-or does not parse fails closed with 503 `project token state unavailable`. Each
-isolate caches a floor for 15 seconds and reads KV with `cacheTtl: 30`, so with
-KV propagation a raised floor rejects older tokens everywhere within about 105
-seconds.
+least `max(N, 1)`. A missing key means floor 0: no floor. The `projectId` must
+be a generated project id, and the MAC is checked before the floor is read, so
+an invalid token never reads KV. A floor that cannot be read or does not parse
+fails closed with 503 `project token state unavailable`. Each isolate caches a
+floor for 15 seconds and reads KV with `cacheTtl: 30`, so with KV propagation a
+raised floor rejects older tokens everywhere within about 105 seconds.
 
 Service-binding auth and `/email/verify-receipt` use this check. `/revalidate`
 forwards the token, and the API checks it against the same floor.
@@ -68,10 +65,11 @@ forwards the token, and the API checks it against the same floor.
 When the proxy calls a tenant Worker's `/__void/*` handler, it sends the token
 for the generation `resolve-worker` reports (`proxyTokenGen`), or for the floor
 when the API does not report one. If that Worker answers 403
-`{"error":"unauthorized"}`, the proxy retries with the previous generation.
-At generation 2 it then also tries the legacy token: a Worker deploy that
-moves a project from 0 to 1 queues a rotation to 2 for its older Workers. It
-never sends a generation above the issued one.
+`{"error":"unauthorized"}`, the proxy retries once with the previous
+generation. It never sends a generation above the issued one, or generation 0:
+when that generation is 0, it sends nothing and the caller handles the request
+as it does for a Worker without the handler, with the REST fallback where the
+route has one.
 
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a

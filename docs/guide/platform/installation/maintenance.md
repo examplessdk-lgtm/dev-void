@@ -76,6 +76,17 @@ An upgrade validates the runtime, applies supported pending migrations, deploys 
 
 Before starting, Void checks access to the installation's Cloudflare account, Workers, and existing R2 buckets. If credentials are rejected, set `CLOUDFLARE_API_TOKEN` to a management token scoped to that account and retry. This overrides the installation's saved management token.
 
+::: warning Rotate project credentials before upgrading
+Current releases no longer accept the original project credentials that projects received before credential rotation was added. If the platform has projects that still use them:
+
+1. Make sure the platform runs a release that has `void platform system rotate-proxy-tokens`. If it runs an older release, upgrade and follow the last paragraph below.
+2. Run `void platform system rotate-proxy-tokens --plan`, then `void platform system rotate-proxy-tokens --yes`.
+3. Rerun `--yes` until it reports `complete: true` (this can take several minutes), and check that `--plan` shows 0 pending, 0 failed and 0 legacy projects.
+4. Upgrade. Right after, run `--yes` again until it reports `complete: true`. This covers projects created since step 3.
+
+If you upgraded first, run steps 2 and 3 right away. Until a project is rotated, its app keeps serving pages, but AI, email and ISR revalidation fail. Redeploying the project also fixes it; if that deploy fails, run `void platform system rotate-proxy-tokens --project <id> --yes`.
+:::
+
 ::: details Migration safety, credential rotation, and interrupted upgrades
 
 Some upgrades briefly put the platform into maintenance mode. Traffic resumes after the new version passes health checks. If an upgrade is interrupted during maintenance, rerun the same command to complete it.
