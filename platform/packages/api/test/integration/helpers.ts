@@ -650,7 +650,8 @@ export async function createTestProject(
 ): Promise<{ id: string; slug: string }> {
   const n = ++projectCounter;
   const s = slug ?? `test-project-${n}`;
-  const id = `proj_test${n}`;
+  // Same shape as generateId('proj'): internal routes reject any other id.
+  const id = `proj_test${String(n).padStart(8, '0')}`;
   await db.insert(projects).values({ id, user_id: userId, slug: s });
   return { id, slug: s };
 }

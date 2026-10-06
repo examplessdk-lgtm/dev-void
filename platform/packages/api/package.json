@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     "./tiers": "./src/tiers.ts",
+    "./id": "./src/id.ts",
     "./api": "./src/api.ts",
     "./reserved-slugs": "./src/reserved-slugs.ts",
     "./routing": "./src/routing.ts",

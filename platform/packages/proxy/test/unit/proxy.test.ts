@@ -91,7 +91,7 @@ function createMockKv(data: Record<string, string> = {}) {
  * its legacy verify-owner URL while the API now resolves roles dynamically.
  */
 const DEFAULT_OWNERSHIP: Record<string, Array<string>> = {
-  user_1: ['proj_1', 'proj_42', 'proj_99', 'p'],
+  user_1: ['proj_000000000001', 'proj_000000000042', 'proj_000000000099', 'proj_000000000000'],
 };
 
 type ApiFetchHandler = (input: string | Request, init?: RequestInit) => Promise<Response>;
@@ -184,7 +184,12 @@ describe('proxy worker', () => {
 
   beforeAll(async () => {
     validToken = await signJwt({ sub: 'user_1', login: 'testuser' }, JWT_SECRET);
-    for (const pid of ['proj_1', 'proj_42', 'proj_99', 'p']) {
+    for (const pid of [
+      'proj_000000000001',
+      'proj_000000000042',
+      'proj_000000000099',
+      'proj_000000000000',
+    ]) {
       aiTokens[pid] = await signAiToken(pid, JWT_SECRET);
     }
   });
@@ -358,7 +363,11 @@ describe('proxy worker', () => {
 
     it('allows a larger remote write body through to authentication', async () => {
       const response = await worker.fetch(
-        post('/r2/put', { projectId: 'proj_1', aiToken: 'invalid', pad: 'x'.repeat(1024 * 1024) }),
+        post('/r2/put', {
+          projectId: 'proj_000000000001',
+          aiToken: 'invalid',
+          pad: 'x'.repeat(1024 * 1024),
+        }),
         createEnv(),
       );
       expect(response.status).toBe(403);
@@ -446,7 +455,7 @@ describe('proxy worker', () => {
         new Request('https://proxy.void.cloud/email/send', {
           method: 'POST',
           body: JSON.stringify({
-            projectId: 'proj_1',
+            projectId: 'proj_000000000001',
             aiToken: 'invalid-project-token',
             mimeBase64: 'AAAA'.repeat(Math.ceil((5 * 1024 * 1024) / 3)),
           }),
@@ -500,7 +509,7 @@ describe('proxy worker', () => {
     const claims = {
       version: 1 as const,
       receiptId: 'a'.repeat(64),
-      projectId: 'proj_1',
+      projectId: 'proj_000000000001',
       deploymentId: 'deploy_1',
       recipient: 'support@example.com',
       expiresAt: Date.now() + 30_000,
@@ -528,13 +537,36 @@ describe('proxy worker', () => {
     expect((await call(JWT_SECRET, projectToken, missing)).status).toBe(503);
   });
 
+  it('rejects a receipt check for a non-project id even when its HMAC matches', async () => {
+    for (const projectId of ['eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEifQ', 'proj_1']) {
+      const claims = {
+        version: 1 as const,
+        receiptId: 'a'.repeat(64),
+        projectId,
+        deploymentId: 'deploy_1',
+        recipient: 'support@example.com',
+        expiresAt: Date.now() + 30_000,
+      };
+      const res = await worker.fetch(
+        post(
+          '/email/verify-receipt',
+          { ...claims, receipt: await signEmailReceipt(claims, EMAIL_SIGNING_SECRET) },
+          { 'x-void-internal': await signAiToken(projectId, JWT_SECRET) },
+        ),
+        createEnv(),
+      );
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ valid: false });
+    }
+  });
+
   describe('JWT authentication (HTTPS path)', () => {
     it('accepts valid JWT for the project owner', async () => {
       const env = createEnv();
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${validToken}` },
         ),
         env,
@@ -553,7 +585,7 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'm', inputs: {}, projectId: 'p' },
+          { model: 'm', inputs: {}, projectId: 'proj_000000000000' },
           { authorization: `Bearer ${expiredToken}` },
         ),
         createEnv(),
@@ -572,7 +604,7 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'm', inputs: {}, projectId: 'p' },
+          { model: 'm', inputs: {}, projectId: 'proj_000000000000' },
           { authorization: `Bearer ${badToken}` },
         ),
         createEnv(),
@@ -585,7 +617,7 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'm', inputs: {}, projectId: 'p' },
+          { model: 'm', inputs: {}, projectId: 'proj_000000000000' },
           { authorization: 'Bearer not.a.valid.jwt.at.all' },
         ),
         createEnv(),
@@ -608,7 +640,7 @@ describe('proxy worker', () => {
   describe('JWT project ownership verification', () => {
     it('accepts a prerender token only for its scoped project', async () => {
       const token = await signJwt(
-        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_000000000001' },
         JWT_SECRET,
       );
       const api = createMockApi();
@@ -618,7 +650,7 @@ describe('proxy worker', () => {
       const allowed = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         ),
         env,
@@ -626,13 +658,13 @@ describe('proxy worker', () => {
       expect(allowed.status).toBe(200);
       expect(apiFetch).toHaveBeenCalledTimes(1);
       expect(String(apiFetch.mock.calls[0]?.[0])).toContain(
-        '/internal/verify-prerender-build/proj_1',
+        '/internal/verify-prerender-build/proj_000000000001',
       );
 
       const denied = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_42' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000042' },
           { authorization: `Bearer ${token}` },
         ),
         env,
@@ -648,12 +680,12 @@ describe('proxy worker', () => {
 
     it('revokes an already-minted manual prerender token when project access changes', async () => {
       const token = await signJwt(
-        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_000000000001' },
         JWT_SECRET,
       );
       let active = true;
       const api = createMockApi(async (input) => {
-        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_000000000001');
         return active
           ? Response.json({ ok: true })
           : Response.json({ error: 'forbidden' }, { status: 403 });
@@ -662,7 +694,7 @@ describe('proxy worker', () => {
       const request = () =>
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         );
 
@@ -679,11 +711,11 @@ describe('proxy worker', () => {
 
     it('accepts a manual prerender token while the previous API revision is active', async () => {
       const token = await signJwt(
-        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_1' },
+        { sub: 'user_1', login: 'testuser', aud: 'prerender', project: 'proj_000000000001' },
         JWT_SECRET,
       );
       const api = createMockApi(async (input) => {
-        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_000000000001');
         return Response.json(
           { error: 'userId and credential provenance required' },
           { status: 400 },
@@ -693,7 +725,7 @@ describe('proxy worker', () => {
       const response = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         ),
         createEnv(undefined, undefined, api),
@@ -708,7 +740,7 @@ describe('proxy worker', () => {
           sub: 'user_1',
           login: 'testuser',
           aud: 'prerender',
-          project: 'proj_1',
+          project: 'proj_000000000001',
           build: 'bld_1',
         },
         JWT_SECRET,
@@ -719,7 +751,7 @@ describe('proxy worker', () => {
         if (url.includes('/internal/verify-owner/')) {
           return Response.json({ ok: true });
         }
-        expect(url).toContain('/internal/verify-prerender-build/proj_1');
+        expect(url).toContain('/internal/verify-prerender-build/proj_000000000001');
         return active
           ? Response.json({ ok: true })
           : Response.json({ error: 'build is no longer active' }, { status: 403 });
@@ -728,7 +760,7 @@ describe('proxy worker', () => {
       const request = () =>
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         );
 
@@ -745,13 +777,13 @@ describe('proxy worker', () => {
 
     it('rejects deploy tokens at the binding proxy', async () => {
       const token = await signJwt(
-        { sub: 'user_1', login: 'testuser', aud: 'deploy', project: 'proj_1' },
+        { sub: 'user_1', login: 'testuser', aud: 'deploy', project: 'proj_000000000001' },
         JWT_SECRET,
       );
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         ),
         createEnv(),
@@ -765,14 +797,14 @@ describe('proxy worker', () => {
           sub: 'user_1',
           login: 'testuser',
           aud: 'prerender',
-          project: 'proj_1',
+          project: 'proj_000000000001',
           credential: 'cred_1',
         },
         JWT_SECRET,
       );
       let active = true;
       const api = createMockApi(async (input, init) => {
-        expect(String(input)).toContain('/internal/verify-prerender-build/proj_1');
+        expect(String(input)).toContain('/internal/verify-prerender-build/proj_000000000001');
         expect(JSON.parse(String(init?.body))).toEqual({
           userId: 'user_1',
           credentialId: 'cred_1',
@@ -785,7 +817,7 @@ describe('proxy worker', () => {
       const request = () =>
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${token}` },
         );
       expect((await worker.fetch(request(), env)).status).toBe(200);
@@ -904,7 +936,7 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'test-model', inputs: {}, projectId: 'proj_1' },
+          { model: 'test-model', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${validToken}` },
         ),
         env,
@@ -957,7 +989,7 @@ describe('proxy worker', () => {
       const response = await worker.fetch(
         post(
           '/r2/get',
-          { binding: 'FILES', key: 'large.bin', projectId: 'proj_1' },
+          { binding: 'FILES', key: 'large.bin', projectId: 'proj_000000000001' },
           { authorization: `Bearer ${validToken}` },
         ),
         createEnv(undefined, undefined, api),
@@ -979,8 +1011,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'test-model',
           inputs: {},
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -997,8 +1029,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'test-model',
           inputs: {},
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1016,7 +1048,7 @@ describe('proxy worker', () => {
 
     it('rejects request with missing aiToken', async () => {
       const res = await worker.fetch(
-        post('/ai/run', { model: 'm', inputs: {}, projectId: 'proj_1' }),
+        post('/ai/run', { model: 'm', inputs: {}, projectId: 'proj_000000000001' }),
         createEnv(),
       );
 
@@ -1029,7 +1061,7 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: 'invalid-token',
         }),
         createEnv(),
@@ -1044,8 +1076,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_42'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000042'],
         }),
         createEnv(),
       );
@@ -1053,17 +1085,54 @@ describe('proxy worker', () => {
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: 'invalid project token' });
     });
+
+    it('rejects a login JWT split into projectId and aiToken', async () => {
+      const [header, body, signature] = validToken.split('.');
+      // The JWT signature is the same HMAC a project token would carry for this string.
+      expect(await signAiToken(`${header}.${body}`, JWT_SECRET)).toBe(signature);
+      const env = createEnv();
+      const res = await worker.fetch(
+        post('/ai/run', {
+          model: 'test-model',
+          inputs: {},
+          projectId: `${header}.${body}`,
+          aiToken: signature,
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(env.AI.run).not.toHaveBeenCalled();
+    });
+
+    it('rejects a project id outside the generated format even with a matching token', async () => {
+      const env = createEnv();
+      const res = await worker.fetch(
+        post('/ai/run', {
+          model: 'test-model',
+          inputs: {},
+          projectId: 'proj_1',
+          aiToken: await signAiToken('proj_1', JWT_SECRET),
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'invalid project token' });
+      expect(env.AI.run).not.toHaveBeenCalled();
+    });
   });
 
   describe('AI usage limit (KV block)', () => {
     it('returns 429 when ai-block key exists (service binding path)', async () => {
-      const env = createEnv({}, { 'ai-block:proj_1': '1' });
+      const env = createEnv({}, { 'ai-block:proj_000000000001': '1' });
       const res = await worker.fetch(
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1079,11 +1148,11 @@ describe('proxy worker', () => {
     });
 
     it('returns 429 when ai-block key exists (JWT path)', async () => {
-      const env = createEnv({}, { 'ai-block:proj_1': '1' });
+      const env = createEnv({}, { 'ai-block:proj_000000000001': '1' });
       const res = await worker.fetch(
         post(
           '/ai/run',
-          { model: 'm', inputs: {}, projectId: 'proj_1' },
+          { model: 'm', inputs: {}, projectId: 'proj_000000000001' },
           { authorization: `Bearer ${validToken}` },
         ),
         env,
@@ -1104,8 +1173,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1122,8 +1191,8 @@ describe('proxy worker', () => {
           model: '@cf/meta/llama-3-8b-instruct',
           inputs: { prompt: 'hi' },
           options: { max_tokens: 100 },
-          projectId: 'proj_42',
-          aiToken: aiTokens['proj_42'],
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
         }),
         env,
       );
@@ -1134,7 +1203,7 @@ describe('proxy worker', () => {
         { prompt: 'hi' },
         {
           max_tokens: 100,
-          gateway: { id: 'void', metadata: { projectId: 'proj_42' } },
+          gateway: { id: 'void', metadata: { projectId: 'proj_000000000042' } },
         },
       );
     });
@@ -1145,8 +1214,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_42',
-          aiToken: aiTokens['proj_42'],
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
         }),
         env,
       );
@@ -1155,7 +1224,7 @@ describe('proxy worker', () => {
         'm',
         {},
         {
-          gateway: { id: 'void-team', metadata: { projectId: 'proj_42' } },
+          gateway: { id: 'void-team', metadata: { projectId: 'proj_000000000042' } },
         },
       );
     });
@@ -1174,8 +1243,8 @@ describe('proxy worker', () => {
               metadata: { user: 'alice', projectId: 'wrong' },
             },
           },
-          projectId: 'proj_42',
-          aiToken: aiTokens['proj_42'],
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
         }),
         env,
       );
@@ -1188,7 +1257,7 @@ describe('proxy worker', () => {
             id: 'void',
             skipCache: true,
             cacheTtl: 60,
-            metadata: { user: 'alice', projectId: 'proj_42' },
+            metadata: { user: 'alice', projectId: 'proj_000000000042' },
           },
         },
       );
@@ -1196,7 +1265,11 @@ describe('proxy worker', () => {
 
     it('returns 400 when model is missing', async () => {
       const res = await worker.fetch(
-        post('/ai/run', { inputs: {}, projectId: 'p', aiToken: aiTokens['p'] }),
+        post('/ai/run', {
+          inputs: {},
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
+        }),
         createEnv(),
       );
 
@@ -1217,8 +1290,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: { prompt: 'hi', stream: true },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1238,8 +1311,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: { prompt: 'hi' },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1257,8 +1330,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: '@cf/black-forest-labs/flux-1-schnell',
           inputs: { prompt: 'a red cube' },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1279,8 +1352,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: '@cf/image-model',
           inputs: { prompt: 'a blue cube' },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1296,8 +1369,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'proj_99',
-          aiToken: aiTokens['proj_99'],
+          projectId: 'proj_000000000099',
+          aiToken: aiTokens['proj_000000000099'],
         }),
         env,
       );
@@ -1306,7 +1379,7 @@ describe('proxy worker', () => {
         'm',
         {},
         {
-          gateway: { id: 'void', metadata: { projectId: 'proj_99' } },
+          gateway: { id: 'void', metadata: { projectId: 'proj_000000000099' } },
         },
       );
     });
@@ -1320,8 +1393,8 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post('/ai/models', {
           inputs: { search: 'llama' },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1341,8 +1414,8 @@ describe('proxy worker', () => {
         post('/ai/toMarkdown', {
           inputs: { content: 'hello' },
           options: { format: 'md' },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1391,8 +1464,8 @@ describe('proxy worker', () => {
             },
           },
           providerKey: 'sk-test-key',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1411,7 +1484,7 @@ describe('proxy worker', () => {
       expect(init.method).toBe('POST');
       const headers = new Headers(init.headers);
       expect(headers.get('authorization')).toBe('Bearer sk-test-key');
-      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_1');
+      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_000000000001');
       expect(headers.get('content-type')).toBe('application/json');
       expect(headers.get('openai-beta')).toBe('assistants=v2');
       expect(JSON.parse(init.body as string)).toEqual({
@@ -1430,8 +1503,8 @@ describe('proxy worker', () => {
           provider: 'openai',
           path: '/chat/completions',
           providerKey: 'key',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1456,8 +1529,8 @@ describe('proxy worker', () => {
             value: { contents: [{ parts: [{ text: 'Hello' }] }] },
           },
           providerKey: 'google-key',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1470,7 +1543,7 @@ describe('proxy worker', () => {
       const headers = new Headers(fetchMock.mock.calls[0][1]!.headers);
       expect(headers.get('x-goog-api-key')).toBe('google-key');
       expect(headers.get('authorization')).toBeNull();
-      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_1');
+      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_000000000001');
     });
 
     it('reconstructs multipart form data bodies', async () => {
@@ -1501,8 +1574,8 @@ describe('proxy worker', () => {
             ],
           },
           providerKey: 'sk-test',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1535,8 +1608,8 @@ describe('proxy worker', () => {
           path: '/v1/images',
           body: { type: 'json', value: { prompt: 'a small robot' } },
           providerKey: 'fal-key',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1554,8 +1627,8 @@ describe('proxy worker', () => {
         post('/ai/provider', {
           path: '/chat/completions',
           providerKey: 'sk-test',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1566,8 +1639,8 @@ describe('proxy worker', () => {
         post('/ai/provider', {
           provider: 'openai',
           providerKey: 'sk-test',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1578,8 +1651,8 @@ describe('proxy worker', () => {
         post('/ai/provider', {
           provider: 'openai',
           path: '/chat/completions',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1602,8 +1675,8 @@ describe('proxy worker', () => {
             provider: 'openai',
             path,
             providerKey: 'sk-test',
-            projectId: 'proj_1',
-            aiToken: aiTokens['proj_1'],
+            projectId: 'proj_000000000001',
+            aiToken: aiTokens['proj_000000000001'],
           }),
           env,
         );
@@ -1627,8 +1700,8 @@ describe('proxy worker', () => {
           path: '/chat/completions',
           body: { type: 'json', value: { model: 'gpt-4o' } },
           providerKey: 'sk-bad-key',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1639,14 +1712,14 @@ describe('proxy worker', () => {
     });
 
     it('respects usage limits for provider-native requests', async () => {
-      const env = createEnv({}, { 'ai-block:proj_1': '1' });
+      const env = createEnv({}, { 'ai-block:proj_000000000001': '1' });
       const res = await worker.fetch(
         post('/ai/provider', {
           provider: 'openai',
           path: '/chat/completions',
           providerKey: 'sk-test',
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1674,8 +1747,8 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post('/revalidate', {
           paths: ['/', '/blog'],
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1686,9 +1759,9 @@ describe('proxy worker', () => {
       expect(apiFetch).toHaveBeenCalledOnce();
       // Fetcher.fetch() receives (url: string, init: RequestInit)
       const [url, init] = apiFetch.mock.calls[0];
-      expect(url).toBe('https://api/internal/revalidate/proj_1');
+      expect(url).toBe('https://api/internal/revalidate/proj_000000000001');
       expect(init.method).toBe('POST');
-      expect(new Headers(init.headers).get('x-void-internal')).toBe(aiTokens['proj_1']);
+      expect(new Headers(init.headers).get('x-void-internal')).toBe(aiTokens['proj_000000000001']);
       expect(JSON.parse(init.body)).toEqual({ paths: ['/', '/blog'] });
     });
 
@@ -1704,8 +1777,8 @@ describe('proxy worker', () => {
       const res = await worker.fetch(
         post('/revalidate', {
           all: true,
-          projectId: 'proj_1',
-          aiToken: aiTokens['proj_1'],
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
         }),
         env,
       );
@@ -1736,8 +1809,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1757,8 +1830,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1786,8 +1859,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'google/gemini-2.5-flash',
           inputs: { contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1810,8 +1883,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'google/gemini-2.5-flash',
           inputs: { messages: [{ role: 'user', content: 'Hello' }] },
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );
@@ -1831,8 +1904,8 @@ describe('proxy worker', () => {
         post('/ai/run', {
           model: 'm',
           inputs: {},
-          projectId: 'p',
-          aiToken: aiTokens['p'],
+          projectId: 'proj_000000000000',
+          aiToken: aiTokens['proj_000000000000'],
         }),
         env,
       );

@@ -95,7 +95,7 @@ function fixture() {
   };
   const app = new Hono();
   app.use('*', async (context, next) => {
-    context.set('projectId', 'proj_1');
+    context.set('projectId', 'proj_000000000001');
     context.set('body', await context.req.json());
     await next();
   });

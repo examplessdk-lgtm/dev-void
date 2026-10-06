@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { hmacVerifyState } from '../auth/hmac.ts';
 import { getProject } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { isProjectId } from '../id.ts';
 import { runRevalidate } from '../revalidate-core.ts';
 
 const app = new Hono<ApiEnv>();
@@ -17,7 +18,10 @@ app.post('/:id', async (context) => {
   if (!token) {
     return context.json({ error: 'missing internal auth' }, 401);
   }
-  if (!(await hmacVerifyState(projectId, token, context.env.JWT_SECRET))) {
+  if (
+    !isProjectId(projectId) ||
+    !(await hmacVerifyState(projectId, token, context.env.JWT_SECRET))
+  ) {
     return context.json({ error: 'invalid internal auth' }, 403);
   }
 

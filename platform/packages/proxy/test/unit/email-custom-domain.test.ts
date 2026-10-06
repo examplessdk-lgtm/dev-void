@@ -164,8 +164,8 @@ async function postSend(
 
 async function sendBody(overrides: Record<string, unknown> = {}) {
   return {
-    projectId: 'proj_1',
-    aiToken: await signHmac('proj_1', JWT_SECRET),
+    projectId: 'proj_000000000001',
+    aiToken: await signHmac('proj_000000000001', JWT_SECRET),
     from: CUSTOM_FROM,
     recipients: ['dev@example.com'],
     mimeBase64: mimeBase64(),
@@ -270,11 +270,11 @@ describe('POST /email/send — custom sender domain', () => {
     expect(leaseInit.method).toBe('POST');
     expect(JSON.parse(leaseInit.body as string)).toEqual({
       domain: CUSTOM_DOMAIN,
-      projectId: 'proj_1',
+      projectId: 'proj_000000000001',
     });
     const leaseHeaders = new Headers(leaseInit.headers);
     expect(leaseHeaders.get('x-void-internal')).toBe(
-      await signHmac(`email-lease-v1\nproj_1\n${CUSTOM_DOMAIN}`, EMAIL_SIGNING_SECRET),
+      await signHmac(`email-lease-v1\nproj_000000000001\n${CUSTOM_DOMAIN}`, EMAIL_SIGNING_SECRET),
     );
 
     // The delivery: one POST to the CUSTOMER account's send_raw, leased
