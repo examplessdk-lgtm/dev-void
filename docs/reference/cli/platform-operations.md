@@ -54,6 +54,7 @@ void platform system asset-migrations [--page <n>] [--limit <n>]
 void platform system events [--page <n>] [--limit <n>]
 void platform system backfill-queue-tokens
 void platform system sandbox-drain [--cursor <opaque-cursor>]
+void platform system rotate-proxy-tokens [--project <id>] [--all]
 ```
 
 `overview` shows platform totals and recent activity. `health` checks the configured services and database, and exits with a nonzero status if a check fails. `cli-versions` reports the CLI versions used by deployments.
@@ -63,6 +64,8 @@ void platform system sandbox-drain [--cursor <opaque-cursor>]
 `events` shows the administrator, target, and outcome of changes. A pending event means the outcome has not been recorded. Previews and session login/logout do not create these events. `backfill-queue-tokens` repairs older queue entries that are missing authentication tokens and supports `--plan` before applying the repair.
 
 `sandbox-drain` removes legacy tenant-owned Sandbox resources. Use `--plan` to preview and `--yes` to apply, then pass `nextCursor` as `--cursor` to continue. Application traffic stays paused during cleanup.
+
+`rotate-proxy-tokens` gives projects new platform credentials on all of their Workers, without a redeploy. Without `--project` it covers every project that still uses its original credentials; `--all` covers every project. Use `--plan` to preview and `--yes` to apply. Each run does a bounded batch and the platform finishes the rest in the background; a rotation takes about 6 minutes per project, longer while a deploy is running. Use `--plan` to check progress until nothing is pending or failed. Running `--yes` again with `--project` or `--all` while a rotation is still running starts one more rotation for that project. When a rotation is finished, the previous credentials no longer work. Each rotation starts a new version of the project's live Worker, so WebSocket connections reconnect once.
 
 Use the [platform lifecycle commands](./platform-installation.md#lifecycle-commands) to maintain your installation's Workers.
 
