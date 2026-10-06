@@ -12,6 +12,7 @@ import { hmacSignState } from '../../src/auth/hmac.ts';
 import { signJwt } from '../../src/auth/jwt.ts';
 import { createResource } from '../../src/db.ts';
 import app from '../../src/index.ts';
+import { deriveProxyToken } from '../../src/proxy-token.ts';
 import {
   clearTables,
   createTestDeployment,
@@ -68,6 +69,14 @@ async function internalRequest(
     }),
     env,
   );
+}
+
+async function clearProxyTokenStateCache(): Promise<void> {
+  const moduleUrl = new URL('../../../proxy/src/proxy-token.ts', import.meta.url).href;
+  const proxyToken = (await import(/* @vite-ignore */ moduleUrl)) as {
+    clearProxyTokenStateCache(): void;
+  };
+  proxyToken.clearProxyTokenStateCache();
 }
 
 async function proxyRequest(projectId: string, aiToken: string) {
@@ -160,5 +169,93 @@ describe('per-project token checks', () => {
     });
     expect(prerender.status).toBe(200);
     expect(await prerender.json()).toEqual({ ok: true });
+  });
+});
+
+describe('project token generations', () => {
+  async function liveProject() {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const deployment = await createTestDeployment(env.db, project.id, 'live');
+    await env.ROUTING.put(project.slug, JSON.stringify({ version: deployment.id }));
+    mockCfApi();
+    return project;
+  }
+
+  async function setFloor(projectId: string, value: string) {
+    await env.ROUTING.put(`proxy-token:${projectId}`, value);
+  }
+
+  beforeEach(async () => {
+    await clearProxyTokenStateCache();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  it('accepts tokens at or above the floor at the proxy and rejects the legacy token', async () => {
+    const project = await liveProject();
+    await setFloor(project.id, '{"gen":1}');
+    for (const gen of [1, 2]) {
+      const { response } = await proxyRequest(
+        project.id,
+        await deriveProxyToken(JWT_SECRET, project.id, gen),
+      );
+      expect(response.status).toBe(200);
+    }
+    const { response, run } = await proxyRequest(
+      project.id,
+      await hmacSignState(project.id, JWT_SECRET),
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'invalid project token' });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('accepts the legacy and v2 tokens at /internal/revalidate while no floor is set', async () => {
+    const project = await liveProject();
+    for (const gen of [0, 1]) {
+      const response = await internalRequest(
+        'revalidate',
+        project.id,
+        await deriveProxyToken(JWT_SECRET, project.id, gen),
+        { paths: ['/about'] },
+      );
+      expect(response.status).toBe(200);
+    }
+  });
+
+  it('applies the floor at /internal/revalidate', async () => {
+    const project = await liveProject();
+    await setFloor(project.id, '{"gen":1}');
+    for (const gen of [1, 2]) {
+      const response = await internalRequest(
+        'revalidate',
+        project.id,
+        await deriveProxyToken(JWT_SECRET, project.id, gen),
+        { paths: ['/about'] },
+      );
+      expect(response.status).toBe(200);
+    }
+    const legacy = await internalRequest(
+      'revalidate',
+      project.id,
+      await hmacSignState(project.id, JWT_SECRET),
+      { paths: ['/about'] },
+    );
+    expect(legacy.status).toBe(403);
+    expect(await legacy.json()).toEqual({ error: 'invalid internal auth' });
+  });
+
+  it('fails closed at /internal/revalidate when the floor is malformed', async () => {
+    const project = await liveProject();
+    await setFloor(project.id, 'not json');
+    const response = await internalRequest(
+      'revalidate',
+      project.id,
+      await hmacSignState(project.id, JWT_SECRET),
+      { paths: ['/about'] },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: 'project token state unavailable' });
   });
 });

@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vite-plus/test';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import worker from '../../src/index.ts';
+import { clearProxyTokenStateCache } from '../../src/proxy-token.ts';
 
 const JWT_SECRET = 'test-secret-key';
 
@@ -88,6 +89,8 @@ describe('KV proxy endpoints', () => {
   beforeAll(async () => {
     token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
+
+  beforeEach(clearProxyTokenStateCache);
 
   afterEach(() => {
     globalThis.fetch = originalFetch;

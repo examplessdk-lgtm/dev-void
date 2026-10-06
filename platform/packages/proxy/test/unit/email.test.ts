@@ -18,6 +18,7 @@ vi.mock('cloudflare:email', () => ({
 
 const worker = (await import('../../src/index.ts')).default;
 const { readMimeFromAddrSpec } = await import('../../src/email.ts');
+const { clearProxyTokenStateCache } = await import('../../src/proxy-token.ts');
 // The framework's own MIME builder — the ONLY legitimate producer of the
 // `mimeBase64` a tenant posts — so the proxy's From pin is checked against
 // every `From:` shape it really renders, not against hand-typed lookalikes.
@@ -209,6 +210,14 @@ function happyPathKv(extra: Record<string, string> = {}) {
     ...extra,
   });
 }
+
+/** KV keys read outside the project token check. */
+function nonAuthKvReads(kv: MockKv): Array<string> {
+  return kv.get.mock.calls.map((c) => c[0]).filter((key) => !key.startsWith('proxy-token:'));
+}
+
+// The floor cache lives for the whole isolate; start every test cold.
+beforeEach(clearProxyTokenStateCache);
 
 // --- Inbound helpers ---
 
@@ -462,7 +471,7 @@ describe('POST /email/send — platform capability', () => {
       message: 'This Void platform does not enable email.',
     });
     expect((env.SEND_EMAIL as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
-    expect(kv.get).not.toHaveBeenCalled();
+    expect(nonAuthKvReads(kv)).toEqual([]);
     expect(kv.put).not.toHaveBeenCalled();
   });
 
@@ -736,7 +745,7 @@ describe('POST /email/send — request validation', () => {
     // Refused above the normalization loop, so not one per-recipient
     // delivery object was built.
     expect(body.deliveries).toBeUndefined();
-    expect(kv.get).not.toHaveBeenCalled();
+    expect(nonAuthKvReads(kv)).toEqual([]);
     expect(kv.put).not.toHaveBeenCalled();
     expect(sender.calls).toHaveLength(0);
   });
@@ -776,7 +785,7 @@ describe('POST /email/send — request validation', () => {
     const body = await readSend(res);
     expect(body.error?.code).toBe('INVALID_TO');
     expect(body.deliveries).toBeUndefined();
-    expect(kv.get).not.toHaveBeenCalled();
+    expect(nonAuthKvReads(kv)).toEqual([]);
     expect(kv.put).not.toHaveBeenCalled();
     expect(sender.calls).toHaveLength(0);
   });
@@ -806,7 +815,7 @@ describe('POST /email/send — request validation', () => {
     expect(body.error?.code).toBe('INVALID_FROM');
     expect(body.error?.message).not.toContain(tag);
     expect(body.deliveries).toBeUndefined();
-    expect(kv.get).not.toHaveBeenCalled();
+    expect(nonAuthKvReads(kv)).toEqual([]);
     expect(kv.put).not.toHaveBeenCalled();
     expect(sender.calls).toHaveLength(0);
   });
@@ -852,7 +861,7 @@ describe('POST /email/send — MIME From pin (what the recipient sees)', () => {
     expect(body.error?.code).toBe('INVALID_FROM');
     expect(sender.calls).toHaveLength(0);
     // Refused before the suspension, allowlist and quota reads.
-    expect(kv.get.mock.calls.map((c) => c[0])).toEqual([]);
+    expect(nonAuthKvReads(kv)).toEqual([]);
     expect(kv.put).not.toHaveBeenCalled();
   });
 
@@ -1115,7 +1124,7 @@ describe('POST /email/send — MIME From pin (what the recipient sees)', () => {
       expect(body.error?.code).toBe('INVALID_FROM');
       expect(body.error?.message).toContain('does not match the envelope sender');
       expect(sender.calls).toHaveLength(0);
-      expect(kv.get.mock.calls.map((c) => c[0])).toEqual([]);
+      expect(nonAuthKvReads(kv)).toEqual([]);
     });
 
     it.each([
