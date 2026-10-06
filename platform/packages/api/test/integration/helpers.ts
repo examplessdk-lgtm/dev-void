@@ -5,6 +5,7 @@ import { drizzle } from 'drizzle-orm/pglite';
 import pg from 'pg';
 import { vi } from 'vite-plus/test';
 import { signJwt } from '../../src/auth/jwt.ts';
+import type { CronSyncState } from '../../src/cron-scheduler-client.ts';
 import type { Db } from '../../src/db.ts';
 import { generateId } from '../../src/id.ts';
 import { encryptProjectSecret } from '../../src/project-secrets.ts';
@@ -432,6 +433,47 @@ export async function captureQueries<T>(
   } finally {
     capture.active = false;
   }
+}
+
+/** Queries captured so far by the active `captureQueries` on `db`. */
+export function capturedQueryCount(db: Db): number {
+  const capture = queryCaptures.get(db);
+  if (!capture?.active) {
+    throw new Error('no query capture is active');
+  }
+  return capture.queries.length;
+}
+
+/**
+ * Stateful CronScheduler namespace: `/sync` stores the posted state per
+ * project, `/snapshot` returns it, `/clear` removes it. Records every call.
+ */
+export function createCronSchedulerMock(): {
+  namespace: DurableObjectNamespace;
+  states: Map<string, CronSyncState>;
+  calls: Array<{ name: string; path: string }>;
+} {
+  const states = new Map<string, CronSyncState>();
+  const calls: Array<{ name: string; path: string }> = [];
+  const namespace = {
+    idFromName: (name: string) => ({ toString: () => name }),
+    get: (id: { toString(): string }) => ({
+      fetch: async (request: Request) => {
+        const name = id.toString();
+        const path = new URL(request.url).pathname;
+        calls.push({ name, path });
+        if (path === '/sync') {
+          states.set(name, (await request.json()) as CronSyncState);
+        } else if (path === '/clear') {
+          states.delete(name);
+        } else if (path === '/snapshot') {
+          return Response.json({ state: states.get(name) ?? null });
+        }
+        return Response.json({ ok: true });
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  return { namespace, states, calls };
 }
 
 export async function setupEnv(): Promise<TestEnv> {
@@ -1054,6 +1096,7 @@ export type CfApiMocks = {
   // Dispatch script / container-app endpoints. State-aware defaults are wired
   // up when overrides are not supplied. Tests can still override individually.
   getDispatchScript?: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  patchScriptSettings?: (url: string, init?: RequestInit) => Response | Promise<Response>;
   createContainerApp?: (url: string, init?: RequestInit) => Response | Promise<Response>;
   patchContainerApp?: (url: string, init?: RequestInit) => Response | Promise<Response>;
   deleteContainerApp?: (url: string, init?: RequestInit) => Response | Promise<Response>;
@@ -1365,6 +1408,42 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
     });
   };
 
+  // PATCH dispatch script settings — the binding list replaces the stored one:
+  // `inherit` keeps the stored binding of that name (unknown name → 400) and a
+  // name left out is removed. Echoes the new bindings like Cloudflare does.
+  const defaultPatchScriptSettings = async (url: string, init?: RequestInit): Promise<Response> => {
+    const scriptName = parseScriptNameFromUrl(url);
+    const script = scriptName ? state.hostScripts.get(scriptName) : undefined;
+    if (!script) {
+      return cfError('workers.api.error.script_not_found', 404, 10007);
+    }
+    const part = init?.body instanceof FormData ? init.body.get('settings') : null;
+    const settings = (
+      part instanceof Blob
+        ? JSON.parse(await part.text())
+        : typeof part === 'string'
+          ? JSON.parse(part)
+          : null
+    ) as { bindings?: Array<{ type: string; name: string; [key: string]: unknown }> } | null;
+    if (!Array.isArray(settings?.bindings)) {
+      return cfError('settings.bindings is required', 400);
+    }
+    const bindings: SandboxMockHostScript['bindings'] = [];
+    for (const binding of settings.bindings) {
+      if (binding.type !== 'inherit') {
+        bindings.push(binding);
+        continue;
+      }
+      const stored = script.bindings.find((entry) => entry.name === binding.name);
+      if (!stored) {
+        return cfError(`cannot inherit unknown binding ${binding.name}`, 400);
+      }
+      bindings.push(stored);
+    }
+    script.bindings = bindings;
+    return cfSuccess({ bindings });
+  };
+
   // Container app handlers.
   const defaultListContainerApps = (url: string): Response => {
     const name = parseAppNameQuery(url);
@@ -1511,6 +1590,7 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
     listWorkerBindings: defaultListWorkerBindings,
     deleteWorker: defaultDeleteWorker,
     getDispatchScript: defaultGetDispatchScript,
+    patchScriptSettings: defaultPatchScriptSettings,
     createContainerApp: defaultCreateContainerApp,
     patchContainerApp: defaultPatchContainerApp,
     deleteContainerApp: defaultDeleteContainerApp,
@@ -1662,6 +1742,9 @@ export function mockCfApi(overrides: Partial<CfApiMocks> = {}): MockCfApiHandle 
     }
     if (method === 'GET' && url.includes('/workers/dispatch/') && url.includes('/bindings')) {
       return mocks.listWorkerBindings(url, init);
+    }
+    if (method === 'PATCH' && url.includes('/workers/dispatch/') && url.endsWith('/settings')) {
+      return mocks.patchScriptSettings!(url, init);
     }
     // GET on a dispatch script (no /bindings, no /secrets) — read the
     // script's metadata + migration_tag. Must come AFTER /bindings and
