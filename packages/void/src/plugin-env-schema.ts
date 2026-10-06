@@ -1,6 +1,7 @@
-import { mkdirSync } from 'node:fs';
-import { join } from 'pathslash';
-import { type Plugin, type ResolvedConfig } from 'vite';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { parseEnv } from 'node:util';
+import { join, resolve } from 'pathslash';
+import { loadEnv, resolveEnvPrefix, type Plugin, type ResolvedConfig } from 'vite';
 import { findEnvFile, generateEnvTypes } from './codegen/env-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
 import { loadUserEnvFile } from './host/load-user-env.ts';
@@ -31,6 +32,40 @@ export type EnvSchemaFacts = {
   serverKeys: Array<string>;
   requiredServerKeys: Array<string>;
 };
+
+/**
+ * Delete the client values Vite took from `<root>/.env` during a build.
+ * Keys come from Vite's own parser (`node:util` `parseEnv`), so every key
+ * Vite read is covered. A key stays when the shell or the `vp run` task
+ * runner supplies it: `loadEnv` with `envDir: false` returns exactly those
+ * values. Nothing is stripped when Vite loads env files from another
+ * `envDir` (or none), since `<root>/.env` was not the source.
+ */
+function stripLocalClientEnv(root: string, config: ResolvedConfig): void {
+  if (config.envDir === false || realDir(config.envDir) !== realDir(root)) {
+    return;
+  }
+  const file = join(root, LOCAL_ENV_FILE);
+  if (!existsSync(file)) {
+    return;
+  }
+  const prefixes = resolveEnvPrefix({ envPrefix: config.envPrefix });
+  const shell = loadEnv(config.mode, false, prefixes);
+  for (const key of Object.keys(parseEnv(readFileSync(file, 'utf8')))) {
+    if (shell[key] === undefined && prefixes.some((prefix) => key.startsWith(prefix))) {
+      delete config.env[key];
+    }
+  }
+}
+
+/** Vite resolves symlinks in `root` (and so `envDir`); compare real paths. */
+function realDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+}
 
 /** Patterns Vite's `define` typically uses for env-shaped constants. */
 const DEFINE_ENV_PATTERN =
@@ -249,12 +284,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // pass. CI/shell values remain available, and schema defaults are added
       // immediately below.
       if (command === 'build') {
-        const local = loadLocalEnv(root, { onWarn: (message) => voidWarn(message) });
-        for (const [key, value] of Object.entries(local)) {
-          if (process.env[key] === undefined && config.env[key] === value) {
-            delete config.env[key];
-          }
-        }
+        stripLocalClientEnv(root, config);
       }
       await applyClientValuesToViteEnv(config);
 

@@ -69,6 +69,47 @@ describe('parseDotenv', () => {
   });
 });
 
+describe('parseDotenv — lines Vite and Wrangler both read', () => {
+  // Expected values come from running Vite's parser (node:util parseEnv)
+  // and Wrangler's (dotenv 16.3.1) on the same lines; both agree on these.
+  it.each([
+    ['export A=1', { A: '1' }],
+    ['export  B = 2', { B: '2' }],
+    ['  export C=3', { C: '3' }],
+    ['export J="q"', { J: 'q' }],
+    ["export K='q'", { K: 'q' }],
+    ['export=5', { export: '5' }],
+    ['export =6', { export: '6' }],
+    ['exportE=7', { exportE: '7' }],
+    ['export F', {}],
+  ])('%j', (line, expected) => {
+    expect(parseDotenv(line, { expand: false })).toEqual(expected);
+  });
+
+  it('lets a later export line win over an earlier plain line', () => {
+    expect(parseDotenv('VITE_A=2\nexport VITE_A=1\n')).toEqual({ VITE_A: '1' });
+  });
+
+  it('expands references to exported keys', () => {
+    expect(parseDotenv('export BASE=https://a.com\nURL=${BASE}/v1\n')).toEqual({
+      BASE: 'https://a.com',
+      URL: 'https://a.com/v1',
+    });
+  });
+
+  // The runtimes disagree on these, so Void reads neither.
+  it.each([
+    // Wrangler reads K=v; Vite does not read the line.
+    ['K: v'],
+    // Wrangler reads D=4; Vite reads the key "export\tD".
+    ['export\tD=4'],
+    // Vite reads the key "export H"; Wrangler does not read the line.
+    ['export export H=9'],
+  ])('skips %j', (line) => {
+    expect(parseDotenv(line)).toEqual({});
+  });
+});
+
 describe('parseDotenvFile', () => {
   it('returns {} for a missing file', () => {
     expect(parseDotenvFile('/definitely/not/a/real/path/.env')).toEqual({});

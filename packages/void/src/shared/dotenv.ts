@@ -1,6 +1,16 @@
 /**
  * Shared dotenv parser + variable expander used by local `.env` consumers.
  *
+ * Grammar: Void reads a line only when both runtimes that consume `.env`
+ * read it — Vite (`node:util` `parseEnv`, client `VITE_` keys) and
+ * Wrangler (dotenv 16, the dev Worker). That is `KEY=VALUE` with an optional
+ * `export ` prefix (`export` plus one or more spaces). The key and value are
+ * trimmed, and one pair of matching single or double quotes around the value
+ * is removed; the value is otherwise kept as written (no inline `#` comment
+ * stripping, escape decoding, or multi-line values), so such a value can differ
+ * from what Vite or Wrangler read. `KEY: value` is not read:
+ * Wrangler accepts it but Vite does not, so the two would disagree.
+ *
  * Expansion supports `${VAR}` and `$VAR`, a `\$VAR` literal-escape, and
  * transitive references across earlier entries in the same record. Cycles
  * are detected and fall through to the raw literal rather than looping.
@@ -37,10 +47,13 @@ export type ParseDotenvLineResult = {
   value: string;
 };
 
+/** `export` + spaces before a key. Tab is left out: Vite then reads `export\tKEY` as the key. */
+const EXPORT_PREFIX = /^export +/;
+
 /**
- * Parse a single `KEY=VALUE` line into `{ key, value }`, stripping matching
- * single/double quotes around the value. Returns `null` for blanks, comments,
- * and non-assignment lines.
+ * Parse a single `KEY=VALUE` or `export KEY=VALUE` line into
+ * `{ key, value }`, stripping matching single/double quotes around the
+ * value. Returns `null` for blanks, comments, and non-assignment lines.
  */
 export function parseDotenvLine(line: string): ParseDotenvLineResult | null {
   const trimmed = line.trim();
@@ -51,7 +64,7 @@ export function parseDotenvLine(line: string): ParseDotenvLineResult | null {
   if (equalsIndex === -1) {
     return null;
   }
-  const key = trimmed.slice(0, equalsIndex).trim();
+  const key = trimmed.slice(0, equalsIndex).trim().replace(EXPORT_PREFIX, '').trim();
   let value = trimmed.slice(equalsIndex + 1).trim();
   if (
     (value.startsWith('"') && value.endsWith('"')) ||

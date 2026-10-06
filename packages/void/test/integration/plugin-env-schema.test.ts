@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveConfig } from 'vite';
+import { build, resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
 import { envSchemaPlugin } from '../../src/plugin-env-schema.ts';
@@ -50,6 +50,26 @@ async function runConfigResolved(
     const handler = (hook as { handler: (c: unknown) => unknown }).handler;
     await handler.call({}, resolved);
   }
+}
+
+async function buildEntry(root: string, config: { envDir?: string } = {}): Promise<string> {
+  const output = await build({
+    ...config,
+    root,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [envSchemaPlugin(root)],
+    build: {
+      write: false,
+      minify: false,
+      rollupOptions: { input: join(root, 'entry.js'), preserveEntrySignatures: 'strict' },
+    },
+  });
+  return [output]
+    .flat()
+    .flatMap((result) => ('output' in result ? result.output : []))
+    .map((chunk) => ('code' in chunk ? chunk.code : ''))
+    .join('\n');
 }
 
 afterEach(() => {
@@ -176,6 +196,57 @@ describe('envSchemaPlugin auto-discovery', () => {
 
     await expect(runConfigResolved(plugin, resolved)).rejects.toThrow('VITE_TITLE is required');
     expect(resolved.env.VITE_TITLE).toBeUndefined();
+  });
+
+  it('keeps every local .env client value out of a production client build', async () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, '.env'),
+      [
+        'export VITE_B=local-export',
+        // Vite drops the inline comment, so its value differs from Void's.
+        'VITE_C=local-comment # note',
+        'VITE_D=local-plain',
+        // Vite reads this key; Void's own parser skips it.
+        'VITE_E.F=local-dot',
+        'MODE=local-mode',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(root, 'entry.js'), 'export const env = import.meta.env;\n');
+    for (const key of ['VITE_B', 'VITE_C', 'VITE_D', 'VITE_E.F', 'MODE']) {
+      vi.stubEnv(key, undefined);
+    }
+
+    const code = await buildEntry(root);
+
+    expect(code).not.toContain('local-');
+    expect(code).toContain('"production"');
+  });
+
+  it('keeps a shell value for a key that is also in .env', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'VITE_API=local-api\n');
+    writeFileSync(join(root, 'entry.js'), 'export const api = import.meta.env.VITE_API;\n');
+    vi.stubEnv('VITE_API', 'shell-api');
+
+    const code = await buildEntry(root);
+
+    expect(code).toContain('"shell-api"');
+    expect(code).not.toContain('local-api');
+  });
+
+  it('keeps values Vite loads from another envDir', async () => {
+    const root = createTempRoot();
+    mkdirSync(join(root, 'envs'));
+    writeFileSync(join(root, '.env'), 'VITE_API=local-api\n');
+    writeFileSync(join(root, 'envs', '.env.production'), 'VITE_API=prod-api\n');
+    writeFileSync(join(root, 'entry.js'), 'export const api = import.meta.env.VITE_API;\n');
+    vi.stubEnv('VITE_API', undefined);
+
+    const code = await buildEntry(root, { envDir: 'envs' });
+
+    expect(code).toContain('"prod-api"');
   });
 
   it('reports server and required names without values', async () => {
