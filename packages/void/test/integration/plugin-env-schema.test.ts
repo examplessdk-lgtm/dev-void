@@ -346,3 +346,59 @@ describe('envSchemaPlugin auto-discovery', () => {
     expect(resolved.env).toEqual({ VITE_TITLE: 'Vite' });
   });
 });
+
+describe('envSchemaPlugin reserved __VOID_ names', () => {
+  async function runConfigFor(root: string, command: 'serve' | 'build'): Promise<void> {
+    const handler = envSchemaPlugin(root).config as (c: unknown, e: unknown) => Promise<void>;
+    await handler.call(
+      {},
+      {},
+      { command, mode: command === 'build' ? 'production' : 'development' },
+    );
+  }
+
+  afterEach(async () => {
+    const { defineEnv } = await import('../../src/runtime/env-public.ts');
+    defineEnv({});
+  });
+
+  for (const command of ['serve', 'build'] as const) {
+    for (const withEnvTs of [false, true]) {
+      it.each(['__VOID_PROXY_TOKEN', '__VOID_EMAIL_FROM'])(
+        `rejects %s in .env (${command}, env.ts: ${withEnvTs})`,
+        async (key) => {
+          const root = createTempRoot();
+          if (withEnvTs) {
+            writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+          }
+          writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${key}=local\n`);
+
+          await expect(runConfigFor(root, command)).rejects.toThrow(
+            `.env defines names reserved for Void: ${key}. Void sets these itself; remove them. ` +
+              'To trigger crons or queues locally, use the x-void-dev-trigger header printed at dev start.',
+          );
+        },
+      );
+    }
+
+    it(`accepts a normal .env and a reserved name set only in the shell (${command})`, async () => {
+      const root = createTempRoot();
+      writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');
+      vi.stubEnv('__VOID_PROXY_TOKEN', 'from-shell');
+
+      await expect(runConfigFor(root, command)).resolves.toBeUndefined();
+    });
+
+    it(`rejects a reserved name declared in env.ts (${command})`, async () => {
+      const { defineEnv } = await import('../../src/runtime/env-public.ts');
+      const { string } = await import('../../src/runtime/env-helpers.ts');
+      const root = createTempRoot();
+      writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+      defineEnv({ API_URL: string(), __VOID_X: string().optional() });
+
+      await expect(runConfigFor(root, command)).rejects.toThrow(
+        'env.ts declares names reserved for Void: __VOID_X.',
+      );
+    });
+  }
+});

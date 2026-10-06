@@ -40,7 +40,7 @@ import {
   isViteBuildOrPreview,
   getOrCreateDevTriggerToken,
 } from './plugin-dev-config.ts';
-import { devTriggersHintPlugin, workerConfigDeclaresSecrets } from './plugin-dev-triggers-hint.ts';
+import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { emailDevInboxPlugin } from './plugin-email-dev-inbox.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
@@ -74,12 +74,7 @@ import { assertNoRootSourceConventionConflicts } from './project-paths.ts';
 import { hasEmailHandlers } from './router/email.ts';
 import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/parse-filename.ts';
 import { resolveSandboxConfig } from './sandbox/config.ts';
-import {
-  CLOUDFLARE_DEPLOY_BUILD_ENV,
-  loadLocalEnv,
-  resolveRemoteMode,
-  stripInternalEnvKeys,
-} from './shared/env.ts';
+import { CLOUDFLARE_DEPLOY_BUILD_ENV, loadLocalEnv, resolveRemoteMode } from './shared/env.ts';
 import { validateSsrEntry } from './ssr/entry.ts';
 
 const scheduledPointerCleanups = new Set<string>();
@@ -383,17 +378,11 @@ export function voidPlugin(options?: {
   const outDir = join(root, '.void');
   mkdirSync(outDir, { recursive: true });
 
-  // Wrangler loads `.env` into the dev Worker itself; once the final config
-  // declares `secrets`, it loads only declared keys, so the stripped
-  // `__VOID_PROXY_TOKEN` never reaches the Worker. The dev-triggers hint
-  // reads this to print the header the dispatcher will accept.
-  let devWorkerDeclaresSecrets = false;
-
   // Config function that merges inferred bindings with the resolved Cloudflare
   // config. Bindings already declared there (with real IDs) take precedence;
   // placeholders are added only for inferred bindings that are missing.
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
-    const result = mergeWorkerBindings(resolved, {
+    return mergeWorkerBindings(resolved, {
       websocketRoutes,
       routeEnvironment,
       workerConfig,
@@ -421,8 +410,6 @@ export function voidPlugin(options?: {
         versionMetadataBinding = value;
       },
     });
-    devWorkerDeclaresSecrets = workerConfigDeclaresSecrets(result, resolved);
-    return result;
   }
 
   function applyEnvSchema(facts: EnvSchemaFacts): void {
@@ -478,17 +465,13 @@ export function voidPlugin(options?: {
         // Keep the dev Worker on the same values that env-schema validation
         // sees. Shell values override .env, and shell-only values are included
         // only when declared by the schema. Never copy unrelated host secrets.
-        const devEnv = { ...local };
+        // envSchemaPlugin rejects `__VOID_*` names in .env and env.ts, so no
+        // reserved key can enter here.
+        const env = { ...local };
         for (const key of new Set([...Object.keys(local), ...(envSchemaFacts?.keys ?? [])])) {
           if (process.env[key] !== undefined) {
-            devEnv[key] = process.env[key];
+            env[key] = process.env[key];
           }
-        }
-        const { sanitized: env, stripped } = stripInternalEnvKeys(devEnv);
-        if (stripped.length > 0) {
-          voidWarn(
-            `Ignoring internal env keys from .env: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
-          );
         }
         workerConfig.vars = {
           ...(workerConfig.vars as Record<string, string> | undefined),
@@ -836,11 +819,7 @@ export function voidPlugin(options?: {
       ...(vinextWorkerEntry ? [vinextWorkerEntry] : []),
       frameworkBuildWrapperPlugin,
       frameworkTriggersPlugin(root, { devTriggerToken }),
-      devTriggersHintPlugin(root, {
-        framework: true,
-        devTriggerToken,
-        workerDeclaresSecrets: () => devWorkerDeclaresSecrets,
-      }),
+      devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
       ...cloudflare({
         configPath: cloudflareConfigPath,
         ...inspectorPortOption,
@@ -1082,11 +1061,7 @@ export function voidPlugin(options?: {
       configPath: authConfigPath,
     }),
     prerenderPlugin(root, config),
-    devTriggersHintPlugin(root, {
-      framework: false,
-      devTriggerToken,
-      workerDeclaresSecrets: () => devWorkerDeclaresSecrets,
-    }),
+    devTriggersHintPlugin(root, { framework: false, devTriggerToken }),
     ...cloudflare({
       configPath: cloudflareConfigPath,
       ...inspectorPortOption,

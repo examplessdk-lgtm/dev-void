@@ -82,13 +82,40 @@ export function resolveRemoteMode(configRemote: boolean | undefined): boolean {
 }
 
 /**
+ * Names starting with this prefix are reserved for Void. Void sets them
+ * itself (proxy credentials, email and AI wiring), so `.env` and `env.ts`
+ * must not define them: Wrangler loads `.env` into the dev Worker on its own
+ * and writes it over `vars`, so dropping keys from `vars` cannot keep them
+ * out. `envSchemaPlugin` and `void env check` reject them instead.
+ */
+export const RESERVED_ENV_PREFIX = '__VOID_';
+
+/** Names in `keys` that use the reserved `__VOID_` prefix, in input order. */
+export function findReservedEnvKeys(keys: Iterable<string>): Array<string> {
+  return Array.from(keys).filter((key) => key.startsWith(RESERVED_ENV_PREFIX));
+}
+
+/**
+ * The error for reserved names found in `.env` or `env.ts`. Shared by the
+ * Vite plugin and `void env check` so both print the same text.
+ */
+export function reservedEnvKeysMessage(source: '.env' | 'env.ts', keys: Array<string>): string {
+  const verb = source === '.env' ? 'defines' : 'declares';
+  return (
+    `${source} ${verb} names reserved for Void: ${keys.join(', ')}. ` +
+    'Void sets these itself; remove them. To trigger crons or queues locally, use the ' +
+    'x-void-dev-trigger header printed at dev start.'
+  );
+}
+
+/**
  * Internal env keys reserved for Void runtime use. These are how the Vite
  * plugin and deploy pipeline pass credential/runtime state to workerd. None
  * of them should ever originate from user-authored `.env` files, shell env,
- * or CI config — if they do, we strip them and warn at the call site.
+ * or CI config. `.env` and `env.ts` are rejected up front (see
+ * `RESERVED_ENV_PREFIX`); prerender still strips these from its inputs.
  *
- * Callers: `index.ts` envPlugin.config (dev wrangler.json vars) and
- * `prerender.ts` buildPrerenderBindings (CF prerender subprocess bindings).
+ * Caller: `prerender.ts` buildPrerenderBindings (CF prerender subprocess bindings).
  */
 export const INTERNAL_ENV_KEYS = [
   '__VOID_ACCESS_CREDENTIALS',

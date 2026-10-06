@@ -41,6 +41,8 @@ VITE_API_ORIGIN=http://localhost:5173
 
 Keep `.env` out of Git. Other dotenv files, including `.env.local`, `.env.production`, `.env.example`, and Wrangler’s `.dev.vars*`, are not supported.
 
+Names starting with `__VOID_` are reserved for Void. Void stops with an error if `.env` or `env.ts` defines one.
+
 Run the local check at any time:
 
 ```sh

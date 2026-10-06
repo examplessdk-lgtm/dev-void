@@ -422,16 +422,18 @@ export default (controller, env) => env.run();`,
         { headers: { 'x-void-dev-trigger': 'wrong' }, authorized: false },
         { headers: { 'x-void-internal': 'proxy' }, authorized: false },
         { headers: { 'x-void-dev-trigger': 'tk' }, authorized: true },
-        { headers: { 'x-void-dev-trigger': 'tk' }, proxyToken: 'proxy', authorized: false },
+        // A proxy token in the dev Worker env never changes the dev rule.
+        { headers: { 'x-void-dev-trigger': 'tk' }, proxyToken: 'proxy', authorized: true },
         {
           headers: { 'x-void-dev-trigger': 'tk', 'x-void-internal': 'wrong' },
           proxyToken: 'proxy',
-          authorized: false,
+          authorized: true,
         },
+        { headers: { 'x-void-internal': 'proxy' }, proxyToken: 'proxy', authorized: false },
         {
           headers: { 'x-void-dev-trigger': 'wrong', 'x-void-internal': 'proxy' },
           proxyToken: 'proxy',
-          authorized: true,
+          authorized: false,
         },
       ];
       for (const { headers, proxyToken, authorized } of cases) {

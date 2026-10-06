@@ -117,6 +117,15 @@ describe('void env check (subprocess)', () => {
     expect(stdout).toContain('only .env is supported');
     expect(stdout).toContain('.env.local');
   });
+
+  it('rejects names reserved for Void in .env', () => {
+    const root = createProject('{ STRIPE_KEY: string() }');
+    writeFileSync(join(root, '.env'), 'STRIPE_KEY=sk_dev\n__VOID_PROXY_TOKEN=local\n');
+    const { stdout, status } = runVoid(root, ['env', 'check']);
+    expect(status).toBe(1);
+    expect(stdout).toContain('.env defines names reserved for Void: __VOID_PROXY_TOKEN.');
+    expect(stdout).toContain('x-void-dev-trigger');
+  });
 });
 
 describe('void env types (subprocess)', () => {

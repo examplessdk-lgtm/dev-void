@@ -548,6 +548,88 @@ describe('voidPlugin dev asset routing', () => {
     expect(config.vars).not.toHaveProperty('VOID_TEST_UNRELATED');
   });
 
+  it('keeps reserved names set only in the shell out of the dev Worker', async () => {
+    const root = createProjectRoot();
+    writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');
+    vi.stubEnv('__VOID_PROXY_TOKEN', 'from-shell');
+    vi.stubEnv('__VOID_EMAIL_FROM', 'from-shell');
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const { voidPlugin } = await import('../../src/index.ts');
+    const plugins = voidPlugin();
+    const schemaPlugin = plugins.find((plugin) => plugin.name === 'void:env-schema');
+    const schemaConfig = getHookHandler(schemaPlugin?.config) as (
+      config: import('vite').UserConfig,
+      env: import('vite').ConfigEnv,
+    ) => Promise<void>;
+    await expect(schemaConfig({}, { command: 'serve', mode: 'development' })).resolves.toBe(
+      undefined,
+    );
+
+    const envPlugin = plugins.find((plugin) => plugin.name === 'void:env');
+    const envConfig = getHookHandler(envPlugin?.config) as (
+      config: import('vite').UserConfig,
+      env: import('vite').ConfigEnv,
+    ) => void;
+    envConfig({}, { command: 'serve', mode: 'development' });
+
+    const cloudflarePlugin = plugins.find(
+      (plugin): plugin is MockCloudflarePlugin => plugin.name === 'mock:cloudflare',
+    );
+    const config = cloudflarePlugin!.api.pluginConfig.config({});
+    expect(config.vars).toMatchObject({ API_URL: 'http://localhost' });
+    expect(config.vars).not.toHaveProperty('__VOID_PROXY_TOKEN');
+    expect(config.vars).not.toHaveProperty('__VOID_EMAIL_FROM');
+  });
+
+  function createSvelteKitProjectRoot(): string {
+    const root = createProjectRoot();
+    mkdirSync(join(root, 'src/routes'), { recursive: true });
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', dependencies: { '@sveltejs/kit': '2.0.0' } }),
+    );
+    return root;
+  }
+
+  const reservedEnvApps = [
+    ['native', createProjectRoot],
+    ['Class A framework', createFrameworkProjectRoot],
+    ['Class B/C framework', createSvelteKitProjectRoot],
+    ['Node target', createNodeProjectRoot],
+  ] as const;
+
+  for (const [label, createRoot] of reservedEnvApps) {
+    for (const command of ['serve', 'build'] as const) {
+      for (const requiredEnvKey of [false, true]) {
+        it(`stops ${label} ${command} on a reserved .env name (env.ts with required key: ${requiredEnvKey})`, async () => {
+          const root = createRoot();
+          if (requiredEnvKey) {
+            writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+            const { defineEnv } = await import('../../src/runtime/env-public.ts');
+            const { string } = await import('../../src/runtime/env-helpers.ts');
+            defineEnv({ API_KEY: string() });
+          }
+          writeFileSync(join(root, '.env'), 'API_KEY=k\n__VOID_PROXY_TOKEN=local\n');
+          vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+          const { voidPlugin } = await import('../../src/index.ts');
+          const schemaPlugins = voidPlugin().filter((plugin) => plugin.name === 'void:env-schema');
+          expect(schemaPlugins).toHaveLength(1);
+          const schemaConfig = getHookHandler(schemaPlugins[0]!.config) as (
+            config: import('vite').UserConfig,
+            env: import('vite').ConfigEnv,
+          ) => Promise<void>;
+          await expect(
+            schemaConfig({}, { command, mode: command === 'build' ? 'production' : 'development' }),
+          ).rejects.toThrow(
+            '.env defines names reserved for Void: __VOID_PROXY_TOKEN. Void sets these itself',
+          );
+        });
+      }
+    }
+  }
+
   it('enables remote mode on an explicit Workers AI binding during direct development', async () => {
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
     const config = await resolveCloudflareConfig(createAiProjectRoot('cloudflare'), {

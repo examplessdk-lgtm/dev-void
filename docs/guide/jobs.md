@@ -70,8 +70,6 @@ curl -X POST http://localhost:5173/__void/scheduled \
   -d '{"cron":"0 * * * *","scheduledTime":'"$(date +%s000)"'}'
 ```
 
-If you set `__VOID_PROXY_TOKEN` in `.env`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
-
 The endpoint works in native Void apps and supported frameworks. Framework jobs run in the adapter's development runtime and use the bindings it provides.
 
 ## Deployment behavior

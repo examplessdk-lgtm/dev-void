@@ -117,6 +117,7 @@ type RoutingPluginOptions = {
 export function routingPlugin(root: string, options: RoutingPluginOptions): Plugin {
   let scan: ScanResult | null = null;
   let routeEnvironment: RouteEnvironment = 'prod';
+  let previewing = false;
   let ssr: SsrCompileOptions | null = null;
   let authConfigPath: string | null = null;
   const paths = readProjectPaths(root);
@@ -521,7 +522,9 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     configResolved(config) {
       resolvedConfig = config;
       authClientPath = resolveAuthClientPath(config);
-      compileOptions.dev = config.command === 'serve';
+      // `vite preview` reports `command: 'serve'` but runs the built bundle,
+      // so it never compiles the route table as dev.
+      compileOptions.dev = config.command === 'serve' && !previewing;
       compileOptions.assetsDir = config.build.assetsDir;
       compileOptions.reactRefresh = config.plugins.some(
         (plugin) =>
@@ -540,6 +543,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       }
     },
     config(_, env) {
+      previewing = env.isPreview === true;
       routeEnvironment = env.command === 'serve' && !env.isPreview ? 'dev' : 'prod';
       // The Void environment hook has selected the route-specific binding set
       // before this hook runs. Keep route compilation aligned with the Worker

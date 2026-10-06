@@ -1,21 +1,9 @@
-import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import { scanJobsSync } from './crons/scan.ts';
 import { voidLog } from './log.ts';
 import { afterServerReady } from './plugin-dev-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import { scanQueuesSync } from './queues/scan.ts';
-import { parseDotenvFile } from './shared/dotenv.ts';
-
-/**
- * True when a dev Worker config declares `secrets`. Wrangler then loads only
- * declared `.env` keys into the Worker, so `__VOID_PROXY_TOKEN` stays out.
- */
-export function workerConfigDeclaresSecrets(
-  ...configs: Array<{ readonly secrets?: unknown } | undefined>
-): boolean {
-  return configs.some((config) => Boolean(config?.secrets));
-}
 
 /**
  * Prints a one-shot hint on dev server start when the project has crons
@@ -25,12 +13,7 @@ export function workerConfigDeclaresSecrets(
  */
 export function devTriggersHintPlugin(
   root: string,
-  options: {
-    framework: boolean;
-    devTriggerToken: string;
-    /** See `workerConfigDeclaresSecrets`. Read after the dev server starts. */
-    workerDeclaresSecrets: () => boolean;
-  },
+  options: { framework: boolean; devTriggerToken: string },
 ): Plugin {
   const { devTriggerToken } = options;
   return {
@@ -62,16 +45,9 @@ export function devTriggersHintPlugin(
 
         console.log();
         voidLog(`Detected ${summary.join(' and ')}. Trigger locally:`);
-        // Mirror the dispatcher's auth: a configured `__VOID_PROXY_TOKEN`
-        // (the platform's prod handshake) requires `x-void-internal`;
-        // otherwise the dev-trigger token is accepted. The Worker only sees
-        // the `.env` value when Wrangler loads undeclared keys.
-        const configuredProxyToken = options.workerDeclaresSecrets()
-          ? undefined
-          : parseDotenvFile(join(root, '.env'), { expand: false }).__VOID_PROXY_TOKEN;
-        const authHeader = configuredProxyToken
-          ? `x-void-internal: ${configuredProxyToken}`
-          : `x-void-dev-trigger: ${devTriggerToken}`;
+        // Dev dispatchers accept only this header (see the serve branch in
+        // router/compile.ts and the framework triggers dispatcher).
+        const authHeader = `x-void-dev-trigger: ${devTriggerToken}`;
 
         if (jobs.length > 0) {
           const sample = jobs[0].crons[0];

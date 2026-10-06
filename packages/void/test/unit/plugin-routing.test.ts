@@ -477,4 +477,45 @@ describe('routingPlugin', () => {
       'virtual:void-routes',
     ]);
   });
+
+  // Manual trigger auth is baked into the route table: dev accepts only the
+  // dev trigger header. `vite preview` reports `command: 'serve'` but runs
+  // the built bundle, so it must keep the build rule.
+  it.each([
+    { command: 'serve' as const, isPreview: false, serve: true },
+    { command: 'serve' as const, isPreview: true, serve: false },
+    { command: 'build' as const, isPreview: false, serve: false },
+  ])(
+    'compiles trigger auth for $command (preview: $isPreview) as serve=$serve',
+    async ({ command, isPreview, serve }) => {
+      const root = createTempRoot();
+      mkdirSync(join(root, 'crons'), { recursive: true });
+      writeFileSync(
+        join(root, 'crons', 'sync.ts'),
+        'export const cron = "0 * * * *";\nexport default async () => {};\n',
+      );
+
+      const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+      const config = getHookHandler(plugin.config) as (
+        config: import('vite').UserConfig,
+        env: import('vite').ConfigEnv,
+      ) => unknown;
+      const configResolved = getHookHandler(plugin.configResolved) as (
+        config: import('vite').ResolvedConfig,
+      ) => void;
+      const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
+
+      config({}, { command, mode: command === 'build' ? 'production' : 'development', isPreview });
+      configResolved({
+        build: { assetsDir: 'assets' },
+        command,
+        mode: 'development',
+        plugins: [],
+      } as unknown as import('vite').ResolvedConfig);
+
+      const code = await load('virtual:void-routes');
+      expect(code).toContain('app.post("/__void/scheduled"');
+      expect(code).toContain(`const __VOID_SERVE = ${serve};`);
+    },
+  );
 });

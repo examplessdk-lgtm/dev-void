@@ -137,6 +137,4 @@ curl -X POST http://localhost:5173/__void/queue \
   -d '{"queue":"my-queue","messages":[{"id":"1","timestamp":'"$(date +%s000)"',"body":{"hello":"world"},"attempts":1}]}'
 ```
 
-If you set `__VOID_PROXY_TOKEN` in `.env`, that explicit token takes precedence and the printed curl command uses `x-void-internal: <your-token>` instead.
-
 In supported meta-frameworks, use `/__void/queue` to test a consumer manually. It runs inside the framework adapter's development runtime with that adapter's bindings. Sending to a queue binding doesn't automatically invoke the consumer in this mode.

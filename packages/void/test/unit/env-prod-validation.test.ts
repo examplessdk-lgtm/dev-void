@@ -197,4 +197,54 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
     // Key name is still there so the user can find it.
     expect(formatted).toContain('VITE_PORT');
   });
+
+  it('rejects reserved __VOID_ names in .env for a local check, with or without env.ts', async () => {
+    for (const withEnvTs of [true, false]) {
+      const root = createTempProject({ withEnvTs });
+      writeDotenv(
+        root,
+        '.env',
+        'API_URL=http://localhost\n__VOID_PROXY_TOKEN=x\n__VOID_EMAIL_FROM=y\n',
+      );
+
+      const error = await validateProdEnv(root, { productionOnly: false }).catch((e: Error) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        '.env defines names reserved for Void: __VOID_PROXY_TOKEN, __VOID_EMAIL_FROM.',
+      );
+      expect((error as Error).message).toContain('Void sets these itself');
+      expect((error as Error).message).toContain('x-void-dev-trigger header printed at dev start');
+    }
+  });
+
+  it('does not read .env names during production validation', async () => {
+    const root = createTempProject({ withEnvTs: false });
+    writeDotenv(root, '.env', '__VOID_PROXY_TOKEN=x\n');
+
+    await expect(validateProdEnv(root, { productionOnly: true })).resolves.toMatchObject({
+      hasSchema: false,
+    });
+  });
+
+  it('ignores a reserved name set only in the shell', async () => {
+    const root = createTempProject();
+    defineEnv({ STRIPE_KEY: string() });
+    writeDotenv(root, '.env', 'STRIPE_KEY=sk_dev\n');
+    vi.stubEnv('__VOID_PROXY_TOKEN', 'shell');
+
+    const { report } = await validateProdEnv(root, { productionOnly: false });
+    expect(report.valid).toBe(true);
+  });
+
+  it.each([false, true])(
+    'rejects reserved __VOID_ names declared in env.ts (productionOnly: %s)',
+    async (productionOnly) => {
+      const root = createTempProject();
+      defineEnv({ STRIPE_KEY: string(), __VOID_TOKEN: string().optional() });
+
+      await expect(validateProdEnv(root, { productionOnly })).rejects.toThrow(
+        'env.ts declares names reserved for Void: __VOID_TOKEN.',
+      );
+    },
+  );
 });

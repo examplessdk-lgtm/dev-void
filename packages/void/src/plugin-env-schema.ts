@@ -7,7 +7,15 @@ import { loadUserEnvFile } from './host/load-user-env.ts';
 import { voidLog, voidWarn } from './log.ts';
 import { afterServerReady } from './plugin-dev-config.ts';
 import { loadEnvPublic } from './plugin-env-client-guard.ts';
-import { findLegacyEnvFiles, isClientEnvKey, loadLocalEnv } from './shared/env.ts';
+import { parseDotenvFile } from './shared/dotenv.ts';
+import {
+  findLegacyEnvFiles,
+  findReservedEnvKeys,
+  isClientEnvKey,
+  loadLocalEnv,
+  LOCAL_ENV_FILE,
+  reservedEnvKeysMessage,
+} from './shared/env.ts';
 
 export type EnvSchemaPluginOptions = {
   /**
@@ -67,6 +75,17 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       }
     }
     options.onSchema({ keys, clientKeys, serverKeys, requiredServerKeys });
+  }
+
+  async function assertNoReservedSchemaKeys() {
+    const { _hasRegisteredSchema, _getRegisteredSchema } = await loadEnvPublic();
+    if (!_hasRegisteredSchema()) {
+      return;
+    }
+    const reserved = findReservedEnvKeys(Object.keys(_getRegisteredSchema() ?? {}));
+    if (reserved.length > 0) {
+      throw new Error(reservedEnvKeysMessage('env.ts', reserved));
+    }
   }
 
   function regenerateTypes() {
@@ -199,6 +218,15 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
           `void/env supports one local file: .env. Remove ${legacyFiles.join(', ')} and follow the env migration guide.`,
         );
       }
+      // Every mode (serve, build, preview), with or without env.ts. Only the
+      // file is read: a shell value never reaches the dev Worker unless
+      // env.ts declares it, which is checked below.
+      const reservedInDotenv = findReservedEnvKeys(
+        Object.keys(parseDotenvFile(join(root, LOCAL_ENV_FILE), { expand: false })),
+      );
+      if (reservedInDotenv.length > 0) {
+        throw new Error(reservedEnvKeysMessage('.env', reservedInDotenv));
+      }
       envFile = findEnvFile(root);
       if (!envFile) {
         return;
@@ -208,6 +236,7 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       // secrets before the Cloudflare plugin resolves worker bindings.
       await importUserEnv(environment.command === 'build');
       await emitSchemaFacts();
+      await assertNoReservedSchemaKeys();
     },
     async configResolved(config) {
       command = config.command;

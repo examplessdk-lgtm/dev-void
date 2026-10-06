@@ -159,12 +159,9 @@ function __json(body, status = 200) {
   });
 }
 
-function __authorize(request, env) {
-  const internal = request.headers.get("x-void-internal");
-  const dev = request.headers.get("x-void-dev-trigger");
-  const expected = env?.__VOID_PROXY_TOKEN;
-  if (expected) return internal === expected;
-  return dev === __DEV_TRIGGER_TOKEN;
+// Dev only: production framework Workers dispatch through cli/wrapper.ts.
+function __authorize(request) {
+  return request.headers.get("x-void-dev-trigger") === __DEV_TRIGGER_TOKEN;
 }
 
 function __wrapMessage(m, decisions) {
@@ -254,7 +251,7 @@ export async function handleDevTrigger(request, env, ctx) {
   if (url.pathname !== "/__void/scheduled" && url.pathname !== "/__void/queue") {
     return null;
   }
-  if (!__authorize(request, env)) {
+  if (!__authorize(request)) {
     return __json({ error: "unauthorized" }, 401);
   }
   if (url.pathname === "/__void/scheduled") {

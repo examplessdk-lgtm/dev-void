@@ -52,7 +52,6 @@ describe('devTriggersHintPlugin', () => {
       devTriggersHintPlugin(root, {
         framework: false,
         devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => false,
       }),
     );
     expect(log).not.toHaveBeenCalled();
@@ -71,7 +70,6 @@ describe('devTriggersHintPlugin', () => {
       devTriggersHintPlugin(root, {
         framework: false,
         devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => false,
       }),
     );
 
@@ -101,7 +99,6 @@ describe('devTriggersHintPlugin', () => {
       devTriggersHintPlugin(root, {
         framework: false,
         devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => false,
       }),
     );
 
@@ -112,7 +109,7 @@ describe('devTriggersHintPlugin', () => {
     expect(output).toContain('"queue":"emails"');
   });
 
-  it('prints x-void-internal when .env defines __VOID_PROXY_TOKEN', async () => {
+  it('always prints the dev-trigger header, whatever .env holds', async () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'crons'), { recursive: true });
     writeFileSync(
@@ -123,34 +120,7 @@ describe('devTriggersHintPlugin', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await runConfigureServer(
-      devTriggersHintPlugin(root, {
-        framework: false,
-        devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => false,
-      }),
-    );
-
-    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
-    expect(output).toContain('x-void-internal: local-proxy-token');
-    expect(output).not.toContain('x-void-dev-trigger: dev-token-test');
-  });
-
-  it('prints the dev-trigger token when the Worker declares secrets and skips the .env proxy token', async () => {
-    const root = createTempRoot();
-    mkdirSync(join(root, 'crons'), { recursive: true });
-    writeFileSync(
-      join(root, 'crons', 'heartbeat.ts'),
-      'export const cron = "0 * * * *";\nexport default async () => {};\n',
-    );
-    writeFileSync(join(root, '.env'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    await runConfigureServer(
-      devTriggersHintPlugin(root, {
-        framework: false,
-        devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => true,
-      }),
+      devTriggersHintPlugin(root, { framework: false, devTriggerToken: 'dev-token-test' }),
     );
 
     const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
@@ -171,7 +141,6 @@ describe('devTriggersHintPlugin', () => {
       devTriggersHintPlugin(root, {
         framework: true,
         devTriggerToken: 'dev-token-test',
-        workerDeclaresSecrets: () => false,
       }),
     );
 
@@ -180,69 +149,4 @@ describe('devTriggersHintPlugin', () => {
     expect(output).toContain('/__void/scheduled');
     expect(output).toContain('x-void-dev-trigger: dev-token-test');
   });
-});
-
-describe('framework dev-triggers hint', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-    vi.restoreAllMocks();
-  });
-
-  function svelteKitProject(cloudflare: Record<string, unknown>, typed: boolean): string {
-    const root = createTempRoot();
-    mkdirSync(join(root, 'crons'), { recursive: true });
-    mkdirSync(join(root, 'src/routes'), { recursive: true });
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ type: 'module', dependencies: { '@sveltejs/kit': '2.0.0' } }),
-    );
-    writeFileSync(
-      join(root, 'crons', 'heartbeat.ts'),
-      'export const cron = "0 * * * *";\nexport default async () => {};\n',
-    );
-    writeFileSync(join(root, '.env'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
-    if (typed) {
-      writeFileSync(
-        join(root, 'void.config.ts'),
-        `export default { cloudflare: ${JSON.stringify(cloudflare)} };\n`,
-      );
-    } else {
-      writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify(cloudflare));
-    }
-    return root;
-  }
-
-  async function frameworkHint(root: string): Promise<string> {
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
-    const { voidPlugin } = await import('../../src/index.ts');
-    const plugins = voidPlugin();
-    expect(plugins.some((plugin) => plugin.name === 'void:sveltekit-hooks-inject')).toBe(true);
-    const hint = plugins.find((plugin) => plugin.name === 'void:dev-triggers-hint');
-    if (!hint) {
-      throw new Error('Expected framework dev-triggers hint');
-    }
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runConfigureServer(hint as ReturnType<typeof devTriggersHintPlugin>);
-    return log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
-  }
-
-  for (const typed of [true, false]) {
-    const source = typed ? 'void.config.ts' : 'wrangler.jsonc';
-
-    it(`prints the dev-trigger token when ${source} declares secrets`, async () => {
-      const output = await frameworkHint(
-        svelteKitProject({ name: 'app', secrets: { required: ['API_KEY'] } }, typed),
-      );
-      expect(output).toContain('x-void-dev-trigger: ');
-      expect(output).not.toContain('x-void-internal');
-    });
-
-    it(`prints the .env proxy token when ${source} declares no secrets`, async () => {
-      const output = await frameworkHint(svelteKitProject({ name: 'app' }, typed));
-      expect(output).toContain('x-void-internal: local-proxy-token');
-    });
-  }
 });

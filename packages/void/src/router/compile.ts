@@ -49,12 +49,16 @@ export type CompileOptions = {
   homeDir: string;
   /** Whether to inject React Fast Refresh preamble in dev SSR HTML. */
   reactRefresh: boolean;
-  /** Whether the generated route module is being compiled for dev server usage. */
+  /**
+   * Whether the generated route module is being compiled for the Vite dev
+   * server. Also picks the manual trigger auth rule: dev accepts only
+   * `x-void-dev-trigger`; every build uses the proxy token or build key.
+   */
   dev?: boolean;
   /**
-   * Ephemeral token for local dev manual trigger endpoints when
-   * __VOID_PROXY_TOKEN is unset. Stable for a dev-server process so tooling can
-   * print paste-ready curl commands without requiring .dev.vars.
+   * Token for local dev manual trigger endpoints (`x-void-dev-trigger`).
+   * Stable for a dev-server process so tooling can print paste-ready curl
+   * commands.
    */
   devTriggerToken?: string;
   /** Auth configuration (null = disabled) */
@@ -506,7 +510,7 @@ export function compileRouteTable(
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
     lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__expected ? __token !== __expected : import.meta.env.DEV ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __token !== __VOID_BUILD_KEY) {',
+      '  if (__VOID_SERVE ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __expected ? __token !== __expected : __token !== __VOID_BUILD_KEY) {',
     );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
@@ -581,7 +585,7 @@ export function compileRouteTable(
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
     lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__expected ? __token !== __expected : import.meta.env.DEV ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __token !== __VOID_BUILD_KEY) {',
+      '  if (__VOID_SERVE ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __expected ? __token !== __expected : __token !== __VOID_BUILD_KEY) {',
     );
     lines.push('    return c.json({ error: "unauthorized" }, 401);');
     lines.push('  }');
@@ -886,6 +890,11 @@ export function compileRouteTable(
   lines.push(
     `export const __VOID_DEV_TRIGGER_TOKEN = ${JSON.stringify(options.devTriggerToken ?? crypto.randomUUID())};`,
   );
+  // Manual trigger auth (`/__void/scheduled`, `/__void/queue`) is fixed when the
+  // module is compiled, not read from `import.meta.env.DEV`: a build with
+  // NODE_ENV=development still has DEV=true, and must keep the proxy-token /
+  // build-key rule. Only the Vite dev server compiles with `dev: true`.
+  lines.push(`const __VOID_SERVE = ${JSON.stringify(options.dev === true)};`);
   // Baked ISR policy. The ordered page table preserves explicit opt-outs and
   // object-config inheritance before the flat fallback map is consulted.
   // `__VOID_ISR_DEPLOYMENT_ID` MUST be a COMPILE-TIME LITERAL —

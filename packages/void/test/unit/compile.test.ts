@@ -259,15 +259,16 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/scheduled handler: configured proxy token first; otherwise
-    // dev trigger token in dev, build key in prod.
+    // The /__void/scheduled handler: dev compiles accept only the dev trigger
+    // token; builds use the proxy token when set, otherwise the build key.
     expect(code).toContain('app.post("/__void/scheduled"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('c.req.header("x-void-dev-trigger")');
     expect(code).toContain('__getRawEnv()?.__VOID_PROXY_TOKEN');
     expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
-    expect(code).toContain('import.meta.env.DEV');
+    expect(code).not.toContain('import.meta.env.DEV');
+    expect(code).toContain('const __VOID_SERVE = false;');
   });
 
   it('generates /__void/queue auth guard with __getRawEnv() and x-void-internal check', () => {
@@ -295,14 +296,14 @@ describe('compileRouteTable', () => {
       testOptions,
     );
 
-    // The /__void/queue HTTP route: configured proxy token first; otherwise
-    // dev trigger token in dev, build key in prod.
+    // The /__void/queue HTTP route: same rule as /__void/scheduled.
     expect(code).toContain('app.post("/__void/queue"');
     expect(code).toContain('c.req.header("x-void-internal")');
     expect(code).toContain('c.req.header("x-void-dev-trigger")');
     expect(code).toContain('__VOID_DEV_TRIGGER_TOKEN');
     expect(code).toContain('__VOID_BUILD_KEY');
-    expect(code).toContain('import.meta.env.DEV');
+    expect(code).not.toContain('import.meta.env.DEV');
+    expect(code).toContain('const __VOID_SERVE = false;');
     // Queue dispatch logic must be exported as __processQueue for direct native handler use
     expect(code).toContain('export async function __processQueue');
   });
@@ -357,9 +358,11 @@ describe('compileRouteTable', () => {
     const code = compileRouteTable(scan, '/routes', '/middleware', '/crons', '/queues', null, {
       ...testOptions,
       devTriggerToken: 'dev-trigger-test-token',
+      dev: true,
     });
 
     expect(code).toContain('export const __VOID_DEV_TRIGGER_TOKEN = "dev-trigger-test-token"');
+    expect(code).toContain('const __VOID_SERVE = true;');
     expect(code).toContain('__devToken !== __VOID_DEV_TRIGGER_TOKEN');
   });
 

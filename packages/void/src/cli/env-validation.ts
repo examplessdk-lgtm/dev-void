@@ -17,7 +17,15 @@ import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
 import { voidWarn } from '../log.ts';
 import type { EnvValidationReport } from '../runtime/env-public.ts';
-import { findLegacyEnvFiles, isClientEnvKey, loadLocalEnv } from '../shared/env.ts';
+import { parseDotenvFile } from '../shared/dotenv.ts';
+import {
+  findLegacyEnvFiles,
+  findReservedEnvKeys,
+  isClientEnvKey,
+  loadLocalEnv,
+  LOCAL_ENV_FILE,
+  reservedEnvKeysMessage,
+} from '../shared/env.ts';
 import type { StandardSchemaV1 } from '../standard-schema.ts';
 import type { PlatformClient } from './client.ts';
 import {
@@ -109,6 +117,16 @@ export async function validateProdEnv(
       `env: only .env is supported for local development. Remove ${legacyFiles.join(', ')} and follow the env migration guide.`,
     );
   }
+  // Same rule as the Vite plugin, which stops dev and build on these names.
+  // Production validation never reads .env; the build itself reports it.
+  const reservedInDotenv = options.productionOnly
+    ? []
+    : findReservedEnvKeys(
+        Object.keys(parseDotenvFile(join(root, LOCAL_ENV_FILE), { expand: false })),
+      );
+  if (reservedInDotenv.length > 0) {
+    throw new Error(`env: ${reservedEnvKeysMessage('.env', reservedInDotenv)}`);
+  }
   const envFile = findEnvFile(root);
   if (!envFile) {
     return { hasSchema: false, report: emptyReport() };
@@ -116,6 +134,10 @@ export async function validateProdEnv(
   const mod = await loadSchema(envFile);
   if (!mod) {
     return { hasSchema: false, report: emptyReport() };
+  }
+  const reservedInSchema = findReservedEnvKeys(Object.keys(mod._getRegisteredSchema() ?? {}));
+  if (reservedInSchema.length > 0) {
+    throw new Error(`env: ${reservedEnvKeysMessage('env.ts', reservedInSchema)}`);
   }
 
   const local = options.productionOnly
