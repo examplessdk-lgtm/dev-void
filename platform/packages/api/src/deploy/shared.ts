@@ -114,6 +114,68 @@ export type UploadUrlsRequestAsset = Readonly<{
   contentType: string;
 }>;
 
+// Main module Cloudflare runs when the manifest does not name `workerMain`.
+export const DEFAULT_WORKER_MAIN_MODULE = 'index.js';
+
+// Extensions the CLI collects from the worker build output, plus the JSON
+// modules `moduleContentType` understands.
+const WORKER_MODULE_EXTENSION_REGEX = /\.(?:js|mjs|cjs|wasm|map|txt|json)$/;
+// C0 controls, DEL, and C1 controls.
+// oxlint-disable-next-line no-control-regex
+const CONTROL_CHARACTER_REGEX = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * Explain why `name` cannot be a Worker module, or return null when it can.
+ * Module names become multipart part names next to the platform's own
+ * `metadata` part in the Cloudflare upload, so they must be plain relative
+ * module paths.
+ */
+export function workerModuleNameError(name: string): string | null {
+  if (name.length === 0) {
+    return 'must not be empty';
+  }
+  if (CONTROL_CHARACTER_REGEX.test(name)) {
+    return 'must not contain control characters';
+  }
+  if (name.includes('\\')) {
+    return 'must use forward slashes';
+  }
+  if (name.startsWith('/')) {
+    return 'must be a relative path';
+  }
+  if (name.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return 'must not contain empty, "." or ".." path segments';
+  }
+  if (name.toLowerCase() === 'metadata') {
+    return 'is reserved';
+  }
+  if (!WORKER_MODULE_EXTENSION_REGEX.test(name)) {
+    return 'must end in .js, .mjs, .cjs, .wasm, .map, .txt or .json';
+  }
+  return null;
+}
+
+/**
+ * Explain why an uploaded module set cannot be deployed, or return null when
+ * every name is a valid module and the main module is among them.
+ */
+export function workerFilesError(
+  names: ReadonlyArray<string>,
+  workerMain: string | undefined,
+): string | null {
+  for (const name of names) {
+    const nameError = workerModuleNameError(name);
+    if (nameError) {
+      return `workerFiles entry ${JSON.stringify(name)} ${nameError}`;
+    }
+  }
+  const mainModule = workerMain ?? DEFAULT_WORKER_MAIN_MODULE;
+  if (names.length > 0 && !names.includes(mainModule)) {
+    return `workerFiles must include the main module ${JSON.stringify(mainModule)}`;
+  }
+  return null;
+}
+
 export function moduleContentType(filename: string): string {
   if (filename.endsWith('.wasm')) {
     return 'application/wasm';
