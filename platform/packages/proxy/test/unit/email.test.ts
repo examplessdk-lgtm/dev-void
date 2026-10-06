@@ -184,15 +184,15 @@ async function postSend(
 }
 
 /**
- * A `/email/send` body that passes every gate for `proj_1` / slug `acme`.
+ * A `/email/send` body that passes every gate for `proj_000000000001` / slug `acme`.
  * The MIME `From:` follows the envelope under test, exactly as the framework
  * renders both from one `from.email`; pass `mimeBase64` to diverge them.
  */
 async function sendBody(overrides: Record<string, unknown> = {}) {
   const from = typeof overrides.from === 'string' ? overrides.from : DEFAULT_FROM;
   return {
-    projectId: 'proj_1',
-    aiToken: await signHmac('proj_1', JWT_SECRET),
+    projectId: 'proj_000000000001',
+    aiToken: await signHmac('proj_000000000001', JWT_SECRET),
     from,
     recipients: ['dev@example.com'],
     mimeBase64: mimeBase64(mimeFor(from)),
@@ -201,11 +201,11 @@ async function sendBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** KV contents that let `proj_1` send to `dev@example.com`. */
+/** KV contents that let `proj_000000000001` send to `dev@example.com`. */
 function happyPathKv(extra: Record<string, string> = {}) {
   return createMockKv({
-    'email-slug:proj_1': 'acme',
-    'email-allowlist:proj_1': JSON.stringify(['dev@example.com']),
+    'email-slug:proj_000000000001': 'acme',
+    'email-allowlist:proj_000000000001': JSON.stringify(['dev@example.com']),
     ...extra,
   });
 }
@@ -618,7 +618,7 @@ describe('POST /email/send — request validation', () => {
     );
     expect((await readSend(res)).ok).toBe(true);
     expect(sender.recipients()).toEqual(['dev@example.com']);
-    expect(kv.store.get(monthKeyFor('proj_1'))).toBeUndefined();
+    expect(kv.store.get(monthKeyFor('proj_000000000001'))).toBeUndefined();
   });
 
   it('shares one request deadline across admission and binding fan-out', async () => {
@@ -626,7 +626,7 @@ describe('POST /email/send — request validation', () => {
     try {
       const recipients = ['first@example.com', 'second@example.com', 'third@example.com'];
       const kv = happyPathKv({
-        'email-allowlist:proj_1': JSON.stringify(recipients),
+        'email-allowlist:proj_000000000001': JSON.stringify(recipients),
       });
       let markFirst!: () => void;
       let markSecond!: () => void;
@@ -745,12 +745,12 @@ describe('POST /email/send — request validation', () => {
     const MAX_RECIPIENTS = 50;
     const recipients = Array.from({ length: MAX_RECIPIENTS }, (_, i) => `dev${i}@example.com`);
     const kv = createMockKv({
-      'email-slug:proj_1': 'acme',
-      'email-allowlist:proj_1': JSON.stringify(recipients),
+      'email-slug:proj_000000000001': 'acme',
+      'email-allowlist:proj_000000000001': JSON.stringify(recipients),
       // Raised so the burst + monthly gates cannot answer first and hide
       // whether the cap itself let the list through.
-      'email-burst-limit:proj_1': '1000',
-      'email-limit:proj_1': '1000',
+      'email-burst-limit:proj_000000000001': '1000',
+      'email-limit:proj_000000000001': '1000',
     });
     const sender = createSender();
     const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
@@ -758,7 +758,7 @@ describe('POST /email/send — request validation', () => {
 
     expect((await readSend(res)).ok).toBe(true);
     expect(sender.recipients()).toEqual(recipients);
-    expect(kv.store.get(monthKeyFor('proj_1'))).toBeUndefined();
+    expect(kv.store.get(monthKeyFor('proj_000000000001'))).toBeUndefined();
   });
 
   // Bound each address before normalization copies it.
@@ -1180,7 +1180,7 @@ describe('POST /email/send — per-recipient fan-out', () => {
     // already-drained (empty) stream. Assert the delivered BYTES.
     const mime = mimeFor(DEFAULT_FROM, 'Subject: fan-out\r\n\r\nbody bytes\r\n');
     const recipients = ['a@example.com', 'b@example.com', 'c@example.com'];
-    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
+    const kv = happyPathKv({ 'email-allowlist:proj_000000000001': JSON.stringify(recipients) });
     const sender = createSender();
     const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
     const res = await postSend(env, await sendBody({ recipients, mimeBase64: mimeBase64(mime) }));
@@ -1211,7 +1211,7 @@ describe('POST /email/send — per-recipient fan-out', () => {
 
   it('records per-recipient outcomes when one send fails mid-batch', async () => {
     const recipients = ['alice@example.com', 'bob@example.com', 'carol@example.com'];
-    const kv = happyPathKv({ 'email-allowlist:proj_1': JSON.stringify(recipients) });
+    const kv = happyPathKv({ 'email-allowlist:proj_000000000001': JSON.stringify(recipients) });
     const sender = createSender({
       fail: (to) => (to === 'bob@example.com' ? new Error('upstream blew up') : undefined),
     });
@@ -1294,7 +1294,7 @@ describe('POST /email/send — the envelope handed to CF', () => {
     ['a carriage return', `acme\r\nX-Bcc: attacker@evil.com@${PROD_DOMAIN}`, 'acme'],
     ['a null byte', `acme\x00@${PROD_DOMAIN}`, 'acme'],
   ])('never hands a control character to the send binding (%s)', async (_label, from, slug) => {
-    const kv = happyPathKv({ 'email-slug:proj_1': slug });
+    const kv = happyPathKv({ 'email-slug:proj_000000000001': slug });
     const sender = createSender();
     const env = createMockEnv(kv, { SEND_EMAIL: sender.binding });
     await postSend(env, await sendBody({ from }));
@@ -1340,10 +1340,11 @@ describe('POST /email/send — requestId is bounded and sanitized at intake', ()
       expect(lines).toHaveLength(1);
       // The id is sliced to 128 code units and each LF becomes one space,
       // so the whole line is the fixed fields plus at most 128 chars of id.
-      const fixed = `[email-log] proj_1  dev@example.com sent cf-msg-1 @${Date.now()}`.length;
+      const fixed = `[email-log] proj_000000000001  dev@example.com sent cf-msg-1 @${Date.now()}`
+        .length;
       expect(lines[0]!.length).toBeLessThanOrEqual(fixed + 128);
       expect(lines[0]).not.toMatch(CONTROL);
-      expect(lines[0]!.split(' ')[1]).toBe('proj_1');
+      expect(lines[0]!.split(' ')[1]).toBe('proj_000000000001');
       // Generous: the slice-first path is ~0 ms; the JSON body is ~5 MB.
       expect(elapsed).toBeLessThan(500);
 
@@ -1357,7 +1358,7 @@ describe('POST /email/send — requestId is bounded and sanitized at intake', ()
       expect(lines2).toHaveLength(1);
       expect(lines2[0]).not.toMatch(CONTROL);
       expect(lines2[0]).not.toContain('\n[email-log]');
-      expect(lines2[0]!.split(' ')[1]).toBe('proj_1');
+      expect(lines2[0]!.split(' ')[1]).toBe('proj_000000000001');
     } finally {
       logSpy.mockRestore();
     }

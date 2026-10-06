@@ -1,6 +1,7 @@
 import { isRecord } from '@void/deploy-core';
 import { usageLimitResponse } from '@void/edge';
 import { verifyEmailReceipt } from '@void/platform/email-protocol';
+import { isProjectId } from '@voidcloud/api/id';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { ai } from './ai.ts';
@@ -97,8 +98,11 @@ app.post('/email/verify-receipt', async (context) => {
   ) {
     return context.json({ valid: false }, 400);
   }
-  const projectToken = await hmacSign(input.projectId, context.env.JWT_SECRET);
-  if (context.req.header('x-void-internal') !== projectToken) {
+  if (
+    !isProjectId(input.projectId) ||
+    context.req.header('x-void-internal') !==
+      (await hmacSign(input.projectId, context.env.JWT_SECRET))
+  ) {
     return context.json({ valid: false }, 403);
   }
   if (!context.env.EMAIL_SIGNING_SECRET) {
@@ -231,7 +235,10 @@ app.post('/*', async (context, next) => {
     if (!projectId || !aiToken) {
       return context.json({ error: 'projectId and aiToken required' }, 400);
     }
-    if (!(await verifyHmac(projectId, aiToken, context.env.JWT_SECRET))) {
+    if (
+      !isProjectId(projectId) ||
+      !(await verifyHmac(projectId, aiToken, context.env.JWT_SECRET))
+    ) {
       return context.json({ error: 'invalid project token' }, 403);
     }
     context.set('projectId', projectId);

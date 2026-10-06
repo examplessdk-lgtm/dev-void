@@ -28,24 +28,24 @@ describe('resolveResource', () => {
   });
 
   it('returns cf_id for a known resource', async () => {
-    const api = createMockApi({ 'proj_1:d1:DB': 'd1-uuid-123' });
-    const result = await resolveResource(api, JWT_SECRET, 'proj_1', 'd1', 'DB');
+    const api = createMockApi({ 'proj_000000000001:d1:DB': 'd1-uuid-123' });
+    const result = await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
     expect(result).toBe('d1-uuid-123');
   });
 
   it('throws for an unknown resource', async () => {
     const api = createMockApi({});
-    await expect(resolveResource(api, JWT_SECRET, 'proj_1', 'kv', 'MISSING')).rejects.toThrow(
-      'Resource resolution failed (404)',
-    );
+    await expect(
+      resolveResource(api, JWT_SECRET, 'proj_000000000001', 'kv', 'MISSING'),
+    ).rejects.toThrow('Resource resolution failed (404)');
   });
 
   it('calls API with correct URL and body', async () => {
-    const api = createMockApi({ 'proj_42:r2:STORAGE': 'r2-uuid-456' });
-    await resolveResource(api, JWT_SECRET, 'proj_42', 'r2', 'STORAGE');
+    const api = createMockApi({ 'proj_000000000042:r2:STORAGE': 'r2-uuid-456' });
+    await resolveResource(api, JWT_SECRET, 'proj_000000000042', 'r2', 'STORAGE');
 
     expect(api.fetch).toHaveBeenCalledWith(
-      'https://api/internal/resolve-resource/proj_42',
+      'https://api/internal/resolve-resource/proj_000000000042',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ type: 'r2', binding: 'STORAGE' }),
@@ -54,17 +54,17 @@ describe('resolveResource', () => {
   });
 
   it('caches resolved resource IDs', async () => {
-    const api = createMockApi({ 'proj_1:d1:DB': 'd1-uuid-123' });
-    await resolveResource(api, JWT_SECRET, 'proj_1', 'd1', 'DB');
-    await resolveResource(api, JWT_SECRET, 'proj_1', 'd1', 'DB');
-    await resolveResource(api, JWT_SECRET, 'proj_1', 'd1', 'DB');
+    const api = createMockApi({ 'proj_000000000001:d1:DB': 'd1-uuid-123' });
+    await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
+    await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
+    await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
 
     expect((api.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
 
   it('includes HMAC token in x-void-internal header', async () => {
-    const api = createMockApi({ 'proj_1:d1:DB': 'd1-uuid-123' });
-    await resolveResource(api, JWT_SECRET, 'proj_1', 'd1', 'DB');
+    const api = createMockApi({ 'proj_000000000001:d1:DB': 'd1-uuid-123' });
+    await resolveResource(api, JWT_SECRET, 'proj_000000000001', 'd1', 'DB');
 
     const call = (api.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const init = call[1] as RequestInit;
@@ -82,7 +82,7 @@ describe('verifyProjectDeployAccess', () => {
       verifyProjectDeployAccess(
         api,
         JWT_SECRET,
-        'proj_1',
+        'proj_000000000001',
         'user_1',
         'jwt',
         'access',
@@ -100,7 +100,14 @@ describe('verifyProjectDeployAccess', () => {
 
     const missing = { fetch: vi.fn() } as unknown as Fetcher;
     await expect(
-      verifyProjectDeployAccess(missing, JWT_SECRET, 'proj_1', 'user_1', 'jwt', 'access'),
+      verifyProjectDeployAccess(
+        missing,
+        JWT_SECRET,
+        'proj_000000000001',
+        'user_1',
+        'jwt',
+        'access',
+      ),
     ).resolves.toBe(false);
     expect(missing.fetch).not.toHaveBeenCalled();
   });

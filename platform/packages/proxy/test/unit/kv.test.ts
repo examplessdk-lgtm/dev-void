@@ -86,7 +86,7 @@ describe('KV proxy endpoints', () => {
   const originalFetch = globalThis.fetch;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_1', JWT_SECRET);
+    token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
 
   afterEach(() => {
@@ -98,13 +98,13 @@ describe('KV proxy endpoints', () => {
     it('returns text value', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => new Response('hello world')));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/get', {
           binding: 'CACHE',
           key: 'greeting',
           type: 'text',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -124,13 +124,13 @@ describe('KV proxy endpoints', () => {
     it('returns JSON value', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ count: 42 })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/get', {
           binding: 'CACHE',
           key: 'data',
           type: 'json',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -143,13 +143,13 @@ describe('KV proxy endpoints', () => {
     it('returns null for missing key (404)', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => new Response('Not Found', { status: 404 })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/get', {
           binding: 'CACHE',
           key: 'missing',
           type: 'text',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -162,13 +162,13 @@ describe('KV proxy endpoints', () => {
     it('URL-encodes the key', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => new Response('val')));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       await worker.fetch(
         post('/kv/get', {
           binding: 'CACHE',
           key: 'user:1:profile',
           type: 'text',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -186,7 +186,7 @@ describe('KV proxy endpoints', () => {
         post('/kv/get', {
           binding: 'MISSING',
           key: 'k',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -198,7 +198,7 @@ describe('KV proxy endpoints', () => {
     it('returns 400 when key is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/kv/get', { binding: 'CACHE', projectId: 'proj_1', aiToken: token }),
+        post('/kv/get', { binding: 'CACHE', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -210,13 +210,13 @@ describe('KV proxy endpoints', () => {
     it('writes value to CF KV API', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/put', {
           binding: 'CACHE',
           key: 'greeting',
           value: 'hello',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -234,14 +234,14 @@ describe('KV proxy endpoints', () => {
     it('includes expiration query params', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       await worker.fetch(
         post('/kv/put', {
           binding: 'CACHE',
           key: 'temp',
           value: 'x',
           expiration_ttl: 300,
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -256,13 +256,13 @@ describe('KV proxy endpoints', () => {
     it('serializes non-string values as JSON', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       await worker.fetch(
         post('/kv/put', {
           binding: 'CACHE',
           key: 'data',
           value: { count: 1 },
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -281,7 +281,7 @@ describe('KV proxy endpoints', () => {
           binding: 'MISSING',
           key: 'k',
           value: 'v',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -295,12 +295,12 @@ describe('KV proxy endpoints', () => {
     it('deletes key via CF KV API', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/delete', {
           binding: 'CACHE',
           key: 'greeting',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -318,7 +318,7 @@ describe('KV proxy endpoints', () => {
     it('returns 400 when key is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/kv/delete', { binding: 'CACHE', projectId: 'proj_1', aiToken: token }),
+        post('/kv/delete', { binding: 'CACHE', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -338,11 +338,11 @@ describe('KV proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/list', {
           binding: 'CACHE',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -361,14 +361,14 @@ describe('KV proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:kv:CACHE': 'kv-ns-123' });
+      const env = createEnv({ 'proj_000000000001:kv:CACHE': 'kv-ns-123' });
       const res = await worker.fetch(
         post('/kv/list', {
           binding: 'CACHE',
           prefix: 'user:',
           limit: 10,
           cursor: 'prev-cursor',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -388,7 +388,7 @@ describe('KV proxy endpoints', () => {
     it('returns 400 when binding is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/kv/list', { projectId: 'proj_1', aiToken: token }),
+        post('/kv/list', { projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -400,7 +400,7 @@ describe('KV proxy endpoints', () => {
       const res = await worker.fetch(
         post('/kv/list', {
           binding: 'MISSING',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,

@@ -156,7 +156,7 @@ describe('WfP dispatch path', () => {
   let token: string;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_1', JWT_SECRET);
+    token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
 
   afterEach(() => {
@@ -165,7 +165,7 @@ describe('WfP dispatch path', () => {
 
   describe('D1 via dispatch', () => {
     it('dispatches D1 query through user worker and returns response', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () => {
         return Response.json({
           results: [{ id: 1, name: 'Alice' }],
           success: true,
@@ -179,7 +179,7 @@ describe('WfP dispatch path', () => {
           sql: 'SELECT * FROM users',
           params: [],
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -198,7 +198,7 @@ describe('WfP dispatch path', () => {
     });
 
     it('dispatches D1 batch through user worker', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () => {
         return Response.json([
           { results: [{ count: 1 }], success: true, meta: {} },
           { results: [{ count: 2 }], success: true, meta: {} },
@@ -212,7 +212,7 @@ describe('WfP dispatch path', () => {
             { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
             { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
           ],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -229,7 +229,7 @@ describe('WfP dispatch path', () => {
 
     it('keeps a native batch atomic when the second statement violates a constraint', async () => {
       const native = createAtomicD1();
-      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      const env = createEnv({ proj_000000000001: 'user-my-app-dpl_active' });
       attachNativeBindingHandler(env, token, native.db);
       vi.spyOn(console, 'error').mockImplementation(() => {});
       const restFetch = vi.spyOn(globalThis, 'fetch');
@@ -241,7 +241,7 @@ describe('WfP dispatch path', () => {
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Bob'] },
           ],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -255,7 +255,7 @@ describe('WfP dispatch path', () => {
 
     it('commits a successful native batch exactly once', async () => {
       const native = createAtomicD1();
-      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      const env = createEnv({ proj_000000000001: 'user-my-app-dpl_active' });
       attachNativeBindingHandler(env, token, native.db);
       const restFetch = vi.spyOn(globalThis, 'fetch');
 
@@ -266,7 +266,7 @@ describe('WfP dispatch path', () => {
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [2, 'Bob'] },
           ],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -284,7 +284,7 @@ describe('WfP dispatch path', () => {
 
     it('does not replay a native batch when transport fails after the commit', async () => {
       const native = createAtomicD1();
-      const env = createEnv({ proj_1: 'user-my-app-dpl_active' });
+      const env = createEnv({ proj_000000000001: 'user-my-app-dpl_active' });
       attachNativeBindingHandler(env, token, native.db, (response) => {
         if (response.ok) {
           throw new Error('response lost after native commit');
@@ -299,7 +299,7 @@ describe('WfP dispatch path', () => {
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [1, 'Alice'] },
             { sql: 'INSERT INTO users (id, name) VALUES (?, ?)', params: [2, 'Bob'] },
           ],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -320,14 +320,16 @@ describe('WfP dispatch path', () => {
 
   describe('KV via dispatch', () => {
     it('dispatches KV get through user worker', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () => Response.json('hello world'));
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () =>
+        Response.json('hello world'),
+      );
 
       const res = await worker.fetch(
         post('/kv/get', {
           binding: 'CACHE',
           key: 'greeting',
           type: 'text',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -338,7 +340,7 @@ describe('WfP dispatch path', () => {
     });
 
     it('dispatches KV put through user worker', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () =>
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () =>
         Response.json({ success: true }),
       );
 
@@ -347,7 +349,7 @@ describe('WfP dispatch path', () => {
           binding: 'CACHE',
           key: 'greeting',
           value: 'hello',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -358,7 +360,7 @@ describe('WfP dispatch path', () => {
     });
 
     it('preserves the REST fallback for a read-only dispatch transport failure', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () => {
         throw new Error('dispatch transport unavailable');
       });
       env.API.fetch = vi.fn(async (url: string) => {
@@ -374,7 +376,7 @@ describe('WfP dispatch path', () => {
           binding: 'CACHE',
           key: 'greeting',
           type: 'text',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -386,7 +388,7 @@ describe('WfP dispatch path', () => {
     });
 
     it('does not replay a write after a dispatch transport failure', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () => {
         throw new Error('response lost after KV write');
       });
       const restFetch = vi.spyOn(globalThis, 'fetch');
@@ -396,7 +398,7 @@ describe('WfP dispatch path', () => {
           binding: 'CACHE',
           key: 'greeting',
           value: 'hello',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -412,7 +414,7 @@ describe('WfP dispatch path', () => {
 
   describe('R2 via dispatch', () => {
     it('dispatches R2 list through user worker', async () => {
-      const env = createEnv({ proj_1: 'user-my-app' }, async () =>
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async () =>
         Response.json({
           objects: [{ key: 'file.txt', size: 100, lastModified: '' }],
           truncated: false,
@@ -423,7 +425,7 @@ describe('WfP dispatch path', () => {
       const res = await worker.fetch(
         post('/r2/list', {
           binding: 'STORAGE',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -475,7 +477,7 @@ describe('WfP dispatch path', () => {
           sql: 'SELECT * FROM users',
           params: [],
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -500,7 +502,7 @@ describe('WfP dispatch path', () => {
     it('falls back when dispatch returns 404 (old deploy)', async () => {
       // Worker resolved but returns 404 for /__void
       const env = createEnv(
-        { proj_1: 'user-my-app' },
+        { proj_000000000001: 'user-my-app' },
         async () => new Response('Not Found', { status: 404 }),
       );
 
@@ -531,7 +533,7 @@ describe('WfP dispatch path', () => {
           binding: 'DB',
           sql: 'SELECT 1',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -564,7 +566,7 @@ describe('WfP dispatch path', () => {
           binding: 'DB',
           sql: 'SELECT 1',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -576,7 +578,7 @@ describe('WfP dispatch path', () => {
           binding: 'DB',
           sql: 'SELECT 2',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -591,7 +593,7 @@ describe('WfP dispatch path', () => {
   describe('auth forwarding', () => {
     it('sends x-void-internal header to dispatched worker', async () => {
       let capturedHeaders: Record<string, string> = {};
-      const env = createEnv({ proj_1: 'user-my-app' }, async (_url, init) => {
+      const env = createEnv({ proj_000000000001: 'user-my-app' }, async (_url, init) => {
         capturedHeaders = Object.fromEntries(new Headers(init.headers as HeadersInit).entries());
         return Response.json({ results: [], success: true, meta: {} });
       });
@@ -601,7 +603,7 @@ describe('WfP dispatch path', () => {
           binding: 'DB',
           sql: 'SELECT 1',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,

@@ -86,7 +86,7 @@ describe('R2 proxy endpoints', () => {
   const originalFetch = globalThis.fetch;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_1', JWT_SECRET);
+    token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
 
   afterEach(() => {
@@ -109,12 +109,12 @@ describe('R2 proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/get', {
           binding: 'STORAGE',
           key: 'avatar.png',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -136,12 +136,12 @@ describe('R2 proxy endpoints', () => {
     it('returns null for missing object (404)', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => new Response('Not Found', { status: 404 })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/get', {
           binding: 'STORAGE',
           key: 'missing.txt',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -157,7 +157,7 @@ describe('R2 proxy endpoints', () => {
         post('/r2/get', {
           binding: 'MISSING',
           key: 'k',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -169,7 +169,7 @@ describe('R2 proxy endpoints', () => {
     it('returns 400 when key is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/r2/get', { binding: 'STORAGE', projectId: 'proj_1', aiToken: token }),
+        post('/r2/get', { binding: 'STORAGE', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -189,7 +189,7 @@ describe('R2 proxy endpoints', () => {
       globalThis.fetch = asFetchMock(fetchMock);
       const response = await worker.fetch(
         post('/r2/put-conditional', {
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
           binding: 'STORAGE',
           key: 'key',
@@ -209,10 +209,10 @@ describe('R2 proxy endpoints', () => {
     it('rejects conditional writes without a compatible deployed worker before REST fallback', async () => {
       const fetchMock = vi.fn(async () => Response.json({ success: true }));
       globalThis.fetch = asFetchMock(fetchMock);
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'bucket' });
       const res = await worker.fetch(
         post('/r2/put-conditional', {
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
           binding: 'STORAGE',
           key: 'key',
@@ -229,7 +229,7 @@ describe('R2 proxy endpoints', () => {
     it('writes base64-encoded data via CF R2 API', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const base64 = btoa('hello world');
       const res = await worker.fetch(
         post('/r2/put', {
@@ -237,7 +237,7 @@ describe('R2 proxy endpoints', () => {
           key: 'test.txt',
           base64,
           contentType: 'text/plain',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -255,13 +255,13 @@ describe('R2 proxy endpoints', () => {
     it('writes text value when no base64', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/put', {
           binding: 'STORAGE',
           key: 'hello.txt',
           value: 'hello',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -278,7 +278,7 @@ describe('R2 proxy endpoints', () => {
           binding: 'MISSING',
           key: 'k',
           value: 'v',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -292,12 +292,12 @@ describe('R2 proxy endpoints', () => {
     it('deletes single key', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/delete', {
           binding: 'STORAGE',
           key: 'old.txt',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -315,12 +315,12 @@ describe('R2 proxy endpoints', () => {
     it('deletes multiple keys', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => Response.json({ success: true })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/delete', {
           binding: 'STORAGE',
           keys: ['a.txt', 'b.txt'],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -332,11 +332,11 @@ describe('R2 proxy endpoints', () => {
     });
 
     it('returns 400 when no key or keys provided', async () => {
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/delete', {
           binding: 'STORAGE',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -361,11 +361,11 @@ describe('R2 proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/list', {
           binding: 'STORAGE',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -392,13 +392,13 @@ describe('R2 proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/list', {
           binding: 'STORAGE',
           prefix: 'uploads/',
           limit: 1,
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -420,7 +420,7 @@ describe('R2 proxy endpoints', () => {
       const res = await worker.fetch(
         post('/r2/list', {
           binding: 'MISSING',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -447,12 +447,12 @@ describe('R2 proxy endpoints', () => {
         ),
       );
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/head', {
           binding: 'STORAGE',
           key: 'avatar.png',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -474,12 +474,12 @@ describe('R2 proxy endpoints', () => {
     it('returns null for missing object', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => new Response(null, { status: 404 })));
 
-      const env = createEnv({ 'proj_1:r2:STORAGE': 'my-bucket' });
+      const env = createEnv({ 'proj_000000000001:r2:STORAGE': 'my-bucket' });
       const res = await worker.fetch(
         post('/r2/head', {
           binding: 'STORAGE',
           key: 'missing.txt',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -492,7 +492,7 @@ describe('R2 proxy endpoints', () => {
     it('returns 400 when key is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/r2/head', { binding: 'STORAGE', projectId: 'proj_1', aiToken: token }),
+        post('/r2/head', { binding: 'STORAGE', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 

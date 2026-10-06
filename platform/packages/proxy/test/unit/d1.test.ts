@@ -97,7 +97,7 @@ describe('D1 proxy endpoints', () => {
   const originalFetch = globalThis.fetch;
 
   beforeAll(async () => {
-    token = await signAiToken('proj_1', JWT_SECRET);
+    token = await signAiToken('proj_000000000001', JWT_SECRET);
   });
 
   afterEach(() => {
@@ -113,14 +113,14 @@ describe('D1 proxy endpoints', () => {
       ];
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response(rows)));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'SELECT * FROM users',
           params: [],
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -144,14 +144,14 @@ describe('D1 proxy endpoints', () => {
       const rows = [{ id: 1, name: 'Alice' }];
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response(rows)));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'SELECT * FROM users WHERE id = ?',
           params: [1],
           method: 'first',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -164,14 +164,14 @@ describe('D1 proxy endpoints', () => {
     it('returns null for method=first with no results', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response([])));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'SELECT * FROM users WHERE id = ?',
           params: [999],
           method: 'first',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -188,13 +188,13 @@ describe('D1 proxy endpoints', () => {
       ];
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response(rows)));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'SELECT * FROM users',
           method: 'raw',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -213,14 +213,14 @@ describe('D1 proxy endpoints', () => {
       const meta = { duration: 0.002, changes: 1 };
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response([], meta)));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'UPDATE users SET name = ? WHERE id = ?',
           params: ['Charlie', 1],
           method: 'run',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -239,7 +239,7 @@ describe('D1 proxy endpoints', () => {
           binding: 'MISSING',
           sql: 'SELECT 1',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -252,7 +252,7 @@ describe('D1 proxy endpoints', () => {
     it('returns 400 when binding or sql is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/d1/query', { method: 'all', projectId: 'proj_1', aiToken: token }),
+        post('/d1/query', { method: 'all', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -265,13 +265,13 @@ describe('D1 proxy endpoints', () => {
         vi.fn(async () => new Response('Internal Server Error', { status: 500 })),
       );
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/query', {
           binding: 'DB',
           sql: 'SELECT 1',
           method: 'all',
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -285,7 +285,7 @@ describe('D1 proxy endpoints', () => {
     it('fails before writing when the active deployment has no native batch handler', async () => {
       globalThis.fetch = asFetchMock(vi.fn(async () => cfD1Response([{ count: 1 }])));
 
-      const env = createEnv({ 'proj_1:d1:DB': 'd1-uuid-abc' });
+      const env = createEnv({ 'proj_000000000001:d1:DB': 'd1-uuid-abc' });
       const res = await worker.fetch(
         post('/d1/batch', {
           binding: 'DB',
@@ -293,7 +293,7 @@ describe('D1 proxy endpoints', () => {
             { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
             { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
           ],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,
@@ -309,7 +309,7 @@ describe('D1 proxy endpoints', () => {
     it('returns 400 when statements is missing', async () => {
       const env = createEnv({});
       const res = await worker.fetch(
-        post('/d1/batch', { binding: 'DB', projectId: 'proj_1', aiToken: token }),
+        post('/d1/batch', { binding: 'DB', projectId: 'proj_000000000001', aiToken: token }),
         env,
       );
 
@@ -323,7 +323,7 @@ describe('D1 proxy endpoints', () => {
         post('/d1/batch', {
           binding: 'MISSING',
           statements: [{ sql: 'SELECT 1' }],
-          projectId: 'proj_1',
+          projectId: 'proj_000000000001',
           aiToken: token,
         }),
         env,

@@ -14,3 +14,15 @@ export function generateId(prefix: string): string {
   }
   return `${prefix}_${id}`;
 }
+
+const PROJECT_ID = new RegExp(`^proj_[${ALPHABET}]{${ID_LENGTH}}$`);
+
+/**
+ * Whether `value` has the shape `generateId('proj')` produces. The project
+ * token is an HMAC over the project id under the same key that signs login
+ * JWTs and OAuth state, so callers check this before verifying the token:
+ * any other string (such as a JWT's `header.body`) must not authenticate.
+ */
+export function isProjectId(value: unknown): value is string {
+  return typeof value === 'string' && PROJECT_ID.test(value);
+}

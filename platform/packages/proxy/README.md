@@ -24,11 +24,11 @@ Deployed user worker            Proxy                       Downstream
 
 Project requests use these authentication paths:
 
-| Path            | When               | Auth                                      |
-| --------------- | ------------------ | ----------------------------------------- |
-| Service binding | Deployed Void apps | HMAC-signed `projectId` token (`aiToken`) |
-| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`         |
-| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT |
+| Path            | When               | Auth                                                                                  |
+| --------------- | ------------------ | ------------------------------------------------------------------------------------- |
+| Service binding | Deployed Void apps | HMAC-signed `projectId` token (`aiToken`); `projectId` must be a generated project id |
+| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`                                                     |
+| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT                                             |
 
 Project-scoped POST routes require `projectId` in the JSON body. The public
 `GET /health` route has no project body, and `/email/verify-receipt` checks a
