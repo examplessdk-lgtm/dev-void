@@ -80,6 +80,7 @@ import {
   decodeBase64ToBytes,
   MAX_WORKER_FILE_BYTES,
   moduleContentType,
+  workerFilesError,
 } from './shared.ts';
 
 /**
@@ -547,6 +548,16 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
       },
       400,
     );
+  }
+
+  // Module names become multipart part names in the Cloudflare upload. This
+  // also covers modules restored from a staged deployment input.
+  const workerFilesProblem = workerFilesError(
+    workerFiles.map(({ name }) => name),
+    incomingManifest.workerMain,
+  );
+  if (workerFilesProblem) {
+    return context.json({ event: 'error', message: workerFilesProblem }, 400);
   }
 
   // Pre-validation done — now run the atomic precheck-and-claim

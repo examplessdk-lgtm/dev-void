@@ -36,7 +36,12 @@ import {
 import { assertDeploymentCanProceed } from './guards.ts';
 import { isCfAssetPlainText } from './migrations.ts';
 import { StaticAssetDisappearedError, attachServingStoreMetadata } from './serving-assets.ts';
-import { R2_HEAD_VERIFY_CONCURRENCY, DEFAULT_TAIL_SERVICE_NAME, CF_RETRY } from './shared.ts';
+import {
+  R2_HEAD_VERIFY_CONCURRENCY,
+  DEFAULT_TAIL_SERVICE_NAME,
+  CF_RETRY,
+  DEFAULT_WORKER_MAIN_MODULE,
+} from './shared.ts';
 
 export async function uploadDeploymentWorker(input: {
   currentStep: string;
@@ -323,7 +328,7 @@ export async function uploadDeploymentWorker(input: {
   );
   const tailServiceName = context.env.TAIL_SERVICE_NAME ?? DEFAULT_TAIL_SERVICE_NAME;
   const metadata: Record<string, unknown> = {
-    main_module: manifest.workerMain ?? 'index.js',
+    main_module: manifest.workerMain ?? DEFAULT_WORKER_MAIN_MODULE,
     compatibility_date: manifest.compatibilityDate ?? '2026-02-12',
     compatibility_flags: manifest.compatibilityFlags ?? ['nodejs_compat'],
     bindings: allBindings,

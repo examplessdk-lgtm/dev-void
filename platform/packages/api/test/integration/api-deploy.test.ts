@@ -1634,6 +1634,44 @@ describe('POST /projects/:id/deploy', () => {
     expect(rows).toEqual([]);
   });
 
+  it.each([
+    [
+      { 'index.js': 'export default {};', metadata: '{}' },
+      {},
+      'workerFiles entry "metadata" is reserved',
+    ],
+    [
+      { 'index.js': 'export default {};', '../x.js': 'x' },
+      {},
+      'workerFiles entry "../x.js" must not contain empty, "." or ".." path segments',
+    ],
+    [
+      { 'index.js': 'export default {};' },
+      { workerMain: 'entry.mjs' },
+      'workerFiles must include the main module "entry.mjs"',
+    ],
+  ])(
+    'rejects invalid worker module sets before admitting the deploy (%#)',
+    async (workers, manifest, message) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'bad-module-name');
+      const res = await app.fetch(
+        await buildDeployRequest(env, project.id, user.jwt, {
+          manifest: { version: 3, bindings: {}, type: 'void', ...manifest },
+          workers,
+        }),
+        env,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ event: 'error', message });
+      const rows = await env.db
+        .select({ id: deployments.id })
+        .from(deployments)
+        .where(eq(deployments.project_id, project.id));
+      expect(rows).toEqual([]);
+    },
+  );
+
   it('accepts a manifest limits.cpuMs under the plan ceiling and routes with it', async () => {
     const user = await createTestUser(env.db, 'prolimituser2', 'github', undefined, 'pro');
     const project = await createTestProject(env.db, user.id, 'under-ceiling-app');
