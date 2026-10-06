@@ -306,6 +306,8 @@ export const projects = pgTable(
     type: text('mode').notNull().default('void').$type<'void' | 'spa' | 'static' | 'framework'>(),
     active_deployment_id: text('active_deployment_id'),
     websocket_version: integer('websocket_version').notNull().default(0),
+    // Highest proxy token generation issued for this project. 0 = legacy token.
+    proxy_token_gen: integer('proxy_token_gen').notNull().default(0),
     status: text('status').notNull().default('active').$type<'active' | 'deleting'>(),
     created_at: timestamp('created_at', { mode: 'string' }).notNull().defaultNow(),
   },
@@ -636,6 +638,7 @@ export const projectCleanupJobs = pgTable(
         | 'routing-key'
         | 'cron'
         | 'custom-hostname'
+        | 'proxy-token-rotation'
       >(),
     payload: jsonb('payload').notNull().$type<Record<string, string>>(),
     attempts: integer('attempts').notNull().default(0),

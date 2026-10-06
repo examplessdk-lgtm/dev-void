@@ -1,14 +1,18 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vite-plus/test';
 import { getDeployment, getProject, type Db } from '../../src/db.ts';
+import { replayDeploymentCutover } from '../../src/deploy/recovery.ts';
 import { settleExpiredDeployment } from '../../src/deployment-recovery.ts';
 import type { ApiEnv } from '../../src/env.ts';
+import { deriveProxyToken } from '../../src/proxy-token.ts';
 import { deployments, domains, projectMigrations, projects, resources } from '../../src/schema.ts';
 import {
   clearTables,
   createTestDeployment,
   createTestProject,
   createTestUser,
+  cfSuccess,
+  mockCfApi,
   setupEnv,
   teardownEnv,
   type TestEnv,
@@ -289,3 +293,85 @@ test('preserves retained historical deployment artifacts while terminalizing its
   expect(fetch).not.toHaveBeenCalled();
   expect(await env.ROUTING.get(`manifest:${candidate.id}`)).toBe('{}');
 });
+
+test.each([
+  { issued: 1, held: 0, fallback: 1 },
+  { issued: 1, held: 1, fallback: null },
+  { issued: 0, held: 0, fallback: null },
+])(
+  'cutover replay to a Worker on generation $held while generation $issued is issued writes fallback $fallback',
+  async ({ issued, held, fallback }) => {
+    await env.db
+      .update(projects)
+      .set({ proxy_token_gen: issued })
+      .where(eq(projects.id, project.id));
+    const deployment = await createTestDeployment(env.db, project.id);
+    await env.db
+      .update(deployments)
+      .set({
+        manifest: JSON.stringify({
+          version: 3,
+          type: 'void',
+          bindings: {},
+          schedules: [{ cron: '*/5 * * * *', filePath: 'crons/tick.ts' }],
+          queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+        }),
+      })
+      .where(eq(deployments.id, deployment.id));
+    await env.db.insert(resources).values({
+      id: 'resource-replay-queue',
+      project_id: project.id,
+      type: 'queue',
+      cf_id: '25832cb0ce3d4f60b1e538911a4629f4',
+      binding_name: 'emails',
+    });
+    const heldToken = await deriveProxyToken(env.JWT_SECRET, project.id, held);
+    mockCfApi({
+      listWorkerBindings: () =>
+        cfSuccess([{ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: heldToken }]),
+    });
+    const syncBodies: Array<string> = [];
+    const originalGet = env.CRON_SCHEDULER.get.bind(env.CRON_SCHEDULER);
+    vi.spyOn(env.CRON_SCHEDULER, 'get').mockImplementation((id) => {
+      const stub = originalGet(id);
+      return {
+        ...stub,
+        fetch: async (request: Request) => {
+          if (new URL(request.url).pathname === '/sync') {
+            syncBodies.push(await request.text());
+          }
+          return new Response('{}', { status: 200 });
+        },
+      } as unknown as DurableObjectStub;
+    });
+
+    const lockedProject = (await getProject(env.db, project.id))!;
+    await replayDeploymentCutover(
+      env as unknown as ApiEnv['Bindings'],
+      env.db,
+      lockedProject,
+      (await getDeployment(env.db, deployment.id))!,
+      lockedProject.type,
+      { restoreCommitted: true },
+    );
+
+    const expected = {
+      proxyToken: heldToken,
+      ...(fallback === null
+        ? {}
+        : { proxyTokenFallback: await deriveProxyToken(env.JWT_SECRET, project.id, fallback) }),
+    };
+    expect(
+      await env.ROUTING.get(`queue:${project.id.replaceAll('_', '-')}-emails`, 'json'),
+    ).toEqual({
+      workerName: `user-${project.slug}-${deployment.id}`,
+      projectId: project.id,
+      queueName: 'emails',
+      ...expected,
+    });
+    expect(syncBodies).toHaveLength(1);
+    const sync = JSON.parse(syncBodies[0]!) as Record<string, unknown>;
+    expect(sync.proxyToken).toBe(expected.proxyToken);
+    expect(sync.proxyTokenFallback).toBe(expected.proxyTokenFallback);
+  },
+);

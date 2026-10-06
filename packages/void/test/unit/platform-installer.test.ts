@@ -2909,6 +2909,7 @@ describe('platform installer', () => {
     expect(database.migrations.slice(baseline.length).map((migration) => migration.tag)).toEqual([
       '0056_email_shared_recipients',
       '0057_github_authority_constraints',
+      '0058_project_proxy_token_gen',
     ]);
     const rows = baseline.map((migration, index) => ({
       id: index + 1,
@@ -2934,7 +2935,7 @@ describe('platform installer', () => {
       '0.22.0',
       true,
     );
-    expect(result.appliedMigrations).toBe(2);
+    expect(result.appliedMigrations).toBe(3);
     expect(
       accepted.queries.some((query) =>
         query.includes('CREATE TRIGGER "void_shared_email_recipient_teardown_guard"'),
@@ -2973,10 +2974,48 @@ describe('platform installer', () => {
         sourceVersion,
         true,
       );
-      expect(result.appliedMigrations).toBe(1);
+      expect(result.appliedMigrations).toBe(2);
       expect(
         accepted.queries.some((query) => query.includes('"authorized_by_user_id" SET NOT NULL')),
       ).toBe(true);
+      expect(accepted.rows).toHaveLength(database.migrations.length);
+    },
+  );
+
+  it.each(['0.25.0', '0.26.0'])(
+    'upgrades a %s installation through the project proxy token generation',
+    async (sourceVersion) => {
+      const database = readPlatformRuntimeManifest().database;
+      const baseline = database.migrations.filter((migration) => migration.index <= 57);
+      expect(baseline.at(-1)?.tag).toBe('0057_github_authority_constraints');
+      const rows = baseline.map((migration, index) => ({
+        id: index + 1,
+        hash: migration.sha256,
+        created_at: migration.timestampMillis,
+      }));
+      const rejected = migrationConnection(rows);
+      await expect(
+        preparePlatformDatabaseConnection(
+          rejected,
+          getPlatformRuntimeDirectory(),
+          database,
+          '0.24.0',
+          true,
+        ),
+      ).rejects.toThrow('cannot safely roll back');
+      expect(rejected.queries).not.toContain('BEGIN');
+      const accepted = migrationConnection(rows);
+      const result = await preparePlatformDatabaseConnection(
+        accepted,
+        getPlatformRuntimeDirectory(),
+        database,
+        sourceVersion,
+        true,
+      );
+      expect(result.appliedMigrations).toBe(1);
+      expect(accepted.queries.some((query) => query.includes('ADD COLUMN "proxy_token_gen"'))).toBe(
+        true,
+      );
       expect(accepted.rows).toHaveLength(database.migrations.length);
     },
   );

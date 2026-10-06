@@ -610,6 +610,49 @@ describe('DELETE /projects/:id', () => {
     expect(await env.ROUTING.get(project.slug)).toBe(JSON.stringify({ projectId: replacement.id }));
   });
 
+  it('deletes the proxy token floor and retries a failed delete from the cleanup queue', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'proxy-token-floor');
+    const floorKey = `proxy-token:${project.id}`;
+    await env.ROUTING.put(floorKey, JSON.stringify({ gen: 2 }));
+    mockCfApi();
+    const deleteRoute = env.ROUTING.delete.bind(env.ROUTING);
+    const routeDelete = vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+      if (key === floorKey) {
+        throw new Error('temporary KV failure');
+      }
+      return deleteRoute(key);
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await db.getProject(env.db, project.id)).toBeNull();
+    const pending = await env.db.execute<{ kind: string; payload: unknown }>(sql`
+      SELECT kind, payload FROM project_cleanup_jobs
+      WHERE target = ${`routing-key:${project.id}:${floorKey}`}
+    `);
+    expect(pending.rows).toEqual([{ kind: 'routing-key', payload: { key: floorKey } }]);
+
+    routeDelete.mockRestore();
+    await scheduled(
+      { cron: FAST_CRON, scheduledTime: Date.now() } as ScheduledController,
+      env as unknown as Parameters<typeof scheduled>[1],
+      createMockExecutionContext(),
+    );
+    expect(await env.ROUTING.get(floorKey)).toBeNull();
+    const finished = await env.db.execute(sql`
+      SELECT target FROM project_cleanup_jobs
+      WHERE target = ${`routing-key:${project.id}:${floorKey}`}
+    `);
+    expect(finished.rows).toEqual([]);
+  });
+
   it('deletes Zero Trust applications only after retryable cleanup succeeds', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'zero-trust-teardown');

@@ -18,7 +18,7 @@ import {
 import * as db from '../../src/db.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
-import { deriveProxyInternalAuth } from '../../src/proxy-token.ts';
+import { deriveProxyInternalAuth, deriveProxyToken } from '../../src/proxy-token.ts';
 import { users } from '../../src/schema.ts';
 import {
   deployments,
@@ -3138,6 +3138,90 @@ describe('POST /projects/:id/rollback', () => {
       proxyToken: 'token-baked-into-d1',
     });
   });
+
+  it.each([
+    { issued: 1, held: 0, fallback: 1 },
+    { issued: 1, held: 1, fallback: null },
+    { issued: 0, held: 0, fallback: null },
+  ])(
+    'rollback to a Worker on generation $held while generation $issued is issued writes fallback $fallback',
+    async ({ issued, held, fallback }) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'roll-token-gen');
+      await env.db
+        .update(projects)
+        .set({ proxy_token_gen: issued })
+        .where(eq(projects.id, project.id));
+      const queueRoutingKey = `queue:${project.id.replaceAll('_', '-')}-emails`;
+      await env.db.insert(resources).values({
+        id: 'res_roll_token_gen',
+        project_id: project.id,
+        type: 'queue',
+        cf_id: '25832cb0ce3d4f60b1e538911a4629f4',
+        binding_name: 'emails',
+      });
+      const manifest = JSON.stringify({
+        version: 3,
+        bindings: {},
+        schedules: [{ cron: '*/5 * * * *', filePath: 'crons/tick.ts' }],
+        queues: [{ name: 'emails', bindingName: 'QUEUE_EMAILS' }],
+      });
+      const d1 = await createDeployment(env.db, project.id, manifest);
+      await updateDeploymentStatus(env.db, d1.id, 'live');
+      await markDeploymentRetained(env.db, d1.id, true);
+      const d2 = await createDeployment(env.db, project.id, manifest);
+      await updateDeploymentStatus(env.db, d2.id, 'live');
+      await markDeploymentRetained(env.db, d2.id, true);
+      await setActiveDeployment(env.db, project.id, d2.id);
+
+      const heldToken = await deriveProxyToken(env.JWT_SECRET, project.id, held);
+      mockCfApi({
+        listWorkerBindings: () =>
+          cfSuccess([{ type: 'plain_text', name: '__VOID_PROXY_TOKEN', text: heldToken }]),
+      });
+      const syncBodies: Array<string> = [];
+      const originalGet = env.CRON_SCHEDULER.get.bind(env.CRON_SCHEDULER);
+      vi.spyOn(env.CRON_SCHEDULER, 'get').mockImplementation((id) => {
+        const stub = originalGet(id);
+        return {
+          ...stub,
+          fetch: async (req: Request) => {
+            if (new URL(req.url).pathname === '/sync') {
+              syncBodies.push(await req.text());
+            }
+            return new Response('{}', { status: 200 });
+          },
+        } as unknown as DurableObjectStub;
+      });
+
+      const res = await app.fetch(
+        new Request(`http://localhost/projects/${project.id}/rollback`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${user.jwt}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deploymentId: d1.id }),
+        }),
+        env,
+      );
+      expect(res.status).toBe(200);
+
+      const expected = {
+        proxyToken: heldToken,
+        ...(fallback === null
+          ? {}
+          : { proxyTokenFallback: await deriveProxyToken(env.JWT_SECRET, project.id, fallback) }),
+      };
+      expect(await env.ROUTING.get(queueRoutingKey, 'json')).toEqual({
+        workerName: `user-roll-token-gen-${d1.id}`,
+        projectId: project.id,
+        queueName: 'emails',
+        ...expected,
+      });
+      expect(syncBodies).toHaveLength(1);
+      const sync = JSON.parse(syncBodies[0]!) as Record<string, unknown>;
+      expect(sync.proxyToken).toBe(expected.proxyToken);
+      expect(sync.proxyTokenFallback).toBe(expected.proxyTokenFallback);
+    },
+  );
 });
 
 describe('GET /projects/:id/logs', () => {

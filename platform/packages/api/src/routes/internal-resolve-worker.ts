@@ -12,7 +12,8 @@ const app = new Hono<ApiEnv>();
  * Authenticated by the proxy's own credential (see requireProxyInternalAuth).
  *
  * POST /internal/resolve-worker/:projectId
- * Returns: { "workerName": "user-<slug>-<deploymentId>", "deploymentId": "..." }
+ * Returns: { "workerName": "user-<slug>-<deploymentId>", "deploymentId": "...",
+ *            "proxyTokenGen": <issued proxy token generation> }
  * or 409 when the active deployment is static-only.
  */
 app.post('/:projectId', async (context) => {
@@ -47,6 +48,7 @@ app.post('/:projectId', async (context) => {
   return context.json({
     workerName: getProjectDeploymentWorkerName(project.slug, deployment.id),
     deploymentId: deployment.id,
+    proxyTokenGen: project.proxy_token_gen,
   });
 });
 

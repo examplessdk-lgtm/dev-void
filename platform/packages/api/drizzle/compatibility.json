@@ -57,6 +57,14 @@
     {
       "platformVersion": "0.24.0",
       "schemaDigest": "3e3458ba1268853dc8e9a887270863557c2a4c5a5210f8615d247bf1f4bf6bcc"
+    },
+    {
+      "platformVersion": "0.25.0",
+      "schemaDigest": "7581930465664b7c578518bea54f36a83d20fcc47d9528183419033930d7ff4a"
+    },
+    {
+      "platformVersion": "0.26.0",
+      "schemaDigest": "7581930465664b7c578518bea54f36a83d20fcc47d9528183419033930d7ff4a"
     }
   ]
 }

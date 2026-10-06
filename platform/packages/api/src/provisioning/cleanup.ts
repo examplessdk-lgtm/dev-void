@@ -41,6 +41,7 @@ import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
 import { getLegacyProjectWorkerName, getProjectDeploymentWorkerName } from '../naming.ts';
 import { requireProjectCapability } from '../project-access.ts';
+import { proxyTokenStateKey } from '../proxy-token.ts';
 import {
   deployments as deploymentsTable,
   projectCleanupJobs,
@@ -456,6 +457,12 @@ async function cleanupBestEffortResources(
   // Retire any account mirror left by the removed tenant-owned Sandbox proxy.
   cleanup.push(
     cleanupJob(projectId, 'routing-key', `project:${projectId}`, { key: `project:${projectId}` }),
+  );
+  // Proxy token accept floor.
+  cleanup.push(
+    cleanupJob(projectId, 'routing-key', proxyTokenStateKey(projectId), {
+      key: proxyTokenStateKey(projectId),
+    }),
   );
 
   // Queue routing KV entries

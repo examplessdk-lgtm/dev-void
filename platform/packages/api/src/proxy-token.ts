@@ -277,19 +277,6 @@ export async function verifyProxyToken(
   return true;
 }
 
-/**
- * Returns the token for the current floor (floor 0 is the legacy token).
- * Stopgap until the issued generation is stored with the project.
- */
-export async function issueProxyToken(
-  routing: Pick<KVNamespace, 'get'>,
-  jwtSecret: string,
-  projectId: string,
-): Promise<string> {
-  const state = await readProxyTokenState(routing, projectId);
-  return deriveProxyToken(jwtSecret, projectId, state.gen);
-}
-
 // --- Isolate cache ---
 
 export type ProxyTokenStateCache = Readonly<{

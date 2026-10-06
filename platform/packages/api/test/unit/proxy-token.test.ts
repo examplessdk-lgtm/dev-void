@@ -7,7 +7,6 @@ import {
   deriveProxyInternalAuth,
   deriveProxyToken,
   isAcceptedGeneration,
-  issueProxyToken,
   LEGACY_PROXY_TOKEN_STATE,
   parseProxyTokenState,
   PROXY_INTERNAL_AUTH_HEADER,
@@ -157,12 +156,12 @@ describe('parseProxyTokenState', () => {
 
 describe('state table', () => {
   it.each([
-    { raw: null, accepted: [0, 1, 5], rejected: [], send: [0], issue: 0 },
-    { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [], send: [0], issue: 0 },
-    { raw: '{"gen":1}', accepted: [1, 2], rejected: [0], send: [1, 0], issue: 1 },
-    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1], send: [2, 1], issue: 2 },
-    { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2], send: [3, 2], issue: 3 },
-  ])('floor $raw', async ({ raw, accepted, rejected, send, issue }) => {
+    { raw: null, accepted: [0, 1, 5], rejected: [], send: [0] },
+    { raw: '{"gen":0}', accepted: [0, 1, 5], rejected: [], send: [0] },
+    { raw: '{"gen":1}', accepted: [1, 2], rejected: [0], send: [1, 0] },
+    { raw: '{"gen":2}', accepted: [2, 3], rejected: [0, 1], send: [2, 1] },
+    { raw: '{"gen":3}', accepted: [3, 4], rejected: [0, 1, 2], send: [3, 2] },
+  ])('floor $raw', async ({ raw, accepted, rejected, send }) => {
     const { routing } = kvStub(raw === null ? {} : { [proxyTokenStateKey(PROJECT)]: raw });
     const state = await readProxyTokenState(routing, PROJECT);
     for (const gen of accepted) {
@@ -174,15 +173,11 @@ describe('state table', () => {
       expect(await verify(await deriveProxyToken(SECRET, PROJECT, gen), state).result).toBe(false);
     }
     expect(sendGenerations(state.gen)).toEqual(send);
-    expect(await issueProxyToken(routing, SECRET, PROJECT)).toBe(
-      await deriveProxyToken(SECRET, PROJECT, issue),
-    );
   });
 
   it('fails closed on a malformed floor', async () => {
     const { routing } = kvStub({ [proxyTokenStateKey(PROJECT)]: '{"gen":"x"}' });
     await expect(readProxyTokenState(routing, PROJECT)).rejects.toThrow(ProxyTokenStateError);
-    await expect(issueProxyToken(routing, SECRET, PROJECT)).rejects.toThrow(ProxyTokenStateError);
   });
 
   it('sends the issued generation, then the one before it', () => {

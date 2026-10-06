@@ -51,6 +51,7 @@ describe('POST /internal/resolve-worker/:projectId', () => {
     expect(await current.json()).toEqual({
       workerName: `user-${project.slug}-${newer.id}`,
       deploymentId: newer.id,
+      proxyTokenGen: 0,
     });
 
     await setActiveDeployment(env.db, project.id, rollbackTarget.id);
@@ -59,6 +60,7 @@ describe('POST /internal/resolve-worker/:projectId', () => {
     expect(await rolledBack.json()).toEqual({
       workerName: `user-${project.slug}-${rollbackTarget.id}`,
       deploymentId: rollbackTarget.id,
+      proxyTokenGen: 0,
     });
   });
 

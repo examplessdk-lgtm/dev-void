@@ -87,6 +87,7 @@ import {
   isAlreadyExistsError as isDestinationAlreadyExistsError,
 } from '../provisioning/email-routing.ts';
 import { isManagedSandbox, verifySandboxController } from '../provisioning/sandbox-controller.ts';
+import { proxyTokenCopies } from '../proxy-token-rotation.ts';
 import { EMAIL_RESERVED_SLUGS } from '../reserved-slugs.ts';
 import {
   buildRoutingJson,
@@ -1516,10 +1517,17 @@ const app = new Hono<ApiEnv>()
             // /__void/scheduled and /__void/queue handlers both validate
             // against the SAME __VOID_PROXY_TOKEN binding, so one lookup
             // is authoritative for both.
+            // The target may not hold the issued generation yet (a rotation
+            // is still updating it), so its copies carry the issued token as
+            // the fallback.
             const needsProxyToken = !!manifest?.schedules?.length || !!manifest?.queues?.length;
-            const targetProxyToken = needsProxyToken
-              ? await resolveRollbackProxyToken(context.env, workerName, projectId)
-              : null;
+            const targetProxyTokens = needsProxyToken
+              ? await proxyTokenCopies(
+                  context.env.JWT_SECRET,
+                  lockedProject,
+                  await resolveRollbackProxyToken(context.env, workerName, projectId),
+                )
+              : {};
 
             // Sync cron scheduler to point at the rollback target.
             //
@@ -1536,7 +1544,7 @@ const app = new Hono<ApiEnv>()
               await syncCronScheduler(context.env, projectId, {
                 workerName,
                 schedules: manifest.schedules,
-                proxyToken: targetProxyToken!,
+                ...targetProxyTokens,
               });
             } else {
               await clearCronScheduler(context.env, projectId);
@@ -1669,7 +1677,7 @@ const app = new Hono<ApiEnv>()
                     workerName,
                     projectId,
                     queueName: q.name,
-                    proxyToken: targetProxyToken!,
+                    ...targetProxyTokens,
                   }),
                 );
               }
