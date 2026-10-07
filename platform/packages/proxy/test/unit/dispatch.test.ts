@@ -750,6 +750,7 @@ describe('proxy token generations', () => {
   });
 
   it.each([
+    { held: 0, tokens: [2, 1, 0] },
     { held: 1, tokens: [2, 1] },
     { held: 2, tokens: [2] },
   ])('sends issued generation 2 to a Worker holding $held', async ({ held, tokens }) => {
@@ -850,17 +851,17 @@ describe('proxy token generations', () => {
     await reader.cancel();
   });
 
-  it('returns the second reject when the Worker holds neither token', async () => {
+  it('returns the last reject when the Worker holds none of the tokens', async () => {
     const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
-      held: await tok(0),
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 3 },
+      held: await tok(1),
     });
 
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
 
     expect(res?.status).toBe(403);
     expect(await res?.json()).toEqual({ error: 'unauthorized' });
-    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
+    expect(sent.map((s) => s.token)).toEqual([await tok(3), await tok(2)]);
   });
 
   it('does not retry after a thrown fetch', async () => {

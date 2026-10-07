@@ -167,12 +167,15 @@ export async function dispatchToWorker(
 
   try {
     let res = await send(tokens[0]);
-    // While a token rotation is in progress the Worker may still hold the
-    // previous token. Its reject comes before any handler runs, so a second
+    // While a token rotation is in progress the Worker may still hold an
+    // older token. Its reject comes before any handler runs, so another
     // attempt cannot repeat a write.
-    if (tokens.length > 1 && (await isTokenRejection(res))) {
+    for (const token of tokens.slice(1)) {
+      if (!(await isTokenRejection(res))) {
+        break;
+      }
       await res.body?.cancel();
-      res = await send(tokens[1]);
+      res = await send(token);
     }
 
     // 404 means old deploy without /__void handler → fall back

@@ -87,12 +87,18 @@ export function isAcceptedGeneration(state: ProxyTokenState, gen: number): boole
 /**
  * Generations a sender tries, in order, for the issued generation: the
  * current one, then the one before it while Workers may still hold it.
+ * Generation 2 also tries the legacy token last: a Worker deploy moves a
+ * project from 0 to 1 and queues a rotation to 2 for its older Workers, which
+ * hold the legacy token until that rotation patches them.
  */
 export function sendGenerations(issueGen: number): ReadonlyArray<number> {
   if (!Number.isSafeInteger(issueGen) || issueGen < 0) {
     throw new RangeError(`invalid proxy token generation: ${issueGen}`);
   }
-  return issueGen >= 1 ? [issueGen, issueGen - 1] : [0];
+  if (issueGen === 0) {
+    return [0];
+  }
+  return issueGen === 2 ? [2, 1, 0] : [issueGen, issueGen - 1];
 }
 
 // --- Keys ---

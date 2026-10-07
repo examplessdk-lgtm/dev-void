@@ -68,8 +68,10 @@ forwards the token, and the API checks it against the same floor.
 When the proxy calls a tenant Worker's `/__void/*` handler, it sends the token
 for the generation `resolve-worker` reports (`proxyTokenGen`), or for the floor
 when the API does not report one. If that Worker answers 403
-`{"error":"unauthorized"}`, the proxy retries once with the previous
-generation. It never sends a generation above the issued one.
+`{"error":"unauthorized"}`, the proxy retries with the previous generation.
+At generation 2 it then also tries the legacy token: a Worker deploy that
+moves a project from 0 to 1 queues a rotation to 2 for its older Workers. It
+never sends a generation above the issued one.
 
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a
