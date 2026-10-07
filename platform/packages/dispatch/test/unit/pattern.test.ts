@@ -371,4 +371,19 @@ describe('substituteParams', () => {
   it('ignores extra params not referenced by destination', () => {
     expect(substituteParams('/articles/:slug', { slug: 'hi', extra: 'x' })).toBe('/articles/hi');
   });
+
+  it('keeps a path destination on the same site when a capture starts with a slash', () => {
+    expect(substituteParams('/:splat', { splat: '/evil.com' })).toBe('/evil.com');
+    expect(substituteParams('/:splat', { splat: '\\evil.com' })).toBe('/evil.com');
+    expect(substituteParams(':splat', { splat: '//evil.com' })).toBe('/evil.com');
+    expect(substituteParams('/:path*', { path: '//evil.com/x' })).toBe('/evil.com/x');
+  });
+
+  it('leaves protocol-relative, absolute and prefixed destinations unchanged', () => {
+    expect(substituteParams('//cdn.example.com/:splat', { splat: 'a' })).toBe(
+      '//cdn.example.com/a',
+    );
+    expect(substituteParams('https://x.com/:splat', { splat: '/a' })).toBe('https://x.com//a');
+    expect(substituteParams('/posts/:splat', { splat: '/x' })).toBe('/posts//x');
+  });
 });

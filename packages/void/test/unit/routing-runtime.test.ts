@@ -94,6 +94,15 @@ describe('typed HTTP execution', () => {
       'redirect[/old/:id] -> /new/42?set=1 301 (config)',
     );
   });
+  it('keeps catch-all redirects on the same site when the capture starts with a slash', async () => {
+    const app = new Hono();
+    const runtime = createRoutingRuntime(app, { nodeTarget: true });
+    app.use(runtime.contextMiddleware);
+    app.use(runtime.routingMiddleware([{ source: '/en/*', destination: '/:splat', status: 301 }]));
+    const response = await app.fetch(new Request('https://app.test/en//evil.com'));
+    expect(response.status).toBe(301);
+    expect(response.headers.get('location')).toBe('/evil.com');
+  });
   it.each([true, false])('gates dynamic rewrite tracing on dev=%s', async (dev) => {
     const app = new Hono();
     const runtime = createRoutingRuntime(app, { nodeTarget: true, dev });

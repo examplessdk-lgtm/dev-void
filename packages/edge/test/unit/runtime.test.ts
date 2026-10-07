@@ -54,6 +54,17 @@ describe('createStaticEdgeHandler', () => {
     expect(binding.fetch).not.toHaveBeenCalled();
   });
 
+  it('keeps catch-all redirects on the same site when the capture starts with a slash', async () => {
+    const binding = assets({});
+    const response = await createStaticEdgeHandler({
+      redirectRules: [{ source: '/en/*', destination: '/:splat', status: 301 }],
+    }).fetch(new Request('https://example.com/en//evil.com'), { ASSETS: binding });
+
+    expect(response.status).toBe(301);
+    expect(response.headers.get('location')).toBe('/evil.com');
+    expect(binding.fetch).not.toHaveBeenCalled();
+  });
+
   it('rewrites before assets and exposes the original URL', async () => {
     const binding = assets({ '/new': new Response('rewritten') });
     const response = await createStaticEdgeHandler({
