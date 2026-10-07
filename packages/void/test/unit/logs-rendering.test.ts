@@ -145,10 +145,46 @@ it('drops terminal control sequences from app log text but keeps colors and line
   ]);
 });
 
+it('ends app log text with a reset so its styles cannot hide the next printed line', async () => {
+  logsFixture.entries = [
+    {
+      timestamp: 0,
+      method: 'GET',
+      url: '/search?q=\x1b[8m',
+      status: '200',
+      outcome: 'ok',
+      logs: [{ level: 'log', message: ['q=\x1b[8m'] }],
+      exceptions: [{ name: 'Error', message: 'x\x1b[7;30;40m' }],
+    },
+  ];
+  const output = Object.assign(
+    new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    }),
+    { columns: 120 },
+  );
+  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
+  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
+  await runLogsCommand('/fixture', '', '1h');
+
+  const styled = print.mock.calls
+    .map((args) => String(args[0] ?? ''))
+    .filter((line) => line.includes('\x1b[8m') || line.includes('\x1b[7;30;40m'));
+  expect(styled).toHaveLength(3);
+  for (const line of styled) {
+    expect(line.lastIndexOf('\x1b[0m')).toBeGreaterThan(
+      Math.max(line.lastIndexOf('\x1b[8m'), line.lastIndexOf('\x1b[7;30;40m')),
+    );
+  }
+});
+
 it('keeps color codes, newlines and tabs, and drops other control characters', () => {
   expect(sanitizeTerminalLogText('\x1b[1;38;2;255;0;0mbold\x1b[0m\tcol\nnext')).toBe(
-    '\x1b[1;38;2;255;0;0mbold\x1b[0m\tcol\nnext',
+    '\x1b[1;38;2;255;0;0mbold\x1b[0m\tcol\nnext\x1b[0m',
   );
+  expect(sanitizeTerminalLogText('q=\x1b[8m hidden')).toBe('q=\x1b[8m hidden\x1b[0m');
   expect(sanitizeTerminalLogText('a\x1b]52;c;ZXZpbA==\x07b')).toBe('a]52;c;ZXZpbA==b');
   expect(sanitizeTerminalLogText('x\x1b[2J\x1b[?25l\x1b[1Ay')).toBe('x[2J[?25l[1Ay');
   expect(sanitizeTerminalLogText('over\rwrite')).toBe('overwrite');
