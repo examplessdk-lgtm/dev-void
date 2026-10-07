@@ -324,14 +324,32 @@ async function selectInventory(
  * every retained one (rollback leases excluded), oldest first. A retained
  * Worker whose author can no longer deploy is left out: it keeps its old
  * token, which the raised floor rejects, so rolling back to it needs a new
- * deploy before platform services work again. Rows of a static deployment
- * stay in; their GET finds no script.
+ * deploy before platform services work again. A Worker the running rotation
+ * found without a proxy token binding is left out the same way; one the walk
+ * has not reached yet looks like any other until its GET. Rows of a static
+ * deployment stay in; their GET finds no script.
  */
 export async function listProxyTokenInventory(
   db: DbOrTx,
   project: Pick<Project, 'id' | 'slug' | 'active_deployment_id'>,
 ): Promise<ReadonlyArray<InventoryRow>> {
-  return (await selectInventory(db, project)).filter((row) => !row.skipped);
+  const [job] = await db
+    .select({ payload: projectCleanupJobs.payload })
+    .from(projectCleanupJobs)
+    .where(and(jobTarget(project.id), eq(projectCleanupJobs.kind, PROXY_TOKEN_ROTATION_JOB_KIND)));
+  const unbound = unboundDeployments(job?.payload);
+  return (await selectInventory(db, project)).filter(
+    (row) => !row.skipped && !unbound.has(row.deploymentId),
+  );
+}
+
+/**
+ * Deployments whose Worker this rotation found without a proxy token binding
+ * (`unbound` in the job payload, comma-separated). Their rows keep the
+ * generation they hold.
+ */
+function unboundDeployments(payload: JobPayload | undefined): ReadonlySet<string> {
+  return new Set(payload?.unbound ? payload.unbound.split(',') : []);
 }
 
 function parseCursor(cursor: string | undefined): { createdAt: string; id: string } | undefined {
@@ -547,17 +565,34 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
   const gen = project.proxy_token_gen;
   const token = await deriveProxyToken(ctx.env.JWT_SECRET, ctx.projectId, gen);
   const bindings = await ctx.cf.getScriptBindings(row.workerName);
+  const current = bindings ? tokenBinding(bindings) : undefined;
+  if (bindings && !current) {
+    // Deployed before the binding rename: there is no binding to PATCH. Its
+    // row and copies keep the generation it holds, so senders still reach it;
+    // its own proxy calls fail once the floor rises, until a redeploy.
+    rotationLog(
+      'skipped',
+      ctx.projectId,
+      `worker=${row.workerName} has no ${PROXY_TOKEN_BINDING} binding; redeploy the project to give it one`,
+    );
+    const unbound = [...new Set(unboundDeployments(payload)).add(row.deploymentId)].join(',');
+    await finishStep(
+      tx,
+      ctx.projectId,
+      sql`jsonb_build_object('cursor', ${cursor}::text, 'unbound', ${unbound}::text)`,
+    );
+    return { kind: 'continue' };
+  }
   let patched = false;
   if (bindings === null) {
     if (row.active && !isStaticProjectType(project.type)) {
       throw new Error(`active Worker ${row.workerName} not found`);
     }
-  } else {
-    const current = tokenBinding(bindings);
-    if (current && current.type !== 'plain_text') {
+  } else if (current) {
+    if (current.type !== 'plain_text') {
       throw new Error(`Worker ${row.workerName} has a ${current.type} proxy token binding`);
     }
-    if (current && current.text !== token) {
+    if (current.text !== token) {
       const result =
         (await ctx.cf.patchScriptBindings(
           row.workerName,
@@ -568,15 +603,15 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
       }
       patched = true;
       rotationLog('patched', ctx.projectId, `worker=${row.workerName} gen=${gen}`);
-    } else if (current && (locked.attempts > 0 || row.proxyTokenGen !== gen)) {
+    } else if (locked.attempts > 0 || row.proxyTokenGen !== gen) {
       // An earlier attempt patched this Worker and then lost the response,
       // failed or rolled back before its step committed. Its old version can
       // still serve, so it drains as if patched now.
       patched = true;
     }
   }
-  // The Worker now holds tok(gen), or holds no proxy token at all. Only now do
-  // the row and the copies name it, so senders never run ahead of the Worker.
+  // The Worker now holds tok(gen), or has no script. Only now do the row and
+  // the copies name it, so senders never run ahead of the Worker.
   if (patched && row.active) {
     const active = await activeWorker(tx, project);
     if (hasTokenCopies(project, active)) {
@@ -611,8 +646,9 @@ async function revoke(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise
     return { kind: 'continue' };
   }
   const gen = project.proxy_token_gen;
+  const unbound = unboundDeployments(payload);
   const stale = (await selectInventory(tx, project)).find(
-    (row) => !row.skipped && row.proxyTokenGen !== gen,
+    (row) => !row.skipped && !unbound.has(row.deploymentId) && row.proxyTokenGen !== gen,
   );
   if (stale) {
     // The floor would reject the token a sender still presents to this Worker.
@@ -633,11 +669,12 @@ async function revoke(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise
       await finishStep(tx, ctx.projectId, sql`'{"phase":"patch","cursor":""}'::jsonb`);
       return { kind: 'continue' };
     }
-    if (hasTokenCopies(project, active)) {
+    // An active Worker without the binding keeps the copies of the token it holds.
+    if (current && hasTokenCopies(project, active)) {
       await writeCopies(ctx.env, ctx.projectId, active, token);
     }
   }
-  // Written before COMMIT: KV may only run ahead, and every Worker holds T.
+  // Written before COMMIT: KV may only run ahead, and every patched Worker holds T.
   await ctx.env.ROUTING.put(proxyTokenStateKey(ctx.projectId), serializeProxyTokenState({ gen }));
   await finishStep(
     tx,

@@ -72,7 +72,7 @@ These commands are for Void Cloud's Workers. Self-hosted installations use the [
 
 A deploy gives a project still on generation 0 a generation 1 token. Its older Workers keep the legacy token, which stays accepted until the project rotates.
 
-Workers deployed before the binding rename hold the legacy token in `__AI_TOKEN`, which rotation cannot replace, so they lose AI, email and ISR revalidation when their project rotates, including after a rollback to such a deployment. Get them redeployed. To list the active ones, set `rename_live_at` (psql `\set`) to the first production deploy that contains commit `54375ae1` (2026-03-03), or a later time if unsure; static deployments in the list need nothing.
+Workers deployed before the binding rename hold the legacy token in `__AI_TOKEN`, which rotation cannot replace. A rotation skips them (`[proxy-token-rotation] skipped <project> worker=<name> has no __VOID_PROXY_TOKEN binding`) and leaves their deployment rows, queue entries and cron scheduler on the legacy token, so queues, crons and proxy calls into them keep working. Their own calls to the proxy (AI, email, ISR revalidation) fail once the floor rises, including after a rollback to such a deployment. Get them redeployed. To list the active ones, set `rename_live_at` (psql `\set`) to the first production deploy that contains commit `54375ae1` (2026-03-03), or a later time if unsure; static deployments in the list need nothing.
 
 ```sql
 SELECT p.id, p.slug, d.id AS deployment_id, d.created_at

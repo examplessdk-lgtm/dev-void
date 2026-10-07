@@ -23,6 +23,7 @@ import { reconcileProjectCleanupJobs } from '../../src/provisioning/cleanup.ts';
 import {
   advanceProxyTokenRotation,
   issueProjectProxyToken,
+  listProxyTokenInventory,
   PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS,
   PROXY_TOKEN_ROTATION_WAIT_MS,
   proxyTokenRotationStuckWarning,
@@ -1028,9 +1029,51 @@ describe('proxy token rotation', () => {
       cf.state.hostScripts.get(fx.worker(fx.retained[0]!))!.bindings = [
         { type: 'd1', name: 'DB', id: 'd1-database-id' },
       ];
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await request(fx.projectId);
+      await advance(fx.projectId, { waitMs: 60_000 });
+      expect((await job(fx.projectId))!.payload.phase).toBe('revoke');
+      const [project] = await env.db.select().from(projects).where(eq(projects.id, fx.projectId));
+      expect(
+        (await listProxyTokenInventory(env.db, project!)).map((row) => row.workerName),
+      ).toEqual([fx.retained[1]!, fx.active].map(fx.worker));
+
+      expect(await step(fx.projectId)).toMatchObject({ status: 'pending', phase: 'settle' });
+      expect(await step(fx.projectId)).toEqual({ status: 'done', gen: 1 });
+      expect(patchedScripts()).toEqual([fx.worker(fx.retained[1]!), fx.worker(fx.active)]);
+      expect(log).toHaveBeenCalledWith(
+        `[proxy-token-rotation] skipped ${fx.projectId} worker=${fx.worker(fx.retained[0]!)} has no __VOID_PROXY_TOKEN binding; redeploy the project to give it one`,
+      );
+      // Its row still names the token it holds; the floor rises past it.
+      expect(await held(fx.retained[0]!)).toBe(0);
+      expect(await held(fx.retained[1]!)).toBe(1);
+      expect(await held(fx.active)).toBe(1);
+      expect(await floor(fx.projectId)).toEqual({ gen: 1 });
+    });
+
+    it('leaves the row and copies of an active Worker without a proxy token binding', async () => {
+      const cf = cfApi();
+      const fx = await setupProject(cf);
+      cf.state.hostScripts.get(fx.worker(fx.active))!.bindings = [
+        { type: 'd1', name: 'DB', id: 'd1-database-id' },
+      ];
+      vi.spyOn(console, 'log').mockImplementation(() => {});
       await request(fx.projectId);
       expect(await advance(fx.projectId)).toEqual({ status: 'done', gen: 1 });
-      expect(patchedScripts()).toEqual([fx.worker(fx.retained[1]!), fx.worker(fx.active)]);
+
+      expect(patchedScripts()).toEqual(fx.retained.map(fx.worker));
+      // One GET in the walk and one at REVOKE: no re-walk for its row.
+      expect(events.filter((event) => event === `GET ${fx.worker(fx.active)}`)).toHaveLength(2);
+      expect(await held(fx.active)).toBe(0);
+      expect(await resolvedGen(fx.projectId)).toBe(0);
+      expect((await routing.get(fx.queueKey, 'json')) as Record<string, unknown>).toMatchObject({
+        proxyToken: fx.legacy,
+      });
+      expect(cron.states.get(fx.projectId)).toMatchObject({ proxyToken: fx.legacy });
+      for (const id of fx.retained) {
+        expect(await held(id)).toBe(1);
+      }
+      expect(await floor(fx.projectId)).toEqual({ gen: 1 });
     });
 
     it('fails when the active Worker of a Worker project has no script', async () => {
