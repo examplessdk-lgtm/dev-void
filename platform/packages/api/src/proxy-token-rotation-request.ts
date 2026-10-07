@@ -17,6 +17,7 @@ export type ProxyTokenRotationReason =
   | 'member-removed'
   | 'member-role-changed'
   | 'user-deleted'
+  | 'user-suspended'
   | 'untrusted-deploy-replaced'
   | 'operator'
   | 'operator-bulk';

@@ -12,6 +12,7 @@ import {
   getGitHubConnection,
   getProject,
   respondToProjectInvitation,
+  suspendUser,
 } from '../../src/db.ts';
 import {
   projectAccessEvents,
@@ -21,6 +22,7 @@ import {
   projectOwnershipPeriods,
   users,
 } from '../../src/schema.ts';
+import { REASON_REQUESTS_EXCEEDED } from '../../src/suspension.ts';
 import {
   createTestBuild,
   captureQueries,
@@ -160,6 +162,36 @@ describe('project team lifecycle', () => {
       expect(job).toMatchObject({
         kind: 'proxy-token-rotation',
         payload: { phase: 'requested', reason: 'user-deleted' },
+      });
+    }
+  });
+
+  it('rotates the proxy token of every project an admin-suspended user could deploy to', async () => {
+    const owner = await createTestUser(env.db, 'suspension-owner');
+    const member = await createTestUser(env.db, 'suspension-member');
+    const collaborated = await createProject(env.db, owner.id, 'suspension-collaborator');
+    const read = await createProject(env.db, owner.id, 'suspension-reader');
+    const administered = await createProject(env.db, owner.id, 'suspension-admin');
+    await env.db.insert(projectMembers).values([
+      { project_id: collaborated.id, user_id: member.id, role: 'collaborator' },
+      { project_id: read.id, user_id: member.id, role: 'reader' },
+      { project_id: administered.id, user_id: member.id, role: 'admin' },
+    ]);
+
+    await suspendUser(env.db, member.id, REASON_REQUESTS_EXCEEDED);
+    await suspendUser(env.db, owner.id, 'admin_suspended');
+    expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
+
+    await suspendUser(env.db, member.id, 'admin_suspended');
+
+    const jobs = await env.db.select().from(projectCleanupJobs);
+    expect(jobs.map((job) => job.project_id).sort()).toEqual(
+      [collaborated.id, administered.id].sort(),
+    );
+    for (const job of jobs) {
+      expect(job).toMatchObject({
+        kind: 'proxy-token-rotation',
+        payload: { phase: 'requested', reason: 'user-suspended' },
       });
     }
   });

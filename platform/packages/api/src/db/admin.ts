@@ -203,7 +203,23 @@ export async function suspendUser(db: Db, id: string, reason: string): Promise<v
     await target.update(users).set({ suspended_reason: reason }).where(eq(users.id, id));
   };
   if (isAdminSuspended(reason)) {
-    await withAdminRemovalGuard(db, id, suspend);
+    await withAdminRemovalGuard(db, id, async (tx) => {
+      await suspend(tx);
+      // An admin suspension ends deploy access, like account deletion.
+      const deployMemberships = await tx
+        .select({ projectId: projectMembers.project_id })
+        .from(projectMembers)
+        .where(
+          and(
+            eq(projectMembers.user_id, id),
+            inArray(projectMembers.role, ['collaborator', 'admin']),
+          ),
+        )
+        .orderBy(asc(projectMembers.project_id));
+      for (const { projectId } of deployMemberships) {
+        await requestProxyTokenRotation(tx, projectId, 'user-suspended', 'member');
+      }
+    });
   } else {
     // Usage limits suspend app traffic, not administrator access. A delayed
     // quota write must not undo an administrator's manual access revocation.
