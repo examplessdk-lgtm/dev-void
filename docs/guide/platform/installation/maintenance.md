@@ -102,17 +102,6 @@ After rotating project credentials, roll back only to a release that already acc
 
 :::
 
-#### After upgrading
-
-Projects deployed before credential rotation keep their original platform credentials until you rotate them. After the upgrade finishes, rotate them once and check progress:
-
-```sh
-void platform system rotate-proxy-tokens --yes
-void platform system rotate-proxy-tokens --plan
-```
-
-The platform finishes the rest in the background. Check with `--plan` until nothing is pending or failed; a failed rotation is retried every 15 minutes, and `--plan` shows its error. Each rotated project's live Worker starts a new version, so WebSocket connections reconnect once. See [Platform Operations](/reference/cli/platform-operations#operator-system) for details.
-
 ### Follow upgrade and rollback progress
 
 Watching progress is optional: a running upgrade or rollback proceeds through

@@ -14,6 +14,10 @@ import { getDeployment } from '../../src/db.ts';
 import { app } from '../../src/index.ts';
 import { getProjectDeploymentWorkerName } from '../../src/naming.ts';
 import { loadSandboxDeploymentPageProjection } from '../../src/operator/sandbox-operations.ts';
+import {
+  reconcileProxyTokenRotations,
+  type ProxyTokenRotationEnv,
+} from '../../src/proxy-token-rotation.ts';
 import { deriveProxyToken } from '../../src/proxy-token.ts';
 import { databaseTimestampMs } from '../../src/routes/deploy.ts';
 import { readSandboxDrainCheckpoint } from '../../src/sandbox-drain.ts';
@@ -1543,17 +1547,21 @@ describe('proxy token rotation', () => {
       WHERE kind = 'proxy-token-rotation'`);
   }
 
-  /** Reruns the default (legacy) apply past each wait until nothing is left. */
-  async function applyUntilComplete() {
+  /** One scheduled rotation run past the current waits. */
+  async function runRotations() {
+    await endWaits();
+    await reconcileProxyTokenRotations(env.db, env as unknown as ProxyTokenRotationEnv);
+  }
+
+  /** Scheduled rotation runs until no job is left. */
+  async function finishRotations() {
     for (let run = 0; run < 6; run++) {
-      await endWaits();
-      const response = await req('/system/rotate-proxy-tokens', {});
-      const body = (await response.json()) as { complete: boolean };
-      if (body.complete) {
-        expect(response.status).toBe(200);
-        return body;
+      await runRotations();
+      const plan = await req('/system/rotate-proxy-tokens', { dryRun: true });
+      const body = (await plan.json()) as { summary: { pending: number; failed: number } };
+      if (body.summary.pending + body.summary.failed === 0) {
+        return;
       }
-      expect(response.status).toBe(207);
     }
     throw new Error('Rotation did not complete within six runs.');
   }
@@ -1564,11 +1572,11 @@ describe('proxy token rotation', () => {
     const empty = await rotationProject(cf, 'rotate-plan-empty');
     const rotated = await rotationProject(cf, 'rotate-plan-rotated', { gen: 1 });
 
-    const legacy = await req('/system/rotate-proxy-tokens', { dryRun: true });
-    expect(legacy.status).toBe(200);
-    const text = await legacy.text();
+    const progress = await req('/system/rotate-proxy-tokens', { dryRun: true });
+    expect(progress.status).toBe(200);
+    const text = await progress.text();
     expect(JSON.parse(text)).toEqual({
-      summary: { legacy: 2, wouldQueue: 2, pending: 0, failed: 0 },
+      summary: { pending: 0, failed: 0 },
       projects: [],
       dryRun: true,
       action: 'system.rotate-proxy-tokens',
@@ -1576,7 +1584,7 @@ describe('proxy token rotation', () => {
     });
     const all = await req('/system/rotate-proxy-tokens', { dryRun: true, all: true });
     expect(await all.json()).toMatchObject({
-      summary: { legacy: 2, wouldQueue: 3 },
+      summary: { wouldQueue: 3, pending: 0, failed: 0 },
       target: { projects: 'all' },
     });
 
@@ -1610,32 +1618,24 @@ describe('proxy token rotation', () => {
     expect(await env.db.select().from(operatorEvents)).toEqual([]);
   });
 
-  test('rotates every legacy project in bounded runs, then every project with --all', async () => {
+  test('rotates every project with --all in bounded runs', async () => {
     const cf = cloudflare();
     const withWorkers = await rotationProject(cf, 'rotate-bulk-workers', { workers: true });
     const empty = await rotationProject(cf, 'rotate-bulk-empty');
     const rotated = await rotationProject(cf, 'rotate-bulk-rotated', { gen: 1 });
 
-    const first = await req('/system/rotate-proxy-tokens', {});
+    const first = await req('/system/rotate-proxy-tokens', { all: true });
     expect(first.status).toBe(207);
     expect(await first.json()).toMatchObject({
       ok: true,
       complete: false,
-      queued: 2,
-      pending: 2,
+      queued: 3,
+      pending: 3,
       failed: 0,
       failures: [],
     });
-    expect(await rotationJob(rotated.id)).toBeUndefined();
 
-    expect(await applyUntilComplete()).toMatchObject({
-      ok: true,
-      complete: true,
-      queued: 0,
-      pending: 0,
-      failed: 0,
-      retryAfterSeconds: null,
-    });
+    await finishRotations();
     for (const project of [withWorkers, empty]) {
       expect(await issued(project.id)).toBe(1);
       expect(await env.ROUTING.get(`proxy-token:${project.id}`, 'json')).toEqual({ gen: 1 });
@@ -1643,18 +1643,8 @@ describe('proxy token rotation', () => {
     for (const worker of withWorkers.workers) {
       expect(scriptToken(cf, worker)).toBe(await tok(withWorkers.id, 1));
     }
-    expect(await issued(rotated.id)).toBe(1);
-
-    const all = await req('/system/rotate-proxy-tokens', { all: true });
-    expect(await all.json()).toMatchObject({ queued: 3, complete: false });
-    await applyUntilComplete();
-    for (const project of [withWorkers, empty, rotated]) {
-      expect(await issued(project.id)).toBe(2);
-    }
-
-    const rerun = await req('/system/rotate-proxy-tokens', {});
-    expect(rerun.status).toBe(200);
-    expect(await rerun.json()).toMatchObject({ queued: 0, complete: true });
+    expect(await issued(rotated.id)).toBe(2);
+    expect(await env.ROUTING.get(`proxy-token:${rotated.id}`, 'json')).toEqual({ gen: 2 });
     expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
   });
 
@@ -1692,9 +1682,9 @@ describe('proxy token rotation', () => {
     expect(Date.parse(body.job.waitUntil)).toBeGreaterThan(Date.now());
     expect(patchCount(cf)).toBe(0);
 
-    const bulk = await req('/system/rotate-proxy-tokens', { dryRun: true });
-    expect(await bulk.json()).toMatchObject({
-      summary: { legacy: 0, wouldQueue: 0, pending: 1, failed: 0 },
+    const progress = await req('/system/rotate-proxy-tokens', { dryRun: true });
+    expect(await progress.json()).toMatchObject({
+      summary: { pending: 1, failed: 0 },
       projects: [{ projectId: project.id, slug: 'rotate-progress', phase: 'patch' }],
     });
   });
@@ -1706,14 +1696,13 @@ describe('proxy token rotation', () => {
       const project = await rotationProject(cf, `rotate-again-${phase}`, { workers: true });
       await req('/system/rotate-proxy-tokens', { project: project.id });
       while ((await rotationJob(project.id))!.payload.phase !== phase) {
-        await endWaits();
-        await req('/system/rotate-proxy-tokens', {});
+        await runRotations();
       }
 
       await req('/system/rotate-proxy-tokens', { project: project.id });
       expect((await rotationJob(project.id))!.payload.again).toBe('1');
 
-      await applyUntilComplete();
+      await finishRotations();
       expect(await issued(project.id)).toBe(2);
       for (const worker of project.workers) {
         expect(scriptToken(cf, worker)).toBe(await tok(project.id, 2));
@@ -1737,17 +1726,14 @@ describe('proxy token rotation', () => {
     expect(job!.payload).toMatchObject({ phase: 'patch', reason: 'member-removed' });
     expect(job!.payload.again).toBeUndefined();
 
-    await applyUntilComplete();
+    await finishRotations();
     expect(await issued(project.id)).toBe(1);
   });
 
-  test('flags a running rotation with --all but not with the legacy rerun', async () => {
+  test('flags a running rotation with --all', async () => {
     const cf = cloudflare();
     const project = await rotationProject(cf, 'rotate-flag', { workers: true });
     await req('/system/rotate-proxy-tokens', { project: project.id });
-
-    const legacy = await req('/system/rotate-proxy-tokens', {});
-    expect(await legacy.json()).toMatchObject({ queued: 0, pending: 1 });
     expect((await rotationJob(project.id))!.payload.again).toBeUndefined();
 
     const all = await req('/system/rotate-proxy-tokens', { all: true });
@@ -1763,7 +1749,7 @@ describe('proxy token rotation', () => {
 
     await req('/system/rotate-proxy-tokens', { project: project.id });
     await endWaits();
-    const failed = await req('/system/rotate-proxy-tokens', {});
+    const failed = await req('/system/rotate-proxy-tokens', { project: project.id });
     expect(failed.status).toBe(207);
     expect(await failed.json()).toMatchObject({
       ok: false,
@@ -1800,6 +1786,14 @@ describe('proxy token rotation', () => {
         expect(await response.json()).toMatchObject({ error: 'invalid_argument' });
       }
     }
+    for (const body of [{}, { all: false }]) {
+      const response = await req('/system/rotate-proxy-tokens', body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: 'invalid_argument',
+        message: 'Supply --project <id> or --all.',
+      });
+    }
     const unknown = await req('/system/rotate-proxy-tokens', {
       project: 'proj_zzzzzzzzzzzz',
       dryRun: true,
@@ -1809,7 +1803,7 @@ describe('proxy token rotation', () => {
     await rotationProject(cf, 'rotate-unavailable');
     for (const extraEnv of [{ DEV_AUTH_BYPASS: 'true' }, { CF_API_TOKEN: '' }]) {
       for (const dryRun of [true, false]) {
-        const response = await req('/system/rotate-proxy-tokens', { dryRun }, extraEnv);
+        const response = await req('/system/rotate-proxy-tokens', { all: true, dryRun }, extraEnv);
         expect(response.status).toBe(409);
         expect(await response.json()).toMatchObject({ error: 'rotation_unavailable' });
       }

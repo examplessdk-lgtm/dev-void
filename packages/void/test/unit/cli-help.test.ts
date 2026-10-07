@@ -146,7 +146,7 @@ describe('rendered help advertises the flags the parser honours', () => {
     const page = render(['platform', 'system', 'rotate-proxy-tokens']);
     expect(page).toContain('--project <value>');
     expect(page).toContain('--all');
-    expect(page).toContain('Cover every project');
+    expect(page).toContain('Rotate every project');
     expect(page).toContain('--plan');
   });
 

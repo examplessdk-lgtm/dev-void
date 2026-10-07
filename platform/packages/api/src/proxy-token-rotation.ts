@@ -178,14 +178,10 @@ const jobTarget = (projectId: string) =>
 // --- Requests ---
 
 /**
- * Bulk requests. `legacy` queues every project still on generation 0 that has
- * no job; `all` queues every project, with the member rule on an existing job.
- * Returns the number of jobs inserted or flagged.
+ * Queues every project not being deleted, with the member rule on an
+ * existing job. Returns the number of jobs inserted or flagged.
  */
-export async function requestBulkProxyTokenRotations(
-  db: DbOrTx,
-  scope: 'legacy' | 'all',
-): Promise<number> {
+export async function requestBulkProxyTokenRotations(db: DbOrTx): Promise<number> {
   const reason: ProxyTokenRotationReason = 'operator-bulk';
   const result = await db.execute(sql`
     INSERT INTO ${projectCleanupJobs} (target, project_id, kind, payload, next_attempt_at)
@@ -193,18 +189,13 @@ export async function requestBulkProxyTokenRotations(
       ${PROXY_TOKEN_ROTATION_JOB_KIND}::text, jsonb_build_object('phase', 'requested', 'reason', ${reason}::text), now()
     FROM ${projects}
     WHERE ${projects.status} <> 'deleting'
-      ${scope === 'legacy' ? sql`AND ${projects.proxy_token_gen} = 0` : sql``}
-    ${
-      scope === 'legacy'
-        ? sql`ON CONFLICT (target) DO NOTHING`
-        : sql`ON CONFLICT (target) DO UPDATE
-            SET payload = project_cleanup_jobs.payload || '{"again":"1"}'::jsonb
-            WHERE project_cleanup_jobs.payload->>'phase' <> 'requested'`
-    }
+    ON CONFLICT (target) DO UPDATE
+      SET payload = project_cleanup_jobs.payload || '{"again":"1"}'::jsonb
+      WHERE project_cleanup_jobs.payload->>'phase' <> 'requested'
     RETURNING target`);
   const count = result.rows.length;
   if (count > 0) {
-    console.log(`[proxy-token-rotation] requested ${count} project(s) scope=${scope}`);
+    console.log(`[proxy-token-rotation] requested ${count} project(s)`);
   }
   return count;
 }

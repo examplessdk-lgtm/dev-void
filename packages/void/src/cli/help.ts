@@ -112,7 +112,7 @@ function operatorHelpTree(): HelpTree {
                                       ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
                                       : 'Read a scoped Cloudflare API token from stdin'
                                     : flag === 'all'
-                                      ? 'Cover every project, not only those still on their original credentials'
+                                      ? 'Rotate every project'
                                       : 'Read a full API session from stdin for explicit operator session exchange',
                   })),
                 ],

@@ -19,8 +19,7 @@ export type ProxyTokenRotationReason =
   | 'user-deleted'
   | 'untrusted-deploy-replaced'
   | 'operator'
-  | 'operator-bulk'
-  | 'legacy-init';
+  | 'operator-bulk';
 
 export function rotationLog(event: string, projectId: string, detail = ''): void {
   console.log(`[proxy-token-rotation] ${event} ${projectId}${detail ? ` ${detail}` : ''}`);

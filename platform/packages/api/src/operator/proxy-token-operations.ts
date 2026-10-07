@@ -77,29 +77,29 @@ async function jobCounts(db: Db, projectId: string | undefined) {
   };
 }
 
-/** Projects a bulk request would cover: `legacy` inserts only, `all` also flags jobs past START. */
-async function bulkPreview(db: Db, all: boolean) {
+/** Projects --all would queue or flag: every project without a job or with one past START. */
+async function countWouldQueue(db: Db): Promise<number> {
   const job = sql`${projectCleanupJobs.target} = ${PROXY_TOKEN_ROTATION_JOB_KIND}::text || ':' || ${projects.id}`;
   const [row] = await db
     .select({
-      legacy: sql<number>`count(*) FILTER (WHERE ${projects.proxy_token_gen} = 0)::integer`,
-      wouldQueue: all
-        ? sql<number>`count(*) FILTER (WHERE ${projectCleanupJobs.target} IS NULL
-            OR ${projectCleanupJobs.payload}->>'phase' <> 'requested')::integer`
-        : sql<number>`count(*) FILTER (WHERE ${projects.proxy_token_gen} = 0
-            AND ${projectCleanupJobs.target} IS NULL)::integer`,
+      wouldQueue: sql<number>`count(*) FILTER (WHERE ${projectCleanupJobs.target} IS NULL
+        OR ${projectCleanupJobs.payload}->>'phase' <> 'requested')::integer`,
     })
     .from(projects)
     .leftJoin(projectCleanupJobs, job)
     .where(sql`${projects.status} <> 'deleting'`);
+  return row?.wouldQueue ?? 0;
+}
+
+/** Progress of every rotation job; with `all`, also what an --all apply would queue. */
+async function bulkPreview(db: Db, all: boolean) {
   const counts = await jobCounts(db, undefined);
   return preview(
     'system.rotate-proxy-tokens',
     { projects: 'all' },
     {
       summary: {
-        legacy: row?.legacy ?? 0,
-        wouldQueue: row?.wouldQueue ?? 0,
+        ...(all ? { wouldQueue: await countWouldQueue(db) } : {}),
         pending: counts.pending,
         failed: counts.failed,
       },
@@ -109,11 +109,11 @@ async function bulkPreview(db: Db, all: boolean) {
 }
 
 /**
- * `void platform system rotate-proxy-tokens`. Without `project` it covers
- * every project still on the legacy token (`all`: every project). A preview
- * reads the database only and never returns a token. An apply requests the
- * rotations and advances them within a bounded budget; the scheduled run
- * finishes the rest.
+ * `void platform system rotate-proxy-tokens`. An apply needs `project` or
+ * `all` (every project); a preview without either shows the progress of
+ * every rotation. A preview reads the database only and never returns a
+ * token. An apply requests the rotations and advances them within a bounded
+ * budget; the scheduled run finishes the rest.
  */
 export async function rotateProxyTokens(db: Db, env: ApiEnv['Bindings'], input: RotateInput) {
   if (input.project !== undefined && !isProjectId(input.project)) {
@@ -124,6 +124,9 @@ export async function rotateProxyTokens(db: Db, env: ApiEnv['Bindings'], input: 
   }
   if (input.project !== undefined && input.all === true) {
     throw new OperatorError(400, 'Choose either project or all.', 'invalid_argument');
+  }
+  if (!input.dryRun && input.project === undefined && input.all !== true) {
+    throw new OperatorError(400, 'Supply --project <id> or --all.', 'invalid_argument');
   }
   if (isDevBypass(env) || !env.CF_API_TOKEN) {
     throw new OperatorError(
@@ -184,7 +187,7 @@ export async function rotateProxyTokens(db: Db, env: ApiEnv['Bindings'], input: 
     await advanceProxyTokenRotation(db, env, project.id, budget);
     queued = 1;
   } else {
-    queued = await requestBulkProxyTokenRotations(db, all ? 'all' : 'legacy');
+    queued = await requestBulkProxyTokenRotations(db);
     await reconcileProxyTokenRotations(db, env, {
       maxCfCalls: APPLY_MAX_CF_CALLS,
       maxMs: APPLY_MAX_MS,
