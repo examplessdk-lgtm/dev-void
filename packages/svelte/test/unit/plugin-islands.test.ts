@@ -170,3 +170,30 @@ import Sidebar from "./Sidebar.svelte" with { island: "load" }
     expect(clientEntry).not.toContain('Sidebar');
   });
 });
+
+describe('islandsPlugin — island style loader', () => {
+  beforeEach(() => {
+    mkdirSync(PAGES_DIR, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it('island-style loader is build-only', () => {
+    const plugin = islandsPlugin(PAGES_DIR).find(
+      (candidate) => candidate.name === 'void-svelte:islands-style',
+    );
+    expect(plugin?.apply).toBe('build');
+
+    writeFile(
+      'Card.island.svelte',
+      `<p>Card</p>
+<style>p { color: red; }</style>
+<style lang="scss">.second { color: blue; }</style>`,
+    );
+    const load = plugin!.load as HookWithHandler<(id: string) => string>;
+    const file = join(PAGES_DIR, 'Card.island.svelte');
+    expect(load.handler(`${file}?island-style&index=1&lang.css`)).toBe('.second { color: blue; }');
+  });
+});

@@ -268,6 +268,10 @@ export function islandsPlugin(
     },
     {
       name: 'void-svelte:islands-style',
+      // Only the build's client entry imports `?island-style` (dev CSS comes
+      // from Void's dev CSS collector), so this raw file reader never needs
+      // to run on the dev server.
+      apply: 'build',
 
       resolveId: {
         filter: { id: /\?island-style&/ },
