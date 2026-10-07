@@ -90,6 +90,17 @@ type RoutingEntry = Readonly<{
   zeroTrust?: ProjectZeroTrustRouting;
 }>;
 
+// Written by the API (suspension.ts projectSuspensionKey) while an administrator
+// has suspended the project's owner.
+async function isProjectSuspended(env: Env, projectId: string): Promise<boolean> {
+  try {
+    return (await env.ROUTING.get(`project-suspended:${projectId}`, { cacheTtl: 60 })) !== null;
+  } catch (error) {
+    console.error(`[queue-relay] suspension check failed project="${projectId}"; relaying`, error);
+    return false;
+  }
+}
+
 type QueueRoutingEntry = Readonly<{
   workerName: string;
   projectId: string;
@@ -104,6 +115,12 @@ type QueueRoutingEntry = Readonly<{
 const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 const STATIC_ASSET_HEDGE_DELAY_MS = 1000;
 const PLATFORM_QUEUE_RETRY_DELAY_SECONDS = 300;
+// Batches of a project whose owner an administrator suspended wait here. Each
+// retry uses one of the queue's max_retries (3 unless the app sets maxRetries),
+// so a message survives about one hour per retry, and a queue with maxRetries 0
+// drops it on the first suspended delivery. Delivery resumes within about an
+// hour of a restore.
+const SUSPENDED_PROJECT_QUEUE_RETRY_DELAY_SECONDS = 3600;
 // A relay the Worker rejects for its token is retried after the queue routing
 // entry (read with cacheTtl 60) has had time to catch up with a token rotation,
 // so one rotation costs a message about one attempt instead of all of them.
@@ -1952,7 +1969,16 @@ export default {
       batch.retryAll();
       return;
     }
-    const { workerName, queueName, proxyToken } = JSON.parse(routingRaw) as QueueRoutingEntry;
+    const { workerName, projectId, queueName, proxyToken } = JSON.parse(
+      routingRaw,
+    ) as QueueRoutingEntry;
+    if (projectId && (await isProjectSuspended(env, projectId))) {
+      console.warn(
+        `[queue-relay] project suspended; retrying queue="${batch.queue}" in ${SUSPENDED_PROJECT_QUEUE_RETRY_DELAY_SECONDS}s`,
+      );
+      batch.retryAll({ delaySeconds: SUSPENDED_PROJECT_QUEUE_RETRY_DELAY_SECONDS });
+      return;
+    }
 
     // Serialize batch for relay
     const messages = Array.from(batch.messages, (message) => ({

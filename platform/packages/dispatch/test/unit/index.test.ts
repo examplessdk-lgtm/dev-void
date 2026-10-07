@@ -4391,6 +4391,8 @@ describe('queue relay', () => {
     trafficState?: string;
     lifecycleValue?: string | null;
     lifecycleError?: Error;
+    suspendedProjects?: Array<string>;
+    markerError?: Error;
   }) {
     const workerFetch = vi.fn(
       async (_req: Request) =>
@@ -4402,6 +4404,13 @@ describe('queue relay', () => {
           throw options.lifecycleError;
         }
         return options.lifecycleValue ?? null;
+      }
+      if (key.startsWith('project-suspended:')) {
+        if (options.markerError) {
+          throw options.markerError;
+        }
+        const projectId = key.slice('project-suspended:'.length);
+        return options.suspendedProjects?.includes(projectId) ? 'operator_review' : null;
       }
       return options.routingRaw ?? null;
     });
@@ -4531,6 +4540,78 @@ describe('queue relay', () => {
 
     expect(batch.retryAll).toHaveBeenCalledOnce();
     expect(batch.ackAll).not.toHaveBeenCalled();
+  });
+
+  it("holds a suspended project's batch without invoking its worker", async () => {
+    const routing = JSON.stringify({
+      workerName: 'user-app',
+      projectId: 'p1',
+      queueName: 'emails',
+    });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, dispatchGet } = createQueueEnv({
+      routingRaw: routing,
+      suspendedProjects: ['p1'],
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+    } finally {
+      warning.mockRestore();
+    }
+
+    expect(dispatchGet).not.toHaveBeenCalled();
+    expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 3600 });
+    expect(batch.ackAll).not.toHaveBeenCalled();
+  });
+
+  it('relays batches of projects without a suspension marker', async () => {
+    const routing = JSON.stringify({
+      workerName: 'user-app',
+      projectId: 'p2',
+      queueName: 'emails',
+    });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, routingGet, workerFetch } = createQueueEnv({
+      routingRaw: routing,
+      suspendedProjects: ['p1'],
+      workerResponse: Response.json({ ok: true }),
+    });
+
+    await app.queue(batch, env);
+
+    expect(routingGet).toHaveBeenCalledWith('project-suspended:p2', { cacheTtl: 60 });
+    expect(workerFetch).toHaveBeenCalledOnce();
+    expect(batch.ackAll).toHaveBeenCalledOnce();
+  });
+
+  it('relays when the suspension marker cannot be read', async () => {
+    const routing = JSON.stringify({
+      workerName: 'user-app',
+      projectId: 'p3',
+      queueName: 'emails',
+    });
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, workerFetch } = createQueueEnv({
+      routingRaw: routing,
+      markerError: new Error('routing unavailable'),
+      workerResponse: Response.json({ ok: true }),
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining('suspension check failed'),
+        expect.any(Error),
+      );
+    } finally {
+      error.mockRestore();
+    }
+
+    expect(workerFetch).toHaveBeenCalledOnce();
+    expect(batch.ackAll).toHaveBeenCalledOnce();
   });
 
   it('acks all on legacy protocol (ok: true, no decisions)', async () => {
@@ -4858,7 +4939,9 @@ describe('queue relay', () => {
       return Response.json({ ok: true });
     });
     const env = {
-      ROUTING: { get: async () => routing },
+      ROUTING: {
+        get: async (key: string) => (key.startsWith('project-suspended:') ? null : routing),
+      },
       DISPATCH: { get: () => ({ fetch: workerFetch }) },
       ISR_CACHE: { getWithMetadata: async () => ({ value: null, metadata: null }) },
       ANALYTICS: { writeDataPoint: () => {} },

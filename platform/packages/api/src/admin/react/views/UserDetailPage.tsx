@@ -169,7 +169,11 @@ export function UserDetailPage({ path, platformName, username }: AdminPageProps)
           <Button type="submit" label="Unsuspend" />
         </form>
       ) : (
-        <form method="post" action={`/admin/users/${user.id}/suspend`}>
+        <form
+          method="post"
+          action={`/admin/users/${user.id}/suspend`}
+          data-confirm={`Suspend "${user.login}" and ${projects.length} project(s)? Requests, cron jobs and queue delivery stop. Queue messages are dropped when their retries run out, after about 3 hours by default. Restore does not bring them back.`}
+        >
           <FormTextInput
             label="Reason"
             name="reason"

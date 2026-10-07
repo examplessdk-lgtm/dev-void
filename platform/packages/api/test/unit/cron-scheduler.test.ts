@@ -213,10 +213,11 @@ describe('CronScheduler.alarm', () => {
 
   type StubCtx = ReturnType<typeof makeStubCtx>;
 
-  function makeStubCtx(initial: Record<string, unknown> = {}) {
+  function makeStubCtx(initial: Record<string, unknown> = {}, name?: string) {
     const store = new Map<string, unknown>(Object.entries(initial));
     let alarmTime: number | null = null;
     return {
+      id: { name },
       storage: {
         get: vi.fn(async (k: string) => store.get(k)),
         put: vi.fn(async (k: string, v: unknown) => {
@@ -237,7 +238,10 @@ describe('CronScheduler.alarm', () => {
 
   function makeScheduler(
     ctx: StubCtx,
-    env: { CRON_FIRES_QUEUE: { sendBatch: (batch?: unknown) => Promise<void> } },
+    env: {
+      CRON_FIRES_QUEUE: { sendBatch: (batch?: unknown) => Promise<void> };
+      ROUTING?: { get: (key: string, options?: unknown) => Promise<string | null> };
+    },
   ) {
     // Bypass the real DurableObject constructor wiring in the mock above
     return new CronScheduler(
@@ -436,5 +440,62 @@ describe('CronScheduler.alarm', () => {
     // setAlarm must NOT have been called — runtime retains current alarm
     // for retry.
     expect(ctx.storage.setAlarm).not.toHaveBeenCalled();
+  });
+
+  const everyMinute = () => ({
+    state: {
+      workerName: 'user-foo',
+      schedules: [{ name: 'job', cron: '* * * * *' }],
+      proxyToken: 'tok',
+    },
+  });
+
+  it('skips firing while an administrator has suspended the project', async () => {
+    const ctx = makeStubCtx(everyMinute(), 'proj_1');
+    const sendBatch = vi.fn(async () => {});
+    const get = vi.fn(async (key: string, _options?: unknown) =>
+      key === 'project-suspended:proj_1' ? 'operator_review' : null,
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const s = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch }, ROUTING: { get } });
+      await expect(s.alarm()).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(sendBatch).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledWith('project-suspended:proj_1', { cacheTtl: 60 });
+    // The alarm stays armed so firing resumes after a restore.
+    expect(ctx.storage.setAlarm).toHaveBeenCalledOnce();
+  });
+
+  it('fires normally without a suspension marker', async () => {
+    const ctx = makeStubCtx(everyMinute(), 'proj_1');
+    const sendBatch = vi.fn(async () => {});
+    const get = vi.fn(async (_key: string, _options?: unknown) => null);
+    const s = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch }, ROUTING: { get } });
+    await expect(s.alarm()).resolves.toBeUndefined();
+
+    expect(get).toHaveBeenCalledWith('project-suspended:proj_1', { cacheTtl: 60 });
+    expect(sendBatch).toHaveBeenCalledOnce();
+  });
+
+  it('keeps firing when the suspension marker cannot be read', async () => {
+    const ctx = makeStubCtx(everyMinute(), 'proj_1');
+    const sendBatch = vi.fn(async () => {});
+    const get = vi.fn(async (_key: string, _options?: unknown): Promise<string | null> => {
+      throw new Error('KV unavailable');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const s = makeScheduler(ctx, { CRON_FIRES_QUEUE: { sendBatch }, ROUTING: { get } });
+      await expect(s.alarm()).resolves.toBeUndefined();
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+
+    expect(sendBatch).toHaveBeenCalledOnce();
   });
 });

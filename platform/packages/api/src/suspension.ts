@@ -17,3 +17,12 @@ export function routingSuspensionReason(suspendedReason: string | null): string 
     ? suspendedReason
     : null;
 }
+
+/**
+ * ROUTING key present while a project's owner is suspended by an administrator.
+ * Cron firing (CronScheduler) and queue relay (dispatch) pause while it exists.
+ * Usage-limit suspensions never write it.
+ */
+export function projectSuspensionKey(projectId: string): string {
+  return `project-suspended:${projectId}`;
+}

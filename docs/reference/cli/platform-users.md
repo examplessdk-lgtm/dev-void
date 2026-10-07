@@ -22,7 +22,7 @@ void platform user restore <id>
 void platform user delete <id>
 ```
 
-Suspending a user blocks their applications. Deleting a user also deletes their project resources. A plan change updates resource limits while preserving any administrator suspension.
+Suspending a user blocks their applications, including scheduled jobs and queue consumers. While the account is suspended, each queue message is retried about once an hour, and each retry uses one of its queue's retries. Messages that run out of retries are dropped: after about 3 hours with the default of 3 retries, and at once for a queue with `maxRetries: 0`. Restore an account suspended by mistake promptly; queue delivery resumes within about an hour. Deleting a user also deletes their project resources. A plan change updates resource limits while preserving any administrator suspension.
 
 The last active administrator cannot be deleted or suspended. Both previews and
 actual mutations enforce this rule, including in the browser admin UI. Allowed

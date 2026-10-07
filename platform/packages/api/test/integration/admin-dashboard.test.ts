@@ -1084,6 +1084,7 @@ describe('GET /admin/users/:id', () => {
     expect(html).toContain('detailuser');
     expect(html).toContain('Plan');
     expect(html).toContain('Suspension');
+    expect(html).toContain('Queue messages are dropped when their retries run out');
   });
 
   test('renders plan limits card', async () => {

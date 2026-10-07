@@ -631,6 +631,7 @@ describe('operator tenant mutations', () => {
     expect(planCounterCalls.map((call) => call.path)).toEqual(['/init', '/reevaluate-limits']);
     expect(planCounterCalls[1]!.body).toEqual({ userId: target.id });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+    expect(await env.ROUTING.get(`project-suspended:${project.id}`)).toBeNull();
 
     resumeSuspendDb.resolve();
     const suspension = await suspensionPromise;
@@ -641,6 +642,7 @@ describe('operator tenant mutations', () => {
       suspended: 'operator_review',
       limits: { cpuMs: 50, subRequests: 1000 },
     });
+    expect(await env.ROUTING.get(`project-suspended:${project.id}`)).toBe('operator_review');
     expect(await env.ROUTING.get(`project:${project.id}`)).toBeNull();
 
     const retryDetachStarted = deferred();
@@ -666,6 +668,7 @@ describe('operator tenant mutations', () => {
     resumeRetry.resolve();
     expect((await retryPromise).status).toBe(200);
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBe('operator_review');
+    expect(await env.ROUTING.get(`project-suspended:${project.id}`)).toBe('operator_review');
 
     resumeRestoreDb.resolve();
     const restore = await restorePromise;
@@ -676,6 +679,7 @@ describe('operator tenant mutations', () => {
       suspended_reason: null,
     });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+    expect(await env.ROUTING.get(`project-suspended:${project.id}`)).toBeNull();
   });
 
   test('rejects unknown owners and deleting, deploy, rollback, and build work', async () => {
@@ -955,6 +959,13 @@ describe('operator tenant mutations', () => {
         target: { id: path.includes('/projects/') ? project.id : user.id },
       });
     }
+    const suspendPreview = await req(`/users/${user.id}/suspend`, {
+      reason: 'review',
+      dryRun: true,
+    });
+    expect(await suspendPreview.json()).toMatchObject({
+      effect: expect.stringContaining('Restore does not bring them back.'),
+    });
     expect(await getUser(env.db, user.id)).toMatchObject({ plan: 'free', suspended_reason: null });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(putSpy).not.toHaveBeenCalled();
@@ -983,19 +994,45 @@ describe('operator tenant mutations', () => {
       project.slug,
       JSON.stringify({ workerName: 'worker', projectId: project.id }),
     );
+    const markerKey = `project-suspended:${project.id}`;
     expect((await req(`/users/${user.id}/suspend`, { reason: 'operator_review' })).status).toBe(
       200,
     );
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBe('operator_review');
+    expect(await env.ROUTING.get(markerKey)).toBe('operator_review');
     expect((await req(`/users/${user.id}/plan`, { plan: 'pro' })).status).toBe(200);
     expect(await getUser(env.db, user.id)).toMatchObject({
       plan: 'pro',
       suspended_reason: 'operator_review',
     });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBe('operator_review');
+    expect(await env.ROUTING.get(markerKey)).toBe('operator_review');
     expect((await req(`/users/${user.id}/restore`, {})).status).toBe(200);
     expect(await getUser(env.db, user.id)).toMatchObject({ suspended_reason: null });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+    expect(await env.ROUTING.get(markerKey)).toBeNull();
+  });
+
+  test('keeps background runs going for usage-limit suspensions', async () => {
+    const user = await createTestUser(env.db, 'usage-suspended-user');
+    const project = await createTestProject(env.db, user.id, 'usage-suspended-project');
+    await env.ROUTING.put(
+      project.slug,
+      JSON.stringify({
+        workerName: 'worker',
+        projectId: project.id,
+        userId: user.id,
+        suspended: 'requests_exceeded',
+      }),
+    );
+    await env.db
+      .update(users)
+      .set({ suspended_reason: 'requests_exceeded' })
+      .where(eq(users.id, user.id));
+
+    expect((await req(`/users/${user.id}/plan`, { plan: 'pro' })).status).toBe(200);
+
+    expect(await env.ROUTING.get(`project-suspended:${project.id}`)).toBeNull();
   });
 
   test('queues proxy token rotations for a suspended administrator when routing fails', async () => {

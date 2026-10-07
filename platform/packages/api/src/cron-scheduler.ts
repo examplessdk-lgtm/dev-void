@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { CronExpressionParser } from 'cron-parser';
 import type { CronSyncState as CronState } from './cron-scheduler-client.ts';
 import type { ApiEnv } from './env.ts';
+import { projectSuspensionKey } from './suspension.ts';
 
 /**
  * Convert a CF/Quartz-style cron expression to Unix-style for cron-parser.
@@ -229,6 +230,14 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
       return;
     }
 
+    if (await this.isProjectSuspended()) {
+      console.warn(
+        `CronScheduler: owner suspended by an administrator; skipping fire for ${state.workerName}`,
+      );
+      await this.scheduleNextAlarm();
+      return;
+    }
+
     // Hand off to the cron-fires queue: this DO cannot dispatch to the user
     // worker directly (see `CronFireMessage`).
     // The worker fans an expression out to every matching job. Deliver the
@@ -291,6 +300,23 @@ export class CronScheduler extends DurableObject<ApiEnv['Bindings']> {
     }
 
     await this.scheduleNextAlarm();
+  }
+
+  /** The DO is always addressed by idFromName(projectId) (cron-scheduler-client.ts). */
+  private async isProjectSuspended(): Promise<boolean> {
+    const projectId = this.ctx.id.name;
+    if (!projectId) {
+      // Alarms armed before the runtime stored names: fire as before until the next sync.
+      return false;
+    }
+    try {
+      return (
+        (await this.env.ROUTING.get(projectSuspensionKey(projectId), { cacheTtl: 60 })) !== null
+      );
+    } catch (error) {
+      console.error(`CronScheduler: suspension check failed for ${projectId}; firing`, error);
+      return false;
+    }
   }
 
   private async scheduleNextAlarm(): Promise<void> {

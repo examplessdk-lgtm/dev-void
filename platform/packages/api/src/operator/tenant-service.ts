@@ -61,7 +61,7 @@ import {
   projects,
   users,
 } from '../schema.ts';
-import { isAdminSuspended, routingSuspensionReason } from '../suspension.ts';
+import { isAdminSuspended, projectSuspensionKey, routingSuspensionReason } from '../suspension.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
 import type { DeployManifest, Project, User } from '../types.ts';
 import {
@@ -687,6 +687,18 @@ async function republishProjectOwnerState(
         }),
       );
     }
+    // Background runs (cron, queues) pause only for an administrator suspension;
+    // usage-limit suspensions keep them running.
+    const markerKey = projectSuspensionKey(project.id);
+    const marker = await context.env.ROUTING.get(markerKey);
+    const reason = owner.suspended_reason;
+    if (reason !== null && isAdminSuspended(reason)) {
+      if (marker !== reason) {
+        await context.env.ROUTING.put(markerKey, reason);
+      }
+    } else if (marker !== null) {
+      await context.env.ROUTING.delete(markerKey);
+    }
     return owner;
   });
 }
@@ -924,6 +936,8 @@ export async function suspendOperatorUser(
     return preview('user.suspend', target, {
       reason,
       projects: projects.map((p) => ({ id: p.id, slug: p.slug })),
+      effect:
+        'Requests, cron jobs and queue delivery stop for these projects. Queue messages are dropped when their retries run out: after about 3 hours by default, at once with maxRetries 0. Restore does not bring them back.',
     });
   }
   // Ordinary users remain edge-first. Administrators have already lost access
