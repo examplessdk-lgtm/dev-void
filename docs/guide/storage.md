@@ -42,12 +42,12 @@ const head = await storage.head('uploads/photo.jpg');
 A common pattern is serving uploaded files from an API route:
 
 ```ts
+// routes/files/[key].ts
 import { defineHandler } from 'void';
 import { storage } from 'void/storage';
 
 export const GET = defineHandler(async (c) => {
-  const key = c.req.param('key');
-  const object = await storage.get(key);
+  const object = await storage.get(`uploads/${c.req.param('key')}`);
 
   if (!object) {
     return c.notFound();
@@ -56,10 +56,15 @@ export const GET = defineHandler(async (c) => {
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set('etag', object.httpEtag);
+  // Don't let an uploaded HTML or SVG file run as a page on your site.
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Content-Disposition', 'attachment');
 
   return new Response(object.body, { headers });
 });
 ```
+
+Files your users upload can contain HTML or scripts. Store them under keys your server picks, and serve them with `nosniff` and `Content-Disposition: attachment`. `<img>` and `<video>` tags still display them; opening the URL directly downloads the file.
 
 ## Custom bindings
 

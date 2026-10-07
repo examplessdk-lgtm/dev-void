@@ -355,19 +355,31 @@ On the server, use `c.req.parseBody()` to access the uploaded file:
 
 ```ts
 // pages/photos.server.ts
-import { defineHandler } from 'void';
+import { defineHandler, ValidationError } from 'void/handler';
 import { storage } from 'void/storage';
+
+// file.name and file.type come from the browser. Don't use them as the key or trust the type.
+const imageTypes = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+]);
 
 export const action = defineHandler(async (c) => {
   const body = await c.req.parseBody();
-  const file = body['photo'] as File;
-  if (file && file.size > 0) {
-    await storage.put(file.name, file.stream(), {
-      httpMetadata: { contentType: file.type },
-    });
+  const file = body['photo'];
+  if (!(file instanceof File) || file.size === 0) return;
+  const ext = imageTypes.get(file.type);
+  if (!ext) {
+    throw new ValidationError({ photo: 'Upload a JPEG, PNG, or WebP image.' });
   }
+  await storage.put(`uploads/${crypto.randomUUID()}.${ext}`, file.stream(), {
+    httpMetadata: { contentType: file.type },
+  });
 });
 ```
+
+Pick the storage key on the server and allow only the file types you expect. See [Serving Files](../storage.md#serving-files) to send them back safely.
 
 ## Choosing a Primitive
 
