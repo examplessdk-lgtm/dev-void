@@ -12,6 +12,11 @@ import type { RotationBudget } from './proxy-token-rotation.ts';
 
 const PROXY_TOKEN_BINDING = '__VOID_PROXY_TOKEN';
 const REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * A call needs at least this much of the run's time left. Starting one closer
+ * to the deadline would cut a settings PATCH off with its outcome unknown.
+ */
+const MIN_REQUEST_MS = 5_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 60;
 /** Cloudflare's "script not found" error code. */
 const SCRIPT_NOT_FOUND_CODE = 10007;
@@ -91,7 +96,8 @@ export function createRotationCloudflareClient(
 
   async function request<T>(method: string, path: string, body?: BodyInit): Promise<T> {
     const { budget } = input;
-    if (budget.cfCallsRemaining <= 0 || Date.now() >= budget.deadline) {
+    const remainingMs = budget.deadline - Date.now();
+    if (budget.cfCallsRemaining <= 0 || remainingMs < MIN_REQUEST_MS) {
       throw new RotationBudgetExhaustedError();
     }
     budget.cfCallsRemaining -= 1;
@@ -103,7 +109,7 @@ export function createRotationCloudflareClient(
       method,
       headers,
       body,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remainingMs)),
     });
     if (response.status === 429) {
       throw new CloudflareRateLimitError(parseRetryAfter(response.headers.get('Retry-After')));

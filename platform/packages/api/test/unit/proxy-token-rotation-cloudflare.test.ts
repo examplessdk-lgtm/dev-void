@@ -175,4 +175,24 @@ describe('createRotationCloudflareClient', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(runBudget.cfCallsRemaining).toBe(5);
   });
+
+  it('stops before fetch when less than five seconds are left', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => cfSuccess(BINDINGS));
+    const runBudget = { cfCallsRemaining: 5, deadline: Date.now() + 4_000 };
+    await expect(client(fetchMock, runBudget).getScriptBindings(SCRIPT)).rejects.toBeInstanceOf(
+      RotationBudgetExhaustedError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('times a call out at the run deadline when it comes before the request timeout', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.fn<typeof fetch>(async () => cfSuccess(BINDINGS));
+    const runBudget = { cfCallsRemaining: 5, deadline: Date.now() + 20_000 };
+    await client(fetchMock, runBudget).getScriptBindings(SCRIPT);
+    const [ms] = timeout.mock.calls[0] ?? [];
+    expect(ms).toBeGreaterThan(15_000);
+    expect(ms).toBeLessThanOrEqual(20_000);
+    timeout.mockRestore();
+  });
 });
