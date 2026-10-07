@@ -86,6 +86,12 @@ describe('Pages metadata wiring', () => {
     expect(code).toContain('namedActions: true');
     expect(code).not.toContain('handlePageMutation(handler');
   });
+  it('marks page render options as dev only in dev builds', () => {
+    expect(compile()).toContain('renderOptions: {"renderMode":"server","dev":true} }');
+    const prod = compile({ ...testOptions, dev: false });
+    expect(prod).toContain('renderOptions: {"renderMode":"server"} }');
+    expect(prod).not.toContain('"renderMode":"server","dev"');
+  });
   it('passes dev CSS metadata and a shared manifest loader to the runtime', () => {
     const code = compile();
     expect(code).toContain('getVoidPagesDevCss');

@@ -63,6 +63,8 @@ type PageHeadHandler =
   | undefined;
 type PageRenderOptions = {
   renderMode?: PageRenderMode;
+  /** Dev server build: rejected deferred props keep their raw error message. */
+  dev?: boolean;
 };
 type AssetTags = {
   css: string;
@@ -341,12 +343,33 @@ function renderedResponse(
   });
 }
 
+/**
+ * Message sent to the browser for a rejected deferred prop. HTTPException
+ * messages are deliberate and pass through, as in the page error handler.
+ * Anything else is logged and, outside dev, replaced with a generic message so
+ * internal details (SQL, hostnames, URLs) do not reach the page.
+ */
+function deferredErrorMessage(err: unknown, dev: boolean): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (
+    err &&
+    typeof err === 'object' &&
+    'getResponse' in err &&
+    typeof err.getResponse === 'function'
+  ) {
+    return message;
+  }
+  console.error(err);
+  return dev ? message : 'Internal Server Error';
+}
+
 /** Build a streaming response that sends an initial chunk then streams deferred results. */
 function streamDeferredResponse(
   initialChunk: PageRenderResult,
   deferredMap: Record<string, ResolvedDeferredGroup>,
   c: CloudContext,
   contentType: string,
+  dev: boolean,
   formatResolved: (group: string, data: unknown) => string,
   formatRejected: (group: string, error: string) => string,
   assetTags?: AssetTags,
@@ -359,9 +382,7 @@ function streamDeferredResponse(
   const pendingChunks = entries.map(([group, { resolver }]) =>
     resolver(c)
       .then((data) => formatResolved(group, data))
-      .catch((err: unknown) =>
-        formatRejected(group, err instanceof Error ? err.message : String(err)),
-      ),
+      .catch((err: unknown) => formatRejected(group, deferredErrorMessage(err, dev))),
   );
 
   (async () => {
@@ -486,6 +507,7 @@ export async function handlePageGet(
       deferredMap,
       c,
       'application/x-ndjson',
+      options?.dev === true,
       (group, data) => JSON.stringify({ __deferred: group, data }) + '\n',
       (group, error) => JSON.stringify({ __deferred: group, error }) + '\n',
     );
@@ -510,6 +532,7 @@ export async function handlePageGet(
     deferredMap,
     c,
     'text/html; charset=utf-8',
+    options?.dev === true,
     (group, data) =>
       `\n<script>window.__resolveDeferred?window.__resolveDeferred(${safeJsonStringify(group)},${safeJsonStringify(data)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},${safeJsonStringify(data)}])</script>`,
     (group, error) =>

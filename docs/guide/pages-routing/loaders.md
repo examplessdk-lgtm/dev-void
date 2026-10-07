@@ -157,6 +157,10 @@ around the Suspense boundary when the page should render a custom failure state.
 For explicit React prop annotations, import `Deferred` from `@void/react`; the
 adapter export is typed as `Promise<T>`.
 
+In production, an unexpected error in a deferred prop reaches the page as
+`Internal Server Error`; throw an
+[`HTTPException`](../../integrations/hono.md#utilities) to show your own message.
+
 In Vue, Svelte, and Solid, `Deferred<T>` behaves as a [discriminated union](https://www.typescriptlang.org/docs/handbook/2/narrowing.html#discriminated-unions) with three states:
 
 ```ts

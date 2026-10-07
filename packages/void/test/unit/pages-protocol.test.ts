@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import { defer } from '../../src/pages/defer.ts';
 import {
@@ -932,7 +933,8 @@ describe('handlePageGet with deferred props', () => {
     expect(deferredLine.data).toEqual({ requests: 100 });
   });
 
-  it('SPA — streams error for failed deferred resolver', async () => {
+  it('SPA — dev streams the raw error for a failed deferred resolver', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const c = await createTestContext('GET', '/dashboard', {
       headers: { 'x-voidpages': 'true' },
     });
@@ -942,22 +944,112 @@ describe('handlePageGet with deferred props', () => {
       usage: defer(() => Promise.reject(new Error('timeout'))),
     }));
 
-    const response = await handlePageGet(
-      handler,
-      undefined,
-      c,
-      'dashboard',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
+    try {
+      const response = await handlePageGet(
+        handler,
+        undefined,
+        c,
+        'dashboard',
+        mockRenderFn,
+        mockGetAssetTags,
+        undefined,
+        { dev: true },
+      );
 
-    const text = await response.text();
-    const lines = text.trim().split('\n');
-    expect(lines.length).toBe(2);
+      const text = await response.text();
+      const lines = text.trim().split('\n');
+      expect(lines.length).toBe(2);
 
-    const deferredLine = JSON.parse(lines[1]);
-    expect(deferredLine.__deferred).toBe('usage');
-    expect(deferredLine.error).toBe('timeout');
+      const deferredLine = JSON.parse(lines[1]);
+      expect(deferredLine.__deferred).toBe('usage');
+      expect(deferredLine.error).toBe('timeout');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('SPA — production streams a generic error and logs the original', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const c = await createTestContext('GET', '/dashboard', {
+      headers: { 'x-voidpages': 'true' },
+    });
+    const error = new Error('db 10.0.0.5 refused');
+
+    try {
+      const response = await handlePageGet(
+        () => ({ usage: defer(() => Promise.reject(error)) }),
+        undefined,
+        c,
+        'dashboard',
+        mockRenderFn,
+        mockGetAssetTags,
+      );
+
+      const text = await response.text();
+      expect(text).not.toContain('10.0.0.5');
+      expect(JSON.parse(text.trim().split('\n')[1])).toEqual({
+        __deferred: 'usage',
+        error: 'Internal Server Error',
+      });
+      expect(consoleError).toHaveBeenCalledWith(error);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('SSR — production rejects deferred props with a generic error', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const c = await createTestContext('GET', '/dashboard');
+    const error = new Error('db 10.0.0.5 refused');
+
+    try {
+      const response = await handlePageGet(
+        () => ({ usage: defer(() => Promise.reject(error)) }),
+        undefined,
+        c,
+        'dashboard',
+        mockRenderFn,
+        mockGetAssetTags,
+      );
+
+      const text = await response.text();
+      expect(text).not.toContain('10.0.0.5');
+      expect(text).toContain('window.__rejectDeferred("usage","Internal Server Error")');
+      expect(consoleError).toHaveBeenCalledWith(error);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('SPA — production keeps HTTPException messages for deferred props', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const c = await createTestContext('GET', '/dashboard', {
+      headers: { 'x-voidpages': 'true' },
+    });
+
+    try {
+      const response = await handlePageGet(
+        () => ({
+          usage: defer(() =>
+            Promise.reject(new HTTPException(403, { message: 'Upgrade required' })),
+          ),
+        }),
+        undefined,
+        c,
+        'dashboard',
+        mockRenderFn,
+        mockGetAssetTags,
+      );
+
+      const text = await response.text();
+      expect(JSON.parse(text.trim().split('\n')[1])).toEqual({
+        __deferred: 'usage',
+        error: 'Upgrade required',
+      });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('SPA — no deferred props returns normal JSON (not streaming)', async () => {

@@ -1122,7 +1122,7 @@ function compilePageRoutes(
       page.renderMode === 'island' && pages.islandClientEntryId
         ? 'getIslandsAssetTags'
         : 'getPagesAssetTags';
-    const routeOptions = `{ ${serverImportPath ? 'load: _pload_' + safeId + ', ' : ''}${mdHeadRef ? 'head: ' + mdHeadRef + ', ' : ''}componentId: ${JSON.stringify(page.componentId)}, render: ${renderer}, assets: ${assetTags}, headConfig: __voidHeadConfig, renderOptions: ${JSON.stringify({ renderMode: page.renderMode })} }`;
+    const routeOptions = `{ ${serverImportPath ? 'load: _pload_' + safeId + ', ' : ''}${mdHeadRef ? 'head: ' + mdHeadRef + ', ' : ''}componentId: ${JSON.stringify(page.componentId)}, render: ${renderer}, assets: ${assetTags}, headConfig: __voidHeadConfig, renderOptions: ${JSON.stringify({ renderMode: page.renderMode, ...(options.dev === true ? { dev: true } : {}) })} }`;
     lines.push(
       `app.get(${JSON.stringify(page.pattern)}, __createPageGetHandler(${routeOptions}));`,
     );
