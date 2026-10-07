@@ -1345,11 +1345,41 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     });
     expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
     expect(await issued(team.projectId)).toBe(3);
-    await expectWorkersOn(cf, team, [untrusted, trusted], 3);
+    await expectWorkersOn(cf, team, [trusted], 3);
+    // The retained copy of the removed collaborator's code keeps the token the
+    // floor now rejects.
+    await expectWorkersOn(cf, team, [untrusted], 2);
+    expect(await floor(team.projectId)).toEqual({ gen: 3 });
 
     // The code being replaced now is the owner's: nothing more to rotate.
     await deploy(team.projectId, team.owner.jwt);
     expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('never gives a new token to retained code whose author can no longer deploy', async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+    const trusted = await deploy(team.projectId, team.owner.jwt);
+    await removeCollaborator(team);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    await expectWorkersOn(cf, team, [trusted], 2);
+    await expectWorkersOn(cf, team, [untrusted], 1);
+
+    // Rolling back to it does not bring its token back.
+    await rollback(team.projectId, team.owner.jwt, untrusted);
+    expect(await job(team.projectId)).toBeUndefined();
+    await expectWorkersOn(cf, team, [untrusted], 1);
+    expect(await floor(team.projectId)).toEqual({ gen: 2 });
+    await request(team.projectId);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
+    await expectWorkersOn(cf, team, [untrusted], 3);
+    // Active again, it gets the token; replacing it rotates once more.
+    await rollback(team.projectId, team.owner.jwt, trusted);
+    expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 4 });
+    await expectWorkersOn(cf, team, [untrusted], 3);
+    await expectWorkersOn(cf, team, [trusted], 4);
   });
 
   it('moves past the generation the first deploy issued when a member is removed', async () => {
@@ -1375,7 +1405,9 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     const trusted = await deploy(team.projectId, team.owner.jwt);
     expect((await job(team.projectId))!.payload.again).toBe('1');
     expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 3 });
-    await expectWorkersOn(cf, team, [untrusted, trusted], 3);
+    await expectWorkersOn(cf, team, [trusted], 3);
+    // Already retained when the walk reached it, so it never got generation 2.
+    await expectWorkersOn(cf, team, [untrusted], 1);
   });
 
   it('needs no extra generation when the replacement lands before START', async () => {
@@ -1390,7 +1422,8 @@ describe('rotation after code from a user who lost deploy access is replaced', (
       reason: 'member-removed',
     });
     expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
-    await expectWorkersOn(cf, team, [untrusted, trusted], 2);
+    await expectWorkersOn(cf, team, [trusted], 2);
+    await expectWorkersOn(cf, team, [untrusted], 1);
   });
 
   it('rotates when the next deploy finishes an interrupted cutover over the code', async () => {

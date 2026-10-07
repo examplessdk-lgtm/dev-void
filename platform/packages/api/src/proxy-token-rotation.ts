@@ -200,13 +200,37 @@ export async function requestBulkProxyTokenRotations(db: DbOrTx): Promise<number
   return count;
 }
 
+/** The user who deployed a deployment's code. */
+const deploymentAuthor = deployments.initiated_by_user_id;
+
+type CodeAuthor = Readonly<{ userId: string | null; suspendedReason: string | null }>;
+
+/**
+ * Whether the author of some code can still deploy it to the project. Owner
+ * suspension does not count against it; a collaborator or admin suspended by
+ * an admin does. Code with no known author counts as trusted.
+ */
+async function authorCanDeploy(
+  tx: DbOrTx,
+  projectId: string,
+  author: CodeAuthor,
+): Promise<boolean> {
+  if (!author.userId) {
+    return true;
+  }
+  const role = await projectRoleForUser(tx, projectId, author.userId);
+  return (
+    role === 'owner' ||
+    (!!role && hasProjectCapability(role, 'deploy') && !isAdminSuspended(author.suspendedReason))
+  );
+}
+
 /**
  * While code from a user who can no longer deploy is active, it receives every
  * new token, so a rotation protects only once that code stops running. Call in
  * the cutover transaction (project lock held) right before the active
  * deployment changes: when the code being replaced was deployed by such a user,
- * this requests one more generation. Owner suspension does not count; a
- * collaborator or admin suspended by an admin does.
+ * this requests one more generation.
  */
 export async function requestRotationIfReplacingUntrustedCode(
   tx: DbOrTx,
@@ -216,23 +240,18 @@ export async function requestRotationIfReplacingUntrustedCode(
   const [current] = await tx
     .select({
       deploymentId: projects.active_deployment_id,
-      initiatedBy: deployments.initiated_by_user_id,
-      authorSuspendedReason: users.suspended_reason,
+      userId: deploymentAuthor,
+      suspendedReason: users.suspended_reason,
     })
     .from(projects)
     .innerJoin(deployments, eq(deployments.id, projects.active_deployment_id))
-    .leftJoin(users, eq(users.id, deployments.initiated_by_user_id))
+    .leftJoin(users, eq(users.id, deploymentAuthor))
     .where(eq(projects.id, projectId))
     .limit(1);
-  if (!current?.initiatedBy || current.deploymentId === nextDeploymentId) {
-    return false;
-  }
-  const role = await projectRoleForUser(tx, projectId, current.initiatedBy);
   if (
-    role === 'owner' ||
-    (role &&
-      hasProjectCapability(role, 'deploy') &&
-      !isAdminSuspended(current.authorSuspendedReason))
+    !current ||
+    current.deploymentId === nextDeploymentId ||
+    (await authorCanDeploy(tx, projectId, current))
   ) {
     return false;
   }
@@ -247,6 +266,8 @@ type InventoryRow = Readonly<{
   workerName: string;
   createdAt: string;
   active: boolean;
+  /** A retained Worker whose author can no longer deploy: it keeps its old token. */
+  skipped: boolean;
 }>;
 
 function inventoryWhere(
@@ -271,29 +292,44 @@ async function selectInventory(
   options: Readonly<{ after?: { createdAt: string; id: string }; limit?: number }> = {},
 ): Promise<ReadonlyArray<InventoryRow>> {
   const query = db
-    .select({ id: deployments.id, createdAt: deployments.created_at })
+    .select({
+      id: deployments.id,
+      createdAt: deployments.created_at,
+      userId: deploymentAuthor,
+      suspendedReason: users.suspended_reason,
+    })
     .from(deployments)
+    .leftJoin(users, eq(users.id, deploymentAuthor))
     .where(inventoryWhere(project, options.after))
     .orderBy(asc(deployments.created_at), asc(deployments.id));
   const rows = options.limit === undefined ? await query : await query.limit(options.limit);
-  return rows.map((row) => ({
-    deploymentId: row.id,
-    workerName: getProjectDeploymentWorkerName(project.slug, row.id),
-    createdAt: row.createdAt,
-    active: row.id === project.active_deployment_id,
-  }));
+  const inventory: Array<InventoryRow> = [];
+  for (const row of rows) {
+    const active = row.id === project.active_deployment_id;
+    inventory.push({
+      deploymentId: row.id,
+      workerName: getProjectDeploymentWorkerName(project.slug, row.id),
+      createdAt: row.createdAt,
+      active,
+      skipped: !active && !(await authorCanDeploy(db, project.id, row)),
+    });
+  }
+  return inventory;
 }
 
 /**
- * Every Worker that may hold the project's token: the active deployment and
- * every retained one (rollback leases excluded), oldest first. Rows of a
- * static deployment stay in; their GET finds no script.
+ * Every Worker that gets the project's next token: the active deployment and
+ * every retained one (rollback leases excluded), oldest first. A retained
+ * Worker whose author can no longer deploy is left out: it keeps its old
+ * token, which the raised floor rejects, so rolling back to it needs a new
+ * deploy before platform services work again. Rows of a static deployment
+ * stay in; their GET finds no script.
  */
-export function listProxyTokenInventory(
+export async function listProxyTokenInventory(
   db: DbOrTx,
   project: Pick<Project, 'id' | 'slug' | 'active_deployment_id'>,
 ): Promise<ReadonlyArray<InventoryRow>> {
-  return selectInventory(db, project);
+  return (await selectInventory(db, project)).filter((row) => !row.skipped);
 }
 
 function parseCursor(cursor: string | undefined): { createdAt: string; id: string } | undefined {
@@ -530,6 +566,12 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
     );
     return { kind: 'continue' };
   }
+  const cursor = `${row.createdAt}|${row.deploymentId}`;
+  if (row.skipped) {
+    rotationLog('skipped', ctx.projectId, `worker=${row.workerName} author cannot deploy`);
+    await finishStep(tx, ctx.projectId, sql`jsonb_build_object('cursor', ${cursor}::text)`);
+    return { kind: 'continue' };
+  }
   ctx.workerName = row.workerName;
   const token = await deriveProxyToken(ctx.env.JWT_SECRET, ctx.projectId, project.proxy_token_gen);
   const bindings = await ctx.cf.getScriptBindings(row.workerName);
@@ -574,7 +616,6 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
       patched = true;
     }
   }
-  const cursor = `${row.createdAt}|${row.deploymentId}`;
   await finishStep(
     tx,
     ctx.projectId,
