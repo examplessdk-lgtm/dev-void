@@ -21,4 +21,35 @@ describe('route URL interpolation', () => {
     expect(interpolateRouteParams('/:id', undefined)).toBe('/:id');
     expect(interpolateRouteParams('/:toString', {})).toBe('/:toString');
   });
+
+  it.each([
+    ['/api/posts/:id', { id: '..' }],
+    ['/api/posts/:id', { id: '.' }],
+    ['/files/:path{.+}', { path: 'a/../../admin' }],
+    ['/files/:path{.+}', { path: './x' }],
+  ])('rejects dot segments that would change the path of %s (%j)', (path, params) => {
+    expect(() => interpolateRouteParams(path, params)).toThrow(TypeError);
+    expect(() => interpolateRouteParams(path, params)).toThrow(/it would change the request path/);
+  });
+
+  it('rejects a leading param that would make the path start with //', () => {
+    expect(() => interpolateRouteParams('/:path{.+}', { path: '/evil.com/x' })).toThrow(
+      new TypeError(
+        'Route param "path" would make the request path start with "//", which changes the request host.',
+      ),
+    );
+  });
+
+  it('keeps values that only contain dots or encoded dots', () => {
+    expect(interpolateRouteParams('/api/posts/:id', { id: '...' })).toBe('/api/posts/...');
+    expect(interpolateRouteParams('/api/posts/:id', { id: '.hidden' })).toBe('/api/posts/.hidden');
+    expect(interpolateRouteParams('/api/posts/:id', { id: 'a..b' })).toBe('/api/posts/a..b');
+    expect(interpolateRouteParams('/api/posts/:id', { id: '%2e%2e' })).toBe(
+      '/api/posts/%252e%252e',
+    );
+    expect(interpolateRouteParams('/api/posts/:id', { id: '../admin' })).toBe(
+      '/api/posts/..%2Fadmin',
+    );
+    expect(interpolateRouteParams('/files/:path{.+}', { path: 'a//b' })).toBe('/files/a//b');
+  });
 });
