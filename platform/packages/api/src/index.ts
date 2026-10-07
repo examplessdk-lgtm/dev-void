@@ -183,6 +183,15 @@ function isSandboxDrainMaintenanceRequest(request: Request): boolean {
 }
 
 const app = new Hono<ApiEnv>()
+  // No platform page is meant to be framed. Tenant apps can share a site with
+  // the API (e.g. on workers.dev), so a framing page would get the admin cookie.
+  .use('*', async (context, next) => {
+    await next();
+    if (context.res.headers.get('Content-Type')?.startsWith('text/html')) {
+      context.header('X-Frame-Options', 'DENY');
+      context.header('Content-Security-Policy', "frame-ancestors 'none'");
+    }
+  })
   .use('*', async (context, next) => {
     context.env = await resolvePlatformApplicationEnvironment(context.env);
     await next();
