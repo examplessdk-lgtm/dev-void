@@ -26,6 +26,7 @@ export {
 } from './action-result.ts';
 export type { ActionErrorHandlingScope, ActionResult } from './action-result.ts';
 export { isEqualFormValue } from './form-value-equality.ts';
+export { interpolateRouteParams };
 export {
   createPageNavigationEngine,
   hasFiles,

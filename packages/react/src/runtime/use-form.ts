@@ -10,6 +10,7 @@ import {
 import {
   VoidActionError,
   getValidationErrors,
+  interpolateRouteParams,
   isAbortError,
   isEqualFormValue,
   submitAction,
@@ -67,24 +68,6 @@ export function useForm(
   defaults: Record<string, unknown>,
   options?: { params?: Record<string, string> },
 ): UntypedForm {
-  let resolvedUrl = url;
-
-  // Strip ?action query before param resolution, then re-append
-  let actionQuery = '';
-  const qIdx = resolvedUrl.indexOf('?');
-  if (qIdx !== -1) {
-    actionQuery = resolvedUrl.slice(qIdx);
-    resolvedUrl = resolvedUrl.slice(0, qIdx);
-  }
-
-  if (options?.params) {
-    for (const [key, value] of Object.entries(options.params)) {
-      resolvedUrl = resolvedUrl.replace(`:${key}`, encodeURIComponent(value));
-    }
-  }
-
-  resolvedUrl = resolvedUrl + actionQuery;
-
   const router = useContext(RouterContext);
   const [data, setDataState] = useState<Record<string, unknown>>(() => ({ ...defaults }));
   const [defaultsState, setDefaultsState] = useState<Record<string, unknown>>(() => ({
@@ -160,7 +143,9 @@ export function useForm(
 
       let result;
       try {
-        result = await submitAction(router, resolvedUrl, {
+        // Params are filled in on submit, so a param that would change the
+        // request path (such as "..") fails this submit, not the page render.
+        result = await submitAction(router, interpolateRouteParams(url, options?.params), {
           method,
           data: { ...dataRef.current },
           _resolveOnShell: true,
