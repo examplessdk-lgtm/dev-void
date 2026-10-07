@@ -68,11 +68,23 @@ These commands are for Void Cloud's Workers. Self-hosted installations use the [
 
 ### Proxy token rotation
 
-`void platform system rotate-proxy-tokens` replaces the project tokens tenant Workers use to call the proxy; see the [proxy README](../packages/proxy/README.md#project-tokens) for the token format and accept floor. Rotation needs the API, proxy, and dispatch Workers that accept token generations to run in production one release before the release that adds rotation. After that release is deployed, rotate one canary project on staging with `--project <id> --yes`, check AI, email, queues, crons, remote D1/KV/R2, prerendering, and WebSocket reconnects, then run the bulk `--yes` on staging, then on production.
+`void platform system rotate-proxy-tokens` replaces the project tokens tenant Workers use to call the proxy; see the [proxy README](../packages/proxy/README.md#project-tokens) for the token format and accept floor. Release order: the release whose API, proxy, and dispatch Workers accept token generations must be live on production first; then ship the release that adds rotation. After it reaches staging, rotate one canary project with `--project <id> --yes` and check AI, email, queues, crons, remote D1/KV/R2, prerendering, and WebSocket reconnects.
+
+A deploy gives a project still on generation 0 a generation 1 token. Its older Workers keep the legacy token, which stays accepted until the project rotates.
+
+Workers deployed before the binding rename hold the legacy token in `__AI_TOKEN`, which rotation cannot replace, so they lose AI, email and ISR revalidation when their project rotates, including after a rollback to such a deployment. Get them redeployed. To list the active ones, set `rename_live_at` (psql `\set`) to the first production deploy that contains commit `54375ae1` (2026-03-03), or a later time if unsure; static deployments in the list need nothing.
+
+```sql
+SELECT p.id, p.slug, d.id AS deployment_id, d.created_at
+FROM deployments d JOIN projects p ON p.id = d.project_id
+WHERE d.id = p.active_deployment_id
+  AND p.status <> 'deleting'
+  AND d.created_at < :'rename_live_at';
+```
 
 The API also requests a rotation when a collaborator or admin loses deploy access, and again when a deploy or rollback replaces code from a user who can no longer deploy. The API cron advances rotations every two minutes. A failed step is retried after 15 minutes and logs `[proxy-token-rotation] FAILED <project> phase=<phase> attempts=<n> worker=<name>: <error>`. Alert on `attempts >= 4` (about one hour of retries); project owners and admins see a CLI warning at the same point. `--plan --project <id>` shows the job's phase and last error.
 
-Accept floors live in the ROUTING namespace. If it is ever recreated, every floor reads as 0 and old tokens work again: run `rotate-proxy-tokens --all --yes`. Before rolling the platform back, let running rotations finish (`--plan` shows nothing pending); after a rollback to the release before rotation, a project in the middle of a rotation gets 403 on remote D1/KV/R2 until the platform is upgraded again. A rollback to an older release drops rotations that have not finished, and Workers deployed while it runs carry the legacy token, which a rotated project rejects. After upgrading again, run `rotate-proxy-tokens --all --yes` and check with `--plan` until nothing is pending or failed: every Worker gets a new token and every floor rises again.
+Accept floors live in the ROUTING namespace. If it is ever recreated, every floor reads as 0 and old tokens work again: run `rotate-proxy-tokens --all --yes`. Before rolling the platform back, let running rotations finish (`--plan` shows nothing pending). After a rollback to the release before rotation, a project in the middle of a rotation gets 403 on remote D1/KV/R2, and so does a project deployed since the upgrade, until it is redeployed or the platform is upgraded again; unfinished rotations resume after the upgrade. A rollback to an older release drops rotations that have not finished, and Workers deployed while it runs carry the legacy token, which a rotated project rejects. After upgrading again from such a rollback, run `rotate-proxy-tokens --all --yes` and check with `--plan` until nothing is pending or failed: every Worker gets a new token and every floor rises again. Keep the API and proxy on the same release: a proxy from before token generations cannot call the metadata routes of an API that has rotation.
 
 ## Secrets
 
