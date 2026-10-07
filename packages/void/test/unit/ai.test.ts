@@ -215,6 +215,7 @@ describe('runtime ai', () => {
 
     expect(proxyFetch).toHaveBeenCalledOnce();
     const init = proxyFetch.mock.calls[0][1]!;
+    expect(proxyFetch.mock.calls[0][0]).toBe('https://ai-proxy/ai/provider');
     expect(JSON.parse(init.body as string)).toMatchObject({
       action: 'provider',
       provider: 'openai',

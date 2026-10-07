@@ -24,11 +24,11 @@ Deployed user worker            Proxy                       Downstream
 
 Project requests use these authentication paths:
 
-| Path            | When               | Auth                                                                                                         |
-| --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
-| Service binding | Deployed Void apps | Project token (`aiToken`), checked against the project's accept floor; see [Project tokens](#project-tokens) |
-| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`                                                                            |
-| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT                                                                    |
+| Path            | When               | Auth                                                                                                                                                                                               |
+| --------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Service binding | Deployed Void apps | Project token (`aiToken`), checked against the project's accept floor; see [Project tokens](#project-tokens); requests use bare hosts (`https://ai-proxy`, `https://proxy`, `https://email-proxy`) |
+| HTTPS           | Local development  | `Authorization: Bearer <api-jwt>`                                                                                                                                                                  |
+| HTTPS           | Managed prerender  | Five-minute, project-scoped prerender JWT                                                                                                                                                          |
 
 Project-scoped POST routes require `projectId` in the JSON body. The public
 `GET /health` route has no project body, and `/email/verify-receipt` checks a
@@ -36,11 +36,14 @@ separate internal proof. Prerender JWTs are accepted only when their signed
 project claim exactly matches `projectId`; they are not valid at deployment or
 project-management APIs.
 
-The proxy bounds JSON bodies before authentication: control routes accept up to
-1 MiB, while `/ai/run`, `/ai/provider`, `/ai/toMarkdown`, `/kv/put`, and R2 put
-routes accept up to 8 MiB. Email sends retain their 8 MiB envelope limit and
-receipt verification accepts up to 2 KiB. A stalled body times out after five
-seconds; non-email routes return 413 for oversized bodies and 408 for timeouts.
+HTTPS callers must send `Authorization: Bearer`; the proxy verifies it before
+reading the body, and a request to a public hostname without it gets 401 unread.
+Service-binding bodies are bounded before their project token is checked:
+control routes accept up to 1 MiB, while `/ai/run`, `/ai/provider`,
+`/ai/toMarkdown`, `/kv/put`, and R2 put routes accept up to 8 MiB. Email sends
+retain their 8 MiB envelope limit and receipt verification accepts up to 2 KiB.
+A stalled body times out after five seconds; non-email routes return 413 for
+oversized bodies and 408 for timeouts.
 
 ### Project tokens
 

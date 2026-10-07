@@ -154,7 +154,7 @@ async function postSend(
   body: Record<string, unknown>,
 ): Promise<Response> {
   return (worker.fetch as (req: Request, env: unknown) => Promise<Response>)(
-    new Request('https://proxy.void.cloud/email/send', {
+    new Request('https://email-proxy/email/send', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),

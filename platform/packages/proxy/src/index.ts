@@ -126,7 +126,36 @@ app.post('/email/relay', (context) => context.json({ error: 'not found' }, 404))
 
 // Auth middleware — parses body, authenticates, sets projectId
 app.post('/*', async (context, next) => {
-  const path = new URL(context.req.url).pathname;
+  const url = new URL(context.req.url);
+  const path = url.pathname;
+
+  // Check credentials before buffering up to 8 MiB of JSON. Header tokens are
+  // verified here. Body tokens (projectId + aiToken) come only from deployed
+  // Workers over the __VOID_PROXY service binding, which calls bare hosts
+  // (https://ai-proxy, https://proxy, https://email-proxy). Public hostnames
+  // always contain a dot, so a public request without a header is refused unread.
+  const authHeader = context.req.header('authorization');
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const payload = token ? await verifyJwt(token, context.env.JWT_SECRET) : null;
+  if (authHeader !== undefined && !payload) {
+    return context.json(
+      {
+        error: 'invalid or expired token',
+        message:
+          'This proxy credential is invalid or expired. Sign in to the connected platform again for remote development, or restart the build to obtain a fresh prerender token.',
+      },
+      401,
+    );
+  }
+  if (authHeader === undefined && url.hostname.includes('.')) {
+    return context.json(
+      {
+        error: 'authorization required',
+        message: 'Send a Void platform token in the Authorization header.',
+      },
+      401,
+    );
+  }
 
   let body: ProxyBody;
   try {
@@ -147,21 +176,8 @@ app.post('/*', async (context, next) => {
   context.set('body', body);
 
   let revalidateHuman: (() => Promise<boolean>) | undefined;
-  const authHeader = context.req.header('authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    // HTTPS path (local dev) — validate JWT
-    const token = authHeader.slice(7);
-    const payload = await verifyJwt(token, context.env.JWT_SECRET);
-    if (!payload) {
-      return context.json(
-        {
-          error: 'invalid or expired token',
-          message:
-            'This proxy credential is invalid or expired. Sign in to the connected platform again for remote development, or restart the build to obtain a fresh prerender token.',
-        },
-        401,
-      );
-    }
+  if (payload) {
+    // HTTPS path (local dev) — JWT verified above
     const projectId = asString(body.projectId);
     if (!projectId) {
       return context.json({ error: 'projectId required' }, 400);

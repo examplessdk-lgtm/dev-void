@@ -82,7 +82,7 @@ function createEnv(
 }
 
 function post(path: string, body: unknown): Request {
-  return new Request(`https://proxy.void.cloud${path}`, {
+  return new Request(`https://proxy${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),

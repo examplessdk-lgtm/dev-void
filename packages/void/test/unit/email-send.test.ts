@@ -688,7 +688,7 @@ describe('sendEmail (proxy round trip)', () => {
       }),
     );
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toContain('/email/send');
+    expect(calls[0].url).toBe('https://email-proxy/email/send');
     const body = calls[0].body as Record<string, unknown>;
     expect(body.projectId).toBe('p_test');
     expect(body.aiToken).toBe('tok');

@@ -95,7 +95,7 @@ async function proxyRequest(projectId: string, aiToken: string) {
   ).default;
   const run = vi.fn(async () => ({ response: 'ok' }));
   const response = await proxyWorker.fetch(
-    new Request('https://proxy.example.com/ai/run', {
+    new Request('https://ai-proxy/ai/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId, aiToken, model: 'test-model', inputs: {} }),

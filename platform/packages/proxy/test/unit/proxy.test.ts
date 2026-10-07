@@ -166,7 +166,10 @@ function createEnv(
 }
 
 function post(path: string, body: unknown, headers?: Record<string, string>): Request {
-  return new Request(`https://proxy.void.cloud${path}`, {
+  // Service-binding callers use bare hosts and no header; HTTPS callers send Bearer.
+  const origin =
+    headers?.authorization === undefined ? 'https://proxy' : 'https://proxy.void.cloud';
+  return new Request(`${origin}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
@@ -304,7 +307,7 @@ describe('proxy worker', () => {
         controller.close();
       });
       const cancel = vi.fn();
-      const request = new Request('https://proxy.void.cloud/ai/models', {
+      const request = new Request('https://ai-proxy/ai/models', {
         method: 'POST',
         headers: { 'content-length': String(1024 * 1024 + 1) },
         body: new ReadableStream({ pull, cancel }, { highWaterMark: 0 }),
@@ -319,7 +322,7 @@ describe('proxy worker', () => {
 
     it('enforces the byte cap when Content-Length is missing', async () => {
       const body = new TextEncoder().encode(JSON.stringify({ pad: 'x'.repeat(1024 * 1024) }));
-      const request = new Request('https://proxy.void.cloud/ai/models', {
+      const request = new Request('https://ai-proxy/ai/models', {
         method: 'POST',
         body: new ReadableStream({
           start(controller) {
@@ -339,7 +342,7 @@ describe('proxy worker', () => {
       vi.useFakeTimers();
       let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
       let cancelled = false;
-      const request = new Request('https://proxy.void.cloud/ai/models', {
+      const request = new Request('https://ai-proxy/ai/models', {
         method: 'POST',
         body: new ReadableStream({
           start(value) {
@@ -458,7 +461,7 @@ describe('proxy worker', () => {
   describe('email send request bounds', () => {
     it('allows a maximum-size MIME envelope through to authentication', async () => {
       const response = await worker.fetch(
-        new Request('https://proxy.void.cloud/email/send', {
+        new Request('https://email-proxy/email/send', {
           method: 'POST',
           body: JSON.stringify({
             projectId: 'proj_000000000001',
@@ -479,7 +482,7 @@ describe('proxy worker', () => {
           controller.close();
         });
         const cancel = vi.fn();
-        const request = new Request(`https://proxy.void.cloud${path}`, {
+        const request = new Request(`https://email-proxy${path}`, {
           method: 'POST',
           headers: { 'content-length': String(8 * 1024 * 1024 + 1) },
           body: new ReadableStream({ pull, cancel }, { highWaterMark: 0 }),
@@ -495,7 +498,7 @@ describe('proxy worker', () => {
     it('ends a stalled unauthenticated send body without waiting for cancellation', async () => {
       vi.useFakeTimers();
       const cancel = vi.fn(() => new Promise<void>(() => {}));
-      const request = new Request('https://proxy.void.cloud/email/send', {
+      const request = new Request('https://email-proxy/email/send', {
         method: 'POST',
         body: new ReadableStream({ cancel }),
         duplex: 'half',
@@ -508,6 +511,79 @@ describe('proxy worker', () => {
       expect(status).toBe(400);
       expect(cancel).toHaveBeenCalledOnce();
       await response;
+    });
+  });
+
+  describe('authentication before the body is read', () => {
+    function streamedPost(url: string, headers: Record<string, string> = {}) {
+      const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {
+        controller.enqueue(new TextEncoder().encode('{}'));
+        controller.close();
+      });
+      const request = new Request(url, {
+        method: 'POST',
+        headers,
+        body: new ReadableStream({ pull, cancel: vi.fn() }, { highWaterMark: 0 }),
+        duplex: 'half',
+      } as RequestInit);
+      return { request, pull };
+    }
+
+    it.each(['https://proxy.void.cloud', 'https://void-proxy.example.workers.dev'])(
+      'refuses a request to %s without a header before reading its body',
+      async (host) => {
+        const { request, pull } = streamedPost(`${host}/ai/run`);
+        const response = await worker.fetch(request, createEnv());
+        expect(response.status).toBe(401);
+        expect(await response.json()).toMatchObject({ error: 'authorization required' });
+        expect(pull).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses an invalid bearer token before reading the body', async () => {
+      const { request, pull } = streamedPost('https://proxy.void.cloud/ai/run', {
+        authorization: 'Bearer junk',
+      });
+      const response = await worker.fetch(request, createEnv());
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({ error: 'invalid or expired token' });
+      expect(pull).not.toHaveBeenCalled();
+    });
+
+    it('never accepts a body project token next to a non-bearer header', async () => {
+      const env = createEnv();
+      const response = await worker.fetch(
+        post(
+          '/ai/run',
+          {
+            model: 'm',
+            inputs: {},
+            projectId: 'proj_000000000001',
+            aiToken: aiTokens['proj_000000000001'],
+          },
+          { authorization: 'Basic x' },
+        ),
+        env,
+      );
+      expect(response.status).toBe(401);
+      expect(env.AI.run).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'https://ai-proxy/ai/run',
+      'https://proxy/revalidate',
+      'https://email-proxy/email/send',
+    ])('checks the body project token on the binding host %s', async (url) => {
+      const response = await worker.fetch(
+        new Request(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ projectId: 'proj_000000000001', aiToken: 'invalid' }),
+        }),
+        createEnv(),
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'invalid project token' });
     });
   });
 
