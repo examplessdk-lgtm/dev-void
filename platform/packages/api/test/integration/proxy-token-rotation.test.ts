@@ -673,6 +673,41 @@ describe('proxy token rotation', () => {
     expect(await floor(fx.projectId)).toEqual({ gen: 1 });
   });
 
+  it('still drains a Worker whose PATCH applied in an attempt that failed', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf, { retained: 0 });
+    const token = await tok(fx.projectId, 1);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Cloudflare applies the PATCH, but the response is lost.
+    hooks.fetch = (method, script) => {
+      if (method !== 'PATCH') {
+        return undefined;
+      }
+      const binding = cf.state.hostScripts
+        .get(script)!
+        .bindings.find((b) => b.name === '__VOID_PROXY_TOKEN')!;
+      binding.text = token;
+      return cfError('internal error', 500);
+    };
+    await request(fx.projectId);
+    expect(await advance(fx.projectId)).toMatchObject({ status: 'failed', phase: 'patch' });
+    expect(scriptToken(cf, fx.worker(fx.active))).toBe(token);
+
+    hooks.fetch = undefined;
+    await kick(fx.projectId);
+    expect(await advance(fx.projectId, { waitMs: 60_000 })).toMatchObject({
+      status: 'pending',
+      phase: 'revoke',
+      reason: 'waiting',
+    });
+    expect((await job(fx.projectId))!.payload.lastPatchAt).toBeDefined();
+    expect(await floor(fx.projectId)).toBeNull();
+    expect(patchedScripts()).toEqual([fx.worker(fx.active)]);
+
+    await step(fx.projectId);
+    expect(await floor(fx.projectId)).toEqual({ gen: 1 });
+  });
+
   it('patches a Worker created after the walk passed before raising the floor', async () => {
     const cf = cfApi();
     const fx = await setupProject(cf);

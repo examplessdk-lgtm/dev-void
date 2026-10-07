@@ -325,6 +325,8 @@ type StepResult =
 type LockedStep = {
   project: Project;
   payload: JobPayload;
+  /** Failed attempts of this step since the last one that committed. */
+  attempts: number;
 };
 
 async function issuedGeneration(db: DbOrTx, projectId: string): Promise<number> {
@@ -340,10 +342,11 @@ async function issuedGeneration(db: DbOrTx, projectId: string): Promise<number> 
 async function lockJob(
   tx: DbOrTx,
   projectId: string,
-): Promise<{ payload: JobPayload; waitSeconds: number | null } | null> {
+): Promise<{ payload: JobPayload; attempts: number; waitSeconds: number | null } | null> {
   const [job] = await tx
     .select({
       payload: projectCleanupJobs.payload,
+      attempts: projectCleanupJobs.attempts,
       waitSeconds: sql<number | null>`CASE
         WHEN (${projectCleanupJobs.payload}->>'waitUntil')::timestamptz > now()
         THEN ceil(extract(epoch FROM (${projectCleanupJobs.payload}->>'waitUntil')::timestamptz - now()))::integer
@@ -352,7 +355,9 @@ async function lockJob(
     .from(projectCleanupJobs)
     .where(and(jobTarget(projectId), eq(projectCleanupJobs.kind, PROXY_TOKEN_ROTATION_JOB_KIND)))
     .for('update');
-  return job ? { payload: job.payload, waitSeconds: job.waitSeconds } : null;
+  return job
+    ? { payload: job.payload, attempts: job.attempts, waitSeconds: job.waitSeconds }
+    : null;
 }
 
 /** Project lock, then job lock, then the wait, then no deployment in flight. */
@@ -378,7 +383,7 @@ async function lockStep(tx: DbOrTx, ctx: StepContext): Promise<LockedStep | Step
   if (await getActiveDeployment(tx, ctx.projectId)) {
     return { kind: 'busy' };
   }
-  return { project, payload: job.payload };
+  return { project, payload: job.payload, attempts: job.attempts };
 }
 
 /** Final statement of a successful step: merge `fields` into the payload. */
@@ -562,6 +567,11 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
           });
         }
       }
+    } else if (current && locked.attempts > 0) {
+      // The failed attempt before this one may have patched this Worker and
+      // then lost the response or rolled back. Its old version can still
+      // serve, so it drains as if patched now.
+      patched = true;
     }
   }
   const cursor = `${row.createdAt}|${row.deploymentId}`;
