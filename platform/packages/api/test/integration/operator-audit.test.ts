@@ -195,7 +195,7 @@ test('records complete and partial 207 mutation outcomes as failed', async () =>
   expect(await failed.json()).toMatchObject({ ok: false, partial: false });
 
   vi.restoreAllMocks();
-  cloudflareWorkerStub('void-dashboard-staging');
+  cloudflareWorkerStub('void-api-staging');
   const partial = await request('/workers/rollback-all', {
     environment: 'staging',
     versions: {

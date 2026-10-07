@@ -942,7 +942,7 @@ describe('operator installation-aware system and worker operations', () => {
     expect((await req('/workers/rollback-all', {})).status).toBe(400);
   });
   test('bulk rollback pins reviewed targets, stops after failure, and persists partial outcomes', async () => {
-    const fetch = cloudflareWorkerStub('void-dashboard-staging');
+    const fetch = cloudflareWorkerStub('void-api-staging');
     const versions = {
       dispatch: 'previous',
       'email-gateway': 'previous',
@@ -953,24 +953,28 @@ describe('operator installation-aware system and worker operations', () => {
     };
     const response = await req('/workers/rollback-all', { environment: 'staging', versions });
     expect(response.status).toBe(207);
-    const result = (await response.json()) as { events: Array<{ status: string }> };
+    const result = (await response.json()) as {
+      events: Array<{ worker_name: string; status: string }>;
+    };
     expect(result).toMatchObject({ ok: false, partial: true, environment: 'staging' });
-    expect(result.events.map((event) => event.status)).toEqual([
-      'success',
-      'success',
-      'failed',
-      'skipped',
-      'skipped',
-      'skipped',
+    // Rollback runs in reverse deploy order, so the email gateway, which the
+    // API's confirmation page posts back through, rolls back after the API.
+    expect(result.events.map((event) => [event.worker_name, event.status])).toEqual([
+      ['dashboard', 'success'],
+      ['dispatch', 'success'],
+      ['tail', 'success'],
+      ['api', 'failed'],
+      ['email-gateway', 'skipped'],
+      ['proxy', 'skipped'],
     ]);
     const writes = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
-    expect(writes).toHaveLength(3);
-    expect(writes[0][0]).toContain('void-dispatch-staging');
+    expect(writes).toHaveLength(4);
+    expect(writes[0][0]).toContain('void-dashboard-staging');
     expect(JSON.parse(String(writes[0][1]?.body))).toMatchObject({
       versions: [{ version_id: 'previous', percentage: 100 }],
     });
     const persisted = await env.db.select().from(platformEvents);
-    expect(persisted.filter((event) => event.status === 'skipped')).toHaveLength(3);
+    expect(persisted.filter((event) => event.status === 'skipped')).toHaveLength(2);
   });
   test('queue backfill preview reads all targets without writing or returning tokens', async () => {
     await env.ROUTING.put(
