@@ -18,6 +18,8 @@ const MAX_PAGES = 5000;
 // dedupes only identical strings. 100 matches Vercel's per-project cap and is
 // far above what real apps declare.
 const MAX_CRON_EXPRESSIONS = 100;
+// The scheduler parses every entry, shared expression or not, on each alarm.
+const MAX_SCHEDULES = 1000;
 
 /**
  * Strict literal-hostname regex used to validate `redirectRules[].host` /
@@ -119,6 +121,9 @@ export function validateManifestShape(parsed: unknown): string | null {
   if (manifest.schedules !== undefined) {
     if (!Array.isArray(manifest.schedules)) {
       return 'invalid manifest shape: schedules must be an array';
+    }
+    if (manifest.schedules.length > MAX_SCHEDULES) {
+      return `invalid manifest shape: schedules has ${manifest.schedules.length} entries, exceeds the ${MAX_SCHEDULES} per-project limit`;
     }
     const cronExpressions = new Set<string>();
     for (const schedule of manifest.schedules) {

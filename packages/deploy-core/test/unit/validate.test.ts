@@ -91,4 +91,18 @@ describe('cron expression cap', () => {
     ];
     expect(validateManifestShape(withCrons(crons))).toContain('101 distinct');
   });
+
+  it('accepts 1000 entries sharing one expression', () => {
+    expect(
+      validateManifestShape(withCrons(Array.from({ length: 1000 }, () => '* * * * *'))),
+    ).toBeNull();
+  });
+
+  it('rejects 1001 entries sharing one expression', () => {
+    const result = validateManifestShape(
+      withCrons(Array.from({ length: 1001 }, () => '* * * * *')),
+    );
+    expect(result).toContain('1001 entries');
+    expect(result).toContain('1000 per-project limit');
+  });
 });
