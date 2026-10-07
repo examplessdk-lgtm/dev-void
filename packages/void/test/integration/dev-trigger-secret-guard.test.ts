@@ -37,6 +37,9 @@ describe('dev server with the dev-trigger secret guard', () => {
     writeFileSync(join(root, '.void', 'dev-trigger-token'), TOKEN);
     writeFileSync(join(root, '.void', 'dev-triggers.ts'), `export const token = "${TOKEN}";\n`);
     writeFileSync(join(root, '.void', 'routes.d.ts'), 'export {};\n');
+    // Astro writes its background dev server output, startup hint included, here.
+    mkdirSync(join(root, '.astro'), { recursive: true });
+    writeFileSync(join(root, '.astro', 'dev.log'), `x-void-dev-trigger: ${TOKEN}\n`);
 
     server = await createServer({
       root,
@@ -73,6 +76,8 @@ describe('dev server with the dev-trigger secret guard', () => {
     '/.void/dev-triggers.ts',
     '/.void/dev-triggers.ts?import',
     '/.void/dev-triggers.ts?raw',
+    '/.astro/dev.log',
+    '/.astro/dev.log?raw',
   ])('does not serve the token at %s', async (path) => {
     const response = await get(port, path.replace('<root>', fsRoot()));
     expect(response.status).toBe(404);

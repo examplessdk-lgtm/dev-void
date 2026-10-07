@@ -117,13 +117,15 @@ export function getOrCreateDevTriggerToken(root: string): string {
 }
 
 // Request paths that would return the dev-trigger token: `.void/dev-trigger-token`,
-// the generated `.void/dev-triggers.ts`, and Nitro's dev bundle (`.nuxt/dev/` for
-// Nuxt, `dist/.nitro/dev/` for Analog), which inlines that module. Matched anywhere
+// the generated `.void/dev-triggers.ts`, Nitro's dev bundle (`.nuxt/dev/` for
+// Nuxt, `dist/.nitro/dev/` for Analog), which inlines that module, and Astro's
+// `.astro/dev.log`, which records the startup hint when `astro dev` runs in the
+// background (`--background`, or started by a coding agent). Matched anywhere
 // in the decoded, lower-cased path so `/@fs/<abs>/`, `/@id/`, a base such as
 // `/_nuxt/`, case-insensitive file systems, dot segments, `//`, `%2e`, `\` and
 // Windows trailing dots/spaces all hit.
 const DEV_TRIGGER_SECRET_PATH_RE =
-  /(?:^|\/)\.void[. ]*\/(?:.*\/)?dev-trigger|(?:^|\/)\.(?:nuxt|nitro)[. ]*\/(?:.*\/)?dev\//;
+  /(?:^|\/)\.void[. ]*\/(?:.*\/)?dev-trigger|(?:^|\/)\.(?:nuxt|nitro)[. ]*\/(?:.*\/)?dev\/|(?:^|\/)\.astro[. ]*\/(?:.*\/)?dev\.log/;
 
 export function isDevTriggerSecretRequest(url: string | undefined): boolean {
   if (!url) {

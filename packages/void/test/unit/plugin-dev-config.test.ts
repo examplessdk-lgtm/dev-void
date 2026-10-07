@@ -28,6 +28,9 @@ describe('isDevTriggerSecretRequest', () => {
     '/dist/.nitro/dev/index.mjs',
     '/@fs/Users/me/app/dist/.nitro/dev/index.mjs.map',
     '\\.void\\dev-trigger-token',
+    '/.astro/dev.log',
+    '/.ASTRO/Dev.Log?raw',
+    '/@fs/Users/me/app/.astro/dev.log',
   ])('refuses %s', (url) => {
     expect(isDevTriggerSecretRequest(url)).toBe(true);
   });
@@ -47,6 +50,8 @@ describe('isDevTriggerSecretRequest', () => {
     '/_nuxt/.nuxt/components.plugin.mjs',
     '/_nuxt/@fs/Users/me/app/.nuxt/devtools/x.mjs',
     '/dist/.nitro/types/nitro.d.ts',
+    '/.astro/dev.json',
+    '/.astro/content.d.ts',
     '/?q=/.void/dev-trigger-token',
     '/@vite/client',
   ])('allows %s', (url) => {
