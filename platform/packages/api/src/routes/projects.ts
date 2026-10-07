@@ -2673,7 +2673,8 @@ const app = new Hono<ApiEnv>()
     const workerName = `user-${project.slug}`;
     // A slug can be reused after deletion, so rows from before this project
     // existed belong to an earlier owner.
-    const startMs = Math.max(Date.now() - sinceMs, databaseTimestampMs(project.created_at) ?? 0);
+    const createdAtMs = databaseTimestampMs(project.created_at) ?? 0;
+    const startMs = Math.max(Date.now() - sinceMs, createdAtMs);
     const sinceStr = new Date(startMs).toISOString().replace('T', ' ').slice(0, 19);
     const dataset = context.env.LOGS_DATASET ?? 'void_logs';
 
@@ -2688,6 +2689,10 @@ const app = new Hono<ApiEnv>()
       levelFilter = `\n        AND blob2 LIKE '%"level":"${level}"%'`;
     }
 
+    // `timestamp` is when the row was written, in whole seconds, and keeps the
+    // scan short. An earlier owner's invocation can start before this project
+    // was created and still be written after, so also bound its start time
+    // (`double1`, in ms).
     const query = `
       SELECT
         blob1 as outcome,
@@ -2701,7 +2706,8 @@ const app = new Hono<ApiEnv>()
         min(timestamp) as ingestedAt
       FROM ${dataset}
       WHERE index1 = '${workerName}'
-        AND timestamp >= toDateTime('${sinceStr}')${deployFilter}${levelFilter}
+        AND timestamp >= toDateTime('${sinceStr}')
+        AND double1 >= ${createdAtMs}${deployFilter}${levelFilter}
       ${LOG_ROW_GROUP_BY}
       ORDER BY ingestedAt DESC
       LIMIT ${limit}

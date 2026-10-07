@@ -3439,10 +3439,8 @@ describe('GET /projects/:id/logs', () => {
   it('does not return rows from before the project was created', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'reused-slug');
-    const createdAt = new Date(Math.floor((Date.now() - 60 * 60_000) / 1000) * 1000)
-      .toISOString()
-      .replace('T', ' ')
-      .slice(0, 19);
+    const createdAtMs = Math.floor((Date.now() - 60 * 60_000) / 1000) * 1000 + 250;
+    const createdAt = new Date(createdAtMs).toISOString().replace('T', ' ').slice(0, 23);
     await env.db.update(projects).set({ created_at: createdAt }).where(eq(projects.id, project.id));
 
     let capturedBody = '';
@@ -3460,7 +3458,9 @@ describe('GET /projects/:id/logs', () => {
       env,
     );
     expect(res.status).toBe(200);
-    expect(capturedBody).toContain(`timestamp >= toDateTime('${createdAt}')`);
+    expect(capturedBody).toContain(`timestamp >= toDateTime('${createdAt.slice(0, 19)}')`);
+    // An earlier owner's invocation can start before creation and be written after it.
+    expect(capturedBody).toContain(`AND double1 >= ${createdAtMs}`);
   });
 
   it('uses the since bound when the project is older than it', async () => {
