@@ -25,12 +25,20 @@ export default defineMiddleware(cors({ origin: 'https://example.com' }));
 ```
 
 ```ts
-// middleware/02.cache.ts
-import { defineMiddleware } from 'void';
+// routes/api/products.ts (per-route cache)
+import { defineHandler } from 'void';
 import { cache } from 'hono/cache';
+import { listProducts } from '../../lib/products';
 
-export default defineMiddleware(cache({ cacheName: 'my-app', cacheControl: 'max-age=3600' }));
+export const GET = defineHandler(
+  cache({ cacheName: 'products', cacheControl: 'max-age=3600' }),
+  async () => ({ products: await listProducts() }),
+);
 ```
+
+::: warning
+`cache()` stores one response per URL and returns it to every visitor. It skips requests with an `Authorization` header, but not cookies. Use it only on routes whose response is the same for everyone, never on a route that reads the signed-in user. To cache pages, use [revalidation](../guide/edge/revalidation.md), which skips requests that carry a cookie.
+:::
 
 ```ts
 // routes/api/webhooks/stripe.ts (per-route usage)
