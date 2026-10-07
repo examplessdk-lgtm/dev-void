@@ -11,7 +11,7 @@ import {
   saveOperatorToken,
 } from './operator-auth.ts';
 import { OperatorClient, OperatorClientError } from './operator-client.ts';
-import { printSuccess } from './output.ts';
+import { printSuccess, sanitizeTerminalText } from './output.ts';
 
 const MAX_RUNTIME_FOLLOW_ROWS = 10_000;
 export const BUILD_LOG_DRAIN_TIMEOUT_MS: number = 2 * 60_000;
@@ -22,11 +22,11 @@ function printable(value: unknown): string {
   }
   if (typeof value === 'string') {
     // Tenant text must not execute terminal control sequences.
-    // eslint-disable-next-line no-control-regex
-    return value.replace(/[\u0000-\u001f\u007f]/g, ' ');
+    return sanitizeTerminalText(value);
   }
   if (typeof value === 'object') {
-    return JSON.stringify(value);
+    // JSON escapes C0 controls but leaves C1 controls such as U+009B (CSI) raw.
+    return sanitizeTerminalText(JSON.stringify(value));
   }
   return String(value);
 }

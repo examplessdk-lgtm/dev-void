@@ -1381,6 +1381,42 @@ describe('operator transport and execution', () => {
     ]);
   });
 
+  it('neutralizes C1 terminal controls in human operator output', async () => {
+    vi.stubEnv('VOID_API_URL', 'https://one.example');
+    vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
+    const write = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          data: [
+            {
+              timestamp: 1234,
+              method: 'GET',
+              url: '/x\u009b2J',
+              status: '503',
+              outcome: 'exception',
+              logs: [{ level: 'error', message: ['hi \u009b2J', '\u009d52;c;ZXZpbA==\u009c'] }],
+              exceptions: [{ name: 'Error\u009b', message: 'bad\u009b31m' }],
+            },
+          ],
+          nextCursor: null,
+          watermark: '1235',
+        }),
+      ),
+    );
+
+    await runOperatorCommand(parseOperatorArgs(['deployment', 'logs', 'deployment-1']));
+
+    const lines = write.mock.calls.map(([line]) => String(line));
+    expect(lines).toEqual([
+      '1234 GET /x 2J 503',
+      '  [error] ["hi  2J"," 52;c;ZXZpbA== "]',
+      '  Error : bad 31m',
+    ]);
+    expect(lines.some((line) => /[\u0080-\u009f]/.test(line))).toBe(false);
+  });
+
   it('renders every worker and audit event field without table-column truncation', async () => {
     vi.stubEnv('VOID_API_URL', 'https://one.example');
     vi.stubEnv('VOID_OPERATOR_TOKEN', 'operator');
