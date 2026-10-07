@@ -3434,6 +3434,68 @@ describe('GET /projects/:id/logs', () => {
     expect(res.status).toBe(400);
   });
 
+  // Log rows are keyed by `user-<slug>`, and a deleted project's slug can be
+  // claimed again, so rows older than this project belong to an earlier owner.
+  it('does not return rows from before the project was created', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'reused-slug');
+    const createdAt = new Date(Math.floor((Date.now() - 60 * 60_000) / 1000) * 1000)
+      .toISOString()
+      .replace('T', ' ')
+      .slice(0, 19);
+    await env.db.update(projects).set({ created_at: createdAt }).where(eq(projects.id, project.id));
+
+    let capturedBody = '';
+    mockCfApi({
+      analyticsQuery: (_url, init) => {
+        capturedBody = typeof init?.body === 'string' ? init.body : '';
+        return Response.json({ data: [] });
+      },
+    });
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/logs?since=7d`, {
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(capturedBody).toContain(`timestamp >= toDateTime('${createdAt}')`);
+  });
+
+  it('uses the since bound when the project is older than it', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, 'old-project');
+    const createdAt = new Date(Date.now() - 30 * 24 * 60 * 60_000)
+      .toISOString()
+      .replace('T', ' ')
+      .slice(0, 19);
+    await env.db.update(projects).set({ created_at: createdAt }).where(eq(projects.id, project.id));
+
+    let capturedBody = '';
+    mockCfApi({
+      analyticsQuery: (_url, init) => {
+        capturedBody = typeof init?.body === 'string' ? init.body : '';
+        return Response.json({ data: [] });
+      },
+    });
+
+    const before = Date.now();
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}/logs?since=1h`, {
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    const after = Date.now();
+    expect(res.status).toBe(200);
+    const bound = /timestamp >= toDateTime\('([^']+)'\)/.exec(capturedBody)?.[1];
+    expect(bound).toBeDefined();
+    const boundMs = Date.parse(`${bound!.replace(' ', 'T')}Z`);
+    expect(boundMs).toBeGreaterThanOrEqual(Math.floor((before - 60 * 60_000) / 1000) * 1000);
+    expect(boundMs).toBeLessThanOrEqual(after - 60 * 60_000);
+  });
+
   it('appends an error-level WHERE clause when level=error', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'lvl-error');

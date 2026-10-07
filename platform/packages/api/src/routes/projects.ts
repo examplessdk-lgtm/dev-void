@@ -55,6 +55,7 @@ import {
   tryCreateEmailDestination,
   ACTIVE_BUILD_STATUSES,
 } from '../db.ts';
+import { databaseTimestampMs } from '../deploy/recovery.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
 import { validateSubmittedExecutionPlans } from '../migrations/execution-plan.ts';
 import { ensureTrackingTable, queryD1, runRemoteMigrations } from '../migrations/remote-runner.ts';
@@ -2670,7 +2671,10 @@ const app = new Hono<ApiEnv>()
     }
 
     const workerName = `user-${project.slug}`;
-    const sinceStr = new Date(Date.now() - sinceMs).toISOString().replace('T', ' ').slice(0, 19);
+    // A slug can be reused after deletion, so rows from before this project
+    // existed belong to an earlier owner.
+    const startMs = Math.max(Date.now() - sinceMs, databaseTimestampMs(project.created_at) ?? 0);
+    const sinceStr = new Date(startMs).toISOString().replace('T', ' ').slice(0, 19);
     const dataset = context.env.LOGS_DATASET ?? 'void_logs';
 
     const deployFilter = deploymentId ? `\n        AND blob7 = '${deploymentId}'` : '';
