@@ -622,4 +622,71 @@ describe('analogDevTriggerInjectPlugin', () => {
     });
     expect(registered).toBeGreaterThan(0);
   });
+
+  async function proxyTrigger(address: unknown) {
+    const root = createTempRoot();
+    const plugin = analogDevTriggerInjectPlugin(root);
+    let proxy: ((req: unknown, res: unknown, next: (err?: unknown) => void) => unknown) | undefined;
+    // The temp root is removed after each test, so skip the process exit cleanup hook.
+    const once = vi.spyOn(process, 'once').mockReturnValue(process);
+    callConfigureServer(plugin, {
+      httpServer: { once() {}, address: () => address },
+      middlewares: {
+        use(fn: typeof proxy) {
+          proxy = fn;
+        },
+      },
+    });
+    once.mockRestore();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response('ok', { status: 202 }));
+    const req = {
+      method: 'POST',
+      url: '/__void/scheduled',
+      headers: { host: 'evil.example/.localhost', 'content-type': 'application/json' },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('{"cron":"* * * * *"}');
+      },
+    };
+    const res = {
+      statusCode: 0,
+      body: undefined as Buffer | undefined,
+      setHeader() {},
+      end(body: Buffer) {
+        res.body = body;
+      },
+    };
+    const next = vi.fn();
+    await proxy!(req, res, next);
+    return { fetchSpy, res, next };
+  }
+
+  it('proxies to the bound dev server, not the request Host', async () => {
+    const { fetchSpy, res, next } = await proxyTrigger({
+      address: '::',
+      family: 'IPv6',
+      port: 51234,
+    });
+    expect(next).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0]![0]).toBe('http://localhost:51234/api/__void/cron-trigger');
+    expect(res.statusCode).toBe(202);
+    expect(res.body?.toString()).toBe('ok');
+  });
+
+  it.each([
+    ['0.0.0.0', 'IPv4', 'http://127.0.0.1:51234/api/__void/cron-trigger'],
+    ['127.0.0.1', 'IPv4', 'http://127.0.0.1:51234/api/__void/cron-trigger'],
+    ['::1', 'IPv6', 'http://[::1]:51234/api/__void/cron-trigger'],
+  ])('proxies to the dev server bound to %s', async (bound, family, expected) => {
+    const { fetchSpy } = await proxyTrigger({ address: bound, family, port: 51234 });
+    expect(fetchSpy.mock.calls[0]![0]).toBe(expected);
+  });
+
+  it('leaves trigger requests alone when the dev server is not listening', async () => {
+    const { fetchSpy, next } = await proxyTrigger(null);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith();
+  });
 });

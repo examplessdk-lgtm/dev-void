@@ -471,6 +471,22 @@ export function analogDevTriggerInjectPlugin(root: string): Plugin {
           next();
           return;
         }
+        // Target the address this dev server is bound to. The request Host
+        // header comes from the client and must not choose where the proxy
+        // sends the request.
+        const address = server.httpServer?.address();
+        if (!address || typeof address !== 'object') {
+          next();
+          return;
+        }
+        const hostname =
+          address.address === '0.0.0.0'
+            ? '127.0.0.1'
+            : address.address === '::'
+              ? 'localhost'
+              : address.address.includes(':')
+                ? `[${address.address}]`
+                : address.address;
         try {
           const chunks: Array<Buffer> = [];
           for await (const chunk of req) {
@@ -485,12 +501,14 @@ export function analogDevTriggerInjectPlugin(root: string): Plugin {
               headers.set(key, value.join(', '));
             }
           }
-          const host = req.headers.host ?? 'localhost';
-          const upstream = await fetch(`http://${host}/api/__void/${match.file}`, {
-            method: 'POST',
-            headers,
-            body,
-          });
+          const upstream = await fetch(
+            `http://${hostname}:${address.port}/api/__void/${match.file}`,
+            {
+              method: 'POST',
+              headers,
+              body,
+            },
+          );
           res.statusCode = upstream.status;
           upstream.headers.forEach((value, key) => res.setHeader(key, value));
           res.end(Buffer.from(await upstream.arrayBuffer()));
