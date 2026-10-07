@@ -103,6 +103,10 @@ type QueueRoutingEntry = Readonly<{
 const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 const STATIC_ASSET_HEDGE_DELAY_MS = 1000;
 const PLATFORM_QUEUE_RETRY_DELAY_SECONDS = 300;
+// A relay the Worker rejects for its token is retried after the queue routing
+// entry (read with cacheTtl 60) has had time to catch up with a token rotation,
+// so one rotation costs a message about one attempt instead of all of them.
+const QUEUE_TOKEN_REJECTED_RETRY_DELAY_SECONDS = 120;
 const PLATFORM_STATIC_ASSET_TIMEOUT: FailureKind = 'platform-static-asset-timeout';
 const PLATFORM_STATIC_ASSET_ERROR: FailureKind = 'platform-static-asset-error';
 const PLATFORM_STATIC_ASSET_MISSING: FailureKind = 'platform-static-asset-missing';
@@ -1968,7 +1972,14 @@ export default {
         console.error(
           `[queue-relay] relay failed queue="${queueName}" worker="${workerName}" status=${res.status} body=${JSON.stringify(snippet)}`,
         );
-        batch.retryAll();
+        // Never relayed again with another token: the Worker's own middleware
+        // has already run for this request. A later delivery runs it again, as
+        // any queue retry does.
+        if (res.status === 401 || res.status === 403) {
+          batch.retryAll({ delaySeconds: QUEUE_TOKEN_REJECTED_RETRY_DELAY_SECONDS });
+        } else {
+          batch.retryAll();
+        }
         return;
       }
 

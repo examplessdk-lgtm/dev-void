@@ -88,7 +88,6 @@ import {
 } from '../provisioning/email-routing.ts';
 import { isManagedSandbox, verifySandboxController } from '../provisioning/sandbox-controller.ts';
 import {
-  proxyTokenCopies,
   proxyTokenRotationWarnings,
   requestRotationIfReplacingUntrustedCode,
 } from '../proxy-token-rotation.ts';
@@ -1529,17 +1528,12 @@ const app = new Hono<ApiEnv>()
             // /__void/scheduled and /__void/queue handlers both validate
             // against the SAME __VOID_PROXY_TOKEN binding, so one lookup
             // is authoritative for both.
-            // The target may not hold the issued generation yet (a rotation
-            // is still updating it), so its copies carry the issued token as
-            // the fallback.
+            // The target may hold an older generation than the issued one;
+            // its copies get the token it holds.
             const needsProxyToken = !!manifest?.schedules?.length || !!manifest?.queues?.length;
-            const targetProxyTokens = needsProxyToken
-              ? await proxyTokenCopies(
-                  context.env.JWT_SECRET,
-                  lockedProject,
-                  await resolveRollbackProxyToken(context.env, workerName, projectId),
-                )
-              : {};
+            const targetProxyToken = needsProxyToken
+              ? await resolveRollbackProxyToken(context.env, workerName, projectId)
+              : null;
 
             // Sync cron scheduler to point at the rollback target.
             //
@@ -1556,7 +1550,7 @@ const app = new Hono<ApiEnv>()
               await syncCronScheduler(context.env, projectId, {
                 workerName,
                 schedules: manifest.schedules,
-                ...targetProxyTokens,
+                proxyToken: targetProxyToken!,
               });
             } else {
               await clearCronScheduler(context.env, projectId);
@@ -1689,7 +1683,7 @@ const app = new Hono<ApiEnv>()
                     workerName,
                     projectId,
                     queueName: q.name,
-                    ...targetProxyTokens,
+                    proxyToken: targetProxyToken!,
                   }),
                 );
               }

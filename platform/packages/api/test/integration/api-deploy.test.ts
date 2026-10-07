@@ -2052,6 +2052,13 @@ describe('POST /projects/:id/deploy', () => {
       .from(projects)
       .where(eq(projects.id, project.id));
     expect(row!.gen).toBe(1);
+    // The deployment records the generation its Worker was uploaded with.
+    expect(
+      await env.db
+        .select({ gen: deployments.proxy_token_gen })
+        .from(deployments)
+        .where(eq(deployments.project_id, project.id)),
+    ).toEqual([{ gen: 1 }]);
     expect(kvPut.mock.calls.map(([key]) => key)).not.toContainEqual(
       expect.stringMatching(/^proxy-token:/),
     );

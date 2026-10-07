@@ -4556,7 +4556,7 @@ describe('queue relay', () => {
   });
 
   it.each([401, 403])(
-    'relays once and retries the batch when the Worker rejects the token with %i',
+    'relays once and retries the batch later when the Worker rejects the token with %i',
     async (status) => {
       const routing = JSON.stringify({
         workerName: 'user-app',
@@ -4579,9 +4579,33 @@ describe('queue relay', () => {
 
       expect(workerFetch).toHaveBeenCalledOnce();
       expect(batch.retryAll).toHaveBeenCalledOnce();
+      expect(batch.retryAll).toHaveBeenCalledWith({ delaySeconds: 120 });
       expect(batch.ackAll).not.toHaveBeenCalled();
     },
   );
+
+  it('retries other relay failures without a delay', async () => {
+    const batch = createMockBatch('test-queue', [{ id: 'm1', body: 'hello' }]);
+    const { env, workerFetch } = createQueueEnv({
+      routingRaw: JSON.stringify({
+        workerName: 'user-app',
+        projectId: 'proj-1',
+        queueName: 'emails',
+        proxyToken: 'tok',
+      }),
+      workerResponse: new Response('boom', { status: 500 }),
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await app.queue(batch, env);
+    } finally {
+      errSpy.mockRestore();
+    }
+
+    expect(workerFetch).toHaveBeenCalledOnce();
+    expect(batch.retryAll).toHaveBeenCalledWith();
+  });
 
   it('forwards x-void-internal on legacy /__queue fallback too', async () => {
     const routing = JSON.stringify({

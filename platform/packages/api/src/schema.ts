@@ -568,6 +568,9 @@ export const deployments = pgTable(
     // attribution survives account deletion.
     billing_user_id: text('billing_user_id'),
     initiated_by_user_id: text('initiated_by_user_id'),
+    // Proxy token generation this deployment's Worker holds. 0 = legacy token,
+    // which every Worker deployed before generations were stored holds.
+    proxy_token_gen: integer('proxy_token_gen').notNull().default(0),
   },
   (table) => [
     index('idx_deployments_project_id').on(table.project_id, table.created_at),

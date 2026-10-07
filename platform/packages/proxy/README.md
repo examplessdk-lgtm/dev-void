@@ -68,11 +68,20 @@ Service-binding auth and `/email/verify-receipt` use this check. `/revalidate`
 forwards the token, and the API checks it against the same floor.
 
 When the proxy calls a tenant Worker's `/__void/*` handler, it sends the token
-for the generation `resolve-worker` reports (`proxyTokenGen`), or for the floor
-when the API does not report one. It sends each call once. The Worker's own
-middleware runs before its `/__void/*` handler checks the token, so a 403
+for the generation `resolve-worker` reports (`proxyTokenGen`): the generation
+recorded on the active deployment (`deployments.proxy_token_gen`), which is
+the token that Worker holds. When the API does not report one, it sends the
+token for the floor. It sends each call once. The Worker's own middleware runs
+before its `/__void/*` handler checks the token, so a 403
 `{"error":"unauthorized"}` is returned to the caller and never replayed with
-another token. Cron fires and queue relays follow the same rule.
+another token. Cron fires and queue relays follow the same rule: each queue
+entry and the cron scheduler hold the one token their Worker holds.
+
+A rotation records a Worker's new generation, and updates its queue entries and
+cron scheduler, only after Cloudflare confirms the PATCH. Until that step
+commits, and while Cloudflare can still serve the Worker's previous version,
+calls to it get a clean 403: proxy calls fail, cron fires are dropped with
+`AUTH_DRIFT`, and queue batches are retried after 120 seconds.
 
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a

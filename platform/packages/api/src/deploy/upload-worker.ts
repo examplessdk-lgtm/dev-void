@@ -108,6 +108,18 @@ export async function uploadDeploymentWorker(input: {
     emit({ event: 'provisioning', bindings: bindingLabels });
   }
 
+  // Recorded before the upload: this deployment's Worker does not exist until
+  // the upload creates it holding this token, and only a rotation changes it.
+  const proxyToken = await issueProjectProxyToken(
+    context.get('db'),
+    context.env.JWT_SECRET,
+    projectId,
+  );
+  await context
+    .get('db')
+    .update(deployments)
+    .set({ proxy_token_gen: proxyToken.gen })
+    .where(eq(deployments.id, deployment.id));
   const workerBindings = await provisionBindings(
     context.get('db'),
     context.env.CF_ACCOUNT_ID,
@@ -117,11 +129,7 @@ export async function uploadDeploymentWorker(input: {
     context.env.VOID_PROXY_SERVICE ?? 'void-proxy',
     {
       projectSlug: project.slug,
-      proxyToken: await issueProjectProxyToken(
-        context.get('db'),
-        context.env.JWT_SECRET,
-        projectId,
-      ),
+      proxyToken: proxyToken.token,
       emailSenderDomain: context.env.EMAIL_SENDER_DOMAIN,
       deploymentId: deployment.id,
     },

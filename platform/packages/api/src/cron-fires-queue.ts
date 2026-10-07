@@ -117,7 +117,10 @@ export async function processCronFiresBatch(
           // user worker's baked __VOID_PROXY_TOKEN. Retrying would yield
           // the same 401 (same token in, same status out), so we ack; the
           // next deploy's /sync resyncs the token. Logged with a stable
-          // greppable marker so ops can alert on this.
+          // greppable marker so ops can alert on this. Right after a token
+          // rotation patches the Worker, its old version can still answer
+          // for a moment; that fire is dropped too, never replayed with
+          // another token, because the Worker's own middleware already ran.
           console.error(
             `[cron-fires] AUTH_DRIFT non-delivery for ${msg.body.workerName} (cron ${msg.body.cron}): status=${status} body=${outcome.bodySnippet ?? ''}; acking — next deploy will resync token`,
           );

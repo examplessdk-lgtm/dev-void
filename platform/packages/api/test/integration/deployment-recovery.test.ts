@@ -295,12 +295,12 @@ test('preserves retained historical deployment artifacts while terminalizing its
 });
 
 test.each([
-  { issued: 1, held: 0, fallback: 1 },
-  { issued: 1, held: 1, fallback: null },
-  { issued: 0, held: 0, fallback: null },
+  { issued: 1, held: 0 },
+  { issued: 1, held: 1 },
+  { issued: 0, held: 0 },
 ])(
-  'cutover replay to a Worker on generation $held while generation $issued is issued writes fallback $fallback',
-  async ({ issued, held, fallback }) => {
+  'cutover replay to a Worker on generation $held while generation $issued is issued writes only its token',
+  async ({ issued, held }) => {
     await env.db
       .update(projects)
       .set({ proxy_token_gen: issued })
@@ -355,23 +355,18 @@ test.each([
       { restoreCommitted: true },
     );
 
-    const expected = {
-      proxyToken: heldToken,
-      ...(fallback === null
-        ? {}
-        : { proxyTokenFallback: await deriveProxyToken(env.JWT_SECRET, project.id, fallback) }),
-    };
     expect(
       await env.ROUTING.get(`queue:${project.id.replaceAll('_', '-')}-emails`, 'json'),
     ).toEqual({
       workerName: `user-${project.slug}-${deployment.id}`,
       projectId: project.id,
       queueName: 'emails',
-      ...expected,
+      proxyToken: heldToken,
     });
     expect(syncBodies).toHaveLength(1);
     const sync = JSON.parse(syncBodies[0]!) as Record<string, unknown>;
-    expect(sync.proxyToken).toBe(expected.proxyToken);
-    expect(sync.proxyTokenFallback).toBe(expected.proxyTokenFallback);
+    // Exactly one token: the one the Worker holds.
+    expect(Object.keys(sync).filter((key) => key.startsWith('proxyToken'))).toEqual(['proxyToken']);
+    expect(sync.proxyToken).toBe(heldToken);
   },
 );

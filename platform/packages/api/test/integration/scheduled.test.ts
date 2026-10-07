@@ -736,8 +736,9 @@ describe('scheduled() proxy token rotations', () => {
   ])('advances a due rotation on the %s cron', async (_tier, controller) => {
     const projectId = await dueRotation();
     await scheduled(controller, makeBindings(env), mockCtx);
-    // START and COPIES run; the rotation then waits for KV copies to spread.
-    expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'patch' });
+    // A project without Workers runs START through REVOKE, then waits for the
+    // raised floor to reach every reader.
+    expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'settle' });
   });
 
   it('leaves rotations to the next tick when a Zero Trust batch used this one', async () => {

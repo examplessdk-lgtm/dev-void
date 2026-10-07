@@ -18,7 +18,7 @@ import {
   deriveProxyToken,
   type ProxyInternalRoute,
 } from '../../src/proxy-token.ts';
-import { projects } from '../../src/schema.ts';
+import { deployments, projects } from '../../src/schema.ts';
 import {
   clearTables,
   createTestDeployment,
@@ -319,7 +319,7 @@ describe('proxy credential on the metadata routes', () => {
       'resolve-resource': { cf_id: 'cf-kv-id' },
       'verify-prerender-build': { ok: true },
     };
-    return { project, bodies, expected };
+    return { project, deployment, bodies, expected };
   }
 
   function floorReads(get: { mock: { calls: Array<Array<unknown>> } }) {
@@ -348,23 +348,63 @@ describe('proxy credential on the metadata routes', () => {
     },
   );
 
-  it('reports the issued proxy token generation from /internal/resolve-worker', async () => {
-    const { project } = await liveProject();
-    await env.db.update(projects).set({ proxy_token_gen: 3 }).where(eq(projects.id, project.id));
+  async function resolvedGeneration(projectId: string): Promise<unknown> {
     const response = await internalRequest(
       'resolve-worker',
-      project.id,
+      projectId,
       {
         'x-void-proxy-internal': await deriveProxyInternalAuth(
           JWT_SECRET,
           'resolve-worker',
-          project.id,
+          projectId,
         ),
       },
       {},
     );
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ proxyTokenGen: 3 });
+    return ((await response.json()) as { proxyTokenGen?: unknown }).proxyTokenGen;
+  }
+
+  async function setGenerations(
+    projectId: string,
+    issued: number,
+    held: Readonly<Record<string, number>>,
+  ): Promise<void> {
+    await env.db
+      .update(projects)
+      .set({ proxy_token_gen: issued })
+      .where(eq(projects.id, projectId));
+    for (const [deploymentId, gen] of Object.entries(held)) {
+      await env.db
+        .update(deployments)
+        .set({ proxy_token_gen: gen })
+        .where(eq(deployments.id, deploymentId));
+    }
+  }
+
+  it('reports the generation the active Worker holds from /internal/resolve-worker', async () => {
+    const { project, deployment } = await liveProject();
+    await setGenerations(project.id, 3, { [deployment.id]: 3 });
+    expect(await resolvedGeneration(project.id)).toBe(3);
+  });
+
+  it('reports the held generation, not the issued one, when they differ', async () => {
+    const { project, deployment } = await liveProject();
+    await setGenerations(project.id, 2, { [deployment.id]: 0 });
+    expect(await resolvedGeneration(project.id)).toBe(0);
+  });
+
+  it('reports generation 0 after a rollback to a Worker that still holds the legacy token', async () => {
+    const { project, deployment: older } = await liveProject();
+    const newer = await createTestDeployment(env.db, project.id, 'live');
+    await setGenerations(project.id, 1, { [older.id]: 0, [newer.id]: 1 });
+    expect(await resolvedGeneration(project.id)).toBe(1);
+
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: older.id })
+      .where(eq(projects.id, project.id));
+    expect(await resolvedGeneration(project.id)).toBe(0);
   });
 
   it.each(routes)(

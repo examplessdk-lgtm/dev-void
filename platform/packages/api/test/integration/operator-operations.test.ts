@@ -15,7 +15,9 @@ import { app } from '../../src/index.ts';
 import { getProjectDeploymentWorkerName } from '../../src/naming.ts';
 import { loadSandboxDeploymentPageProjection } from '../../src/operator/sandbox-operations.ts';
 import {
+  advanceProxyTokenRotation,
   reconcileProxyTokenRotations,
+  requestProxyTokenRotation,
   type ProxyTokenRotationEnv,
 } from '../../src/proxy-token-rotation.ts';
 import { deriveProxyToken } from '../../src/proxy-token.ts';
@@ -1668,7 +1670,7 @@ describe('proxy token rotation', () => {
       projectId: project.id,
       gen: 1,
       job: {
-        phase: 'patch',
+        phase: 'revoke',
         reason: 'operator',
         again: false,
         attempts: 0,
@@ -1679,13 +1681,15 @@ describe('proxy token rotation', () => {
       action: 'system.rotate-proxy-tokens',
       target: { projects: project.id },
     });
+    // Every Worker is patched; the floor waits for their old versions to drain.
     expect(Date.parse(body.job.waitUntil)).toBeGreaterThan(Date.now());
-    expect(patchCount(cf)).toBe(0);
+    expect(patchCount(cf)).toBe(2);
+    expect(await env.ROUTING.get(`proxy-token:${project.id}`)).toBeNull();
 
     const progress = await req('/system/rotate-proxy-tokens', { dryRun: true });
     expect(await progress.json()).toMatchObject({
       summary: { pending: 1, failed: 0 },
-      projects: [{ projectId: project.id, slug: 'rotate-progress', phase: 'patch' }],
+      projects: [{ projectId: project.id, slug: 'rotate-progress', phase: 'revoke' }],
     });
   });
 
@@ -1694,7 +1698,18 @@ describe('proxy token rotation', () => {
     async (phase) => {
       const cf = cloudflare();
       const project = await rotationProject(cf, `rotate-again-${phase}`, { workers: true });
-      await req('/system/rotate-proxy-tokens', { project: project.id });
+      if (phase === 'patch') {
+        // Stop right after START, before the first Worker is patched.
+        await requestProxyTokenRotation(env.db, project.id, 'operator', 'operator');
+        await advanceProxyTokenRotation(
+          env.db,
+          env as unknown as ProxyTokenRotationEnv,
+          project.id,
+          { cfCallsRemaining: 0, deadline: Date.now() + 60_000 },
+        );
+      } else {
+        await req('/system/rotate-proxy-tokens', { project: project.id });
+      }
       while ((await rotationJob(project.id))!.payload.phase !== phase) {
         await runRotations();
       }
@@ -1723,7 +1738,7 @@ describe('proxy token rotation', () => {
 
     await req('/system/rotate-proxy-tokens', { project: project.id });
     const job = await rotationJob(project.id);
-    expect(job!.payload).toMatchObject({ phase: 'patch', reason: 'member-removed' });
+    expect(job!.payload).toMatchObject({ phase: 'revoke', reason: 'member-removed' });
     expect(job!.payload.again).toBeUndefined();
 
     await finishRotations();
@@ -1747,8 +1762,6 @@ describe('proxy token rotation', () => {
     cf.state.hostScripts.delete(project.workers[1]!);
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await req('/system/rotate-proxy-tokens', { project: project.id });
-    await endWaits();
     const failed = await req('/system/rotate-proxy-tokens', { project: project.id });
     expect(failed.status).toBe(207);
     expect(await failed.json()).toMatchObject({

@@ -612,6 +612,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "proxy_token_gen": {
+          "name": "proxy_token_gen",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         }
       },
       "indexes": {

@@ -757,6 +757,33 @@ describe('proxy token generations', () => {
     },
   );
 
+  it('sends the generation the Worker holds when a higher one is issued', async () => {
+    // Issued generation 2 and floor 0; the active deployment still holds the legacy token.
+    const legacy = await tok(0);
+    const { env, sent, floorReads } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 0 },
+      held: legacy,
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+
+    expect(res?.status).toBe(200);
+    expect(sent.map((s) => s.token)).toEqual([legacy]);
+    expect(floorReads()).toBe(0);
+  });
+
+  it('makes exactly one request to a Worker that always rejects', async () => {
+    const { env, sent } = setup({
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 0 },
+      respond: () => Response.json({ error: 'unauthorized' }, { status: 403 }),
+    });
+
+    const res = await dispatchToWorker(env, PROJECT_ID, '/d1/query', KV_BODY);
+
+    expect(res?.status).toBe(403);
+    expect(sent.map((s) => s.token)).toEqual([await tok(0)]);
+  });
+
   it('does not replay after a thrown fetch', async () => {
     const { env, sent } = setup({
       resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },

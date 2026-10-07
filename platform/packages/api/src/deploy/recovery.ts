@@ -29,10 +29,7 @@ import {
   removeQueueConsumer,
   getDispatchWorkerProxyToken,
 } from '../provisioning/cloudflare-api.ts';
-import {
-  proxyTokenCopies,
-  requestRotationIfReplacingUntrustedCode,
-} from '../proxy-token-rotation.ts';
+import { requestRotationIfReplacingUntrustedCode } from '../proxy-token-rotation.ts';
 import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { type DeployManifest, type Deployment, type Project } from '../types.ts';
 import {
@@ -334,15 +331,10 @@ export async function replayDeploymentCutover(
     desiredQueueResources.set(queue.name, resource);
   }
   const needsProxyToken = !isStatic && (!!manifest.schedules?.length || desiredQueues.length > 0);
-  // The replayed Worker may not hold the issued generation yet, so its copies
-  // carry the issued token as the fallback.
-  const proxyTokens = needsProxyToken
-    ? await proxyTokenCopies(
-        env.JWT_SECRET,
-        project,
-        await resolveCutoverProxyToken(env, workerName, project.id),
-      )
-    : {};
+  // The token the replayed Worker holds, which may be older than the issued one.
+  const proxyToken = needsProxyToken
+    ? await resolveCutoverProxyToken(env, workerName, project.id)
+    : null;
 
   await env.ROUTING.put(project.slug, routingJson);
   await reconcileProjectDomainRoutes(env, domains, routingJson);
@@ -350,7 +342,7 @@ export async function replayDeploymentCutover(
     await syncCronScheduler(env, project.id, {
       workerName,
       schedules: manifest.schedules,
-      ...proxyTokens,
+      proxyToken: proxyToken!,
     });
   } else {
     await clearCronScheduler(env, project.id);
@@ -376,7 +368,7 @@ export async function replayDeploymentCutover(
     }
     await env.ROUTING.put(
       `queue:${getProjectQueueName(project.id, queue.name)}`,
-      JSON.stringify({ workerName, projectId: project.id, queueName: queue.name, ...proxyTokens }),
+      JSON.stringify({ workerName, projectId: project.id, queueName: queue.name, proxyToken }),
     );
   }
 

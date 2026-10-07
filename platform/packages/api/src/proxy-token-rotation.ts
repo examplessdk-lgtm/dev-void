@@ -38,9 +38,16 @@ export {
  *
  * `projects.proxy_token_gen` is the highest generation the platform has issued
  * for the project (0 = the legacy token). Deploys bake the token for that
- * generation into the Worker, and the proxy sends it. A Worker deploy moves 0
- * to 1 (`issueProjectProxyToken`); after that only a rotation raises it. The
- * KV accept floor (`proxy-token:<projectId>`) never exceeds it.
+ * generation into the Worker. A Worker deploy moves 0 to 1
+ * (`issueProjectProxyToken`); after that only a rotation raises it. The KV
+ * accept floor (`proxy-token:<projectId>`) never exceeds it.
+ *
+ * `deployments.proxy_token_gen` is the generation that deployment's Worker
+ * holds. Senders (the proxy through resolve-worker, the queue entries and the
+ * cron scheduler) present exactly that token, once: the Worker runs its own
+ * middleware before the generated handlers check the token, so a rejected
+ * call is never replayed with another token. A rotation writes the row only
+ * after Cloudflare confirms the Worker holds the new token.
  */
 
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
@@ -57,13 +64,14 @@ export type RotationBudget = { cfCallsRemaining: number; readonly deadline: numb
  * generation. A project still on generation 0 moves to generation 1 here, so
  * new code never receives the legacy token. The floor stays where it is:
  * older Workers of the project keep the legacy token, which stays accepted
- * until a rotation raises the floor, and the proxy tries it after generation 1.
+ * until a rotation raises the floor. The caller records `gen` on its
+ * deployment row.
  */
 export async function issueProjectProxyToken(
   db: Db,
   jwtSecret: string,
   projectId: string,
-): Promise<string> {
+): Promise<Readonly<{ gen: number; token: string }>> {
   const [initialized] = await db
     .update(projects)
     .set({ proxy_token_gen: 1 })
@@ -71,7 +79,10 @@ export async function issueProjectProxyToken(
     .returning({ gen: projects.proxy_token_gen });
   if (initialized) {
     console.info('[proxy-token] initialized', { projectId });
-    return deriveProxyToken(jwtSecret, projectId, initialized.gen);
+    return {
+      gen: initialized.gen,
+      token: await deriveProxyToken(jwtSecret, projectId, initialized.gen),
+    };
   }
   const [row] = await db
     .select({ gen: projects.proxy_token_gen })
@@ -81,30 +92,7 @@ export async function issueProjectProxyToken(
   if (!row) {
     throw new Error(`project ${projectId} not found`);
   }
-  return deriveProxyToken(jwtSecret, projectId, row.gen);
-}
-
-/**
- * Token fields for the queue routing entries and the cron scheduler when they
- * point at an existing Worker. A Worker that has not yet received the issued
- * generation still holds its own token; the issued one rides along as the
- * fallback so the relay keeps working once that Worker is updated.
- */
-export async function proxyTokenCopies(
-  jwtSecret: string,
-  project: Pick<Project, 'id' | 'proxy_token_gen'>,
-  workerToken: string | undefined,
-): Promise<Readonly<{ proxyToken?: string; proxyTokenFallback?: string }>> {
-  if (workerToken === undefined) {
-    return {};
-  }
-  if (project.proxy_token_gen < 1) {
-    return { proxyToken: workerToken };
-  }
-  const issued = await deriveProxyToken(jwtSecret, project.id, project.proxy_token_gen);
-  return workerToken === issued
-    ? { proxyToken: workerToken }
-    : { proxyToken: workerToken, proxyTokenFallback: issued };
+  return { gen: row.gen, token: await deriveProxyToken(jwtSecret, projectId, row.gen) };
 }
 
 // --- Rotation ---
@@ -114,8 +102,9 @@ export async function proxyTokenCopies(
 //
 //   requested  START: raise projects.proxy_token_gen to T. Postgres only, so
 //              T is committed before anything outside sees tok(T).
-//   copies     queue entries and the cron scheduler get tok(T) as fallback.
-//   patch      one Worker per step: GET its bindings, PATCH tok(T) in.
+//   patch      one Worker per step: GET its bindings, PATCH tok(T) in, then
+//              record T on its deployment row and, for the active Worker,
+//              point the queue entries and the cron scheduler at tok(T).
 //   revoke     every Worker holds tok(T): write the accept floor T.
 //   settle     wait until every floor reader sees T, then finish.
 //
@@ -124,9 +113,12 @@ export async function proxyTokenCopies(
 // writes). A wait is stored in the payload as `waitUntil`, taken from
 // `clock_timestamp()` after the step's last outside write, so a kick of
 // `next_attempt_at` never cuts it short. Until the floor rises both tokens are
-// accepted, so a failed or unfinished rotation never breaks a tenant.
+// accepted, so a failed or unfinished rotation never breaks a tenant. Each
+// sender presents only the token its deployment row records, so right after a
+// PATCH, until the step commits and Cloudflare stops serving the Worker's old
+// version, a call can get a 403 that is not retried.
 
-export type ProxyTokenRotationPhase = 'requested' | 'copies' | 'patch' | 'revoke' | 'settle';
+export type ProxyTokenRotationPhase = 'requested' | 'patch' | 'revoke' | 'settle';
 
 export type ProxyTokenRotationEnv = Pick<
   ApiEnv['Bindings'],
@@ -272,6 +264,8 @@ type InventoryRow = Readonly<{
   workerName: string;
   createdAt: string;
   active: boolean;
+  /** Generation recorded for the token this Worker holds. */
+  proxyTokenGen: number;
   /** A retained Worker whose author can no longer deploy: it keeps its old token. */
   skipped: boolean;
 }>;
@@ -301,6 +295,7 @@ async function selectInventory(
     .select({
       id: deployments.id,
       createdAt: deployments.created_at,
+      proxyTokenGen: deployments.proxy_token_gen,
       userId: deploymentAuthor,
       suspendedReason: users.suspended_reason,
     })
@@ -317,6 +312,7 @@ async function selectInventory(
       workerName: getProjectDeploymentWorkerName(project.slug, row.id),
       createdAt: row.createdAt,
       active,
+      proxyTokenGen: row.proxyTokenGen,
       skipped: !active && !(await authorCanDeploy(db, project.id, row)),
     });
   }
@@ -473,28 +469,20 @@ function hasTokenCopies(project: Project, active: ActiveWorker | null): active i
 }
 
 /**
- * Rewrites the queue routing entries and the cron scheduler of the active
- * Worker. Built from the active manifest, never from what KV holds. A field
- * left out removes it.
+ * Points the queue routing entries and the cron scheduler of the active Worker
+ * at `proxyToken`, the one token that Worker holds. Built from the active
+ * manifest, never from what KV holds.
  */
 async function writeCopies(
   env: ProxyTokenRotationEnv,
   projectId: string,
   active: ActiveWorker,
-  tokens: Readonly<{ proxyToken?: string; proxyTokenFallback?: string }>,
+  proxyToken: string,
 ): Promise<void> {
-  if (!tokens.proxyToken) {
-    return;
-  }
-  const fields = {
-    proxyToken: tokens.proxyToken,
-    ...(tokens.proxyTokenFallback ? { proxyTokenFallback: tokens.proxyTokenFallback } : {}),
-  };
   if (active.manifest?.schedules?.length) {
     const state = await snapshotCronScheduler(env, projectId);
     if (state && state.workerName === active.workerName) {
-      const { proxyToken: _token, proxyTokenFallback: _fallback, ...rest } = state;
-      await syncCronScheduler(env, projectId, { ...rest, ...fields });
+      await syncCronScheduler(env, projectId, { ...state, proxyToken });
     }
   }
   for (const queue of active.manifest?.queues ?? []) {
@@ -504,7 +492,7 @@ async function writeCopies(
         workerName: active.workerName,
         projectId,
         queueName: queue.name,
-        ...fields,
+        proxyToken,
       }),
     );
   }
@@ -522,35 +510,12 @@ async function start(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise<
   await tx
     .update(projectCleanupJobs)
     .set({
-      payload: sql`jsonb_build_object('phase', 'copies', 'reason', ${projectCleanupJobs.payload}->>'reason', 'gen', ${String(gen)}::text, 'cursor', '')`,
+      payload: sql`jsonb_build_object('phase', 'patch', 'reason', ${projectCleanupJobs.payload}->>'reason', 'gen', ${String(gen)}::text, 'cursor', '')`,
       attempts: 0,
       last_error: null,
     })
     .where(jobTarget(ctx.projectId));
   rotationLog('started', ctx.projectId, `gen=${gen}`);
-  return { kind: 'continue' };
-}
-
-async function copies(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise<StepResult> {
-  const active = await activeWorker(tx, locked.project);
-  if (hasTokenCopies(locked.project, active)) {
-    ctx.workerName = active.workerName;
-    const bindings = await ctx.cf.getScriptBindings(active.workerName);
-    const current = bindings ? tokenBinding(bindings) : undefined;
-    if (current?.type === 'plain_text' && current.text) {
-      await writeCopies(
-        ctx.env,
-        ctx.projectId,
-        active,
-        await proxyTokenCopies(ctx.env.JWT_SECRET, locked.project, current.text),
-      );
-    }
-  }
-  await finishStep(
-    tx,
-    ctx.projectId,
-    sql`jsonb_build_object('phase', 'patch', 'waitUntil', ${isoUtc(sql`clock_timestamp() + ${ctx.wait}`)})`,
-  );
   return { kind: 'continue' };
 }
 
@@ -579,7 +544,8 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
     return { kind: 'continue' };
   }
   ctx.workerName = row.workerName;
-  const token = await deriveProxyToken(ctx.env.JWT_SECRET, ctx.projectId, project.proxy_token_gen);
+  const gen = project.proxy_token_gen;
+  const token = await deriveProxyToken(ctx.env.JWT_SECRET, ctx.projectId, gen);
   const bindings = await ctx.cf.getScriptBindings(row.workerName);
   let patched = false;
   if (bindings === null) {
@@ -601,26 +567,27 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
         throw new Error(`Worker ${row.workerName} did not take the new proxy token`);
       }
       patched = true;
-      rotationLog(
-        'patched',
-        ctx.projectId,
-        `worker=${row.workerName} gen=${project.proxy_token_gen}`,
-      );
-      if (row.active) {
-        const active = await activeWorker(tx, project);
-        if (hasTokenCopies(project, active)) {
-          await writeCopies(ctx.env, ctx.projectId, active, {
-            proxyToken: token,
-            proxyTokenFallback: current.text,
-          });
-        }
-      }
-    } else if (current && locked.attempts > 0) {
-      // The failed attempt before this one may have patched this Worker and
-      // then lost the response or rolled back. Its old version can still
-      // serve, so it drains as if patched now.
+      rotationLog('patched', ctx.projectId, `worker=${row.workerName} gen=${gen}`);
+    } else if (current && (locked.attempts > 0 || row.proxyTokenGen !== gen)) {
+      // An earlier attempt patched this Worker and then lost the response,
+      // failed or rolled back before its step committed. Its old version can
+      // still serve, so it drains as if patched now.
       patched = true;
     }
+  }
+  // The Worker now holds tok(gen), or holds no proxy token at all. Only now do
+  // the row and the copies name it, so senders never run ahead of the Worker.
+  if (patched && row.active) {
+    const active = await activeWorker(tx, project);
+    if (hasTokenCopies(project, active)) {
+      await writeCopies(ctx.env, ctx.projectId, active, token);
+    }
+  }
+  if (row.proxyTokenGen !== gen) {
+    await tx
+      .update(deployments)
+      .set({ proxy_token_gen: gen })
+      .where(eq(deployments.id, row.deploymentId));
   }
   await finishStep(
     tx,
@@ -644,6 +611,15 @@ async function revoke(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise
     return { kind: 'continue' };
   }
   const gen = project.proxy_token_gen;
+  const stale = (await selectInventory(tx, project)).find(
+    (row) => !row.skipped && row.proxyTokenGen !== gen,
+  );
+  if (stale) {
+    // The floor would reject the token a sender still presents to this Worker.
+    rotationLog('rewalk', ctx.projectId, `worker=${stale.workerName} gen=${stale.proxyTokenGen}`);
+    await finishStep(tx, ctx.projectId, sql`'{"phase":"patch","cursor":""}'::jsonb`);
+    return { kind: 'continue' };
+  }
   const token = await deriveProxyToken(ctx.env.JWT_SECRET, ctx.projectId, gen);
   const active = await activeWorker(tx, project);
   if (active) {
@@ -658,7 +634,7 @@ async function revoke(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Promise
       return { kind: 'continue' };
     }
     if (hasTokenCopies(project, active)) {
-      await writeCopies(ctx.env, ctx.projectId, active, { proxyToken: token });
+      await writeCopies(ctx.env, ctx.projectId, active, token);
     }
   }
   // Written before COMMIT: KV may only run ahead, and every Worker holds T.
@@ -723,8 +699,6 @@ function runStep(db: Db, ctx: StepContext): Promise<StepResult> {
     switch (locked.payload.phase as ProxyTokenRotationPhase) {
       case 'requested':
         return start(tx, ctx, locked);
-      case 'copies':
-        return copies(tx, ctx, locked);
       case 'patch':
         return patchNext(tx, ctx, locked);
       case 'revoke':
