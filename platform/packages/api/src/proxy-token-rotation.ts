@@ -38,8 +38,9 @@ export {
  *
  * `projects.proxy_token_gen` is the highest generation the platform has issued
  * for the project (0 = the legacy token). Deploys bake the token for that
- * generation into the Worker, and the proxy sends it. Only a rotation raises
- * it; the KV accept floor (`proxy-token:<projectId>`) never exceeds it.
+ * generation into the Worker, and the proxy sends it. A Worker deploy moves 0
+ * to 1 (`issueProjectProxyToken`); after that only a rotation raises it. The
+ * KV accept floor (`proxy-token:<projectId>`) never exceeds it.
  */
 
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
