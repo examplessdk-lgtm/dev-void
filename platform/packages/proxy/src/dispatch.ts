@@ -4,13 +4,13 @@ import {
   ProxyTokenStateError,
 } from '@voidcloud/api/proxy-token';
 import { hmacSign } from './hmac.ts';
-import { tenantSendTokens } from './proxy-token.ts';
+import { tenantSendToken } from './proxy-token.ts';
 import type { Env } from './types.ts';
 
 type WorkerResolution = Readonly<{
   workerName: string;
   deploymentId: string;
-  /** Generation of the token the platform issues to this project's Workers. */
+  /** Generation of the token the active Worker holds, when the API reports it. */
   proxyTokenGen?: number;
 }>;
 
@@ -65,49 +65,6 @@ function isGeneration(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** The binding handler's reject is `{"error":"unauthorized"}`; anything larger is not it. */
-const TOKEN_REJECTION_MAX_BYTES = 256;
-
-/**
- * The binding handler's reject for a token it does not hold, sent before any handler runs.
- * The tenant Worker controls this response, so only a small prefix is ever read and the
- * returned response still streams unbuffered.
- */
-async function isTokenRejection(res: Response): Promise<boolean> {
-  if (res.status !== 403 || !res.body) {
-    return false;
-  }
-  if (Number(res.headers.get('content-length')) > TOKEN_REJECTION_MAX_BYTES) {
-    return false;
-  }
-  const reader = res.clone().body!.getReader();
-  const chunks: Array<Uint8Array> = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        break;
-      }
-      size += chunk.value.byteLength;
-      if (size > TOKEN_REJECTION_MAX_BYTES) {
-        return false;
-      }
-      chunks.push(chunk.value);
-    }
-    const data: unknown = JSON.parse(await new Blob(chunks).text());
-    return (
-      typeof data === 'object' &&
-      data !== null &&
-      (data as { error?: unknown }).error === 'unauthorized'
-    );
-  } catch {
-    return false;
-  } finally {
-    void reader.cancel().catch(() => {});
-  }
-}
-
 /**
  * Dispatch a binding operation to the user's deployed worker via Workers for Platforms.
  * The user worker handles it via native D1/KV/R2 bindings at the `/__void/*` route.
@@ -134,9 +91,9 @@ export async function dispatchToWorker(
     return null;
   }
 
-  let tokens: ReadonlyArray<string>;
+  let token: string;
   try {
-    tokens = await tenantSendTokens(env, projectId, resolution.proxyTokenGen);
+    token = await tenantSendToken(env, projectId, resolution.proxyTokenGen);
   } catch (error) {
     if (!(error instanceof ProxyTokenStateError)) {
       throw error;
@@ -154,26 +111,18 @@ export async function dispatchToWorker(
     return null;
   }
 
-  const payload = JSON.stringify(body);
-  const send = (token: string) =>
-    worker.fetch(`https://worker/__void${path}`, {
+  try {
+    // Sent exactly once. The Worker's own middleware runs before its
+    // `/__void/*` handler checks the token, so a rejected request is not free
+    // to replay.
+    const res = await worker.fetch(`https://worker/__void${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         'x-void-internal': token,
       },
-      body: payload,
+      body: JSON.stringify(body),
     });
-
-  try {
-    let res = await send(tokens[0]);
-    // While a token rotation is in progress the Worker may still hold the
-    // previous token. Its reject comes before any handler runs, so a second
-    // attempt cannot repeat a write.
-    if (tokens.length > 1 && (await isTokenRejection(res))) {
-      await res.body?.cancel();
-      res = await send(tokens[1]);
-    }
 
     // 404 means old deploy without /__void handler → fall back
     if (res.status === 404) {

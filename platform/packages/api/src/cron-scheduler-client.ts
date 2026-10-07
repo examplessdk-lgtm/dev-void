@@ -4,8 +4,6 @@ export type CronSyncState = Readonly<{
   workerName: string;
   schedules: ReadonlyArray<{ name: string; cron: string }>;
   proxyToken?: string;
-  /** Second token to try when the Worker rejects `proxyToken`. */
-  proxyTokenFallback?: string;
 }>;
 
 /**

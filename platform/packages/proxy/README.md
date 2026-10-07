@@ -67,9 +67,10 @@ forwards the token, and the API checks it against the same floor.
 
 When the proxy calls a tenant Worker's `/__void/*` handler, it sends the token
 for the generation `resolve-worker` reports (`proxyTokenGen`), or for the floor
-when the API does not report one. If that Worker answers 403
-`{"error":"unauthorized"}`, the proxy retries once with the previous
-generation. It never sends a generation above the issued one.
+when the API does not report one. It sends each call once. The Worker's own
+middleware runs before its `/__void/*` handler checks the token, so a 403
+`{"error":"unauthorized"}` is returned to the caller and never replayed with
+another token. Cron fires and queue relays follow the same rule.
 
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a

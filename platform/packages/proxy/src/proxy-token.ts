@@ -2,7 +2,6 @@ import {
   createProxyTokenStateCache,
   deriveProxyToken,
   ProxyTokenStateError,
-  sendGenerations,
   verifyProxyToken,
 } from '@voidcloud/api/proxy-token';
 import type { Env } from './types.ts';
@@ -42,17 +41,15 @@ export async function verifyTenantProxyToken(
 }
 
 /**
- * Tokens to present to a tenant Worker, in order. Without the issued
- * generation, sends for the cached floor, which throws `ProxyTokenStateError`
- * when the floor cannot be read.
+ * The one token to present to a tenant Worker. Without the issued generation,
+ * sends for the cached floor, which throws `ProxyTokenStateError` when the
+ * floor cannot be read.
  */
-export async function tenantSendTokens(
+export async function tenantSendToken(
   env: Pick<Env, 'ROUTING' | 'JWT_SECRET'>,
   projectId: string,
   issueGen: number | undefined,
-): Promise<ReadonlyArray<string>> {
+): Promise<string> {
   const gen = issueGen ?? (await stateCache.read(env.ROUTING, projectId)).gen;
-  return Promise.all(
-    sendGenerations(gen).map((sendGen) => deriveProxyToken(env.JWT_SECRET, projectId, sendGen)),
-  );
+  return deriveProxyToken(env.JWT_SECRET, projectId, gen);
 }

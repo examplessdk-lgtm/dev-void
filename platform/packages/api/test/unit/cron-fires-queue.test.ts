@@ -108,83 +108,14 @@ describe('processCronFiresBatch', () => {
     }
   });
 
-  describe('fallback token', () => {
-    const unauthorized = () => Response.json({ error: 'unauthorized' }, { status: 401 });
-
-    function rotatingMessage() {
-      return makeMessage({
-        workerName: 'user-foo-dpl_a',
-        cron: '* * * * *',
-        scheduledTime: 1_700_000_000_000,
-        proxyToken: 'old-tok',
-        proxyTokenFallback: 'new-tok',
-      });
-    }
-
-    function authDriftLogs(errSpy: { mock: { calls: Array<Array<unknown>> } }) {
-      return errSpy.mock.calls.filter((args) =>
-        typeof args[0] === 'string' ? args[0].includes('AUTH_DRIFT') : false,
-      );
-    }
-
-    it('invokes once more with the fallback when the worker rejects the token', async () => {
+  it.each([401, 403])(
+    'invokes the cron handler once when the worker rejects the token with %i',
+    async (status) => {
+      // The Worker's own middleware runs before the cron route checks the
+      // token, so a rejected fire is never sent again with another token.
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
-        const seen: Array<{ token: string | null; body: string }> = [];
-        const env = makeEnv(async (req) => {
-          const token = req.headers.get('x-void-internal');
-          seen.push({ token, body: await req.text() });
-          return token === 'new-tok' ? Response.json({ ok: true }) : unauthorized();
-        });
-        const msg = rotatingMessage();
-
-        await processCronFiresBatch(makeBatch([msg]), env);
-
-        expect(seen.map((call) => call.token)).toEqual(['old-tok', 'new-tok']);
-        expect(seen[1].body).toBe(seen[0].body);
-        expect(msg.ack).toHaveBeenCalledOnce();
-        expect(msg.retry).not.toHaveBeenCalled();
-        expect(authDriftLogs(errSpy)).toHaveLength(0);
-      } finally {
-        errSpy.mockRestore();
-      }
-    });
-
-    it('invokes once more after a 403 unauthorized reject', async () => {
-      const fetchSpy = vi.fn(async (req: Request) =>
-        req.headers.get('x-void-internal') === 'new-tok'
-          ? Response.json({ ok: true })
-          : Response.json({ error: 'unauthorized' }, { status: 403 }),
-      );
-      const msg = rotatingMessage();
-
-      await processCronFiresBatch(makeBatch([msg]), makeEnv(fetchSpy));
-
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
-      expect(msg.ack).toHaveBeenCalledOnce();
-    });
-
-    it('acks with AUTH_DRIFT when the fallback is rejected too', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const fetchSpy = vi.fn(async () => unauthorized());
-        const msg = rotatingMessage();
-
-        await processCronFiresBatch(makeBatch([msg]), makeEnv(fetchSpy));
-
-        expect(fetchSpy).toHaveBeenCalledTimes(2);
-        expect(msg.ack).toHaveBeenCalledOnce();
-        expect(msg.retry).not.toHaveBeenCalled();
-        expect(authDriftLogs(errSpy)).toHaveLength(1);
-      } finally {
-        errSpy.mockRestore();
-      }
-    });
-
-    it('does not invoke again without a fallback', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const fetchSpy = vi.fn(async () => unauthorized());
+        const fetchSpy = vi.fn(async () => Response.json({ error: 'unauthorized' }, { status }));
         const msg = makeMessage({
           workerName: 'user-foo-dpl_a',
           cron: '* * * * *',
@@ -196,70 +127,16 @@ describe('processCronFiresBatch', () => {
 
         expect(fetchSpy).toHaveBeenCalledOnce();
         expect(msg.ack).toHaveBeenCalledOnce();
-        expect(authDriftLogs(errSpy)).toHaveLength(1);
-      } finally {
-        errSpy.mockRestore();
-      }
-    });
-
-    it('does not invoke again for a 401 with another body', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const fetchSpy = vi.fn(async () => Response.json({ error: 'expired' }, { status: 401 }));
-        const msg = rotatingMessage();
-
-        await processCronFiresBatch(makeBatch([msg]), makeEnv(fetchSpy));
-
-        expect(fetchSpy).toHaveBeenCalledOnce();
-        expect(msg.ack).toHaveBeenCalledOnce();
-      } finally {
-        errSpy.mockRestore();
-      }
-    });
-
-    it('does not invoke again after a thrown fetch', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const fetchSpy = vi.fn(async () => {
-          throw new Error('connection reset');
-        });
-        const msg = rotatingMessage();
-
-        await processCronFiresBatch(makeBatch([msg]), makeEnv(fetchSpy));
-
-        expect(fetchSpy).toHaveBeenCalledOnce();
-        expect(msg.ack).toHaveBeenCalledOnce();
         expect(msg.retry).not.toHaveBeenCalled();
+        const drift = errSpy.mock.calls.filter((args) =>
+          typeof args[0] === 'string' ? args[0].includes('AUTH_DRIFT') : false,
+        );
+        expect(drift).toHaveLength(1);
       } finally {
         errSpy.mockRestore();
       }
-    });
-
-    it('uses the legacy /__scheduled path for the fallback too', async () => {
-      const seen: Array<{ path: string; token: string | null }> = [];
-      const env = makeEnv(async (req) => {
-        const path = new URL(req.url).pathname;
-        const token = req.headers.get('x-void-internal');
-        seen.push({ path, token });
-        if (path === '/__void/scheduled') {
-          return new Response('not found', { status: 404 });
-        }
-        return token === 'new-tok' ? Response.json({ ok: true }) : unauthorized();
-      });
-      const msg = rotatingMessage();
-
-      await processCronFiresBatch(makeBatch([msg]), env);
-
-      expect(seen).toEqual([
-        { path: '/__void/scheduled', token: 'old-tok' },
-        { path: '/__scheduled', token: 'old-tok' },
-        { path: '/__void/scheduled', token: 'new-tok' },
-        { path: '/__scheduled', token: 'new-tok' },
-      ]);
-      expect(msg.ack).toHaveBeenCalledOnce();
-      expect(msg.retry).not.toHaveBeenCalled();
-    });
-  });
+    },
+  );
 
   it('acks 5xx responses and does not retry the user worker', async () => {
     // A Response (any status) means the user worker received the request.

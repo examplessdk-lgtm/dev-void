@@ -85,17 +85,6 @@ export function isAcceptedGeneration(state: ProxyTokenState, gen: number): boole
   return gen >= state.gen;
 }
 
-/**
- * Generations a sender tries, in order, for the issued generation: the
- * current one, then the one before it while Workers may still hold it.
- */
-export function sendGenerations(issueGen: number): ReadonlyArray<number> {
-  if (!Number.isSafeInteger(issueGen) || issueGen < 0) {
-    throw new RangeError(`invalid proxy token generation: ${issueGen}`);
-  }
-  return issueGen >= 1 ? [issueGen, issueGen - 1] : [0];
-}
-
 // --- Keys ---
 
 const encoder = new TextEncoder();

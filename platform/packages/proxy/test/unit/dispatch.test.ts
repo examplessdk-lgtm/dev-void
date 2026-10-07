@@ -714,16 +714,7 @@ describe('proxy token generations', () => {
     expect(sent.map((s) => s.token)).toEqual([legacy]);
   });
 
-  it('sends the floor token, then the previous one, when there is no issued generation', async () => {
-    const { env, sent } = setup({ floor: '{"gen":2}', held: await tok(1) });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(200);
-    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
-  });
-
-  it('sends one request when the Worker holds the floor token', async () => {
+  it('sends the floor token when there is no issued generation', async () => {
     const { env, sent } = setup({ floor: '{"gen":1}', held: await tok(1) });
 
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
@@ -732,138 +723,41 @@ describe('proxy token generations', () => {
     expect(sent.map((s) => s.token)).toEqual([await tok(1)]);
   });
 
-  it('retries generation 1 with the legacy token and the same body', async () => {
-    const legacy = await tok(0);
+  it('sends the reported generation without reading the floor', async () => {
     const { env, sent, floorReads } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      held: legacy,
+      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
+      held: await tok(2),
     });
 
     const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
 
     expect(res?.status).toBe(200);
-    expect(await res?.json()).toBe('hello');
-    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
-    expect(sent[1].body).toEqual(sent[0].body);
+    expect(sent.map((s) => s.token)).toEqual([await tok(2)]);
     expect(sent[0].body).toEqual(KV_BODY);
     expect(floorReads()).toBe(0);
   });
 
   it.each([
-    { held: 1, tokens: [2, 1] },
-    { held: 2, tokens: [2] },
-  ])('sends issued generation 2 to a Worker holding $held', async ({ held, tokens }) => {
-    const { env, sent, floorReads } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
-      held: await tok(held),
-    });
+    { label: 'a reported generation', resolution: { proxyTokenGen: 2 }, floor: null },
+    { label: 'the floor', resolution: {}, floor: '{"gen":2}' },
+  ])(
+    'returns the reject from a Worker holding another token after one request ($label)',
+    async ({ resolution, floor }) => {
+      const { env, sent } = setup({
+        resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', ...resolution },
+        floor,
+        held: await tok(1),
+      });
 
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
+      const res = await dispatchToWorker(env, PROJECT_ID, '/kv/put', KV_BODY);
 
-    expect(res?.status).toBe(200);
-    expect(sent.map((s) => s.token)).toEqual(await Promise.all(tokens.map(tok)));
-    expect(floorReads()).toBe(0);
-  });
+      expect(res?.status).toBe(403);
+      expect(await res?.json()).toEqual({ error: 'unauthorized' });
+      expect(sent.map((s) => s.token)).toEqual([await tok(2)]);
+    },
+  );
 
-  it('does not retry a 403 with another error', async () => {
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      respond: () => Response.json({ error: 'forbidden' }, { status: 403 }),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.json()).toEqual({ error: 'forbidden' });
-    expect(sent).toHaveLength(1);
-  });
-
-  it('does not retry a 403 whose body is not JSON', async () => {
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      respond: () => new Response('denied', { status: 403 }),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.text()).toBe('denied');
-    expect(sent).toHaveLength(1);
-  });
-
-  it('retries a reject that is streamed without a declared length', async () => {
-    const legacy = await tok(0);
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      respond: (token) =>
-        token === legacy
-          ? Response.json('hello')
-          : new Response(new Blob(['{"error":"unauthorized"}']).stream(), { status: 403 }),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(200);
-    expect(sent.map((s) => s.token)).toEqual([await tok(1), legacy]);
-  });
-
-  it('does not read a 403 that declares a large body', async () => {
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      respond: () =>
-        new Response('{"error":"unauthorized"}', {
-          status: 403,
-          headers: { 'content-length': String(64 * 1024 * 1024) },
-        }),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(403);
-    expect(sent).toHaveLength(1);
-  });
-
-  it('stops reading a streamed 403 once it outgrows a reject', async () => {
-    let pulls = 0;
-    const chunk = new TextEncoder().encode(' '.repeat(64));
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
-      respond: () =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            pull(controller) {
-              pulls++;
-              controller.enqueue(chunk);
-            },
-          }),
-          { status: 403 },
-        ),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(403);
-    expect(sent).toHaveLength(1);
-    expect(pulls).toBeLessThan(16);
-    const reader = res!.body!.getReader();
-    expect((await reader.read()).value).toEqual(chunk);
-    await reader.cancel();
-  });
-
-  it('returns the second reject when the Worker holds neither token', async () => {
-    const { env, sent } = setup({
-      resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 2 },
-      held: await tok(0),
-    });
-
-    const res = await dispatchToWorker(env, PROJECT_ID, '/kv/get', KV_BODY);
-
-    expect(res?.status).toBe(403);
-    expect(await res?.json()).toEqual({ error: 'unauthorized' });
-    expect(sent.map((s) => s.token)).toEqual([await tok(2), await tok(1)]);
-  });
-
-  it('does not retry after a thrown fetch', async () => {
+  it('does not replay after a thrown fetch', async () => {
     const { env, sent } = setup({
       resolution: { workerName: 'user-my-app', deploymentId: 'dpl_active', proxyTokenGen: 1 },
       respond: () => {
