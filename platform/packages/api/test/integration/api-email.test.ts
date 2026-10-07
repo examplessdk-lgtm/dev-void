@@ -530,20 +530,27 @@ describe('POST /projects/:id/email/destinations', () => {
   });
 
   it('rate-limits to 5 adds per minute', async () => {
-    mockCfApi();
-    const user = await createTestUser(env.db);
-    const project = await createTestProject(env.db, user.id);
+    // Keep all six requests in one minute bucket even when the test crosses
+    // a wall-clock minute.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    try {
+      mockCfApi();
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id);
 
-    for (let i = 0; i < 5; i++) {
-      const res = await addDestination(project.id, user.jwt, `r${i}@example.com`);
-      expect(res.status).toBe(201);
+      for (let i = 0; i < 5; i++) {
+        const res = await addDestination(project.id, user.jwt, `r${i}@example.com`);
+        expect(res.status).toBe(201);
+      }
+
+      const res = await addDestination(project.id, user.jwt, 'r5@example.com');
+      expect(res.status).toBe(429);
+      expect((await res.json()) as { error: string }).toEqual({
+        error: expect.stringMatching(/per minute|limit/i),
+      });
+    } finally {
+      vi.useRealTimers();
     }
-
-    const res = await addDestination(project.id, user.jwt, 'r5@example.com');
-    expect(res.status).toBe(429);
-    expect((await res.json()) as { error: string }).toEqual({
-      error: expect.stringMatching(/per minute|limit/i),
-    });
   });
 
   it('rate-limits to 50 adds per day', async () => {

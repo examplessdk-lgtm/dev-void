@@ -1,6 +1,18 @@
-import { chromium } from 'playwright';
+import { chromium, type Browser } from 'playwright';
+import { afterAll } from 'vite-plus/test';
 import { app } from '../../src/index.ts';
 import type { TestEnv } from './helpers.ts';
+
+// One browser serves every submission in a test file; each submission gets its
+// own context, so cookies and page state stay isolated. Launching and closing
+// Chromium per submission costs more than the form exchange itself on a busy
+// machine.
+let browser: Promise<Browser> | undefined;
+afterAll(async () => {
+  const launched = browser;
+  browser = undefined;
+  await (await launched?.catch(() => undefined))?.close();
+});
 
 /** Exercise the rendered native form locally, without provider or public HTTP. */
 export async function nativeFormSubmission(input: {
@@ -12,13 +24,13 @@ export async function nativeFormSubmission(input: {
   button: string;
   noReferrer?: boolean;
 }) {
-  const browser = await chromium.launch();
+  browser ??= chromium.launch();
+  const context = await (await browser).newContext({ javaScriptEnabled: false });
   let pagePolicy: string | null = null;
   let submission:
     | { origin: string | undefined; referrer: string | undefined; status: number }
     | undefined;
   try {
-    const context = await browser.newContext({ javaScriptEnabled: false });
     const split = input.cookie.indexOf('=');
     await context.addCookies([
       {
@@ -104,6 +116,6 @@ export async function nativeFormSubmission(input: {
     }
     return { pagePolicy, submission };
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
