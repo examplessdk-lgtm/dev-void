@@ -22,6 +22,8 @@ export const live = defineLiveStream({
 });
 ```
 
+This example accepts visitors who are not signed in. Without `onSubscribe`, any connection can subscribe to any topic, so read [Authorization](#authorization) before you publish private data.
+
 Void enables live streams when a [scanned file](../reference/resource-inference.md#scanned-directories) imports `void/live`, so keep this module in `src/` or another scanned directory. To keep it in an unscanned directory such as `lib/`, add that directory to [`inference.scanDirs`](../reference/resource-inference.md#custom-scan-directories) and list the default directories you still use, because `scanDirs` replaces them.
 
 Expose it from a normal route:
@@ -101,6 +103,8 @@ await live.withEnv(env).publish('post:12', { title: 'Updated title' });
 
 Only a connection's owner can change its subscriptions. The example above allows anonymous connections; authenticated streams use the current Void user by default.
 
+The owner decides who can change a connection's subscriptions, not which topics the connection can read.
+
 For authenticated streams, pass the same owner key to `connect()` and
 `control()`:
 
@@ -127,16 +131,17 @@ current authenticated user and uses `user:${user.id}` when the user has a string
 `id`. If neither path produces an owner and `allowAnonymousControl` is not set,
 the request is rejected with `403`.
 
-For stream-local subscription rules, use `onSubscribe`:
+Without `onSubscribe`, any connection that passes the owner check (any signed-in user, or any visitor when `allowAnonymousControl` is set) can subscribe to any topic and receives everything published to it. Topic names are easy to guess. Use `onSubscribe` to decide who can read each topic: return a `Response` to reject the subscription, or return nothing to allow it.
 
 ```ts
 export const live = defineLiveStream({
   id: 'app',
   async onSubscribe(ctx) {
-    const match = /^post:(.+)$/.exec(ctx.topic);
-    if (match && !(await canReadPost(ctx.env, ctx.user, match[1]))) {
-      return new Response('Forbidden', { status: 403 });
-    }
+    const post = /^post:(.+)$/.exec(ctx.topic);
+    if (post && (await canReadPost(ctx.env, ctx.user, post[1]))) return;
+    const inbox = /^user:(.+):inbox$/.exec(ctx.topic);
+    if (inbox && ctx.owner === `user:${inbox[1]}`) return;
+    return new Response('Forbidden', { status: 403 });
   },
 });
 ```

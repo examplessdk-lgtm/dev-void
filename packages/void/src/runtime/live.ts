@@ -124,6 +124,7 @@ export type LiveStreamOptions = {
   allowAnonymousControl?: boolean;
   identifyConnection?: (ctx: LiveHookContext) => MaybePromise<string | null | undefined>;
   onConnect?: (ctx: LiveConnectHookContext) => MaybePromise<Response | void>;
+  /** Decides who can read each topic. Without it, any connection that passes the owner check can subscribe to any topic. Return a Response to reject. */
   onSubscribe?: (ctx: LiveSubscribeHookContext) => MaybePromise<Response | void>;
   limits?: Partial<LiveLimits>;
 };
