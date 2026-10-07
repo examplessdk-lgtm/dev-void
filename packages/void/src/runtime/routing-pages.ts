@@ -45,7 +45,16 @@ export function createPageMutationHandler(
     const actionName = options.namedActions
       ? new URL(context.req.url).searchParams.keys().next().value
       : undefined;
-    const handler = options.namedActions ? mod.actions?.[actionName || 'default'] : mod.action;
+    // The name comes from the query string, so only own function properties
+    // count; `?constructor` or `?valueOf` must not reach Object.prototype.
+    const name = actionName || 'default';
+    const named = mod.actions;
+    const candidate = named && Object.hasOwn(named, name) ? named[name] : undefined;
+    const handler = options.namedActions
+      ? typeof candidate === 'function'
+        ? candidate
+        : undefined
+      : mod.action;
     if (options.namedActions && !handler) {
       return new Response('Unknown action' + (actionName ? ': ' + actionName : ''), {
         status: 404,

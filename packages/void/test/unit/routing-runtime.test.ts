@@ -436,6 +436,10 @@ describe('typed Pages and SSR execution', () => {
       ['/named', 'default', 200],
       ['/named?save', 'save', 200],
       ['/named?missing', 'Unknown action: missing', 404],
+      ['/named?constructor', 'Unknown action: constructor', 404],
+      ['/named?__proto__', 'Unknown action: __proto__', 404],
+      ['/named?valueOf', 'Unknown action: valueOf', 404],
+      ['/named?toString', 'Unknown action: toString', 404],
       ['/single', 'single', 200],
     ] as const) {
       const response = await app.fetch(new Request('https://app.test' + path, { method: 'POST' }));
