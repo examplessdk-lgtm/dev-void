@@ -1063,15 +1063,18 @@ describe('proxy token rotation', () => {
     cfApi();
     const owner = await createTestUser(env.db);
     const legacy = await createTestProject(env.db, owner.id);
+    await addDeployment(legacy.id, { active: true });
+    const idle = await createTestProject(env.db, owner.id);
     const rotated = await createTestProject(env.db, owner.id);
     await env.db.update(projects).set({ proxy_token_gen: 1 }).where(eq(projects.id, rotated.id));
 
     expect(await requestBulkProxyTokenRotations(env.db, 'legacy')).toBe(1);
     expect(await requestBulkProxyTokenRotations(env.db, 'legacy')).toBe(0);
+    expect(await job(idle.id)).toBeUndefined();
     expect(await job(rotated.id)).toBeUndefined();
 
     await advance(legacy.id, { waitMs: 60_000 });
-    expect(await requestBulkProxyTokenRotations(env.db, 'all')).toBe(2);
+    expect(await requestBulkProxyTokenRotations(env.db, 'all')).toBe(3);
     expect((await job(legacy.id))!.payload.again).toBe('1');
     expect((await job(rotated.id))!.payload).toEqual({
       phase: 'requested',

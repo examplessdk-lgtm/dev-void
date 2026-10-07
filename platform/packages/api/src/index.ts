@@ -95,7 +95,10 @@ import {
 } from './provisioning/cloudflare-api.ts';
 import { reconcileEmailDestinationCleanups } from './provisioning/email-destination-cleanup.ts';
 import { retrySandboxControllerCleanup } from './provisioning/sandbox-controller.ts';
-import { reconcileProxyTokenRotations } from './proxy-token-rotation.ts';
+import {
+  reconcileProxyTokenRotations,
+  requestBulkProxyTokenRotations,
+} from './proxy-token-rotation.ts';
 import { oidcRoutes } from './routes/auth-oidc.ts';
 import auth from './routes/auth.ts';
 import deleteRoute from './routes/delete.ts';
@@ -690,9 +693,14 @@ async function scheduled(
     }
   }
 
-  // Proxy token rotations, bounded per tick so deploys keep their share of the
-  // Cloudflare API rate limit.
+  // Proxy token rotations. Projects whose Workers still hold the legacy token
+  // are queued (nothing once none is left), then due rotations advance,
+  // bounded per tick so deploys keep their share of the Cloudflare API rate
+  // limit.
   if (!isDevBypass(env) && env.CF_API_TOKEN) {
+    await requestBulkProxyTokenRotations(db, 'legacy').catch((error) =>
+      console.error('[scheduled] proxy token rotation request failed:', error),
+    );
     await reconcileProxyTokenRotations(db, env, { maxCfCalls: 100, maxMs: 25_000 }).catch((error) =>
       console.error('[scheduled] proxy token rotation failed:', error),
     );

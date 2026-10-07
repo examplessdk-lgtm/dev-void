@@ -1568,7 +1568,7 @@ describe('proxy token rotation', () => {
     expect(legacy.status).toBe(200);
     const text = await legacy.text();
     expect(JSON.parse(text)).toEqual({
-      summary: { legacy: 2, wouldQueue: 2, pending: 0, failed: 0 },
+      summary: { legacy: 1, wouldQueue: 1, pending: 0, failed: 0 },
       projects: [],
       dryRun: true,
       action: 'system.rotate-proxy-tokens',
@@ -1576,7 +1576,7 @@ describe('proxy token rotation', () => {
     });
     const all = await req('/system/rotate-proxy-tokens', { dryRun: true, all: true });
     expect(await all.json()).toMatchObject({
-      summary: { legacy: 2, wouldQueue: 3 },
+      summary: { legacy: 1, wouldQueue: 3 },
       target: { projects: 'all' },
     });
 
@@ -1621,8 +1621,8 @@ describe('proxy token rotation', () => {
     expect(await first.json()).toMatchObject({
       ok: true,
       complete: false,
-      queued: 2,
-      pending: 2,
+      queued: 1,
+      pending: 1,
       failed: 0,
       failures: [],
     });
@@ -1636,10 +1636,11 @@ describe('proxy token rotation', () => {
       failed: 0,
       retryAfterSeconds: null,
     });
-    for (const project of [withWorkers, empty]) {
-      expect(await issued(project.id)).toBe(1);
-      expect(await env.ROUTING.get(`proxy-token:${project.id}`, 'json')).toEqual({ gen: 1 });
-    }
+    expect(await issued(withWorkers.id)).toBe(1);
+    expect(await env.ROUTING.get(`proxy-token:${withWorkers.id}`, 'json')).toEqual({ gen: 1 });
+    expect(await issued(empty.id)).toBe(0);
+    expect(await env.ROUTING.get(`proxy-token:${empty.id}`)).toBeNull();
+    expect(await rotationJob(empty.id)).toBeUndefined();
     for (const worker of withWorkers.workers) {
       expect(scriptToken(cf, worker)).toBe(await tok(withWorkers.id, 1));
     }
@@ -1648,9 +1649,9 @@ describe('proxy token rotation', () => {
     const all = await req('/system/rotate-proxy-tokens', { all: true });
     expect(await all.json()).toMatchObject({ queued: 3, complete: false });
     await applyUntilComplete();
-    for (const project of [withWorkers, empty, rotated]) {
-      expect(await issued(project.id)).toBe(2);
-    }
+    expect(await issued(withWorkers.id)).toBe(2);
+    expect(await issued(rotated.id)).toBe(2);
+    expect(await issued(empty.id)).toBe(1);
 
     const rerun = await req('/system/rotate-proxy-tokens', {});
     expect(rerun.status).toBe(200);

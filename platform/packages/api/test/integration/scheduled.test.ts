@@ -6,13 +6,14 @@ import {
   proxyTokenRotationTarget,
   requestProxyTokenRotation,
 } from '../../src/proxy-token-rotation.ts';
-import { builds, domains, projectCleanupJobs, projects } from '../../src/schema.ts';
+import { builds, deployments, domains, projectCleanupJobs, projects } from '../../src/schema.ts';
 import {
   setupEnv,
   teardownEnv,
   clearTables,
   createTestUser,
   createTestProject,
+  createTestDeployment,
   type TestEnv,
 } from './helpers.ts';
 
@@ -730,6 +731,27 @@ describe('scheduled() proxy token rotations', () => {
     return { gen: project!.gen, phase: job?.payload.phase };
   }
 
+  async function legacyProject(
+    userId: string,
+    values: Partial<typeof projects.$inferInsert> = {},
+  ): Promise<string> {
+    const project = await createTestProject(env.db, userId);
+    await createTestDeployment(env.db, project.id, 'live');
+    await env.db
+      .update(projects)
+      .set({ proxy_token_gen: 0, ...values })
+      .where(eq(projects.id, project.id));
+    return project.id;
+  }
+
+  async function jobCount(projectId: string): Promise<number> {
+    const rows = await env.db
+      .select({ target: projectCleanupJobs.target })
+      .from(projectCleanupJobs)
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(projectId)));
+    return rows.length;
+  }
+
   it.each([
     ['fast', fastController],
     ['hourly', mockController],
@@ -738,6 +760,31 @@ describe('scheduled() proxy token rotations', () => {
     await scheduled(controller, makeBindings(env), mockCtx);
     // START and COPIES run; the rotation then waits for KV copies to spread.
     expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'patch' });
+  });
+
+  it('queues projects whose Workers hold the legacy token', async () => {
+    const { id: userId } = await createTestUser(env.db, 'legacy-owner');
+    const live = await legacyProject(userId);
+    const retained = (await createTestProject(env.db, userId)).id;
+    const { id: failed } = await createTestDeployment(env.db, retained, 'failed');
+    await env.db.update(deployments).set({ retained: true }).where(eq(deployments.id, failed));
+    const neverDeployed = (await createTestProject(env.db, userId)).id;
+    const rotated = await legacyProject(userId, { proxy_token_gen: 1 });
+    const deleting = await legacyProject(userId, { status: 'deleting' });
+    const staticSite = await legacyProject(userId, { type: 'static' });
+
+    await scheduled(mockController, makeBindings(env), mockCtx);
+    await scheduled(mockController, makeBindings(env), mockCtx);
+
+    for (const projectId of [live, retained]) {
+      expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'patch' });
+      expect(await jobCount(projectId)).toBe(1);
+    }
+    for (const projectId of [neverDeployed, staticSite]) {
+      expect(await rotationState(projectId)).toEqual({ gen: 0, phase: undefined });
+    }
+    expect(await rotationState(rotated)).toEqual({ gen: 1, phase: undefined });
+    expect(await jobCount(deleting)).toBe(0);
   });
 
   it('leaves rotations to the next tick when a Zero Trust batch used this one', async () => {
@@ -750,9 +797,13 @@ describe('scheduled() proxy token rotations', () => {
   it.each([
     ['during installer staging', { PLATFORM_TRAFFIC_STATE: 'staging' }],
     ['under the development auth bypass', { DEV_AUTH_BYPASS: 'true' }],
+    ['without a Cloudflare API token', { CF_API_TOKEN: '' }],
   ])('does not rotate %s', async (_case, overrides) => {
     const projectId = await dueRotation();
+    const { id: userId } = await createTestUser(env.db, 'legacy-owner');
+    const legacy = await legacyProject(userId);
     await scheduled(mockController, { ...makeBindings(env), ...overrides }, mockCtx);
     expect(await rotationState(projectId)).toEqual({ gen: 0, phase: 'requested' });
+    expect(await jobCount(legacy)).toBe(0);
   });
 });

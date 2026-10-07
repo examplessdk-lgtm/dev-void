@@ -5,6 +5,7 @@ import { isProjectId } from '../id.ts';
 import {
   advanceProxyTokenRotation,
   listProxyTokenInventory,
+  onLegacyProxyToken,
   PROXY_TOKEN_ROTATION_JOB_KIND,
   proxyTokenRotationTarget,
   reconcileProxyTokenRotations,
@@ -82,11 +83,11 @@ async function bulkPreview(db: Db, all: boolean) {
   const job = sql`${projectCleanupJobs.target} = ${PROXY_TOKEN_ROTATION_JOB_KIND}::text || ':' || ${projects.id}`;
   const [row] = await db
     .select({
-      legacy: sql<number>`count(*) FILTER (WHERE ${projects.proxy_token_gen} = 0)::integer`,
+      legacy: sql<number>`count(*) FILTER (WHERE ${onLegacyProxyToken()})::integer`,
       wouldQueue: all
         ? sql<number>`count(*) FILTER (WHERE ${projectCleanupJobs.target} IS NULL
             OR ${projectCleanupJobs.payload}->>'phase' <> 'requested')::integer`
-        : sql<number>`count(*) FILTER (WHERE ${projects.proxy_token_gen} = 0
+        : sql<number>`count(*) FILTER (WHERE ${onLegacyProxyToken()}
             AND ${projectCleanupJobs.target} IS NULL)::integer`,
     })
     .from(projects)

@@ -194,8 +194,9 @@ const jobTarget = (projectId: string) =>
 // --- Requests ---
 
 /**
- * Bulk requests. `legacy` queues every project still on generation 0 that has
- * no job; `all` queues every project, with the member rule on an existing job.
+ * Bulk requests. `legacy` queues every project whose Workers still hold the
+ * legacy token and that has no job; the API cron runs it every tick. `all`
+ * queues every project, with the member rule on an existing job.
  * Returns the number of jobs inserted or flagged.
  */
 export async function requestBulkProxyTokenRotations(
@@ -209,7 +210,7 @@ export async function requestBulkProxyTokenRotations(
       ${PROXY_TOKEN_ROTATION_JOB_KIND}::text, jsonb_build_object('phase', 'requested', 'reason', ${reason}::text), now()
     FROM ${projects}
     WHERE ${projects.status} <> 'deleting'
-      ${scope === 'legacy' ? sql`AND ${projects.proxy_token_gen} = 0` : sql``}
+      ${scope === 'legacy' ? sql`AND ${onLegacyProxyToken()}` : sql``}
     ${
       scope === 'legacy'
         ? sql`ON CONFLICT (target) DO NOTHING`
@@ -266,6 +267,22 @@ export async function requestRotationIfReplacingUntrustedCode(
 }
 
 // --- Inventory ---
+
+/**
+ * A project whose Workers still hold the legacy token: on generation 0, not
+ * static, with an active or retained deployment (the rows
+ * `listProxyTokenInventory` walks). A project never deployed has none; its
+ * first Worker deploy issues generation 1. Static projects never get a token.
+ */
+export function onLegacyProxyToken(): SQL {
+  return sql`(${projects.proxy_token_gen} = 0
+    AND ${projects.type} NOT IN ('static', 'spa')
+    AND EXISTS (
+      SELECT 1 FROM ${deployments}
+      WHERE ${deployments.project_id} = ${projects.id}
+        AND (${deployments.retained} OR ${deployments.id} = ${projects.active_deployment_id})
+        AND ${deployments.source} IS DISTINCT FROM 'rollback-lease'))`;
+}
 
 type InventoryRow = Readonly<{
   deploymentId: string;
