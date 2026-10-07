@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { PlatformClient, type ManifestOnlyDeployPayload } from '../../src/cli/client.ts';
+import {
+  DEPLOY_POST_ATTEMPTS,
+  PlatformClient,
+  type ManifestOnlyDeployPayload,
+} from '../../src/cli/client.ts';
 import type { DeployManifest } from '../../src/cli/types.ts';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
@@ -452,12 +456,22 @@ describe('PlatformClient.finalizeDeploy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('does not retry a headers timeout — the platform is still working on the request', async () => {
-    const headersTimeout = Object.assign(new Error('Headers Timeout Error'), {
+  function headersTimeoutError() {
+    const cause = Object.assign(new Error('Headers Timeout Error'), {
       name: 'HeadersTimeoutError',
       code: 'UND_ERR_HEADERS_TIMEOUT',
     });
-    fetchMock.mockRejectedValue(new TypeError('fetch failed', { cause: headersTimeout }));
+    return { cause, error: new TypeError('fetch failed', { cause }) };
+  }
+
+  const idempotencyKeys = () =>
+    deployPostCalls().map(
+      ([, init]) => (init.headers as Record<string, string>)['x-void-deploy-idempotency-key'],
+    );
+
+  it('retries a headers timeout with the same idempotency key, then rethrows it', async () => {
+    const { cause, error } = headersTimeoutError();
+    fetchMock.mockRejectedValue(error);
 
     vi.useFakeTimers();
     const cliLog = makeCliLog();
@@ -465,17 +479,57 @@ describe('PlatformClient.finalizeDeploy', () => {
     try {
       const assertion = expect(
         client.finalizeDeploy(projectId, makePayload()).next(),
-      ).rejects.toMatchObject({ message: 'fetch failed', cause: headersTimeout });
+      ).rejects.toMatchObject({ message: 'fetch failed', cause });
       await vi.runAllTimersAsync();
       await assertion;
 
-      expect(deployPostCalls()).toHaveLength(1);
-      expect(cliLog.warn).not.toHaveBeenCalledWith('deploy_fetch_retry', expect.anything());
+      expect(deployPostCalls()).toHaveLength(4);
+      expect(DEPLOY_POST_ATTEMPTS).toBe(4);
+      expect(new Set(idempotencyKeys()).size).toBe(1);
+      const retries = cliLog.warn.mock.calls.filter(([msg]) => msg === 'deploy_fetch_retry');
+      expect(retries.map(([, fields]) => fields?.delayMs)).toEqual([1000, 5000, 10000]);
       expect(cliLog.error).toHaveBeenCalledWith(
         'deploy_fetch_rejected',
         expect.any(TypeError),
-        expect.objectContaining({ attempts: 1 }),
+        expect.objectContaining({ attempts: 4 }),
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows the existing deployment receipt returned to a retry after a headers timeout', async () => {
+    const done = {
+      event: 'done',
+      deployment: 'dpl_existing',
+      url: 'https://x.void.app',
+      urls: [],
+      assets: 1,
+      workers: 1,
+      seq: 3,
+    };
+    fetchMock
+      .mockRejectedValueOnce(headersTimeoutError().error)
+      .mockResolvedValueOnce(
+        ndjsonStreamResponse([
+          { event: 'start', deploymentId: 'dpl_existing', seq: 1 },
+          { event: 'worker_upload', seq: 2 },
+          done,
+        ]),
+      );
+
+    vi.useFakeTimers();
+    try {
+      const deploy = collectDeploy();
+      await vi.runAllTimersAsync();
+      expect(await deploy).toEqual([
+        { event: 'start', deploymentId: 'dpl_existing' },
+        { event: 'worker_upload', seq: 2 },
+        done,
+      ]);
+      expect(deployPostCalls()).toHaveLength(2);
+      const [first, second] = idempotencyKeys();
+      expect(second).toBe(first);
     } finally {
       vi.useRealTimers();
     }

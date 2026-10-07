@@ -594,8 +594,10 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  * - Only `fetch` rejections (`TypeError` — no HTTP response) are retried.
  *   A Response of any status means the server answered; surface it
  *   verbatim rather than replay a request it may have accepted.
- * - A headers timeout is not retried. The server received the request and
- *   is still working on it, so a replay would wait for the same work again.
+ * - A headers timeout is retried too. Every attempt sends the same
+ *   idempotency key, so once an earlier request has created its deployment,
+ *   a receipt-aware platform answers the retry with that deployment's
+ *   receipt and the CLI follows it to the real result.
  * - A rejected fetch does NOT prove the request never arrived — the
  *   connection may have dropped after delivery. Arbitration is left to
  *   the server's precheck, the only atomic (project-locked) verdict: if
@@ -609,6 +611,11 @@ export type ManifestOnlyDeployPayload = DeployUploadPayload;
  */
 const DEPLOY_POST_MAX_RETRIES = 3;
 const DEPLOY_POST_BACKOFF_MS = [1000, 5000, 10000];
+/**
+ * Every transport failure is retried, so a `TypeError` thrown by the deploy
+ * POST always comes after this many attempts.
+ */
+export const DEPLOY_POST_ATTEMPTS: number = DEPLOY_POST_MAX_RETRIES + 1;
 const DEPLOY_OBSERVATION_TIMEOUT_MS = 30_000;
 const DEPLOY_OBSERVATION_DEADLINE_MS = 30 * 60_000;
 const DEPLOY_OBSERVATION_BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000];
@@ -1301,7 +1308,7 @@ export class PlatformClient {
 
     // `fetch` reports transport failures as TypeError ('fetch failed') —
     // the only retryable case per the DEPLOY_POST_* contract above.
-    // Anything else (e.g. AbortError, headers timeout) fails fast.
+    // Anything else (e.g. AbortError) is not transient and fails fast.
     let res: Response;
     let attempt = 0;
     while (true) {
@@ -1309,11 +1316,7 @@ export class PlatformClient {
         res = await this.request(url, init);
         break;
       } catch (err) {
-        if (
-          !(err instanceof TypeError) ||
-          isHeadersTimeoutError(err) ||
-          attempt >= DEPLOY_POST_MAX_RETRIES
-        ) {
+        if (!(err instanceof TypeError) || attempt >= DEPLOY_POST_MAX_RETRIES) {
           cliLog?.error('deploy_fetch_rejected', err, { url, attempts: attempt + 1 });
           throw err;
         }

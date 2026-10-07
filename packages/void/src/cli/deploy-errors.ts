@@ -1,4 +1,5 @@
 import {
+  DEPLOY_POST_ATTEMPTS,
   isCliOutdatedError,
   isHeadersTimeoutError,
   parsePlatformErrorBody,
@@ -86,14 +87,14 @@ export function formatConnectionLostMessage(
  * Convert an exception thrown during the deploy NDJSON stream into a
  * user-facing `Error` with a readable message.
  *
- * Three cases:
+ * Four cases:
  *   1. `PlatformApiError` with 409 + a JSON body carrying `{error, deployment}`
  *      — surface the server-supplied error and prefer the body's deployment id.
  *   2. Any other `PlatformApiError` — retain the client's actionable message and
  *      structured error fields; opaque provider failures use a trimmed body snippet.
- *   3. A headers timeout — the platform accepted the connection but sent no
- *      response in time. Explain that the deploy may still finish and how to
- *      check and retry.
+ *   3. A headers timeout on the last deploy POST attempt — the platform sent
+ *      no response in time. Explain that the deploy may still finish and how
+ *      to check and retry.
  *   4. Anything else — preserve the original message, plus its root cause when
  *      there is one, under a `Connection lost during deploy: <original>`
  *      prefix so the caller can still tell network, parse, and transport
@@ -134,7 +135,7 @@ export function formatStreamDeployError(
 
   if (isHeadersTimeoutError(err)) {
     const lines = [
-      'deploy: The Void platform did not respond within 5 minutes while preparing the deploy.',
+      `deploy: The Void platform did not respond while preparing the deploy. Tried ${DEPLOY_POST_ATTEMPTS} times; the last try waited 5 minutes.`,
       'It may still finish. Check `void project status`, then run `void deploy` again to retry.',
     ];
     if (logPath) {

@@ -63,7 +63,7 @@ describe('formatStreamDeployError', () => {
     expect(formatted.message).toContain('fetch failed');
   });
 
-  it('explains a headers timeout in plain words and keeps the log line', () => {
+  it('explains a headers timeout after the last retry in plain words and keeps the log line', () => {
     const err = new TypeError('fetch failed', {
       cause: Object.assign(new Error('Headers Timeout Error'), {
         name: 'HeadersTimeoutError',
@@ -75,7 +75,7 @@ describe('formatStreamDeployError', () => {
 
     expect(formatted.message).toBe(
       [
-        'deploy: The Void platform did not respond within 5 minutes while preparing the deploy.',
+        'deploy: The Void platform did not respond while preparing the deploy. Tried 4 times; the last try waited 5 minutes.',
         'It may still finish. Check `void project status`, then run `void deploy` again to retry.',
         'If this keeps happening, share the detailed log below.',
         'Detailed log: /tmp/deploy.jsonl',
