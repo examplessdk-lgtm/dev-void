@@ -210,7 +210,7 @@ function applyProviderHeaders({
   headers,
   provider,
   providerKey,
-  projectId,
+  usageTag,
   apiKeyHeader,
   apiKeyPrefix,
   contentType,
@@ -218,7 +218,7 @@ function applyProviderHeaders({
   headers: Headers;
   provider: string;
   providerKey: string;
-  projectId: string;
+  usageTag: string;
   apiKeyHeader?: string | null;
   apiKeyPrefix?: string | null;
   contentType?: string;
@@ -228,7 +228,15 @@ function applyProviderHeaders({
   const keyPrefix = apiKeyPrefix ?? defaults.prefix;
 
   headers.set(keyHeader, `${keyPrefix}${providerKey}`);
-  headers.set('cf-aig-metadata-projectId', projectId);
+  // Runs after the key header is set, so a caller-chosen key header name
+  // cannot set a gateway control either.
+  const callerGatewayHeaders = [...headers.keys()].filter((name) =>
+    GATEWAY_CONTROL_HEADER.test(name),
+  );
+  for (const name of callerGatewayHeaders) {
+    headers.delete(name);
+  }
+  headers.set('cf-aig-metadata', JSON.stringify({ projectId: usageTag }));
   if (contentType && !headers.has('content-type')) {
     headers.set('content-type', contentType);
   }
@@ -413,7 +421,7 @@ ai.post('/provider', async (context) => {
       headers: headersFromRecord(body.headers),
       provider,
       providerKey,
-      projectId,
+      usageTag: await deriveAiUsageTag(context.env.JWT_SECRET, projectId),
       apiKeyHeader,
       apiKeyPrefix,
       contentType: requestBody.contentType,

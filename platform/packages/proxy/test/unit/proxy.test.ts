@@ -1834,7 +1834,10 @@ describe('proxy worker', () => {
       expect(init.method).toBe('POST');
       const headers = new Headers(init.headers);
       expect(headers.get('authorization')).toBe('Bearer sk-test-key');
-      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_000000000001');
+      expect(headers.get('cf-aig-metadata')).toBe(
+        JSON.stringify({ projectId: usageTags['proj_000000000001'] }),
+      );
+      expect(headers.has('cf-aig-metadata-projectId')).toBe(false);
       expect(headers.get('content-type')).toBe('application/json');
       expect(headers.get('openai-beta')).toBe('assistants=v2');
       expect(JSON.parse(init.body as string)).toEqual({
@@ -1893,7 +1896,61 @@ describe('proxy worker', () => {
       const headers = new Headers(fetchMock.mock.calls[0][1]!.headers);
       expect(headers.get('x-goog-api-key')).toBe('google-key');
       expect(headers.get('authorization')).toBeNull();
-      expect(headers.get('cf-aig-metadata-projectId')).toBe('proj_000000000001');
+      expect(headers.get('cf-aig-metadata')).toBe(
+        JSON.stringify({ projectId: usageTags['proj_000000000001'] }),
+      );
+    });
+
+    it('keeps gateway control headers under platform control', async () => {
+      function gatewayHeaders(headers: Headers): Array<[string, string]> {
+        return [...headers].filter(([name]) => name.startsWith('cf-aig-'));
+      }
+      const signedMetadata = JSON.stringify({ projectId: usageTags['proj_000000000001'] });
+      const fetchMock = mockProviderFetch('{}', {
+        headers: { 'content-type': 'application/json' },
+      });
+      const { gateway } = mockProviderGateway();
+      const env = createEnv({ gateway });
+
+      const callerHeaders = await worker.fetch(
+        post('/ai/provider', {
+          provider: 'openai',
+          path: '/chat/completions',
+          headers: {
+            'cf-aig-metadata': '{"projectId":"proj_000000000001"}',
+            'CF-AIG-Collect-Log': 'false',
+            'cf-aig-custom-cost': '{"total_cost":0}',
+            'cf-aig-cache-key': 'shared-key',
+            'x-keep': 'yes',
+          },
+          providerKey: 'sk-test',
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
+        }),
+        env,
+      );
+      expect(callerHeaders.status).toBe(200);
+      const forwarded = new Headers(fetchMock.mock.calls[0][1]!.headers);
+      expect(gatewayHeaders(forwarded)).toStrictEqual([['cf-aig-metadata', signedMetadata]]);
+      expect(forwarded.get('x-keep')).toBe('yes');
+      expect(forwarded.get('authorization')).toBe('Bearer sk-test');
+
+      const keyHeader = await worker.fetch(
+        post('/ai/provider', {
+          provider: 'openai',
+          path: '/chat/completions',
+          apiKeyHeader: 'cf-aig-collect-log',
+          apiKeyPrefix: '',
+          providerKey: 'false',
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
+        }),
+        env,
+      );
+      expect(keyHeader.status).toBe(200);
+      expect(gatewayHeaders(new Headers(fetchMock.mock.calls[1][1]!.headers))).toStrictEqual([
+        ['cf-aig-metadata', signedMetadata],
+      ]);
     });
 
     it('reconstructs multipart form data bodies', async () => {
