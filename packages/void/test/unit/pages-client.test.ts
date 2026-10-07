@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { createVoidRouter, ssrProxy } from '../../src/pages/client.ts';
+import { createPageNavigationEngine } from '../../src/pages/navigation-engine.ts';
 import { parseCacheFor } from '../../src/pages/prefetch.ts';
 
 type DeferredTestWindow = Window & {
@@ -1256,5 +1257,122 @@ describe('createVoidRouter prefetch', () => {
     await slowVisit;
 
     expect(resolveDeferred).not.toHaveBeenCalled();
+  });
+});
+
+describe('createVoidRouter other-origin visits', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function createRouter() {
+    stubClientGlobals();
+    const fetchMock = vi.fn(async () =>
+      Response.json(
+        { component: 'users', props: { users: [] } },
+        { headers: { 'X-VoidPages': 'true' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const applyUpdate = vi.fn();
+    const { router } = await createVoidRouter({
+      adapter: {
+        applyUpdate,
+        createDeferred: vi.fn(() => ({})),
+        isLoading: vi.fn(() => false),
+        rejectDeferred: vi.fn((_ref, error) => error),
+        resolveDeferred: vi.fn((_ref, value) => value),
+      },
+      components: {
+        home: vi.fn(async () => ({ default: {} })),
+        users: vi.fn(async () => ({ default: {} })),
+      },
+      layoutTree: {},
+      matchRoute: vi.fn((url) => (url === '/users' ? 'users' : 'home')),
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+      prefetchHoverDelay: 75,
+      routeMeta: {},
+      viewTransitions: false,
+    });
+    return { router, fetchMock, applyUpdate };
+  }
+
+  it.each(['javascript:alert(1)', ' JaVaScRiPt:alert(1)', 'data:text/html,x'])(
+    'rejects %j without fetching or assigning location',
+    async (url) => {
+      const { router, fetchMock, applyUpdate } = await createRouter();
+
+      await expect(router.visit(url)).rejects.toThrow(/refusing to navigate/);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(applyUpdate).not.toHaveBeenCalled();
+      expect(window.location.href).toBeUndefined();
+    },
+  );
+
+  it('rejects a same-origin blob URL passed straight to the navigation engine', async () => {
+    stubClientGlobals();
+    const fetchMock = vi.fn(
+      async () => new Response('<script></script>', { headers: { 'Content-Type': 'text/html' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const engine = await createPageNavigationEngine({
+      adapter: {
+        createDeferred: () => ({}),
+        resolveDeferred: (_ref, value) => value,
+        rejectDeferred: (_ref, error) => error,
+        isLoading: () => false,
+      },
+      components: { home: async () => ({ default: {} }) },
+      layoutTree: {},
+      routeMeta: {},
+      matchRoute: () => 'home',
+      viewTransitions: false,
+      prefetchHoverDelay: 75,
+      prefetchDefaultCacheFor: parseCacheFor('30s'),
+    });
+
+    const resource = engine.prepareVisit(
+      'blob:http://localhost/0b5e4c1a-7f0d-4f9e-9b52-1c3d2e4f5a6b',
+    );
+
+    await expect(resource.shell).rejects.toThrow('refusing to navigate to a blob: URL');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.location.href).toBeUndefined();
+  });
+
+  it('sends other-origin http(s) GET visits to a full page load without fetching', async () => {
+    const { router, fetchMock, applyUpdate } = await createRouter();
+
+    await expect(router.visit('https://other.example/x?y=1#z')).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(window.location.href).toBe('https://other.example/x?y=1#z');
+  });
+
+  it('rejects non-GET visits to another origin without sending them', async () => {
+    const { router, fetchMock } = await createRouter();
+
+    await expect(
+      router.visit('https://other.example/x', { method: 'POST', data: { a: 1 } }),
+    ).rejects.toThrow('Void Router: non-GET visits must target the current origin.');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.location.href).toBeUndefined();
+  });
+
+  it('still loads absolute same-origin URLs in place', async () => {
+    const { router, fetchMock, applyUpdate } = await createRouter();
+
+    await router.visit('http://localhost/users');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/users',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ 'X-VoidPages': 'true' }),
+      }),
+    );
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(applyUpdate.mock.calls[0][0]).toMatchObject({ component: 'users' });
+    expect(window.location.href).toBeUndefined();
   });
 });

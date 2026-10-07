@@ -594,6 +594,21 @@ export async function createPageNavigationEngine(
     commitTarget: { fetchUrl: string; hash: string },
     deferredRegistry: DeferredRegistry,
   ): Promise<PageNavigationResult | undefined> {
+    // Page data only comes from this origin. Other http(s) URLs get a full page
+    // load; other schemes (javascript:, data:, ...) must never reach location.href.
+    // Check the scheme first: a blob: URL reports the origin that created it.
+    const target = new URL(url, window.location.origin);
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      throw new Error(`Void Router: refusing to navigate to a ${target.protocol} URL.`);
+    }
+    if (target.origin !== window.location.origin) {
+      if (method !== 'GET') {
+        throw new Error('Void Router: non-GET visits must target the current origin.');
+      }
+      window.location.href = url;
+      return undefined;
+    }
+
     if (method !== 'GET') {
       _prefetchCache.flushAll();
     }

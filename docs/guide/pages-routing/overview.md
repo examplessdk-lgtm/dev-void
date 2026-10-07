@@ -212,6 +212,8 @@ router.refresh(); // re-fetch current page props
 router.visit('/logout', { method: 'POST' }); // non-GET navigation
 ```
 
+`router.visit()` updates the page in place for same-origin URLs. `http(s)` URLs on another origin get a full page load, and other schemes such as `javascript:` are rejected.
+
 For dynamic route params, use `useParams()` from the same adapter package:
 
 ```tsx
