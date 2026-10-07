@@ -169,4 +169,26 @@ describe('withPrivateDrizzleConfig', () => {
     );
     expect(process.listenerCount('SIGINT')).toBe(before);
   });
+
+  it('removes a project config that an older CLI left with a database URL', () => {
+    const leftover = join(root, '.void', 'drizzle.config.json');
+    mkdirSync(dirname(leftover), { recursive: true });
+    writeFileSync(
+      leftover,
+      JSON.stringify({ dialect: 'postgresql', dbCredentials: { url: 'postgres://u:old@db/app' } }),
+    );
+    withPrivateDrizzleConfig(root, dbUrl, 'postgresql', () => undefined);
+    expect(existsSync(leftover)).toBe(false);
+  });
+
+  it.each(['postgresql://dummy', 'mysql://dummy', ':memory:', '/project/.void/local.sqlite'])(
+    'keeps a project config whose URL is %j',
+    (url) => {
+      const config = join(root, '.void', 'drizzle.config.json');
+      mkdirSync(dirname(config), { recursive: true });
+      writeFileSync(config, JSON.stringify({ dbCredentials: { url } }));
+      withPrivateDrizzleConfig(root, dbUrl, 'postgresql', () => undefined);
+      expect(existsSync(config)).toBe(true);
+    },
+  );
 });

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'pathslash';
 import { readProjectPaths } from '../project-paths.ts';
@@ -60,6 +60,9 @@ export function writeDrizzleConfig(
  * out of the project directory (the dev server can serve files under it).
  * The config lives in a private temp directory that is removed afterwards.
  *
+ * Older CLI versions wrote such URLs to `.void/drizzle.config.json`; a
+ * file left there with one is removed first.
+ *
  * A no-op SIGINT listener stays installed while `run` executes: Drizzle
  * Studio is stopped with Ctrl-C, and without a listener Node would exit on
  * the signal before `finally` removes the directory.
@@ -70,6 +73,7 @@ export function withPrivateDrizzleConfig<T>(
   dialect: DrizzleDialect,
   run: (configPath: string) => T,
 ): T {
+  removeProjectDrizzleConfigWithUrl(root);
   const dir = mkdtempSync(join(tmpdir(), 'void-drizzle-'));
   const noop = () => {};
   process.on('SIGINT', noop);
@@ -79,5 +83,27 @@ export function withPrivateDrizzleConfig<T>(
   } finally {
     process.off('SIGINT', noop);
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The CLI now writes only local SQLite paths or placeholder URLs to
+ * `.void/drizzle.config.json`, so any other URL there is a real one.
+ */
+function removeProjectDrizzleConfigWithUrl(root: string): void {
+  const configPath = join(root, '.void', 'drizzle.config.json');
+  let url: unknown;
+  try {
+    url = JSON.parse(readFileSync(configPath, 'utf-8'))?.dbCredentials?.url;
+  } catch {
+    return;
+  }
+  if (
+    typeof url === 'string' &&
+    url.includes('://') &&
+    url !== 'postgresql://dummy' &&
+    url !== 'mysql://dummy'
+  ) {
+    rmSync(configPath, { force: true });
   }
 }
