@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vite-plus/test';
+import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { env } from '../../src/runtime/env-public.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
 import { basicAuth, type BasicAuthOptions, type CloudEnv } from '../../src/runtime/handler.ts';
@@ -10,16 +10,23 @@ function authorization(value: string) {
   return `Basic ${btoa(binary)}`;
 }
 
-function createApp(options: BasicAuthOptions) {
+function createApp(options: BasicAuthOptions, downstream = vi.fn()) {
   const app = new Hono<CloudEnv>();
 
   app.use('*', basicAuth(options));
-  app.all('*', (c) => c.text('ok'));
+  app.all('*', (c) => {
+    downstream();
+    return c.text('ok');
+  });
 
   return app;
 }
 
 describe('basicAuth', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('challenges requests without credentials', async () => {
     const app = createApp({ username: 'guest', password: 'wedding', realm: 'Preview' });
 
@@ -124,6 +131,55 @@ describe('basicAuth', () => {
     const app = createApp({ username: 'guest', password: 'wedding' });
 
     const res = await app.request('http://localhost/__void/migrate', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+
+  it('skips Void internal endpoints when the password is empty', async () => {
+    const app = createApp({ username: 'guest', password: '' });
+
+    const res = await app.request('http://localhost/__void/migrate', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+
+  it.each([
+    ['an empty password', { username: '', password: '' }, ':'],
+    [
+      'a password callback that returns undefined',
+      { username: 'admin', password: () => undefined as unknown as string },
+      'admin:',
+    ],
+  ])('fails closed for %s', async (_label, options, credentials) => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const downstream = vi.fn();
+    const app = createApp(options, downstream);
+
+    const res = await app.request('http://localhost/', {
+      headers: { Authorization: authorization(credentials) },
+    });
+
+    expect(res.status).toBe(500);
+    expect(downstream).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message:
+          'basicAuth: the password resolved to an empty value. Set the credential before serving requests.',
+      }),
+    );
+  });
+
+  it.each([
+    ['an empty username', ''],
+    ['a username callback that returns undefined', () => undefined as unknown as string],
+  ])('allows password-only gates with %s', async (_label, username) => {
+    const app = createApp({ username, password: 'secret' });
+
+    const res = await app.request('http://localhost/', {
+      headers: { Authorization: authorization(':secret') },
+    });
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('ok');

@@ -378,6 +378,12 @@ export function basicAuth(options: BasicAuthOptions): MiddlewareHandler<CloudEnv
 
     const username = resolveBasicAuthOption(options.username, '');
     const password = resolveBasicAuthOption(options.password, '');
+    // An unset secret must not turn into a gate that accepts an empty password.
+    if (!password) {
+      throw new Error(
+        'basicAuth: the password resolved to an empty value. Set the credential before serving requests.',
+      );
+    }
     const credentials = parseBasicAuthHeader(c.req.raw.headers.get('Authorization'));
     const usernameMatches = credentials && timingSafeStringEqual(credentials.username, username);
     const passwordMatches = credentials && timingSafeStringEqual(credentials.password, password);

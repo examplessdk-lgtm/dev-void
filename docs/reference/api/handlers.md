@@ -103,6 +103,8 @@ Void’s reserved `/__void` endpoints use their own authentication and are exclu
 
 When credentials come from `void/env`, wrap the reads in functions so they are resolved per request after Void has bound the runtime env.
 
+If `password` resolves to an empty value, requests fail with a server error instead of passing the gate.
+
 For app-specific bypasses such as health checks or public webhooks, compose that logic in your own middleware before calling `basicAuth()`.
 
 ```ts
