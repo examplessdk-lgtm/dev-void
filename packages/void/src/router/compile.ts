@@ -1521,8 +1521,12 @@ export function compileNodeApp(
     ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
     : '';
   const envSource = target === 'deno' ? 'Deno.env.toObject()' : 'process.env';
+  // Path discovery answers only the build-time prerender runner, which passes
+  // `{ __VOID_PRERENDER: "1" }` as the Hono env. HTTP servers never do: Node
+  // passes `{ incoming, outgoing }`, Bun its Server and Deno its handler info.
+  const discoveryRequest = `c.req.method === "POST" && c.req.path === "/__void/prerender-paths" && c.env?.__VOID_PRERENDER === "1"`;
   const envMiddleware = envSchemaModule
-    ? `app.use("*", async (c, next) => { if (c.req.method !== "POST" || c.req.path !== "/__void/prerender-paths") await _validateEnvOnce(${envSource}); return next(); });\n`
+    ? `app.use("*", async (c, next) => { if (!(${discoveryRequest})) await _validateEnvOnce(${envSource}); return next(); });\n`
     : '';
 
   return `${staticImport}
@@ -1537,11 +1541,7 @@ assetApp.get("*", serveStatic({ root: clientRoot }));
 const assets = { fetch: (request) => assetApp.fetch(request) };
 const app = new Hono();
 ${envMiddleware}app.post("/__void/prerender-paths", async (c) => {
-  const __expected = c.env?.__VOID_PROXY_TOKEN;
-  if (__expected) {
-    const __token = c.req.header("x-void-internal");
-    if (!__token || __token !== __expected) return c.json({ error: "unauthorized" }, 401);
-  }
+  if (c.env?.__VOID_PRERENDER !== "1") return c.notFound();
   const paths = await __voidCollectPrerenderPaths(c.req.raw);
   return c.json({ paths });
 });

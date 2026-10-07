@@ -270,7 +270,9 @@ async function createCloudflarePrerenderRunner(options: {
     modulesRoot: workerDir,
     compatibilityDate: wranglerCompat.compatibilityDate,
     compatibilityFlags: wranglerCompat.compatibilityFlags ?? [],
-    bindings,
+    // Marks this Worker as the build-time prerender runner, the only place the
+    // built app answers path discovery. Deployed Workers never carry it.
+    bindings: { ...bindings, __VOID_PRERENDER: '1' },
   };
   if (clientDir) {
     mfOptions.serviceBindings = {
@@ -328,20 +330,11 @@ async function createCloudflarePrerenderRunner(options: {
   }
 
   const mf = new Miniflare(convertV4MiniflareOptions(mfOptions));
-  const allBindings = mfOptions.bindings as Record<string, unknown> | undefined;
-  const proxyToken = allBindings?.__VOID_PROXY_TOKEN as string | undefined;
 
   return {
     async collectPaths(): Promise<Array<string>> {
-      const headers: Record<string, string> = {};
-      if (proxyToken) {
-        headers['x-void-internal'] = proxyToken;
-      }
       return readPrerenderPathsResponse(
-        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, {
-          method: 'POST',
-          headers,
-        }),
+        await mf.dispatchFetch(`http://localhost${PRERENDER_PATHS_ENDPOINT}`, { method: 'POST' }),
       );
     },
     async fetchPath(path: string): Promise<Response> {
@@ -440,11 +433,12 @@ if (!fetch) {
   process.exit(1);
 }
 
+// The second argument is the Hono env. Its marker is what lets the built app
+// answer path discovery; HTTP servers never pass it.
 async function collectPaths() {
-  const headers = {};
-  if (process.env.__VOID_PROXY_TOKEN) headers["x-void-internal"] = process.env.__VOID_PROXY_TOKEN;
   const response = await fetch(
-    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST", headers }),
+    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
+    { __VOID_PRERENDER: "1" },
   );
   if (!response.ok) {
     throw new Error("prerender: Failed to collect prerender paths. HTTP " + response.status + ".");

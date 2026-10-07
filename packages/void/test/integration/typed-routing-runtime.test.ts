@@ -244,10 +244,17 @@ renderPage.preambleScript = ${JSON.stringify(preambleScript)};`;
       expect(await (await runtime.dispatchFetch('https://app.test/__void/ready')).json()).toEqual({
         ready: true,
       });
-      const unauthorized = await runtime.dispatchFetch('https://app.test/__void/prerender-paths', {
-        method: 'POST',
-      });
-      expect(unauthorized.status).toBe(401);
+      // Path discovery answers only the build-time prerender runner, so the
+      // deployed Worker treats it as an ordinary request, even with the proxy
+      // token. This fixture has no binding handler, so the pages fallback answers.
+      for (const headers of [{}, { 'x-void-internal': 'secret' }]) {
+        const discovery = await runtime.dispatchFetch('https://app.test/__void/prerender-paths', {
+          method: 'POST',
+          headers,
+        });
+        expect(discovery.status).toBe(404);
+        expect(await discovery.text()).not.toContain('"paths"');
+      }
     },
   );
 });

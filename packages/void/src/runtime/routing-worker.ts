@@ -205,7 +205,12 @@ export function createWorkerFetch(
 ): (request: Request, env: RuntimeEnvironment, ctx: ExecutionContext) => Promise<Response> {
   return async (request, originalEnv, ctx) => {
     const url = new URL(request.url);
-    const discovery = request.method === 'POST' && url.pathname === '/__void/prerender-paths';
+    // Only the build-time prerender runner sets this binding. Without it the
+    // request is an ordinary app request, so env validation runs as usual.
+    const discovery =
+      request.method === 'POST' &&
+      url.pathname === '/__void/prerender-paths' &&
+      originalEnv.__VOID_PRERENDER === '1';
     if (options.validateEnv && !discovery) {
       await options.validateEnv(originalEnv);
     }
@@ -238,13 +243,6 @@ export function createWorkerFetch(
           return internal;
         }
         if (discovery) {
-          const expected = env.__VOID_PROXY_TOKEN;
-          if (expected) {
-            const token = request.headers.get('x-void-internal');
-            if (!token || token !== expected) {
-              return Response.json({ error: 'unauthorized' }, { status: 401 });
-            }
-          }
           return Response.json({ paths: await options.collectPrerenderPaths(request, env, ctx) });
         }
         const userEnv = options.filterBindings(env);

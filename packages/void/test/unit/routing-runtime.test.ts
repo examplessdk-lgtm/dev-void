@@ -171,9 +171,10 @@ describe('typed Worker fetch execution', () => {
     expect(await missing.json()).toEqual({ ready: true });
     expect(missing.headers.get('cache-control')).toBe('no-store');
   });
-  it('validates readiness and app requests while discovery skips validation and checks its token', async () => {
+  it('validates readiness and app requests and answers discovery only for the prerender runner', async () => {
     const validateEnv = vi.fn(async () => {});
-    const fetch = worker({ validateEnv });
+    const collectPrerenderPaths = vi.fn(async () => ['/page']);
+    const fetch = worker({ validateEnv, collectPrerenderPaths });
     const env = { PUBLIC: 'yes', __VOID_PROXY_TOKEN: 'secret' };
     expect(
       await (await fetch(new Request('https://app.test/__void/ready'), env, context)).json(),
@@ -182,18 +183,22 @@ describe('typed Worker fetch execution', () => {
       public: 'yes',
       keys: ['PUBLIC'],
     });
-    const url = 'https://app.test/__void/prerender-paths';
-    expect((await fetch(new Request(url, { method: 'POST' }), env, context)).status).toBe(401);
-    expect(
-      await (
-        await fetch(
-          new Request(url, { method: 'POST', headers: { 'x-void-internal': 'secret' } }),
-          env,
-          context,
-        )
-      ).json(),
-    ).toEqual({ paths: ['/page'] });
     expect(validateEnv).toHaveBeenCalledTimes(2);
+    const url = 'https://app.test/__void/prerender-paths';
+    for (const headers of [{}, { 'x-void-internal': 'secret' }] as Array<Record<string, string>>) {
+      const response = await fetch(new Request(url, { method: 'POST', headers }), env, context);
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain('/page');
+    }
+    expect(collectPrerenderPaths).not.toHaveBeenCalled();
+    expect(validateEnv).toHaveBeenCalledTimes(4);
+    const runner = await fetch(
+      new Request(url, { method: 'POST' }),
+      { PUBLIC: 'yes', __VOID_PRERENDER: '1' },
+      context,
+    );
+    expect(await runner.json()).toEqual({ paths: ['/page'] });
+    expect(validateEnv).toHaveBeenCalledTimes(4);
   });
   it('resolves remote env after validating original bindings and enters scopes before internal routes', async () => {
     const original = { __VOID_REMOTE: '1' };

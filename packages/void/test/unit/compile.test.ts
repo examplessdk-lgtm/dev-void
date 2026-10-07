@@ -1979,6 +1979,10 @@ describe('compileNodeApp', () => {
       'import innerApp, { __voidCollectPrerenderPaths } from "virtual:void-routes"',
     );
     expect(code).toContain('app.post("/__void/prerender-paths"');
+    // Only the prerender runner passes the marker as the Hono env.
+    expect(code).toContain('if (c.env?.__VOID_PRERENDER !== "1") return c.notFound();');
+    expect(code).not.toContain('__VOID_PROXY_TOKEN');
+    expect(code).not.toContain('x-void-internal');
   });
 
   it('generates bun app with hono/bun serveStatic', () => {
@@ -2014,7 +2018,7 @@ describe('compileNodeApp', () => {
     expect(code).toContain('app.use("*", async (c, next)');
     expect(code).toContain('await _validateEnvOnce(process.env)');
     expect(code).toContain(
-      'if (c.req.method !== "POST" || c.req.path !== "/__void/prerender-paths")',
+      'if (!(c.req.method === "POST" && c.req.path === "/__void/prerender-paths" && c.env?.__VOID_PRERENDER === "1")) await _validateEnvOnce(process.env)',
     );
   });
 

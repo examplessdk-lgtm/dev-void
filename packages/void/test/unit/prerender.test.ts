@@ -130,7 +130,8 @@ const sensitive = [
   'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
 ];
 export default {
-  fetch() {
+  fetch(request, env) {
+    if (env?.__VOID_PRERENDER !== '1') return new Response('Not Found', { status: 404 });
     const paths = process.env.PUBLIC_VALUE === 'visible' ? ['/safe'] : ['/safe-missing'];
     if (sensitive.some((name) => process.env[name])) paths.push('/credential-leaked');
     return Response.json({ paths });
@@ -209,7 +210,7 @@ describe('collectPrerenderPaths (Cloudflare target)', () => {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== '/__void/prerender-paths') {
+    if (url.pathname !== '/__void/prerender-paths' || env.__VOID_PRERENDER !== '1') {
       return new Response('Not Found', { status: 404 });
     }
     const { results } = await env.DB.prepare('SELECT path FROM pages ORDER BY path').all();
