@@ -60,6 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -425,7 +426,12 @@ describe('emailDomainAdd', () => {
       .mockReturnValueOnce('ghp_ignored')
       .mockReturnValue(CFUT_TOKEN);
     const deps = addDeps({ readClipboard });
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    // Fake time keeps the 40 ms watch window from closing on a slow machine
+    // before the third read; the token arrives on the second 1 ms poll.
+    vi.useFakeTimers();
+    const added = emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    await vi.advanceTimersByTimeAsync(deps.watchTimeoutMs!);
+    await added;
     expect(deps.verifyToken).toHaveBeenCalledTimes(1);
     expect(deps.verifyToken).toHaveBeenCalledWith(CFUT_TOKEN);
     expect(deps.clearClipboard).toHaveBeenCalledTimes(1);
