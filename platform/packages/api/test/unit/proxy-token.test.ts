@@ -30,12 +30,12 @@ const PROJECT = 'proj_000000000001';
 const OTHER_PROJECT = 'proj_000000000002';
 
 const TOK_0 = 'ZMRzpVRsaOJSG_unVlA0oqSaz2kApOohvao_XGR8Q0c';
-const TOK_1 = 'v2.1.3W5_i2g79pUCXyzxWPQWmTqscSNtC_2vuHC84z775Y8';
-const TOK_2 = 'v2.2.Vx_qycCHPx2BoYvQrbQ7JrhbONKU7f0jNK23B0YUhOs';
+const TOK_1 = '1.tSB1ya3fUJXjnL2nfUht0aCBRh9d1pFCrH_rJIJGGWo';
+const TOK_2 = '2.Ko4ZEz_VQ8IZH70koONArHkURyEHZUwLJsqFsGJgwyE';
 const INTERNAL: Record<ProxyInternalRoute, string> = {
-  'resolve-worker': 'fSljhl8vCcBSR-jWXklS-KDL4K8lFb_wPaRAu-aKPv0',
-  'resolve-resource': 'gNOx85Zh_di7yHFjG8AlV0QQ8PbHYs1ipC2ukAl7i5Y',
-  'verify-prerender-build': 'A7F1IjLUbEWq0atQH3W5dsR1DidJ6ZgqU6QQ3lehBbc',
+  'resolve-worker': 'Phjba6joMrR31HPBsOamhNdtbT3__9Fg6zkd34dJiS0',
+  'resolve-resource': 'qqnenNPCqY-C4RMAfPn0AUdXlvKS0tvkDcC8lyjTYck',
+  'verify-prerender-build': 'L-_KXs8KdULytY5ibjHuH095R-1L3OM91NokMoj6828',
 };
 const ROUTES = Object.keys(INTERNAL) as Array<ProxyInternalRoute>;
 
@@ -47,15 +47,15 @@ function nodeTok(gen: number, projectId = PROJECT): string {
   if (gen === 0) {
     return base64url(createHmac('sha256', SECRET).update(projectId).digest());
   }
-  const key = Buffer.from(hkdfSync('sha256', SECRET, 'void-proxy-token', 'v2', 32));
-  const mac = createHmac('sha256', key).update(`void-proxy-token:v2:${projectId}:${gen}`).digest();
-  return `v2.${gen}.${base64url(mac)}`;
+  const key = Buffer.from(hkdfSync('sha256', SECRET, 'void-proxy-token', 'proxy-token', 32));
+  const mac = createHmac('sha256', key).update(`void-proxy-token:${projectId}:${gen}`).digest();
+  return `${gen}.${base64url(mac)}`;
 }
 
 function nodeInternal(route: ProxyInternalRoute, projectId = PROJECT): string {
-  const key = Buffer.from(hkdfSync('sha256', SECRET, 'void-proxy-internal', 'v1', 32));
+  const key = Buffer.from(hkdfSync('sha256', SECRET, 'void-proxy-internal', 'proxy-internal', 32));
   return base64url(
-    createHmac('sha256', key).update(`void-proxy-internal:v1\n${route}\n${projectId}`).digest(),
+    createHmac('sha256', key).update(`void-proxy-internal\n${route}\n${projectId}`).digest(),
   );
 }
 
@@ -111,7 +111,7 @@ describe('vectors', () => {
   });
 
   it('keeps internal values distinct from each other and from tenant tokens', () => {
-    const values = [...Object.values(INTERNAL), TOK_0, TOK_1.slice('v2.1.'.length)];
+    const values = [...Object.values(INTERNAL), TOK_0, TOK_1.slice('1.'.length)];
     expect(new Set(values).size).toBe(values.length);
   });
 
@@ -193,7 +193,7 @@ describe('state table', () => {
 });
 
 describe('verifyProxyToken', () => {
-  it('accepts legacy and v2 tokens when no floor is set', async () => {
+  it('accepts the legacy and generation tokens when no floor is set', async () => {
     expect(await verify(TOK_0).result).toBe(true);
     expect(await verify(TOK_1).result).toBe(true);
   });
@@ -218,14 +218,14 @@ describe('verifyProxyToken', () => {
   });
 
   it('rejects a MAC relabelled with another generation', async () => {
-    const relabelled = `v2.2.${TOK_1.slice('v2.1.'.length)}`;
+    const relabelled = `2.${TOK_1.slice('1.'.length)}`;
     const { result, readState } = verify(relabelled);
     expect(await result).toBe(false);
     expect(readState).not.toHaveBeenCalled();
   });
 
   it('rejects a bad MAC without reading the floor', async () => {
-    const badMac = `v2.1.${'A'.repeat(43)}`;
+    const badMac = `1.${'A'.repeat(43)}`;
     for (const token of [badMac, 'A'.repeat(43)]) {
       const { result, readState } = verify(token);
       expect(await result).toBe(false);
@@ -234,14 +234,15 @@ describe('verifyProxyToken', () => {
   });
 
   it.each([
-    ['leading zero generation', `v2.01.${TOK_1.slice('v2.1.'.length)}`],
-    ['leading zero and short MAC', 'v2.01.x'],
+    ['generation zero in the dotted form', `0.${TOK_1.slice('1.'.length)}`],
+    ['leading zero generation', `01.${TOK_1.slice('1.'.length)}`],
+    ['leading zero and short MAC', '01.x'],
     ['42-char MAC', TOK_0.slice(0, 42)],
     ['44-char MAC', `${TOK_0}A`],
     ['trailing padding', `${TOK_0}=`],
     ['standard base64 alphabet', `+${TOK_0.slice(1)}`],
     ['empty token', ''],
-    ['unsafe generation', `v2.9999999999999999.${TOK_1.slice('v2.1.'.length)}`],
+    ['unsafe generation', `9999999999999999.${TOK_1.slice('1.'.length)}`],
   ])('rejects a malformed token (%s) without reading the floor', async (_name, token) => {
     const { result, readState } = verify(token);
     expect(await result).toBe(false);
@@ -416,7 +417,7 @@ describe('verifyProxyInternalAuth', () => {
   it.each([
     ['42 chars', INTERNAL['resolve-worker'].slice(0, 42)],
     ['44 chars', `${INTERNAL['resolve-worker']}A`],
-    ['a v2 token shape', 'v2.1.x'],
+    ['a generation token shape', '1.x'],
     ['a tenant token', TOK_1],
     ['the legacy token', TOK_0],
     ['empty', ''],

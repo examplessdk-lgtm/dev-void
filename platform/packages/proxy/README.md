@@ -47,10 +47,10 @@ seconds; non-email routes return 413 for oversized bodies and 408 for timeouts.
 Each deployed Worker holds its project token in the `__VOID_PROXY_TOKEN`
 binding. Both forms are derived from `JWT_SECRET`:
 
-| Form             | Generation | Value                                                                                                                                                 |
-| ---------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Legacy           | 0          | base64url `HMAC-SHA256(JWT_SECRET, projectId)`                                                                                                        |
-| `v2.<gen>.<mac>` | `<gen>`    | `<mac>` = base64url `HMAC-SHA256(K, "void-proxy-token:v2:" + projectId + ":" + gen)`, `K` = HKDF of `JWT_SECRET` (salt `void-proxy-token`, info `v2`) |
+| Form          | Generation | Value                                                                                                                                                       |
+| ------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Legacy        | 0          | base64url `HMAC-SHA256(JWT_SECRET, projectId)`                                                                                                              |
+| `<gen>.<mac>` | 1 and up   | `<mac>` = base64url `HMAC-SHA256(K, "void-proxy-token:" + projectId + ":" + gen)`, `K` = HKDF of `JWT_SECRET` (salt `void-proxy-token`, info `proxy-token`) |
 
 The ROUTING key `proxy-token:{projectId}` holds the project's accept floor,
 `{"gen": N}`. A token is accepted when its MAC is valid and its generation is at
@@ -73,8 +73,8 @@ generation. It never sends a generation above the issued one.
 
 The proxy authenticates its own `resolve-worker`, `resolve-resource`, and
 `verify-prerender-build` calls with `x-void-proxy-internal`, an HMAC under a
-separate HKDF key (salt `void-proxy-internal`, info `v1`) bound to the route and
-project. That value never leaves the platform. The proxy also sends the legacy
+separate HKDF key (salt `void-proxy-internal`, info `proxy-internal`) bound to
+the route and project. That value never leaves the platform. The proxy also sends the legacy
 `x-void-internal` header so an older API keeps working.
 
 ## Endpoints

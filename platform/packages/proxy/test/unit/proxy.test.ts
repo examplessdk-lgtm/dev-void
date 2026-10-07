@@ -1153,7 +1153,7 @@ describe('proxy worker', () => {
       vi.restoreAllMocks();
     });
 
-    it('accepts the legacy and v2 tokens while no floor is set', async () => {
+    it('accepts the legacy and generation 1 tokens while no floor is set', async () => {
       for (const gen of [0, 1]) {
         clearProxyTokenStateCache();
         const env = createEnv();

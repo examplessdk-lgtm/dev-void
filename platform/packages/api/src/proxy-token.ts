@@ -8,8 +8,9 @@ import { isProjectId } from './id.ts';
  *
  * - legacy (generation 0): base64url(HMAC-SHA256(JWT_SECRET, projectId)),
  *   43 characters, the bytes `hmacSignState` produces;
- * - `v2.<gen>.<mac>`: the MAC is HMAC-SHA256 under a key derived from
- *   JWT_SECRET with HKDF, over the project id and the generation.
+ * - `<gen>.<mac>` (generation 1 and above): the MAC is HMAC-SHA256 under a
+ *   key derived from JWT_SECRET with HKDF, over the project id and the
+ *   generation. The dot keeps it apart from the 43-character legacy token.
  *
  * ROUTING `proxy-token:<projectId>` holds the accept floor `{"gen": F}`. A
  * token is accepted when its MAC is valid and its generation is at least F.
@@ -143,20 +144,26 @@ async function hkdfHmacKey(secret: string, salt: string, info: string): Promise<
   );
 }
 
+// JWT_SECRET signs login JWTs, OAuth/link state and the legacy token as a raw
+// HMAC key. The two keys below are HKDF outputs with their own salt and info,
+// so they differ from that raw key and from each other: a tenant token never
+// verifies as a proxy internal value, and neither verifies as any raw-key MAC.
 function proxyTokenKey(secret: string): Promise<CryptoKey> {
-  return cachedKey(proxyTokenKeys, secret, () => hkdfHmacKey(secret, 'void-proxy-token', 'v2'));
+  return cachedKey(proxyTokenKeys, secret, () =>
+    hkdfHmacKey(secret, 'void-proxy-token', 'proxy-token'),
+  );
 }
 
 function proxyInternalKey(secret: string): Promise<CryptoKey> {
   return cachedKey(proxyInternalKeys, secret, () =>
-    hkdfHmacKey(secret, 'void-proxy-internal', 'v1'),
+    hkdfHmacKey(secret, 'void-proxy-internal', 'proxy-internal'),
   );
 }
 
 // --- Encoding ---
 
 const MAC = /^[A-Za-z0-9_-]{43}$/;
-const V2_TOKEN = /^v2\.([1-9][0-9]{0,15})\.([A-Za-z0-9_-]{43})$/;
+const GENERATION_TOKEN = /^([1-9][0-9]{0,15})\.([A-Za-z0-9_-]{43})$/;
 
 function encodeBase64url(bytes: ArrayBuffer): string {
   let binary = '';
@@ -181,7 +188,7 @@ async function verify(key: Promise<CryptoKey>, message: string, mac: string): Pr
 }
 
 function proxyTokenMessage(projectId: string, gen: number): string {
-  return `void-proxy-token:v2:${projectId}:${gen}`;
+  return `void-proxy-token:${projectId}:${gen}`;
 }
 
 // --- Tenant tokens ---
@@ -201,7 +208,7 @@ export async function deriveProxyToken(
   if (gen === 0) {
     return sign(legacyKey(jwtSecret), projectId);
   }
-  return `v2.${gen}.${await sign(proxyTokenKey(jwtSecret), proxyTokenMessage(projectId, gen))}`;
+  return `${gen}.${await sign(proxyTokenKey(jwtSecret), proxyTokenMessage(projectId, gen))}`;
 }
 
 /** The token's generation when its MAC is valid for `projectId`, else null. No I/O. */
@@ -216,7 +223,7 @@ export async function proxyTokenGeneration(
   if (MAC.test(token)) {
     return (await verify(legacyKey(jwtSecret), projectId, token)) ? 0 : null;
   }
-  const match = V2_TOKEN.exec(token);
+  const match = GENERATION_TOKEN.exec(token);
   if (!match) {
     return null;
   }
@@ -343,7 +350,7 @@ export const PROXY_INTERNAL_AUTH_HEADER = 'x-void-proxy-internal';
 export type ProxyInternalRoute = 'resolve-worker' | 'resolve-resource' | 'verify-prerender-build';
 
 function proxyInternalMessage(route: ProxyInternalRoute, projectId: string): string {
-  return `void-proxy-internal:v1\n${route}\n${projectId}`;
+  return `void-proxy-internal\n${route}\n${projectId}`;
 }
 
 /**

@@ -216,7 +216,7 @@ describe('project token generations', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('accepts the legacy and v2 tokens at /internal/revalidate while no floor is set', async () => {
+  it('accepts the legacy and generation 1 tokens at /internal/revalidate while no floor is set', async () => {
     const project = await liveProject();
     for (const gen of [0, 1]) {
       const response = await internalRequest(
