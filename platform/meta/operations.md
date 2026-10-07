@@ -68,7 +68,17 @@ These commands are for Void Cloud's Workers. Self-hosted installations use the [
 
 ### Proxy token rotation
 
-`void platform system rotate-proxy-tokens` replaces the project tokens tenant Workers use to call the proxy; see the [proxy README](../packages/proxy/README.md#project-tokens) for the token format and accept floor. Rotation needs the API, proxy, and dispatch Workers that accept token generations to run in production one release before the release that adds rotation. After that release is deployed, rotate one canary project on staging with `--project <id> --yes`, check AI, email, queues, crons, remote D1/KV/R2, prerendering, and WebSocket reconnects, then run the bulk `--yes` on staging, then on production.
+`void platform system rotate-proxy-tokens` replaces the project tokens tenant Workers use to call the proxy; see the [proxy README](../packages/proxy/README.md#project-tokens) for the token format and accept floor. Rotation needs the API, proxy, and dispatch Workers that accept token generations to run in production one release before the release that adds rotation: that release starts rotating every project still on the legacy token as soon as it is deployed. Staging deploys first and is the canary: check `--plan` on staging until `legacy`, `pending` and `failed` are all 0, and check AI, email, queues, crons, remote D1/KV/R2, prerendering, and WebSocket reconnects on a staging app. Then advance `prod` and check `--plan` on production the same way.
+
+Workers deployed before the binding rename keep the old credential in `__AI_TOKEN`; rotation skips them and then raises the floor, so they lose AI, email and ISR revalidation. Before the rotation release reaches staging, and again before production, list the active ones and get each redeployed. Set `rename_live_at` (psql `\set`) to the first production deploy that contains commit `54375ae1` (2026-03-03); if unsure, use a later time. Static deployments in the list need nothing.
+
+```sql
+SELECT p.id, p.slug, d.id AS deployment_id, d.created_at
+FROM deployments d JOIN projects p ON p.id = d.project_id
+WHERE d.id = p.active_deployment_id
+  AND p.status <> 'deleting'
+  AND d.created_at < :'rename_live_at';
+```
 
 The API also requests a rotation when a collaborator or admin loses deploy access, and again when a deploy or rollback replaces code from a user who can no longer deploy. The API cron advances rotations every two minutes. A failed step is retried after 15 minutes and logs `[proxy-token-rotation] FAILED <project> phase=<phase> attempts=<n> worker=<name>: <error>`. Alert on `attempts >= 4` (about one hour of retries); project owners and admins see a CLI warning at the same point. `--plan --project <id>` shows the job's phase and last error.
 

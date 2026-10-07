@@ -98,20 +98,19 @@ void platform rollback [id] --runtime /path/to/earlier/runtime
 
 Keep the earlier runtime files if you need rollback. If the installed version is a custom build, also pass its files with `--from-runtime /path/to/current/runtime`. Void checks that the earlier version can run against your current database and refuses incompatible rollbacks. A later `upgrade` can move forward again. See [Platform Development](/guide/platform/development/runtime#deploying-your-runtime) for working with custom builds.
 
-After rotating project credentials, roll back only to a release that already accepts rotated credentials. An older release breaks AI, email, ISR revalidation, and remote D1, KV, and R2 for rotated projects. If an older proxy runs next to a newer API, prerendering and remote D1, KV, and R2 also fail for rotated projects until both run the same release. An older release also drops rotations that have not finished, and a rotated project deployed while it runs stays broken after you upgrade again. If you rolled back to such a release, after upgrading again run `void platform system rotate-proxy-tokens --all --yes` and check with `--plan` until nothing is pending or failed. Let running rotations finish before you roll back.
+After upgrading to a release with credential rotation, roll back only to a release that accepts rotated credentials. An older release breaks AI, email, ISR revalidation, and remote D1, KV, and R2 for rotated projects. If an older proxy runs next to a newer API, prerendering and remote D1, KV, and R2 also fail for rotated projects until both run the same release. An older release also drops rotations that have not finished, and a rotated project deployed while it runs stays broken after you upgrade again. If you rolled back to such a release, after upgrading again run `void platform system rotate-proxy-tokens --all --yes` and check with `--plan` until nothing is pending or failed. Let running rotations finish before you roll back.
 
 :::
 
 #### After upgrading
 
-Projects deployed before credential rotation keep their original platform credentials until you rotate them. After the upgrade finishes, rotate them once and check progress:
+After an upgrade, the platform gives projects deployed before credential rotation new credentials by itself, a few at a time. Check progress until `legacy`, `pending` and `failed` are all 0:
 
 ```sh
-void platform system rotate-proxy-tokens --yes
 void platform system rotate-proxy-tokens --plan
 ```
 
-The platform finishes the rest in the background. Check with `--plan` until nothing is pending or failed; a failed rotation is retried every 15 minutes, and `--plan` shows its error. Each rotated project's live Worker starts a new version, so WebSocket connections reconnect once. See [Platform Operations](/reference/cli/platform-operations#operator-system) for details.
+A failed rotation is retried every 15 minutes, and `--plan` shows its error. Each rotated project's live Worker starts a new version, so WebSocket connections reconnect once. See [Platform Operations](/reference/cli/platform-operations#operator-system) for details.
 
 ### Follow upgrade and rollback progress
 
