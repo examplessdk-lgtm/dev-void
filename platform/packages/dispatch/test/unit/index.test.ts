@@ -3765,9 +3765,33 @@ describe('hashed asset caching', () => {
     expect(workerFetch).toHaveBeenCalledTimes(1); // still 1
   });
 
+  it('does not serve one project cached asset to the next project on the same host', async () => {
+    const url = 'https://test.void.app/assets/main-abc123.js';
+    const previous = createEnv({
+      routing: { workerName: 'old-worker', projectId: 'proj-old', hashedAssetsPrefix: 'assets' },
+      workerResponse: new Response('evil'),
+    });
+    const previousCtx = createCtx();
+    expect(await (await app.fetch(new Request(url), previous.env, previousCtx)).text()).toBe(
+      'evil',
+    );
+    await Promise.all(
+      (previousCtx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]),
+    );
+    expect(edgeCacheStore.size).toBe(1);
+
+    const next = createEnv({
+      routing: { workerName: 'new-worker', projectId: 'proj-new', hashedAssetsPrefix: 'assets' },
+      workerResponse: new Response('fresh'),
+    });
+    const res = await app.fetch(new Request(url), next.env, createCtx());
+    expect(await res.text()).toBe('fresh');
+    expect(next.workerFetch).toHaveBeenCalledOnce();
+  });
+
   it('replaces an unmarked legacy hashed body instead of serving it', async () => {
     edgeCacheStore.set(
-      'https://test.void.app/assets/stale.js',
+      'https://test.void.app/assets/stale.js?_p=proj-1',
       new Response('user-alice', {
         headers: { 'Cache-Control': 'public, max-age=31536000, immutable' },
       }),
@@ -3788,7 +3812,7 @@ describe('hashed asset caching', () => {
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=31536000, immutable');
     await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
 
-    const replacement = edgeCacheStore.get('https://test.void.app/assets/stale.js');
+    const replacement = edgeCacheStore.get('https://test.void.app/assets/stale.js?_p=proj-1');
     expect(replacement?.headers.get(SHARED_CACHE_POLICY_HEADER)).toBe(
       String(SHARED_CACHE_POLICY_VERSION),
     );
@@ -3909,8 +3933,8 @@ describe('hashed asset caching', () => {
 
     await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
 
-    expect(edgeCacheStore.has('https://test.void.app/assets/logo-abc123.png')).toBe(true);
-    expect(edgeCacheStore.has('https://test.void.app/logo')).toBe(false);
+    expect(edgeCacheStore.has('https://test.void.app/assets/logo-abc123.png?_p=proj-1')).toBe(true);
+    expect(edgeCacheStore.has('https://test.void.app/logo?_p=proj-1')).toBe(false);
   });
 
   it('normalizes query strings for cache key', async () => {
@@ -3971,7 +3995,7 @@ describe('hashed asset caching', () => {
     expect(await second.text()).toBe('user-2');
     expect(second.headers.get('Set-Cookie')).toContain('sid=user-2');
     expect(workerFetch).toHaveBeenCalledTimes(2);
-    expect(edgeCacheStore.has(url)).toBe(false);
+    expect(edgeCacheStore.has(`${url}?_p=proj-1`)).toBe(false);
   });
 
   it('keeps credentialed hashed-path responses private without response opt-out headers', async () => {
@@ -4005,7 +4029,7 @@ describe('hashed asset caching', () => {
     expect(workerFetch.mock.calls[0]?.[0].headers.get('Cookie')).toBe('session=alice');
     expect(workerFetch.mock.calls[1]?.[0].headers.get('Cookie')).toBe('session=bob');
     expect(workerFetch).toHaveBeenCalledTimes(2);
-    expect(edgeCacheStore.has(url)).toBe(false);
+    expect(edgeCacheStore.has(`${url}?_p=proj-1`)).toBe(false);
   });
 
   it.each([
@@ -4018,7 +4042,7 @@ describe('hashed asset caching', () => {
         headers: { 'Cache-Control': 'public, max-age=31536000, immutable' },
       }),
     );
-    edgeCacheStore.set(url, currentEntry);
+    edgeCacheStore.set(`${url}?_p=proj-1`, currentEntry);
     const { env, workerFetch } = createEnv({
       routing: {
         workerName: 'test-worker',
@@ -4036,7 +4060,7 @@ describe('hashed asset caching', () => {
 
     expect(await response.text()).toBe('live-user');
     expect(workerFetch).toHaveBeenCalledOnce();
-    expect(await edgeCacheStore.get(url)?.clone().text()).toBe('cached-user');
+    expect(await edgeCacheStore.get(`${url}?_p=proj-1`)?.clone().text()).toBe('cached-user');
   });
 
   it('returns 429 when worker exceeds CPU limit', async () => {

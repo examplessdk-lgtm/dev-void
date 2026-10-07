@@ -788,7 +788,8 @@ describe('WfP asset fallback on CF stub', () => {
 
   it('repairs a pre-existing immutable poison entry without calling the worker', async () => {
     const request = new Request('https://my-app.void.app/assets/app-abc.js');
-    edgeCacheStore.set(request.url, cachedStubResponse('public, max-age=31536000, immutable'));
+    const cacheUrl = `${request.url}?_p=proj_1`;
+    edgeCacheStore.set(cacheUrl, cachedStubResponse('public, max-age=31536000, immutable'));
     const { env, workerFetch } = createEnv({
       routing: {
         workerName: 'user-app',
@@ -811,7 +812,7 @@ describe('WfP asset fallback on CF stub', () => {
     expect(workerFetch).not.toHaveBeenCalled();
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('console.log(1)');
-    expect(await edgeCacheStore.get(request.url)?.clone().text()).toBe('console.log(1)');
+    expect(await edgeCacheStore.get(cacheUrl)?.clone().text()).toBe('console.log(1)');
   });
 
   it('repairs a pre-existing versioned static poison entry', async () => {

@@ -905,6 +905,8 @@ export default {
         // filenames are already content-addressed by their pathname.
         const cacheUrl = new URL(url.toString());
         cacheUrl.search = '';
+        // A host can move to another project; immutable entries must not carry over.
+        cacheUrl.searchParams.set('_p', routing.projectId);
         const cacheKey = new Request(cacheUrl.toString());
 
         // Hashed assets are served straight from the immutable edge cache. Apply

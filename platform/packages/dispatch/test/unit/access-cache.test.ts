@@ -155,9 +155,11 @@ describe.each(['hashed', 'isr'] as const)('Access assertion isolation for %s res
   });
 
   it('replaces edge responses admitted before Access assertions bypassed caching', async () => {
-    const { edgeEntries, origin, request, url } = createHarness(mode);
+    const { edgeEntries, origin, request, routing, url } = createHarness(mode);
     const key =
-      mode === 'hashed' ? url : isrEdgeCacheKey(new Request(url), '/profile', 'deployment').url;
+      mode === 'hashed'
+        ? `${url}?_p=${routing.projectId}`
+        : isrEdgeCacheKey(new Request(url), '/profile', 'deployment').url;
     edgeEntries.set(
       key,
       new Response('profile: alice', {
