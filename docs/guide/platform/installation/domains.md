@@ -23,6 +23,8 @@ Choose an application domain whose wildcard leaves existing Worker Custom Domain
 
 Browser login sessions are specific to each origin. Apps using their own OAuth providers may need to register their new callback URLs. Void's built-in auth uses the request origin automatically unless the app overrides that configuration.
 
+Apps on one application domain can set cookies that the other apps there receive. With a nested domain such as `apps.example.com`, apps can also set cookies for `example.com` and its other subdomains. Apps on `workers.dev` testing URLs can set cookies that every Worker on your account's `workers.dev` subdomain receives. If people outside your team can deploy, use a domain that serves only Void apps. A platform that serves thousands of independent developers can also apply to list its application domain on the [Public Suffix List](https://github.com/publicsuffix/list/wiki/Guidelines).
+
 ### What Changes in Testing Mode?
 
 In testing mode, each app gets a `workers.dev` URL. These URLs continue working after you add a domain; new apps then use the domain.
