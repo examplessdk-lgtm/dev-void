@@ -7,7 +7,8 @@
  *   - `GET    /projects/:id/email/destinations`
  *   - `POST   /projects/:id/email/destinations`
  *   - `DELETE /projects/:id/email/destinations/:destId`
- *   - `GET    /email/destinations/confirm`  (public — the token IS the auth)
+ *   - `GET    /email/destinations/confirm`  (public — shows the Confirm button)
+ *   - `POST   /email/destinations/confirm`  (public — the token IS the auth)
  *
  * Two contracts run through the whole file and are worth stating once:
  *
@@ -1831,10 +1832,11 @@ describe('revokeOwnerVerifiedDestinationsForUserChange', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /email/destinations/confirm — public; the HMAC-signed token IS the auth
+// /email/destinations/confirm — public; the HMAC-signed token IS the auth.
+// GET shows a Confirm button; the button's POST grants consent.
 // ---------------------------------------------------------------------------
 
-describe('GET /email/destinations/confirm', () => {
+describe('/email/destinations/confirm', () => {
   async function seedPlatformPending(
     address: string,
     project: { id: string },
@@ -1874,10 +1876,50 @@ describe('GET /email/destinations/confirm', () => {
 
   async function confirm(token: string): Promise<Response> {
     return app.fetch(
-      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      new Request(
+        `http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`,
+        {
+          method: 'POST',
+        },
+      ),
       env,
     );
   }
+
+  // Mail security scanners fetch every link in a message, so opening the
+  // link must not grant consent on its own.
+  it('opening the link shows a Confirm button and leaves the row pending', async () => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id);
+    const did = await seedPlatformPending('shared@example.com', project);
+    const token = await makeToken(project.id, did, 'shared@example.com');
+
+    const res = await app.fetch(
+      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    const html = await res.text();
+    expect(html).toContain('shared@example.com');
+    expect(html).toContain('<form method="post"');
+    expect(html).toContain(`action="?token=${token}"`);
+    expect(html).not.toContain('Email confirmed');
+
+    const [row] = await env.db
+      .select()
+      .from(emailDestinations)
+      .where(eq(emailDestinations.id, did));
+    expect(row?.status).toBe('pending');
+    expect(row?.verified_at).toBeNull();
+    expect(await readVerifiedDestinations(project.id)).toEqual([]);
+
+    expect(await (await confirm(token)).text()).toContain("You've authorized");
+    const again = await confirm(token);
+    expect(again.status).toBe(200);
+    expect(await again.text()).toContain('Already confirmed');
+  });
 
   it('flips the row to verified and renders the success page', async () => {
     const user = await createTestUser(env.db);
@@ -2414,7 +2456,12 @@ describe('email platform capability', () => {
     );
 
     const res = await app.fetch(
-      new Request(`http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`),
+      new Request(
+        `http://localhost/email/destinations/confirm?token=${encodeURIComponent(token)}`,
+        {
+          method: 'POST',
+        },
+      ),
       capabilityEnv(false),
     );
     expect(res.status).toBe(501);

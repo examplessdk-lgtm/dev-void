@@ -7,7 +7,7 @@ import type { ApiEnv } from '../env.ts';
 /** These service-binding routes independently validate purpose-bound credentials. */
 function internallyAuthenticated(method: string, path: string): boolean {
   return (
-    (method === 'GET' && path === '/email/destinations/confirm') ||
+    ((method === 'GET' || method === 'POST') && path === '/email/destinations/confirm') ||
     (method === 'POST' &&
       (/^\/internal\/(?:resolve-resource|resolve-worker|verify-owner|verify-prerender-build)\/[^/]+$/.test(
         path,

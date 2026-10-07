@@ -67,13 +67,13 @@ export async function sendPlatformVerificationEmail(
     `The Void project "${project.slug}" wants permission to send email to`,
     `${address}.`,
     '',
-    'Click to confirm:',
+    'Open this link and select Confirm:',
     link,
     '',
     'This link expires in 24 hours and can only be used once.',
     '',
     "If you didn't expect this email, ignore it — no permission is granted",
-    'until the link is clicked.',
+    'until you select Confirm.',
   ].join('\r\n');
 
   try {

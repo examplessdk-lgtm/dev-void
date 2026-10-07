@@ -131,7 +131,52 @@ describe('dedicated email gateway', () => {
     expect(response.headers.get('content-type')).toBe('text/html; charset=UTF-8');
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+    expect(response.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
     expect(response.headers.get('set-cookie')).toBeNull();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  // Opening the link shows a Confirm button; consent is the button's POST.
+  it('relays the Confirm button POST with the token and no request body', async () => {
+    const apiFetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+      expect(String(input)).toBe('https://api/email/destinations/confirm?token=payload.signature');
+      expect(init?.body).toBeUndefined();
+      const forwarded = new Request(String(input), init);
+      expect(forwarded.method).toBe('POST');
+      expect([...forwarded.headers]).toEqual([]);
+      return new Response('<!doctype html><p>Confirmed</p>', {
+        headers: { 'content-type': 'text/html; charset=UTF-8' },
+      });
+    });
+    const response = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          cookie: 'untrusted=1',
+        },
+        body: 'token=other.signature',
+      }),
+      env(apiFetch),
+      context,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Confirmed');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+    expect(response.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+
+    const put = await gateway.fetch(
+      new Request('https://gateway.example/email/destinations/confirm?token=payload.signature', {
+        method: 'PUT',
+      }),
+      env(apiFetch),
+      context,
+    );
+    expect(put.status).toBe(404);
     expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 

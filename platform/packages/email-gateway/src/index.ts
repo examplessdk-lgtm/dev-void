@@ -591,10 +591,14 @@ function confirmationResponse(
   status: number,
   contentType?: string | null,
 ): Response {
+  // API response headers are not relayed, so the anti-framing headers are
+  // set here; another site must not frame the Confirm button.
   const headers = new Headers({
     'cache-control': 'no-store',
+    'content-security-policy': "frame-ancestors 'none'",
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
   });
   if (contentType) {
     headers.set('content-type', contentType);
@@ -679,8 +683,10 @@ async function confirmDestination(request: Request, env: Env): Promise<Response>
   try {
     const target = new URL(`https://api${CONFIRMATION_PATH}`);
     target.searchParams.set('token', entries[0]![1]);
+    // GET shows the Confirm button and its POST grants consent. Only the
+    // method and the token are relayed; the request body is not.
     const serviceRequest = env.API.fetch(target.toString(), {
-      method: 'GET',
+      method: request.method,
       redirect: 'manual',
       signal: controller.signal,
     });
@@ -729,7 +735,10 @@ export default {
         emailProtocolVersion: 1,
       });
     }
-    if (request.method === 'GET' && url.pathname === CONFIRMATION_PATH) {
+    if (
+      (request.method === 'GET' || request.method === 'POST') &&
+      url.pathname === CONFIRMATION_PATH
+    ) {
       return confirmDestination(request, env);
     }
     if (request.method !== 'POST') {

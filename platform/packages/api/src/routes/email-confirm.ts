@@ -2,8 +2,10 @@
  * Token-authenticated endpoint for the platform-side destination verification
  * link. The HMAC-signed token IS the auth — it
  * embeds (project_id, destination_id, address, exp) and is validated
- * against EMAIL_SIGNING_SECRET. Single-use is enforced by DB state: the click
- * flips the destination row to 'verified', so a second click finds an
+ * against EMAIL_SIGNING_SECRET. Opening the link (GET) only shows a Confirm
+ * button and never writes, because mail security scanners fetch every link
+ * in a message. The button's POST flips the destination row to
+ * 'verified'; single use is enforced by DB state, so a second POST finds an
  * already-verified row and returns idempotent success.
  *
  * The email gateway exposes the public URL and relays this exact route through
@@ -14,12 +16,13 @@
  */
 
 import { browserPageLead, browserPageStatus } from '@void/platform/browser-page';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { verifyConfirmToken } from '../auth/confirm-token.ts';
 import { platformBrowserPage } from '../browser-page.ts';
 import { getEmailDestinationById, getProject, updateEmailDestinationStatus } from '../db.ts';
 import { escapeHtml } from '../email.ts';
 import type { ApiEnv } from '../env.ts';
+import type { EmailDestination } from '../types.ts';
 
 const app = new Hono<ApiEnv>();
 
@@ -33,7 +36,14 @@ app.use('/destinations/confirm', async (context, next) => {
   context.res.headers.set('referrer-policy', 'no-referrer');
 });
 
-app.get('/destinations/confirm', async (context) => {
+type ConfirmTarget = Readonly<{
+  row: EmailDestination;
+  slug: string;
+  token: string;
+}>;
+
+/** Validates the token and loads the destination row it names. */
+async function loadConfirmTarget(context: Context<ApiEnv>): Promise<ConfirmTarget | Response> {
   const token = context.req.query('token');
   if (!token) {
     return platformBrowserPage(
@@ -75,7 +85,36 @@ app.get('/destinations/confirm', async (context) => {
   }
 
   const project = await getProject(context.get('db'), row.project_id);
-  const slug = project?.slug ?? row.project_id;
+  return { row, slug: project?.slug ?? row.project_id, token };
+}
+
+// Mail security scanners open every link in a message, so opening the link
+// only shows the Confirm button; consent is the POST that button sends.
+app.get('/destinations/confirm', async (context) => {
+  const target = await loadConfirmTarget(context);
+  if (target instanceof Response) {
+    return target;
+  }
+  if (target.row.status === 'verified') {
+    return platformBrowserPage(
+      context,
+      'Email confirmed',
+      successPage(target.slug, target.row.address, true),
+    );
+  }
+  return platformBrowserPage(
+    context,
+    'Confirm email permission',
+    consentPage(target.slug, target.row.address, target.token),
+  );
+});
+
+app.post('/destinations/confirm', async (context) => {
+  const target = await loadConfirmTarget(context);
+  if (target instanceof Response) {
+    return target;
+  }
+  const { row, slug } = target;
 
   if (row.status === 'verified') {
     return platformBrowserPage(context, 'Email confirmed', successPage(slug, row.address, true));
@@ -104,6 +143,13 @@ app.get('/destinations/confirm', async (context) => {
 
   return platformBrowserPage(context, 'Email confirmed', successPage(slug, row.address, false));
 });
+
+function consentPage(slug: string, address: string, token: string): string {
+  return `<div class="void-auth-lead"><h1 id="void-auth-title">Allow ${escapeHtml(slug)} to email ${escapeHtml(address)}?</h1>
+<p>The Void project <strong>${escapeHtml(slug)}</strong> wants permission to send email to <strong>${escapeHtml(address)}</strong>.</p></div>
+<form method="post" action="?token=${escapeHtml(token)}"><button class="void-auth-button void-auth-button-primary" type="submit">Confirm</button></form>
+<p class="void-auth-note">If you didn't expect this, close this page. No permission is granted until you select Confirm.</p>`;
+}
 
 function successPage(slug: string, address: string, alreadyVerified: boolean): string {
   const heading = alreadyVerified ? 'Already confirmed' : 'Email confirmed';
