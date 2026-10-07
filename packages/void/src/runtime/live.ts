@@ -629,13 +629,13 @@ function errorToResponse(error: unknown): Response {
       { status: error.status },
     );
   }
+  // Hooks, bindings and the Durable Object can fail with internal details; log them
+  // on the server and send clients a fixed message.
+  console.error(error);
   return Response.json(
     {
       accepted: false,
-      error: {
-        code: 'INTERNAL_ERROR',
-        message: error instanceof Error ? error.message : String(error),
-      },
+      error: { code: 'INTERNAL_ERROR', message: 'live: internal error.' },
     } satisfies LiveControlResponse,
     { status: 500 },
   );
