@@ -39,6 +39,7 @@ import {
   warnIfPackageJsonIsNotEsm,
   isViteBuildOrPreview,
   getOrCreateDevTriggerToken,
+  devTriggerSecretGuardPlugin,
 } from './plugin-dev-config.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
@@ -797,6 +798,7 @@ export function voidPlugin(options?: {
         ...(viteEnvironment.childEnvironments ?? []),
       ]),
       createWranglerCompatPersistPlugin(root, config),
+      devTriggerSecretGuardPlugin(),
       restartPlugin(),
       bindingWatchPlugin,
       ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),
@@ -884,6 +886,7 @@ export function voidPlugin(options?: {
     }
 
     return [
+      devTriggerSecretGuardPlugin(),
       restartPlugin(),
       envPlugin,
       serverRuntimeOptimizerPlugin,
@@ -1010,6 +1013,7 @@ export function voidPlugin(options?: {
     createDefaultWorkerEnvironmentPlugin(),
     createWorkerEnvironmentSanitizerPlugin([DEFAULT_WORKER_ENVIRONMENT_NAME]),
     createWranglerCompatPersistPlugin(root, config),
+    devTriggerSecretGuardPlugin(),
     restartPlugin(),
     bindingWatchPlugin,
     ...(bindings.needsEmail ? [emailDevInboxPlugin({ devTriggerToken })] : []),

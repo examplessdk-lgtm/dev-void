@@ -12,6 +12,7 @@ import { readConfig } from './config.ts';
 import { resolveLocalD1Target } from './local-d1.ts';
 import { voidLog } from './log.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
+import { devTriggerSecretGuardPlugin } from './plugin-dev-config.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
 import { envClientFoldPlugin } from './plugin-env-client-fold.ts';
@@ -200,6 +201,7 @@ export function createFrameworkPlugins(input: {
   };
 
   return [
+    devTriggerSecretGuardPlugin(),
     createCloudflareBuiltinsExternalPlugin(),
     wranglerCompatPlugin,
     wranglerSyncPlugin,

@@ -49,10 +49,15 @@ describe('playground/analog dev', () => {
     const pg = PLAYGROUND_ROOT;
     rmSync(join(pg, '.void'), { recursive: true, force: true });
     rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
+    rmSync(join(pg, 'dist/.nitro'), { recursive: true, force: true });
     removeWranglerConfig(pg);
 
     DEV_PORT = await getPort();
     DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
+
+    // Analog skips its Nitro dev server when VITEST or NODE_ENV=test is set, so start
+    // the child the way `vp dev` runs for users.
+    const { VITEST: _vitest, NODE_ENV: _nodeEnv, ...userEnv } = process.env;
 
     child = spawn(
       'vp',
@@ -70,7 +75,7 @@ describe('playground/analog dev', () => {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
-          ...process.env,
+          ...userEnv,
           VOID_INSPECTOR_PORT: 'false',
         },
       },
@@ -100,5 +105,21 @@ describe('playground/analog dev', () => {
     expect(wranglerConfig.d1_databases?.some((b) => b.binding === 'DB')).toBe(true);
     expect(wranglerConfig.kv_namespaces?.some((b) => b.binding === 'KV')).toBe(true);
     expect(existsSync(join(ROOT, `${PLAYGROUND}/wrangler.jsonc`))).toBe(false);
+  });
+
+  it('does not serve the dev-trigger token', async () => {
+    const token = readFileSync(join(PLAYGROUND_ROOT, '.void/dev-trigger-token'), 'utf8').trim();
+    // Nitro's dev bundle inlines the trigger dispatch module. Analog builds it before listening.
+    expect(existsSync(join(PLAYGROUND_ROOT, 'dist/.nitro/dev/index.mjs'))).toBe(true);
+
+    for (const path of [
+      '/.void/dev-trigger-token',
+      '/.void/dev-triggers.ts',
+      '/dist/.nitro/dev/index.mjs',
+    ]) {
+      const response = await fetch(`${DEV_BASE}${path}`);
+      expect(response.status, path).toBe(404);
+      expect(await response.text(), path).not.toContain(token);
+    }
   });
 });

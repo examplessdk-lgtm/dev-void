@@ -98,6 +98,21 @@ describe(
       expect(html).toContain('Nuxt + Void');
     });
 
+    it('does not serve the dev-trigger token', async () => {
+      const pg = join(ROOT, PLAYGROUND);
+      const token = readFileSync(join(pg, '.void/dev-trigger-token'), 'utf8').trim();
+
+      const tokenFile = await fetch(`${DEV_BASE}/_nuxt/.void/dev-trigger-token`);
+      expect(tokenFile.status).toBe(404);
+      expect(await tokenFile.text()).not.toContain(token);
+
+      // Nitro's dev bundle inlines the trigger dispatch module.
+      expect(existsSync(join(pg, '.nuxt/dev/index.mjs'))).toBe(true);
+      const fsPath = pg.replaceAll('\\', '/').replace(/^\/+/, '');
+      const bundle = await fetch(`${DEV_BASE}/_nuxt/@fs/${fsPath}/.nuxt/dev/index.mjs`);
+      expect(await bundle.text()).not.toContain(token);
+    });
+
     it('navigates to smoke route via SPA from home page', async () => {
       const { chromium } = await import('playwright');
       const browser = await chromium.launch();

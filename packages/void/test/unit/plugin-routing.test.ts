@@ -174,6 +174,41 @@ describe('routingPlugin', () => {
     expect(workerCode).toContain('cloudflare:workers');
   });
 
+  it('refuses to load the route table in the client environment', async () => {
+    const plugin = routingPlugin(createBareTempRoot(), {
+      isAuthEnabled: () => false,
+      devTriggerToken: 'secret-dev-token',
+    });
+    const config = getHookHandler(plugin.config) as (
+      config: import('vite').UserConfig,
+      env: import('vite').ConfigEnv,
+    ) => void;
+    const configResolved = getHookHandler(plugin.configResolved) as (
+      config: import('vite').ResolvedConfig,
+    ) => void;
+    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
+    const load = getHookHandler(plugin.load) as (
+      this: { environment?: { name?: string } },
+      id: string,
+    ) => Promise<string | undefined>;
+
+    config({}, { command: 'serve', mode: 'development' });
+    configResolved({
+      build: { assetsDir: 'assets' },
+      command: 'serve',
+      mode: 'development',
+      plugins: [],
+    } as unknown as import('vite').ResolvedConfig);
+    await buildStart.call({} as never);
+
+    await expect(
+      load.call({ environment: { name: 'client' } }, 'virtual:void-routes'),
+    ).rejects.toThrow('server-only');
+    await expect(
+      load.call({ environment: { name: 'void_worker' } }, 'virtual:void-routes'),
+    ).resolves.toContain('secret-dev-token');
+  });
+
   it('restarts dev when a structural route change changes the asset routing policy', async () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'routes', 'api.ts'), 'export const GET = () => new Response();\n');

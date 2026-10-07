@@ -9,7 +9,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { join } from 'pathslash';
-import type { ViteDevServer } from 'vite';
+import type { Plugin, ViteDevServer } from 'vite';
 import { voidWarn } from './log.ts';
 
 /** Run `fn` shortly after Vite prints "ready" so dev messages stay visible. */
@@ -114,6 +114,62 @@ export function getOrCreateDevTriggerToken(root: string): string {
     // Fall through and accept the fresh UUID; subsequent reads will win.
     return fresh;
   }
+}
+
+// Request paths that would return the dev-trigger token: `.void/dev-trigger-token`,
+// the generated `.void/dev-triggers.ts`, and Nitro's dev bundle (`.nuxt/dev/` for
+// Nuxt, `dist/.nitro/dev/` for Analog), which inlines that module. Matched anywhere
+// in the decoded, lower-cased path so `/@fs/<abs>/`, `/@id/`, a base such as
+// `/_nuxt/`, case-insensitive file systems, dot segments, `//`, `%2e`, `\` and
+// Windows trailing dots/spaces all hit.
+const DEV_TRIGGER_SECRET_PATH_RE =
+  /(?:^|\/)\.void[. ]*\/(?:.*\/)?dev-trigger|(?:^|\/)\.(?:nuxt|nitro)[. ]*\/(?:.*\/)?dev\//;
+
+export function isDevTriggerSecretRequest(url: string | undefined): boolean {
+  if (!url) {
+    return false;
+  }
+  let path = url.split(/[?#]/, 1)[0] ?? '';
+  for (let i = 0; i < 3; i++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      break;
+    }
+    if (decoded === path) {
+      break;
+    }
+    path = decoded;
+  }
+  return DEV_TRIGGER_SECRET_PATH_RE.test(path.replaceAll('\\', '/').toLowerCase());
+}
+
+/**
+ * Vite serves every root file that `server.fs.deny` does not list, and its default
+ * CORS lets any localhost origin read the reply, so the files above would hand the
+ * token to `--host` peers, other local accounts and other local dev servers.
+ * `server.fs.deny` is not used: a plugin's list replaces Vite's defaults, and the
+ * Cloudflare worker environment applies the same check when it imports
+ * `.void/dev-triggers.ts`. The middleware is added in configureServer, so it runs
+ * before Vite's transform, /@fs/ and static middlewares.
+ */
+export function devTriggerSecretGuardPlugin(): Plugin {
+  return {
+    name: 'void:dev-trigger-secret-guard',
+    apply: 'serve',
+    enforce: 'pre',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (!isDevTriggerSecretRequest(req.url)) {
+          next();
+          return;
+        }
+        res.statusCode = 404;
+        res.end('Not Found');
+      });
+    },
+  };
 }
 
 /**
