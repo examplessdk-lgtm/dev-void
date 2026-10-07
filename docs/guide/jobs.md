@@ -75,3 +75,5 @@ The endpoint works in native Void apps and supported frameworks. Framework jobs 
 ## Deployment behavior
 
 Native scheduled events do not require a manual HTTP token. For framework deployments, HTTP requests to `/__void/scheduled` require a matching `x-void-internal` token: the managed platform supplies its proxy token, or you can explicitly configure `CRON_SECRET` for manual calls. An absent or mismatched token returns `401` without running a job.
+
+On a Void platform, each project can use up to 100 different cron expressions. Jobs that share an expression count once. When you deploy to your own Cloudflare account, Cloudflare's [Cron Trigger limits](https://developers.cloudflare.com/workers/platform/limits/) apply instead.

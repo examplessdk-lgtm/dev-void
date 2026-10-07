@@ -13,6 +13,11 @@ export const MANIFEST_REDIRECT_RULE_STATUSES: ReadonlySet<number> = new Set([
 export const MAX_ROUTING_RULES = 2000;
 export const MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES: number = MAX_ROUTING_RULES;
 const MAX_PAGES = 5000;
+// Each distinct cron expression becomes one message on the platform's shared
+// cron queue, and one user-worker call, every minute it matches. The scheduler
+// dedupes only identical strings. 100 matches Vercel's per-project cap and is
+// far above what real apps declare.
+const MAX_CRON_EXPRESSIONS = 100;
 
 /**
  * Strict literal-hostname regex used to validate `redirectRules[].host` /
@@ -115,6 +120,7 @@ export function validateManifestShape(parsed: unknown): string | null {
     if (!Array.isArray(manifest.schedules)) {
       return 'invalid manifest shape: schedules must be an array';
     }
+    const cronExpressions = new Set<string>();
     for (const schedule of manifest.schedules) {
       if (!isRecord(schedule)) {
         return 'invalid manifest shape: schedules entries must be objects';
@@ -123,6 +129,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (typeof scheduleObject.name !== 'string' || typeof scheduleObject.cron !== 'string') {
         return 'invalid manifest shape: schedules entries must have string name and cron';
       }
+      cronExpressions.add(scheduleObject.cron);
+    }
+    if (cronExpressions.size > MAX_CRON_EXPRESSIONS) {
+      return `invalid manifest shape: schedules has ${cronExpressions.size} distinct cron expressions, exceeds the ${MAX_CRON_EXPRESSIONS} per-project limit`;
     }
   }
 

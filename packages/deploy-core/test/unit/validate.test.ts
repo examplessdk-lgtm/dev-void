@@ -54,3 +54,41 @@ describe('managed email protocol', () => {
     }
   });
 });
+
+describe('cron expression cap', () => {
+  const distinctCron = (i: number) => `${i % 60} ${Math.floor(i / 60)} * * *`;
+  const withCrons = (crons: Array<string>) => ({
+    version: 3,
+    bindings: {},
+    schedules: crons.map((cron, i) => ({ name: `job${i}`, cron })),
+  });
+
+  it('accepts 100 distinct expressions', () => {
+    expect(
+      validateManifestShape(withCrons(Array.from({ length: 100 }, (_, i) => distinctCron(i)))),
+    ).toBeNull();
+  });
+
+  it('counts a shared expression once', () => {
+    expect(
+      validateManifestShape(withCrons(Array.from({ length: 500 }, (_, i) => distinctCron(i % 10)))),
+    ).toBeNull();
+  });
+
+  it('rejects 101 distinct expressions', () => {
+    const result = validateManifestShape(
+      withCrons(Array.from({ length: 101 }, (_, i) => distinctCron(i))),
+    );
+    expect(result).toContain('101 distinct cron expressions');
+    expect(result).toContain('100 per-project limit');
+  });
+
+  it('counts different spellings separately', () => {
+    const crons = [
+      ...Array.from({ length: 99 }, (_, i) => distinctCron(i)),
+      '* * * * *',
+      '*  * * * *',
+    ];
+    expect(validateManifestShape(withCrons(crons))).toContain('101 distinct');
+  });
+});
