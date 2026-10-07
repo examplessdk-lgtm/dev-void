@@ -16,6 +16,7 @@ import {
   bootstrapPlatformAdmin,
   getUserByOAuthAccount,
   getUserByEmail,
+  getOAuthAccountIdForUser,
   updateUserProviderId,
   createOAuthAccount,
   storeOAuthNonce,
@@ -217,8 +218,13 @@ export async function handleAdminOAuthCallback(context: Context<ApiEnv>): Promis
   // Fall back to email lookup — handles first login after seeding by email
   if (!user && email && emailVerified) {
     const byEmail = await getUserByEmail(db, email);
-    if (byEmail && byEmail.provider === provider) {
-      // Backfill the real provider_id so future logins match directly
+    // Backfill only an account seeded by email that has never signed in with this
+    // provider. Never replace or add to an identity the account already linked.
+    if (
+      byEmail &&
+      byEmail.provider === provider &&
+      (await getOAuthAccountIdForUser(db, byEmail.id, provider)) === null
+    ) {
       await updateUserProviderId(db, byEmail.id, providerId);
       await createOAuthAccount(db, byEmail.id, provider, providerId);
       user = byEmail;

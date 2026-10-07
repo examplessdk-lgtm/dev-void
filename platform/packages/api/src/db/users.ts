@@ -339,10 +339,22 @@ export async function countUserDeploymentsToday(db: Db, userId: string): Promise
  * column on membership rows and the connect-authz caller-identity bind.
  */
 export async function getGitHubAccountIdForUser(db: Db, userId: string): Promise<string | null> {
+  return getOAuthAccountIdForUser(db, userId, 'github');
+}
+
+/**
+ * Resolve the provider id of a user's linked identity for `provider`, or null
+ * when the user has never signed in with that provider.
+ */
+export async function getOAuthAccountIdForUser(
+  db: Db,
+  userId: string,
+  provider: string,
+): Promise<string | null> {
   const existing = await db
     .select({ providerId: oauthAccounts.provider_id })
     .from(oauthAccounts)
-    .where(and(eq(oauthAccounts.user_id, userId), eq(oauthAccounts.provider, 'github')))
+    .where(and(eq(oauthAccounts.user_id, userId), eq(oauthAccounts.provider, provider)))
     .limit(1);
   return existing[0]?.providerId ?? null;
 }

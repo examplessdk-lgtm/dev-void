@@ -19,6 +19,7 @@ export {
   updateUserPlan,
   countUserDeploymentsToday,
   getGitHubAccountIdForUser,
+  getOAuthAccountIdForUser,
 } from './db/users.ts';
 
 export {

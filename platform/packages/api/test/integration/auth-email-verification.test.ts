@@ -1108,3 +1108,143 @@ describe('email verification gating on account linking', () => {
     });
   });
 });
+
+describe('email match never reaches an administrator account', () => {
+  async function createAdminWithEmail(login: string, provider: string, providerId: string) {
+    const admin = await createTestUser(env.db, login, provider, providerId, 'custom', 'admin');
+    await env.db.update(users).set({ email: 'admin@example.com' }).where(eq(users.id, admin.id));
+    return admin;
+  }
+
+  async function callback(provider: string, accept?: string): Promise<Response> {
+    const state = await buildSignedState(provider);
+    await seedOAuthNonce(env.db, 'test-nonce');
+    return app.fetch(
+      new Request(`http://localhost/auth/callback?code=test-code&state=${state}`, {
+        headers: { Cookie: 'oauth_nonce=test-nonce', ...(accept ? { Accept: accept } : {}) },
+      }),
+      env,
+      executionCtx,
+    );
+  }
+
+  async function githubIdsFor(userId: string): Promise<Array<string>> {
+    const rows = await env.db
+      .select({ providerId: oauthAccounts.provider_id })
+      .from(oauthAccounts)
+      .where(and(eq(oauthAccounts.user_id, userId), eq(oauthAccounts.provider, 'github')));
+    return rows.map((row) => row.providerId);
+  }
+
+  it('refuses a new GitHub login whose verified email matches a Google-first administrator', async () => {
+    await createAdminWithEmail('admin-g', 'google', 'google-admin');
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 444001,
+        login: 'lookalike',
+        email: 'admin@example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await callback('github');
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'identity_link_required' });
+    expect(await getUserByOAuthAccount(env.db, 'github', '444001')).toBeNull();
+    expect(await env.db.select().from(users)).toHaveLength(1);
+  });
+
+  it('refuses a second GitHub login whose verified email matches an administrator', async () => {
+    const admin = await createAdminWithEmail('admin-gh', 'github', '111');
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 222,
+        login: 'lookalike',
+        email: 'admin@example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await callback('github');
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'identity_link_required' });
+    expect(await githubIdsFor(admin.id)).toEqual(['111']);
+    expect(await getUserByOAuthAccount(env.db, 'github', '222')).toBeNull();
+  });
+
+  it('tells an administrator in the browser to use the account they used before', async () => {
+    await createAdminWithEmail('admin-gh', 'github', '111');
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 222,
+        login: 'lookalike',
+        email: 'admin@example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await callback('github', 'text/html,application/xhtml+xml');
+
+    expect(res.status).toBe(409);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const html = await res.text();
+    expect(html).toContain('This login is not linked');
+    expect(html).toContain('Sign in again with the GitHub or Google account you used before.');
+    expect(html).not.toContain('contact your platform administrator');
+  });
+
+  it('refuses a new Google login whose verified email matches a GitHub-first administrator', async () => {
+    await createAdminWithEmail('admin-gh', 'github', '111');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === 'https://oauth2.googleapis.com/token') {
+          return Response.json({ access_token: 't' });
+        }
+        if (url === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+          return Response.json({
+            id: 'g-new',
+            email: 'admin@example.com',
+            name: 'x',
+            verified_email: true,
+          });
+        }
+        throw new Error(`Unmocked fetch: ${url}`);
+      }),
+    );
+
+    const res = await callback('google');
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'identity_link_required' });
+    expect(await getUserByOAuthAccount(env.db, 'google', 'g-new')).toBeNull();
+  });
+
+  it('still signs an administrator in with an already linked login', async () => {
+    const admin = await createAdminWithEmail('admin-ok', 'github', '333');
+    vi.stubGlobal(
+      'fetch',
+      mockGitHubApi({
+        id: 333,
+        login: 'admin-ok',
+        email: 'admin@example.com',
+        emailVerified: true,
+      }),
+    );
+
+    const res = await callback('github');
+
+    expect(res.status).toBe(302);
+    const token = new URL(res.headers.get('Location')!).searchParams.get('token')!;
+    const { verifyJwt } = await import('../../src/auth/jwt.ts');
+    const payload = await verifyJwt(token, JWT_SECRET);
+    expect(payload?.sub).toBe(admin.id);
+  });
+});

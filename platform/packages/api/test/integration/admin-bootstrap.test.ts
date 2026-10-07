@@ -171,6 +171,40 @@ describe('first administrator dashboard login', () => {
     },
   );
 
+  it('does not replace a linked administrator identity on a matching email', async () => {
+    const owner = await createTestUser(env.db, 'owner', 'github', '5000', 'custom', 'admin');
+    await env.db.update(users).set({ email: 'owner@example.com' }).where(eq(users.id, owner.id));
+    github = { id: 9999, login: 'other', email: 'owner@example.com', verified: true };
+
+    const response = await login();
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get('Set-Cookie')).not.toContain('admin_token=');
+    const [row] = await env.db.select().from(users).where(eq(users.id, owner.id));
+    expect(row?.provider_id).toBe('5000');
+    expect(
+      await env.db.select().from(oauthAccounts).where(eq(oauthAccounts.provider_id, '9999')),
+    ).toHaveLength(0);
+  });
+
+  it('links the first login of an administrator seeded by email', async () => {
+    const seeded = await createTestUser(env.db, 'owner', 'github', 'seeded', 'custom', 'admin');
+    await env.db.delete(oauthAccounts).where(eq(oauthAccounts.user_id, seeded.id));
+    await env.db.update(users).set({ email: 'owner@example.com' }).where(eq(users.id, seeded.id));
+    github = { id: 9998, login: 'owner', email: 'owner@example.com', verified: true };
+
+    const response = await login();
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe('/admin/');
+    expect(response.headers.get('Set-Cookie')).toContain('admin_token=');
+    const [row] = await env.db.select().from(users).where(eq(users.id, seeded.id));
+    expect(row?.provider_id).toBe('9998');
+    expect(await env.db.select().from(oauthAccounts)).toEqual([
+      expect.objectContaining({ user_id: seeded.id, provider: 'github', provider_id: '9998' }),
+    ]);
+  });
+
   it('allows repeated and concurrent owner logins without duplicate users', async () => {
     const requests = [await startLogin(), await startLogin()];
     const responses = await Promise.all(requests.map((request) => app.fetch(request, env)));

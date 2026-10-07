@@ -73,15 +73,19 @@ app.use('*', async (context, next) => {
       .clone()
       .json()
       .catch(() => null)) as { error?: string } | null;
-    const expired = body?.error === 'invalid or expired OAuth state';
-    context.res = platformBrowserError(
-      context,
-      expired ? 'Your sign-in link expired' : 'Login failed',
-      expired
-        ? 'Start a new sign-in to continue.'
-        : 'Login could not be completed. Start a new sign-in or contact your platform administrator.',
-      context.res.status as 400,
-    );
+    const [title, message] =
+      body?.error === 'invalid or expired OAuth state'
+        ? ['Your sign-in link expired', 'Start a new sign-in to continue.']
+        : body?.error === 'identity_link_required'
+          ? [
+              'This login is not linked',
+              'This email belongs to an existing account. Sign in again with the GitHub or Google account you used before.',
+            ]
+          : [
+              'Login failed',
+              'Login could not be completed. Start a new sign-in or contact your platform administrator.',
+            ];
+    context.res = platformBrowserError(context, title, message, context.res.status as 400);
   }
 });
 app.get('/test', (context) => startLoginTest(context));
@@ -392,6 +396,19 @@ app.get('/callback', async (context) => {
     // Link new provider to existing account with the same email.
     const existing = await getUserByEmail(db, email);
     if (existing) {
+      if (existing.role === 'admin') {
+        // An administrator's login token can open an operator session, so a matching
+        // email alone must not sign in to or link an administrator account.
+        // Administrators sign in with a login already linked to them. Managed login
+        // refuses email links for every account.
+        return context.json(
+          {
+            error: 'identity_link_required',
+            message: 'Sign in again with the GitHub or Google account you used before.',
+          },
+          409,
+        );
+      }
       if (resolvedProvider === 'github') {
         // Enforce RFC 0074's one-github-identity-per-account invariant on the login
         // path too (Vercel model: a Void account has a single GitHub login identity;
