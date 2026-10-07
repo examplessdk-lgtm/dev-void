@@ -828,7 +828,11 @@ async function runClaimed(
   }
 }
 
-/** Takes the lease on one due job. A busy or waiting job is not a failure, so `attempts` stays. */
+/**
+ * Takes the lease on one due job. A busy or waiting job is not a failure, so
+ * `attempts` stays. Bulk and deploy-time legacy jobs go last, so a rotation
+ * for a removed member does not wait behind the rotation of every project.
+ */
 async function claimDueJob(db: Db, projectId?: string): Promise<string | null> {
   const result = await db.execute<{ project_id: string }>(sql`
     UPDATE ${projectCleanupJobs} SET next_attempt_at = now() + ${CLAIM_LEASE}
@@ -836,7 +840,8 @@ async function claimDueJob(db: Db, projectId?: string): Promise<string | null> {
       SELECT target FROM ${projectCleanupJobs}
       WHERE kind = ${PROXY_TOKEN_ROTATION_JOB_KIND} AND next_attempt_at <= now()
         ${projectId ? sql`AND target = ${proxyTokenRotationTarget(projectId)}` : sql``}
-      ORDER BY next_attempt_at, created_at
+      ORDER BY (payload->>'reason' IN ('operator-bulk', 'legacy-init')) IS TRUE,
+        next_attempt_at, created_at
       LIMIT 1
       FOR UPDATE SKIP LOCKED
     )

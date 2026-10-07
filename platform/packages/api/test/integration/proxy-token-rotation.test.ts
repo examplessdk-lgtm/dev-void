@@ -1037,6 +1037,38 @@ describe('proxy token rotation', () => {
     expect(await floor(fx.projectId)).toEqual({ gen: 2 });
   });
 
+  it('claims a member request before older bulk jobs', async () => {
+    const cf = cfApi();
+    const backlog = await setupProject(cf);
+    const started = await setupProject(cf);
+    const removed = await setupProject(cf);
+    expect(await requestBulkProxyTokenRotations(env.db, 'legacy')).toBe(3);
+    await advance(started.projectId, { waitMs: 60_000 });
+    await env.db
+      .update(projectCleanupJobs)
+      .set({ next_attempt_at: sql`now() - interval '1 hour'` })
+      .where(eq(projectCleanupJobs.target, proxyTokenRotationTarget(backlog.projectId)));
+
+    await request(started.projectId, 'member');
+    await request(removed.projectId, 'member');
+    expect((await job(started.projectId))!.payload).toMatchObject({
+      reason: 'member-removed',
+      again: '1',
+    });
+    expect((await job(removed.projectId))!.payload).toEqual({
+      phase: 'requested',
+      reason: 'member-removed',
+    });
+
+    hooks.fetch = (method) =>
+      method === 'PATCH'
+        ? new Response('{}', { status: 429, headers: { 'Retry-After': '120' } })
+        : undefined;
+    await reconcileProxyTokenRotations(env.db, testEnv, { waitMs: 0 });
+    expect(await issued(removed.projectId)).toBe(1);
+    expect((await job(backlog.projectId))!.payload.phase).toBe('requested');
+  });
+
   it('drops the job when the project is being deleted', async () => {
     const cf = cfApi();
     const fx = await setupProject(cf);
@@ -1370,7 +1402,7 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     const trusted = await deploy(team.projectId, team.owner.jwt);
     expect((await job(team.projectId))!.payload).toEqual({
       phase: 'requested',
-      reason: 'member-removed',
+      reason: 'untrusted-deploy-replaced',
     });
     expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
     await expectWorkersOn(cf, team, [untrusted, trusted], 2);

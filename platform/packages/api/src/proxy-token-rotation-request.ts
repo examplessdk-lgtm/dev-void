@@ -30,7 +30,8 @@ export function rotationLog(event: string, projectId: string, detail = ''): void
  * Asks for a new token generation. A job that has not started yet already
  * covers the request; one past START may have handed out tok(T), so it
  * finishes and then runs once more (`again`). Operator requests also make the
- * job due now. Call inside the caller's transaction.
+ * job due now. Member requests take over the job's reason, so a queued bulk
+ * job is no longer claimed last. Call inside the caller's transaction.
  */
 export async function requestProxyTokenRotation(
   tx: DbOrTx,
@@ -55,10 +56,7 @@ export async function requestProxyTokenRotation(
       set:
         mode === 'operator'
           ? { payload: flagAgain, next_attempt_at: sql`now()` }
-          : { payload: flagAgain },
-      ...(mode === 'member'
-        ? { setWhere: sql`${projectCleanupJobs.payload}->>'phase' <> 'requested'` }
-        : {}),
+          : { payload: sql`${flagAgain} || jsonb_build_object('reason', ${reason}::text)` },
     })
     .returning({ phase: sql<string>`${projectCleanupJobs.payload}->>'phase'` });
   if (rows.length > 0) {
