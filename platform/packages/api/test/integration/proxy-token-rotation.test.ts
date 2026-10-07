@@ -1512,19 +1512,42 @@ describe('rotation after code from a user who lost deploy access is replaced', (
     expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
   });
 
-  it('does not rotate for code with no recorded author', async () => {
-    cfApi();
-    const team = await setupTeam();
-    const untrusted = await deploy(team.projectId, team.collaborator.jwt);
+  // Deployments made before project teams have no recorded author. Only the
+  // owner could deploy then, and the billing user is that owner.
+  async function unattributed(deploymentId: string, ownerThen: string): Promise<void> {
     await env.db
       .update(deployments)
-      .set({ initiated_by_user_id: null })
-      .where(eq(deployments.id, untrusted));
+      .set({ initiated_by_user_id: null, billing_user_id: ownerThen })
+      .where(eq(deployments.id, deploymentId));
+  }
+
+  it('does not rotate for code without an author from an owner who can still deploy', async () => {
+    cfApi();
+    const team = await setupTeam();
+    const old = await deploy(team.projectId, team.owner.jwt);
+    await unattributed(old, team.owner.id);
     await removeCollaborator(team);
     await finish(team.projectId);
 
     await deploy(team.projectId, team.owner.jwt);
     expect(await job(team.projectId)).toBeUndefined();
+  });
+
+  it('treats code without an author as deployed by the owner of that time', async () => {
+    const cf = cfApi();
+    const team = await setupTeam();
+    // The collaborator owned the project before transferring it.
+    const retained = await deploy(team.projectId, team.collaborator.jwt);
+    const old = await deploy(team.projectId, team.collaborator.jwt);
+    await unattributed(retained, team.collaborator.id);
+    await unattributed(old, team.collaborator.id);
+    await removeCollaborator(team);
+    expect(await finish(team.projectId)).toEqual({ status: 'done', gen: 2 });
+    await expectWorkersOn(cf, team, [old], 2);
+    await expectWorkersOn(cf, team, [retained], 1);
+
+    await deploy(team.projectId, team.owner.jwt);
+    expect((await job(team.projectId))!.payload.reason).toBe('untrusted-deploy-replaced');
   });
 
   it('does not treat a suspended owner as lost deploy access', async () => {

@@ -200,8 +200,14 @@ export async function requestBulkProxyTokenRotations(db: DbOrTx): Promise<number
   return count;
 }
 
-/** The user who deployed a deployment's code. */
-const deploymentAuthor = deployments.initiated_by_user_id;
+/**
+ * The user who deployed a deployment's code. Deployments from before project
+ * teams record no author; only the owner could deploy then, and their billing
+ * user (backfilled with the owner when teams shipped) is that owner.
+ */
+const deploymentAuthor = sql<
+  string | null
+>`coalesce(${deployments.initiated_by_user_id}, ${deployments.billing_user_id})`;
 
 type CodeAuthor = Readonly<{ userId: string | null; suspendedReason: string | null }>;
 
