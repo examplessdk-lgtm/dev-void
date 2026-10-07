@@ -5,6 +5,7 @@ import {
   extractPageDataFromHtml,
   hasCurrentSharedCachePolicy,
   hasSharedCacheOptOut,
+  hasUnlistedQueryParams,
   isFrameworkDocumentRequest,
   isSharedCacheableResponse,
   isrCacheResponse,
@@ -600,8 +601,9 @@ export async function handleFrameworkIsr(
  * Run the ISR caching ladder for a request.
  *
  * Returns a cached/rendered `Response` when ISR applies, or `null` when the
- * caller should render live itself (request not ISR-eligible, or a read/hit
- * cache op failed open).
+ * caller should render live itself (request not ISR-eligible, a read/hit
+ * cache op failed open, or a cache miss for a URL carrying query params
+ * outside the allowlist).
  *
  * Ladder:
  *   - Bail (`null`) if not GET, an API path, a Range request, `shouldBypassIsr`,
@@ -670,6 +672,9 @@ async function handleIsrInternal(
   const host = url.hostname;
   const normalizedVariantUrl = buildVariantOriginalUrl(request.url, pathname, queryAllowlist);
   const variantUrl = new URL(normalizedVariantUrl).search ? normalizedVariantUrl : null;
+  // The key drops these params, but a render may still read them. Never store
+  // such a render under the shared key.
+  const unlisted = hasUnlistedQueryParams(request.url, pathname, queryAllowlist);
   const cache = edgeCache();
   const htmlKey = htmlEdgeKey(host, pathname, deploymentId, variantUrl);
   const jsonKey = jsonEdgeKey(host, pathname, deploymentId, variantUrl);
@@ -736,7 +741,14 @@ async function handleIsrInternal(
         ctx.waitUntil(
           revalidateInBackground(
             env,
-            request,
+            // Refresh from the key's own URL, not the triggering one.
+            unlisted
+              ? new Request(normalizedVariantUrl, {
+                  method: request.method,
+                  headers: request.headers,
+                  cf: request.cf,
+                })
+              : request,
             host,
             pathname,
             isrTtl,
@@ -761,7 +773,11 @@ async function handleIsrInternal(
     }
   }
 
-  // Miss: render live, cache in the background (only when cacheable).
+  // Miss: render live, cache in the background (only when cacheable). A URL
+  // with params outside the allowlist renders live without filling the cache.
+  if (unlisted) {
+    return null;
+  }
   const response = await render(request);
   if (isEventStreamResponse(response)) {
     return response;

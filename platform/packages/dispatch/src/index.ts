@@ -48,6 +48,7 @@ import type { AssetConfig } from './static.ts';
 import {
   buildVariantOriginalUrl,
   exactQueryAllowlist,
+  hasUnlistedQueryParams,
   type QueryAllowlist,
 } from './variant-key.ts';
 import {
@@ -1150,6 +1151,14 @@ export default {
           routing,
           originalUrlVariant,
         );
+        // The key drops these params, but a render may still read them. Never
+        // store such a render under the shared key. Match the allowlist on the
+        // pre-rewrite path, as the rewrite variant does.
+        const unlisted = hasUnlistedQueryParams(
+          request.url,
+          new URL(request.url).pathname,
+          routing.queryAllowlist,
+        );
         const cacheKey = isrEdgeCacheKey(request, pathname, isrDeploymentId, isrOriginalUrlVariant);
         const jsonCacheKey = isrEdgeCacheKeyJson(
           request,
@@ -1245,11 +1254,22 @@ export default {
             }
             if (stale) {
               const staleCacheResponse = cacheResponse.clone();
+              // Refresh from the key's own URL, not the triggering one.
+              let revalidateRequest = workerRequest;
+              if (unlisted) {
+                const keyUrl = new URL(workerRequest.url);
+                keyUrl.search = isrOriginalUrlVariant ? new URL(isrOriginalUrlVariant).search : '';
+                revalidateRequest = rebuildRequest(workerRequest, keyUrl.toString(), (headers) => {
+                  if (originalUrlHeader && isrOriginalUrlVariant) {
+                    headers.set('X-Void-Original-URL', isrOriginalUrlVariant);
+                  }
+                });
+              }
               ctx.waitUntil(
                 revalidateInBackground(
                   env,
                   routing,
-                  workerRequest,
+                  revalidateRequest,
                   url.hostname,
                   pathname,
                   isrTtl,
@@ -1374,6 +1394,7 @@ export default {
           // user-configured rewrite to a private endpoint must not be able to poison
           // the page key just by omitting Cache-Control.
           if (
+            !unlisted &&
             ttl > 0 &&
             workerResponse.status === 200 &&
             (routing.type !== 'framework' || isHtmlResponse(workerResponse)) &&

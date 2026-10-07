@@ -74,6 +74,29 @@ export function buildVariantOriginalUrl(
   return url.toString();
 }
 
+/**
+ * True when the request carries a query parameter that the cache key leaves
+ * out. A render made from such a URL may depend on that parameter, so it must
+ * not be stored under the shared key.
+ */
+export function hasUnlistedQueryParams(
+  requestUrl: string,
+  pathname: string,
+  allowlist: QueryAllowlist | undefined,
+): boolean {
+  const url = new URL(requestUrl);
+  if (!url.search) {
+    return false;
+  }
+  const allowed = resolveQueryAllowlist(allowlist, pathname);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Keep only exact allowlist patterns for uncapped static-cache consumers. */
 export function exactQueryAllowlist(
   allowlist: QueryAllowlist | undefined,

@@ -569,7 +569,7 @@ describe('handleIsr', () => {
     };
 
     const first = createCtx();
-    await handleIsr(htmlRequest('/search?q=one&utm=a'), env, first.ctx, options, render);
+    await handleIsr(htmlRequest('/search?q=one'), env, first.ctx, options, render);
     await first.flush();
     const second = createCtx();
     const same = await handleIsr(
@@ -584,11 +584,80 @@ describe('handleIsr', () => {
     await handleIsr(htmlRequest('/search?q=two'), env, third.ctx, options, render);
     await third.flush();
 
+    expect(same!.headers.get('x-isr-cache')).toBe('HIT');
     expect(await same!.text()).toBe('<html>one</html>');
     expect(render).toHaveBeenCalledTimes(2);
     expect(store.has(isrKey(DPL, HOST, '/search', `https://${HOST}/search?q=one`))).toBe(true);
     expect(store.has(isrKey(DPL, HOST, '/search', `https://${HOST}/search?q=two`))).toBe(true);
     expect(store.has(isrKey(DPL, HOST, '/search'))).toBe(false);
+  });
+
+  it('leaves a cold key empty when the request carries a query param outside the allowlist', async () => {
+    const { store, kv } = createKvMock();
+    const env = makeEnv(kv);
+    const render = vi.fn(async (request: Request) => {
+      const msg = new URL(request.url).searchParams.get('msg') ?? 'clean';
+      return new Response(`<html>${msg}</html>`, { headers: { 'content-type': 'text/html' } });
+    });
+
+    const poisoned = createCtx();
+    const response = await handleIsr(
+      htmlRequest('/blog/post?msg=evil'),
+      env,
+      poisoned.ctx,
+      OPTS,
+      render,
+    );
+    await poisoned.flush();
+    // The caller renders this request live; nothing reaches a shared cache.
+    expect(response).toBeNull();
+    expect(render).not.toHaveBeenCalled();
+    expect([...store.keys()].filter((k) => k.startsWith(isrPrefix(DPL)))).toEqual([]);
+    expect(edge.store.size).toBe(0);
+
+    const clean = createCtx();
+    const fresh = await handleIsr(htmlRequest('/blog/post'), env, clean.ctx, OPTS, render);
+    await clean.flush();
+    expect(fresh!.headers.get('x-isr-cache')).toBe('MISS');
+    expect(await fresh!.text()).toBe('<html>clean</html>');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
+    expect(await new Response(entry!.body).text()).toBe('<html>clean</html>');
+    expect(
+      await edge.store
+        .get(htmlEdgeKey(HOST, '/blog/post', DPL))!
+        .clone()
+        .text(),
+    ).toBe('<html>clean</html>');
+  });
+
+  it('refreshes a stale entry from the cache key URL when the trigger carries an unlisted param', async () => {
+    const { kv, store } = createKvMock();
+    const env = makeEnv(kv);
+    seedEntry(store, '/blog/post', { body: '<html>stale</html>', createdAt: BASE, ttl: 60 });
+    vi.setSystemTime(BASE + 200_000);
+    const { render, requests } = createRender((request) => {
+      const msg = new URL(request.url).searchParams.get('msg') ?? 'clean';
+      return new Response(`<html>${msg}</html>`, { headers: { 'content-type': 'text/html' } });
+    });
+    const { ctx, flush } = createCtx();
+
+    const res = await handleIsr(
+      htmlRequest('/blog/post?msg=evil', { 'X-Test-Marker': 'keep' }),
+      env,
+      ctx,
+      OPTS,
+      render,
+    );
+    expect(res!.headers.get('x-isr-cache')).toBe('STALE');
+    expect(await res!.text()).toBe('<html>stale</html>');
+    await flush();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe(`https://${HOST}/blog/post`);
+    expect(requests[0]!.headers.get('X-Test-Marker')).toBe('keep');
+    const entry = await readIsrCache(env, HOST, '/blog/post');
+    expect(isStale(entry!)).toBe(false);
+    expect(await new Response(entry!.body).text()).toBe('<html>clean</html>');
   });
 
   it('MISS → renders live, returns MISS, and writes KV + HTML edge in the background', async () => {

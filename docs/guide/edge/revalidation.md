@@ -108,7 +108,7 @@ Requests with `Cookie`, `Authorization`, or Cloudflare Access's `Cf-Access-Jwt-A
 
 For a dispatch rewrite, the cache key includes both the destination and original pathname. A direct request to `/en/docs/foo` therefore uses a different entry from `/docs/foo` rewritten to that destination.
 
-Query parameters are excluded by default. Add `routing.revalidateQueryAllowlist` when specific parameters should produce separate cached responses. Middleware `c.rewrite()` runs after the ISR lookup, so it doesn't create an additional cache variant.
+Query parameters are excluded by default. Add `routing.revalidateQueryAllowlist` when specific parameters should produce separate cached responses. Requests with other query parameters get the cached page. If nothing is cached yet, they render live and are not stored, so add every parameter a page reads to `routing.revalidateQueryAllowlist`. Middleware `c.rewrite()` runs after the ISR lookup, so it doesn't create an additional cache variant.
 
 Purge the destination pathname with `revalidate({ paths })`. Purging `/en/docs/foo` clears both direct and rewritten variants. Purging only `/docs/foo` won't clear them, because the entries are stored under the destination.
 

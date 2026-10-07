@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
+import { hasUnlistedQueryParams } from '../../src/core.ts';
 import {
   isrCacheKey,
   isrCachePrefix,
@@ -150,5 +151,46 @@ describe('ISR variant token hashing', () => {
     const token = m![1]!;
     const fromToken = isrEdgeCacheUrlForToken('app.void.app', '/en/docs', 'dpl_1', 'html', token);
     expect(fromToken).toBe(fromUrl);
+  });
+});
+
+describe('hasUnlistedQueryParams', () => {
+  const allowlist = { '/search': ['q'], '/products/*': ['variant'] };
+
+  it('is false without a query string', () => {
+    expect(hasUnlistedQueryParams('https://h/search', '/search', allowlist)).toBe(false);
+    expect(hasUnlistedQueryParams('https://h/page?', '/page', undefined)).toBe(false);
+  });
+
+  it('is false when every param is allowlisted for the path', () => {
+    expect(hasUnlistedQueryParams('https://h/search?q=a&q=b', '/search', allowlist)).toBe(false);
+  });
+
+  it('is true when any param is outside the allowlist', () => {
+    expect(hasUnlistedQueryParams('https://h/search?q=a&utm=x', '/search', allowlist)).toBe(true);
+    expect(hasUnlistedQueryParams('https://h/page?msg=x', '/page', undefined)).toBe(true);
+    expect(hasUnlistedQueryParams('https://h/page?q=a', '/page', allowlist)).toBe(true);
+  });
+
+  it('resolves wildcard allowlist patterns', () => {
+    expect(
+      hasUnlistedQueryParams('https://h/products/shoe?variant=red', '/products/shoe', allowlist),
+    ).toBe(false);
+    expect(
+      hasUnlistedQueryParams(
+        'https://h/products/shoe?variant=red&q=a',
+        '/products/shoe',
+        allowlist,
+      ),
+    ).toBe(true);
+  });
+
+  it('treats param names case-sensitively', () => {
+    expect(hasUnlistedQueryParams('https://h/search?Q=a', '/search', allowlist)).toBe(true);
+  });
+
+  it('ignores empty separators that carry no param', () => {
+    expect(hasUnlistedQueryParams('https://h/search?&', '/search', allowlist)).toBe(false);
+    expect(hasUnlistedQueryParams('https://h/search?&q=a&', '/search', allowlist)).toBe(false);
   });
 });

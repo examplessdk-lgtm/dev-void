@@ -1415,13 +1415,13 @@ describe('ISR (stale-while-revalidate)', () => {
       }),
     });
 
-    for (let i = 0; i < 3; i++) {
+    for (const query of ['', '?cb=0', '?cb=1', '?cb=2']) {
       const ctx = createCtx();
-      await app.fetch(new Request(`https://my-app.void.app/docs?cb=${i}`), env, ctx);
+      await app.fetch(new Request(`https://my-app.void.app/docs${query}`), env, ctx);
       await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
     }
 
-    // First request renders + writes; subsequent requests hit the same KV
+    // The clean request renders + writes; later requests hit the same KV
     // slot regardless of `?cb=` value, so the worker is invoked exactly once.
     expect(workerFetch).toHaveBeenCalledTimes(1);
     const variantKeys = [...kvStore.keys()].filter((k) => k.includes('#rw='));
@@ -1449,14 +1449,135 @@ describe('ISR (stale-while-revalidate)', () => {
       await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
     };
 
-    await send('https://my-app.void.app/search?q=void&cb=1');
-    await send('https://my-app.void.app/search?q=void&cb=2'); // different cb → same slot (cb dropped)
+    await send('https://my-app.void.app/search?q=void');
+    await send('https://my-app.void.app/search?q=void&cb=1'); // cb dropped → same slot
+    await send('https://my-app.void.app/search?q=void&cb=2'); // different cb → same slot
     await send('https://my-app.void.app/search?q=cloud'); // different q → new slot
 
-    // Three requests, two distinct cache slots, two worker invocations.
+    // Four requests, two distinct cache slots, two worker invocations.
     expect(workerFetch).toHaveBeenCalledTimes(2);
     const variantKeys = [...kvStore.keys()].filter((k) => k.includes('#rw='));
     expect(variantKeys).toHaveLength(2);
+  });
+
+  describe('query params outside the allowlist', () => {
+    const settle = async (ctx: ExecutionContext) => {
+      await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
+    };
+    // The page reflects `msg`, which no allowlist names.
+    const renderMsg = async (request: Request) =>
+      new Response(`<html>${new URL(request.url).searchParams.get('msg') ?? 'clean'}</html>`, {
+        headers: { 'Content-Type': 'text/html' },
+      });
+    const rewriteRules = [{ source: '/old', destination: '/blog/post', status: 200 }];
+
+    it.each([
+      { label: 'a direct request', rewrite: false },
+      { label: 'a redirect-rule rewrite', rewrite: true },
+    ])('does not store a cold render for $label', async ({ rewrite }) => {
+      const source = rewrite ? '/old' : '/blog/post';
+      const { env, workerFetch, kvStore } = createEnv({
+        routing: {
+          workerName: 'user-app',
+          projectId: 'proj_1',
+          ssr: true,
+          revalidate: 60,
+          ...(rewrite ? { redirectRules: rewriteRules } : {}),
+        },
+      });
+      workerFetch.mockImplementation(renderMsg);
+
+      const poisonedCtx = createCtx();
+      const poisoned = await app.fetch(
+        new Request(`https://my-app.void.app${source}?msg=evil`),
+        env,
+        poisonedCtx,
+      );
+      await settle(poisonedCtx);
+      // Rendered live from the full URL for this visitor, but never shared.
+      expect(await poisoned.text()).toBe('<html>evil</html>');
+      expect(kvStore.size).toBe(0);
+      expect(edgeCacheStore.size).toBe(0);
+
+      const cleanCtx = createCtx();
+      const clean = await app.fetch(new Request(`https://my-app.void.app${source}`), env, cleanCtx);
+      await settle(cleanCtx);
+      expect(clean.headers.get('x-isr-cache')).toBe('MISS');
+      expect(await clean.text()).toBe('<html>clean</html>');
+      expect([...kvStore.keys()]).toEqual([
+        isrCacheKey(
+          'proj_1',
+          'legacy',
+          'my-app.void.app',
+          '/blog/post',
+          rewrite ? 'https://my-app.void.app/old' : undefined,
+        ),
+      ]);
+
+      // Once warm, the same unlisted param gets the shared page.
+      const later = await app.fetch(
+        new Request(`https://my-app.void.app${source}?msg=evil`),
+        env,
+        createCtx(),
+      );
+      expect(later.headers.get('x-isr-cache')).toBe('HIT');
+      expect(await later.text()).toBe('<html>clean</html>');
+      expect(workerFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      { label: 'a direct request', rewrite: false, query: '' },
+      { label: 'a redirect-rule rewrite', rewrite: true, query: '' },
+      { label: 'a direct request with an allowlisted param', rewrite: false, query: 'q=a' },
+      { label: 'a redirect-rule rewrite with an allowlisted param', rewrite: true, query: 'q=a' },
+    ])('refreshes a stale entry from the cache key URL for $label', async ({ rewrite, query }) => {
+      const source = rewrite ? '/old' : '/blog/post';
+      const search = query ? `?${query}` : '';
+      const originalUrl =
+        rewrite || query ? `https://my-app.void.app${source}${search}` : undefined;
+      const key = isrCacheKey('proj_1', 'legacy', 'my-app.void.app', '/blog/post', originalUrl);
+      const { env, workerFetch, kvStore } = createEnv({
+        routing: {
+          workerName: 'user-app',
+          projectId: 'proj_1',
+          ssr: true,
+          revalidate: 60,
+          queryAllowlist: { '/blog/post': ['q'], '/old': ['q'] },
+          ...(rewrite ? { redirectRules: rewriteRules } : {}),
+        },
+        assets: {
+          [key]: {
+            body: '<html>stale</html>',
+            createdAt: Date.now() - 120_000,
+            ttl: 60,
+            headers: { 'Content-Type': 'text/html' },
+          },
+        },
+      });
+      workerFetch.mockImplementation(renderMsg);
+
+      const ctx = createCtx();
+      const response = await app.fetch(
+        new Request(`https://my-app.void.app${source}?${query ? `${query}&` : ''}msg=evil`, {
+          headers: { 'X-Test-Marker': 'keep' },
+        }),
+        env,
+        ctx,
+      );
+      expect(response.headers.get('x-isr-cache')).toBe('STALE');
+      expect(await response.text()).toBe('<html>stale</html>');
+      await settle(ctx);
+
+      expect(workerFetch).toHaveBeenCalledOnce();
+      const refresh = workerFetch.mock.calls[0]![0] as Request;
+      expect(refresh.url).toBe(`https://my-app.void.app/blog/post${search}`);
+      expect(refresh.headers.get('X-Test-Marker')).toBe('keep');
+      expect(refresh.headers.get('X-Void-Original-URL')).toBe(
+        rewrite ? `https://my-app.void.app/old${search}` : null,
+      );
+      const unpacked = unpackIsrValue(kvStore.get(key)!.value);
+      expect(new TextDecoder().decode(unpacked!.body)).toBe('<html>clean</html>');
+    });
   });
 
   describe('allowlisted query params on direct requests', () => {
