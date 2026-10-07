@@ -127,6 +127,8 @@ Auth sessions use the same database as your app. Void creates `BETTER_AUTH_SECRE
 
 Local development needs no secret setup. To preview a production build locally, provide `BETTER_AUTH_SECRET`.
 
+`POST`, `PUT`, `PATCH` and `DELETE` requests and WebSocket connections from another origin don't use the signed-in session unless that origin is in `trustedOrigins`. If a separate frontend calls your app, add its origin there (see [Customization](#customization)). If your routes use their own cookies, check the request `Origin` yourself, for example with Hono's [`csrf()`](https://hono.dev/docs/middleware/builtin/csrf) middleware.
+
 ## Customization
 
 For advanced configuration, create `auth.ts` at the project root and export `defineAuth(...)`:

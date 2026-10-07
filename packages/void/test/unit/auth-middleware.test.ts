@@ -10,7 +10,7 @@ vi.mock('better-auth', () => ({
   betterAuth: mocks.betterAuth,
 }));
 
-import type { AuthState } from '../../src/runtime/auth.ts';
+import { requireAuth, type AuthState, type AuthUser } from '../../src/runtime/auth.ts';
 import {
   createVoidAuthRuntime,
   type VoidAuthRuntimeOptions,
@@ -177,5 +177,237 @@ describe('runVoidAuthMiddleware response headers', () => {
     });
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(response.headers.getSetCookie()).toEqual(['session=rotated; Path=/; HttpOnly']);
+  });
+});
+
+describe('cross-origin cookie sessions', () => {
+  const env = { BETTER_AUTH_SECRET: 'test-secret' };
+  const now = new Date();
+  const signedIn: AuthState = {
+    user: {
+      id: 'victim',
+      name: 'Victim',
+      email: 'victim@example.test',
+      emailVerified: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    session: {
+      id: 'victim-session',
+      userId: 'victim',
+      token: 'synthetic-token',
+      expiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  // Better Auth's context matches origins against `this.trustedOrigins`.
+  function mockAuth(
+    options: Record<string, unknown> = {},
+    trustedOrigins: Array<string> = ['https://app.void.app'],
+  ) {
+    mocks.getSession.mockImplementation(async ({ headers }: { headers: Headers }) => ({
+      response: headers.has('cookie') ? signedIn : null,
+      headers: new Headers(),
+    }));
+    mocks.betterAuth.mockReturnValue({
+      api: { getSession: mocks.getSession },
+      options,
+      $context: Promise.resolve({
+        trustedOrigins,
+        isTrustedOrigin(this: { trustedOrigins: Array<string> }, url: string) {
+          return this.trustedOrigins.includes(url);
+        },
+      }),
+    });
+  }
+
+  function upgradeRequest(headers: Record<string, string>): Request {
+    return new Request('https://app.void.app/chat/general', {
+      headers: { upgrade: 'websocket', cookie: 'session=victim', ...headers },
+    });
+  }
+
+  async function sessionCookieFor(request: Request): Promise<string | null> {
+    await runtime.resolveVoidAuthState(request, env, authRuntimeOptions, {} as never);
+    expect(mocks.getSession).toHaveBeenCalledOnce();
+    return (mocks.getSession.mock.calls[0]![0] as { headers: Headers }).headers.get('cookie');
+  }
+
+  function routeApp() {
+    const app = new Hono<{ Variables: { user: AuthUser | null } }>();
+    app.use(async (c, next) => {
+      await runtime.runVoidAuthMiddleware(c, next, authRuntimeOptions, {} as never);
+    });
+    return app;
+  }
+
+  it('ignores the cookie on a WebSocket upgrade from another origin', async () => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(
+        sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+      ).resolves.toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ignores the cookie on a WebSocket upgrade from a plain http page on the same host', async () => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(
+        sessionCookieFor(upgradeRequest({ origin: 'http://app.void.app' })),
+      ).resolves.toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the cookie when Vite HTTPS hands the upgrade over as http', async () => {
+    // The default base URL follows the request, so Better Auth trusts only http.
+    mockAuth({}, ['http://app.void.app']);
+    const request = new Request('http://app.void.app/chat/general', {
+      headers: { upgrade: 'websocket', cookie: 'session=victim', origin: 'https://app.void.app' },
+    });
+    await expect(sessionCookieFor(request)).resolves.toBe('session=victim');
+  });
+
+  it.each([
+    ['the same origin', { origin: 'https://app.void.app' }],
+    ['no origin', {}],
+    [
+      'an opaque origin the browser marks same-origin',
+      { origin: 'null', 'sec-fetch-site': 'same-origin' },
+    ],
+  ])('keeps the cookie on a WebSocket upgrade from %s', async (_label, headers) => {
+    mockAuth();
+    await expect(sessionCookieFor(upgradeRequest(headers))).resolves.toBe('session=victim');
+  });
+
+  it('keeps the cookie for an origin Better Auth trusts', async () => {
+    mockAuth({}, ['https://app.void.app', 'https://admin.example.com']);
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'https://admin.example.com' })),
+    ).resolves.toBe('session=victim');
+  });
+
+  it('evaluates function-form trustedOrigins with the request', async () => {
+    const trustedOrigins = vi.fn(async (request?: Request) =>
+      request?.headers.get('origin') === 'https://admin.example.com'
+        ? ['https://admin.example.com', null]
+        : [],
+    );
+    mockAuth({ trustedOrigins });
+    const request = upgradeRequest({ origin: 'https://admin.example.com' });
+    await expect(sessionCookieFor(request)).resolves.toBe('session=victim');
+    expect(trustedOrigins).toHaveBeenCalledWith(request);
+  });
+
+  it('follows the Better Auth CSRF opt-out options', async () => {
+    mockAuth({ advanced: { disableCSRFCheck: true } });
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+    ).resolves.toBe('session=victim');
+
+    mocks.getSession.mockClear();
+    mockAuth({ advanced: { disableOriginCheck: true } });
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+    ).resolves.toBe('session=victim');
+
+    mocks.getSession.mockClear();
+    mockAuth({ advanced: { disableOriginCheck: true, disableCSRFCheck: false } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(
+        sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+      ).resolves.toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ignores the cookie for an opaque origin that is not same-origin', async () => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(
+        sessionCookieFor(upgradeRequest({ origin: 'null', 'sec-fetch-site': 'same-site' })),
+      ).resolves.toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('leaves a cross-origin WebSocket upgrade without a user in the middleware', async () => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const app = routeApp();
+    app.get('/chat/general', (c) => c.json({ user: c.get('user') }));
+    try {
+      const response = await app.request(
+        upgradeRequest({ origin: 'https://evil.void.app' }),
+        undefined,
+        env,
+      );
+      await expect(response.json()).resolves.toEqual({ user: null });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not sign in a cross-origin POST but keeps its raw cookies', async () => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const app = routeApp();
+    app.post('/api/profile', (c) => {
+      const cookie = c.req.header('cookie');
+      return c.json({ id: requireAuth(c).id, cookie });
+    });
+    app.post('/api/whoami', (c) => c.json({ user: c.get('user'), cookie: c.req.header('cookie') }));
+    try {
+      const init = {
+        method: 'POST',
+        headers: { cookie: 'session=victim', origin: 'https://evil.void.app' },
+        body: '{}',
+      };
+      const denied = await app.request('https://app.void.app/api/profile', init, env);
+      expect(denied.status).toBe(401);
+
+      const whoami = await app.request('https://app.void.app/api/whoami', init, env);
+      await expect(whoami.json()).resolves.toEqual({ user: null, cookie: 'session=victim' });
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[0]![0])).toContain('https://evil.void.app');
+      expect(String(warn.mock.calls[0]![0])).toContain('trustedOrigins');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['a same-origin POST', 'POST', { origin: 'https://app.void.app' }],
+    ['a POST without an Origin header', 'POST', {}],
+    ['a cross-origin GET', 'GET', { origin: 'https://evil.void.app' }],
+  ])('keeps the session for %s', async (_label, method, headers) => {
+    mockAuth();
+    const warn = vi.spyOn(console, 'warn');
+    const app = routeApp();
+    app.on(method, '/api/profile', (c) => c.json({ id: requireAuth(c).id }));
+    try {
+      const response = await app.request(
+        'https://app.void.app/api/profile',
+        { method, headers: { cookie: 'session=victim', ...headers } },
+        env,
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ id: 'victim' });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -151,6 +151,8 @@ Messages are JSON events. Raw string and binary messages are not supported.
 
 When Void auth is enabled, every WebSocket hook receives the current user as `ctx.user`, or `null` for an anonymous connection. Use `onBeforeConnect` to reject unauthenticated clients.
 
+Connections from another origin are anonymous unless that origin is in your auth `trustedOrigins`. If you read your own cookies from `ctx.request`, check its `Origin` header yourself.
+
 ## Hooks
 
 Both `defineRoom()` and `defineWebSocket()` support:
