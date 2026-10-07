@@ -38,8 +38,9 @@ export {
  *
  * `projects.proxy_token_gen` is the highest generation the platform has issued
  * for the project (0 = the legacy token). Deploys bake the token for that
- * generation into the Worker, and the proxy sends it. Only a rotation raises
- * it; the KV accept floor (`proxy-token:<projectId>`) never exceeds it.
+ * generation into the Worker, and the proxy sends it. A Worker deploy moves 0
+ * to 1 (`issueProjectProxyToken`); after that only a rotation raises it. The
+ * KV accept floor (`proxy-token:<projectId>`) never exceeds it.
  */
 
 /** How long a rotation waits for KV copies and old Worker versions to drain. */
@@ -51,12 +52,27 @@ export const PROXY_TOKEN_ROTATION_STUCK_ATTEMPTS = 4;
 /** Cloudflare API calls and wall-clock time one rotation run may still spend. */
 export type RotationBudget = { cfCallsRemaining: number; readonly deadline: number };
 
-/** The token for the project's issued generation. Generation 0 is the legacy token. */
+/**
+ * The token a deploy bakes into its Worker: the one for the project's issued
+ * generation. A project still on generation 0 moves to generation 1 here, so
+ * new code never receives the legacy token. The floor stays where it is:
+ * older Workers of the project keep the legacy token, which stays accepted
+ * until a rotation raises the floor, and the proxy tries it after generation 1.
+ */
 export async function issueProjectProxyToken(
   db: Db,
   jwtSecret: string,
   projectId: string,
 ): Promise<string> {
+  const [initialized] = await db
+    .update(projects)
+    .set({ proxy_token_gen: 1 })
+    .where(and(eq(projects.id, projectId), eq(projects.proxy_token_gen, 0)))
+    .returning({ gen: projects.proxy_token_gen });
+  if (initialized) {
+    console.info('[proxy-token] initialized', { projectId });
+    return deriveProxyToken(jwtSecret, projectId, initialized.gen);
+  }
   const [row] = await db
     .select({ gen: projects.proxy_token_gen })
     .from(projects)
