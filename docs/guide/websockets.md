@@ -153,6 +153,8 @@ When Void auth is enabled, every WebSocket hook receives the current user as `ct
 
 Connections from another origin are anonymous unless that origin is in your auth `trustedOrigins`. If you read your own cookies from `ctx.request`, check its `Origin` header yourself.
 
+`ctx.user` is resolved when the socket connects and stays the same for that connection, even if the user later signs out or the session is revoked. For actions that must respect a ban or role change, re-check your own records in `onMessage` and close the connection with `ctx.connection.close()` in rooms or `ctx.socket.close()` in `defineWebSocket()`.
+
 ## Hooks
 
 Both `defineRoom()` and `defineWebSocket()` support:
