@@ -29,6 +29,7 @@ import {
   platformLoginConnections,
   platformLoginIdentities,
   platformLoginRevisions,
+  projectCleanupJobs,
   projectDeployCredentials,
   projectInvitations,
   projectMembers,
@@ -995,6 +996,57 @@ describe('operator tenant mutations', () => {
     expect((await req(`/users/${user.id}/restore`, {})).status).toBe(200);
     expect(await getUser(env.db, user.id)).toMatchObject({ suspended_reason: null });
     expect(JSON.parse((await env.ROUTING.get(project.slug))!).suspended).toBeUndefined();
+  });
+
+  test('queues proxy token rotations for a suspended administrator when routing fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const owner = await createTestUser(env.db, 'rotation-owner');
+    const target = await createTestUser(
+      env.db,
+      'rotation-admin',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const owned = await createTestProject(env.db, target.id, 'rotation-admin-owned');
+    const shared = await createTestProject(env.db, owner.id, 'rotation-shared');
+    await env.db
+      .insert(projectMembers)
+      .values({ project_id: shared.id, user_id: target.id, role: 'collaborator' });
+    await env.ROUTING.put(
+      owned.slug,
+      JSON.stringify({ workerName: 'worker', projectId: owned.id }),
+    );
+    const failingRouting = {
+      get: (key: string) => env.ROUTING.get(key),
+      put: async () => {
+        throw new Error('KV unavailable');
+      },
+      delete: (key: string) => env.ROUTING.delete(key),
+    } as unknown as KVNamespace;
+
+    const response = await req(
+      `/users/${target.id}/suspend`,
+      { reason: 'admin_suspended' },
+      { ROUTING: failingRouting },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await getUser(env.db, target.id)).toMatchObject({ suspended_reason: 'admin_suspended' });
+    expect(
+      await env.db
+        .select({ projectId: projectCleanupJobs.project_id, payload: projectCleanupJobs.payload })
+        .from(projectCleanupJobs),
+    ).toEqual([
+      { projectId: shared.id, payload: { phase: 'requested', reason: 'user-suspended' } },
+    ]);
+
+    // A retry runs the whole suspension again; the queued request covers it.
+    expect((await req(`/users/${target.id}/suspend`, { reason: 'admin_suspended' })).status).toBe(
+      200,
+    );
+    expect(await env.db.select().from(projectCleanupJobs)).toHaveLength(1);
   });
 
   test('reports persisted plan changes and preserves suspension on failed restore cleanup', async () => {
