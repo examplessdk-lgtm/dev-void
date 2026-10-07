@@ -3,6 +3,7 @@ import { getToken } from './auth.ts';
 import { PlatformClient, type LogEntry } from './client.ts';
 import { dim, formatCount, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
+import { sanitizeTerminalLogText } from './terminal-log-text.ts';
 
 export async function runLogsCommand(
   root: string,
@@ -83,11 +84,12 @@ export async function runLogsCommand(
   outro(dim(formatCount(entries.length, 'log entry', 'log entries')));
 }
 
+// Logs carry data from app visitors, so terminal control sequences are dropped before printing.
 function printEntry(entry: LogEntry): void {
   const time = formatTime(entry.timestamp);
-  const method = entry.method || '-';
-  const url = entry.url || '-';
-  const status = entry.status || '-';
+  const method = sanitizeTerminalLogText(entry.method || '-');
+  const url = sanitizeTerminalLogText(entry.url || '-');
+  const status = sanitizeTerminalLogText(entry.status || '-');
 
   const statusNum = parseInt(status, 10);
   const coloredStatus =
@@ -107,7 +109,7 @@ function printEntry(entry: LogEntry): void {
   );
 
   for (const l of entry.logs) {
-    const text = l.message.map(String).join(' ');
+    const text = sanitizeTerminalLogText(l.message.map(String).join(' '));
     const level = l.level ?? 'log';
     const marker =
       level === 'error'
@@ -124,7 +126,7 @@ function printEntry(entry: LogEntry): void {
     console.log(
       wrapTextWithPrefix(
         process.stdout,
-        `${ex.name}: ${ex.message}`,
+        sanitizeTerminalLogText(`${ex.name}: ${ex.message}`),
         ' '.repeat(14),
         `  ${pc.red('[exception]')} `,
       ),

@@ -1604,7 +1604,7 @@ it('renders binary and text frames from a real Node WebSocket in order and remov
               eventTimestamp: 1790000000000,
               outcome: 'ok',
               logs: [
-                { level: 'log', message: ['binary marker'] },
+                { level: 'log', message: ['binary marker \u001b]52;c;ZXZpbA==\u0007'] },
                 { level: 'error', message: ['error marker'] },
               ],
             },
@@ -1667,6 +1667,8 @@ it('renders binary and text frames from a real Node WebSocket in order and remov
     expect(output.stderr).not.toContain('malformed tail');
     expect(output.stdout).toContain('POST https://isolated.invalid/runtime - ok');
     expect(output.stdout).toContain('  (log) binary marker');
+    expect(output.stdout).not.toContain('\x1b]');
+    expect(output.stdout).not.toContain('\x07');
     expect(output.stdout).toContain('  (error) error marker');
     expect(output.stdout).toContain('Queue owned-queue - ok');
     expect(output.stdout.indexOf('binary marker')).toBeLessThan(

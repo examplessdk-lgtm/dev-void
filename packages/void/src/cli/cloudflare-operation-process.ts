@@ -18,6 +18,7 @@ import {
   printCloudflareLoginLink,
   printCloudflareLoginPrompt,
 } from './cloudflare-login-output.ts';
+import { sanitizeTerminalLogText } from './terminal-log-text.ts';
 
 type Result = {
   status: number;
@@ -1180,20 +1181,23 @@ async function tail(): Promise<Result> {
                   : typeof detail.mailFrom === 'string'
                     ? `Email from ${detail.mailFrom}`
                     : 'Worker event';
+            // Request URLs, log lines and exceptions carry data from app visitors,
+            // so terminal control sequences are dropped before printing.
             process.stdout.write(
-              `${prefix} - ${log.outcome ?? 'unknown'} @ ${new Date(Number(log.eventTimestamp)).toLocaleString()}\n`,
+              `${sanitizeTerminalLogText(prefix)} - ${log.outcome ?? 'unknown'} @ ${new Date(Number(log.eventTimestamp)).toLocaleString()}\n`,
             );
             if (Array.isArray(log.logs)) {
               for (const line of log.logs.map(object)) {
+                const message = Array.isArray(line.message) ? line.message.join(' ') : '';
                 process.stdout.write(
-                  `  (${line.level ?? 'log'}) ${Array.isArray(line.message) ? line.message.join(' ') : ''}\n`,
+                  `  (${line.level ?? 'log'}) ${sanitizeTerminalLogText(message)}\n`,
                 );
               }
             }
             if (Array.isArray(log.exceptions)) {
               for (const exception of log.exceptions.map(object)) {
                 process.stderr.write(
-                  `  ${exception.name ?? 'Error'}: ${exception.message ?? ''}\n`,
+                  `  ${sanitizeTerminalLogText(`${exception.name ?? 'Error'}: ${exception.message ?? ''}`)}\n`,
                 );
               }
             }
