@@ -117,4 +117,37 @@ describe('prerender pool', () => {
       );
     },
   );
+
+  it('refuses prerender paths that escape the output directory', async () => {
+    const root = fixture();
+    const clientDir = join(root, 'client');
+    const fetched: Array<string> = [];
+    const outputs: Array<[string, string, string | undefined]> = [];
+    const result = await renderPrerenderPaths(
+      ['/blog/../../escape', '/ok', '/../client/data-escape'],
+      clientDir,
+      async (path) => {
+        fetched.push(path);
+        return new Response('<h1>page</h1>');
+      },
+      async (path) => Response.json({ path }, { headers: { 'X-VoidPages': 'true' } }),
+      (path, outputFile, error) => outputs.push([path, outputFile, error]),
+    );
+    const error = 'prerender path resolves outside the output directory';
+    expect(result.rendered).toEqual(['/ok']);
+    expect(result.failed).toEqual([
+      { path: '/blog/../../escape', error },
+      { path: '/../client/data-escape', error },
+    ]);
+    expect(fetched).toEqual(['/ok']);
+    expect(outputs).toContainEqual(['/blog/../../escape', 'blog/../../escape.html', error]);
+    expect(existsSync(join(root, 'escape.html'))).toBe(false);
+    expect(existsSync(join(clientDir, '_void/escape.json'))).toBe(false);
+    expect(existsSync(join(clientDir, 'data-escape.html'))).toBe(false);
+    expect(existsSync(join(clientDir, '_void/client/data-escape.json'))).toBe(false);
+    expect(readFileSync(join(clientDir, 'ok.html'), 'utf8')).toBe('<h1>page</h1>');
+    expect(JSON.parse(readFileSync(join(clientDir, '_void/pages/ok.json'), 'utf8'))).toEqual({
+      path: '/ok',
+    });
+  });
 });

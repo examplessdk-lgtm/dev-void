@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'pathslash';
+import { dirname, isAbsolute, join, relative } from 'pathslash';
 
 export type PrerenderResult = {
   rendered: Array<string>;
@@ -12,6 +12,12 @@ function outputFileForPath(path: string): string {
 
 function pageDataFileForPath(path: string): string {
   return path === '/' ? '_void/pages/index.json' : `_void/pages/${path.slice(1)}.json`;
+}
+
+/** Whether `path` resolves strictly inside `directory`. */
+function isInside(directory: string, path: string): boolean {
+  const child = relative(directory, path);
+  return child !== '' && child !== '..' && !child.startsWith('../') && !isAbsolute(child);
 }
 
 function normalizedFile(clientDir: string, path: string): string {
@@ -110,6 +116,19 @@ export async function renderPrerenderPaths(
           const path = paths[index]!;
           const result = results[index]!;
           const outputFile = outputFileForPath(path);
+          const outputPath = join(clientDir, outputFile);
+          const pageDataPath = join(clientDir, pageDataFileForPath(path));
+          // Paths come from getPrerenderPaths and may include unencoded user data
+          // such as '../', which must not write files outside the output directory.
+          if (
+            !isInside(clientDir, outputPath) ||
+            !isInside(join(clientDir, '_void/pages'), pageDataPath)
+          ) {
+            const error = 'prerender path resolves outside the output directory';
+            result.failed.push({ path, error });
+            onResult?.(path, outputFile, error);
+            continue;
+          }
           try {
             const response = await fetchPath(path);
             const html = await response.text();
@@ -119,14 +138,12 @@ export async function renderPrerenderPaths(
               onResult?.(path, outputFile, error);
               continue;
             }
-            const outputPath = join(clientDir, outputFile);
             mkdirSync(dirname(outputPath), { recursive: true });
             writeFileSync(outputPath, html);
             if (fetchPageData) {
               const pageDataResponse = await fetchPageData(path);
               if (pageDataResponse.headers.get('X-VoidPages')) {
                 const pageData = await pageDataResponse.json();
-                const pageDataPath = join(clientDir, pageDataFileForPath(path));
                 mkdirSync(dirname(pageDataPath), { recursive: true });
                 writeFileSync(pageDataPath, JSON.stringify(pageData));
               }
