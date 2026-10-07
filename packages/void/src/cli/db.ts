@@ -78,6 +78,32 @@ function runDrizzleKit(root: string, args: Array<string>): void {
   });
 }
 
+/**
+ * Run a drizzle-kit command against a real database URL. The config holding
+ * the URL lives in a private temp directory outside the project and is
+ * removed afterwards. Exits with code 1 when drizzle-kit fails; it has
+ * already printed its own error.
+ */
+async function runDrizzleKitWithDatabaseUrl(
+  root: string,
+  url: string,
+  dialect: DatabaseDialect,
+  command: 'push' | 'studio',
+): Promise<void> {
+  const { withPrivateDrizzleConfig } = await import('../drizzle/config.ts');
+  const succeeded = withPrivateDrizzleConfig(root, url, dialect, (configPath) => {
+    try {
+      runDrizzleKit(root, [command, '--config', configPath]);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!succeeded) {
+    process.exit(1);
+  }
+}
+
 type SeedTarget = {
   displayPath: string;
   kind: 'module' | 'sql';
@@ -358,19 +384,19 @@ async function runConnect(
 }
 
 async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
-  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-
-  let configPath: string;
   if (dialect !== 'sqlite') {
     const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
-    configPath = writeDrizzleConfig(root, url, dialect);
-  } else {
-    const { mkdirSync } = await import('node:fs');
-    const { dirname } = await import('pathslash');
-    const { databasePath: dbPath } = getLocalD1Target(root);
-    mkdirSync(dirname(dbPath), { recursive: true });
-    configPath = writeDrizzleConfig(root, dbPath);
+    await runDrizzleKitWithDatabaseUrl(root, url, dialect, 'push');
+    printSuccess('Database schema pushed.');
+    return;
   }
+
+  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
+  const { mkdirSync } = await import('node:fs');
+  const { dirname } = await import('pathslash');
+  const { databasePath: dbPath } = getLocalD1Target(root);
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const configPath = writeDrizzleConfig(root, dbPath);
 
   try {
     runDrizzleKit(root, ['push', '--config', configPath]);
@@ -1370,29 +1396,16 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
       dbUrl = await fetchRemoteDatabaseUrl(client, projectConfig.projectId);
     }
 
-    const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-    const configPath = writeDrizzleConfig(root, dbUrl, dialect);
-
     log.info('Opening Drizzle Studio (remote)...');
-    try {
-      runDrizzleKit(root, ['studio', '--config', configPath]);
-    } catch {
-      process.exit(1);
-    }
+    await runDrizzleKitWithDatabaseUrl(root, dbUrl, dialect, 'studio');
     return;
   }
 
   if (dialect !== 'sqlite') {
-    const { writeDrizzleConfig } = await import('../drizzle/config.ts');
     const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
-    const configPath = writeDrizzleConfig(root, url, dialect);
 
     log.info('Opening Drizzle Studio...');
-    try {
-      runDrizzleKit(root, ['studio', '--config', configPath]);
-    } catch {
-      process.exit(1);
-    }
+    await runDrizzleKitWithDatabaseUrl(root, url, dialect, 'studio');
     return;
   }
 

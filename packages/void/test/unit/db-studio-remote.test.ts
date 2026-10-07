@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 // ---- hoisted mocks ---------------------------------------------------------
@@ -41,14 +41,20 @@ vi.mock('../../src/cli/client', () => ({
   },
 }));
 
-// Mock writeDrizzleConfig to avoid needing a real schema on disk.
+// Mock the drizzle config writers to avoid needing a real schema on disk.
 const mockWriteDrizzleConfig = vi.fn<(root: string, dbPath: string, dialect?: string) => string>(
   (root, _dbPath, _dialect) => join(root, '.void', 'drizzle.config.json'),
+);
+const mockWithPrivateDrizzleConfig = vi.fn(
+  (_root: string, _dbUrl: string, _dialect: string, run: (configPath: string) => unknown) =>
+    run(join(tmpdir(), 'void-drizzle-test', 'drizzle.config.json')),
 );
 
 vi.mock('../../src/drizzle/config.ts', () => ({
   writeDrizzleConfig: (...args: Array<unknown>) =>
     mockWriteDrizzleConfig(...(args as Parameters<typeof mockWriteDrizzleConfig>)),
+  withPrivateDrizzleConfig: (...args: Array<unknown>) =>
+    mockWithPrivateDrizzleConfig(...(args as Parameters<typeof mockWithPrivateDrizzleConfig>)),
 }));
 
 // Mock execFileSync (used by runDrizzleKit) so no child process is spawned.
@@ -78,6 +84,14 @@ vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
 // ---------------------------------------------------------------------------
 
 const roots: Array<string> = [];
+
+function expectConfigOutsideRoot(root: string): void {
+  expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  const cliArgs = (mockExecFileSync.mock.calls[0] as unknown as [string, Array<string>])[1];
+  const configPath = cliArgs[cliArgs.indexOf('--config') + 1];
+  expect(configPath).toBeDefined();
+  expect(relative(root, configPath!).startsWith('..')).toBe(true);
+}
 
 function createProjectRoot(options: { database?: 'pg' } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'void-db-studio-remote-'));
@@ -127,7 +141,7 @@ describe('void db studio --remote (PostgreSQL)', () => {
     }
   });
 
-  it('fetches the database URL via getDatabaseUrl and calls writeDrizzleConfig with it', async () => {
+  it('fetches the database URL via getDatabaseUrl and keeps it out of the project directory', async () => {
     const root = createProjectRoot({ database: 'pg' });
     const dbUrl = 'postgres://user:pass@host:5432/mydb';
     mockGetDatabaseUrl.mockResolvedValue({ url: dbUrl });
@@ -135,7 +149,27 @@ describe('void db studio --remote (PostgreSQL)', () => {
     await runDbCommand(root, { action: 'studio', remote: true });
 
     expect(mockGetDatabaseUrl).toHaveBeenCalledTimes(1);
-    expect(mockWriteDrizzleConfig).toHaveBeenCalledWith(root, dbUrl, 'postgresql');
+    expect(mockWithPrivateDrizzleConfig).toHaveBeenCalledWith(
+      root,
+      dbUrl,
+      'postgresql',
+      expect.any(Function),
+    );
+    expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();
+    expectConfigOutsideRoot(root);
+  });
+
+  it('exits with code 1 when drizzle-kit studio fails', async () => {
+    const root = createProjectRoot({ database: 'pg' });
+    mockGetDatabaseUrl.mockResolvedValue({ url: 'postgres://user:pass@host:5432/mydb' });
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw new Error('Command failed');
+    });
+
+    await expect(runDbCommand(root, { action: 'studio', remote: true })).rejects.toThrow(
+      'process.exit:1',
+    );
+    expect(mockWithPrivateDrizzleConfig).toHaveBeenCalledTimes(1);
   });
 
   it('spawns drizzle-kit studio --config <configPath>', async () => {
@@ -173,8 +207,9 @@ describe('void db studio --remote (PostgreSQL)', () => {
       .map((c: Array<unknown>) => String(c[0]))
       .join('\n');
     expect(errorCalls).toContain('void db set-url');
-    // writeDrizzleConfig and execFileSync must NOT have been called
+    // No config may be written and drizzle-kit must NOT have been spawned
     expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();
+    expect(mockWithPrivateDrizzleConfig).not.toHaveBeenCalled();
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
@@ -255,6 +290,7 @@ describe('void db studio --remote (D1)', () => {
     expect(errorCalls).toContain('void db execute --remote');
 
     expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();
+    expect(mockWithPrivateDrizzleConfig).not.toHaveBeenCalled();
     expect(mockExecFileSync).not.toHaveBeenCalled();
     expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
   });
@@ -292,6 +328,43 @@ describe('void db studio (local, regression)', () => {
     await expect(runDbCommand(root, { action: 'studio' })).rejects.toThrow('process.exit:1');
 
     expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
+  });
+
+  it('local PG studio keeps the .env database URL out of the project directory', async () => {
+    const root = createProjectRoot({ database: 'pg' });
+    const dbUrl = 'postgres://local:pass@localhost:5432/dev';
+    writeFileSync(join(root, '.env'), `DATABASE_URL=${dbUrl}\n`);
+
+    await runDbCommand(root, { action: 'studio' });
+
+    expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
+    expect(mockWithPrivateDrizzleConfig).toHaveBeenCalledWith(
+      root,
+      dbUrl,
+      'postgresql',
+      expect.any(Function),
+    );
+    expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();
+    expectConfigOutsideRoot(root);
+  });
+
+  it('PG push keeps the .env database URL out of the project directory', async () => {
+    const root = createProjectRoot({ database: 'pg' });
+    const dbUrl = 'postgres://local:pass@localhost:5432/dev';
+    writeFileSync(join(root, '.env'), `DATABASE_URL=${dbUrl}\n`);
+
+    await runDbCommand(root, { action: 'push' });
+
+    expect(mockWithPrivateDrizzleConfig).toHaveBeenCalledWith(
+      root,
+      dbUrl,
+      'postgresql',
+      expect.any(Function),
+    );
+    expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();
+    const cliArgs = (mockExecFileSync.mock.calls[0] as unknown as [string, Array<string>])[1];
+    expect(cliArgs).toContain('push');
+    expectConfigOutsideRoot(root);
   });
 
   it('local PG studio does not call getDatabaseUrl (uses local URL path)', async () => {

@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { toSlash } from 'pathslash';
 import { describe, it, expect, beforeEach, afterEach } from 'vite-plus/test';
-import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
+import { withPrivateDrizzleConfig, writeDrizzleConfig } from '../../src/drizzle/config.ts';
 
 describe('writeDrizzleConfig', () => {
   let root: string;
@@ -94,5 +94,79 @@ describe('writeDrizzleConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.schema).toBe('./.void/better-auth-schema.ts');
+  });
+});
+
+describe('withPrivateDrizzleConfig', () => {
+  let root: string;
+  const dbUrl = 'postgres://user:secret@db.example.com:5432/app';
+
+  beforeEach(() => {
+    root = join(tmpdir(), `void-drizzle-private-${Date.now()}`);
+    mkdirSync(join(root, 'db'), { recursive: true });
+    writeFileSync(join(root, 'db/schema.ts'), 'export const users = {};');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('passes a config outside the project that holds the database URL', () => {
+    const result = withPrivateDrizzleConfig(root, dbUrl, 'postgresql', (configPath) => {
+      expect(relative(root, configPath).startsWith('..')).toBe(true);
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(config.dbCredentials.url).toBe(dbUrl);
+      expect(config.dialect).toBe('postgresql');
+      expect(config.schema).toBe('./db/schema.ts');
+      expect(config.out).toBe('./db/migrations');
+      return 'ran';
+    });
+    expect(result).toBe('ran');
+    expect(existsSync(join(root, '.void', 'drizzle.config.json'))).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('writes the config readable by the owner only', () => {
+    withPrivateDrizzleConfig(root, dbUrl, 'postgresql', (configPath) => {
+      expect(statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(configPath)).mode & 0o777).toBe(0o700);
+    });
+  });
+
+  it('removes the config after run returns', () => {
+    let seen = '';
+    withPrivateDrizzleConfig(root, dbUrl, 'postgresql', (configPath) => {
+      seen = configPath;
+    });
+    expect(seen).not.toBe('');
+    expect(existsSync(dirname(seen))).toBe(false);
+  });
+
+  it('removes the config after run throws', () => {
+    let seen = '';
+    expect(() =>
+      withPrivateDrizzleConfig(root, dbUrl, 'mysql', (configPath) => {
+        seen = configPath;
+        throw new Error('drizzle-kit failed');
+      }),
+    ).toThrow('drizzle-kit failed');
+    expect(seen).not.toBe('');
+    expect(existsSync(dirname(seen))).toBe(false);
+  });
+
+  it('keeps a SIGINT listener only while run executes', () => {
+    const before = process.listenerCount('SIGINT');
+    withPrivateDrizzleConfig(root, dbUrl, 'postgresql', () => {
+      expect(process.listenerCount('SIGINT')).toBe(before + 1);
+    });
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+
+  it('still reports a missing schema', () => {
+    rmSync(join(root, 'db', 'schema.ts'));
+    const before = process.listenerCount('SIGINT');
+    expect(() => withPrivateDrizzleConfig(root, dbUrl, 'postgresql', () => undefined)).toThrow(
+      'No Drizzle schema found',
+    );
+    expect(process.listenerCount('SIGINT')).toBe(before);
   });
 });
