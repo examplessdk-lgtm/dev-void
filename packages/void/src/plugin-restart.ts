@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { TLSSocket } from 'node:tls';
 import type { Plugin } from 'vite';
@@ -26,8 +27,11 @@ const RESTARTING_HTML_HEAD = `<!DOCTYPE html>
   <script>
     var target=`;
 
+const RESTARTING_HTML_MIDDLE = `;
+    var token=`;
+
 const RESTARTING_HTML_TAIL = `;
-    fetch("/__void/restart",{method:"POST"}).catch(function(){});
+    fetch("/__void/restart",{method:"POST",headers:{"x-void-restart":token}}).catch(function(){});
     setTimeout(function p(){
       fetch("/__void/ping").then(function(r){
         if(r.ok)location.href=target;
@@ -64,10 +68,37 @@ export function sanitizeReturnPath(value: string | null | undefined): string {
   return value;
 }
 
-export function renderRestartingPage(returnPath: string | null | undefined): string {
+/** Header the restarting page sends the per-server restart token in. */
+export const RESTART_TOKEN_HEADER = 'x-void-restart';
+
+/**
+ * `token` is the `t` query value the toast navigated with. The page sends it
+ * back with its POST; `/__void/restart` checks it, not this page.
+ */
+export function renderRestartingPage(
+  returnPath: string | null | undefined,
+  token: string | null | undefined,
+): string {
   return (
-    RESTARTING_HTML_HEAD + safeJsonStringify(sanitizeReturnPath(returnPath)) + RESTARTING_HTML_TAIL
+    RESTARTING_HTML_HEAD +
+    safeJsonStringify(sanitizeReturnPath(returnPath)) +
+    RESTARTING_HTML_MIDDLE +
+    safeJsonStringify(token ?? '') +
+    RESTARTING_HTML_TAIL
   );
+}
+
+/** Whether `presented` is this server's restart token, compared in constant time. */
+export function isRestartTokenValid(
+  presented: string | Array<string> | undefined,
+  expected: string,
+): boolean {
+  if (typeof presented !== 'string' || expected.length === 0) {
+    return false;
+  }
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.byteLength === b.byteLength && timingSafeEqual(a, b);
 }
 
 /**
@@ -100,14 +131,21 @@ export function isSameOriginNavigation(req: IncomingMessage): boolean {
   return site === undefined || site === 'same-origin' || site === 'none';
 }
 
-const CLIENT_MODULE = `if (import.meta.hot) {
+/**
+ * The toast is the only in-app way to reach `/__void/restarting`, so it is
+ * the only place that knows the restart token. Vite's default `server.cors`
+ * lets only localhost origins read this module, the same exposure as the
+ * HMR token in `/@vite/client`.
+ */
+const clientModule = (token: string): string => `if (import.meta.hot) {
+  const token = ${JSON.stringify(token)};
   import.meta.hot.on("void:new-binding", (d) => {
     if (document.getElementById("void-binding-hint")) return;
     const e = document.createElement("div");
     e.id = "void-binding-hint";
     e.style.cssText = "position:fixed;top:16px;right:16px;z-index:99999;padding:12px 16px;background:rgba(26,26,46,0.95);color:#e0def4;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;border-radius:8px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.4);backdrop-filter:blur(8px);cursor:pointer;max-width:300px;transform:translateX(calc(100% + 16px));transition:transform .3s ease";
     e.innerHTML = "<strong style=\\"color:#c4a7e7\\">[void]</strong> " + d.message + " Click to restart.";
-    e.onclick = () => { location.href = "/__void/restarting?return=" + encodeURIComponent(location.pathname + location.search); };
+    e.onclick = () => { location.href = "/__void/restarting?return=" + encodeURIComponent(location.pathname + location.search) + "&t=" + encodeURIComponent(token); };
     document.body.appendChild(e);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       e.style.transform = "translateX(0)";
@@ -121,8 +159,8 @@ const CLIENT_MODULE = `if (import.meta.hot) {
  * Serves three endpoints:
  * - `/__void/restarting` — standalone loading page (no Vite HMR client);
  *                          same-origin navigation only
- * - `/__void/restart`    — same-origin POST triggers `server.restart()` after a
- *                          short delay
+ * - `/__void/restart`    — same-origin POST carrying this server's restart
+ *                          token triggers `server.restart()` after a short delay
  * - `/__void/ping`       — health check; returns 503 on the old server instance
  *                          (after restart is triggered) and 200 on the new one
  *
@@ -130,6 +168,12 @@ const CLIENT_MODULE = `if (import.meta.hot) {
  * `void:new-binding` HMR events and shows a toast with a click-to-restart action.
  */
 export function restartPlugin(): Plugin {
+  // Browsers omit Fetch Metadata for plain-HTTP non-localhost origins
+  // (`void dev --host` on a LAN IP), so the navigation check alone lets any
+  // page open `/__void/restarting`, whose POST then carries our own Origin.
+  // The token proves the navigation came from the toast. Each server instance
+  // (including the one `server.restart()` creates) gets a fresh one.
+  let restartToken = '';
   return {
     name: 'void:restart',
     apply: 'serve',
@@ -145,12 +189,15 @@ export function restartPlugin(): Plugin {
       // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
       filter: { id: /^\0virtual:void\/binding-hint$/ },
       handler() {
-        return CLIENT_MODULE;
+        return clientModule(restartToken);
       },
     },
 
     configureServer(server) {
       let restartPending = false;
+      // This instance checks its own token; `load` serves the latest one.
+      const token = randomBytes(16).toString('base64url');
+      restartToken = token;
 
       server.middlewares.use('/__void/ping', (_req, res) => {
         res.writeHead(restartPending ? 503 : 200);
@@ -163,7 +210,10 @@ export function restartPlugin(): Plugin {
           res.end();
           return;
         }
-        if (!isSameOriginRequest(req)) {
+        if (
+          !isSameOriginRequest(req) ||
+          !isRestartTokenValid(req.headers[RESTART_TOKEN_HEADER], token)
+        ) {
           res.writeHead(403);
           res.end();
           return;
@@ -181,13 +231,20 @@ export function restartPlugin(): Plugin {
           return;
         }
         let returnPath: string | null = null;
+        let presented: string | null = null;
         try {
-          returnPath = new URL(req.url ?? '/', 'http://void.invalid').searchParams.get('return');
+          const params = new URL(req.url ?? '/', 'http://void.invalid').searchParams;
+          returnPath = params.get('return');
+          presented = params.get('t');
         } catch {
-          // A request url that does not parse returns to `/`.
+          // A request url that does not parse returns to `/` without restarting.
         }
-        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-        res.end(renderRestartingPage(returnPath));
+        res.writeHead(200, {
+          'Content-Type': 'text/html',
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
+        });
+        res.end(renderRestartingPage(returnPath, presented));
       });
     },
   };
