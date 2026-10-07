@@ -14,6 +14,12 @@ import app, { FAST_CRON, scheduled } from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
 import { reconcileProjectCleanupJobs } from '../../src/provisioning/cleanup.ts';
 import {
+  CLOSED_PROXY_TOKEN_STATE,
+  deriveProxyToken,
+  readProxyTokenState,
+  verifyProxyToken,
+} from '../../src/proxy-token.ts';
+import {
   resources,
   projects,
   deployments,
@@ -610,18 +616,18 @@ describe('DELETE /projects/:id', () => {
     expect(await env.ROUTING.get(project.slug)).toBe(JSON.stringify({ projectId: replacement.id }));
   });
 
-  it('deletes the proxy token floor and retries a failed delete from the cleanup queue', async () => {
+  it('closes the proxy token floor and retries a failed write from the cleanup queue', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'proxy-token-floor');
     const floorKey = `proxy-token:${project.id}`;
     await env.ROUTING.put(floorKey, JSON.stringify({ gen: 2 }));
     mockCfApi();
-    const deleteRoute = env.ROUTING.delete.bind(env.ROUTING);
-    const routeDelete = vi.spyOn(env.ROUTING, 'delete').mockImplementation(async (key) => {
+    const putRoute = env.ROUTING.put.bind(env.ROUTING);
+    const routePut = vi.spyOn(env.ROUTING, 'put').mockImplementation(async (key, value) => {
       if (key === floorKey) {
         throw new Error('temporary KV failure');
       }
-      return deleteRoute(key);
+      return putRoute(key, value);
     });
 
     const res = await app.fetch(
@@ -633,24 +639,60 @@ describe('DELETE /projects/:id', () => {
     );
     expect(res.status).toBe(200);
     expect(await db.getProject(env.db, project.id)).toBeNull();
+    expect(await env.ROUTING.get(floorKey, 'json')).toEqual({ gen: 2 });
     const pending = await env.db.execute<{ kind: string; payload: unknown }>(sql`
       SELECT kind, payload FROM project_cleanup_jobs
-      WHERE target = ${`routing-key:${project.id}:${floorKey}`}
+      WHERE target = ${`routing-put:${project.id}:${floorKey}`}
     `);
-    expect(pending.rows).toEqual([{ kind: 'routing-key', payload: { key: floorKey } }]);
+    expect(pending.rows).toEqual([
+      { kind: 'routing-put', payload: { key: floorKey, value: CLOSED_PROXY_TOKEN_STATE } },
+    ]);
 
-    routeDelete.mockRestore();
+    routePut.mockRestore();
     await scheduled(
       { cron: FAST_CRON, scheduledTime: Date.now() } as ScheduledController,
       env as unknown as Parameters<typeof scheduled>[1],
       createMockExecutionContext(),
     );
-    expect(await env.ROUTING.get(floorKey)).toBeNull();
+    expect(await env.ROUTING.get(floorKey)).toBe(CLOSED_PROXY_TOKEN_STATE);
     const finished = await env.db.execute(sql`
       SELECT target FROM project_cleanup_jobs
-      WHERE target = ${`routing-key:${project.id}:${floorKey}`}
+      WHERE target = ${`routing-put:${project.id}:${floorKey}`}
     `);
     expect(finished.rows).toEqual([]);
+  });
+
+  it.each([
+    ['a never-rotated project', null, [0, 1]],
+    ['a rotated project', 2, [1, 2, 3]],
+  ])('rejects every proxy token of %s once it is deleted', async (_label, floor, gens) => {
+    const user = await createTestUser(env.db);
+    const project = await createTestProject(env.db, user.id, `token-after-delete-${floor ?? 0}`);
+    if (floor !== null) {
+      await env.ROUTING.put(`proxy-token:${project.id}`, JSON.stringify({ gen: floor }));
+    }
+    mockCfApi();
+    const accepted = async (gen: number) =>
+      verifyProxyToken({
+        jwtSecret: env.JWT_SECRET,
+        projectId: project.id,
+        token: await deriveProxyToken(env.JWT_SECRET, project.id, gen),
+        readState: () => readProxyTokenState(env.ROUTING, project.id),
+      });
+    expect(await accepted(gens.at(-1)!)).toBe(true);
+
+    const res = await app.fetch(
+      new Request(`http://localhost/projects/${project.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${user.jwt}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const gen of gens) {
+      expect(await accepted(gen)).toBe(false);
+    }
   });
 
   it('deletes Zero Trust applications only after retryable cleanup succeeds', async () => {

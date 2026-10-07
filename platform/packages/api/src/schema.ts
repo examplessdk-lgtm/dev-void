@@ -636,6 +636,7 @@ export const projectCleanupJobs = pgTable(
         | 'worker-bundle'
         | 'project-assets'
         | 'routing-key'
+        | 'routing-put'
         | 'cron'
         | 'custom-hostname'
         | 'proxy-token-rotation'

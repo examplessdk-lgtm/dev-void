@@ -41,7 +41,7 @@ import { cancelContainerBuildDos } from '../github/cancel-builds.ts';
 import { generateId } from '../id.ts';
 import { getLegacyProjectWorkerName, getProjectDeploymentWorkerName } from '../naming.ts';
 import { requireProjectCapability } from '../project-access.ts';
-import { proxyTokenStateKey } from '../proxy-token.ts';
+import { CLOSED_PROXY_TOKEN_STATE, proxyTokenStateKey } from '../proxy-token.ts';
 import {
   deployments as deploymentsTable,
   projectCleanupJobs,
@@ -131,6 +131,7 @@ const RETRYABLE_CLEANUP_JOB_KINDS = [
   'worker-bundle',
   'project-assets',
   'routing-key',
+  'routing-put',
   'cron',
   'custom-hostname',
 ] as const satisfies ReadonlyArray<ProjectCleanupJobInput['kind']>;
@@ -173,6 +174,9 @@ async function executeCleanupJob(
       return;
     case 'routing-key':
       await env.ROUTING.delete(jobValue(job, 'key'));
+      return;
+    case 'routing-put':
+      await env.ROUTING.put(jobValue(job, 'key'), jobValue(job, 'value'));
       return;
     case 'cron':
       await clearCronScheduler(env, jobValue(job, 'projectId'));
@@ -458,10 +462,12 @@ async function cleanupBestEffortResources(
   cleanup.push(
     cleanupJob(projectId, 'routing-key', `project:${projectId}`, { key: `project:${projectId}` }),
   );
-  // Proxy token accept floor.
+  // Proxy token accept floor: closed, not deleted. A missing floor accepts
+  // the legacy token, so deleting it would revive every token ever issued.
   cleanup.push(
-    cleanupJob(projectId, 'routing-key', proxyTokenStateKey(projectId), {
+    cleanupJob(projectId, 'routing-put', proxyTokenStateKey(projectId), {
       key: proxyTokenStateKey(projectId),
+      value: CLOSED_PROXY_TOKEN_STATE,
     }),
   );
 

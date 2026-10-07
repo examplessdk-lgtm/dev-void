@@ -54,7 +54,9 @@ binding. Both forms are derived from `JWT_SECRET`:
 
 The ROUTING key `proxy-token:{projectId}` holds the project's accept floor,
 `{"gen": N}`. A token is accepted when its MAC is valid and its generation is at
-least `N`. A missing key means floor 0, so the legacy token is accepted. The
+least `N`. A missing key means floor 0, so the legacy token is accepted.
+Deleting a project sets its floor above every issued generation, so none of
+its tokens work again. The
 `projectId` must be a generated project id, and the MAC is checked before the
 floor is read, so an invalid token never reads KV. A floor that cannot be read
 or does not parse fails closed with 503 `project token state unavailable`. Each

@@ -81,6 +81,15 @@ export function serializeProxyTokenState(state: ProxyTokenState): string {
   return JSON.stringify({ gen: state.gen });
 }
 
+/**
+ * The floor a deleted project keeps. Issued generations are a Postgres
+ * `integer`, far below it, so no token is accepted. Deleting the key instead
+ * would bring back floor 0 and the legacy token.
+ */
+export const CLOSED_PROXY_TOKEN_STATE = serializeProxyTokenState({
+  gen: Number.MAX_SAFE_INTEGER - 1,
+});
+
 export function isAcceptedGeneration(state: ProxyTokenState, gen: number): boolean {
   return gen >= state.gen;
 }
