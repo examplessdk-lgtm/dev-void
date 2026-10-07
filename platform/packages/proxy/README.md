@@ -92,12 +92,12 @@ the route and project. That value never leaves the platform.
 
 ### AI
 
-| Endpoint              | Body                                                                             | Notes                           |
-| --------------------- | -------------------------------------------------------------------------------- | ------------------------------- |
-| `POST /ai/run`        | `{ model, inputs?, options?, projectId, aiToken? }`                              | Cloudflare AI binding inference |
-| `POST /ai/provider`   | `{ provider, path, method?, headers?, body?, providerKey, projectId, aiToken? }` | Provider-native AI Gateway call |
-| `POST /ai/models`     | `{ inputs?, projectId, aiToken? }`                                               | List models                     |
-| `POST /ai/toMarkdown` | `{ inputs, options?, projectId, aiToken? }`                                      | `AI.toMarkdown()` passthrough   |
+| Endpoint              | Body                                                                             | Notes                                                |
+| --------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `POST /ai/run`        | `{ model, inputs?, options?, projectId, aiToken? }`                              | Cloudflare AI binding inference                      |
+| `POST /ai/provider`   | `{ provider, path, method?, headers?, body?, providerKey, projectId, aiToken? }` | Provider-native AI Gateway call                      |
+| `POST /ai/models`     | `{ inputs?, projectId, aiToken? }`                                               | List models                                          |
+| `POST /ai/toMarkdown` | `{ inputs, options?, projectId, aiToken? }`                                      | `AI.toMarkdown()` through the project-tagged gateway |
 
 `/ai/*` also checks `ROUTING` for `ai-block:{projectId}` before forwarding.
 

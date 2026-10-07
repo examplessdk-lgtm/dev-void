@@ -162,26 +162,45 @@ function providerAuthDefaults(provider: string): { header: string; prefix: strin
   return PROVIDER_AUTH_DEFAULTS[provider] ?? { header: 'authorization', prefix: 'Bearer ' };
 }
 
+// AI usage is counted from the platform gateway's log rows by their
+// `projectId` metadata, so the platform owns the gateway id, its metadata and
+// logging. Cloudflare saves only the first five metadata entries, and
+// integer-like keys always sort first, so caller metadata could push the
+// project out; `collectLog: false` would drop the row.
+const PLATFORM_GATEWAY_KEYS = new Set(['id', 'metadata', 'collectLog']);
+// `cf-aig-*` request headers set the same metadata, logging and cost.
+const GATEWAY_CONTROL_HEADER = /^cf-aig-/i;
+
+function withoutKeys(
+  record: Record<string, unknown>,
+  drop: (key: string) => boolean,
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !drop(key)));
+}
+
+/** Options for an AI binding call that goes through the project-tagged platform gateway. */
 function gatewayOptions(
   value: unknown,
   projectId: string,
   gatewayId: string,
 ): Record<string, unknown> {
   const options = asRecord(value);
-  const gateway = asRecord(options.gateway);
-  const metadata = asRecord(gateway.metadata);
+  const gateway = withoutKeys(asRecord(options.gateway), (key) => PLATFORM_GATEWAY_KEYS.has(key));
+  if (typeof gateway.cacheKey === 'string') {
+    // A caller cache key only hits inside its own project.
+    gateway.cacheKey = `${projectId}:${gateway.cacheKey}`;
+  }
 
-  return {
+  const result: Record<string, unknown> = {
     ...options,
-    gateway: {
-      ...gateway,
-      id: gatewayId,
-      metadata: {
-        ...metadata,
-        projectId,
-      },
-    },
+    gateway: { ...gateway, id: gatewayId, metadata: { projectId } },
   };
+  if ('extraHeaders' in options) {
+    result.extraHeaders = withoutKeys(asRecord(options.extraHeaders), (key) =>
+      GATEWAY_CONTROL_HEADER.test(key),
+    );
+  }
+  return result;
 }
 
 function applyProviderHeaders({
@@ -438,8 +457,14 @@ ai.post('/models', async (context) => {
 
 ai.post('/toMarkdown', async (context) => {
   const body = context.get('body');
+  const projectId = context.get('projectId');
+  const options = gatewayOptions(
+    body.options,
+    projectId,
+    context.env.AI_GATEWAY_ID ?? DEFAULT_GATEWAY_ID,
+  );
   try {
-    const result = await context.env.AI.toMarkdown(body.inputs, body.options);
+    const result = await context.env.AI.toMarkdown(body.inputs, options);
     return context.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

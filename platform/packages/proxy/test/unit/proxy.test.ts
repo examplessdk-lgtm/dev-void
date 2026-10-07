@@ -1395,7 +1395,87 @@ describe('proxy worker', () => {
             id: 'void',
             skipCache: true,
             cacheTtl: 60,
-            metadata: { user: 'alice', projectId: 'proj_000000000042' },
+            metadata: { projectId: 'proj_000000000042' },
+          },
+        },
+      );
+    });
+
+    it.each([
+      { a: '1', b: '2', c: '3', d: '4', e: '5' },
+      { '0': '1', '1': '2', '2': '3', '3': '4', '4': '5' },
+    ])('keeps the project as the only gateway metadata entry %j', async (metadata) => {
+      const env = createEnv();
+      await worker.fetch(
+        post('/ai/run', {
+          model: 'm',
+          inputs: {},
+          options: { gateway: { metadata } },
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
+        }),
+        env,
+      );
+
+      const options = env.AI.run.mock.calls[0]![2] as { gateway: { metadata: unknown } };
+      expect(options.gateway.metadata).toStrictEqual({ projectId: 'proj_000000000042' });
+    });
+
+    it('keeps gateway logging on and drops caller gateway control headers', async () => {
+      const env = createEnv();
+      await worker.fetch(
+        post('/ai/run', {
+          model: 'm',
+          inputs: {},
+          options: {
+            gateway: { collectLog: false, eventId: 'event-1' },
+            extraHeaders: {
+              'cf-aig-metadata': '{"projectId":"proj_000000000001"}',
+              'CF-AIG-Custom-Cost': '{"total_cost":0}',
+              'x-keep': 'yes',
+            },
+          },
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
+        }),
+        env,
+      );
+
+      expect(env.AI.run).toHaveBeenCalledWith(
+        'm',
+        {},
+        {
+          gateway: {
+            id: 'void',
+            eventId: 'event-1',
+            metadata: { projectId: 'proj_000000000042' },
+          },
+          extraHeaders: { 'x-keep': 'yes' },
+        },
+      );
+    });
+
+    it('scopes a caller cache key to the project', async () => {
+      const env = createEnv();
+      await worker.fetch(
+        post('/ai/run', {
+          model: 'm',
+          inputs: {},
+          options: { gateway: { cacheKey: 'k' } },
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
+        }),
+        env,
+      );
+
+      expect(env.AI.run).toHaveBeenCalledWith(
+        'm',
+        {},
+        {
+          gateway: {
+            id: 'void',
+            cacheKey: 'proj_000000000042:k',
+            metadata: { projectId: 'proj_000000000042' },
           },
         },
       );
@@ -1560,7 +1640,40 @@ describe('proxy worker', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual(result);
-      expect(env.AI.toMarkdown).toHaveBeenCalledWith({ content: 'hello' }, { format: 'md' });
+      expect(env.AI.toMarkdown).toHaveBeenCalledWith(
+        { content: 'hello' },
+        {
+          format: 'md',
+          gateway: { id: 'void', metadata: { projectId: 'proj_000000000000' } },
+        },
+      );
+    });
+
+    it('converts through the installation gateway without caller gateway control', async () => {
+      const env = { ...createEnv(), AI_GATEWAY_ID: 'void-team' };
+
+      await worker.fetch(
+        post('/ai/toMarkdown', {
+          inputs: { content: 'hello' },
+          options: {
+            gateway: { id: 'other', collectLog: false, metadata: { projectId: 'x' } },
+            extraHeaders: { 'cf-aig-custom-cost': '{"total_cost":0}', 'x-keep': 'yes' },
+            conversionOptions: { image: { descriptionLanguage: 'en' } },
+          },
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
+        }),
+        env,
+      );
+
+      expect(env.AI.toMarkdown).toHaveBeenCalledWith(
+        { content: 'hello' },
+        {
+          gateway: { id: 'void-team', metadata: { projectId: 'proj_000000000042' } },
+          extraHeaders: { 'x-keep': 'yes' },
+          conversionOptions: { image: { descriptionLanguage: 'en' } },
+        },
+      );
     });
   });
 
