@@ -128,13 +128,6 @@ export async function rotateProxyTokens(db: Db, env: ApiEnv['Bindings'], input: 
   if (!input.dryRun && input.project === undefined && input.all !== true) {
     throw new OperatorError(400, 'Supply --project <id> or --all.', 'invalid_argument');
   }
-  if (isDevBypass(env) || !env.CF_API_TOKEN) {
-    throw new OperatorError(
-      409,
-      'Proxy token rotation needs the platform Cloudflare API token.',
-      'rotation_unavailable',
-    );
-  }
   const all = input.all === true;
   const projectId = input.project as string | undefined;
   const [project] = projectId
@@ -177,6 +170,14 @@ export async function rotateProxyTokens(db: Db, env: ApiEnv['Bindings'], input: 
           : null,
         workers: (await listProxyTokenInventory(db, project)).map((row) => row.workerName),
       },
+    );
+  }
+
+  if (isDevBypass(env) || !env.CF_API_TOKEN) {
+    throw new OperatorError(
+      409,
+      'Proxy token rotation needs the platform Cloudflare API token.',
+      'rotation_unavailable',
     );
   }
 

@@ -1802,11 +1802,15 @@ describe('proxy token rotation', () => {
 
     await rotationProject(cf, 'rotate-unavailable');
     for (const extraEnv of [{ DEV_AUTH_BYPASS: 'true' }, { CF_API_TOKEN: '' }]) {
-      for (const dryRun of [true, false]) {
-        const response = await req('/system/rotate-proxy-tokens', { all: true, dryRun }, extraEnv);
-        expect(response.status).toBe(409);
-        expect(await response.json()).toMatchObject({ error: 'rotation_unavailable' });
-      }
+      const preview = await req(
+        '/system/rotate-proxy-tokens',
+        { all: true, dryRun: true },
+        extraEnv,
+      );
+      expect(preview.status).toBe(200);
+      const response = await req('/system/rotate-proxy-tokens', { all: true }, extraEnv);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: 'rotation_unavailable' });
     }
     expect(await env.db.select().from(projectCleanupJobs)).toEqual([]);
     expect(cf).not.toHaveBeenCalled();
