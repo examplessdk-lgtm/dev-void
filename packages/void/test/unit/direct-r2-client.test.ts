@@ -296,7 +296,9 @@ describe('PlatformClient.finalizeDeploy', () => {
       posts++;
       if (posts === 1) {
         return Promise.reject(
-          new TypeError('fetch failed', { cause: new Error('read ECONNRESET') }),
+          new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          }),
         );
       }
       return Promise.resolve(
@@ -448,6 +450,35 @@ describe('PlatformClient.finalizeDeploy', () => {
     const gen = client.finalizeDeploy(projectId, makePayload());
     await expect(gen.next()).rejects.toBeInstanceOf(DOMException);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a headers timeout — the platform is still working on the request', async () => {
+    const headersTimeout = Object.assign(new Error('Headers Timeout Error'), {
+      name: 'HeadersTimeoutError',
+      code: 'UND_ERR_HEADERS_TIMEOUT',
+    });
+    fetchMock.mockRejectedValue(new TypeError('fetch failed', { cause: headersTimeout }));
+
+    vi.useFakeTimers();
+    const cliLog = makeCliLog();
+    const client = new PlatformClient(token, { apiUrl, cliLog });
+    try {
+      const assertion = expect(
+        client.finalizeDeploy(projectId, makePayload()).next(),
+      ).rejects.toMatchObject({ message: 'fetch failed', cause: headersTimeout });
+      await vi.runAllTimersAsync();
+      await assertion;
+
+      expect(deployPostCalls()).toHaveLength(1);
+      expect(cliLog.warn).not.toHaveBeenCalledWith('deploy_fetch_retry', expect.anything());
+      expect(cliLog.error).toHaveBeenCalledWith(
+        'deploy_fetch_rejected',
+        expect.any(TypeError),
+        expect.objectContaining({ attempts: 1 }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not retry HTTP error responses — the server answered', async () => {

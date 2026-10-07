@@ -63,6 +63,71 @@ describe('formatStreamDeployError', () => {
     expect(formatted.message).toContain('fetch failed');
   });
 
+  it('explains a headers timeout in plain words and keeps the log line', () => {
+    const err = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('Headers Timeout Error'), {
+        name: 'HeadersTimeoutError',
+        code: 'UND_ERR_HEADERS_TIMEOUT',
+      }),
+    });
+
+    const formatted = formatStreamDeployError(err, null, '/tmp/deploy.jsonl');
+
+    expect(formatted.message).toBe(
+      [
+        'deploy: The Void platform did not respond within 5 minutes while preparing the deploy.',
+        'It may still finish. Check `void project status`, then run `void deploy` again to retry.',
+        'If this keeps happening, share the detailed log below.',
+        'Detailed log: /tmp/deploy.jsonl',
+      ].join('\n'),
+    );
+  });
+
+  it('omits the log hint for a headers timeout when no log was written', () => {
+    const err = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('Headers Timeout Error'), {
+        code: 'UND_ERR_HEADERS_TIMEOUT',
+      }),
+    });
+
+    const formatted = formatStreamDeployError(err, null, null);
+
+    expect(formatted.message).not.toContain('log');
+    expect(formatted.message).toContain('void project status');
+  });
+
+  it('adds the root cause of a fetch failure', () => {
+    const err = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.example.com'), {
+        code: 'ENOTFOUND',
+      }),
+    });
+
+    const formatted = formatStreamDeployError(err, null, '/tmp/deploy.jsonl');
+
+    expect(formatted.message).toBe(
+      "deploy: Connection lost during deploy: 'fetch failed' (getaddrinfo ENOTFOUND api.example.com).\n" +
+        'Detailed log: /tmp/deploy.jsonl',
+    );
+  });
+
+  it('uses the cause code when the root cause has no message', () => {
+    const refused = Object.assign(new AggregateError([], ''), { code: 'ECONNREFUSED' });
+    const closed = Object.assign(new Error('other side closed'), {
+      name: 'SocketError',
+      code: 'UND_ERR_SOCKET',
+    });
+
+    expect(
+      formatStreamDeployError(new TypeError('fetch failed', { cause: refused }), null).message,
+    ).toBe("deploy: Connection lost during deploy: 'fetch failed' (ECONNREFUSED).");
+    expect(
+      formatStreamDeployError(new TypeError('fetch failed', { cause: closed }), null).message,
+    ).toBe(
+      "deploy: Connection lost during deploy: 'fetch failed' (UND_ERR_SOCKET: other side closed).",
+    );
+  });
+
   it('includes the deployment id for generic mid-stream errors when known', () => {
     const err = new Error('reader canceled');
 

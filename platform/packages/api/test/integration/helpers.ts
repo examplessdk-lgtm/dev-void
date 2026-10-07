@@ -318,7 +318,7 @@ class MemoryR2Bucket {
 
   async put(
     key: string,
-    value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string,
+    value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | Blob | string,
     options?: {
       httpMetadata?: unknown;
       onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string };
@@ -337,6 +337,8 @@ class MemoryR2Bucket {
     } else if (value instanceof ReadableStream) {
       const bytes = await readStreamToBytes(value);
       body = toArrayBuffer(bytes);
+    } else if (value instanceof Blob) {
+      body = await value.arrayBuffer();
     } else {
       body = toArrayBuffer(value);
     }

@@ -1,5 +1,6 @@
 import { and, eq, getTableColumns, lte, ne, or, sql } from 'drizzle-orm';
 import { paginatedR2Delete } from './assets.ts';
+import { R2_CONCURRENCY } from './concurrency.ts';
 import { createDb, type Db, type DbOrTx } from './db.ts';
 import type { DeploymentInput, DeploymentOperation } from './deployment-operation-types.ts';
 import type { ApiEnv } from './env.ts';
@@ -109,14 +110,43 @@ export async function prepareDeploymentInput(
   };
   delete input.body.workerFiles;
   try {
+    // Hash one module at a time so at most one extra copy of module bytes is
+    // alive beside the decoded Blobs; a near-cap request already sits close
+    // to the isolate memory limit.
+    const modules: DeploymentInput['modules'] = [];
     for (let index = 0; index < files.length; index++) {
       const { name, content } = files[index]!;
-      const bytes = await content.arrayBuffer();
-      const digest = await sha256Hex(bytes);
-      const key = `${prefix}${index}`;
-      await r2.put(key, bytes);
-      input.modules.push({ name, key, digest, type: content.type });
+      const digest = await sha256Hex(await content.arrayBuffer());
+      modules.push({ name, key: `${prefix}${index}`, digest, type: content.type });
     }
+    // The request has not answered yet, so upload the Blobs themselves in
+    // parallel. Workers let at most six R2 calls wait for a response at once
+    // (R2_CONCURRENCY); a larger pool would only queue inside the runtime.
+    // After the first failure no new put starts, and every started put
+    // settles before cleanup so none lands under the prefix after it was
+    // deleted.
+    let next = 0;
+    let failed = false;
+    const workers = await Promise.allSettled(
+      Array.from({ length: Math.min(R2_CONCURRENCY, files.length) }, async () => {
+        while (!failed && next < files.length) {
+          const index = next++;
+          try {
+            await r2.put(modules[index]!.key, files[index]!.content);
+          } catch (error) {
+            failed = true;
+            throw error;
+          }
+        }
+      }),
+    );
+    const rejected = workers.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (rejected) {
+      throw rejected.reason;
+    }
+    input.modules = modules;
     const identity = JSON.stringify({
       body: input.body,
       modules: input.modules.map(({ name, digest, type }) => ({ name, digest, type })),

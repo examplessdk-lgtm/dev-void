@@ -1,4 +1,9 @@
-import { isCliOutdatedError, parsePlatformErrorBody, PlatformApiError } from './client.ts';
+import {
+  isCliOutdatedError,
+  isHeadersTimeoutError,
+  parsePlatformErrorBody,
+  PlatformApiError,
+} from './client.ts';
 import { platformErrorMessage } from './platform-errors.ts';
 
 const BODY_SNIPPET_MAX = 200;
@@ -25,6 +30,31 @@ function appendTrailingLines(
   logPath: string | null | undefined,
 ): string {
   return appendLogLine(appendDeploymentLine(message, deploymentId), logPath);
+}
+
+/**
+ * Describe the deepest `cause` of an error in one short line, e.g.
+ * `getaddrinfo ENOTFOUND api.example.com` under `fetch failed`.
+ */
+function describeRootCause(err: Error): string | null {
+  let root: unknown = err;
+  for (let depth = 0; depth < 6; depth++) {
+    const cause = (root as { cause?: unknown }).cause;
+    if (cause === null || typeof cause !== 'object') {
+      break;
+    }
+    root = cause;
+  }
+  if (root === err) {
+    return null;
+  }
+  const { code, message } = root as { code?: unknown; message?: unknown };
+  const text = typeof message === 'string' ? message.trim() : '';
+  const codeText = typeof code === 'string' ? code : '';
+  if (!text) {
+    return codeText || null;
+  }
+  return codeText && !text.includes(codeText) ? `${codeText}: ${text}` : text;
 }
 
 /**
@@ -61,9 +91,13 @@ export function formatConnectionLostMessage(
  *      — surface the server-supplied error and prefer the body's deployment id.
  *   2. Any other `PlatformApiError` — retain the client's actionable message and
  *      structured error fields; opaque provider failures use a trimmed body snippet.
- *   3. Anything else — preserve the original message under a `Connection lost
- *      during deploy: <original>` prefix so the caller can still tell network,
- *      parse, and transport errors apart.
+ *   3. A headers timeout — the platform accepted the connection but sent no
+ *      response in time. Explain that the deploy may still finish and how to
+ *      check and retry.
+ *   4. Anything else — preserve the original message, plus its root cause when
+ *      there is one, under a `Connection lost during deploy: <original>`
+ *      prefix so the caller can still tell network, parse, and transport
+ *      errors apart.
  */
 export function formatStreamDeployError(
   err: unknown,
@@ -98,10 +132,23 @@ export function formatStreamDeployError(
     return err;
   }
 
+  if (isHeadersTimeoutError(err)) {
+    const lines = [
+      'deploy: The Void platform did not respond within 5 minutes while preparing the deploy.',
+      'It may still finish. Check `void project status`, then run `void deploy` again to retry.',
+    ];
+    if (logPath) {
+      lines.push('If this keeps happening, share the detailed log below.');
+    }
+    return new Error(appendTrailingLines(lines.join('\n'), deploymentId, logPath));
+  }
+
   const original = err instanceof Error ? err.message : String(err);
+  const rootCause = err instanceof Error ? describeRootCause(err) : null;
+  const detail = rootCause && rootCause !== original ? ` (${rootCause})` : '';
   return new Error(
     appendTrailingLines(
-      `deploy: Connection lost during deploy: '${original}'.`,
+      `deploy: Connection lost during deploy: '${original}'${detail}.`,
       deploymentId,
       logPath,
     ),
