@@ -1,5 +1,5 @@
 import { signEmailReceipt } from '@void/platform/email-protocol';
-import { deriveProxyToken } from '@voidcloud/api/proxy-token';
+import { deriveAiUsageTag, deriveProxyToken } from '@voidcloud/api/proxy-token';
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite-plus/test';
 import worker from '../../src/index.ts';
 import { PLATFORM_DISABLED_KEY } from '../../src/platform-lifecycle.ts';
@@ -178,6 +178,7 @@ function post(path: string, body: unknown, headers?: Record<string, string>): Re
 describe('proxy worker', () => {
   let validToken: string;
   const aiTokens: Record<string, string> = {};
+  const usageTags: Record<string, string> = {};
 
   beforeEach(clearProxyTokenStateCache);
 
@@ -195,6 +196,7 @@ describe('proxy worker', () => {
       'proj_000000000000',
     ]) {
       aiTokens[pid] = await signAiToken(pid, JWT_SECRET);
+      usageTags[pid] = await deriveAiUsageTag(JWT_SECRET, pid);
     }
   });
 
@@ -1341,7 +1343,7 @@ describe('proxy worker', () => {
         { prompt: 'hi' },
         {
           max_tokens: 100,
-          gateway: { id: 'void', metadata: { projectId: 'proj_000000000042' } },
+          gateway: { id: 'void', metadata: { projectId: usageTags['proj_000000000042'] } },
         },
       );
     });
@@ -1362,7 +1364,7 @@ describe('proxy worker', () => {
         'm',
         {},
         {
-          gateway: { id: 'void-team', metadata: { projectId: 'proj_000000000042' } },
+          gateway: { id: 'void-team', metadata: { projectId: usageTags['proj_000000000042'] } },
         },
       );
     });
@@ -1395,7 +1397,7 @@ describe('proxy worker', () => {
             id: 'void',
             skipCache: true,
             cacheTtl: 60,
-            metadata: { projectId: 'proj_000000000042' },
+            metadata: { projectId: usageTags['proj_000000000042'] },
           },
         },
       );
@@ -1418,7 +1420,7 @@ describe('proxy worker', () => {
       );
 
       const options = env.AI.run.mock.calls[0]![2] as { gateway: { metadata: unknown } };
-      expect(options.gateway.metadata).toStrictEqual({ projectId: 'proj_000000000042' });
+      expect(options.gateway.metadata).toStrictEqual({ projectId: usageTags['proj_000000000042'] });
     });
 
     it('keeps gateway logging on and drops caller gateway control headers', async () => {
@@ -1448,7 +1450,7 @@ describe('proxy worker', () => {
           gateway: {
             id: 'void',
             eventId: 'event-1',
-            metadata: { projectId: 'proj_000000000042' },
+            metadata: { projectId: usageTags['proj_000000000042'] },
           },
           extraHeaders: { 'x-keep': 'yes' },
         },
@@ -1475,7 +1477,7 @@ describe('proxy worker', () => {
           gateway: {
             id: 'void',
             cacheKey: 'proj_000000000042:k',
-            metadata: { projectId: 'proj_000000000042' },
+            metadata: { projectId: usageTags['proj_000000000042'] },
           },
         },
       );
@@ -1597,9 +1599,30 @@ describe('proxy worker', () => {
         'm',
         {},
         {
-          gateway: { id: 'void', metadata: { projectId: 'proj_000000000099' } },
+          gateway: { id: 'void', metadata: { projectId: usageTags['proj_000000000099'] } },
         },
       );
+    });
+
+    it('tags gateway metadata with the signed project value the usage query counts', async () => {
+      const env = createEnv();
+      await worker.fetch(
+        post('/ai/run', {
+          model: 'm',
+          inputs: {},
+          projectId: 'proj_000000000042',
+          aiToken: aiTokens['proj_000000000042'],
+        }),
+        env,
+      );
+
+      const options = env.AI.run.mock.calls[0]![2] as {
+        gateway: { metadata: { projectId: string } };
+      };
+      const tag = options.gateway.metadata.projectId;
+      expect(tag).toBe(await deriveAiUsageTag(env.JWT_SECRET, 'proj_000000000042'));
+      expect(tag).toMatch(/^proj_000000000042\.[A-Za-z0-9_-]{22}$/);
+      expect(tag).not.toBe(await deriveAiUsageTag('other-secret', 'proj_000000000042'));
     });
   });
 
@@ -1644,7 +1667,7 @@ describe('proxy worker', () => {
         { content: 'hello' },
         {
           format: 'md',
-          gateway: { id: 'void', metadata: { projectId: 'proj_000000000000' } },
+          gateway: { id: 'void', metadata: { projectId: usageTags['proj_000000000000'] } },
         },
       );
     });
@@ -1669,7 +1692,7 @@ describe('proxy worker', () => {
       expect(env.AI.toMarkdown).toHaveBeenCalledWith(
         { content: 'hello' },
         {
-          gateway: { id: 'void-team', metadata: { projectId: 'proj_000000000042' } },
+          gateway: { id: 'void-team', metadata: { projectId: usageTags['proj_000000000042'] } },
           extraHeaders: { 'x-keep': 'yes' },
           conversionOptions: { image: { descriptionLanguage: 'en' } },
         },

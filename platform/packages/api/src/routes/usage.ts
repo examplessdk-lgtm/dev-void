@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { uploadPool } from '../concurrency.ts';
 import type { Db } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
+import { deriveAiUsageTag } from '../proxy-token.ts';
 import { projectOwnershipPeriods, projects as projectsTable } from '../schema.ts';
 import { getCurrentBillingPeriodStart } from '../tiers.ts';
 import type { Project } from '../types.ts';
@@ -46,6 +47,7 @@ const projectUsage = new Hono<ApiEnv>()
           context.env.CF_ACCOUNT_ID,
           context.env.CF_API_TOKEN,
           context.env.AI_GATEWAY_ID ?? 'void',
+          context.env.JWT_SECRET,
           projectId,
           since,
           undefined,
@@ -114,6 +116,7 @@ const accountUsage = new Hono<ApiEnv>()
           context.env.CF_ACCOUNT_ID,
           context.env.CF_API_TOKEN,
           context.env.AI_GATEWAY_ID ?? 'void',
+          context.env.JWT_SECRET,
           projectWindows.map(({ project, intervals }) => ({ projectId: project.id, intervals })),
         ),
       ]);
@@ -348,6 +351,7 @@ export async function sumAiUsageForWindows(
   accountId: string,
   apiToken: string,
   gatewayId: string,
+  jwtSecret: string,
   windows: ReadonlyArray<{ projectId: string; intervals: ReadonlyArray<AccountUsageInterval> }>,
 ): Promise<Array<number>> {
   const totals = windows.map(() => 0);
@@ -359,6 +363,7 @@ export async function sumAiUsageForWindows(
       accountId,
       apiToken,
       gatewayId,
+      jwtSecret,
       projectId,
       interval.start,
       interval.end,
@@ -580,18 +585,24 @@ async function queryProjectAiUsage(
   accountId: string,
   apiToken: string,
   gatewayId: string,
+  jwtSecret: string,
   projectId: string,
   since: Date,
   until?: Date,
   failOnError = false,
 ): Promise<{ neurons: number }> {
+  // The platform AI Gateway accepts requests from anyone who knows its URL, so
+  // anyone can write a log row with any metadata. The proxy tags its rows with
+  // a value signed under JWT_SECRET; filtering on that value means rows the
+  // platform did not write are never counted.
+  const usageTag = await deriveAiUsageTag(jwtSecret, projectId);
   const query = `query {
   viewer {
     accounts(filter: { accountTag: "${accountId}" }) {
       aiGatewayRequests(
         filter: {
           gatewayId: "${gatewayId}"
-          metadata_projectId: "${projectId}"
+          metadata_projectId: "${usageTag}"
           datetime_geq: "${since.toISOString()}"
           ${until ? `datetime_lt: "${until.toISOString()}"` : ''}
         }

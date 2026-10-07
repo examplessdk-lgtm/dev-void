@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vite-plus/test';
 import app from '../../src/index.ts';
+import { deriveAiUsageTag } from '../../src/proxy-token.ts';
 import { projects, projectOwnershipPeriods, users } from '../../src/schema.ts';
 import { getCurrentBillingPeriodStart } from '../../src/tiers.ts';
 import { UsageCounter, type CounterState } from '../../src/usage-counter.ts';
@@ -210,8 +211,9 @@ it.each(['fresh', 'initialized'] as const)(
     unavailable = false;
     await restarted.alarm();
     expect(queries).toHaveLength(2);
+    const usageTag = await deriveAiUsageTag(env.JWT_SECRET, project.id);
     for (const query of queries) {
-      expect(query).toContain(`projectId: "${project.id}"`);
+      expect(query).toContain(`metadata_projectId: "${usageTag}"`);
       expect(query).toContain(`datetime_geq: "${ownershipStartedAt}"`);
       expect(query).toContain(`datetime_lt: "${window!.ownershipEndedAt}"`);
     }

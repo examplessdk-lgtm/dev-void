@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-
 import { verifyPrerenderToken } from '../../src/auth/deploy-token.ts';
 import app from '../../src/index.ts';
 import * as projectAccess from '../../src/project-access.ts';
+import { deriveAiUsageTag } from '../../src/proxy-token.ts';
 import {
   deployments,
   domains,
@@ -667,6 +668,9 @@ describe('ownership-period account usage', () => {
       transferredAt.toISOString().replace('T', ' ').slice(0, 19),
     );
     expect(graphqlQueries).toHaveLength(1);
+    expect(graphqlQueries[0]).toContain(
+      `metadata_projectId: "${await deriveAiUsageTag(JWT_SECRET, project.id)}"`,
+    );
     expect(graphqlQueries[0]).toContain(`datetime_geq: "${ownedFrom.toISOString()}"`);
     expect(graphqlQueries[0]).toContain(`datetime_lt: "${transferredAt.toISOString()}"`);
   });

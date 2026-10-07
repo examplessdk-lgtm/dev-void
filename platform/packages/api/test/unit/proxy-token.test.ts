@@ -4,6 +4,7 @@ import { hmacSignState } from '../../src/auth/hmac.ts';
 import { signJwt } from '../../src/auth/jwt.ts';
 import {
   createProxyTokenStateCache,
+  deriveAiUsageTag,
   deriveProxyInternalAuth,
   deriveProxyToken,
   isAcceptedGeneration,
@@ -55,6 +56,12 @@ function nodeInternal(route: ProxyInternalRoute, projectId = PROJECT): string {
   return base64url(
     createHmac('sha256', key).update(`void-proxy-internal\n${route}\n${projectId}`).digest(),
   );
+}
+
+function nodeAiUsageTag(projectId: string, secret = SECRET): string {
+  const key = Buffer.from(hkdfSync('sha256', secret, 'void-ai-usage', 'ai-usage', 32));
+  const mac = base64url(createHmac('sha256', key).update(`void-ai-usage\n${projectId}`).digest());
+  return `${projectId}.${mac.slice(0, 22)}`;
 }
 
 function kvStub(values: Record<string, string> = {}) {
@@ -412,5 +419,36 @@ describe('verifyProxyInternalAuth', () => {
     await expect(verifyProxyInternalAuth(SECRET, 'resolve-worker', PROJECT, value)).resolves.toBe(
       false,
     );
+  });
+});
+
+describe('deriveAiUsageTag', () => {
+  it('is the project id and a 22-character MAC under its own HKDF key', async () => {
+    const tag = await deriveAiUsageTag(SECRET, PROJECT);
+    expect(tag).toBe(nodeAiUsageTag(PROJECT));
+    expect(tag).toMatch(/^proj_000000000001\.[A-Za-z0-9_-]{22}$/);
+    expect(await deriveAiUsageTag(SECRET, PROJECT)).toBe(tag);
+  });
+
+  it('differs per project and per secret', async () => {
+    const tag = await deriveAiUsageTag(SECRET, PROJECT);
+    expect(await deriveAiUsageTag(SECRET, OTHER_PROJECT)).not.toBe(tag);
+    const otherSecret = await deriveAiUsageTag('other-secret', PROJECT);
+    expect(otherSecret).not.toBe(tag);
+    expect(otherSecret).toBe(nodeAiUsageTag(PROJECT, 'other-secret'));
+  });
+
+  it('shares no MAC with tenant tokens or proxy internal values', async () => {
+    const mac = (await deriveAiUsageTag(SECRET, PROJECT)).slice(`${PROJECT}.`.length);
+    for (const value of [TOK_0, TOK_1.slice('1.'.length), TOK_2.slice('2.'.length)]) {
+      expect(value.startsWith(mac)).toBe(false);
+    }
+    for (const route of ROUTES) {
+      expect((await deriveProxyInternalAuth(SECRET, route, PROJECT)).startsWith(mac)).toBe(false);
+    }
+  });
+
+  it('accepts ids that are not project ids', async () => {
+    await expect(deriveAiUsageTag(SECRET, 'project-1')).resolves.toBe(nodeAiUsageTag('project-1'));
   });
 });

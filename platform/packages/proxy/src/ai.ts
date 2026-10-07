@@ -1,4 +1,5 @@
 import { isRecord } from '@void/deploy-core';
+import { deriveAiUsageTag } from '@voidcloud/api/proxy-token';
 import { Hono } from 'hono';
 import { asRecord, asString } from './body.ts';
 import type { ProxyEnv } from './types.ts';
@@ -163,7 +164,8 @@ function providerAuthDefaults(provider: string): { header: string; prefix: strin
 }
 
 // AI usage is counted from the platform gateway's log rows by their
-// `projectId` metadata, so the platform owns the gateway id, its metadata and
+// `projectId` metadata, which holds the signed project tag from
+// `deriveAiUsageTag`, so the platform owns the gateway id, its metadata and
 // logging. Cloudflare saves only the first five metadata entries, and
 // integer-like keys always sort first, so caller metadata could push the
 // project out; `collectLog: false` would drop the row.
@@ -182,6 +184,7 @@ function withoutKeys(
 function gatewayOptions(
   value: unknown,
   projectId: string,
+  usageTag: string,
   gatewayId: string,
 ): Record<string, unknown> {
   const options = asRecord(value);
@@ -193,7 +196,7 @@ function gatewayOptions(
 
   const result: Record<string, unknown> = {
     ...options,
-    gateway: { ...gateway, id: gatewayId, metadata: { projectId } },
+    gateway: { ...gateway, id: gatewayId, metadata: { projectId: usageTag } },
   };
   if ('extraHeaders' in options) {
     result.extraHeaders = withoutKeys(asRecord(options.extraHeaders), (key) =>
@@ -365,6 +368,7 @@ ai.post('/run', async (context) => {
   const options = gatewayOptions(
     body.options,
     projectId,
+    await deriveAiUsageTag(context.env.JWT_SECRET, projectId),
     context.env.AI_GATEWAY_ID ?? DEFAULT_GATEWAY_ID,
   );
 
@@ -461,6 +465,7 @@ ai.post('/toMarkdown', async (context) => {
   const options = gatewayOptions(
     body.options,
     projectId,
+    await deriveAiUsageTag(context.env.JWT_SECRET, projectId),
     context.env.AI_GATEWAY_ID ?? DEFAULT_GATEWAY_ID,
   );
   try {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { deriveAiUsageTag } from '../../src/proxy-token.ts';
 import {
   queryBatchProjectUsageWindows,
   queryProjectAiUsage,
@@ -6,6 +7,7 @@ import {
 } from '../../src/routes/usage.ts';
 
 const apiToken = 'private-cloudflare-token';
+const jwtSecret = 'test-jwt-secret';
 const since = new Date('2026-09-01T00:00:00.000Z');
 const until = new Date('2026-09-02T00:00:00.000Z');
 
@@ -18,7 +20,16 @@ function respond(body: unknown, status = 200): void {
 }
 
 function query(failOnError = true): Promise<{ neurons: number }> {
-  return queryProjectAiUsage('account-1', apiToken, 'void', 'project-1', since, until, failOnError);
+  return queryProjectAiUsage(
+    'account-1',
+    apiToken,
+    'void',
+    jwtSecret,
+    'project-1',
+    since,
+    until,
+    failOnError,
+  );
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -32,7 +43,10 @@ describe('queryProjectAiUsage strict accounting', () => {
     const [url, init] = vi.mocked(fetch).mock.calls[0];
     expect(url).toBe('https://api.cloudflare.com/client/v4/graphql');
     const request = JSON.parse(String(init?.body));
-    expect(request.query).toContain('metadata_projectId: "project-1"');
+    expect(request.query).toContain(
+      `metadata_projectId: "${await deriveAiUsageTag(jwtSecret, 'project-1')}"`,
+    );
+    expect(request.query).not.toContain('metadata_projectId: "project-1"');
     expect(request.query).toContain(`datetime_geq: "${since.toISOString()}"`);
     expect(request.query).toContain(`datetime_lt: "${until.toISOString()}"`);
   });
@@ -176,7 +190,7 @@ describe('account usage query bounds', () => {
     });
     const intervals = Array.from({ length: 12 }, () => ({ start: since, end: until }));
     await expect(
-      sumAiUsageForWindows('account-1', apiToken, 'void', [
+      sumAiUsageForWindows('account-1', apiToken, 'void', jwtSecret, [
         { projectId: 'one', intervals },
         { projectId: 'two', intervals: [intervals[0]!] },
       ]),

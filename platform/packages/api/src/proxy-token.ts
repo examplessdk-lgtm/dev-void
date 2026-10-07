@@ -101,6 +101,7 @@ const encoder = new TextEncoder();
 const legacyKeys = new Map<string, Promise<CryptoKey>>();
 const proxyTokenKeys = new Map<string, Promise<CryptoKey>>();
 const proxyInternalKeys = new Map<string, Promise<CryptoKey>>();
+const aiUsageKeys = new Map<string, Promise<CryptoKey>>();
 
 function cachedKey(
   cache: Map<string, Promise<CryptoKey>>,
@@ -143,7 +144,7 @@ async function hkdfHmacKey(secret: string, salt: string, info: string): Promise<
 }
 
 // JWT_SECRET signs login JWTs, OAuth/link state and the legacy token as a raw
-// HMAC key. The two keys below are HKDF outputs with their own salt and info,
+// HMAC key. The keys below are HKDF outputs with their own salt and info,
 // so they differ from that raw key and from each other: a tenant token never
 // verifies as a proxy internal value, and neither verifies as any raw-key MAC.
 function proxyTokenKey(secret: string): Promise<CryptoKey> {
@@ -156,6 +157,10 @@ function proxyInternalKey(secret: string): Promise<CryptoKey> {
   return cachedKey(proxyInternalKeys, secret, () =>
     hkdfHmacKey(secret, 'void-proxy-internal', 'proxy-internal'),
   );
+}
+
+function aiUsageKey(secret: string): Promise<CryptoKey> {
+  return cachedKey(aiUsageKeys, secret, () => hkdfHmacKey(secret, 'void-ai-usage', 'ai-usage'));
 }
 
 // --- Encoding ---
@@ -361,4 +366,21 @@ export async function verifyProxyInternalAuth(
     return false;
   }
   return verify(proxyInternalKey(jwtSecret), proxyInternalMessage(route, projectId), value);
+}
+
+// --- AI usage tag ---
+
+/**
+ * The project value the proxy writes into AI Gateway metadata and the usage
+ * query filters on: `<projectId>.<22 base64url MAC characters>`. Only the
+ * platform can compute it, so gateway rows written by anyone else never count
+ * toward a project's AI usage.
+ *
+ * Platform only: never put it in a Worker binding or a response. Rotating
+ * JWT_SECRET changes every tag, so counted AI usage restarts for the current
+ * billing period. The project id is not validated here.
+ */
+export async function deriveAiUsageTag(jwtSecret: string, projectId: string): Promise<string> {
+  const mac = await sign(aiUsageKey(jwtSecret), `void-ai-usage\n${projectId}`);
+  return `${projectId}.${mac.slice(0, 22)}`;
 }

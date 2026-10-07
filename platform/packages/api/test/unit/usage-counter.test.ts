@@ -362,6 +362,8 @@ function storedWatermarks(storage: ReturnType<typeof makeFakeStorage>): Map<stri
   );
 }
 
+const JWT_SECRET = 'usage-counter-secret';
+
 function makeCounter(initialState: Partial<CounterState> = {}) {
   const kv = makeFakeKV();
   const storage = makeFakeStorage();
@@ -372,6 +374,7 @@ function makeCounter(initialState: Partial<CounterState> = {}) {
   const env = {
     ROUTING: kv,
     HYPERDRIVE: { connectionString: 'postgres://mock' },
+    JWT_SECRET,
   };
   const ctx = { storage };
 
@@ -1479,6 +1482,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(ownershipStartedAt),
       new Date(ownershipEndedAt),
@@ -1505,6 +1509,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(ownershipStartedAt),
       new Date(extendedOwnershipEndedAt),
@@ -1526,6 +1531,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(ownershipStartedAt),
       new Date(extendedOwnershipEndedAt),
@@ -1572,6 +1578,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(ownershipStartedAt),
       new Date(ownershipEndedAt),
@@ -1650,6 +1657,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(billingPeriodStart),
       new Date(ownershipEndedAt),
@@ -1769,6 +1777,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'p1',
       new Date(ownershipStartedAt),
     );
@@ -1879,6 +1888,7 @@ describe('UsageCounter ownership changes', () => {
         undefined,
         undefined,
         'void',
+        JWT_SECRET,
         'deleted',
         new Date(billingPeriodStart),
         new Date(ownershipEndedAt),
@@ -1955,6 +1965,7 @@ describe('UsageCounter ownership changes', () => {
         undefined,
         undefined,
         'void',
+        JWT_SECRET,
         'retained',
         new Date('2026-02-01T00:00:00.000Z'),
       );
@@ -2010,6 +2021,7 @@ describe('UsageCounter ownership changes', () => {
       undefined,
       undefined,
       'void',
+      JWT_SECRET,
       'transferred',
       new Date(ownershipStartedAt),
       new Date(ownershipEndedAt),
