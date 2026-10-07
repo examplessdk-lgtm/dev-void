@@ -271,3 +271,87 @@ describe('resolveVoidAuthOptions', () => {
     ).resolves.toBe(false);
   });
 });
+
+describe('resolveVoidAuthOptions auth rate limits', () => {
+  function plainRequest(headers: Record<string, string>): Request {
+    return new Request('https://example.com/api/auth/sign-in/email', { headers });
+  }
+
+  function edgeRequest(headers: Record<string, string>): Request {
+    const request = plainRequest(headers);
+    Object.defineProperty(request, 'cf', { value: { colo: 'SJC' } });
+    return request;
+  }
+
+  function resolve(
+    request: Request,
+    runtime: Partial<Parameters<typeof resolveVoidAuthOptions>[2]> = {},
+  ) {
+    return resolveVoidAuthOptions(
+      request,
+      { BETTER_AUTH_SECRET: 'secret' },
+      { dialect: 'sqlite', providers: null, ...runtime },
+      {} as never,
+    );
+  }
+
+  it('limits auth requests per Cloudflare client IP on a deployed Worker', async () => {
+    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }));
+    expect(options.rateLimit?.enabled).toBe(true);
+    expect(options.advanced?.ipAddress?.ipAddressHeaders).toEqual(['cf-connecting-ip']);
+  });
+
+  it('leaves the dev server unlimited', async () => {
+    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+      dev: true,
+    });
+    expect(options.rateLimit).toBeUndefined();
+  });
+
+  it('does not trust the Cloudflare IP header outside a Worker', async () => {
+    const { options } = await resolve(plainRequest({ 'cf-connecting-ip': '203.0.113.7' }));
+    expect(options.rateLimit).toBeUndefined();
+    expect(options.advanced).toBeUndefined();
+  });
+
+  it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1'])(
+    'leaves a local preview from %s unlimited',
+    async (ip) => {
+      const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': ip }));
+      expect(options.rateLimit).toBeUndefined();
+      expect(options.advanced).toBeUndefined();
+    },
+  );
+
+  it('does not share one bucket for requests without a client IP', async () => {
+    const { options } = await resolve(edgeRequest({}));
+    expect(options.rateLimit).toBeUndefined();
+    expect(options.advanced).toBeUndefined();
+  });
+
+  it('keeps an explicit rateLimit setting', async () => {
+    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+      userConfig: { rateLimit: { enabled: false, window: 60 } },
+    });
+    expect(options.rateLimit).toEqual({ enabled: false, window: 60 });
+  });
+
+  it('adds the client IP header next to other advanced settings', async () => {
+    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+      userConfig: { advanced: { cookiePrefix: 'x' } },
+    });
+    expect(options.advanced).toEqual({
+      cookiePrefix: 'x',
+      ipAddress: { ipAddressHeaders: ['cf-connecting-ip'] },
+    });
+  });
+
+  it('keeps an explicit ipAddress setting', async () => {
+    const ipAddress = { ipAddressHeaders: ['x-real-ip'], ipv6Subnet: 48 };
+    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+      userConfig: { advanced: { ipAddress } },
+    });
+    expect(options.advanced?.ipAddress).toBe(ipAddress);
+    expect(options.rateLimit?.enabled).toBe(true);
+  });
+});

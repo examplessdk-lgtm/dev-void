@@ -129,6 +129,8 @@ Local development needs no secret setup. To preview a production build locally, 
 
 `POST`, `PUT`, `PATCH` and `DELETE` requests and WebSocket connections from another origin don't use the signed-in session unless that origin is in `trustedOrigins`. If a separate frontend calls your app, add its origin there (see [Customization](#customization)). If your routes use their own cookies, check the request `Origin` yourself, for example with Hono's [`csrf()`](https://hono.dev/docs/middleware/builtin/csrf) middleware.
 
+Deployed apps on Cloudflare limit auth requests per client IP with Better Auth's defaults, for example 3 sign-in attempts per 10 seconds. Each Worker instance keeps its own count. Change or turn off the limits with `rateLimit` in `auth.ts`. To share one count across instances, set `rateLimit: { storage: 'database' }`, then run `void db generate` for a direct Cloudflare deploy.
+
 ## Customization
 
 For advanced configuration, create `auth.ts` at the project root and export `defineAuth(...)`:

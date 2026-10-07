@@ -362,6 +362,44 @@ async function sessionHeaders(
   return withoutCookie;
 }
 
+const LOOPBACK_IP = /^(127\.|::1$|::ffff:127\.)/;
+
+/**
+ * The client IP set by Cloudflare's edge, or null outside a deployed Worker.
+ * `request.cf` keeps a client-supplied header from being trusted on Node, Bun
+ * or Deno, and local previews report a loopback address.
+ */
+function cloudflareClientIp(request: Request): string | null {
+  const cf = (request as { cf?: unknown }).cf;
+  if (typeof cf !== 'object' || cf === null) {
+    return null;
+  }
+  const ip = request.headers.get('cf-connecting-ip');
+  if (!ip || LOOPBACK_IP.test(ip)) {
+    return null;
+  }
+  return ip;
+}
+
+/**
+ * Better Auth enables rate limiting only when NODE_ENV is "production", which
+ * Workers never set. Turn it on for deployed Cloudflare requests and key it by
+ * Cloudflare's client IP header. Explicit user settings still win.
+ */
+function applyCloudflareRateLimitDefaults(options: BetterAuthOptions): BetterAuthOptions {
+  return {
+    ...options,
+    rateLimit: {
+      ...options.rateLimit,
+      enabled: options.rateLimit?.enabled ?? true,
+    },
+    advanced: {
+      ...options.advanced,
+      ipAddress: options.advanced?.ipAddress ?? { ipAddressHeaders: ['cf-connecting-ip'] },
+    },
+  };
+}
+
 export function assertRuntimeDialect(
   runtime: VoidAuthRuntimeOptions,
   dialect: VoidAuthDialect,
@@ -405,8 +443,12 @@ export function createVoidAuthRuntime(
       trustedOrigins: [origin],
     };
 
+    const resolved = resolveUserConfig(runtime.userConfig, defaults, request, env, dialect);
     return {
-      options: resolveUserConfig(runtime.userConfig, defaults, request, env, dialect),
+      options:
+        runtime.dev !== true && cloudflareClientIp(request)
+          ? applyCloudflareRateLimitDefaults(resolved)
+          : resolved,
       dispose,
     };
   }
