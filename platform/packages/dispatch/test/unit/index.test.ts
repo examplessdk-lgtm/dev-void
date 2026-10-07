@@ -1459,6 +1459,94 @@ describe('ISR (stale-while-revalidate)', () => {
     expect(variantKeys).toHaveLength(2);
   });
 
+  describe('allowlisted query params on direct requests', () => {
+    const send = async (env: Env, path: string) => {
+      const ctx = createCtx();
+      const response = await app.fetch(new Request(`https://my-app.void.app${path}`), env, ctx);
+      await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
+      return response;
+    };
+    // The page reflects `q`.
+    const renderQuery = async (request: Request) =>
+      new Response(`<html>${new URL(request.url).searchParams.get('q') ?? 'none'}</html>`, {
+        headers: { 'Content-Type': 'text/html' },
+      });
+    const bareKey = isrCacheKey('proj_1', 'legacy', 'my-app.void.app', '/search');
+
+    it('stores each allowlisted value under its own key', async () => {
+      const { env, workerFetch, kvStore } = createEnv({
+        routing: {
+          workerName: 'user-app',
+          projectId: 'proj_1',
+          ssr: true,
+          revalidate: 60,
+          queryAllowlist: { '/search': ['q'] },
+        },
+      });
+      workerFetch.mockImplementation(renderQuery);
+
+      expect(await (await send(env, '/search?q=a')).text()).toBe('<html>a</html>');
+      const b = await send(env, '/search?q=b');
+      expect(b.headers.get('x-isr-cache')).toBe('MISS');
+      expect(await b.text()).toBe('<html>b</html>');
+      const again = await send(env, '/search?q=a');
+      expect(again.headers.get('x-isr-cache')).toBe('HIT');
+      expect(await again.text()).toBe('<html>a</html>');
+      expect(workerFetch).toHaveBeenCalledTimes(2);
+      expect([...kvStore.keys()].filter((k) => k.includes('#rw='))).toHaveLength(2);
+      expect(kvStore.has(bareKey)).toBe(false);
+
+      // A request without allowlisted params keeps the bare key.
+      const plain = await send(env, '/search');
+      expect(plain.headers.get('x-isr-cache')).toBe('MISS');
+      expect(await plain.text()).toBe('<html>none</html>');
+      expect(kvStore.has(bareKey)).toBe(true);
+    });
+
+    it('shares the bare key across query values without an allowlist', async () => {
+      const { env, workerFetch, kvStore } = createEnv({
+        routing: { workerName: 'user-app', projectId: 'proj_1', ssr: true, revalidate: 60 },
+      });
+      workerFetch.mockImplementation(renderQuery);
+
+      expect((await send(env, '/search')).headers.get('x-isr-cache')).toBe('MISS');
+      for (const path of ['/search?q=a', '/search?q=b']) {
+        const response = await send(env, path);
+        expect(response.headers.get('x-isr-cache')).toBe('HIT');
+        expect(await response.text()).toBe('<html>none</html>');
+      }
+      expect(workerFetch).toHaveBeenCalledOnce();
+      expect([...kvStore.keys()]).toEqual([bareKey]);
+    });
+
+    it('keys allowlisted params when fallback rules cover other paths', async () => {
+      const { env, kvStore } = createEnv({
+        routing: {
+          workerName: 'user-app',
+          projectId: 'proj_1',
+          ssr: true,
+          revalidate: 60,
+          queryAllowlist: { '/search': ['q'] },
+          fallbackRules: [{ source: '/app/*', destination: '/index.html', status: 200 }],
+        },
+        workerResponse: new Response('<html>a</html>', {
+          headers: { 'Content-Type': 'text/html' },
+        }),
+      });
+
+      await send(env, '/search?q=a');
+      expect([...kvStore.keys()]).toEqual([
+        isrCacheKey(
+          'proj_1',
+          'legacy',
+          'my-app.void.app',
+          '/search',
+          'https://my-app.void.app/search?q=a',
+        ),
+      ]);
+    });
+  });
+
   it('isolates ISR KV keys between direct and rewritten requests to the same path', async () => {
     const { env, workerFetch, kvStore } = createEnv({
       routing: {

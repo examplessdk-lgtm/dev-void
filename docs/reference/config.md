@@ -434,7 +434,7 @@ ISR revalidation TTL in seconds, either globally or per path. See [Revalidation]
 
 #### `routing.revalidateQueryAllowlist`
 
-Query parameters that participate in ISR variant keys for dispatch rewrites. Keys are source URL patterns, values are query parameter names to keep. When omitted, rewritten ISR cache keys drop every incoming query parameter to avoid unbounded cache fanout.
+Query parameters to keep in ISR cache keys. Keys are source URL patterns, values are query parameter names to keep. The listed parameters are part of the cache key for every request to a matching path; all other query parameters are left out of the key. When omitted, ISR cache keys drop every incoming query parameter to avoid unbounded cache fanout.
 
 ```json
 {

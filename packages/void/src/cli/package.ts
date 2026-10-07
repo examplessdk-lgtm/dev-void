@@ -364,7 +364,7 @@ export type PackageOptions = {
   sandbox?: ResolvedSandboxConfig;
   /** Resolved void/live Durable Object binding and class names. */
   live?: LiveBindingConfig;
-  /** Query params that participate in ISR variant keys for dispatch rewrites. */
+  /** Query params kept in the ISR cache key for every request to a matching path; all others are left out. */
   revalidateQueryAllowlist?: Record<string, Array<string>>;
 };
 

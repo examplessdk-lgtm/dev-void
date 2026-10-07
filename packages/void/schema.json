@@ -212,7 +212,7 @@
         },
         "revalidateQueryAllowlist": {
           "type": "object",
-          "description": "Query parameters that participate in ISR variant keys for dispatch rewrites. Keys are source URL patterns; values are arrays of query parameter names. When omitted, rewritten ISR drops every query parameter from the variant key.",
+          "description": "Query parameters that are part of the ISR cache key for every request to a matching path. Keys are source URL patterns; values are arrays of query parameter names. All other query parameters are left out of the key. When omitted, ISR drops every query parameter from the cache key.",
           "patternProperties": {
             "^(\\/|\\*$)": {
               "type": "array",

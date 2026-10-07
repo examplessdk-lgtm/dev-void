@@ -316,19 +316,25 @@ function buildFallbackOriginalUrlVariant(
   routing: RoutingEntry,
   originalUrlVariant: string | undefined,
 ): string | undefined {
-  // Fallback rewrites are discovered after the first worker/static miss, but
-  // ISR needs the read key before dispatching. If a fallback rule can handle
-  // this pathname, use the same original-URL variant a later fallback dispatch
-  // would expose via X-Void-Original-URL so query-allowlisted renders cannot
-  // collide with the direct ISR key.
-  if (originalUrlVariant || !routing.fallbackRules?.length) {
+  // ISR keys a request by its allowlisted query params. A redirect-rule rewrite
+  // already built that variant. Fallback rewrites are discovered after the
+  // first worker/static miss, but ISR needs the read key before dispatching: if
+  // a fallback rule can handle this pathname, use the same original-URL variant
+  // a later fallback dispatch would expose via X-Void-Original-URL so
+  // query-allowlisted renders cannot collide with the direct ISR key. A direct
+  // request keys on its allowlisted params too, and keeps the bare key when it
+  // has none.
+  if (originalUrlVariant) {
     return originalUrlVariant;
   }
-  const fallback = applyRoutingRules(pathname, routing.fallbackRules, requestHost);
-  if (fallback?.type !== 'rewrite') {
-    return undefined;
+  const variant = buildVariantOriginalUrl(requestUrl, pathname, routing.queryAllowlist);
+  const fallback = routing.fallbackRules?.length
+    ? applyRoutingRules(pathname, routing.fallbackRules, requestHost)
+    : undefined;
+  if (fallback?.type === 'rewrite') {
+    return variant;
   }
-  return buildVariantOriginalUrl(requestUrl, pathname, routing.queryAllowlist);
+  return new URL(variant).search ? variant : undefined;
 }
 
 function resolveCachedWfpFallbackPathname(
