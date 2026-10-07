@@ -1,6 +1,15 @@
 -- Shared seed data for local dev
 -- Local: psql -d void_api_dev -f scripts/seed.sql
 
+-- Remove the demo projects older seeds created as proj_seed1..6: they hold
+-- the same slugs, so the projects below would not insert. Deployments,
+-- builds, domains and resources do not cascade from projects.
+DELETE FROM builds WHERE project_id IN ('proj_seed1', 'proj_seed2', 'proj_seed3', 'proj_seed4', 'proj_seed5', 'proj_seed6');
+DELETE FROM deployments WHERE project_id IN ('proj_seed1', 'proj_seed2', 'proj_seed3', 'proj_seed4', 'proj_seed5', 'proj_seed6');
+DELETE FROM domains WHERE project_id IN ('proj_seed1', 'proj_seed2', 'proj_seed3', 'proj_seed4', 'proj_seed5', 'proj_seed6');
+DELETE FROM resources WHERE project_id IN ('proj_seed1', 'proj_seed2', 'proj_seed3', 'proj_seed4', 'proj_seed5', 'proj_seed6');
+DELETE FROM projects WHERE id IN ('proj_seed1', 'proj_seed2', 'proj_seed3', 'proj_seed4', 'proj_seed5', 'proj_seed6');
+
 -- Users
 INSERT INTO users (id, provider, provider_id, login, email, plan, billing_cycle_start, suspended_reason, role, created_at) VALUES ('user_seed1', 'github', '100001', 'alice', 'alice@example.com', 'free', '2026-01-21T00:00:00.000Z', NULL, 'user', '2025-11-22T00:00:00.000Z') ON CONFLICT (id) DO NOTHING;
 INSERT INTO users (id, provider, provider_id, login, email, plan, billing_cycle_start, suspended_reason, role, created_at) VALUES ('user_seed2', 'github', '100002', 'bob', 'bob@example.com', 'solo', '2026-02-13T00:00:00.000Z', NULL, 'user', '2025-12-22T00:00:00.000Z') ON CONFLICT (id) DO NOTHING;
