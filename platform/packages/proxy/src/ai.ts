@@ -210,7 +210,6 @@ function applyProviderHeaders({
   headers,
   provider,
   providerKey,
-  usageTag,
   apiKeyHeader,
   apiKeyPrefix,
   contentType,
@@ -218,7 +217,6 @@ function applyProviderHeaders({
   headers: Headers;
   provider: string;
   providerKey: string;
-  usageTag: string;
   apiKeyHeader?: string | null;
   apiKeyPrefix?: string | null;
   contentType?: string;
@@ -228,15 +226,17 @@ function applyProviderHeaders({
   const keyPrefix = apiKeyPrefix ?? defaults.prefix;
 
   headers.set(keyHeader, `${keyPrefix}${providerKey}`);
-  // Runs after the key header is set, so a caller-chosen key header name
-  // cannot set a gateway control either.
+  // Provider-native calls bill to the app's own provider key, so they carry
+  // no usage tag and do not count toward the platform AI allowance. Caller
+  // gateway headers are dropped after the key header is set, so neither they
+  // nor a caller-chosen key header name can set gateway metadata, logging,
+  // cost or billing.
   const callerGatewayHeaders = [...headers.keys()].filter((name) =>
     GATEWAY_CONTROL_HEADER.test(name),
   );
   for (const name of callerGatewayHeaders) {
     headers.delete(name);
   }
-  headers.set('cf-aig-metadata', JSON.stringify({ projectId: usageTag }));
   if (contentType && !headers.has('content-type')) {
     headers.set('content-type', contentType);
   }
@@ -421,7 +421,6 @@ ai.post('/provider', async (context) => {
       headers: headersFromRecord(body.headers),
       provider,
       providerKey,
-      usageTag: await deriveAiUsageTag(context.env.JWT_SECRET, projectId),
       apiKeyHeader,
       apiKeyPrefix,
       contentType: requestBody.contentType,
