@@ -24,7 +24,7 @@ vp run check
 vp test run
 ```
 
-The normal Void Cloud deployment script deploys the proxy first, then applies PostgreSQL migrations and deploys the API, followed by the email gateway, tail, dispatch, and dashboard Workers. The first email rollout uses the separate order in [Configure the shared mail zone](#configure-the-shared-mail-zone). The API hosts the build scheduler and build-container Durable Objects. The optional dashboard uses the API for authentication and is deployed after the API it depends on.
+The normal Void Cloud deployment script deploys the proxy first, then the email gateway, then applies PostgreSQL migrations and deploys the API, followed by the tail, dispatch, and dashboard Workers. The email gateway goes first so it can already relay requests from pages the new API serves, such as the email confirmation form. The first email rollout uses the separate order in [Configure the shared mail zone](#configure-the-shared-mail-zone). The API hosts the build scheduler and build-container Durable Objects. The optional dashboard uses the API for authentication and is deployed after the API it depends on.
 
 The `deploy` and `deploy:staging` scripts in `platform/package.json` target these existing hosted environments. Forks should use `void platform upgrade --runtime` as described in [source deployment](../../docs/guide/platform/development/runtime.md#deploying-source-builds-from-ci).
 
