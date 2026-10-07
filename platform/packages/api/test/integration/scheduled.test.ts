@@ -771,18 +771,23 @@ describe('scheduled() proxy token rotations', () => {
     const neverDeployed = (await createTestProject(env.db, userId)).id;
     const rotated = await legacyProject(userId, { proxy_token_gen: 1 });
     const deleting = await legacyProject(userId, { status: 'deleting' });
-    const staticSite = await legacyProject(userId, { type: 'static' });
+    // Now static, but its earlier Worker deployment stays retained for rollback.
+    const nowStatic = await legacyProject(userId);
+    await env.db
+      .update(deployments)
+      .set({ retained: true })
+      .where(eq(deployments.project_id, nowStatic));
+    await createTestDeployment(env.db, nowStatic, 'live');
+    await env.db.update(projects).set({ type: 'static' }).where(eq(projects.id, nowStatic));
 
     await scheduled(mockController, makeBindings(env), mockCtx);
     await scheduled(mockController, makeBindings(env), mockCtx);
 
-    for (const projectId of [live, retained]) {
+    for (const projectId of [live, retained, nowStatic]) {
       expect(await rotationState(projectId)).toEqual({ gen: 1, phase: 'patch' });
       expect(await jobCount(projectId)).toBe(1);
     }
-    for (const projectId of [neverDeployed, staticSite]) {
-      expect(await rotationState(projectId)).toEqual({ gen: 0, phase: undefined });
-    }
+    expect(await rotationState(neverDeployed)).toEqual({ gen: 0, phase: undefined });
     expect(await rotationState(rotated)).toEqual({ gen: 1, phase: undefined });
     expect(await jobCount(deleting)).toBe(0);
   });

@@ -269,14 +269,15 @@ export async function requestRotationIfReplacingUntrustedCode(
 // --- Inventory ---
 
 /**
- * A project whose Workers still hold the legacy token: on generation 0, not
- * static, with an active or retained deployment (the rows
- * `listProxyTokenInventory` walks). A project never deployed has none; its
- * first Worker deploy issues generation 1. Static projects never get a token.
+ * A project whose Workers may still hold the legacy token: on generation 0,
+ * with an active or retained deployment (the rows `listProxyTokenInventory`
+ * walks). A project never deployed has none; its first Worker deploy issues
+ * generation 1. A static project is included too: `projects.type` follows
+ * only the active deployment, and earlier Worker deployments stay retained
+ * for rollback. Its static rows have no script, so its rotation is cheap.
  */
 export function onLegacyProxyToken(): SQL {
   return sql`(${projects.proxy_token_gen} = 0
-    AND ${projects.type} NOT IN ('static', 'spa')
     AND EXISTS (
       SELECT 1 FROM ${deployments}
       WHERE ${deployments.project_id} = ${projects.id}
