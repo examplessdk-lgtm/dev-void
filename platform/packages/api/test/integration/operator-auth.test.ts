@@ -71,6 +71,56 @@ describe('operator authentication', () => {
     ).toBe(401);
   });
 
+  test('confirmation repeats the exact ISO UTC expiry the elevation issued', async () => {
+    const admin = await createTestUser(
+      env.db,
+      'operator-expiry',
+      'github',
+      undefined,
+      'free',
+      'admin',
+    );
+    const created = await request('/session', admin.jwt, {});
+    expect(created.status).toBe(200);
+    const createdBody = (await created.json()) as { token: string; expiresAt: string };
+
+    const confirmed = await request('/session', createdBody.token);
+    expect(confirmed.status).toBe(200);
+    const confirmedBody = (await confirmed.json()) as {
+      apiVersion: number;
+      expiresAt: string;
+      user: { id: string; login: string; role: string };
+      capabilities: Record<string, unknown>;
+      hostedWorkerOperations: unknown;
+    };
+
+    // The expiry round-trips through Postgres as a timestamp without time zone,
+    // and the string-mode column mapping reformats it as SQL text; the handler
+    // must serialize it back to the ISO UTC text the admin app pins. Assert the
+    // real conversion result, not a fixture.
+    const isoUtc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    expect(createdBody.expiresAt).toMatch(isoUtc);
+    expect(confirmedBody.expiresAt).toBe(createdBody.expiresAt);
+    expect(Date.parse(confirmedBody.expiresAt)).toBe(Date.parse(createdBody.expiresAt));
+
+    // The remaining shape the admin app validates before accepting a session.
+    expect(confirmedBody.apiVersion).toBe(1);
+    expect(confirmedBody.user).toEqual({ id: admin.id, login: admin.login, role: 'admin' });
+    for (const name of [
+      'ai',
+      'customDomains',
+      'email',
+      'githubActions',
+      'githubOAuth',
+      'googleOAuth',
+      'managedBuilds',
+      'sandbox',
+    ]) {
+      expect(typeof confirmedBody.capabilities[name]).toBe('boolean');
+    }
+    expect(typeof confirmedBody.hostedWorkerOperations).toBe('boolean');
+  });
+
   test('keeps login, elevation, authenticated drain, session, and logout usable in drain maintenance', async () => {
     const admin = await createTestUser(
       env.db,

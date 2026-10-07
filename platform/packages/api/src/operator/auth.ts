@@ -117,9 +117,17 @@ operatorSessionRoutes.post('/session', async (context) => {
 export const authenticatedSessionRoutes = new Hono<ApiEnv>();
 authenticatedSessionRoutes.get('/session', (context) => {
   const user = context.get('user');
+  // operator_sessions.expires_at is a timestamp without time zone whose wall
+  // time is UTC by convention: the POST above inserts a UTC ISO string. The
+  // string-mode column mapping returns it in SQL text form
+  // ("YYYY-MM-DD HH:MM:SS.sss"), so parse it explicitly as UTC and serialize
+  // with toISOString() — the response then carries the same instant and the
+  // same ISO text the POST returned.
+  const storedExpiry: string = context.get('operatorSession').expiresAt;
+  const expiresAt = new Date(`${storedExpiry.replace(' ', 'T')}+00:00`).toISOString();
   return context.json({
     apiVersion: 1,
-    expiresAt: context.get('operatorSession').expiresAt,
+    expiresAt,
     user: { id: user.id, login: user.login, role: user.role },
     capabilities: getPlatformCapabilities(context.env),
     hostedWorkerOperations: !context.env.PLATFORM_INSTALLATION_ID,
