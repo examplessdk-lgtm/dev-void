@@ -113,7 +113,7 @@ import { requireProjectRouteCapability } from './project-access.ts';
 import { getRequestsDataset, queryAnalyticsEngine, queryProjectRequestOverview } from './usage.ts';
 
 /**
- * Slugs no project may claim. Two overlapping reasons:
+ * Slugs no project may claim. Three overlapping reasons:
  *
  *  - hostname collisions on `*.void.app` (`www`, `api`, `dash`, `cname`, …),
  *    including the hostname dispatch keeps for platform health probes;
@@ -123,12 +123,17 @@ import { getRequestsDataset, queryAnalyticsEngine, queryProjectRequestOverview }
  *    could send mail indistinguishable from the platform's own. That set
  *    is folded in here rather than listed twice: this check only reaches
  *    NEW projects, so the email path enforces the same set on its own
- *    against a project that registered the slug before it was reserved.
+ *    against a project that registered the slug before it was reserved;
+ *  - certificate-authority domain-validation mailboxes on the shared mail
+ *    domain (`admin`, `administrator`, `hostmaster`, `postmaster`,
+ *    `webmaster`): a project receiving one could pass a CA email check and
+ *    get a certificate for that domain. Reserved for new projects only.
  */
 export const RESERVED_SLUGS = new Set([
   ...EMAIL_RESERVED_SLUGS,
   PLATFORM_HEALTH_HOSTNAME_LABEL,
   'admin',
+  'administrator',
   'api',
   'app',
   'assets',
@@ -143,6 +148,7 @@ export const RESERVED_SLUGS = new Set([
   'ftp',
   'gateway',
   'help',
+  'hostmaster',
   'imap',
   'login',
   'mail',
@@ -161,6 +167,7 @@ export const RESERVED_SLUGS = new Set([
   'static',
   'status',
   'support',
+  'webmaster',
   'www',
 ]);
 

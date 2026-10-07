@@ -2023,6 +2023,28 @@ describe('POST /projects', () => {
     });
   });
 
+  // `<slug>@<mail domain>` is the project's mailbox, and a certificate
+  // authority may prove control of that domain by mailing `hostmaster@`.
+  it('rejects CA domain-validation mailbox slugs', async () => {
+    const user = await createTestUser(env.db);
+
+    for (const slug of ['administrator', 'hostmaster', 'webmaster']) {
+      const res = await app.fetch(
+        new Request('http://localhost/projects', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${user.jwt}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ slug }),
+        }),
+        env,
+      );
+      expect(res.status, slug).toBe(400);
+      expect(await res.json()).toEqual({ error: 'this name is reserved' });
+    }
+  });
+
   // The slug is the prefix of the project's email local-part
   // (`<slug>+noreply@<domain>`), which RFC 5321 caps at 64 octets. The runtime
   // refuses to build a default sender from a slug over 56, so a longer slug

@@ -34,6 +34,19 @@ describe('reserved slugs (real implementation)', () => {
     }
   });
 
+  // A certificate authority may prove control of a domain by mailing one of
+  // these local-parts, and a project slug is a mailbox on the shared mail
+  // domain. The three newer names are refused only at create time, so an
+  // existing project that already holds one keeps receiving its mail.
+  it('blocks the CA domain-validation mailboxes', () => {
+    for (const slug of ['admin', 'administrator', 'hostmaster', 'postmaster', 'webmaster']) {
+      expect(RESERVED_SLUGS.has(slug)).toBe(true);
+    }
+    for (const slug of ['administrator', 'hostmaster', 'webmaster']) {
+      expect(isReservedEmailSlug(slug)).toBe(false);
+    }
+  });
+
   it('allows normal project slugs', () => {
     for (const slug of ['my-app', 'cool-project', 'hello-world', 'test123']) {
       expect(RESERVED_SLUGS.has(slug)).toBe(false);

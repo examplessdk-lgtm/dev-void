@@ -20,9 +20,10 @@
  * api rather than carrying a copy that can drift.
  *
  * The rest of `RESERVED_SLUGS` (`www`, `api`, `mail`, `smtp`, …) is NOT
- * here: that set has been reserved since the platform's first commit, so
- * no project can hold one of those, and a hostname collision is not a
- * mailbox.
+ * here: a hostname collision is not a mailbox. The certificate-authority
+ * validation mailboxes (`administrator`, `hostmaster`, `webmaster`) were
+ * added to that list later, on purpose for project creation only: an
+ * existing project with one of those names keeps its mail.
  */
 export const EMAIL_RESERVED_SLUGS: ReadonlySet<string> = new Set([
   'abuse',
