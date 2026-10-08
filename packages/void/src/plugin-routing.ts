@@ -482,6 +482,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         hasEmail: hasEmailHandlers(),
         serveSpaFallback: shouldServeSpaFallback(),
         live: options.live,
+        dev: compileOptions.dev,
         isr,
         notFound: currentNotFoundHandling(),
         durableObjects: options.durableObjects,

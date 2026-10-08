@@ -1767,6 +1767,30 @@ describe('compileWorkerEntry', () => {
     expect(code).toContain('__setLiveBindingName("VOID_LIVE_abcd1234");');
   });
 
+  it('turns on live dev error messages only in the dev entry', () => {
+    const options = {
+      hasQueues: false,
+      assetsDir: 'assets',
+      webSocketClasses: [],
+      runtimeEnvPath: 'void/_env',
+      sandbox: false,
+      serveSpaFallback: false,
+      live: true,
+    };
+
+    const devCode = compileWorkerEntry({ ...options, dev: true });
+    expect(devCode).toContain('import { __setLiveBindingName, __setLiveDev } from "void/live";');
+    expect(devCode).toContain('__setLiveDev(true);');
+
+    const prodCode = compileWorkerEntry(options);
+    expect(prodCode).toContain('__setLiveBindingName("VOID_LIVE");');
+    expect(prodCode).not.toContain('__setLiveDev');
+    expect(compileWorkerEntry({ ...options, dev: false })).not.toContain('__setLiveDev');
+    expect(compileWorkerEntry({ ...options, live: false, dev: true })).not.toContain(
+      '__setLiveDev',
+    );
+  });
+
   it('re-exports the VoidPlatformSandbox Durable Object class when enabled', () => {
     const code = compileWorkerEntry({
       hasQueues: false,

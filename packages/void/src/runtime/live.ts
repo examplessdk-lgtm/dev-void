@@ -146,6 +146,9 @@ export type LiveStream = {
 };
 
 let liveBindingName = 'VOID_LIVE';
+// Only the worker entry compiled by the Vite dev server turns this on. Builds
+// never call the setter, so production clients get a fixed internal error.
+let liveDev = false;
 const registeredStreamIds = new Set<string>();
 const DEFAULT_LIMITS: LiveLimits = {
   maxSubscriptionsPerConnection: 256,
@@ -163,6 +166,10 @@ export function __setLiveBindingName(name: string): void {
 
 export function __getLiveBindingName(): string {
   return liveBindingName;
+}
+
+export function __setLiveDev(dev: boolean): void {
+  liveDev = dev === true;
 }
 
 export function defineLiveStream(options: LiveStreamOptions): LiveStream {
@@ -631,12 +638,17 @@ function errorToResponse(error: unknown): Response {
     );
   }
   // Hooks, bindings and the Durable Object can fail with internal details; log them
-  // on the server and send clients a fixed message.
+  // on the server and send clients a fixed message. Dev keeps the real message.
   console.error(error);
+  const message = liveDev
+    ? error instanceof Error
+      ? error.message
+      : String(error)
+    : 'live: internal error.';
   return Response.json(
     {
       accepted: false,
-      error: { code: 'INTERNAL_ERROR', message: 'live: internal error.' },
+      error: { code: 'INTERNAL_ERROR', message },
     } satisfies LiveControlResponse,
     { status: 500 },
   );

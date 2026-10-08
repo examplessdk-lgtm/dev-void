@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
 import type { CloudContext } from '../../src/runtime/handler.ts';
 import { createLiveDurableObject } from '../../src/runtime/live-server.ts';
-import { defineLiveStream, type LiveLimits } from '../../src/runtime/live.ts';
+import { __setLiveDev, defineLiveStream, type LiveLimits } from '../../src/runtime/live.ts';
 
 const LIMITS: LiveLimits = {
   maxSubscriptionsPerConnection: 256,
@@ -713,6 +713,45 @@ describe('live Durable Object runtime', () => {
       expect(text).not.toContain('secret detail');
       expect(consoleError).toHaveBeenCalledTimes(1);
     } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('sends the real hook error message in dev only', async () => {
+    const harness = createHarness();
+    const stream = defineLiveStream({
+      id: `dev-error-${crypto.randomUUID()}`,
+      allowAnonymousControl: true,
+      onSubscribe() {
+        throw new Error('hook detail');
+      },
+    });
+    const control = () =>
+      stream.control(
+        liveContext(harness.env, 'https://void.live/live', {
+          connectionId: 'connection-dev-error',
+          operations: [{ kind: 'subscribe', id: 'card', topic: 'post:12' }],
+        }),
+      );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      __setLiveDev(true);
+      const devResponse = await control();
+      expect(devResponse.status).toBe(500);
+      await expect(devResponse.json()).resolves.toEqual({
+        accepted: false,
+        error: { code: 'INTERNAL_ERROR', message: 'hook detail' },
+      });
+
+      __setLiveDev(false);
+      const prodResponse = await control();
+      expect(prodResponse.status).toBe(500);
+      await expect(prodResponse.json()).resolves.toEqual({
+        accepted: false,
+        error: { code: 'INTERNAL_ERROR', message: 'live: internal error.' },
+      });
+    } finally {
+      __setLiveDev(false);
       consoleError.mockRestore();
     }
   });

@@ -1202,6 +1202,11 @@ export interface WorkerEntryOptions {
   hasEmail?: boolean;
   live?: boolean | { bindingName?: string; className?: string };
   /**
+   * Whether the entry is compiled for the Vite dev server. Dev lets void/live
+   * send the real internal error message to the client; builds never set it.
+   */
+  dev?: boolean;
+  /**
    * When present, wraps the render path with the self-host ISR cache ladder.
    * `runtimePath` is the import specifier for `handleIsr`. The deployment id is
    * NOT passed here - the single source of truth is the compile-time
@@ -1256,6 +1261,7 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
     serveSpaFallback = false,
     hasEmail = false,
     live,
+    dev = false,
     isr,
     notFound = 'none',
     durableObjects = [],
@@ -1291,11 +1297,15 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
       ? (live.className ?? 'VoidLiveStreamDurableObject')
       : 'VoidLiveStreamDurableObject';
   const liveRouteImport = hasLive ? ', VoidLiveStreamDurableObject' : '';
-  const liveRuntimeImport = hasLive ? `import { __setLiveBindingName } from "void/live";\n` : '';
+  const liveDev = hasLive && dev === true;
+  const liveRuntimeImport = hasLive
+    ? `import { __setLiveBindingName${liveDev ? ', __setLiveDev' : ''} } from "void/live";\n`
+    : '';
+  const liveDevCall = liveDev ? '__setLiveDev(true);\n' : '';
   const liveExport = hasLive
     ? liveClassName === 'VoidLiveStreamDurableObject'
-      ? `export { VoidLiveStreamDurableObject };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
-      : `export { VoidLiveStreamDurableObject as ${liveClassName} };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n`
+      ? `export { VoidLiveStreamDurableObject };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n${liveDevCall}`
+      : `export { VoidLiveStreamDurableObject as ${liveClassName} };\n__setLiveBindingName(${JSON.stringify(liveBindingName)});\n${liveDevCall}`
     : '';
   const durableObjectImports = durableObjects
     .map(
