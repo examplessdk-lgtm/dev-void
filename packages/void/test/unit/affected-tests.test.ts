@@ -34,6 +34,24 @@ const tests: Array<TestFile> = [
   { path: 'platform/packages/proxy/test/proxy.test.ts', project: 'platform-unit', source: '' },
 ];
 
+// Fixture commits must not depend on the developer's Git identity or commit signing setup.
+const fixtureGit =
+  (cwd: string) =>
+  (...args: Array<string>) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'user.email=tests@example.com',
+        '-c',
+        'user.name=Tests',
+        ...args,
+      ],
+      { cwd, stdio: 'pipe' },
+    );
+
 describe('affected test planning', () => {
   it('does not report provisional fixture ownership before test discovery', () => {
     const plan = planAffectedTests(['package.json', 'playground/spa/src/index.ts'], []);
@@ -135,12 +153,10 @@ describe('affected test planning', () => {
 describe('Git change collection', () => {
   it('includes staged, unstaged, untracked, deleted, renamed, and committed branch paths', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-affected-git-'));
-    const git = (...args: Array<string>) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+    const git = fixtureGit(root);
     const write = (path: string, content = path) => writeFileSync(join(root, path), content);
     try {
       git('init', '--quiet');
-      git('config', 'user.email', 'tests@example.com');
-      git('config', 'user.name', 'Tests');
       for (const path of [
         'staged.ts',
         'unstaged.ts',
@@ -218,7 +234,7 @@ describe('Git change collection', () => {
 it('previews the native transitive import graph without running test or setup code', () => {
   const root = mkdtempSync(join(tmpdir(), 'void-affected-preview-'));
   const repository = fileURLToPath(new URL('../../../../', import.meta.url));
-  const git = (...args: Array<string>) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  const git = fixtureGit(root);
   const write = (path: string, content: string) => writeFileSync(join(root, path), content);
   try {
     mkdirSync(join(root, 'packages/void/src'), { recursive: true });
@@ -243,17 +259,7 @@ it('previews the native transitive import graph without running test or setup co
     );
     git('init', '--quiet');
     git('add', '.');
-    git(
-      '-c',
-      'user.email=tests@example.com',
-      '-c',
-      'user.name=Tests',
-      'commit',
-      '--quiet',
-      '--no-verify',
-      '-m',
-      'Fixture.',
-    );
+    git('commit', '--quiet', '--no-verify', '-m', 'Fixture.');
     write('packages/void/src/leaf.ts', 'export const value = 2;');
     const runner = new URL('../../../../test/affected.mjs', import.meta.url).href;
     const output = execFileSync(
@@ -271,17 +277,7 @@ it('previews the native transitive import graph without running test or setup co
     expect(output).not.toContain('[unit] packages/void/test/unit/unrelated.test.ts');
     write('setup.ts', 'export default function setup() {}');
     git('add', '.');
-    git(
-      '-c',
-      'user.email=tests@example.com',
-      '-c',
-      'user.name=Tests',
-      'commit',
-      '--quiet',
-      '--no-verify',
-      '-m',
-      'Prime fixture.',
-    );
+    git('commit', '--quiet', '--no-verify', '-m', 'Prime fixture.');
     const run = () =>
       spawnSync(
         process.execPath,
@@ -316,7 +312,7 @@ it('previews the native transitive import graph without running test or setup co
 it('executes conservative integration consumers without an import edge', () => {
   const root = mkdtempSync(join(tmpdir(), 'void-affected-consumer-'));
   const repository = fileURLToPath(new URL('../../../../', import.meta.url));
-  const git = (...args: Array<string>) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  const git = fixtureGit(root);
   const write = (path: string, content: string) => writeFileSync(join(root, path), content);
   try {
     mkdirSync(join(root, 'platform/packages/api/src'), { recursive: true });
@@ -340,17 +336,7 @@ it('executes conservative integration consumers without an import edge', () => {
     );
     git('init', '--quiet');
     git('add', '.');
-    git(
-      '-c',
-      'user.email=tests@example.com',
-      '-c',
-      'user.name=Tests',
-      'commit',
-      '--quiet',
-      '--no-verify',
-      '-m',
-      'Fixture.',
-    );
+    git('commit', '--quiet', '--no-verify', '-m', 'Fixture.');
     write('platform/packages/api/src/entry.ts', 'export const value = 2;');
     const runner = new URL('../../../../test/affected.mjs', import.meta.url).href;
     const result = spawnSync(
@@ -378,7 +364,7 @@ it.each([false, true])(
   (unit) => {
     const root = mkdtempSync(join(tmpdir(), 'void-affected-full-'));
     const repository = fileURLToPath(new URL('../../../../', import.meta.url));
-    const git = (...args: Array<string>) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+    const git = fixtureGit(root);
     const write = (path: string, content: string) => writeFileSync(join(root, path), content);
     try {
       mkdirSync(join(root, 'packages/void/test/unit'), { recursive: true });
@@ -398,17 +384,7 @@ it.each([false, true])(
       }
       git('init', '--quiet');
       git('add', '.');
-      git(
-        '-c',
-        'user.email=tests@example.com',
-        '-c',
-        'user.name=Tests',
-        'commit',
-        '--quiet',
-        '--no-verify',
-        '-m',
-        'Fixture.',
-      );
+      git('commit', '--quiet', '--no-verify', '-m', 'Fixture.');
       write('package.json', '{"type":"module","private":true}');
       const runner = new URL('../../../../test/affected.mjs', import.meta.url).href;
       const output = execFileSync(
