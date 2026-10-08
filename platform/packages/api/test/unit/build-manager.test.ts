@@ -7174,8 +7174,14 @@ describe('build-agent GET /logs serves post-child-close lines', () => {
     // is just under the 2 MiB budget, and the line cap is 2000). Serialized, each
     // NUL is `\u0000` — six bytes — so the real body is ~12.6 MB.
     const control = '\u0000'.repeat(1048);
-    for (let i = 0; i < MAX_LOG_RESPONSE_LINES; i++) {
-      record(control, 'stdout');
+    // record() mirrors each line to stderr; keep the NUL bytes out of the test output.
+    const mirror = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (let i = 0; i < MAX_LOG_RESPONSE_LINES; i++) {
+        record(control, 'stdout');
+      }
+    } finally {
+      mirror.mockRestore();
     }
 
     server = await startControlServer(0);
@@ -7735,8 +7741,14 @@ describe('build-agent log buffer is bounded', () => {
     const control = '\u0000'.repeat(64 * 1024);
     const flood = Math.ceil((MAX_BUFFERED_LOG_BYTES / (control.length * 6)) * 2);
     expect(flood).toBeLessThan(MAX_BUFFERED_LOG_LINES);
-    for (let i = 0; i < flood; i += 1) {
-      record(control, 'stdout');
+    // record() mirrors each line to stderr; keep the NUL bytes out of the test output.
+    const mirror = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (let i = 0; i < flood; i += 1) {
+        record(control, 'stdout');
+      }
+    } finally {
+      mirror.mockRestore();
     }
 
     const wire = getBufferedLogLines().reduce(
