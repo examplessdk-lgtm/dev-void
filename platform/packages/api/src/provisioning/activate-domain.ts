@@ -59,27 +59,24 @@ export async function tryActivateDomain(
   const cf = await getCustomHostname(env.CF_ZONE_ID, env.CF_API_TOKEN, domain.cf_hostname_id);
 
   // Custom-hostname validation has two independent axes:
-  //   - Hostname OWNERSHIP — proven by the `_cf-custom-hostname` TXT, surfaced
-  //     as `ownership_verification`, and the input to the top-level `status`.
+  //   - Hostname OWNERSHIP — the input to the top-level `status`. CF accepts
+  //     the `_cf-custom-hostname` TXT (`ownership_verification`), the HTTP
+  //     token, or a CNAME to the SaaS zone (real-time validation).
   //   - Certificate DCV — `ssl.method` / `ssl.validation_records`, the input
   //     to `ssl.status`.
-  // The anti-wildcard-hijack lever is the OWNERSHIP gate, NOT the cert-DCV
-  // method: a wildcard CNAME (`*.victim → cname.void.app`) cannot forge a
-  // per-host `_cf-custom-hostname` TXT value, so ownership stays unsatisfied
-  // and `status` never reaches `active`. Cert DCV (HTTP-based, edge-validated,
-  // auto-renewing) is orthogonal and method-agnostic here, which also keeps
-  // pending domains still on `txt` DCV activatable.
+  // Because the CNAME alone proves ownership, a leftover or wildcard CNAME
+  // (`*.victim → cname.void.app`) lets whoever adds the hostname first
+  // activate it. Other hosting platforms accept the same trade-off; we keep
+  // it so setup needs only the traffic CNAME. Cert DCV (HTTP-based,
+  // edge-validated, auto-renewing) is orthogonal and method-agnostic here,
+  // which also keeps pending domains still on `txt` DCV activatable.
   //
-  // The primary signal is CF's own `status === 'active'`: for a hostname
-  // proxying through CF (which a custom domain always is), CF only flips
-  // `status` to `active` after DNS-based ownership completes. The absence of
+  // The primary signal is CF's own `status === 'active'`. The absence of
   // BOTH outstanding ownership challenges — the TXT `ownership_verification`
   // AND the HTTP `ownership_verification_http` — is defense-in-depth on top
   // of that (CF stops returning them once ownership is proven), so we refuse
   // to route even if CF ever surfaced `active` with an ownership challenge
-  // still outstanding. We deliberately do NOT add our own DNS re-check here:
-  // it would break a domain whenever a user removed the TXT after setup, for
-  // no real gain over CF's gate.
+  // still outstanding.
   const gateOk =
     cf.status === 'active' &&
     cf.ssl.status === 'active' &&
