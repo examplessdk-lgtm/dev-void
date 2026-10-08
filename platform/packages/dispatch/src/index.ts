@@ -2634,14 +2634,16 @@ function hasHtmlHandlingSource(manifest: Record<string, string>, pathname: strin
  * `listed` is the asset manifest's answer for the path (see
  * `isKnownStaticAssetPath`).
  *
- * A worker deploy without an asset manifest uploaded no files, so it has no
- * asset layer and the worker answers everything. So does a deploy whose
- * `run_worker_first` covers every path. Otherwise the asset layer serves listed
- * files itself, and an unlisted path reaches the worker only with
- * `not_found_handling: 'none'` (Cloudflare's default); the SPA shell and the
- * 404 page come from the asset layer. When `listed` is `undefined` (no readable
- * manifest, or an HTML file the asset layer answers the path from), the path is
- * not known to be the worker's.
+ * A worker deploy published since asset manifests were introduced has no
+ * manifest only when it uploaded no files, so the worker answers everything.
+ * So does a deploy whose `run_worker_first` covers every path. Older live
+ * deploys may still have an asset layer without a manifest, so callers use a
+ * `true` here for a successful response only when the manifest also marks the
+ * path unlisted. Otherwise the asset layer serves listed files itself, and an
+ * unlisted path reaches the worker only with `not_found_handling: 'none'`
+ * (Cloudflare's default); the SPA shell and the 404 page come from the asset
+ * layer. When `listed` is `undefined` (no readable manifest, or an HTML file the
+ * asset layer answers the path from), the path is not known to be the worker's.
  */
 function workerAnsweredPath(routing: RoutingEntry, listed: boolean | undefined): boolean {
   if (!routing.assetManifestId) {
