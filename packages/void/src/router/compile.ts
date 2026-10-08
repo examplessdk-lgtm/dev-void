@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { relative } from 'pathslash';
 import type { VoidAuthProvider } from '../auth/providers.ts';
 import type { DevRedirectRule, HeaderRule } from '../cli/types.ts';
 import type { NotFoundHandling } from '../config.ts';
@@ -478,25 +479,38 @@ export function compileRouteTable(
       lines.push(`const job${i}Crons = ${JSON.stringify(job.crons)};`);
     }
     lines.push('');
+    // Workers log capture keeps only an error's own name, message and stack (not
+    // AggregateError.errors or cause), so each job logs its own error, with the job file
+    // and cron, as soon as it fails.
     lines.push('export async function scheduled(controller, env, ctx) {');
+    lines.push('  const run = async (job, loadJob) => {');
+    lines.push('    try {');
+    lines.push('      const mod = await loadJob();');
+    lines.push(
+      "      if (typeof mod.default === 'function') await mod.default(controller, env, ctx);",
+    );
+    lines.push('    } catch (error) {');
+    lines.push(
+      '      console.error(`[void] Scheduled job ${job} failed for cron "${controller.cron}":`, error);',
+    );
+    lines.push('      return { job, error };');
+    lines.push('    }');
+    lines.push('  };');
     lines.push('  const tasks = [];');
     for (let i = 0; i < scan.jobs.length; i++) {
       const job = scan.jobs[i];
       const filePath = JSON.stringify(`${jobsDir}/${job.filePath}`);
-      lines.push(`  if (job${i}Crons.includes(controller.cron)) {`);
-      lines.push('    tasks.push((async () => {');
-      lines.push(`      const mod = await import(${filePath});`);
+      const label = JSON.stringify(relative(options.projectRoot, `${jobsDir}/${job.filePath}`));
       lines.push(
-        "      if (typeof mod.default === 'function') await mod.default(controller, env, ctx);",
+        `  if (job${i}Crons.includes(controller.cron)) tasks.push(run(${label}, () => import(${filePath})));`,
       );
-      lines.push('    })());');
-      lines.push('  }');
     }
-    lines.push('  const results = await Promise.allSettled(tasks);');
+    lines.push('  const failures = (await Promise.all(tasks)).filter(Boolean);');
+    lines.push('  if (failures.length) {');
     lines.push(
-      '  const errors = results.filter(result => result.status === "rejected").map(result => result.reason);',
+      '    throw new AggregateError(failures.map((failure) => failure.error), `Scheduled jobs failed: ${failures.map((failure) => failure.job).join(", ")}`);',
     );
-    lines.push('  if (errors.length) throw new AggregateError(errors, "Scheduled jobs failed");');
+    lines.push('  }');
     lines.push('}');
     lines.push('');
   } else {
