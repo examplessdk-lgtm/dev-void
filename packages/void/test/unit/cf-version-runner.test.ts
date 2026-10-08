@@ -39,66 +39,78 @@ const roots: Array<string> = [];
 const pinnedCfVersion = JSON.parse(
   readFileSync(fileURLToPath(import.meta.resolve('cf/package.json')), 'utf8'),
 ).version as string;
+// Each real cf subprocess loads cf's bundle before it does any work. That takes about half a
+// second when idle and several seconds on a busy machine, which can pass Vitest's 5s default.
+const REAL_CF_TIMEOUT_MS = process.platform === 'win32' ? 20_000 : 15_000;
 
-it('reads the exact immutable SDK draft source through the real pinned cf HTTP transport', async () => {
-  const prepared = await output();
-  const draft = voidSecretDraftVersion();
-  const requests: Array<string> = [];
-  const server = createServer((request, response) => {
-    requests.push(request.url ?? '');
-    request.resume();
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const command = createCfCommand({
-      accountId: 'test-account',
-      apiBaseUrl,
-      verifyUploader: () => true,
-      env: () => ({
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        CI: 'true',
-        CLOUDFLARE_API_TOKEN: 'synthetic-token',
-        CLOUDFLARE_ACCOUNT_ID: 'test-account',
-        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-      }),
+it(
+  'reads the exact immutable SDK draft source through the real pinned cf HTTP transport',
+  async () => {
+    const prepared = await output();
+    const draft = voidSecretDraftVersion();
+    const requests: Array<string> = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url ?? '');
+      request.resume();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
     });
-    const commands: Array<{ args: Array<string>; bounds: unknown }> = [];
-    const runner = createCfVersionRunner({
-      output: prepared,
-      workerName: 'void-test',
-      runCf: (args, options) => {
-        commands.push({ args, bounds: options });
-        return command(args, options);
-      },
-      verifyResources: async () => {
-        throw new Error('A read must not provision or probe resources');
-      },
-    });
-    const result = await runner(
-      { type: 'versions.view', versionId: draft.id, workerName: 'void-test', includeSource: true },
-      { capture: true },
-    );
-    expect(result.status).toBe(0);
-    expect(isVoidSecretOnlyDraft(result.data as Record<string, unknown>)).toBe(true);
-    expect(requests).toEqual([
-      `/client/v4/accounts/test-account/workers/workers/void-test/versions/${draft.id}?include=modules`,
-    ]);
-    expect(commands).toHaveLength(1);
-    expect(commands[0]!.bounds).toMatchObject({ timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
-    expect(JSON.stringify(result)).not.toContain('synthetic-token');
-  } finally {
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-    });
-    await prepared.dispose();
-  }
-});
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+      const command = createCfCommand({
+        accountId: 'test-account',
+        apiBaseUrl,
+        verifyUploader: () => true,
+        env: () => ({
+          PATH: process.env.PATH,
+          SYSTEMROOT: process.env.SYSTEMROOT,
+          WINDIR: process.env.WINDIR,
+          CI: 'true',
+          CLOUDFLARE_API_TOKEN: 'synthetic-token',
+          CLOUDFLARE_ACCOUNT_ID: 'test-account',
+          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+        }),
+      });
+      const commands: Array<{ args: Array<string>; bounds: unknown }> = [];
+      const runner = createCfVersionRunner({
+        output: prepared,
+        workerName: 'void-test',
+        runCf: (args, options) => {
+          commands.push({ args, bounds: options });
+          return command(args, options);
+        },
+        verifyResources: async () => {
+          throw new Error('A read must not provision or probe resources');
+        },
+      });
+      const result = await runner(
+        {
+          type: 'versions.view',
+          versionId: draft.id,
+          workerName: 'void-test',
+          includeSource: true,
+        },
+        { capture: true },
+      );
+      expect(result.status).toBe(0);
+      expect(isVoidSecretOnlyDraft(result.data as Record<string, unknown>)).toBe(true);
+      expect(requests).toEqual([
+        `/client/v4/accounts/test-account/workers/workers/void-test/versions/${draft.id}?include=modules`,
+      ]);
+      expect(commands).toHaveLength(1);
+      expect(commands[0]!.bounds).toMatchObject({ timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
+      expect(JSON.stringify(result)).not.toContain('synthetic-token');
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      await prepared.dispose();
+    }
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 afterEach(() => {
   vi.restoreAllMocks();
   syncBuiltinESMExports();
@@ -107,26 +119,28 @@ afterEach(() => {
   }
 });
 
-it('preserves real cf provider codes so a missing Worker can reach its first upload', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'void-cf-missing-worker-'));
-  roots.push(root);
-  const requests: Array<string> = [];
-  const server = createServer((request, response) => {
-    requests.push(request.url ?? '');
-    request.resume();
-    response.writeHead(404, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        success: false,
-        errors: [{ code: 10007, message: 'The given script does not exist.' }],
-        result: null,
-      }),
-    );
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const script = `
+it(
+  'preserves real cf provider codes so a missing Worker can reach its first upload',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-cf-missing-worker-'));
+    roots.push(root);
+    const requests: Array<string> = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url ?? '');
+      request.resume();
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: false,
+          errors: [{ code: 10007, message: 'The given script does not exist.' }],
+          result: null,
+        }),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+      const script = `
       import { createCfCommand } from ${JSON.stringify(new URL('../../src/cli/cf-version-runner.ts', import.meta.url).href)};
       const command = createCfCommand({
         accountId: 'test-account', apiBaseUrl: ${JSON.stringify(apiBaseUrl)},
@@ -137,254 +151,74 @@ it('preserves real cf provider codes so a missing Worker can reach its first upl
         { cwd: ${JSON.stringify(root)}, capture: true },
       )));
     `;
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        process.execPath,
-        ['--input-type=module', '-e', script],
-        {
-          cwd: root,
-          timeout: 20_000,
-          env: {
-            PATH: process.env.PATH,
-            SYSTEMROOT: process.env.SYSTEMROOT,
-            WINDIR: process.env.WINDIR,
-            TMP: process.env.TMP,
-            TEMP: process.env.TEMP,
-            CI: 'true',
-            CLOUDFLARE_API_TOKEN: 'synthetic-token',
-            CLOUDFLARE_ACCOUNT_ID: 'test-account',
-            CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          process.execPath,
+          ['--input-type=module', '-e', script],
+          {
+            cwd: root,
+            timeout: 20_000,
+            env: {
+              PATH: process.env.PATH,
+              SYSTEMROOT: process.env.SYSTEMROOT,
+              WINDIR: process.env.WINDIR,
+              TMP: process.env.TMP,
+              TEMP: process.env.TEMP,
+              CI: 'true',
+              CLOUDFLARE_API_TOKEN: 'synthetic-token',
+              CLOUDFLARE_ACCOUNT_ID: 'test-account',
+              CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+            },
           },
-        },
-        (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+          (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+        );
+      });
+      const missing = JSON.parse(stdout);
+      expect(missing.status).toBe(1);
+      expect(missing.errorCode).toBe(10007);
+      expect(requests).toEqual([
+        '/client/v4/accounts/test-account/workers/scripts/missing-worker/deployments',
+      ]);
+      const operations: Array<string> = [];
+      const result = await activateCloudflareVersion({
+        workerName: 'missing-worker',
+        message: 'review',
+        verifyUploader: () => true,
+        verifyInheritedSecrets: true,
+        runWrangler: operationFixture((args) => {
+          operations.push(args.slice(0, 2).join(' '));
+          return args[1] === 'upload'
+            ? { status: 1, stdout: '', stderr: 'Test stopped before uploading.' }
+            : missing;
+        }),
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'upload-failed' });
+      expect(operations).toEqual(['deployments status', 'versions list', 'versions upload']);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
       );
-    });
-    const missing = JSON.parse(stdout);
-    expect(missing.status).toBe(1);
-    expect(missing.errorCode).toBe(10007);
-    expect(requests).toEqual([
-      '/client/v4/accounts/test-account/workers/scripts/missing-worker/deployments',
-    ]);
-    const operations: Array<string> = [];
-    const result = await activateCloudflareVersion({
-      workerName: 'missing-worker',
-      message: 'review',
-      verifyUploader: () => true,
-      verifyInheritedSecrets: true,
-      runWrangler: operationFixture((args) => {
-        operations.push(args.slice(0, 2).join(' '));
-        return args[1] === 'upload'
-          ? { status: 1, stdout: '', stderr: 'Test stopped before uploading.' }
-          : missing;
-      }),
-    });
-    expect(result).toMatchObject({ ok: false, reason: 'upload-failed' });
-    expect(operations).toEqual(['deployments status', 'versions list', 'versions upload']);
-  } finally {
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-  }
-});
+    }
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 
-it('classifies the pinned prebuilt uploader’s missing-Worker diagnostic', async () => {
-  const prepared = await output();
-  const requests: Array<string> = [];
-  const server = createServer((request, response) => {
-    requests.push(request.url ?? '');
-    request.resume();
-    response.writeHead(404, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        success: false,
-        errors: [{ code: 10007, message: 'The given script does not exist.' }],
-        result: null,
-      }),
-    );
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const command = createCfCommand({
-      accountId: 'account-id',
-      apiBaseUrl,
-      verifyUploader: () => true,
-      env: () => ({
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        TMP: process.env.TMP,
-        TEMP: process.env.TEMP,
-        CI: 'true',
-        CLOUDFLARE_API_TOKEN: 'synthetic-token',
-        CLOUDFLARE_ACCOUNT_ID: 'account-id',
-        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-      }),
-    });
-    const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
-      cwd: prepared.directory,
-      capture: true,
-    });
-    expect(result, result.stdout + result.stderr).toMatchObject({
-      status: 1,
-      failure: 'not-found',
-      signal: null,
-      error: null,
-    });
-    // cf deliberately omits the API code from this local error.
-    expect(result.errorCode).toBeUndefined();
-    expect(requests).toEqual(['/client/v4/accounts/account-id/workers/services/void-test']);
-  } finally {
-    prepared.dispose();
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-  }
-});
-
-it('reproduces the pinned cf uploader refusing an API-origin revision without confirmation', async () => {
-  const prepared = await output();
-  const requests: Array<{ method: string; path: string }> = [];
-  const server = createServer((request, response) => {
-    requests.push({ method: request.method!, path: request.url! });
-    request.resume();
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        success: true,
-        errors: [],
-        messages: [],
-        result: {
-          default_environment: {
-            environment: 'production',
-            script: { id: 'void-test', last_deployed_from: 'api' },
-          },
-        },
-      }),
-    );
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const command = createCfCommand({
-      accountId: 'account-id',
-      apiBaseUrl,
-      verifyUploader: () => true,
-      env: () => ({
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        TMP: process.env.TMP,
-        TEMP: process.env.TEMP,
-        CI: 'true',
-        CLOUDFLARE_API_TOKEN: 'synthetic-token',
-        CLOUDFLARE_ACCOUNT_ID: 'account-id',
-        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-      }),
-    });
-    const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
-      cwd: prepared.directory,
-      capture: true,
-    });
-    expect(result).toMatchObject({ status: 1, signal: null, error: null });
-    expect(result.stdout.replace(/\s+/g, ' ')).toContain(
-      'Aborting the upload operation because of conflicts.',
-    );
-    expect(result.stdout.replace(/\s+/g, ' ')).toContain('last updated via the script API');
-    expect(requests).toEqual([
-      { method: 'GET', path: '/client/v4/accounts/account-id/workers/services/void-test' },
-    ]);
-  } finally {
-    prepared.dispose();
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-    });
-  }
-});
-
-// This exercises several real cf subprocesses; Windows CI takes about 14s
-// before assertion/cleanup overhead, leaving no margin in a 15s deadline.
 it(
-  'uploads an ordinary API-origin revision with genuine cf reads and UUID-pinned inheritance',
+  'classifies the pinned prebuilt uploader’s missing-Worker diagnostic',
   async () => {
-    const current = '11111111-1111-4111-8111-111111111111';
-    const next = '22222222-2222-4222-8222-222222222222';
-    const triggerConfig = {
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
-    const message = encodeCloudflareVersionMessage([], triggerConfig);
-    const prepared = await output({
-      secrets: { required: ['AUTH_SECRET'] },
-      version_metadata: { binding: 'APP_VERSION' },
-      send_email: [
-        {
-          name: 'SEND_EMAIL',
-          allowed_sender_addresses: ['sender@example.test'],
-          allowed_destination_addresses: ['receiver@example.test'],
-        },
-      ],
-    });
-    const originalConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
-    let traffic = [{ version_id: current, percentage: 100 }];
-    let uploaded = false;
-    const events: Array<string> = [];
-    const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
-    const server = createServer(async (request, response) => {
-      const chunks: Array<Buffer> = [];
-      for await (const chunk of request) {
-        chunks.push(Buffer.from(chunk));
-      }
-      const text = Buffer.concat(chunks).toString('utf8');
-      const row = {
-        method: request.method!,
-        path: request.url!,
-        body: text ? JSON.parse(text) : {},
-      };
-      requests.push(row);
-      const path = new URL(row.path, 'http://localhost').pathname;
-      let result: unknown;
-      if (row.method === 'POST' && path.endsWith('/workers/workers/void-test/versions')) {
-        uploaded = true;
-        events.push('upload');
-        result = { id: next, urls: [`https://${next.slice(0, 8)}-void-test.example.workers.dev`] };
-      } else if (row.method === 'GET' && path.endsWith('/deployments')) {
-        events.push('owner');
-        result = { deployments: [{ versions: traffic }] };
-      } else if (row.method === 'GET' && path.endsWith('/versions')) {
-        result = [
-          { id: current, number: 1, annotations: { 'workers/message': message } },
-          ...(uploaded
-            ? [{ id: next, number: 2, annotations: { 'workers/message': message } }]
-            : []),
-        ];
-      } else if (row.method === 'GET' && path.endsWith(`/versions/${current}`)) {
-        events.push('secret-source');
-        result = {
-          id: current,
-          number: 1,
-          bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
-          annotations: { 'workers/message': message },
-        };
-      } else if (row.method === 'GET' && path.endsWith('/services/void-test')) {
-        result = {
-          default_environment: {
-            environment: 'production',
-            script: { id: 'void-test', last_deployed_from: 'api' },
-          },
-        };
-      } else {
-        response.writeHead(501);
-        response.end('Unexpected local test request');
-        return;
-      }
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
+    const prepared = await output();
+    const requests: Array<string> = [];
+    const server = createServer((request, response) => {
+      requests.push(request.url ?? '');
+      request.resume();
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: false,
+          errors: [{ code: 10007, message: 'The given script does not exist.' }],
+          result: null,
+        }),
+      );
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
@@ -405,105 +239,83 @@ it(
           CLOUDFLARE_API_BASE_URL: apiBaseUrl,
         }),
       });
-      const calls: Array<Array<string>> = [];
-      const runCf: Parameters<typeof createCfVersionRunner>[0]['runCf'] = async (args, options) => {
-        calls.push(args);
-        // These mutation acknowledgements retain the activation protocol's state;
-        // all discovery reads and the actual version POST use the real transports.
-        if (args.slice(0, 3).join(' ') === 'workers deployments create') {
-          traffic = JSON.parse(args[args.indexOf('--versions') + 1]!);
-          events.push('activate');
-          return { status: 0, stdout: '{}', stderr: '' };
-        }
-        if (args.slice(0, 3).join(' ') === 'workers triggers deploy') {
-          events.push('triggers');
-          return { status: 0, stdout: '{}', stderr: '' };
-        }
-        return command(args, options);
-      };
-      const runner = createCfVersionRunner({
-        output: prepared,
-        workerName: 'void-test',
-        runCf,
-        pinnedUpload: {
-          accountId: 'account-id',
-          apiBaseUrl,
-          getToken: async () => 'synthetic-token',
-          verifyUploader: () => true,
-        },
-        verifyResources: createCfResourceVerifier({
-          configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
-          runCf,
-          runWrangler: () => {
-            throw new Error('An app without paid bindings must not probe paid services.');
+      const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
+        cwd: prepared.directory,
+        capture: true,
+      });
+      expect(result, result.stdout + result.stderr).toMatchObject({
+        status: 1,
+        failure: 'not-found',
+        signal: null,
+        error: null,
+      });
+      // cf deliberately omits the API code from this local error.
+      expect(result.errorCode).toBeUndefined();
+      expect(requests).toEqual(['/client/v4/accounts/account-id/workers/services/void-test']);
+    } finally {
+      prepared.dispose();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  },
+  REAL_CF_TIMEOUT_MS,
+);
+
+it(
+  'reproduces the pinned cf uploader refusing an API-origin revision without confirmation',
+  async () => {
+    const prepared = await output();
+    const requests: Array<{ method: string; path: string }> = [];
+    const server = createServer((request, response) => {
+      requests.push({ method: request.method!, path: request.url! });
+      request.resume();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          messages: [],
+          result: {
+            default_environment: {
+              environment: 'production',
+              script: { id: 'void-test', last_deployed_from: 'api' },
+            },
           },
-          verifyCompatibilityRunner: () => true,
         }),
-      });
-      const result = await activateCloudflareVersion({
-        runWrangler: runner,
-        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
-        workerName: 'void-test',
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+      const command = createCfCommand({
+        accountId: 'account-id',
+        apiBaseUrl,
         verifyUploader: () => true,
-        verifyInheritedSecrets: true,
-        expectedPreviousVersionId: current,
-        requireVersionMetadata: true,
-        pinActiveSecrets: createActiveSecretPinner({
-          output: prepared,
-          handoffPending: false,
-          requiredNames: ['AUTH_SECRET'],
+        env: () => ({
+          PATH: process.env.PATH,
+          SYSTEMROOT: process.env.SYSTEMROOT,
+          WINDIR: process.env.WINDIR,
+          TMP: process.env.TMP,
+          TEMP: process.env.TEMP,
+          CI: 'true',
+          CLOUDFLARE_API_TOKEN: 'synthetic-token',
+          CLOUDFLARE_ACCOUNT_ID: 'account-id',
+          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
         }),
-        readinessAttempts: 1,
-        message,
-        fetch: async (url) => {
-          expect(String(url)).toBe(
-            `https://${next.slice(0, 8)}-void-test.example.workers.dev/__void/ready`,
-          );
-          expect(traffic).toEqual([{ version_id: current, percentage: 100 }]);
-          events.push('ready');
-          return Response.json({ ready: true, versionId: next });
-        },
       });
-      expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
-        ok: true,
-        versionId: next,
-        previousVersionId: current,
+      const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
+        cwd: prepared.directory,
+        capture: true,
       });
-      expect(prepared.activeSecrets).toEqual({
-        versionId: current,
-        bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
-      });
-      const posts = requests.filter((row) => row.method === 'POST');
-      expect(posts).toHaveLength(1);
-      expect(posts[0]!.path).toBe(
-        '/client/v4/accounts/account-id/workers/workers/void-test/versions',
+      expect(result).toMatchObject({ status: 1, signal: null, error: null });
+      expect(result.stdout.replace(/\s+/g, ' ')).toContain(
+        'Aborting the upload operation because of conflicts.',
       );
-      expect(posts[0]!.body.bindings).toContainEqual({
-        name: 'AUTH_SECRET',
-        type: 'inherit',
-        version_id: current,
-      });
-      expect(posts[0]!.body.bindings).toContainEqual({
-        name: 'SEND_EMAIL',
-        type: 'send_email',
-        allowed_sender_addresses: ['sender@example.test'],
-        allowed_destination_addresses: ['receiver@example.test'],
-      });
-      expect(posts[0]!.body.bindings).toContainEqual({
-        name: 'APP_VERSION',
-        type: 'version_metadata',
-      });
-      expect(requests.some((row) => row.path.includes('/services/'))).toBe(false);
-      expect(calls.some((args) => args.slice(0, 3).join(' ') === 'workers versions create')).toBe(
-        false,
-      );
-      expect(events.indexOf('upload')).toBeLessThan(events.indexOf('ready'));
-      expect(events.indexOf('ready')).toBeLessThan(events.indexOf('activate'));
-      expect(events.indexOf('activate')).toBeLessThan(events.indexOf('triggers'));
-      expect(
-        events.slice(0, events.indexOf('upload')).filter((event) => event === 'owner'),
-      ).toHaveLength(2);
-      expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(originalConfig);
+      expect(result.stdout.replace(/\s+/g, ' ')).toContain('last updated via the script API');
+      expect(requests).toEqual([
+        { method: 'GET', path: '/client/v4/accounts/account-id/workers/services/void-test' },
+      ]);
     } finally {
       prepared.dispose();
       await new Promise<void>((resolve) => {
@@ -512,26 +324,235 @@ it(
       });
     }
   },
-  process.platform === 'win32' ? 30_000 : 15_000,
+  REAL_CF_TIMEOUT_MS,
 );
 
-it('captures a version list larger than Node’s default child-process buffer', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'void-cf-large-version-list-'));
-  roots.push(root);
-  const version = {
-    id: '00000000-0000-0000-0000-000000000001',
-    number: 1,
-    modules: [{ name: 'index.js', content_base64: 'a'.repeat(2 * 1024 * 1024) }],
+// This exercises several real cf subprocesses; Windows CI takes about 14s
+// before assertion/cleanup overhead, and a loaded machine slows each cf
+// start, so a 15s deadline leaves no margin on any platform.
+it('uploads an ordinary API-origin revision with genuine cf reads and UUID-pinned inheritance', async () => {
+  const current = '11111111-1111-4111-8111-111111111111';
+  const next = '22222222-2222-4222-8222-222222222222';
+  const triggerConfig = {
+    workers_dev: true,
+    preview_urls: true,
+    routes: [],
+    crons: [],
+    queueConsumers: [],
+    workflows: [],
   };
-  const server = createServer((request, response) => {
-    request.resume();
+  const message = encodeCloudflareVersionMessage([], triggerConfig);
+  const prepared = await output({
+    secrets: { required: ['AUTH_SECRET'] },
+    version_metadata: { binding: 'APP_VERSION' },
+    send_email: [
+      {
+        name: 'SEND_EMAIL',
+        allowed_sender_addresses: ['sender@example.test'],
+        allowed_destination_addresses: ['receiver@example.test'],
+      },
+    ],
+  });
+  const originalConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
+  let traffic = [{ version_id: current, percentage: 100 }];
+  let uploaded = false;
+  const events: Array<string> = [];
+  const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Array<Buffer> = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
+    const row = {
+      method: request.method!,
+      path: request.url!,
+      body: text ? JSON.parse(text) : {},
+    };
+    requests.push(row);
+    const path = new URL(row.path, 'http://localhost').pathname;
+    let result: unknown;
+    if (row.method === 'POST' && path.endsWith('/workers/workers/void-test/versions')) {
+      uploaded = true;
+      events.push('upload');
+      result = { id: next, urls: [`https://${next.slice(0, 8)}-void-test.example.workers.dev`] };
+    } else if (row.method === 'GET' && path.endsWith('/deployments')) {
+      events.push('owner');
+      result = { deployments: [{ versions: traffic }] };
+    } else if (row.method === 'GET' && path.endsWith('/versions')) {
+      result = [
+        { id: current, number: 1, annotations: { 'workers/message': message } },
+        ...(uploaded ? [{ id: next, number: 2, annotations: { 'workers/message': message } }] : []),
+      ];
+    } else if (row.method === 'GET' && path.endsWith(`/versions/${current}`)) {
+      events.push('secret-source');
+      result = {
+        id: current,
+        number: 1,
+        bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+        annotations: { 'workers/message': message },
+      };
+    } else if (row.method === 'GET' && path.endsWith('/services/void-test')) {
+      result = {
+        default_environment: {
+          environment: 'production',
+          script: { id: 'void-test', last_deployed_from: 'api' },
+        },
+      };
+    } else {
+      response.writeHead(501);
+      response.end('Unexpected local test request');
+      return;
+    }
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ success: true, errors: [], result: [version] }));
+    response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const script = `
+    const command = createCfCommand({
+      accountId: 'account-id',
+      apiBaseUrl,
+      verifyUploader: () => true,
+      env: () => ({
+        PATH: process.env.PATH,
+        SYSTEMROOT: process.env.SYSTEMROOT,
+        WINDIR: process.env.WINDIR,
+        TMP: process.env.TMP,
+        TEMP: process.env.TEMP,
+        CI: 'true',
+        CLOUDFLARE_API_TOKEN: 'synthetic-token',
+        CLOUDFLARE_ACCOUNT_ID: 'account-id',
+        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      }),
+    });
+    const calls: Array<Array<string>> = [];
+    const runCf: Parameters<typeof createCfVersionRunner>[0]['runCf'] = async (args, options) => {
+      calls.push(args);
+      // These mutation acknowledgements retain the activation protocol's state;
+      // all discovery reads and the actual version POST use the real transports.
+      if (args.slice(0, 3).join(' ') === 'workers deployments create') {
+        traffic = JSON.parse(args[args.indexOf('--versions') + 1]!);
+        events.push('activate');
+        return { status: 0, stdout: '{}', stderr: '' };
+      }
+      if (args.slice(0, 3).join(' ') === 'workers triggers deploy') {
+        events.push('triggers');
+        return { status: 0, stdout: '{}', stderr: '' };
+      }
+      return command(args, options);
+    };
+    const runner = createCfVersionRunner({
+      output: prepared,
+      workerName: 'void-test',
+      runCf,
+      pinnedUpload: {
+        accountId: 'account-id',
+        apiBaseUrl,
+        getToken: async () => 'synthetic-token',
+        verifyUploader: () => true,
+      },
+      verifyResources: createCfResourceVerifier({
+        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+        runCf,
+        runWrangler: () => {
+          throw new Error('An app without paid bindings must not probe paid services.');
+        },
+        verifyCompatibilityRunner: () => true,
+      }),
+    });
+    const result = await activateCloudflareVersion({
+      runWrangler: runner,
+      configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+      workerName: 'void-test',
+      verifyUploader: () => true,
+      verifyInheritedSecrets: true,
+      expectedPreviousVersionId: current,
+      requireVersionMetadata: true,
+      pinActiveSecrets: createActiveSecretPinner({
+        output: prepared,
+        handoffPending: false,
+        requiredNames: ['AUTH_SECRET'],
+      }),
+      readinessAttempts: 1,
+      message,
+      fetch: async (url) => {
+        expect(String(url)).toBe(
+          `https://${next.slice(0, 8)}-void-test.example.workers.dev/__void/ready`,
+        );
+        expect(traffic).toEqual([{ version_id: current, percentage: 100 }]);
+        events.push('ready');
+        return Response.json({ ready: true, versionId: next });
+      },
+    });
+    expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
+      ok: true,
+      versionId: next,
+      previousVersionId: current,
+    });
+    expect(prepared.activeSecrets).toEqual({
+      versionId: current,
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+    });
+    const posts = requests.filter((row) => row.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.path).toBe(
+      '/client/v4/accounts/account-id/workers/workers/void-test/versions',
+    );
+    expect(posts[0]!.body.bindings).toContainEqual({
+      name: 'AUTH_SECRET',
+      type: 'inherit',
+      version_id: current,
+    });
+    expect(posts[0]!.body.bindings).toContainEqual({
+      name: 'SEND_EMAIL',
+      type: 'send_email',
+      allowed_sender_addresses: ['sender@example.test'],
+      allowed_destination_addresses: ['receiver@example.test'],
+    });
+    expect(posts[0]!.body.bindings).toContainEqual({
+      name: 'APP_VERSION',
+      type: 'version_metadata',
+    });
+    expect(requests.some((row) => row.path.includes('/services/'))).toBe(false);
+    expect(calls.some((args) => args.slice(0, 3).join(' ') === 'workers versions create')).toBe(
+      false,
+    );
+    expect(events.indexOf('upload')).toBeLessThan(events.indexOf('ready'));
+    expect(events.indexOf('ready')).toBeLessThan(events.indexOf('activate'));
+    expect(events.indexOf('activate')).toBeLessThan(events.indexOf('triggers'));
+    expect(
+      events.slice(0, events.indexOf('upload')).filter((event) => event === 'owner'),
+    ).toHaveLength(2);
+    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(originalConfig);
+  } finally {
+    prepared.dispose();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+  }
+}, 30_000);
+
+it(
+  'captures a version list larger than Node’s default child-process buffer',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-cf-large-version-list-'));
+    roots.push(root);
+    const version = {
+      id: '00000000-0000-0000-0000-000000000001',
+      number: 1,
+      modules: [{ name: 'index.js', content_base64: 'a'.repeat(2 * 1024 * 1024) }],
+    };
+    const server = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, errors: [], result: [version] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+      const script = `
       import { createCfCommand } from ${JSON.stringify(new URL('../../src/cli/cf-version-runner.ts', import.meta.url).href)};
       const command = createCfCommand({
         accountId: 'test-account', apiBaseUrl: ${JSON.stringify(apiBaseUrl)},
@@ -543,36 +564,38 @@ it('captures a version list larger than Node’s default child-process buffer', 
       );
       console.log(JSON.stringify({ status: result.status, length: result.stdout.length, error: result.error }));
     `;
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        process.execPath,
-        ['--input-type=module', '-e', script],
-        {
-          cwd: root,
-          timeout: 20_000,
-          env: {
-            PATH: process.env.PATH,
-            SYSTEMROOT: process.env.SYSTEMROOT,
-            WINDIR: process.env.WINDIR,
-            TMP: process.env.TMP,
-            TEMP: process.env.TEMP,
-            CI: 'true',
-            CLOUDFLARE_API_TOKEN: 'synthetic-token',
-            CLOUDFLARE_ACCOUNT_ID: 'test-account',
-            CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          process.execPath,
+          ['--input-type=module', '-e', script],
+          {
+            cwd: root,
+            timeout: 20_000,
+            env: {
+              PATH: process.env.PATH,
+              SYSTEMROOT: process.env.SYSTEMROOT,
+              WINDIR: process.env.WINDIR,
+              TMP: process.env.TMP,
+              TEMP: process.env.TEMP,
+              CI: 'true',
+              CLOUDFLARE_API_TOKEN: 'synthetic-token',
+              CLOUDFLARE_ACCOUNT_ID: 'test-account',
+              CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+            },
           },
-        },
-        (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+          (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+        );
+      });
+      expect(JSON.parse(stdout)).toEqual({ status: 0, length: expect.any(Number), error: null });
+      expect((JSON.parse(stdout) as { length: number }).length).toBeGreaterThan(1024 * 1024);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
       );
-    });
-    expect(JSON.parse(stdout)).toEqual({ status: 0, length: expect.any(Number), error: null });
-    expect((JSON.parse(stdout) as { length: number }).length).toBeGreaterThan(1024 * 1024);
-  } finally {
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-  }
-});
+    }
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 
 it.runIf(process.platform !== 'win32')(
   'bounds a Container command by terminating its actual child and descendant before returning',
@@ -1883,42 +1906,50 @@ it('refuses to pin when a required secret is absent from the live version', asyn
   }
 });
 
-it('does not delegate credentialed commands to a project-local cf', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'void-cf-pinned-command-'));
-  roots.push(root);
-  const local = join(root, 'node_modules', 'cf');
-  mkdirSync(local, { recursive: true });
-  writeFileSync(join(root, 'package.json'), '{}');
-  writeFileSync(
-    join(local, 'package.json'),
-    JSON.stringify({ name: 'cf', version: '0.0.0', bin: { cf: 'fake.cjs' } }),
-  );
-  writeFileSync(join(local, 'fake.cjs'), 'console.log("UNPINNED_PROJECT_CF_EXECUTED");');
-  const command = createCfCommand({
-    accountId: 'test-account',
-    apiBaseUrl: 'https://api.cloudflare.com/client/v4',
-    verifyUploader: () => true,
-    env: () => ({ PATH: process.env.PATH, CI: 'true', CLOUDFLARE_API_TOKEN: 'synthetic-token' }),
-  });
-  const result = await command(['--version'], { cwd: root, capture: true });
-  expect(result.status, result.stderr).toBe(0);
-  expect(result.stdout).not.toContain('UNPINNED_PROJECT_CF_EXECUTED');
-  expect(result.stdout).toContain(pinnedCfVersion);
-});
+it(
+  'does not delegate credentialed commands to a project-local cf',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-cf-pinned-command-'));
+    roots.push(root);
+    const local = join(root, 'node_modules', 'cf');
+    mkdirSync(local, { recursive: true });
+    writeFileSync(join(root, 'package.json'), '{}');
+    writeFileSync(
+      join(local, 'package.json'),
+      JSON.stringify({ name: 'cf', version: '0.0.0', bin: { cf: 'fake.cjs' } }),
+    );
+    writeFileSync(join(local, 'fake.cjs'), 'console.log("UNPINNED_PROJECT_CF_EXECUTED");');
+    const command = createCfCommand({
+      accountId: 'test-account',
+      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+      verifyUploader: () => true,
+      env: () => ({ PATH: process.env.PATH, CI: 'true', CLOUDFLARE_API_TOKEN: 'synthetic-token' }),
+    });
+    const result = await command(['--version'], { cwd: root, capture: true });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toContain('UNPINNED_PROJECT_CF_EXECUTED');
+    expect(result.stdout).toContain(pinnedCfVersion);
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 
-it('captures noninteractive cf output when Void owns the terminal', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'void-cf-quiet-command-'));
-  roots.push(root);
-  const command = createCfCommand({
-    accountId: 'test-account',
-    apiBaseUrl: 'https://api.cloudflare.com/client/v4',
-    verifyUploader: () => true,
-    env: () => ({ PATH: process.env.PATH, CI: 'true' }),
-  });
-  const result = await command(['--version'], { cwd: root, capture: false });
-  expect(result.status, result.stderr).toBe(0);
-  expect(result.stdout).toContain(pinnedCfVersion);
-});
+it(
+  'captures noninteractive cf output when Void owns the terminal',
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-cf-quiet-command-'));
+    roots.push(root);
+    const command = createCfCommand({
+      accountId: 'test-account',
+      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
+      verifyUploader: () => true,
+      env: () => ({ PATH: process.env.PATH, CI: 'true' }),
+    });
+    const result = await command(['--version'], { cwd: root, capture: false });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(pinnedCfVersion);
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 
 it.each([
   { diagnostic: 'synthetic provider failure [10007]', args: ['--version'] },
@@ -1970,6 +2001,7 @@ it.each([
     expect(result.errors).toBeUndefined();
     expect(result.failure).toBeUndefined();
   },
+  REAL_CF_TIMEOUT_MS,
 );
 
 it('preserves interruption provenance before interpreting an empty cf deployment list', async () => {
@@ -2365,103 +2397,111 @@ it.each(['restore', 'remove'] as const)(
   },
 );
 
-it('applies all local Workflow settings through the real pinned cf trigger transport', async () => {
-  const workflow = {
-    binding: 'JOB',
-    name: 'void-job',
-    class_name: 'Job',
-    limits: { steps: 7 },
-    concurrency: { limit: 2 },
-    schedules: ['0 * * * *'],
-    default_retention: { success_retention: '1 day', error_retention: '3 days' },
-  };
-  const prepared = await output({ workers_dev: false, preview_urls: false, workflows: [workflow] });
-  const original = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
-  const requests: Array<{ method: string; path: string; body: unknown }> = [];
-  const server = createServer(async (request, response) => {
-    const chunks: Array<Buffer> = [];
-    for await (const chunk of request) {
-      chunks.push(Buffer.from(chunk));
-    }
-    const body = Buffer.concat(chunks).toString('utf8');
-    requests.push({
-      method: request.method ?? '',
-      path: request.url ?? '',
-      body: body ? JSON.parse(body) : undefined,
+it(
+  'applies all local Workflow settings through the real pinned cf trigger transport',
+  async () => {
+    const workflow = {
+      binding: 'JOB',
+      name: 'void-job',
+      class_name: 'Job',
+      limits: { steps: 7 },
+      concurrency: { limit: 2 },
+      schedules: ['0 * * * *'],
+      default_retention: { success_retention: '1 day', error_retention: '3 days' },
+    };
+    const prepared = await output({
+      workers_dev: false,
+      preview_urls: false,
+      workflows: [workflow],
     });
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        success: true,
-        errors: [],
-        result: request.url?.endsWith('/workers/subdomain')
-          ? { subdomain: 'fixture' }
-          : { subdomain: { enabled: false, previews_enabled: false } },
-      }),
-    );
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const command = createCfCommand({
-      accountId: 'account-id',
-      apiBaseUrl,
-      verifyUploader: () => true,
-      env: () => ({
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        TMP: process.env.TMP,
-        TEMP: process.env.TEMP,
-        CI: 'true',
-        CLOUDFLARE_API_TOKEN: 'synthetic-token',
-        CLOUDFLARE_ACCOUNT_ID: 'account-id',
-        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-      }),
+    const original = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
+    const requests: Array<{ method: string; path: string; body: unknown }> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Array<Buffer> = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = Buffer.concat(chunks).toString('utf8');
+      requests.push({
+        method: request.method ?? '',
+        path: request.url ?? '',
+        body: body ? JSON.parse(body) : undefined,
+      });
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result: request.url?.endsWith('/workers/subdomain')
+            ? { subdomain: 'fixture' }
+            : { subdomain: { enabled: false, previews_enabled: false } },
+        }),
+      );
     });
-    const runner = createCfVersionRunner({
-      output: prepared,
-      workerName: 'void-test',
-      runCf: command,
-      verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
-    });
-    const result = await deployCloudflareVersionTriggers({
-      workerName: 'void-test',
-      configPath: join(roots.at(-1)!, 'dist', 'ssr', 'wrangler.json'),
-      runWrangler: runner,
-      triggerConfig: {
-        workers_dev: false,
-        preview_urls: false,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [workflow],
-      },
-    });
-    expect(result, result.stdout + result.stderr).toMatchObject({ status: 0 });
-    expect(requests.filter(({ path }) => path.includes('/workflows/'))).toEqual([
-      {
-        method: 'PUT',
-        path: '/client/v4/accounts/account-id/workflows/void-job',
-        body: {
-          script_name: 'void-test',
-          class_name: 'Job',
-          limits: { steps: 7 },
-          concurrency: { limit: 2 },
-          schedules: [{ cron: '0 * * * *' }],
-          default_retention: { success_retention: '1 day', error_retention: '3 days' },
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+      const command = createCfCommand({
+        accountId: 'account-id',
+        apiBaseUrl,
+        verifyUploader: () => true,
+        env: () => ({
+          PATH: process.env.PATH,
+          SYSTEMROOT: process.env.SYSTEMROOT,
+          WINDIR: process.env.WINDIR,
+          TMP: process.env.TMP,
+          TEMP: process.env.TEMP,
+          CI: 'true',
+          CLOUDFLARE_API_TOKEN: 'synthetic-token',
+          CLOUDFLARE_ACCOUNT_ID: 'account-id',
+          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+        }),
+      });
+      const runner = createCfVersionRunner({
+        output: prepared,
+        workerName: 'void-test',
+        runCf: command,
+        verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
+      });
+      const result = await deployCloudflareVersionTriggers({
+        workerName: 'void-test',
+        configPath: join(roots.at(-1)!, 'dist', 'ssr', 'wrangler.json'),
+        runWrangler: runner,
+        triggerConfig: {
+          workers_dev: false,
+          preview_urls: false,
+          routes: [],
+          crons: [],
+          queueConsumers: [],
+          workflows: [workflow],
         },
-      },
-    ]);
-    expect(requests.some(({ path }) => path.includes('/versions'))).toBe(false);
-    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(original);
-  } finally {
-    prepared.dispose();
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-  }
-});
+      });
+      expect(result, result.stdout + result.stderr).toMatchObject({ status: 0 });
+      expect(requests.filter(({ path }) => path.includes('/workflows/'))).toEqual([
+        {
+          method: 'PUT',
+          path: '/client/v4/accounts/account-id/workflows/void-job',
+          body: {
+            script_name: 'void-test',
+            class_name: 'Job',
+            limits: { steps: 7 },
+            concurrency: { limit: 2 },
+            schedules: [{ cron: '0 * * * *' }],
+            default_retention: { success_retention: '1 day', error_retention: '3 days' },
+          },
+        },
+      ]);
+      expect(requests.some(({ path }) => path.includes('/versions'))).toBe(false);
+      expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(original);
+    } finally {
+      prepared.dispose();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  },
+  REAL_CF_TIMEOUT_MS,
+);
 
 it.each([
   {
