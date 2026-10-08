@@ -131,6 +131,38 @@ Local development needs no secret setup. To preview a production build locally, 
 
 Deployed apps on Cloudflare limit auth requests per client IP with Better Auth's defaults, for example 3 sign-in attempts per 10 seconds. Each Worker instance keeps its own count. Change or turn off the limits with `rateLimit` in `auth.ts`. To share one count across instances, set `rateLimit: { storage: 'database' }`, then run `void db generate` for a direct Cloudflare deploy.
 
+### Proxies and end-to-end tests
+
+All requests from one IP share one count. Two common setups reach the limits:
+
+- A server calls your auth endpoints for your users, such as a backend-for-frontend, a rewrite from Vercel or nginx, or another Worker's `fetch`. All of those users share that server's IP.
+- End-to-end tests sign up or sign in many times against a deployed app.
+
+Don't read the client IP from `x-forwarded-for` instead: any client can send that header. Give the trusted caller a secret header, and skip the limits only for requests that carry it:
+
+```ts
+import { defineAuth } from 'void/auth';
+
+export default defineAuth(({ defaults, env }) => ({
+  ...defaults,
+  rateLimit: {
+    customRules: {
+      '/**': (request, rule) =>
+        env.AUTH_TRUSTED_KEY && request.headers.get('x-auth-trusted-key') === env.AUTH_TRUSTED_KEY
+          ? false
+          : rule,
+    },
+  },
+}));
+```
+
+`'/**'` matches every auth endpoint. Returning `false` skips the limit, and returning `rule` keeps the default limit for everyone else. Declare `AUTH_TRUSTED_KEY: string().optional()` in `env.ts` and set it with `void secret put AUTH_TRUSTED_KEY` (see [Environment variables](./env-vars.md#production-server-values)).
+
+Your app no longer limits requests that carry the key, so:
+
+- A proxy that sends it must limit every auth request it forwards for each of its users, including sign-up, password reset and verification emails.
+- A test runner should send it only to your app. Never put the key in code that runs in your users' browsers.
+
 ## Customization
 
 For advanced configuration, create `auth.ts` at the project root and export `defineAuth(...)`:
