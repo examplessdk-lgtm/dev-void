@@ -4,6 +4,8 @@ outline: deep
 
 # First Deployment
 
+Open your platform's API URL in a browser to see its welcome page, CLI connection instructions, and a link to the administrator dashboard. Share this URL with teammates so they can connect to your platform.
+
 First verify the new platform and sign in with the administrator login method selected during setup:
 
 ```sh

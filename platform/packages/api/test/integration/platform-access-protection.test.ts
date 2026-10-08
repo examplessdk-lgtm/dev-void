@@ -150,6 +150,14 @@ async function githubSignature(body: string): Promise<string> {
 }
 
 describe('Access-protected platform requests', () => {
+  it('requires human Access identity to view the welcome page', async () => {
+    expect((await request('/')).status).toBe(403);
+    expect((await request('/', await assertion({ service: true }))).status).toBe(403);
+    const response = await request('/', await assertion());
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Welcome to Void Platform');
+  });
+
   it('keeps maintenance status behind human Access and a matching, revocable administrator session', async () => {
     const session = await createHumanSession(env.db, env.JWT_SECRET, {
       userId: user.id,

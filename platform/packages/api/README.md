@@ -82,6 +82,7 @@ drizzle/
 
 ### Public API
 
+- `GET /` — server-rendered welcome page with the platform name, CLI installation and connection instructions, and links to the administrator dashboard and Void quickstart.
 - `GET /health`
 - `GET /auth/login`
 - `GET /auth/callback`

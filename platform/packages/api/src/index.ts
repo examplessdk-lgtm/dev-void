@@ -505,6 +505,33 @@ const app = new Hono<ApiEnv>()
       supportedClassifierVersions: [1],
     }),
   )
+  .get('/', (context) => {
+    const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
+    const command = escapeHtml(
+      platformConnectCommand(getPlatformApiUrl(context.env, context.req.url)),
+    );
+    context.header('Cache-Control', 'no-store');
+    return context.html(`<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(getPlatformPageTitle('Welcome', context.env, context.req.url))}</title>
+</head><body>
+<main style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:1rem">
+<h1>Welcome to ${name}</h1>
+<p>This is a Void platform. Connect the Void CLI to deploy and manage your applications here.</p>
+<h2>Connect to this platform</h2>
+<p>Install the Void CLI if you haven't already:</p>
+<pre style="overflow:auto"><code>npm install -g void</code></pre>
+<p>From a new or unlinked Void app directory, connect to this platform:</p>
+<pre style="overflow:auto"><code>${command}</code></pre>
+<p>The CLI opens your browser to sign in when needed. If access is restricted, ask your platform administrator for an invitation and sign in with the invited email address.</p>
+<p>Ready to deploy? Run <code>void deploy</code> from your application's directory. To create a new application, follow the <a href="https://void.cloud/guide/quickstart">Void quickstart</a>, then connect it to this platform before deploying.</p>
+<h2>Administration</h2>
+<p>Platform administrators can <a href="/admin/">open the administrator dashboard</a> to manage this instance. If you're setting up the first administrator, you'll be guided through setup.</p>
+</main>
+</body></html>`);
+  })
   .get('/signup-restricted', (context) => {
     const name = escapeHtml(getPlatformDisplayName(context.env, context.req.url));
     return context.html(`<!DOCTYPE html>

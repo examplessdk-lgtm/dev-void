@@ -1,3 +1,4 @@
+import { PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE } from '@void/platform';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import app from '../../src/index.ts';
 import { setupEnv, teardownEnv, type TestEnv } from './helpers.ts';
@@ -11,6 +12,48 @@ afterAll(async () => {
 });
 
 describe('platform onboarding pages', () => {
+  it('welcomes visitors at the API root with this platform’s connection instructions', async () => {
+    const response = await app.fetch(
+      new Request('https://alias.example.com/', {
+        headers: { 'X-Forwarded-Host': 'attacker.example', 'X-Forwarded-Proto': 'http' },
+      }),
+      {
+        ...env,
+        AUTH_REDIRECT_URI: 'https://api.example.com/auth/callback',
+        PLATFORM_DISPLAY_NAME: '<Example Platform>',
+        PLATFORM_INSTALLATION_ID: 'example-installation',
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toContain('text/html');
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const html = await response.text();
+    expect(html).toContain('<h1>Welcome to &lt;Example Platform&gt;</h1>');
+    expect(html).toContain('<title>Welcome · &lt;Example Platform&gt; · Void</title>');
+    expect(html).toContain('npm install -g void');
+    expect(html).toContain('void connect &#39;https://api.example.com&#39;');
+    expect(html).toContain('href="/admin/"');
+    expect(html).toContain('href="https://void.cloud/guide/quickstart"');
+    expect(html).not.toContain('<Example Platform>');
+    expect(html).not.toContain('attacker.example');
+    expect(html).not.toContain('alias.example.com');
+    expect(html).not.toContain('<script');
+  });
+
+  it('keeps the welcome page behind the installation traffic gate', async () => {
+    await env.ROUTING.put(PLATFORM_DISABLED_KEY, PLATFORM_DISABLED_VALUE);
+    try {
+      const response = await app.fetch(new Request('https://api.example.com/'), {
+        ...env,
+        PLATFORM_INSTALLATION_ID: 'example-installation',
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: 'Platform disabled' });
+    } finally {
+      await env.ROUTING.delete(PLATFORM_DISABLED_KEY);
+    }
+  });
+
   it('shows the configured platform identity and connection, ignoring forwarded origins', async () => {
     const response = await app.fetch(
       new Request('https://alias.example.com/invite', {
@@ -98,7 +141,7 @@ describe('platform onboarding pages', () => {
     expect(html).not.toContain('evil.example');
   });
 
-  it.each(['/invite', '/signup-restricted'])(
+  it.each(['/', '/invite', '/signup-restricted'])(
     'uses a generic name for source deployments at %s',
     async (path) => {
       const response = await app.fetch(
@@ -111,6 +154,9 @@ describe('platform onboarding pages', () => {
       const html = await response.text();
       expect(html).toContain('Void Platform');
       expect(html).not.toContain('Void Cloud');
+      if (path === '/') {
+        expect(html).toContain('void connect &#39;https://api.example.com&#39;');
+      }
     },
   );
 
