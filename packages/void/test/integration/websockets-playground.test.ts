@@ -3,12 +3,11 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, killChild, waitForServer } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
 let browser: Browser;
-let port: number;
 let base: string;
 
 async function newPage(): Promise<Page> {
@@ -85,37 +84,37 @@ describe('playground/websockets', () => {
 
     browser = await chromium.launch();
 
-    port = await getPort();
-    base = `http://127.0.0.1:${port}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/websockets',
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(port),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VITE_VOID_NOTIFICATION_STREAM_DELAY_MS: '10',
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          './playground/websockets',
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VITE_VOID_NOTIFICATION_STREAM_DELAY_MS: '10',
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-
-    await waitForServer(base, 20_000);
+      );
+      stderr = '';
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += String(chunk);
+      });
+      return child;
+    }, 20_000);
+    base = server.base;
   });
 
   it('builds WebSocket routes as SQLite-backed Durable Objects', () => {

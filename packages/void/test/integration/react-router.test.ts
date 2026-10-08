@@ -1,11 +1,10 @@
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/react-router';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 describe('playground/react-router dev', { retry: 2 }, () => {
@@ -13,36 +12,36 @@ describe('playground/react-router dev', { retry: 2 }, () => {
   let stderr = '';
 
   beforeAll(async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        `./${PLAYGROUND}`,
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          `./${PLAYGROUND}`,
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-
-    await waitForServer(DEV_BASE, 30_000);
+      );
+      stderr = '';
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += String(chunk);
+      });
+      return child;
+    }, 30_000);
+    DEV_BASE = server.base;
   });
 
   afterAll(async () => {

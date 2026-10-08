@@ -5,12 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
 import { createServer } from 'pglite-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import {
-  collectServerOutput,
-  getPort,
-  waitForServer,
-  killChild,
-} from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const ENV_PATH = join(ROOT, 'playground/pg-test/.env');
@@ -28,7 +23,6 @@ describe('playground/pg-test', () => {
   let pgServer: ReturnType<typeof createServer>;
   let pgPort: number;
   let devChild: ReturnType<typeof spawn>;
-  let devPort: number;
   let BASE: string;
   let serverOutput = () => '';
 
@@ -55,37 +49,33 @@ describe('playground/pg-test', () => {
     writeFileSync(ENV_PATH, `DATABASE_URL=${databaseUrl}\n`);
 
     // 3. Start vite dev server
-    devPort = await getPort();
-    BASE = `http://127.0.0.1:${devPort}`;
-
-    devChild = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/pg-test',
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(devPort),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      devChild = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          './playground/pg-test',
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    serverOutput = collectServerOutput(devChild);
-
-    await waitForServer(BASE, 30_000, {
-      isAlive: () => devChild.exitCode === null && devChild.signalCode === null,
-      diagnostics: serverOutput,
-    });
+      );
+      return devChild;
+    }, 30_000);
+    BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {

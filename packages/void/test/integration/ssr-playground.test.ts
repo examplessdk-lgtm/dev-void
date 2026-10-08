@@ -3,17 +3,10 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import {
-  collectServerOutput,
-  getPort,
-  waitForServer,
-  killChild,
-} from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-let DEV_PORT: number;
 let DEV_BASE: string;
-let PREVIEW_PORT: number;
 let PREVIEW_BASE: string;
 
 describe('playground/ssr dev', () => {
@@ -21,37 +14,33 @@ describe('playground/ssr dev', () => {
   let serverOutput = () => '';
 
   beforeAll(async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/ssr',
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          './playground/ssr',
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    serverOutput = collectServerOutput(child);
-
-    await waitForServer(DEV_BASE, 20_000, {
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: serverOutput,
-    });
+      );
+      return child;
+    }, 20_000);
+    DEV_BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {
@@ -93,37 +82,33 @@ describe('playground/ssr build + preview', () => {
     rmSync(join(ROOT, 'playground/ssr/dist'), { recursive: true, force: true });
     execSync('vp run --filter ./playground/ssr build', { cwd: ROOT, stdio: 'pipe' });
 
-    PREVIEW_PORT = await getPort();
-    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/ssr',
-        'preview',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(PREVIEW_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          './playground/ssr',
+          'preview',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    serverOutput = collectServerOutput(child);
-
-    await waitForServer(PREVIEW_BASE, 20_000, {
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: serverOutput,
-    });
+      );
+      return child;
+    }, 20_000);
+    PREVIEW_BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {

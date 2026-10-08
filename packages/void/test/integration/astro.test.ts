@@ -2,16 +2,10 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import {
-  collectServerOutput,
-  getPort,
-  waitForServer,
-  killChild,
-} from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/astro';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 function readWranglerConfig(root: string): {
@@ -26,36 +20,32 @@ describe('playground/astro dev', () => {
   let child: ReturnType<typeof spawn>;
 
   const startDev = async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        `./${PLAYGROUND}`,
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          ASTRO_DEV_BACKGROUND: 'false',
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          `./${PLAYGROUND}`,
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            ASTRO_DEV_BACKGROUND: 'false',
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    await waitForServer(DEV_BASE, 20_000, {
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: collectServerOutput(child),
-    });
+      );
+      return child;
+    }, 20_000);
+    DEV_BASE = server.base;
   };
 
   beforeAll(async () => {

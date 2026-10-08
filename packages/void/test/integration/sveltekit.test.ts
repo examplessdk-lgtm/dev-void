@@ -5,9 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectBrowserDiagnostics } from '../../../../test/browser-helpers.ts';
 import {
   createIsolatedPlayground,
-  getPort,
-  waitForServer,
   killChild,
+  startServer,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
 
@@ -17,7 +16,7 @@ describe.each([2, 3])('SvelteKit %i compatibility', (major) => {
   let child: ReturnType<typeof spawn>;
   let fixture: IsolatedPlayground;
   let DEV_BASE: string;
-  let serverOutput = '';
+  let serverOutput = () => '';
 
   beforeAll(async () => {
     fixture = createIsolatedPlayground(ROOT, PLAYGROUND);
@@ -77,46 +76,37 @@ export function checkSchema() {
     );
     expect(prepare.status, prepare.stdout + prepare.stderr).toBe(0);
 
-    const DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
     // Kit 3 checks Vite environment identity; use the fixture's Vite+ instance
     // even when the smart runner puts the workspace's binaries first on PATH.
-    child = spawn(
-      process.execPath,
-      [
-        join(pg, 'node_modules/vite-plus/bin/vp'),
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: pg,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
-        },
+    const server = await startServer(
+      (port) => {
+        child = spawn(
+          process.execPath,
+          [
+            join(pg, 'node_modules/vite-plus/bin/vp'),
+            'dev',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--strictPort',
+          ],
+          {
+            cwd: pg,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              VOID_INSPECTOR_PORT: 'false',
+            },
+          },
+        );
+        return child;
       },
+      30_000,
+      { expectStatus: 200, expectBody: 'SvelteKit + Void' },
     );
-
-    const recordOutput = (chunk: Buffer) => {
-      serverOutput = (serverOutput + String(chunk)).slice(-20_000);
-    };
-    child.stdout!.on('data', recordOutput);
-    child.stderr!.on('data', recordOutput);
-
-    try {
-      await waitForServer(DEV_BASE, 30_000, {
-        expectStatus: 200,
-        expectBody: 'SvelteKit + Void',
-        isAlive: () => child.exitCode === null && child.signalCode === null,
-      });
-    } catch (error) {
-      throw new Error(`SvelteKit failed to start:\n${serverOutput}`, { cause: error });
-    }
+    DEV_BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {
@@ -124,8 +114,8 @@ export function checkSchema() {
       await killChild(child);
     }
     fixture?.cleanup();
-    if (serverOutput.includes('error when starting dev server')) {
-      throw new Error(serverOutput);
+    if (serverOutput().includes('error when starting dev server')) {
+      throw new Error(serverOutput());
     }
   });
 
@@ -189,7 +179,7 @@ export function checkSchema() {
       expect(d1User).toBe('Alice');
       expect(kvValue).toBe('ok');
     } catch (error) {
-      throw new Error(`${diagnostics()}\nDev server:\n${serverOutput}`, { cause: error });
+      throw new Error(`${diagnostics()}\nDev server:\n${serverOutput()}`, { cause: error });
     } finally {
       await browser.close();
     }

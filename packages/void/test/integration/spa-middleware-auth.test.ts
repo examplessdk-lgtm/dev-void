@@ -5,10 +5,9 @@ import spawn from 'cross-spawn';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
   createIsolatedPlayground,
-  getPort,
   killChild,
+  startServer,
   type IsolatedPlayground,
-  waitForServer,
 } from '../../../../test/integration-helpers.ts';
 import { renderVoidConfig } from '../../src/config-write.ts';
 import { readConfig } from '../../src/config.ts';
@@ -111,44 +110,42 @@ function writeProtectedAsset(): void {
 }
 
 async function startSpaDevServer(): Promise<string> {
-  const port = await getPort();
-  const base = `http://127.0.0.1:${port}`;
-  stderr = '';
-  child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port)], {
-    cwd: playground.root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      VOID_INSPECTOR_PORT: 'false',
-    },
-  });
-
-  child.stderr!.on('data', (chunk: Buffer) => {
-    stderr += String(chunk);
-  });
-
-  await waitForServer(base, 30_000, {
-    isAlive: () => child?.exitCode === null && child.signalCode === null,
-  });
-  return base;
+  const server = await startServer((port) => {
+    stderr = '';
+    child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+      cwd: playground.root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        VOID_INSPECTOR_PORT: 'false',
+      },
+    });
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    return child;
+  }, 30_000);
+  return server.base;
 }
 
 async function startSpaPreviewServer(): Promise<string> {
-  const port = await getPort();
-  const base = `http://127.0.0.1:${port}`;
-  stderr = '';
-  child = spawn('vp', ['preview', '--host', '127.0.0.1', '--port', String(port)], {
-    cwd: playground.root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
-  });
-  child.stderr!.on('data', (chunk: Buffer) => {
-    stderr += String(chunk);
-  });
-  await waitForServer(base, 30_000, {
-    isAlive: () => child?.exitCode === null && child.signalCode === null,
-  });
-  return base;
+  const server = await startServer((port) => {
+    stderr = '';
+    child = spawn(
+      'vp',
+      ['preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
+      {
+        cwd: playground.root,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+      },
+    );
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    return child;
+  }, 30_000);
+  return server.base;
 }
 
 function readBuiltAssetConfig(): {

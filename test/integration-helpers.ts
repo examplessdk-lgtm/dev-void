@@ -12,8 +12,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer, type Server } from 'node:net';
+import { createServer, type AddressInfo } from 'node:net';
 import { basename, join, relative } from 'node:path/posix';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower
@@ -21,13 +22,8 @@ import { basename, join, relative } from 'node:path/posix';
  */
 const CI_TIMEOUT_SCALE = process.platform === 'win32' ? 3 : 1;
 
-/**
- * Ports held by getPort() until waitForServer() releases them.
- * Prevents TOCTOU races when many integration tests run in parallel —
- * without this, another test's getPort() can grab the same port
- * during the gap between close and the child process's listen().
- */
-const heldServers = new Map<number, Server>();
+/** How many ports startServer() tries before it gives up. */
+const START_ATTEMPTS = 3;
 
 const GENERATED_PLAYGROUND_ENTRIES = new Set([
   '.astro',
@@ -138,51 +134,96 @@ export function createIsolatedPlayground(
   };
 }
 
-/**
- * Returns an unused port by binding to port 0 and reading the
- * OS-assigned port. The underlying socket stays open until
- * waitForServer() is called with a URL on that port, preventing
- * other parallel tests from stealing it.
- */
-export async function getPort(): Promise<number> {
+/** Returns a port that is free right now. Another process can still take it before use. */
+async function getFreePort(): Promise<number> {
   const server = createServer();
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const { port } = server.address() as import('node:net').AddressInfo;
-  server.unref(); // don't block process exit if beforeAll throws before waitForServer
-  heldServers.set(port, server);
+  const { port } = server.address() as AddressInfo;
+  server.close();
+  await once(server, 'close');
   return port;
+}
+
+export type WaitForServerOptions = {
+  expectBody?: string;
+  rejectBody?: string;
+  expectStatus?: number;
+  isAlive?: () => boolean;
+  requestTimeoutMs?: number;
+  diagnostics?: () => string;
+};
+
+export type StartedServer = {
+  child: ReturnType<typeof spawn>;
+  port: number;
+  /** `http://127.0.0.1:<port>` */
+  base: string;
+  /** The server's recent stdout and stderr. */
+  output: () => string;
+};
+
+/**
+ * Starts a server on a free port and waits until it answers.
+ *
+ * The server binds its port seconds after the port is chosen, and another process can take
+ * the port in that time. `spawnServer` must make the server stop instead of moving to the
+ * next port (pass `--strictPort` to Vite): a server that moves can take the port of another
+ * test that is starting at the same time. When the server reports that its port is taken,
+ * it is started again on a new port.
+ */
+export async function startServer(
+  spawnServer: (port: number) => ReturnType<typeof spawn>,
+  timeoutMs: number,
+  options: Omit<WaitForServerOptions, 'isAlive' | 'diagnostics'> = {},
+): Promise<StartedServer> {
+  for (let attempt = 1; ; attempt++) {
+    const port = await getFreePort();
+    const child = spawnServer(port);
+    const output = collectServerOutput(child);
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    const base = `http://127.0.0.1:${port}`;
+    const exited = () => child.exitCode !== null || child.signalCode !== null;
+    // Vite without `--strictPort` (Astro) keeps running and moves to the next port.
+    const moved = () => output().includes(`Port ${port} is in use`);
+    try {
+      await waitForServer(base, timeoutMs, {
+        ...options,
+        isAlive: () => !exited() && !moved(),
+        diagnostics: output,
+      });
+      return { child, port, base, output };
+    } catch (error) {
+      if (exited()) {
+        // The last output can arrive after the exit.
+        await Promise.race([closed, delay(1_000)]);
+      }
+      // Vite with `--strictPort`, Node, Bun and Deno exit with one of these messages.
+      const portTaken = moved() || (exited() && /already in use|EADDRINUSE/.test(output()));
+      await killChild(child);
+      if (!portTaken) {
+        throw error;
+      }
+      if (attempt === START_ATTEMPTS) {
+        throw new Error(`Another process took the server port ${START_ATTEMPTS} times`, {
+          cause: error,
+        });
+      }
+      console.warn(`Another process took port ${port}; starting the server on a new port.`);
+    }
+  }
 }
 
 export async function waitForServer(
   url: string,
   timeoutMs: number,
-  options?: {
-    expectBody?: string;
-    rejectBody?: string;
-    expectStatus?: number;
-    isAlive?: () => boolean;
-    requestTimeoutMs?: number;
-    diagnostics?: () => string;
-  },
+  options?: WaitForServerOptions,
 ): Promise<void> {
-  // Release the held port so the child process can bind to it.
-  // This is called right after spawn(), minimizing the TOCTOU window.
-  const urlPort = Number(new URL(url).port);
-  const held = heldServers.get(urlPort);
-  if (held) {
-    held.close();
-    await once(held, 'close');
-    heldServers.delete(urlPort);
-  }
-
   const effectiveTimeout = timeoutMs * CI_TIMEOUT_SCALE;
   const start = Date.now();
   while (Date.now() - start < effectiveTimeout) {
     if (options?.isAlive && !options.isAlive()) {
-      throw new Error(
-        `Server process exited while waiting for ${url}\n${options.diagnostics?.() ?? ''}`,
-      );
+      throw new Error(`Server stopped while waiting for ${url}\n${options.diagnostics?.() ?? ''}`);
     }
     try {
       const remainingMs = effectiveTimeout - (Date.now() - start);

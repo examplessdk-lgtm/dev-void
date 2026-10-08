@@ -5,7 +5,7 @@ import spawn from 'cross-spawn';
 import { type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import { waitForIslandsHydrated } from '../../../../test/browser-helpers.ts';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer, waitForServer } from '../../../../test/integration-helpers.ts';
 import { launchPagesBrowser } from '../../../../test/pages-browser.ts';
 import { registerSharedClientTests } from '../../../../test/pages-client-contract.ts';
 import { defineSharedIslandTests } from '../../../../test/pages-island-contract.ts';
@@ -24,9 +24,7 @@ declare global {
 type NavElement = HTMLElement & { __stamp?: number };
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-let DEV_PORT: number;
 let DEV_BASE: string;
-let PREVIEW_PORT: number;
 let PREVIEW_BASE: string;
 
 let browser: Browser;
@@ -216,37 +214,37 @@ describe('vue-pages client (dev)', () => {
 
   beforeAll(
     async () => {
-      DEV_PORT = await getPort();
-      DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-      child = spawn(
-        'vp',
-        [
-          'run',
-          '--filter',
-          './playground/vue-pages',
-          'dev',
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(DEV_PORT),
-        ],
-        {
-          cwd: ROOT,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            ...process.env,
-            VOID_INSPECTOR_PORT: 'false',
-          },
-        },
-      );
-
-      child.stderr!.on('data', (chunk: Buffer) => {
-        stderr += String(chunk);
-      });
-
       const serverTimeout = process.platform === 'win32' ? 45_000 : 20_000;
-      await waitForServer(DEV_BASE, serverTimeout);
+      const server = await startServer((port) => {
+        child = spawn(
+          'vp',
+          [
+            'run',
+            '--filter',
+            './playground/vue-pages',
+            'dev',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--strictPort',
+          ],
+          {
+            cwd: ROOT,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              VOID_INSPECTOR_PORT: 'false',
+            },
+          },
+        );
+        stderr = '';
+        child.stderr!.on('data', (chunk: Buffer) => {
+          stderr += String(chunk);
+        });
+        return child;
+      }, serverTimeout);
+      DEV_BASE = server.base;
     },
     process.platform === 'win32' ? 60_000 : 30_000,
   );
@@ -661,38 +659,36 @@ describe('vue-pages client (preview)', { retry: 2 }, () => {
       });
     }
 
-    PREVIEW_PORT = await getPort();
-    PREVIEW_BASE = `http://127.0.0.1:${PREVIEW_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/vue-pages',
-        'preview',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(PREVIEW_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          './playground/vue-pages',
+          'preview',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-
-    await waitForServer(PREVIEW_BASE, 30_000, {
-      isAlive: () => child.exitCode === null,
-    });
+      );
+      stderr = '';
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += String(chunk);
+      });
+      return child;
+    }, 30_000);
+    PREVIEW_BASE = server.base;
   });
 
   afterAll(async () => {

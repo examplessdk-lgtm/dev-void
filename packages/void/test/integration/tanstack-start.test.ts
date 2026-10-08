@@ -1,16 +1,10 @@
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import {
-  collectServerOutput,
-  getPort,
-  killChild,
-  waitForServer,
-} from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/tanstack-start';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 describe('playground/tanstack-start dev', () => {
@@ -18,43 +12,42 @@ describe('playground/tanstack-start dev', () => {
   let stderr = '';
 
   beforeAll(async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        `./${PLAYGROUND}`,
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-        '--strictPort',
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
-        },
-      },
-    );
-
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-
-    // Other test files in the same run can bind the port getPort() released,
+    // Another process can answer on the port before this server starts,
     // so only this app's page counts as ready.
-    await waitForServer(DEV_BASE, 20_000, {
-      expectBody: 'TanStack Start + Void',
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: collectServerOutput(child),
-    });
+    const server = await startServer(
+      (port) => {
+        child = spawn(
+          'vp',
+          [
+            'run',
+            '--filter',
+            `./${PLAYGROUND}`,
+            'dev',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--strictPort',
+          ],
+          {
+            cwd: ROOT,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              VOID_INSPECTOR_PORT: 'false',
+            },
+          },
+        );
+        stderr = '';
+        child.stderr!.on('data', (chunk: Buffer) => {
+          stderr += String(chunk);
+        });
+        return child;
+      },
+      20_000,
+      { expectBody: 'TanStack Start + Void' },
+    );
+    DEV_BASE = server.base;
   });
 
   afterAll(async () => {

@@ -5,11 +5,9 @@ import spawn from 'cross-spawn';
 import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
-  collectServerOutput,
   createIsolatedPlayground,
-  getPort,
   killChild,
-  waitForServer,
+  startServer,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
 import { renderVoidConfig } from '../../src/config-write.ts';
@@ -74,17 +72,15 @@ export default function Home() {
       mkdirSync(join(root, 'public'));
       writeFileSync(join(root, 'public/health.txt'), 'public asset');
       execFileSync('vp', ['build'], { cwd: root, stdio: 'pipe' });
-      const port = await getPort();
-      base = `http://127.0.0.1:${port}`;
-      child = spawn(command, [...args, 'dist/ssr/index.js'], {
-        cwd: root,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PORT: String(port) },
-      });
-      await waitForServer(base, 20_000, {
-        isAlive: () => child.exitCode === null,
-        diagnostics: collectServerOutput(child),
-      });
+      const server = await startServer((port) => {
+        child = spawn(command, [...args, 'dist/ssr/index.js'], {
+          cwd: root,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, PORT: String(port) },
+        });
+        return child;
+      }, 20_000);
+      base = server.base;
     });
 
     afterAll(async () => {
@@ -130,22 +126,24 @@ export default function Home() {
     it('resolves assets from the emitted module when the working directory changes', async () => {
       const elsewhere = join(root, 'another-working-directory');
       mkdirSync(elsewhere);
-      const port = await getPort();
-      const relocatedBase = `http://127.0.0.1:${port}`;
-      const relocated = spawn(command, [...args, join(root, 'dist/ssr/index.js')], {
-        cwd: elsewhere,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, PORT: String(port) },
-      });
+      const relocated = await startServer(
+        (port) =>
+          spawn(command, [...args, join(root, 'dist/ssr/index.js')], {
+            cwd: elsewhere,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, PORT: String(port) },
+          }),
+        20_000,
+      );
+      const relocatedBase = relocated.base;
       try {
-        await waitForServer(relocatedBase, 20_000, { isAlive: () => relocated.exitCode === null });
         const html = await (await fetch(relocatedBase)).text();
         const script = html.match(/<script[^>]*src="([^"]+)"/);
         expect(script).not.toBeNull();
         expect((await fetch(new URL(script![1], relocatedBase))).status).toBe(200);
         expect(await (await fetch(`${relocatedBase}/health.txt`)).text()).toBe('public asset');
       } finally {
-        await killChild(relocated);
+        await killChild(relocated.child);
       }
     });
 

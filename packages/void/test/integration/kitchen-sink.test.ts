@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { chromium, type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 declare global {
   interface Window {
@@ -16,7 +16,6 @@ type NavElement = HTMLElement & { __stamp?: number };
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 
-let PORT: number;
 let BASE: string;
 let browser: Browser;
 
@@ -43,9 +42,6 @@ describe('playground/kitchen-sink', () => {
   let child: ReturnType<typeof spawn>;
 
   beforeAll(async () => {
-    PORT = await getPort();
-    BASE = `http://127.0.0.1:${PORT}`;
-
     // Build first so every dependency is resolved before the server starts;
     // dev-mode dependency optimization makes browser checks unreliable.
     const pg = join(ROOT, 'playground/kitchen-sink');
@@ -57,32 +53,36 @@ describe('playground/kitchen-sink', () => {
     const previewDatabaseId = preparePreviewWranglerConfig(pg);
 
     // Start preview server — pre-built assets, no lazy optimization.
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        './playground/kitchen-sink',
-        'preview',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
-        },
+    const server = await startServer(
+      (port) => {
+        child = spawn(
+          'vp',
+          [
+            'run',
+            '--filter',
+            './playground/kitchen-sink',
+            'preview',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(port),
+            '--strictPort',
+          ],
+          {
+            cwd: ROOT,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              VOID_INSPECTOR_PORT: 'false',
+            },
+          },
+        );
+        return child;
       },
+      30_000,
+      { expectBody: 'Kitchen Sink' },
     );
-
-    await waitForServer(BASE, 30_000, {
-      expectBody: 'Kitchen Sink',
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-    });
+    BASE = server.base;
 
     // Preview mode doesn't auto-run migrations (dev mode's migrationPlugin
     // handles this via configureServer). Apply them directly to the local

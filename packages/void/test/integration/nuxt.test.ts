@@ -3,11 +3,10 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import { collectBrowserDiagnostics } from '../../../../test/browser-helpers.ts';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/nuxt';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 function removeWranglerConfig(root: string) {
@@ -19,7 +18,7 @@ describe(
   'playground/nuxt dev',
   () => {
     let child: ReturnType<typeof spawn>;
-    let serverOutput = '';
+    let serverOutput = () => '';
 
     beforeAll(
       async () => {
@@ -28,46 +27,38 @@ describe(
         rmSync(join(pg, '.wrangler'), { recursive: true, force: true });
         removeWranglerConfig(pg);
 
-        DEV_PORT = await getPort();
-        DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-        child = spawn(
-          'vp',
-          [
-            'run',
-            '--filter',
-            `./${PLAYGROUND}`,
-            'dev',
-            '--host',
-            '127.0.0.1',
-            '--port',
-            String(DEV_PORT),
-          ],
-          {
-            cwd: ROOT,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: {
-              ...process.env,
-              VOID_INSPECTOR_PORT: 'false',
-            },
+        // Nuxt has no strict port option: if its port is taken, it moves to a random port
+        // without saying so, and this start times out instead of retrying.
+        const server = await startServer(
+          (port) => {
+            child = spawn(
+              'vp',
+              [
+                'run',
+                '--filter',
+                `./${PLAYGROUND}`,
+                'dev',
+                '--host',
+                '127.0.0.1',
+                '--port',
+                String(port),
+              ],
+              {
+                cwd: ROOT,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                env: {
+                  ...process.env,
+                  VOID_INSPECTOR_PORT: 'false',
+                },
+              },
+            );
+            return child;
           },
+          30_000,
+          { expectStatus: 200, expectBody: 'Nuxt + Void' },
         );
-
-        const recordOutput = (chunk: Buffer) => {
-          serverOutput = (serverOutput + String(chunk)).slice(-20_000);
-        };
-        child.stdout!.on('data', recordOutput);
-        child.stderr!.on('data', recordOutput);
-
-        try {
-          await waitForServer(DEV_BASE, 30_000, {
-            expectStatus: 200,
-            expectBody: 'Nuxt + Void',
-            isAlive: () => child.exitCode === null && child.signalCode === null,
-          });
-        } catch (error) {
-          throw new Error(`Nuxt failed to start:\n${serverOutput}`, { cause: error });
-        }
+        DEV_BASE = server.base;
+        serverOutput = server.output;
       },
       process.platform === 'win32' ? 120_000 : 45_000,
     );
@@ -144,7 +135,7 @@ describe(
         expect(d1User).toBe('Alice');
         expect(kvValue).toBe('ok');
       } catch (error) {
-        throw new Error(`${diagnostics()}\nDev server:\n${serverOutput}`, { cause: error });
+        throw new Error(`${diagnostics()}\nDev server:\n${serverOutput()}`, { cause: error });
       } finally {
         await browser.close();
       }

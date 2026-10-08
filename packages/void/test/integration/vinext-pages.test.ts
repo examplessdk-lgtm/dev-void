@@ -1,16 +1,10 @@
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import {
-  getPort,
-  waitForServer,
-  killChild,
-  collectServerOutput,
-} from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/vinext-pages';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 describe('playground/vinext-pages dev', () => {
@@ -18,37 +12,33 @@ describe('playground/vinext-pages dev', () => {
   let serverOutput = () => '';
 
   beforeAll(async () => {
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        `./${PLAYGROUND}`,
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          VOID_INSPECTOR_PORT: 'false',
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          `./${PLAYGROUND}`,
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VOID_INSPECTOR_PORT: 'false',
+          },
         },
-      },
-    );
-
-    serverOutput = collectServerOutput(child);
-
-    await waitForServer(DEV_BASE, 20_000, {
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: serverOutput,
-    });
+      );
+      return child;
+    }, 20_000);
+    DEV_BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {

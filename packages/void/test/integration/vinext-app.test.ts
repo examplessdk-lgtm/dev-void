@@ -5,17 +5,14 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
   createIsolatedPlayground,
-  getPort,
-  waitForServer,
   killChild,
-  collectServerOutput,
+  startServer,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
 import { collectWorkerFiles } from '../../src/cli/package.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/vinext-app';
-let DEV_PORT: number;
 let DEV_BASE: string;
 
 describe('playground/vinext-app dev', () => {
@@ -25,24 +22,19 @@ describe('playground/vinext-app dev', () => {
 
   beforeAll(async () => {
     playground = createIsolatedPlayground(ROOT, PLAYGROUND);
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(DEV_PORT)], {
-      cwd: playground.root,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        VOID_INSPECTOR_PORT: 'false',
-      },
-    });
-
-    serverOutput = collectServerOutput(child);
-
-    await waitForServer(DEV_BASE, 30_000, {
-      isAlive: () => child.exitCode === null && child.signalCode === null,
-      diagnostics: serverOutput,
-    });
+    const server = await startServer((port) => {
+      child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+        cwd: playground.root,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          VOID_INSPECTOR_PORT: 'false',
+        },
+      });
+      return child;
+    }, 30_000);
+    DEV_BASE = server.base;
+    serverOutput = server.output;
   });
 
   afterAll(async () => {

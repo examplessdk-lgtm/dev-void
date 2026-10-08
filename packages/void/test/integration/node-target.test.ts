@@ -4,16 +4,13 @@ import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
   createIsolatedPlayground,
-  getPort,
-  waitForServer,
   killChild,
+  startServer,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-let DEV_PORT: number;
 let DEV_BASE: string;
-let PROD_PORT: number;
 let PROD_BASE: string;
 
 describe('playground/node-app dev', () => {
@@ -23,20 +20,18 @@ describe('playground/node-app dev', () => {
 
   beforeAll(async () => {
     playground = createIsolatedPlayground(ROOT, 'playground/node-app');
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
-    child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(DEV_PORT)], {
-      cwd: playground.root,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
-    child.stdout!.resume();
-
-    await waitForServer(DEV_BASE, 20_000);
+    const server = await startServer((port) => {
+      child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+        cwd: playground.root,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      stderr = '';
+      child.stderr!.on('data', (chunk: Buffer) => {
+        stderr += String(chunk);
+      });
+      return child;
+    }, 20_000);
+    DEV_BASE = server.base;
   });
 
   afterAll(async () => {
@@ -101,18 +96,15 @@ describe('playground/node-app build + production', () => {
     });
     expect(build.status, `${build.stdout ?? ''}${build.stderr ?? ''}`).toBe(0);
 
-    PROD_PORT = await getPort();
-    PROD_BASE = `http://127.0.0.1:${PROD_PORT}`;
-
-    child = spawn('node', ['dist/ssr/index.js'], {
-      cwd: playground.root,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PORT: String(PROD_PORT) },
-    });
-
-    await waitForServer(PROD_BASE, 20_000, {
-      isAlive: () => child.exitCode === null,
-    });
+    const server = await startServer((port) => {
+      child = spawn('node', ['dist/ssr/index.js'], {
+        cwd: playground.root,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, PORT: String(port) },
+      });
+      return child;
+    }, 20_000);
+    PROD_BASE = server.base;
   });
 
   afterAll(async () => {

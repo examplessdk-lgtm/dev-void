@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { parse } from 'jsonc-parser';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import { killChild, startServer } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/analog';
@@ -42,7 +42,6 @@ afterAll(() => {
 
 describe('playground/analog dev', () => {
   let child: ReturnType<typeof spawn>;
-  let DEV_PORT: number;
   let DEV_BASE: string;
 
   beforeAll(async () => {
@@ -52,40 +51,38 @@ describe('playground/analog dev', () => {
     rmSync(join(pg, 'dist/.nitro'), { recursive: true, force: true });
     removeWranglerConfig(pg);
 
-    DEV_PORT = await getPort();
-    DEV_BASE = `http://127.0.0.1:${DEV_PORT}`;
-
     // Analog skips its Nitro dev server when VITEST or NODE_ENV=test is set, so start
     // the child the way `vp dev` runs for users.
     const { VITEST: _vitest, NODE_ENV: _nodeEnv, ...userEnv } = process.env;
 
-    child = spawn(
-      'vp',
-      [
-        'run',
-        '--filter',
-        `./${PLAYGROUND}`,
-        'dev',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(DEV_PORT),
-      ],
-      {
-        cwd: ROOT,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...userEnv,
-          VOID_INSPECTOR_PORT: 'false',
-        },
-      },
-    );
-
-    child.stderr!.on('data', () => {});
-
     // Analog's first dev boot compiles the Angular app. Under a fully parallel test run that can
     // exceed the normal 30s readiness window even though subsequent requests are fast.
-    await waitForServer(DEV_BASE, 60_000);
+    const server = await startServer((port) => {
+      child = spawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          `./${PLAYGROUND}`,
+          'dev',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: ROOT,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...userEnv,
+            VOID_INSPECTOR_PORT: 'false',
+          },
+        },
+      );
+      return child;
+    }, 60_000);
+    DEV_BASE = server.base;
   });
 
   afterAll(async () => {

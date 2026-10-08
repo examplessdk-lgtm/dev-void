@@ -261,6 +261,11 @@ three processes per case and uses 30 seconds on Windows and 10 seconds elsewhere
 tests retain their default timeout. `waitForServer` already scales its timeout on Windows;
 callers should pass an unscaled value and leave enough hook time for that wait and setup.
 
+Start integration servers with `startServer` from `test/integration-helpers.ts`, and pass
+`--strictPort` to Vite. A server binds its port seconds after the port is chosen, so another
+process can take it first. Vite without `--strictPort` then moves to the next port, which can be
+another test's port. With it, the server exits and `startServer` starts it again on a new port.
+
 Windows integration tests also use `maxConcurrency: 2`. `maxWorkers` caps files, not concurrent
 tests inside each file: two CI workers with Vitest's default concurrency of five can open ten
 isolated browser contexts at once. The Windows cap reduces that to four without serializing
