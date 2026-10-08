@@ -58,7 +58,7 @@ changes to metaframework output still need `build:all` and the artifact check.
 For a leaf-module edit with known import-based consumers, Vitest's native related command is useful:
 
 ```sh
-vp test related --run packages/void/src/runtime/sse.ts --project unit --project cli-unit
+vp test related --run packages/void/src/runtime/sse.ts --project unit --project unit-pglite --project cli-unit
 vp test list packages/void/test/unit/plugin-routing.test.ts --filesOnly
 ```
 
@@ -89,9 +89,9 @@ or hanging tests when they occur instead of routinely increasing timeouts.
 
 Subprocess and provisioning-lock unit tests start alongside the platform projects so their real
 process deadlines can overlap database work. The remaining SDK unit and integration files then
-share a scheduling phase. `vp run test:unit` includes both `unit` and `cli-unit`; CI does the same.
+share a scheduling phase. `vp run test:unit` includes `unit`, `unit-pglite`, and `cli-unit`; CI does the same.
 Unit files and most API integration files use isolated worker threads to reduce startup time. On Linux,
-API integration files and the PGlite unit files (`platform-unit-pglite`) use forks to isolate PGlite's
+API integration files and the PGlite unit files (`unit-pglite`, `platform-unit-pglite`) use forks to isolate PGlite's
 WebAssembly JIT allocations after native Node 24 cleanup crashes in shared worker processes. API tests
 that change the process timezone also use forks, because threads cannot change Node's timezone. Select every
 API file with `vp test run --project 'platform-api-integration*'`. SDK integration files use forks.

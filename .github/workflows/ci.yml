@@ -70,7 +70,7 @@ jobs:
       - run: vp run build:core
         if: ${{ matrix.shard == 'unit' }}
 
-      - run: vp test run --project unit --project cli-unit
+      - run: vp test run --project unit --project unit-pglite --project cli-unit
         if: ${{ matrix.shard == 'unit' }}
 
       - run: vp run build

@@ -59,7 +59,7 @@ export async function runAffected(root, values) {
     changed: initial.full ? false : changed,
     experimental: { vcsProvider },
     ...(values.unit
-      ? { project: ['unit', 'cli-unit', 'platform-unit', 'platform-unit-pglite'] }
+      ? { project: ['unit', 'unit-pglite', 'cli-unit', 'platform-unit', 'platform-unit-pglite'] }
       : {}),
   });
   try {

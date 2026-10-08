@@ -22,6 +22,13 @@ const cliUnitTests = [
   'packages/void/test/unit/provision-*.test.ts',
   'packages/void/test/unit/deploy-drift.test.ts',
 ];
+// SDK unit files that start PGlite. Add new PGlite unit files here.
+const sdkPgliteUnitTests = [
+  'packages/void/test/unit/db-export-roundtrip.test.ts',
+  'packages/void/test/unit/platform-database-lock.test.ts',
+  'packages/void/test/unit/platform-database-migrations.test.ts',
+  'packages/void/test/unit/runner-pg.test.ts',
+];
 
 // Vitest forwards a FILTERED env to test workers — in CI only VOID_E2E_CF_TOKEN survives, while
 // VOID_E2E_CF_ACCOUNT_ID and VOID_E2E_RUN_ID are dropped. The gated live Cloudflare deploy e2e
@@ -434,12 +441,26 @@ export default defineConfig({
           name: 'unit',
           fsModuleCache: true,
           include: ['packages/*/test/unit/**/*.test.ts'],
-          exclude: cliUnitTests,
+          exclude: [...cliUnitTests, ...sdkPgliteUnitTests],
           sequence: { groupOrder: 2 },
           pool: 'threads',
           maxWorkers,
           // Windows unit tests that import the plugin or spawn a CLI can exceed Vitest's
           // 5-second default under CI load. Keep the faster default on other platforms.
+          ...(process.platform === 'win32' ? { testTimeout: 20_000 } : {}),
+        },
+      },
+      {
+        extends: false,
+        test: {
+          name: 'unit-pglite',
+          fsModuleCache: true,
+          include: sdkPgliteUnitTests,
+          sequence: { groupOrder: 2 },
+          // Node 24 on Linux can abort the whole run while unregistering PGlite's Wasm JIT
+          // allocations across worker threads. Keep each database in its own process.
+          pool: process.platform === 'linux' ? 'forks' : 'threads',
+          maxWorkers,
           ...(process.platform === 'win32' ? { testTimeout: 20_000 } : {}),
         },
       },
