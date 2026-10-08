@@ -1,6 +1,6 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { DbOrTx } from './db/client.ts';
-import { projectCleanupJobs } from './schema.ts';
+import { projectCleanupJobs, projectMembers } from './schema.ts';
 
 // Rotation requests, apart from the runner in `proxy-token-rotation.ts` so the
 // `db/` modules can write one inside their transactions without importing
@@ -26,6 +26,13 @@ export function rotationLog(event: string, projectId: string, detail = ''): void
   console.log(`[proxy-token-rotation] ${event} ${projectId}${detail ? ` ${detail}` : ''}`);
 }
 
+// What a request does to an existing job. Both writers below share these, so
+// one statement for many projects leaves the rows one request per project would.
+const jobStarted = sql`${projectCleanupJobs.payload}->>'phase' <> 'requested'`;
+const flagAgain = sql`CASE WHEN ${projectCleanupJobs.payload}->>'phase' <> 'requested'
+    THEN ${projectCleanupJobs.payload} || '{"again":"1"}'::jsonb
+    ELSE ${projectCleanupJobs.payload} END`;
+
 /**
  * Asks for a new token generation. A job that has not started yet already
  * covers the request; one past START may have handed out tok(T), so it
@@ -38,9 +45,6 @@ export async function requestProxyTokenRotation(
   reason: ProxyTokenRotationReason,
   mode: 'member' | 'operator',
 ): Promise<void> {
-  const flagAgain = sql`CASE WHEN ${projectCleanupJobs.payload}->>'phase' <> 'requested'
-    THEN ${projectCleanupJobs.payload} || '{"again":"1"}'::jsonb
-    ELSE ${projectCleanupJobs.payload} END`;
   const rows = await tx
     .insert(projectCleanupJobs)
     .values({
@@ -56,12 +60,39 @@ export async function requestProxyTokenRotation(
         mode === 'operator'
           ? { payload: flagAgain, next_attempt_at: sql`now()` }
           : { payload: flagAgain },
-      ...(mode === 'member'
-        ? { setWhere: sql`${projectCleanupJobs.payload}->>'phase' <> 'requested'` }
-        : {}),
+      ...(mode === 'member' ? { setWhere: jobStarted } : {}),
     })
     .returning({ phase: sql<string>`${projectCleanupJobs.payload}->>'phase'` });
   if (rows.length > 0) {
+    rotationLog('requested', projectId, `reason=${reason}`);
+  }
+}
+
+/**
+ * `requestProxyTokenRotation` in `member` mode for every project where the
+ * user is a collaborator or admin, in one statement whatever the number of
+ * projects. Call inside the caller's transaction.
+ */
+export async function requestProxyTokenRotationsForMember(
+  tx: DbOrTx,
+  userId: string,
+  reason: ProxyTokenRotationReason,
+): Promise<void> {
+  const deployMember = and(
+    eq(projectMembers.user_id, userId),
+    inArray(projectMembers.role, ['collaborator', 'admin']),
+  );
+  const result = await tx.execute<{ project_id: string }>(sql`
+    INSERT INTO ${projectCleanupJobs} (target, project_id, kind, payload, next_attempt_at)
+    SELECT ${PROXY_TOKEN_ROTATION_JOB_KIND}::text || ':' || ${projectMembers.project_id},
+      ${projectMembers.project_id}, ${PROXY_TOKEN_ROTATION_JOB_KIND}::text,
+      jsonb_build_object('phase', 'requested', 'reason', ${reason}::text), now()
+    FROM ${projectMembers}
+    WHERE ${deployMember}
+    ORDER BY ${projectMembers.project_id}
+    ON CONFLICT (target) DO UPDATE SET payload = ${flagAgain} WHERE ${jobStarted}
+    RETURNING project_id`);
+  for (const { project_id: projectId } of result.rows) {
     rotationLog('requested', projectId, `reason=${reason}`);
   }
 }

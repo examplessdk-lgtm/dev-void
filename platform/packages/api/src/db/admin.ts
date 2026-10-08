@@ -16,7 +16,10 @@ import {
 import { alias } from 'drizzle-orm/pg-core';
 import { lockAuthSettings } from '../auth/configuration.ts';
 import { generateId } from '../id.ts';
-import { requestProxyTokenRotation } from '../proxy-token-rotation-request.ts';
+import {
+  requestProxyTokenRotation,
+  requestProxyTokenRotationsForMember,
+} from '../proxy-token-rotation-request.ts';
 import {
   users,
   projects,
@@ -178,16 +181,7 @@ async function withAdminRemovalGuard<T>(
 
 /** An admin suspension ends deploy access, like account deletion. */
 async function requestRotationsForAdminSuspension(tx: Db, id: string): Promise<void> {
-  const deployMemberships = await tx
-    .select({ projectId: projectMembers.project_id })
-    .from(projectMembers)
-    .where(
-      and(eq(projectMembers.user_id, id), inArray(projectMembers.role, ['collaborator', 'admin'])),
-    )
-    .orderBy(asc(projectMembers.project_id));
-  for (const { projectId } of deployMemberships) {
-    await requestProxyTokenRotation(tx, projectId, 'user-suspended', 'member');
-  }
+  await requestProxyTokenRotationsForMember(tx, id, 'user-suspended');
 }
 
 /**
