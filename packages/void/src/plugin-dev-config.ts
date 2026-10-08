@@ -120,12 +120,13 @@ export function getOrCreateDevTriggerToken(root: string): string {
 // the generated `.void/dev-triggers.ts`, Nitro's dev bundle (`.nuxt/dev/` for
 // Nuxt, `dist/.nitro/dev/` for Analog), which inlines that module, and Astro's
 // `.astro/dev.log`, which records the startup hint when `astro dev` runs in the
-// background (`--background`, or started by a coding agent). Matched anywhere
-// in the decoded, lower-cased path so `/@fs/<abs>/`, `/@id/`, a base such as
-// `/_nuxt/`, case-insensitive file systems, dot segments, `//`, `%2e`, `\` and
-// Windows trailing dots/spaces all hit.
+// background (`--background`, or started by a coding agent). Also
+// `.void/drizzle.config.json`, where older CLI versions wrote database URLs.
+// Matched anywhere in the decoded, lower-cased path so `/@fs/<abs>/`, `/@id/`,
+// a base such as `/_nuxt/`, case-insensitive file systems, dot segments, `//`,
+// `%2e`, `\` and Windows trailing dots/spaces all hit.
 const DEV_TRIGGER_SECRET_PATH_RE =
-  /(?:^|\/)\.void[. ]*\/(?:.*\/)?dev-trigger|(?:^|\/)\.(?:nuxt|nitro)[. ]*\/(?:.*\/)?dev\/|(?:^|\/)\.astro[. ]*\/(?:.*\/)?dev\.log/;
+  /(?:^|\/)\.void[. ]*\/(?:.*\/)?(?:dev-trigger|drizzle\.config\.json)|(?:^|\/)\.(?:nuxt|nitro)[. ]*\/(?:.*\/)?dev\/|(?:^|\/)\.astro[. ]*\/(?:.*\/)?dev\.log/;
 
 export function isDevTriggerSecretRequest(url: string | undefined): boolean {
   if (!url) {
@@ -149,8 +150,8 @@ export function isDevTriggerSecretRequest(url: string | undefined): boolean {
 
 /**
  * Vite serves every root file that `server.fs.deny` does not list, and its default
- * CORS lets any localhost origin read the reply, so the files above would hand the
- * token to `--host` peers, other local accounts and other local dev servers.
+ * CORS lets any localhost origin read the reply, so the files above would hand their
+ * secrets to `--host` peers, other local accounts and other local dev servers.
  * `server.fs.deny` is not used: a plugin's list replaces Vite's defaults, and the
  * Cloudflare worker environment applies the same check when it imports
  * `.void/dev-triggers.ts`. The middleware is added in configureServer, so it runs

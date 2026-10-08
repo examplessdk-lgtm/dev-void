@@ -31,6 +31,11 @@ describe('isDevTriggerSecretRequest', () => {
     '/.astro/dev.log',
     '/.ASTRO/Dev.Log?raw',
     '/@fs/Users/me/app/.astro/dev.log',
+    '/.void/drizzle.config.json',
+    '/.VOID/Drizzle.Config.json',
+    '/%2evoid/drizzle.config.json',
+    '/@fs/Users/me/app/.void/drizzle.config.json',
+    '/.void/drizzle.config.json?raw',
   ])('refuses %s', (url) => {
     expect(isDevTriggerSecretRequest(url)).toBe(true);
   });
@@ -52,6 +57,8 @@ describe('isDevTriggerSecretRequest', () => {
     '/dist/.nitro/types/nitro.d.ts',
     '/.astro/dev.json',
     '/.astro/content.d.ts',
+    '/drizzle.config.json',
+    '/.void/drizzle.config.ts',
     '/?q=/.void/dev-trigger-token',
     '/@vite/client',
   ])('allows %s', (url) => {
