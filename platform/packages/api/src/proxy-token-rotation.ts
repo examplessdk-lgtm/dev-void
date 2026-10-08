@@ -370,6 +370,8 @@ type StepContext = {
   readonly wait: SQL;
   phase: ProxyTokenRotationPhase;
   workerName?: string;
+  /** A Worker may hold a token that its row (and, if active, its copies) do not name yet. */
+  workerAheadOfRow?: boolean;
 };
 
 type StepResult =
@@ -596,6 +598,8 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
       throw new Error(`Worker ${row.workerName} has a ${current.type} proxy token binding`);
     }
     if (current.text !== token) {
+      // Cloudflare can apply the PATCH even when its response is lost.
+      ctx.workerAheadOfRow = true;
       const result =
         (await ctx.cf.patchScriptBindings(
           row.workerName,
@@ -611,6 +615,7 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
       // failed or rolled back before its step committed. Its old version can
       // still serve, so it drains as if patched now.
       patched = true;
+      ctx.workerAheadOfRow = row.proxyTokenGen !== gen;
     }
   }
   // The Worker now holds tok(gen), or has no script. Only now do the row and
@@ -719,6 +724,7 @@ async function settle(tx: DbOrTx, ctx: StepContext): Promise<StepResult> {
 }
 
 function runStep(db: Db, ctx: StepContext): Promise<StepResult> {
+  ctx.workerAheadOfRow = false;
   return db.transaction(async (tx) => {
     const [peek] = await tx
       .select({ phase: sql<string>`${projectCleanupJobs.payload}->>'phase'` })
@@ -816,7 +822,10 @@ async function runClaimed(
         .set({
           attempts: sql`${projectCleanupJobs.attempts} + 1`,
           last_error: message,
-          next_attempt_at: sql`now() + ${CLAIM_LEASE}`,
+          // A Worker ahead of its row rejects the token that the proxy, queue
+          // relays and cron fires send it, now if it is active or after a
+          // rollback to it. Retry on the next run; a run tries each job once.
+          next_attempt_at: ctx.workerAheadOfRow ? sql`now()` : sql`now() + ${CLAIM_LEASE}`,
         })
         .where(jobTarget(projectId))
         .returning({ attempts: projectCleanupJobs.attempts });
@@ -864,13 +873,19 @@ async function runClaimed(
 }
 
 /** Takes the lease on one due job. A busy or waiting job is not a failure, so `attempts` stays. */
-async function claimDueJob(db: Db, projectId?: string): Promise<string | null> {
+async function claimDueJob(
+  db: Db,
+  projectId?: string,
+  skip: ReadonlySet<string> = new Set(),
+): Promise<string | null> {
+  const skipped = [...skip].map((id) => sql`${proxyTokenRotationTarget(id)}`);
   const result = await db.execute<{ project_id: string }>(sql`
     UPDATE ${projectCleanupJobs} SET next_attempt_at = now() + ${CLAIM_LEASE}
     WHERE target = (
       SELECT target FROM ${projectCleanupJobs}
       WHERE kind = ${PROXY_TOKEN_ROTATION_JOB_KIND} AND next_attempt_at <= now()
         ${projectId ? sql`AND target = ${proxyTokenRotationTarget(projectId)}` : sql``}
+        ${skipped.length > 0 ? sql`AND target NOT IN (${sql.join(skipped, sql`, `)})` : sql``}
       ORDER BY next_attempt_at, created_at
       LIMIT 1
       FOR UPDATE SKIP LOCKED
@@ -924,11 +939,14 @@ export async function reconcileProxyTokenRotations(
     deadline: Date.now() + (limits.maxMs ?? 25_000),
   };
   const summary: RotationRunSummary = { done: 0, pending: 0, failed: 0, retryAfterSeconds: null };
+  // One attempt per job per run: a failed step can be due again at once.
+  const attempted = new Set<string>();
   while (budget.cfCallsRemaining > 0 && Date.now() < budget.deadline) {
-    const projectId = await claimDueJob(db);
+    const projectId = await claimDueJob(db, undefined, attempted);
     if (!projectId) {
       break;
     }
+    attempted.add(projectId);
     const outcome = await runClaimed(db, env, projectId, budget, limits);
     if (outcome.status === 'done') {
       summary.done += 1;

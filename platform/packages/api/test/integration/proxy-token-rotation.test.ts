@@ -376,6 +376,16 @@ async function shiftBack(projectId: string, seconds = 3600): Promise<void> {
     WHERE target = ${proxyTokenRotationTarget(projectId)}`);
 }
 
+async function dueNow(projectId: string): Promise<boolean> {
+  const [row] = (
+    await env.db.execute<{ due: boolean }>(
+      sql`SELECT next_attempt_at <= now() AS due FROM project_cleanup_jobs
+        WHERE target = ${proxyTokenRotationTarget(projectId)}`,
+    )
+  ).rows;
+  return row!.due;
+}
+
 async function kick(projectId: string): Promise<void> {
   await env.db
     .update(projectCleanupJobs)
@@ -640,9 +650,10 @@ describe('proxy token rotation', () => {
     }
     expect(await routing.get(fx.queueKey, 'json')).toMatchObject({ proxyToken: fx.legacy });
 
+    // Senders still name tok(0), which the Worker now rejects, so the retry is
+    // due on the next run instead of after the usual failure delay.
     hooks.kvPut = undefined;
     events.length = 0;
-    await kick(fx.projectId);
     expect(await advance(fx.projectId, { waitMs: 60_000 })).toMatchObject({
       status: 'pending',
       phase: 'revoke',
@@ -664,6 +675,54 @@ describe('proxy token rotation', () => {
 
     await step(fx.projectId);
     expect(await floor(fx.projectId)).toEqual({ gen: 1 });
+  });
+
+  it('retries on every run, once per run, while copy writes keep failing after the PATCH', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    hooks.kvPut = (key) => {
+      if (key === fx.queueKey) {
+        throw new Error('queue routing write failed');
+      }
+    };
+    await request(fx.projectId);
+    // Each scheduled run tries the job once, even though it is due again at once.
+    const run = () =>
+      reconcileProxyTokenRotations(env.db, testEnv, { maxCfCalls: 100, maxMs: 25_000, waitMs: 0 });
+    expect(await run()).toMatchObject({ done: 0, pending: 0, failed: 1 });
+    expect((await job(fx.projectId))!.attempts).toBe(1);
+    expect(await run()).toMatchObject({ done: 0, pending: 0, failed: 1 });
+
+    expect((await job(fx.projectId))!.attempts).toBe(2);
+    expect(await dueNow(fx.projectId)).toBe(true);
+  });
+
+  it('retries on the next run when a retained Worker took a PATCH whose response was lost', async () => {
+    const cf = cfApi();
+    const fx = await setupProject(cf);
+    const token = await tok(fx.projectId, 1);
+    const retained = fx.worker(fx.retained[0]!);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // A rollback to this deployment before the retry would make it active.
+    hooks.fetch = (method, script) => {
+      if (method !== 'PATCH' || script !== retained) {
+        return undefined;
+      }
+      cf.state.hostScripts
+        .get(script)!
+        .bindings.find((b) => b.name === '__VOID_PROXY_TOKEN')!.text = token;
+      return cfError('internal error', 500);
+    };
+    await request(fx.projectId);
+    expect(await advance(fx.projectId)).toMatchObject({
+      status: 'failed',
+      phase: 'patch',
+      workerName: retained,
+    });
+    expect(scriptToken(cf, retained)).toBe(token);
+    expect(await held(fx.retained[0]!)).toBe(0);
+    expect(await dueNow(fx.projectId)).toBe(true);
   });
 
   it('writes the generation of a Worker only after Cloudflare confirms its PATCH', async () => {
