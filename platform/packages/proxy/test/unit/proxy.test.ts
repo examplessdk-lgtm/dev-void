@@ -1896,10 +1896,11 @@ describe('proxy worker', () => {
       expect([...headers.keys()].filter((name) => name.startsWith('cf-aig-'))).toEqual([]);
     });
 
+    function gatewayHeaders(headers: Headers): Array<[string, string]> {
+      return [...headers].filter(([name]) => name.startsWith('cf-aig-'));
+    }
+
     it('drops caller gateway control headers on provider-native calls', async () => {
-      function gatewayHeaders(headers: Headers): Array<[string, string]> {
-        return [...headers].filter(([name]) => name.startsWith('cf-aig-'));
-      }
       const fetchMock = mockProviderFetch('{}', {
         headers: { 'content-type': 'application/json' },
       });
@@ -1913,8 +1914,11 @@ describe('proxy worker', () => {
           headers: {
             'cf-aig-metadata': '{"projectId":"proj_000000000001"}',
             'CF-AIG-Collect-Log': 'false',
+            'cf-aig-collect-log-payload': 'false',
             'cf-aig-custom-cost': '{"total_cost":0}',
-            'cf-aig-cache-key': 'shared-key',
+            'cf-aig-authorization': 'Bearer platform-gateway-token',
+            'cf-aig-byok-alias': 'platform-key',
+            'cf-aig-future-control': 'on',
             'x-keep': 'yes',
           },
           providerKey: 'sk-test',
@@ -1943,6 +1947,66 @@ describe('proxy worker', () => {
       );
       expect(keyHeader.status).toBe(200);
       expect(gatewayHeaders(new Headers(fetchMock.mock.calls[1][1]!.headers))).toStrictEqual([]);
+    });
+
+    it('forwards cache, timeout and retry gateway headers on provider-native calls', async () => {
+      const fetchMock = mockProviderFetch('{}', {
+        headers: { 'content-type': 'application/json' },
+      });
+      const { gateway } = mockProviderGateway();
+      const env = createEnv({ gateway });
+
+      const callerHeaders = await worker.fetch(
+        post('/ai/provider', {
+          provider: 'openai',
+          path: '/chat/completions',
+          headers: {
+            'cf-aig-cache-ttl': '3600',
+            'CF-AIG-Skip-Cache': 'true',
+            'cf-aig-request-timeout': '5000',
+            'cf-aig-max-attempts': '3',
+            'cf-aig-retry-delay': '1000',
+            'cf-aig-backoff': 'exponential',
+            'cf-aig-event-id': 'evt_1',
+            'CF-AIG-Cache-Key': 'shared-key',
+            'cf-aig-metadata': '{"projectId":"proj_000000000001"}',
+          },
+          providerKey: 'sk-test',
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
+        }),
+        env,
+      );
+      expect(callerHeaders.status).toBe(200);
+      expect(
+        Object.fromEntries(gatewayHeaders(new Headers(fetchMock.mock.calls[0][1]!.headers))),
+      ).toStrictEqual({
+        'cf-aig-cache-ttl': '3600',
+        'cf-aig-skip-cache': 'true',
+        'cf-aig-request-timeout': '5000',
+        'cf-aig-max-attempts': '3',
+        'cf-aig-retry-delay': '1000',
+        'cf-aig-backoff': 'exponential',
+        'cf-aig-event-id': 'evt_1',
+        'cf-aig-cache-key': 'proj_000000000001:shared-key',
+      });
+
+      const keyHeader = await worker.fetch(
+        post('/ai/provider', {
+          provider: 'openai',
+          path: '/chat/completions',
+          apiKeyHeader: 'cf-aig-cache-key',
+          apiKeyPrefix: '',
+          providerKey: 'shared-key',
+          projectId: 'proj_000000000001',
+          aiToken: aiTokens['proj_000000000001'],
+        }),
+        env,
+      );
+      expect(keyHeader.status).toBe(200);
+      expect(gatewayHeaders(new Headers(fetchMock.mock.calls[1][1]!.headers))).toStrictEqual([
+        ['cf-aig-cache-key', 'proj_000000000001:shared-key'],
+      ]);
     });
 
     it('reconstructs multipart form data bodies', async () => {

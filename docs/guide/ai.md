@@ -142,7 +142,9 @@ For provider-native requests on a direct deployment, configure [`ai.gateway`](..
 Use `ai.provider(provider).fetch(path, init)` for a provider-native API with your
 own provider key. The request goes through the configured Cloudflare AI Gateway
 and retains the provider's native HTTP shape. On a team platform, it also passes
-through that installation's proxy.
+through that installation's proxy. AI Gateway cache, timeout and retry headers,
+such as `cf-aig-cache-ttl` and `cf-aig-max-attempts`, still apply there; the
+platform ignores logging, metadata and cost headers.
 
 ### OpenAI
 
