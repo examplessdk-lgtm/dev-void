@@ -265,6 +265,9 @@ Start integration servers with `startServer` from `test/integration-helpers.ts`,
 `--strictPort` to Vite. A server binds its port seconds after the port is chosen, so another
 process can take it first. Vite without `--strictPort` then moves to the next port, which can be
 another test's port. With it, the server exits and `startServer` starts it again on a new port.
+Another process that took the port can answer on it too, so answers count only after the server
+prints its own URL with the port (`Local: http://…:<port>/` or `Listening on http://…:<port>`).
+For a server that prints no URL, pass `printsUrl: false` and an `expectBody` only that app serves.
 
 Windows integration tests also use `maxConcurrency: 2`. `maxWorkers` caps files, not concurrent
 tests inside each file: two CI workers with Vitest's default concurrency of five can open ten

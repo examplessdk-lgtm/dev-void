@@ -28,7 +28,8 @@ describe(
         removeWranglerConfig(pg);
 
         // Nuxt has no strict port option: if its port is taken, it moves to a random port
-        // without saying so, and this start times out instead of retrying.
+        // without saying so, and this start times out instead of retrying. It also prints no
+        // URL under Vitest, so only the page body shows that the answer comes from this app.
         const server = await startServer(
           (port) => {
             child = spawn(
@@ -55,7 +56,7 @@ describe(
             return child;
           },
           30_000,
-          { expectStatus: 200, expectBody: 'Nuxt + Void' },
+          { expectStatus: 200, expectBody: 'Nuxt + Void', printsUrl: false },
         );
         DEV_BASE = server.base;
         serverOutput = server.output;

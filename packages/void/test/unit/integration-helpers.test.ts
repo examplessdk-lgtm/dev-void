@@ -11,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
@@ -22,9 +23,13 @@ import {
   startServer,
 } from '../../../../test/integration-helpers.ts';
 
-// Answers HTTP on 127.0.0.1:<port> after a short delay, like a dev server that is still starting.
+// Answers HTTP on 127.0.0.1:<port> after a short delay, like a dev server that is still starting,
+// and prints its URL once it listens.
 const SERVER = `setTimeout(() => {
-  require('node:http').createServer((_, res) => res.end('ok')).listen(Number(process.argv[1]), '127.0.0.1');
+  const port = Number(process.argv[1]);
+  require('node:http')
+    .createServer((_, res) => res.end('ok'))
+    .listen(port, '127.0.0.1', () => console.log('Listening on http://127.0.0.1:' + port));
 }, 200);`;
 
 describe('startServer', () => {
@@ -43,6 +48,29 @@ describe('startServer', () => {
         expect(ports).toHaveLength(2);
         expect(server.port).toBe(ports[1]);
         expect(server.port).not.toBe(ports[0]);
+        expect(await (await fetch(server.base)).text()).toBe('ok');
+      } finally {
+        await killChild(server.child);
+      }
+    } finally {
+      other?.close();
+    }
+  });
+
+  it('does not accept another server that answers on the port before this one listens', async () => {
+    const ports: Array<number> = [];
+    let other: Server | undefined;
+    try {
+      const server = await startServer((port) => {
+        ports.push(port);
+        if (!other) {
+          other = createHttpServer((_, res) => res.end('other')).listen(port, '127.0.0.1');
+        }
+        return spawn(process.execPath, ['-e', SERVER, String(port)], { stdio: 'pipe' });
+      }, 10_000);
+      try {
+        expect(ports).toHaveLength(2);
+        expect(server.port).toBe(ports[1]);
         expect(await (await fetch(server.base)).text()).toBe('ok');
       } finally {
         await killChild(server.child);

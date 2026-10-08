@@ -15,6 +15,7 @@ import {
 import { createServer, type AddressInfo } from 'node:net';
 import { basename, join, relative } from 'node:path/posix';
 import { setTimeout as delay } from 'node:timers/promises';
+import { stripVTControlCharacters } from 'node:util';
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower
@@ -150,8 +151,21 @@ export type WaitForServerOptions = {
   rejectBody?: string;
   expectStatus?: number;
   isAlive?: () => boolean;
+  /** Answers on the URL count only once this returns true. */
+  isReady?: () => boolean;
   requestTimeoutMs?: number;
   diagnostics?: () => string;
+};
+
+export type StartServerOptions = Omit<
+  WaitForServerOptions,
+  'isAlive' | 'isReady' | 'diagnostics'
+> & {
+  /**
+   * Pass `false` for a server that does not print its URL (Nuxt under Vitest). Answers then count
+   * as soon as they match, so also pass an `expectBody` that only this app serves.
+   */
+  printsUrl?: boolean;
 };
 
 export type StartedServer = {
@@ -171,11 +185,16 @@ export type StartedServer = {
  * next port (pass `--strictPort` to Vite): a server that moves can take the port of another
  * test that is starting at the same time. When the server reports that its port is taken,
  * it is started again on a new port.
+ *
+ * Another process that takes the port can also answer on it. So answers count only after the
+ * server prints its own URL with the port, which it does once it listens: Vite and Astro print
+ * `Local: http://127.0.0.1:<port>/`, and the Node, Bun and Deno servers print
+ * `Listening on http://…:<port>`.
  */
 export async function startServer(
   spawnServer: (port: number) => ReturnType<typeof spawn>,
   timeoutMs: number,
-  options: Omit<WaitForServerOptions, 'isAlive' | 'diagnostics'> = {},
+  { printsUrl = true, ...options }: StartServerOptions = {},
 ): Promise<StartedServer> {
   for (let attempt = 1; ; attempt++) {
     const port = await getFreePort();
@@ -186,10 +205,16 @@ export async function startServer(
     const exited = () => child.exitCode !== null || child.signalCode !== null;
     // Vite without `--strictPort` (Astro) keeps running and moves to the next port.
     const moved = () => output().includes(`Port ${port} is in use`);
+    const listeningLine = new RegExp(
+      String.raw`(?:Local:?|Listening on)\s+https?://[^\s/]+:${port}(?!\d)`,
+    );
+    let listening = false;
     try {
       await waitForServer(base, timeoutMs, {
         ...options,
         isAlive: () => !exited() && !moved(),
+        isReady: () =>
+          !printsUrl || (listening ||= listeningLine.test(stripVTControlCharacters(output()))),
         diagnostics: output,
       });
       return { child, port, base, output };
@@ -224,6 +249,10 @@ export async function waitForServer(
   while (Date.now() - start < effectiveTimeout) {
     if (options?.isAlive && !options.isAlive()) {
       throw new Error(`Server stopped while waiting for ${url}\n${options.diagnostics?.() ?? ''}`);
+    }
+    if (options?.isReady && !options.isReady()) {
+      await delay(200);
+      continue;
     }
     try {
       const remainingMs = effectiveTimeout - (Date.now() - start);
