@@ -785,6 +785,13 @@ async function runClaimed(
       result = await runStep(db, ctx);
     } catch (error) {
       if (error instanceof CloudflareRateLimitError) {
+        // Not a failed attempt: owners cannot fix a platform-wide rate limit.
+        // The log line lets operators alert on a rotation that stays limited.
+        rotationLog(
+          'RATE-LIMITED',
+          projectId,
+          `phase=${ctx.phase} retryAfter=${error.retryAfterSeconds}s`,
+        );
         await setNextAttempt(
           db,
           projectId,

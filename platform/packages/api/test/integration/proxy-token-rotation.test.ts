@@ -1171,6 +1171,7 @@ describe('proxy token rotation', () => {
       method === 'PATCH'
         ? new Response('{}', { status: 429, headers: { 'Retry-After': '120' } })
         : undefined;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     await request(fx.projectId);
     await request(other.projectId);
 
@@ -1180,6 +1181,9 @@ describe('proxy token rotation', () => {
       failed: 0,
       retryAfterSeconds: 120,
     });
+    expect(log).toHaveBeenCalledWith(
+      `[proxy-token-rotation] RATE-LIMITED ${fx.projectId} phase=patch retryAfter=120s`,
+    );
     const limited = (await job(fx.projectId))!;
     expect(limited.attempts).toBe(0);
     expect(limited.payload.cursor).toBe('');
