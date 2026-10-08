@@ -9,6 +9,14 @@ const apiTimezoneTests = [
   'platform/packages/api/test/integration/api-delete-accounting.test.ts',
   'platform/packages/api/test/integration/email-connections.test.ts',
 ];
+// Platform unit files that start PGlite. Add new PGlite unit files here.
+const pgliteUnitTests = [
+  'platform/packages/api/test/unit/admin-upgrade-compatibility.test.ts',
+  'platform/packages/api/test/unit/email-migration.test.ts',
+  'platform/packages/api/test/unit/email-shared-recipient-migration.test.ts',
+  'platform/packages/api/test/unit/github-authority-constraints-migration.test.ts',
+  'platform/packages/api/test/unit/github-authority-migration.test.ts',
+];
 const cliUnitTests = [
   'packages/void/test/unit/cf-*.test.ts',
   'packages/void/test/unit/provision-*.test.ts',
@@ -443,7 +451,20 @@ export default defineConfig({
           fsModuleCache: true,
           pool: 'threads',
           include: ['platform/packages/*/test/**/*.test.ts'],
-          exclude: ['platform/packages/api/test/integration/**'],
+          exclude: ['platform/packages/api/test/integration/**', ...pgliteUnitTests],
+          maxWorkers,
+        },
+      },
+      {
+        extends: false,
+        resolve: { alias: platformAlias },
+        test: {
+          name: 'platform-unit-pglite',
+          fsModuleCache: true,
+          // Node 24 on Linux can abort the whole run while unregistering PGlite's Wasm JIT
+          // allocations across worker threads. Keep each database in its own process.
+          pool: process.platform === 'linux' ? 'forks' : 'threads',
+          include: pgliteUnitTests,
           maxWorkers,
         },
       },

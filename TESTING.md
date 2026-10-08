@@ -91,9 +91,9 @@ Subprocess and provisioning-lock unit tests start alongside the platform project
 process deadlines can overlap database work. The remaining SDK unit and integration files then
 share a scheduling phase. `vp run test:unit` includes both `unit` and `cli-unit`; CI does the same.
 Unit files and most API integration files use isolated worker threads to reduce startup time. On Linux,
-API integration files use forks to isolate PGlite's WebAssembly JIT allocations after native Node 24
-cleanup crashes in shared worker processes. API tests that change the process timezone also use forks,
-because threads cannot change Node's timezone. Select every
+API integration files and the PGlite unit files (`platform-unit-pglite`) use forks to isolate PGlite's
+WebAssembly JIT allocations after native Node 24 cleanup crashes in shared worker processes. API tests
+that change the process timezone also use forks, because threads cannot change Node's timezone. Select every
 API file with `vp test run --project 'platform-api-integration*'`. SDK integration files use forks.
 This keeps database engines from competing with all framework compilers at startup. Keep module
 isolation enabled: these suites mock globals, keep database state, and exercise real process/lock boundaries.

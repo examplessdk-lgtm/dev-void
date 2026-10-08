@@ -46,6 +46,26 @@ it('keeps process-timezone tests in forks', () => {
   }
 });
 
+it('assigns every platform unit file exactly once and keeps PGlite files in their own project', () => {
+  const discovered = [
+    ...globSync('platform/packages/*/test/**/*.test.ts', {
+      cwd: root,
+      exclude: ['platform/packages/api/test/integration/**'],
+    }),
+  ];
+  const unitProjects = projects.filter((project) => project.test.name.startsWith('platform-unit'));
+  const selected = unitProjects.flatMap(files);
+  expect(selected.sort()).toEqual(discovered.sort());
+  expect(new Set(selected).size).toBe(discovered.length);
+  for (const project of unitProjects) {
+    for (const file of files(project)) {
+      if (readFileSync(join(root, file), 'utf8').includes('@electric-sql/pglite')) {
+        expect(project.test.name, file).toBe('platform-unit-pglite');
+      }
+    }
+  }
+});
+
 it('assigns every SDK unit file exactly once including the subprocess project', () => {
   const discovered = [...globSync('packages/*/test/unit/**/*.test.ts', { cwd: root })];
   const selected = projects

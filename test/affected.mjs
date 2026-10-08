@@ -58,7 +58,9 @@ export async function runAffected(root, values) {
     watch: false,
     changed: initial.full ? false : changed,
     experimental: { vcsProvider },
-    ...(values.unit ? { project: ['unit', 'cli-unit', 'platform-unit'] } : {}),
+    ...(values.unit
+      ? { project: ['unit', 'cli-unit', 'platform-unit', 'platform-unit-pglite'] }
+      : {}),
   });
   try {
     const all = await vitest.globTestSpecifications();
