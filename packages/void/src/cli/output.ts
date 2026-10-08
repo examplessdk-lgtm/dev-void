@@ -152,3 +152,26 @@ export function ensureUtc(s: string): string {
   }
   return s + 'Z';
 }
+
+/**
+ * Stack frames of an error a Worker reported, one line per frame. The log or
+ * exception line already shows `Name: message`, so a leading copy of that
+ * header is dropped; Workers send stacks both with and without it.
+ */
+export function errorStackFrames(error: unknown): Array<string> {
+  if (!error || typeof error !== 'object') {
+    return [];
+  }
+  const { name, message, stack } = error as { name?: unknown; message?: unknown; stack?: unknown };
+  if (typeof stack !== 'string') {
+    return [];
+  }
+  const header = message ? `${String(name)}: ${String(message)}` : String(name);
+  const frames =
+    stack === header
+      ? ''
+      : stack.startsWith(`${header}\n`)
+        ? stack.slice(header.length + 1)
+        : stack;
+  return frames.trimEnd() ? frames.trimEnd().split('\n') : [];
+}

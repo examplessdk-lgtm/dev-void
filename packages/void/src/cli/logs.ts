@@ -1,7 +1,7 @@
 import { outro, log, wrapTextWithPrefix } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient, type LogEntry } from './client.ts';
-import { dim, formatCount, pc } from './output.ts';
+import { dim, errorStackFrames, formatCount, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { sanitizeTerminalLogText } from './terminal-log-text.ts';
 
@@ -109,7 +109,7 @@ function printEntry(entry: LogEntry): void {
   );
 
   for (const l of entry.logs) {
-    const text = sanitizeTerminalLogText(l.message.map(String).join(' '));
+    const text = formatLogMessage(l);
     const level = l.level ?? 'log';
     const marker =
       level === 'error'
@@ -126,12 +126,34 @@ function printEntry(entry: LogEntry): void {
     console.log(
       wrapTextWithPrefix(
         process.stdout,
-        sanitizeTerminalLogText(`${ex.name}: ${ex.message}`),
+        [
+          sanitizeTerminalLogText(`${ex.name}: ${ex.message}`),
+          ...errorStackFrames(ex).map((frame) => dim(sanitizeTerminalLogText(frame))),
+        ].join('\n'),
         ' '.repeat(14),
         `  ${pc.red('[exception]')} `,
       ),
     );
   }
+}
+
+/**
+ * Join a console call's arguments; an argument that was an `Error` is followed
+ * by its dimmed stack frames. Arguments and frames are app data, so each is
+ * sanitized before the dim style is added.
+ */
+function formatLogMessage(log: LogEntry['logs'][number]): string {
+  let text = '';
+  let separator = '';
+  for (const [index, value] of log.message.entries()) {
+    text += `${separator}${sanitizeTerminalLogText(String(value))}`;
+    const frames = errorStackFrames(log.errorInfo?.[index]);
+    if (frames.length > 0) {
+      text += `\n${frames.map((frame) => dim(sanitizeTerminalLogText(frame))).join('\n')}`;
+    }
+    separator = frames.length > 0 ? '\n' : ' ';
+  }
+  return text;
 }
 
 function formatTime(ts: number): string {

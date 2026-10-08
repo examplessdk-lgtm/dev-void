@@ -197,3 +197,145 @@ it('keeps color codes, newlines and tabs, and removes other escape sequences who
   expect(sanitizeTerminalLogText('\u009b2J\u0085\u007f\u0000\u0008end')).toBe('2Jend');
   expect(sanitizeTerminalLogText('plain text, ünïcode ✓')).toBe('plain text, ünïcode ✓');
 });
+
+it('prints stack frames under the error that logged them', async () => {
+  logsFixture.entries = [
+    {
+      timestamp: 0,
+      method: 'GET',
+      url: '/sponsors.svg',
+      status: '500',
+      outcome: 'ok',
+      logs: [
+        {
+          level: 'error',
+          message: ["TypeError: Cannot read properties of undefined (reading 'href')"],
+          errorInfo: [
+            {
+              name: 'TypeError',
+              message: "Cannot read properties of undefined (reading 'href')",
+              stack: '    at assets/resvg.js:14881:64\n    at assets/resvg.js:15409:3',
+            },
+          ],
+        },
+        {
+          level: 'error',
+          message: ['Render failed:', 'Error: font missing', 'retrying'],
+          errorInfo: [
+            null,
+            {
+              name: 'Error',
+              message: 'font missing',
+              stack: 'Error: font missing\n    at render (index.js:10:5)',
+            },
+            null,
+          ],
+        },
+        {
+          level: 'error',
+          message: ['Error'],
+          errorInfo: [{ name: 'Error', message: '', stack: 'Error\n    at g (y.js:2:2)' }],
+        },
+        {
+          level: 'warn',
+          message: ['Error: retry later'],
+          errorInfo: [{ name: 'Error', message: 'retry later' }],
+        },
+      ],
+      exceptions: [
+        {
+          name: 'Error',
+          message: 'Worker threw',
+          stack: 'Error: Worker threw\n    at fetch (index.js:1:1)',
+        },
+        { name: 'Error', message: 'boom', stack: 'Error: boom' },
+        { name: 'Error', message: 'Worker exceeded CPU time limit.' },
+      ],
+    },
+  ];
+  const output = Object.assign(
+    new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    }),
+    { columns: 120 },
+  );
+  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
+  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
+  await runLogsCommand('/fixture', '', '1h');
+  const messages = print.mock.calls.map((args) => String(args[0] ?? ''));
+  const header = messages.findIndex((line) => line.includes('/sponsors.svg'));
+  expect(header).toBeGreaterThanOrEqual(0);
+  expect(
+    messages.slice(header + 1).flatMap((message) => stripVTControlCharacters(message).split('\n')),
+  ).toEqual([
+    "  [error] TypeError: Cannot read properties of undefined (reading 'href')",
+    '              at assets/resvg.js:14881:64',
+    '              at assets/resvg.js:15409:3',
+    '  [error] Render failed: Error: font missing',
+    '              at render (index.js:10:5)',
+    '          retrying',
+    '  [error] Error',
+    '              at g (y.js:2:2)',
+    '  [warn] Error: retry later',
+    '  [exception] Error: Worker threw',
+    '                  at fetch (index.js:1:1)',
+    '  [exception] Error: boom',
+    '  [exception] Error: Worker exceeded CPU time limit.',
+  ]);
+  expect(messages.join('\n')).toContain('\x1b[2m    at assets/resvg.js:14881:64');
+});
+
+it('drops terminal control sequences from stack frames', async () => {
+  logsFixture.entries = [
+    {
+      timestamp: 0,
+      method: 'GET',
+      url: '/sponsors.svg',
+      status: '500',
+      outcome: 'exception',
+      logs: [
+        {
+          level: 'error',
+          message: ['Error: boom'],
+          errorInfo: [
+            {
+              name: 'Error',
+              message: 'boom',
+              stack: 'Error: boom\n    at \x1b]52;c;ZXZpbA==\x07f (a.js:1:1)\x1b[2J\r',
+            },
+          ],
+        },
+      ],
+      exceptions: [
+        {
+          name: 'Error',
+          message: 'x',
+          stack:
+            'Error: x\n    at \x1b]8;;https://evil.example\x07g\x1b]8;;\x07 (b.js:2:2)\u009b2J',
+        },
+      ],
+    },
+  ];
+  const output = Object.assign(
+    new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    }),
+    { columns: 120 },
+  );
+  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
+  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
+  await runLogsCommand('/fixture', '', '1h');
+
+  const printed = print.mock.calls.map((args) => String(args[0] ?? '')).join('\n');
+  for (const unsafe of ['\x1b]', '\x1b[2J', '\r', '\x07', '\u009b']) {
+    expect(printed).not.toContain(unsafe);
+  }
+  expect(printed).not.toContain('evil.example');
+  const plain = stripVTControlCharacters(printed);
+  expect(plain).toContain('    at f (a.js:1:1)');
+  expect(plain).toContain('    at g (b.js:2:2)2J');
+});

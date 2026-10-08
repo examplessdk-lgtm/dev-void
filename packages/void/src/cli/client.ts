@@ -353,8 +353,13 @@ export type SecretResponse = {
 export type LogEntry = {
   timestamp: number;
   outcome: string;
-  logs: Array<{ level: string; message: Array<unknown>; timestamp: number }>;
-  exceptions: Array<{ name: string; message: string; timestamp: number }>;
+  logs: Array<{
+    level: string;
+    message: Array<unknown>;
+    timestamp: number;
+    errorInfo?: Array<{ name: string; message: string; stack?: string } | null>;
+  }>;
+  exceptions: Array<{ name: string; message: string; timestamp: number; stack?: string }>;
   url: string;
   method: string;
   status: string;
