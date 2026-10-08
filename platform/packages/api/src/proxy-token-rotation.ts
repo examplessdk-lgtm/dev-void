@@ -567,9 +567,12 @@ async function patchNext(tx: DbOrTx, ctx: StepContext, locked: LockedStep): Prom
   const bindings = await ctx.cf.getScriptBindings(row.workerName);
   const current = bindings ? tokenBinding(bindings) : undefined;
   if (bindings && !current) {
-    // Deployed before the binding rename: there is no binding to PATCH. Its
-    // row and copies keep the generation it holds, so senders still reach it;
-    // its own proxy calls fail once the floor rises, until a redeploy.
+    // No token binding to PATCH. Every per-deployment Worker the platform
+    // creates has one, so it was removed outside the platform (Workers from
+    // before the binding rename are `user-<slug>` scripts that never reach
+    // this step). Its row and copies keep the generation it holds, so senders
+    // still reach it; its own proxy calls fail once the floor rises, until a
+    // redeploy.
     rotationLog(
       'skipped',
       ctx.projectId,
