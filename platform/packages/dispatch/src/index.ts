@@ -1136,8 +1136,8 @@ export default {
     // Pages protocol (X-VoidPages) uses a separate JSON edge cache; HTML uses KV+edge.
     // ISR applies to SSR page paths only. An API route or an asset-extension
     // path that happens to match a catch-all page pattern must render live and
-    // never enter the ISR cache — mirrors the write-back guard (requestType ===
-    // 'ssr') below and how meta-frameworks resolve API routes to non-ISR outputs.
+    // never enter the ISR cache — mirrors the write-back path check below and
+    // how meta-frameworks resolve API routes to non-ISR outputs.
     const isSsrPath =
       routing.ssr === true &&
       (routing.type !== 'framework' || isFrameworkDocumentRequest(request)) &&
@@ -1488,9 +1488,12 @@ export default {
     // shared representation. For SSR deployments, a dotted path is only a
     // candidate when the emitted asset manifest positively identifies it.
     const staticCachePathname = pathname;
-    const isStaticCandidate =
-      isStaticCacheRequestEligible(request, staticCachePathname, routing) &&
-      (await isKnownStaticAssetPath(env, staticCachePathname, routing, timeoutMs));
+    // `false` only when this SSR deploy's asset manifest was read and no asset
+    // answers the path. Metering reuses it to label app routes.
+    const knownStaticAsset = isStaticCacheRequestEligible(request, staticCachePathname, routing)
+      ? await isKnownStaticAssetPath(env, staticCachePathname, routing, timeoutMs)
+      : undefined;
+    const isStaticCandidate = knownStaticAsset === true;
 
     let staticCacheKey: Request | undefined;
     if (isStaticCandidate) {
@@ -1816,8 +1819,17 @@ export default {
         return meter(clientRevalidateResponse(finalRes), responseFailureKind);
       }
 
-      // Classify for metering
-      const dynamicType = classifyDynamicRequestType(pathname, routing.ssr);
+      // Classify for metering. A path with a file extension is the app's only when
+      // the worker, not Cloudflare's asset layer, answered it, and either the
+      // manifest answer for this exact path says it is not a deployed file or the
+      // response is a server error. Platform asset failures carry a failure kind
+      // and keep the default.
+      const listedAsset = pathname === staticCachePathname ? knownStaticAsset : undefined;
+      const handledByApp =
+        !responseFailureKind &&
+        workerAnsweredPath(routing, listedAsset) &&
+        (listedAsset === false || response.status >= 500);
+      const dynamicType = classifyDynamicRequestType(pathname, routing.ssr, handledByApp);
       if (dynamicType) {
         requestType = dynamicType;
       }
@@ -1845,12 +1857,14 @@ export default {
         // Config TTL is the gatekeeper — worker x-revalidate can reduce but not enable ISR
         const isrTtl = configTtl > 0 ? resolveRevalidateTtl(response, configTtl) : 0;
         // Only a full 200 is cacheable — `.ok` (200–299) would let a 206 poison the entry.
-        // `requestType` was reclassified above from the POST-fallback pathname, so
-        // `=== 'ssr'` already skips a fallback that rewrote to `/api` — the same
-        // `/api` exclusion the miss-write and background-revalidation sites spell out
-        // with `!isApiPath(effective…)`. (This SSR-path gate is stricter than those two:
+        // `pathname` is the POST-fallback pathname, so the SSR path check below
+        // already skips a fallback that rewrote to `/api` — the same `/api` exclusion
+        // the miss-write and background-revalidation sites spell out with
+        // `!isApiPath(effective…)`. (This SSR-path gate is stricter than those two:
         // it also skips extension targets, but requests reaching this branch are not
         // the ssr+revalidate ISR-ladder path where SPA `/index.html` fallbacks cache.)
+        // A path with a file extension never enters the ISR cache here, even when
+        // metering labels it `ssr` because the app's own route answered.
         //
         // Fallback positive-ID gate — the same one the miss-write and background sites
         // enforce: when a FALLBACK rewrote this request, the render may enter the shared
@@ -1866,7 +1880,9 @@ export default {
         if (
           isrTtl > 0 &&
           response.status === 200 &&
-          requestType === 'ssr' &&
+          routing.ssr &&
+          !isApiPath(pathname) &&
+          !hasExtension(pathname) &&
           (routing.type !== 'framework' || isHtmlResponse(response)) &&
           !hasSharedCacheOptOut(response) &&
           (!writebackFallbackApplied ||
@@ -1912,7 +1928,16 @@ export default {
         if (err.label === 'static-asset') {
           return meterStaticAssetFailure(PLATFORM_STATIC_ASSET_TIMEOUT);
         }
-        const dynamicType = classifyDynamicRequestType(pathname, routing.ssr);
+        // The dispatched request was still running when the budget ran out. It
+        // counts as the app's when the worker, not the asset layer, owns the path.
+        const dynamicType = classifyDynamicRequestType(
+          pathname,
+          routing.ssr,
+          workerAnsweredPath(
+            routing,
+            pathname === staticCachePathname ? knownStaticAsset : undefined,
+          ),
+        );
         if (dynamicType) {
           requestType = dynamicType;
         }
@@ -2525,12 +2550,24 @@ function isStaticCacheRequestEligible(
   );
 }
 
+/**
+ * Whether `pathname` may use the deploy-versioned static cache.
+ *
+ * - `true`: a static deploy, a non-SSR deploy, or a path the SSR deploy's asset
+ *   manifest lists.
+ * - `false`: the SSR deploy's asset manifest was read, does not list the path,
+ *   and lists no HTML file Cloudflare's `html_handling` would answer it from.
+ * - `undefined`: there is no manifest to consult, it could not be read, or
+ *   `html_handling` would answer the path from a listed HTML file.
+ *
+ * Only `true` makes a request a static-cache candidate.
+ */
 async function isKnownStaticAssetPath(
   env: Env,
   pathname: string,
   routing: RoutingEntry,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<boolean | undefined> {
   if (routing.staticDeploymentId) {
     return true;
   }
@@ -2538,7 +2575,7 @@ async function isKnownStaticAssetPath(
     return true;
   }
   if (!routing.assetManifestId) {
-    return false;
+    return undefined;
   }
   try {
     const manifest = await fetchAssetManifest(
@@ -2548,18 +2585,76 @@ async function isKnownStaticAssetPath(
       Math.min(timeoutMs, STATIC_ASSET_HEDGE_DELAY_MS),
     );
     if (!manifest) {
-      return false;
+      return undefined;
     }
     if (Object.hasOwn(manifest, pathname)) {
       return true;
     }
     const decoded = safeDecodePathname(pathname);
-    return decoded !== pathname && Object.hasOwn(manifest, decoded);
+    if (decoded !== pathname && Object.hasOwn(manifest, decoded)) {
+      return true;
+    }
+    // Not a listed file, but Cloudflare's asset layer may still serve or
+    // redirect it from an HTML file, so it is not known to be the worker's.
+    const htmlHandling = routing.assetConfig?.html_handling ?? 'auto-trailing-slash';
+    if (
+      htmlHandling !== 'none' &&
+      (hasHtmlHandlingSource(manifest, pathname) || hasHtmlHandlingSource(manifest, decoded))
+    ) {
+      return undefined;
+    }
+    return false;
   } catch {
     // Asset identity is an optimization gate. If the manifest is unavailable,
     // dispatch the request live instead of guessing from the URL or response.
-    return false;
+    return undefined;
   }
+}
+
+/**
+ * Whether the manifest lists an HTML file that Cloudflare's `html_handling`
+ * serves or redirects to for `pathname`: `/x` from `/x.html` or
+ * `/x/index.html`, `/x.html` from `/x/index.html`, and `/x/index.html` from
+ * `/x.html`. Every mode except `none` reads these same files.
+ */
+function hasHtmlHandlingSource(manifest: Record<string, string>, pathname: string): boolean {
+  const sources = [`${pathname}.html`, `${pathname}/index.html`];
+  if (pathname.endsWith('.html')) {
+    const base = pathname.slice(0, -'.html'.length);
+    sources.push(`${base}/index.html`);
+    if (base.endsWith('/index')) {
+      sources.push(`${base.slice(0, -'/index'.length)}.html`);
+    }
+  }
+  return sources.some((source) => Object.hasOwn(manifest, source));
+}
+
+/**
+ * Whether the user worker, not Cloudflare's asset layer, answers `pathname`.
+ * `listed` is the asset manifest's answer for the path (see
+ * `isKnownStaticAssetPath`).
+ *
+ * A worker deploy without an asset manifest uploaded no files, so it has no
+ * asset layer and the worker answers everything. So does a deploy whose
+ * `run_worker_first` covers every path. Otherwise the asset layer serves listed
+ * files itself, and an unlisted path reaches the worker only with
+ * `not_found_handling: 'none'` (Cloudflare's default); the SPA shell and the
+ * 404 page come from the asset layer. When `listed` is `undefined` (no readable
+ * manifest, or an HTML file the asset layer answers the path from), the path is
+ * not known to be the worker's.
+ */
+function workerAnsweredPath(routing: RoutingEntry, listed: boolean | undefined): boolean {
+  if (!routing.assetManifestId) {
+    return true;
+  }
+  const runWorkerFirst = routing.assetConfig?.run_worker_first;
+  if (
+    runWorkerFirst === true ||
+    (Array.isArray(runWorkerFirst) && runWorkerFirst.includes('/**'))
+  ) {
+    return true;
+  }
+  return listed === false && (routing.assetConfig?.not_found_handling ?? 'none') === 'none';
 }
 
 /** Apply the same origin/cached response policy to static reads and writes. */

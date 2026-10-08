@@ -49,6 +49,11 @@ type RoutingEntry = {
   hashedAssetsPrefix?: string;
   staticDeploymentId?: string;
   assetManifestId?: string;
+  assetConfig?: {
+    not_found_handling?: 'none' | 'single-page-application' | '404-page';
+    html_handling?: 'auto-trailing-slash' | 'force-trailing-slash' | 'drop-trailing-slash' | 'none';
+    run_worker_first?: boolean | Array<string>;
+  };
   headerRules?: Array<{ pattern: string; headers: Array<[string, string]> }>;
   redirectRules?: Array<{ source: string; destination: string; status: number; host?: string }>;
   fallbackRules?: Array<{ source: string; destination: string; status: number; host?: string }>;
@@ -6641,3 +6646,476 @@ it.each(['requests', 'execution'] as const)(
     expect(workerFetch).toHaveBeenCalledTimes(resource === 'requests' ? 0 : 1);
   },
 );
+
+function meteredRequestType(analyticsWrites: Array<unknown>): string | undefined {
+  expect(analyticsWrites).toHaveLength(1);
+  return (analyticsWrites[0] as { blobs: Array<string> }).blobs[1];
+}
+
+describe('request type metering for SSR routes with a file extension', () => {
+  // An SSR worker answers both the app's routes and the deploy's static files.
+  // A route such as `routes/sponsors.svg.ts` has a file extension, so its label
+  // comes from the asset manifest or from how the worker answered, never from
+  // the path alone. Void SSR deploys run the worker first for every path.
+  const routing: RoutingEntry = {
+    workerName: 'user-app-dpl_1',
+    projectId: 'proj_1',
+    type: 'void',
+    ssr: true,
+    version: 'deploy-1',
+    assetManifestId: 'deploy-1',
+    assetConfig: { not_found_handling: 'none', run_worker_first: ['/**'] },
+  };
+  const routingWithoutManifest: RoutingEntry = {
+    workerName: 'user-app-dpl_1',
+    projectId: 'proj_1',
+    type: 'void',
+    ssr: true,
+    version: 'deploy-1',
+  };
+  const assetManifest = { '/robots.txt': 'robots-hash' };
+
+  function svgResponse(): Response {
+    return new Response('<svg/>', { headers: { 'Content-Type': 'image/svg+xml' } });
+  }
+
+  it.each(['/sponsors.svg', '/support-matrix.png?theme=dark'])(
+    'labels the route at %s as ssr when the asset manifest does not list it',
+    async (path) => {
+      const { env, workerFetch, analyticsWrites } = createEnv({
+        routing,
+        assetManifest,
+        workerResponse: svgResponse(),
+      });
+
+      const response = await app.fetch(
+        new Request(`https://my-app.void.app${path}`),
+        env,
+        createCtx(),
+      );
+
+      expect(response.status).toBe(200);
+      expect(workerFetch).toHaveBeenCalledOnce();
+      expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+    },
+  );
+
+  // A plain GET goes through the static cache. The other requests skip it, so
+  // the worker's answer is labeled without the manifest's.
+  it.each<[string, RequestInit]>([
+    ['a plain GET', {}],
+    ['a GET with a cookie', { headers: { Cookie: 'a=1' } }],
+    ['a HEAD request', { method: 'HEAD' }],
+    ['a Range request', { headers: { Range: 'bytes=0-3' } }],
+  ])('keeps a file listed in the asset manifest as static for %s', async (_, init) => {
+    const { env, workerFetch, analyticsWrites } = createEnv({
+      routing,
+      assetManifest,
+      workerResponse: new Response('User-agent: *', { headers: { 'Content-Type': 'text/plain' } }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/robots.txt', init),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(workerFetch).toHaveBeenCalledOnce();
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+
+  it.each([
+    ['is missing', async () => null],
+    [
+      'cannot be read',
+      async () => {
+        throw new Error('KV unavailable');
+      },
+    ],
+  ])('keeps a successful response static when the asset manifest %s', async (_, readManifest) => {
+    const created = createEnv({
+      routing,
+      assetManifest,
+      workerResponse: new Response('User-agent: *', { headers: { 'Content-Type': 'text/plain' } }),
+    });
+    const readRouting = created.env.ROUTING.get.bind(created.env.ROUTING);
+    const env = {
+      ...created.env,
+      ROUTING: {
+        get: (key: string) => (key.startsWith('manifest:') ? readManifest() : readRouting(key)),
+      },
+    } as unknown as Env;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await app.fetch(
+        new Request('https://my-app.void.app/robots.txt'),
+        env,
+        createCtx(),
+      );
+
+      expect(response.status).toBe(200);
+      expect(created.workerFetch).toHaveBeenCalledOnce();
+      expect(meteredRequestType(created.analyticsWrites)).toBe('static');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('keeps a successful response static when the deploy has no asset manifest', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: routingWithoutManifest,
+      workerResponse: svgResponse(),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/sponsors.svg'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+
+  // A deploy that uploaded no static files has no asset layer, so the worker
+  // answered the path.
+  it('labels a route server error as ssr when the deploy has no asset manifest', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: routingWithoutManifest,
+      workerResponse: new Response('boom', { status: 500 }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/sponsors.svg'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(500);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it('labels a route that runs past the dispatch budget as ssr when the deploy has no asset manifest', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: routingWithoutManifest,
+      // Never settles, so the dispatch budget runs out first.
+      workerFetchImpl: () => new Promise<Response>(() => {}),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/sponsors.svg'),
+      { ...env, DISPATCH_TIMEOUT_MS: '20' } as Env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it.each<[string, RequestInit]>([
+    ['a HEAD request', { method: 'HEAD' }],
+    ['a GET with a cookie', { headers: { Cookie: 'a=1' } }],
+  ])('labels a route server error from %s as ssr without reading the manifest', async (_, init) => {
+    const { env, analyticsWrites } = createEnv({
+      routing,
+      assetManifest,
+      workerResponse: new Response('boom', { status: 500 }),
+    });
+    const routingGet = vi.spyOn(env.ROUTING, 'get');
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/sponsors.svg', init),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(500);
+    expect(routingGet.mock.calls.some(([key]) => String(key).startsWith('manifest:'))).toBe(false);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it.each([
+    ['an asset manifest that does not list the path', routing],
+    ['no asset manifest', routingWithoutManifest],
+  ])('keeps a platform asset failure static on a deploy with %s', async (_, deployRouting) => {
+    const stubBody = 'Assets have not yet been deployed to this script.\n';
+    const { env, analyticsWrites } = createEnv({
+      routing: deployRouting,
+      assetManifest,
+      workerResponse: new Response(stubBody, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain;charset=UTF-8',
+          'Content-Length': String(stubBody.length),
+        },
+      }),
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const response = await app.fetch(
+        new Request('https://my-app.void.app/sponsors.svg'),
+        env,
+        createCtx(),
+      );
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get('X-Void-Storage-Error')).toBe('static-asset-missing');
+      expect(meteredRequestType(analyticsWrites)).toBe('static');
+      expect((analyticsWrites[0] as { blobs: Array<string> }).blobs[5]).toBe(
+        'platform-static-asset-missing',
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('labels a route that runs past the dispatch budget as ssr', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing,
+      assetManifest,
+      // Never settles, so the dispatch budget runs out first.
+      workerFetchImpl: () => new Promise<Response>(() => {}),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/sponsors.svg', { headers: { Cookie: 'a=1' } }),
+      { ...env, DISPATCH_TIMEOUT_MS: '20' } as Env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it('keeps a route with a file extension out of the ISR cache', async () => {
+    const { env, kvStore, analyticsWrites } = createEnv({
+      routing: { ...routing, revalidate: 60 },
+      assetManifest,
+      workerResponse: svgResponse(),
+    });
+    const ctx = createCtx();
+
+    const response = await app.fetch(new Request('https://my-app.void.app/sponsors.svg'), env, ctx);
+    await Promise.all((ctx.waitUntil as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]));
+
+    expect(response.status).toBe(200);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+    expect([...kvStore.keys()].some((key) => key.includes('/sponsors.svg'))).toBe(false);
+    expect(edgeCacheStore.size).toBe(0);
+  });
+});
+
+describe('request type metering when Cloudflare serves assets before the worker', () => {
+  // Unless `run_worker_first` covers every path, Cloudflare's asset layer
+  // serves listed files without running the worker. An unlisted path reaches
+  // the worker only with `not_found_handling: 'none'`; a SPA deploy gets the
+  // shell from the asset layer instead.
+  const assetFirstRouting: RoutingEntry = {
+    workerName: 'user-app-dpl_1',
+    projectId: 'proj_1',
+    type: 'framework',
+    ssr: true,
+    version: 'deploy-1',
+    assetManifestId: 'deploy-1',
+    assetConfig: { not_found_handling: 'none' },
+  };
+  const spaWithApiRouting: RoutingEntry = {
+    workerName: 'user-app-dpl_1',
+    projectId: 'proj_1',
+    type: 'void',
+    ssr: true,
+    version: 'deploy-1',
+    assetManifestId: 'deploy-1',
+    assetConfig: {
+      not_found_handling: 'single-page-application',
+      run_worker_first: ['/api', '/api/*', '/__void', '/__void/*'],
+    },
+  };
+  const assetManifest = { '/index.html': 'shell-hash', '/robots.txt': 'robots-hash' };
+  const deploys = [
+    ['an asset-first deploy', assetFirstRouting],
+    ['a SPA deploy with API routes', spaWithApiRouting],
+  ] as const;
+
+  it('labels an unlisted path as ssr when the worker answers it', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: assetFirstRouting,
+      assetManifest,
+      workerResponse: new Response('png', { headers: { 'Content-Type': 'image/png' } }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/og.png'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it('labels an unlisted path that runs past the dispatch budget as ssr', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: assetFirstRouting,
+      assetManifest,
+      // Never settles, so the dispatch budget runs out first.
+      workerFetchImpl: () => new Promise<Response>(() => {}),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/og.png'),
+      { ...env, DISPATCH_TIMEOUT_MS: '20' } as Env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  // Cloudflare's default `html_handling` also serves or redirects a path from
+  // an HTML file the manifest lists under another name.
+  it.each([
+    ['/docs/v1.2', '/docs/v1.2.html', 200],
+    ['/docs/v1.2', '/docs/v1.2/index.html', 307],
+    ['/about.html', '/about/index.html', 307],
+    ['/about/index.html', '/about.html', 307],
+    ['/docs/release%20v1.2', '/docs/release v1.2.html', 200],
+  ])('keeps %s static when the asset layer answers it from %s', async (path, file, status) => {
+    const { env, analyticsWrites } = createEnv({
+      routing: assetFirstRouting,
+      assetManifest: { ...assetManifest, [file]: 'page-hash' },
+      workerResponse:
+        status === 200
+          ? new Response('<html>page</html>', { headers: { 'Content-Type': 'text/html' } })
+          : new Response(null, { status, headers: { Location: '/' } }),
+    });
+
+    const response = await app.fetch(
+      new Request(`https://my-app.void.app${path}`),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(status);
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+
+  it('labels an unlisted path as ssr when html_handling is none', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: {
+        ...assetFirstRouting,
+        assetConfig: { not_found_handling: 'none', html_handling: 'none' },
+      },
+      assetManifest: { ...assetManifest, '/docs/v1.2.html': 'page-hash' },
+      workerResponse: new Response('<html>route</html>', {
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/docs/v1.2'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(meteredRequestType(analyticsWrites)).toBe('ssr');
+  });
+
+  it('keeps the SPA shell served for an unlisted path static', async () => {
+    const { env, analyticsWrites } = createEnv({
+      routing: spaWithApiRouting,
+      assetManifest,
+      workerResponse: new Response('<html>shell</html>', {
+        headers: { 'Content-Type': 'text/html' },
+      }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/old-page.html'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+
+  it.each(deploys)('keeps a server error for a listed file static on %s', async (_, routing) => {
+    const { env, analyticsWrites } = createEnv({
+      routing,
+      assetManifest,
+      workerResponse: new Response('unavailable', { status: 503 }),
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/robots.txt'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+
+  it.each(deploys)(
+    'keeps a listed file that runs past the dispatch budget static on %s',
+    async (_, routing) => {
+      const { env, analyticsWrites } = createEnv({
+        routing,
+        assetManifest,
+        // Never settles, so the dispatch budget runs out first.
+        workerFetchImpl: () => new Promise<Response>(() => {}),
+      });
+
+      const response = await app.fetch(
+        new Request('https://my-app.void.app/robots.txt'),
+        { ...env, DISPATCH_TIMEOUT_MS: '20' } as Env,
+        createCtx(),
+      );
+
+      expect(response.status).toBe(503);
+      expect(meteredRequestType(analyticsWrites)).toBe('static');
+    },
+  );
+});
+
+describe('request type metering after a fallback rewrite', () => {
+  // The asset manifest answer belongs to the path that was looked up. After a
+  // fallback rewrites `/missing.png` to the shell, it says nothing about the
+  // shell, so the response keeps the default label.
+  it('does not apply the manifest answer for the original path to the rewrite target', async () => {
+    let calls = 0;
+    const { env, workerFetch, analyticsWrites } = createEnv({
+      routing: {
+        workerName: 'user-app-dpl_1',
+        projectId: 'proj_1',
+        type: 'framework',
+        ssr: true,
+        version: 'deploy-1',
+        assetManifestId: 'deploy-1',
+        fallbackRules: [{ source: '/*', destination: '/index.html', status: 200 }],
+      },
+      assetManifest: { '/index.html': 'shell-hash' },
+      workerFetchImpl: async () => {
+        calls++;
+        return calls === 1
+          ? new Response('missing', { status: 404 })
+          : new Response('<html>shell</html>', { headers: { 'Content-Type': 'text/html' } });
+      },
+    });
+
+    const response = await app.fetch(
+      new Request('https://my-app.void.app/missing.png'),
+      env,
+      createCtx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(workerFetch).toHaveBeenCalledTimes(2);
+    expect(meteredRequestType(analyticsWrites)).toBe('static');
+  });
+});

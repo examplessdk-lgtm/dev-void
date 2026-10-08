@@ -44,6 +44,22 @@ describe('classifyDynamicRequestType', () => {
     expect(classifyDynamicRequestType('/logo.png', true)).toBe(null);
   });
 
+  it("classifies an ssr path with a file extension as 'ssr' when the app answered", () => {
+    expect(classifyDynamicRequestType('/sponsors.svg', true, true)).toBe('ssr');
+  });
+
+  it('returns null for an ssr path with a file extension the app did not answer', () => {
+    expect(classifyDynamicRequestType('/logo.png', true, false)).toBe(null);
+  });
+
+  it('returns null for a non-ssr path the app answered (keep default)', () => {
+    expect(classifyDynamicRequestType('/sponsors.svg', false, true)).toBe(null);
+  });
+
+  it("classifies an '/api' path with a file extension as 'api' when the app answered", () => {
+    expect(classifyDynamicRequestType('/api/data.json', true, true)).toBe('api');
+  });
+
   it('returns null for a non-ssr dynamic path (keep default)', () => {
     expect(classifyDynamicRequestType('/dashboard', false)).toBe(null);
   });

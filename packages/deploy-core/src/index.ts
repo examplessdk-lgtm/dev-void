@@ -36,7 +36,10 @@ export type RedirectRule = {
 export type AssetConfig = {
   not_found_handling?: 'none' | 'single-page-application' | '404-page';
   html_handling?: 'auto-trailing-slash' | 'force-trailing-slash' | 'drop-trailing-slash' | 'none';
-  /** Native Cloudflare Workers Assets routing; ignored by managed dispatch. */
+  /**
+   * Native Cloudflare Workers Assets routing. Managed dispatch does not route
+   * by it; it reads it only to tell whether the app's worker answered a request.
+   */
   run_worker_first?: boolean | Array<string>;
 };
 

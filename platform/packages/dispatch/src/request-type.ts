@@ -22,15 +22,24 @@ export function isApiPath(pathname: string): boolean {
  * default ('static'/'websocket'). Used on BOTH the success path and the dispatch
  * TIMEOUT path so timed-out /api and SSR requests are metered with the right type
  * instead of collapsing into the 'static' bucket.
+ *
+ * An SSR worker also serves the deploy's static files, so a path with a file
+ * extension keeps the default unless `handledByApp` is true, meaning the caller
+ * knows the app's own code answered. That needs the worker, not Cloudflare's
+ * asset layer, to have answered the path, and then either the asset manifest
+ * was read and does not list it (a route such as `routes/og.png.ts`), or the
+ * worker returned a server error or ran past the dispatch budget. A successful
+ * response with no manifest answer keeps the default.
  */
 export function classifyDynamicRequestType(
   pathname: string,
   ssr: boolean | undefined,
+  handledByApp = false,
 ): RequestType | null {
   if (isApiPath(pathname)) {
     return 'api';
   }
-  if (ssr && !hasExtension(pathname)) {
+  if (ssr && (!hasExtension(pathname) || handledByApp)) {
     return 'ssr';
   }
   return null;
