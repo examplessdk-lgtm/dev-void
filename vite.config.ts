@@ -399,6 +399,15 @@ export default defineConfig({
     fsModuleCache: true,
     silent: 'passed-only',
     sequence: { sequencer: SuiteSequencer },
+    // Node 24 bundles undici 7. Its fetch() calls socket.setTypeOfService() on each new
+    // connection and does not catch errors. On macOS this throws EINVAL when the server has
+    // already reset the connection, e.g. when a test polls a port while Vite briefly binds it
+    // to check that it is free. The fetch still rejects and the caller sees that; only this
+    // stray uncaught copy is dropped. undici 8.8+ ignores the error itself.
+    onUnhandledError(error) {
+      const { code, syscall } = error as { code?: unknown; syscall?: unknown };
+      return !(syscall === 'setTypeOfService' && code === 'EINVAL');
+    },
     projects: [
       {
         extends: false,
