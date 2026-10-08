@@ -205,6 +205,9 @@ describe('runListCommand', () => {
       const warn = vi.spyOn(log, 'warn').mockImplementation(() => {
         warnedAt.push(capture.output().length);
       });
+      // The prompts module survives vi.resetModules(), so a second spyOn
+      // returns the first spy with its earlier calls.
+      warn.mockClear();
       await runListCommand(root);
       const out = capture.output();
       capture.restore();
