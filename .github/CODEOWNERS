@@ -2,8 +2,9 @@
 # the Void team. Later rules take precedence over earlier ones.
 
 /.github/ @voidzero-dev/void
-/scripts/ @voidzero-dev/void
-/platform/scripts/ @voidzero-dev/void
+# Script folders at any depth: the publish and deploy jobs run package build
+# scripts such as packages/void/scripts/ and packages/platform/scripts/.
+scripts/ @voidzero-dev/void
 /pnpm-workspace.yaml @voidzero-dev/void
 /pnpm-lock.yaml @voidzero-dev/void
 package.json @voidzero-dev/void
