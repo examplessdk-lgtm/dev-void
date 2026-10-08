@@ -32,7 +32,9 @@ describe('dev server with the dev-trigger secret guard', () => {
   let port: number;
 
   beforeAll(async () => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'void-dev-secret-')));
+    // `.native` expands Windows 8.3 names such as `RUNNER~1` in the CI temp dir;
+    // Vite refuses to serve any file under a short-name path.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'void-dev-secret-')));
     mkdirSync(join(root, '.void'), { recursive: true });
     writeFileSync(join(root, 'index.html'), '<!doctype html><title>app</title>');
     writeFileSync(join(root, '.void', 'dev-trigger-token'), TOKEN);
