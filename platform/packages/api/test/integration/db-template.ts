@@ -10,7 +10,7 @@ import { migrate } from 'drizzle-orm/pglite/migrator';
 import * as schema from '../../src/schema.ts';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../drizzle', import.meta.url));
-const TEMPLATE_VERSION = '2';
+const TEMPLATE_VERSION = '3';
 
 function walkFiles(dir: string): Array<string> {
   const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
@@ -48,7 +48,9 @@ const TEMPLATE_BUNDLE_PATH = join(tmpdir(), `void-api-pglite-${getTemplateHash()
 
 async function buildTemplateBundle(path: string): Promise<void> {
   const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
-  const db = new PGlite({ relaxedDurability: true });
+  // Persist a timezone-independent default in the dump, rather than capturing
+  // the creating process's local timezone (including its DST offset).
+  const db = new PGlite({ postgresqlconf: "timezone = 'UTC'", relaxedDurability: true });
 
   try {
     await migrate(drizzle(db, { schema }), { migrationsFolder: MIGRATIONS_DIR });

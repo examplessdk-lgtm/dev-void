@@ -73,10 +73,15 @@ describe('github_installation_members', () => {
     expect(row.github_account_id).toBe('gh-acct-1');
     expect(row.verified_at).not.toBeNull();
 
-    // expires_at ≈ now + TTL (allow a generous window for test clock jitter).
-    const skewSeconds = (new Date(row.expires_at).getTime() - Date.now()) / 1000;
-    expect(skewSeconds).toBeGreaterThan(MEMBERSHIP_TTL_SECONDS - 120);
-    expect(skewSeconds).toBeLessThan(MEMBERSHIP_TTL_SECONDS + 120);
+    // Both timestamps use the DB clock. Compare there instead of interpreting
+    // a timestamp without timezone as the JavaScript process's local time.
+    const [lifetime] = await env.db
+      .select({
+        seconds: sql<string>`extract(epoch from (${githubInstallationMembers.expires_at} - ${githubInstallationMembers.verified_at}))`,
+      })
+      .from(githubInstallationMembers)
+      .where(eq(githubInstallationMembers.id, row.id));
+    expect(Number(lifetime!.seconds)).toBe(MEMBERSHIP_TTL_SECONDS);
   });
 
   it('upsert on the same (installation, user) refreshes in place and keeps count == 1', async () => {

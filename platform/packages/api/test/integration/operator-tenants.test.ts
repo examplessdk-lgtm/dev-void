@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import {
   afterAll,
   afterEach,
@@ -490,10 +490,14 @@ describe('operator tenant mutations', () => {
     expect(former.ends_at).toBe(current.starts_at);
     expect(current).toMatchObject({ ends_at: null, changed_by_user_id: operatorAdminId });
     const [revokedCredential] = await env.db
-      .select()
+      .select({
+        // Ownership periods use timestamp, credentials use timestamptz. Let
+        // PostgreSQL interpret its own session timezone when comparing them.
+        sameTransferInstant: sql<boolean>`${projectDeployCredentials.revoked_at} = ${current.starts_at}::timestamp::timestamptz`,
+      })
       .from(projectDeployCredentials)
       .where(eq(projectDeployCredentials.id, 'transfer-deploy-credential'));
-    expect(Date.parse(revokedCredential!.revoked_at!)).toBe(Date.parse(current.starts_at));
+    expect(revokedCredential!.sameTransferInstant).toBe(true);
     expect(counterCalls).toEqual([
       {
         ownerId: owner.id,

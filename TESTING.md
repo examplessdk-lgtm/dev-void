@@ -166,6 +166,13 @@ API integration fixtures reset their tables with one ordered SQL block. Use `cle
 than repeating per-table cleanup; it keeps foreign-key delete behavior and migration history
 intact in PGlite and PostgreSQL.
 
+The cached PGlite database template persists a UTC session default, independently of the
+creating or consuming process's timezone. Increment `TEMPLATE_VERSION` in
+`platform/packages/api/test/integration/db-template.ts` when changing template configuration
+so existing local dumps are rebuilt. For database-clock assertions, compare timestamps in SQL;
+JavaScript interprets timestamps without a timezone as local time. Keep explicit non-UTC
+regressions for behavior that must work across timezones.
+
 Platform CI runs the candidate's PostgreSQL concurrency cases in a separate job. The selector
 finds API integration files that read `process.env.VOID_TEST_DATABASE_URL`, excluding mentions
 in comments or strings. Each selected file runs against its own database clone, with two files
