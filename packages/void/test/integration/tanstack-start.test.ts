@@ -1,7 +1,12 @@
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { getPort, waitForServer, killChild } from '../../../../test/integration-helpers.ts';
+import {
+  collectServerOutput,
+  getPort,
+  killChild,
+  waitForServer,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/tanstack-start';
@@ -27,6 +32,7 @@ describe('playground/tanstack-start dev', () => {
         '127.0.0.1',
         '--port',
         String(DEV_PORT),
+        '--strictPort',
       ],
       {
         cwd: ROOT,
@@ -42,7 +48,13 @@ describe('playground/tanstack-start dev', () => {
       stderr += String(chunk);
     });
 
-    await waitForServer(DEV_BASE, 20_000);
+    // Other test files in the same run can bind the port getPort() released,
+    // so only this app's page counts as ready.
+    await waitForServer(DEV_BASE, 20_000, {
+      expectBody: 'TanStack Start + Void',
+      isAlive: () => child.exitCode === null && child.signalCode === null,
+      diagnostics: collectServerOutput(child),
+    });
   });
 
   afterAll(async () => {
