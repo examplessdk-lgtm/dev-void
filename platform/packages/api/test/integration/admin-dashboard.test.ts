@@ -1100,6 +1100,16 @@ describe('GET /admin/ (dashboard)', () => {
       admin.id,
       'a-project-with-a-long-name-for-truncation',
     );
+    const invited = await createTestUser(env.db, 'team-layout-invitee');
+    await env.db.insert(projectInvitations).values({
+      id: 'team-layout-invitation',
+      project_id: project.id,
+      target_user_id: invited.id,
+      target_email_snapshot: 'team-layout-invitee@example.com',
+      role: 'reader',
+      invited_by_user_id: admin.id,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
     const error = 'Worker upload failed: upstream rejected the deployment.\n'.repeat(20);
     const failed = await createTestDeployment(env.db, project.id, 'failed', 'cli', error);
     const email = `${'long-email-address-'.repeat(5)}@example.com`;
@@ -1162,6 +1172,20 @@ describe('GET /admin/ (dashboard)', () => {
           page.setDefaultTimeout(5000);
           await page.goto(`http://localhost${path}`);
           await page.locator('[data-hydrated="true"]').waitFor();
+          if (path === `/admin/projects/${project.id}`) {
+            const teamTables = page.locator('.void-admin-team-table-scroll');
+            expect(await teamTables.count()).toBe(2);
+            for (const teamTable of await teamTables.all()) {
+              const rows = await teamTable.evaluate((container) => {
+                const bounds = container.getBoundingClientRect();
+                return Array.from(container.querySelectorAll('tr'), (row) => {
+                  const rect = row.getBoundingClientRect();
+                  return { top: rect.top - bounds.top, bottom: rect.bottom - bounds.bottom };
+                });
+              });
+              expect(rows.every(({ top, bottom }) => top >= -1 && bottom <= 1)).toBe(true);
+            }
+          }
           const isUsers = path === '/admin/users';
           const table = page.locator(
             isUsers ? '.void-admin-users-table' : '.void-admin-deployments-table',

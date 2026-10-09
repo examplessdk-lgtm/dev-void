@@ -251,6 +251,10 @@ body {
   margin: 0;
 }
 .void-admin-team-table-scroll {
+  --container-padding-inline-start: 0px;
+  --container-padding-inline-end: 0px;
+  --container-padding-block-start: 0px;
+  --container-padding-block-end: 0px;
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
