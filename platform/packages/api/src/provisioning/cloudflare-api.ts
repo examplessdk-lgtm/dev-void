@@ -579,7 +579,7 @@ type HyperdriveOrigin = Readonly<{
 type HyperdriveConfigPayload = Readonly<{
   name?: string;
   origin: HyperdriveOrigin;
-  mtls?: Readonly<{ sslmode: 'require' | 'verify-ca' | 'verify-full' }>;
+  mtls?: Readonly<{ sslmode: 'require' }>;
 }>;
 
 function decodeUrlPart(value: string): string {
@@ -636,6 +636,13 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
     );
   }
 
+  const sslrootcert = url.searchParams.getAll('sslrootcert').at(-1);
+  if (sslrootcert && sslrootcert !== 'system') {
+    throw new InvalidHyperdriveConnectionStringError(
+      'Void-created Hyperdrive uses public certificate authorities and cannot honor sslrootcert. For a database signed by a public certificate authority, use sslrootcert=system.',
+    );
+  }
+
   const sslmode = url.searchParams.get('sslmode');
   let mtls: HyperdriveConfigPayload['mtls'];
   if (sslmode) {
@@ -644,7 +651,10 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
         'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
       );
     }
-    mtls = { sslmode };
+    // Hyperdrive's verify modes require an uploaded CA certificate ID, which a URL
+    // cannot supply. `require` validates server certificates using public WebPKI;
+    // direct database clients retain the connection URL's original verification mode.
+    mtls = { sslmode: 'require' };
   }
 
   return {
@@ -666,7 +676,11 @@ export async function createHyperdrive(
   name: string,
   connectionString: string,
 ): Promise<HyperdriveInfo> {
-  const payload = { name, ...parseHyperdriveConnectionString(connectionString) };
+  const payload = {
+    name,
+    caching: { disabled: true },
+    ...parseHyperdriveConnectionString(connectionString),
+  };
   return cfFetch<HyperdriveInfo>(`${CF_API_BASE}/${accountId}/hyperdrive/configs`, apiToken, {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -682,6 +696,7 @@ export async function updateHyperdrive(
 ): Promise<HyperdriveInfo> {
   const payload = {
     ...(name === undefined ? {} : { name }),
+    caching: { disabled: true },
     ...parseHyperdriveConnectionString(connectionString),
   };
   return cfFetch<HyperdriveInfo>(

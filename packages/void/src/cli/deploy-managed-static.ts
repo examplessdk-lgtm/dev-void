@@ -104,7 +104,9 @@ export async function runStaticDeploy(
     process.exit(1);
   }
 
-  if (routing) {
+  // Full deploys can supply premerged rules; standalone static deploys still
+  // need file-based rules when no routing config was provided.
+  if (routing || (!headerRules && !redirectRules && !fallbackRules)) {
     const merged = mergeAndLintRoutingRules(preset.outputDir, routing);
     headerRules = merged.headerRules;
     redirectRules = merged.redirectRules;

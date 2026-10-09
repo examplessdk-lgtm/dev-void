@@ -1323,6 +1323,7 @@ describe('PUT /projects/:id/database-url', () => {
       createHyperdrive: (_url, init) => {
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'db.example.com',
@@ -1346,7 +1347,7 @@ describe('PUT /projects/:id/database-url', () => {
         },
         body: JSON.stringify({
           connectionString:
-            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=require',
+            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=verify-full&sslrootcert=system',
         }),
       }),
       env,
@@ -1369,6 +1370,7 @@ describe('PUT /projects/:id/database-url', () => {
       createHyperdrive: (_url, init) => {
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'mysql.example.com',
@@ -1445,6 +1447,7 @@ describe('PUT /projects/:id/database-url', () => {
         expect(url).toContain('/hyperdrive/configs/hd-existing');
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'db.example.com',

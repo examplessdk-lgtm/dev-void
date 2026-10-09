@@ -137,6 +137,36 @@ describe('operator email domain management', () => {
     expect((await env.db.select().from(emailDomainRoutes))[0]?.desired_state).toBe('removed');
   });
 
+  it('previews and refuses foreign MX conflicts with supported alternatives and no provider writes', async () => {
+    const owner = await createTestUser(env.db, 'mx-preview-owner');
+    const project = await createTestProject(env.db, owner.id, 'mx-preview-project');
+    const stub = stubCustomerCf({ zones, mx: { 'mail.example.com': ['mx.other.test'] } });
+    const response = await request('/email/domains', {
+      domain: 'mail.example.com',
+      project: project.slug,
+      dryRun: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      dryRun: true,
+      effect:
+        'mail.example.com already receives mail; setup will refuse it — use an unused domain apex or a platform shared email address instead.',
+    });
+    expect(stub.calls.map((call) => call.tag)).toEqual(['mxLookup']);
+    const refused = await request('/email/domains', {
+      domain: 'mail.example.com',
+      project: project.slug,
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({
+      message:
+        'mail.example.com already has MX records; use an unused domain apex or a platform shared email address',
+    });
+    expect(stub.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(await env.db.select().from(emailDomainRoutes)).toHaveLength(0);
+  });
+
   it('leaves a foreign catch-all untouched and reports the refusal', async () => {
     const owner = await createTestUser(env.db, 'foreign-owner'),
       project = await createTestProject(env.db, owner.id, 'foreign-project');

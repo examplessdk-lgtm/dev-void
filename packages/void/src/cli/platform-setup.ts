@@ -187,6 +187,12 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
     ...(plan.deployment.capabilities.customDomains
       ? [{ key: 'ssl_and_certificates', type: 'edit' }]
       : []),
+    ...(plan.deployment.capabilities.sandbox
+      ? [
+          { key: 'containers', type: 'edit' },
+          { key: 'cloudchamber', type: 'edit' },
+        ]
+      : []),
     // Email domain setup and destination consent use this token.
     ...(plan.deployment.capabilities.email
       ? [

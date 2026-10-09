@@ -1598,11 +1598,11 @@ export default {
       const fallbackOriginPathname = pathname;
       let resolved = resolveStaticPath(pathname, assetManifest, assetConfig);
 
-      // Fallback rules — fire only when nothing matched in static resolution.
+      // Fallback rules run on an asset miss, before serving a custom 404 page.
       // Single-pass: re-resolve with rewritten path, no further fallbacks.
       // `fallbackRules` are status-200-only (enforced at API ingest), so
       // `applyRoutingRules` only ever yields `type: 'rewrite'` here.
-      if (!resolved && routing.fallbackRules?.length) {
+      if ((!resolved || resolved.notFound) && routing.fallbackRules?.length) {
         const fallback = applyRoutingRules(pathname, routing.fallbackRules, url.hostname);
         if (fallback?.type === 'rewrite') {
           // Same trust model as the redirectRules rewrite above — framework +

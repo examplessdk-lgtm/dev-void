@@ -449,6 +449,58 @@ describe('direct-to-R2 deploy flow', () => {
     expect(body.preflight).toBe('true');
   });
 
+  it.each(['static', 'spa'] as const)(
+    'includes file-based routing without a routing config (%s)',
+    async (appType) => {
+      writeFileSync(join(assetsDir, '_headers'), '/about\n  X-Test: file-rule\n');
+      writeFileSync(join(assetsDir, '_redirects'), '/old /about 302\n/rewrite /about 200\n');
+      const state = installPlatformMocks();
+
+      await runStaticDeploy(
+        workdir,
+        { projectId: 'proj_t', slug: 'test' },
+        makeClient(),
+        { buildCommand: null, outputDir: assetsDir, appType },
+        true,
+      );
+
+      const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+      expect(body.manifest.headerRules).toEqual([
+        { pattern: '/about', headers: [['X-Test', 'file-rule']] },
+      ]);
+      expect(body.manifest.redirectRules).toEqual([
+        { source: '/old', destination: '/about', status: 302 },
+      ]);
+      expect(body.manifest.fallbackRules).toContainEqual({
+        source: '/rewrite',
+        destination: '/about',
+        status: 200,
+      });
+    },
+  );
+
+  it('preserves routing rules already merged by the full-to-static path', async () => {
+    writeFileSync(join(assetsDir, '_headers'), '/about\n  X-Test: file-rule\n');
+    const headerRules = [
+      { pattern: '/about', headers: [['X-Test', 'config-rule']] as Array<[string, string]> },
+    ];
+    const state = installPlatformMocks();
+
+    await runStaticDeploy(
+      workdir,
+      { projectId: 'proj_t', slug: 'test' },
+      makeClient(),
+      { buildCommand: null, outputDir: assetsDir, appType: 'static' },
+      true,
+      undefined,
+      undefined,
+      headerRules,
+    );
+
+    const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+    expect(body.manifest.headerRules).toEqual(headerRules);
+  });
+
   // `routing.notFound` must reach the STATIC manifest, not only the
   // worker-with-assets path. `detectPreset` classifies any Vite project with
   // no backend files as `spa`, so a plain Vite MPA lands here and would

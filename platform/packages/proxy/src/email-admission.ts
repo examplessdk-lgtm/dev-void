@@ -196,7 +196,15 @@ export function canonicalizeVoidMime(raw: Uint8Array): Uint8Array {
         // terminating empty line) remains byte-for-byte unchanged.
         replace(lineStart, nextLine, new Uint8Array());
       } else if (isMultipartContentType(raw, lineStart, lineEnd)) {
-        const line = decoder.decode(raw.subarray(lineStart, lineEnd));
+        let headerEnd = lineEnd;
+        let afterHeader = nextLine;
+        let line = decoder.decode(raw.subarray(lineStart, headerEnd));
+        // The SDK folds longer multipart boundary parameters onto continuation lines.
+        while (raw[afterHeader] === 32 || raw[afterHeader] === 9) {
+          headerEnd = findCrlf(raw, afterHeader);
+          line += ` ${decoder.decode(raw.subarray(afterHeader, headerEnd)).trimStart()}`;
+          afterHeader = headerEnd === raw.byteLength ? raw.byteLength : headerEnd + 2;
+        }
         const normalized = line.replace(
           /boundary="(=_void_(?:mixed|alternative|related)_[A-Za-z0-9_-]+)"/g,
           (_, token: string) => {
@@ -209,8 +217,10 @@ export function canonicalizeVoidMime(raw: Uint8Array): Uint8Array {
           },
         );
         if (normalized !== line) {
-          replace(lineStart, lineEnd, encoder.encode(normalized));
+          replace(lineStart, headerEnd, encoder.encode(normalized));
         }
+        lineStart = afterHeader;
+        continue;
       }
     } else if (raw[lineStart] === 45 && raw[lineStart + 1] === 45) {
       const tokenStart = lineStart + 2;

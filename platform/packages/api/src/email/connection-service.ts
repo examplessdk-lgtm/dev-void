@@ -1468,7 +1468,7 @@ export async function requestEmailDomainAdd(
       : preflight[0].length > 0;
     if (mxConflict) {
       throw new EmailOperationError(
-        `${domain} already has MX records; use an unused mail subdomain`,
+        `${domain} already has MX records; use an unused domain apex or a platform shared email address`,
         409,
       );
     }

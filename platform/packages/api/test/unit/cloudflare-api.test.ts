@@ -305,6 +305,30 @@ describe('Hyperdrive connection strings', () => {
     });
   });
 
+  it.each(['verify-ca', 'verify-full', 'verify-full&sslrootcert=system'])(
+    'uses Hyperdrive public-CA TLS verification for a PostgreSQL URL with sslmode=%s',
+    (sslmode) => {
+      expect(
+        parseHyperdriveConnectionString(
+          `postgresql://user:pass@db.example.com/app_db?sslmode=${sslmode}`,
+        ).mtls,
+      ).toEqual({ sslmode: 'require' });
+    },
+  );
+
+  it('rejects an explicit private CA before provisioning Hyperdrive', async () => {
+    fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'hd_1', name: 'proj-hyperdrive' }));
+    await expect(
+      createHyperdrive(
+        ACCOUNT,
+        TOKEN,
+        'proj-hyperdrive',
+        'postgresql://user:pass@db.example.com/app?sslmode=verify-full&sslrootcert=/private/company-ca.pem',
+      ),
+    ).rejects.toThrow('cannot honor sslrootcert');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('parses MySQL connection strings and defaults to port 3306', () => {
     expect(parseHyperdriveConnectionString('mysql://user:p%40ss@mysql.example.com/app_db')).toEqual(
       {
@@ -333,6 +357,7 @@ describe('Hyperdrive connection strings', () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       name: 'proj-hyperdrive',
+      caching: { disabled: true },
       origin: {
         database: 'app',
         host: 'db.example.com',
@@ -341,7 +366,7 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgres',
         user: 'user',
       },
-      mtls: { sslmode: 'verify-full' },
+      mtls: { sslmode: 'require' },
     });
   });
 
@@ -352,13 +377,14 @@ describe('Hyperdrive connection strings', () => {
       ACCOUNT,
       TOKEN,
       'hd_1',
-      'postgresql://user:pass@db.example.com/app',
+      'postgresql://user:pass@db.example.com/app?sslmode=verify-full&sslrootcert=system',
       'proj-hyperdrive',
     );
 
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       name: 'proj-hyperdrive',
+      caching: { disabled: true },
       origin: {
         database: 'app',
         host: 'db.example.com',
@@ -367,6 +393,7 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgresql',
         user: 'user',
       },
+      mtls: { sslmode: 'require' },
     });
   });
 

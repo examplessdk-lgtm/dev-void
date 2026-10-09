@@ -321,6 +321,35 @@ describe('platform credential setup links', () => {
     expect(permissions(custom)).toContainEqual({ key: 'ssl_and_certificates', type: 'edit' });
     expect(permissions(original)).not.toContainEqual({ key: 'ssl_and_certificates', type: 'edit' });
   });
+  it.each([false, true])(
+    'requests Containers and Cloudchamber only for managed Sandbox, enabled: %s',
+    (sandbox) => {
+      const original = plan();
+      const selected = {
+        ...original,
+        deployment: {
+          ...original.deployment,
+          capabilities: { ...original.deployment.capabilities, sandbox },
+        },
+      };
+      const runtimePermissions = (input: PlatformInstallPlan) =>
+        JSON.parse(
+          new URL(platformSetupPages(input).runtime.url).searchParams.get('permissionGroupKeys')!,
+        );
+      expect(runtimePermissions(selected)).toEqual([
+        ...runtimePermissions(original),
+        ...(sandbox
+          ? [
+              { key: 'containers', type: 'edit' },
+              { key: 'cloudchamber', type: 'edit' },
+            ]
+          : []),
+      ]);
+      expect(platformManagementSetupPage(selected).url).toBe(
+        platformManagementSetupPage(original).url,
+      );
+    },
+  );
   it('requests the email zone and sending permissions only when email is enabled', () => {
     const original = plan('example.com');
     const withEmail = {

@@ -48,6 +48,8 @@ When Void configures Access in the installation account, the initial management-
 
 The management token also needs **Zone Edit** with authority to create zones if you ask Void to create the zone. If it already exists, use the selected zone with Zone Read and DNS Edit. Nested application domains additionally need **SSL and Certificates: Read** on the management token. A custom runtime that enables custom project domains needs **SSL and Certificates: Edit** on the runtime token; the core runtime does not enable that feature.
 
+If your platform enables Sandbox, its runtime token also needs **Account → Workers Containers → Edit** and **Account → Cloudchamber → Edit**.
+
 Void checks access before provisioning. If it reports a missing permission, update the token's permissions for the selected account or zone and retry.
 
 :::
