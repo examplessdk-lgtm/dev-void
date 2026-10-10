@@ -153,7 +153,10 @@ export function completeRelayedReceipt(
 }
 
 /** Only generated, transport-irrelevant MIME fields are normalized. Body text stays byte-sensitive. */
-export function canonicalizeVoidMime(raw: Uint8Array): Uint8Array {
+export function canonicalizeVoidMime(
+  raw: Uint8Array,
+  version: 'legacy' | 'current' = 'current',
+): Uint8Array {
   if (findCrlfCrlf(raw) === -1) {
     return raw;
   }
@@ -200,7 +203,7 @@ export function canonicalizeVoidMime(raw: Uint8Array): Uint8Array {
         let afterHeader = nextLine;
         let line = decoder.decode(raw.subarray(lineStart, headerEnd));
         // The SDK folds longer multipart boundary parameters onto continuation lines.
-        while (raw[afterHeader] === 32 || raw[afterHeader] === 9) {
+        while (version === 'current' && (raw[afterHeader] === 32 || raw[afterHeader] === 9)) {
           headerEnd = findCrlf(raw, afterHeader);
           line += ` ${decoder.decode(raw.subarray(afterHeader, headerEnd)).trimStart()}`;
           afterHeader = headerEnd === raw.byteLength ? raw.byteLength : headerEnd + 2;
@@ -340,8 +343,9 @@ export async function emailPayloadDigest(
   from: string,
   recipients: Array<string>,
   raw: Uint8Array,
+  version: 'legacy' | 'current' = 'current',
 ): Promise<string> {
-  const canonical = canonicalizeVoidMime(raw);
+  const canonical = canonicalizeVoidMime(raw, version);
   const prefix = encoder.encode(
     JSON.stringify({
       kind,
@@ -358,6 +362,18 @@ export async function emailPayloadDigest(
     .join('');
 }
 
+/** Existing ledger rows retain the pre-unfolding digest for their full retention period. */
+export async function emailPayloadDigests(
+  kind: string,
+  from: string,
+  recipients: Array<string>,
+  raw: Uint8Array,
+): Promise<{ digest: string; legacyDigest?: string }> {
+  const digest = await emailPayloadDigest(kind, from, recipients, raw);
+  const legacyDigest = await emailPayloadDigest(kind, from, recipients, raw, 'legacy');
+  return { digest, ...(legacyDigest === digest ? {} : { legacyDigest }) };
+}
+
 export function admitEmail(
   env: Pick<Env, 'API' | 'EMAIL_SIGNING_SECRET'>,
   body: {
@@ -365,6 +381,7 @@ export function admitEmail(
     kind: 'direct' | 'forward' | 'reply';
     key: string;
     digest: string;
+    legacyDigest?: string;
     from: string;
     recipients: Array<string>;
     transport: 'binding' | 'send_raw' | 'native_forward' | 'native_reply';

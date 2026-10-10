@@ -1,8 +1,14 @@
 import { eq, sql } from 'drizzle-orm';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { emailPayloadDigests } from '../../../proxy/src/email-admission.ts';
+import {
+  legacyMultipartDigest,
+  legacyMultipartMime,
+} from '../../../proxy/test/fixtures/legacy-multipart.ts';
 import { deleteEmailDestination } from '../../src/db.ts';
 import {
   emailActionRecipients,
+  emailActions,
   emailMonthlyUsage,
   emailReceipts,
   emailUnresolvedAttempts,
@@ -914,6 +920,113 @@ describe('authoritative email admission', () => {
       admitEmailAction(env.db, { ...input(project.id, 'same'), digest: 'b'.repeat(64) }),
     ).rejects.toMatchObject({ code: 'CONFLICT' } satisfies Partial<EmailAdmissionError>);
   });
+
+  it.each(['provider_accepted', 'outcome_unknown', 'attempt_started'] as const)(
+    'replays a pre-upgrade multipart operation in state %s without changing its ledger',
+    async (state) => {
+      const project = await fixture();
+      const original = { ...input(project.id, 'upgrade'), digest: legacyMultipartDigest };
+      const first = await admitEmailAction(env.db, original);
+      await transitionEmailRecipients(
+        env.db,
+        first.operationId,
+        original.recipients,
+        'attempt_started',
+      );
+      if (state !== 'attempt_started') {
+        await transitionEmailRecipients(env.db, first.operationId, original.recipients, state, {
+          providerReference: 'original-provider-id',
+        });
+      }
+      const ledger = await env.db.select().from(emailActions);
+      const recipients = await env.db.select().from(emailActionRecipients);
+      const digests = await emailPayloadDigests(
+        'direct',
+        original.from,
+        original.recipients,
+        legacyMultipartMime,
+      );
+      expect(digests.digest).not.toBe(legacyMultipartDigest);
+      expect(digests.legacyDigest).toBe(legacyMultipartDigest);
+      const replay = await admitEmailAction(env.db, { ...original, ...digests });
+      expect(replay).toMatchObject({
+        operationId: first.operationId,
+        replay: true,
+        recipients: [{ state }],
+      });
+      expect(await env.db.select().from(emailActions)).toEqual(ledger);
+      expect(await env.db.select().from(emailActionRecipients)).toEqual(recipients);
+      expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
+      expect((await admitEmailAction(env.db, original)).operationId).toBe(first.operationId);
+
+      for (const [from, to, raw] of [
+        [
+          original.from,
+          original.recipients,
+          new TextEncoder().encode(
+            new TextDecoder().decode(legacyMultipartMime).replace('Plain text', 'Changed text'),
+          ),
+        ],
+        [original.from, ['two@example.com'], legacyMultipartMime],
+        ['acme+different@mail.example.com', original.recipients, legacyMultipartMime],
+      ] as const) {
+        await expect(
+          admitEmailAction(env.db, {
+            ...original,
+            from,
+            recipients: [...to],
+            ...(await emailPayloadDigests('direct', from, [...to], raw)),
+          }),
+        ).rejects.toMatchObject({ code: 'CONFLICT' });
+      }
+    },
+  );
+
+  it('stores the current digest for new multipart sends and accepts rebuilt boundaries', async () => {
+    const project = await fixture();
+    const original = input(project.id, 'new-multipart');
+    const first = await admitEmailAction(env.db, {
+      ...original,
+      ...(await emailPayloadDigests(
+        'direct',
+        original.from,
+        original.recipients,
+        legacyMultipartMime,
+      )),
+    });
+    const rebuilt = new TextEncoder().encode(
+      new TextDecoder()
+        .decode(legacyMultipartMime)
+        .replaceAll('=_void_alternative_1573725Jyj8yLCojOVRltQ', '=_void_alternative_rebuilt'),
+    );
+    const digests = await emailPayloadDigests(
+      'direct',
+      original.from,
+      original.recipients,
+      rebuilt,
+    );
+    expect(digests.legacyDigest).not.toBe(legacyMultipartDigest);
+    expect((await env.db.select().from(emailActions))[0]?.payload_digest).toBe(digests.digest);
+    expect(await admitEmailAction(env.db, { ...original, ...digests })).toMatchObject({
+      operationId: first.operationId,
+      replay: true,
+    });
+    expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
+  });
+
+  it.each(['invalid', 123, null, ['a'.repeat(64)]])(
+    'rejects an invalid legacy digest %j',
+    async (legacyDigest) => {
+      const project = await fixture();
+      await expect(
+        admitEmailAction(env.db, {
+          ...input(project.id, 'invalid-legacy'),
+          legacyDigest: legacyDigest as string,
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+      expect(await env.db.select().from(emailActions)).toHaveLength(0);
+    },
+  );
 
   it('admits a partial batch under atomic recipient quotas and keeps charges after uncertain outcomes', async () => {
     const project = await fixture();

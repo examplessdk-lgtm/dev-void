@@ -4,7 +4,7 @@ import type { Context } from 'hono';
 import { asString } from './body.ts';
 import {
   admitEmail,
-  emailPayloadDigest,
+  emailPayloadDigests,
   finishEmailAttempt,
   startEmailAttempt,
   type Admission,
@@ -1499,7 +1499,7 @@ async function admitDirectSend(
         projectId,
         kind: 'direct',
         key: operationKey,
-        digest: await emailPayloadDigest('direct', from, recipients, raw),
+        ...(await emailPayloadDigests('direct', from, recipients, raw)),
         from,
         recipients,
         transport,

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import { buildMime, normalizeEmail } from '../../../../../packages/void/src/runtime/email/mime.ts';
+import { legacyMultipartDigest, legacyMultipartMime } from '../fixtures/legacy-multipart.ts';
 
 vi.mock('cloudflare:email', () => ({
   EmailMessage: class {
@@ -35,7 +36,7 @@ function fixture() {
     if (path.endsWith('/admit')) {
       const key = body.key as string;
       const previous = actions.get(key);
-      if (previous && previous.digest !== body.digest) {
+      if (previous && previous.digest !== body.digest && previous.digest !== body.legacyDigest) {
         return Response.json({ code: 'CONFLICT' }, { status: 409 });
       }
       if (previous) {
@@ -124,6 +125,37 @@ function fixture() {
 }
 
 describe('proxy email admission delivery', () => {
+  it.each(['provider_accepted', 'outcome_unknown', 'attempt_started'])(
+    'replays pre-upgrade multipart MIME with its recorded %s outcome',
+    async (state) => {
+      const test = fixture();
+      test.actions.set('pre-upgrade', {
+        operationId: 'act_pre_upgrade',
+        digest: legacyMultipartDigest,
+        recipients: [
+          {
+            recipient: 'one@example.com',
+            state,
+            errorCode: null,
+            providerReference: 'provider-before-upgrade',
+          },
+        ],
+      });
+      const response = await test.send('pre-upgrade', undefined, legacyMultipartMime);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ operationId: 'act_pre_upgrade' });
+      expect(test.sender).not.toHaveBeenCalled();
+      expect(test.actions.size).toBe(1);
+      expect(test.actions.get('pre-upgrade')?.digest).toBe(legacyMultipartDigest);
+
+      const changed = new TextEncoder().encode(
+        new TextDecoder().decode(legacyMultipartMime).replace('Plain text', 'Changed text'),
+      );
+      expect((await test.send('pre-upgrade', undefined, changed)).status).toBe(409);
+      expect(test.sender).not.toHaveBeenCalled();
+    },
+  );
+
   it('replays rebuilt SDK multipart MIME without another provider submission', async () => {
     const test = fixture();
     const options = {

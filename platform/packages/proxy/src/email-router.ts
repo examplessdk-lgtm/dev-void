@@ -880,6 +880,8 @@ async function enactSanitized(
     }
     const to = action.to.toLowerCase();
     const from = action.type === 'reply' ? action.from : message.to;
+    // Inbound operation keys embed this digest. Preserve the original algorithm:
+    // changing it would create a second operation for a retained receipt/action.
     const digest = await emailPayloadDigest(
       action.type,
       from,
@@ -887,6 +889,7 @@ async function enactSanitized(
       action.type === 'reply'
         ? action.raw
         : new TextEncoder().encode(JSON.stringify([...(action.headers?.entries() ?? [])].sort())),
+      'legacy',
     );
     let admission;
     try {
