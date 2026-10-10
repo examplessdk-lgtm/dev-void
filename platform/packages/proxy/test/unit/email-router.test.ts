@@ -17,7 +17,6 @@ vi.mock('../../../email-gateway/src/tenant-dispatch.ts', () => ({
     return { actions, receiptId: input.receiptId };
   },
 }));
-import { emailPayloadDigest } from '../../src/email-admission.ts';
 import {
   MAX_INBOUND_BYTES,
   MAX_INBOUND_HEADERS,
@@ -25,7 +24,6 @@ import {
   routeRelayed,
 } from '../../src/email-router.ts';
 import type { Env } from '../../src/types.ts';
-import { legacyMultipartMime } from '../fixtures/legacy-multipart.ts';
 
 const ROUTE_FENCE = {
   routeId: 'route-1',
@@ -1173,24 +1171,6 @@ describe('routeRelayed — reply attempt outcomes', () => {
     });
     return { outcome, apiFetch, providerFetch, env };
   }
-
-  it('preserves pre-upgrade digest-derived reply keys', async () => {
-    const raw = new TextEncoder().encode(
-      new TextDecoder()
-        .decode(legacyMultipartMime)
-        .replaceAll('acme+news@mail.example.com', from)
-        .replaceAll('one@example.com', to),
-    );
-    const digest = await emailPayloadDigest('reply', from, [to], raw, 'legacy');
-    expect(await emailPayloadDigest('reply', from, [to], raw)).not.toBe(digest);
-    const { apiFetch } = await runReply(Response.json({ result: { message_id: 'reply-id' } }), {
-      raw,
-    });
-    expect(apiBodies(apiFetch, '/admit')[0]).toMatchObject({
-      key: `receipt_1:0:${digest.slice(0, 16)}`,
-      digest,
-    });
-  });
 
   it('sends a relayed shared-sender reply through the shared binding', async () => {
     const { outcome, apiFetch, providerFetch, env } = await runReply(new Response(null), {

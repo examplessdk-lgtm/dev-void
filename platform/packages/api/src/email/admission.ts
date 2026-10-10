@@ -50,8 +50,6 @@ export type EmailAdmissionInput = {
   kind: EmailActionKind;
   key: string;
   digest: string;
-  /** Computed by the signed proxy from the same MIME, never accepted from a tenant. */
-  legacyDigest?: string;
   from: string;
   recipients: Array<string>;
   transport: 'binding' | 'send_raw' | 'native_forward' | 'native_reply';
@@ -310,10 +308,6 @@ export async function admitEmailAction(
     !input.key ||
     input.key.length > (input.kind === 'direct' ? 128 : 256) ||
     !/^[a-f0-9]{64}$/.test(input.digest) ||
-    (input.legacyDigest !== undefined &&
-      (input.kind !== 'direct' ||
-        typeof input.legacyDigest !== 'string' ||
-        !/^[a-f0-9]{64}$/.test(input.legacyDigest))) ||
     input.recipients.length > (input.kind === 'direct' ? 50 : 100) ||
     !validAddress(input.from)
   ) {
@@ -347,18 +341,12 @@ export async function admitEmailAction(
       )
       .limit(1);
     if (existing) {
-      if (
-        (existing.payload_digest !== input.digest &&
-          existing.payload_digest !== input.legacyDigest) ||
-        existing.kind !== input.kind
-      ) {
+      if (existing.payload_digest !== input.digest || existing.kind !== input.kind) {
         throw new EmailAdmissionError(
           'CONFLICT',
           'idempotency key was used for a different action',
         );
       }
-      // Do not rewrite the stored digest or recipient outcomes on a legacy replay.
-      // Older proxy executions still need to recognize the original operation.
       return {
         operationId: existing.id,
         replay: true,

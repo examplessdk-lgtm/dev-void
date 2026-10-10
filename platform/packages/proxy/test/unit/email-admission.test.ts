@@ -1,11 +1,5 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
-import {
-  admitEmail,
-  emailPayloadDigest,
-  emailPayloadDigests,
-  finishEmailAttempt,
-} from '../../src/email-admission.ts';
-import { legacyMultipartDigest, legacyMultipartMime } from '../fixtures/legacy-multipart.ts';
+import { admitEmail, emailPayloadDigest, finishEmailAttempt } from '../../src/email-admission.ts';
 
 const encoder = new TextEncoder();
 function message(date: string, id: string, boundary: string, body: string) {
@@ -65,32 +59,6 @@ function nestedMessage(generation: string, bodyLine: string) {
 }
 
 describe('email admission payload digest', () => {
-  it('retains the exact historical digest for folded SDK multipart MIME', async () => {
-    const args = [
-      'direct',
-      'acme+news@mail.example.com',
-      ['one@example.com'] as Array<string>,
-      legacyMultipartMime,
-    ] as const;
-    expect(await emailPayloadDigest(...args, 'legacy')).toBe(legacyMultipartDigest);
-    expect(await emailPayloadDigests(...args)).toEqual({
-      digest: await emailPayloadDigest(...args),
-      legacyDigest: legacyMultipartDigest,
-    });
-  });
-
-  it('omits a redundant legacy digest for single-part MIME', async () => {
-    const args = [
-      'direct',
-      'acme@mail.example.com',
-      ['one@example.com'] as Array<string>,
-      encoder.encode('From: acme@mail.example.com\r\n\r\nbody'),
-    ] as const;
-    expect(await emailPayloadDigests(...args)).toEqual({
-      digest: await emailPayloadDigest(...args),
-    });
-  });
-
   it('deduplicates retries when generated date, message ID and multipart boundary change', async () => {
     const a = message(
       'Fri, 18 Sep 2026 01:00:00 +0000',
