@@ -33,7 +33,7 @@ catalog:
   vite-plus: 1.1.0
   vitest: 5.0.3
   wrangler: ^4.149.0
-  cf: ^1.0.0-beta.13
+  cf: ^1.0.0-beta.14
   oauth4webapi: ^3.8.8
   '@astryxdesign/core': 0.6.5
   '@astryxdesign/theme-neutral': 0.6.5

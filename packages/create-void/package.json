@@ -1,6 +1,6 @@
 {
   "name": "create-void",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "description": "Create a full-stack Void app for Cloudflare Workers.",
   "homepage": "https://void.cloud",
   "bugs": {

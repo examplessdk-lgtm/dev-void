@@ -1,6 +1,6 @@
 {
   "name": "void",
-  "version": "0.26.1",
+  "version": "0.27.0",
   "description": "Full-stack framework and deployment CLI for Cloudflare Workers, powered by Vite.",
   "homepage": "https://void.cloud",
   "bugs": {
