@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { emailPayloadDigests } from '../../../proxy/src/email-admission.ts';
+import { admitEmail, emailPayloadDigests } from '../../../proxy/src/email-admission.ts';
 import {
   legacyMultipartDigest,
   legacyMultipartMime,
@@ -35,6 +35,7 @@ import {
   emailZoneConnections,
 } from '../../src/email/connection-schema.ts';
 import { setEmailRecipientPolicy } from '../../src/email/settings.ts';
+import { app } from '../../src/index.ts';
 import { emailDestinations, projects, users } from '../../src/schema.ts';
 import {
   captureQueries,
@@ -981,6 +982,42 @@ describe('authoritative email admission', () => {
       }
     },
   );
+
+  it('replays a pre-upgrade multipart operation through the signed admission route', async () => {
+    const project = await fixture();
+    const { sharedSenderDomain, ...original } = {
+      ...input(project.id, 'signed-upgrade'),
+      digest: legacyMultipartDigest,
+    };
+    const first = await admitEmailAction(env.db, { ...original, sharedSenderDomain });
+    const proxyEnv = {
+      API: {
+        fetch: (url: string, init?: RequestInit) =>
+          app.fetch(new Request(url, init), { ...env, EMAIL_SENDER_DOMAIN: sharedSenderDomain }),
+      } as never,
+      EMAIL_SIGNING_SECRET: env.EMAIL_SIGNING_SECRET,
+    };
+    const digests = await emailPayloadDigests(
+      'direct',
+      original.from,
+      original.recipients,
+      legacyMultipartMime,
+    );
+    expect(digests.digest).not.toBe(legacyMultipartDigest);
+    expect(digests.legacyDigest).toBe(legacyMultipartDigest);
+
+    await expect(admitEmail(proxyEnv, { ...original, digest: digests.digest })).rejects.toThrow(
+      'IDEMPOTENCY_CONFLICT',
+    );
+    expect(await admitEmail(proxyEnv, { ...original, ...digests })).toMatchObject({
+      operationId: first.operationId,
+      replay: true,
+    });
+    expect((await env.db.select().from(emailActions))[0]?.payload_digest).toBe(
+      legacyMultipartDigest,
+    );
+    expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
+  });
 
   it('stores the current digest for new multipart sends and accepts rebuilt boundaries', async () => {
     const project = await fixture();

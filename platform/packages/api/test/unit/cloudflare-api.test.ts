@@ -305,28 +305,44 @@ describe('Hyperdrive connection strings', () => {
     });
   });
 
-  it.each(['verify-ca', 'verify-full', 'verify-full&sslrootcert=system'])(
-    'uses Hyperdrive public-CA TLS verification for a PostgreSQL URL with sslmode=%s',
-    (sslmode) => {
-      expect(
-        parseHyperdriveConnectionString(
-          `postgresql://user:pass@db.example.com/app_db?sslmode=${sslmode}`,
-        ).mtls,
-      ).toEqual({ sslmode: 'require' });
-    },
-  );
+  it.each([
+    'verify-ca',
+    'verify-full',
+    'verify-full&sslrootcert=system',
+    'verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
+    'require&sslrootcert=./rds-ca.pem',
+  ])('maps PostgreSQL sslmode=%s to Hyperdrive require mode', (sslmode) => {
+    expect(
+      parseHyperdriveConnectionString(
+        `postgresql://user:pass@db.example.com/app_db?sslmode=${sslmode}`,
+      ).mtls,
+    ).toEqual({ sslmode: 'require' });
+  });
 
-  it('rejects an explicit private CA before provisioning Hyperdrive', async () => {
+  it('creates Hyperdrive in require mode from a URL whose sslrootcert names a local CA file', async () => {
     fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'hd_1', name: 'proj-hyperdrive' }));
-    await expect(
-      createHyperdrive(
-        ACCOUNT,
-        TOKEN,
-        'proj-hyperdrive',
-        'postgresql://user:pass@db.example.com/app?sslmode=verify-full&sslrootcert=/private/company-ca.pem',
-      ),
-    ).rejects.toThrow('cannot honor sslrootcert');
-    expect(fetchMock).not.toHaveBeenCalled();
+
+    await createHyperdrive(
+      ACCOUNT,
+      TOKEN,
+      'proj-hyperdrive',
+      'postgresql://user:pass@db.example.com/app?sslmode=verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
+    );
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      name: 'proj-hyperdrive',
+      caching: { disabled: true },
+      origin: {
+        database: 'app',
+        host: 'db.example.com',
+        password: 'pass',
+        port: 5432,
+        scheme: 'postgresql',
+        user: 'user',
+      },
+      mtls: { sslmode: 'require' },
+    });
   });
 
   it('parses MySQL connection strings and defaults to port 3306', () => {

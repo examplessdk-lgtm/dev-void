@@ -1347,7 +1347,7 @@ describe('PUT /projects/:id/database-url', () => {
         },
         body: JSON.stringify({
           connectionString:
-            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=verify-full&sslrootcert=system',
+            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
         }),
       }),
       env,

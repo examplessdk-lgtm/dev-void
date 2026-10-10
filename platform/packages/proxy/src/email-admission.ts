@@ -203,9 +203,10 @@ export function canonicalizeVoidMime(
         let afterHeader = nextLine;
         let line = decoder.decode(raw.subarray(lineStart, headerEnd));
         // The SDK folds longer multipart boundary parameters onto continuation lines.
+        // Folding whitespace is SP or HTAB only; other leading characters stay significant.
         while (version === 'current' && (raw[afterHeader] === 32 || raw[afterHeader] === 9)) {
           headerEnd = findCrlf(raw, afterHeader);
-          line += ` ${decoder.decode(raw.subarray(afterHeader, headerEnd)).trimStart()}`;
+          line += ` ${decoder.decode(raw.subarray(afterHeader, headerEnd)).replace(/^[ \t]+/, '')}`;
           afterHeader = headerEnd === raw.byteLength ? raw.byteLength : headerEnd + 2;
         }
         const normalized = line.replace(

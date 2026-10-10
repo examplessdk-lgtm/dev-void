@@ -636,13 +636,6 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
     );
   }
 
-  const sslrootcert = url.searchParams.getAll('sslrootcert').at(-1);
-  if (sslrootcert && sslrootcert !== 'system') {
-    throw new InvalidHyperdriveConnectionStringError(
-      'Void-created Hyperdrive uses public certificate authorities and cannot honor sslrootcert. For a database signed by a public certificate authority, use sslrootcert=system.',
-    );
-  }
-
   const sslmode = url.searchParams.get('sslmode');
   let mtls: HyperdriveConfigPayload['mtls'];
   if (sslmode) {
@@ -651,9 +644,9 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
         'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
       );
     }
-    // Hyperdrive's verify modes require an uploaded CA certificate ID, which a URL
-    // cannot supply. `require` validates server certificates using public WebPKI;
-    // direct database clients retain the connection URL's original verification mode.
+    // Hyperdrive's verify modes need a CA certificate uploaded to Cloudflare, which a URL
+    // cannot carry, so Void creates Hyperdrive in Cloudflare's default `require` mode.
+    // `sslrootcert` names a CA on the client machine and is not sent to Hyperdrive.
     mtls = { sslmode: 'require' };
   }
 

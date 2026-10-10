@@ -40,6 +40,8 @@ For a Void platform, deploy prompts for the connection string if needed. You can
 
 Void provisions Hyperdrive without saving the connection string in project config. Both `postgres://` and `postgresql://` URLs are supported, including provider query strings such as `?sslmode=require`.
 
+The Hyperdrive that Void creates connects with TLS in Cloudflare's default `require` mode. Hyperdrive does not use the `sslmode=verify-ca`, `sslmode=verify-full`, or `sslrootcert` settings from your connection string. To have Hyperdrive verify your database against a specific certificate authority on a direct Cloudflare deploy, [create the Hyperdrive in Cloudflare with that certificate](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates-for-hyperdrive/) and add its ID to [`cloudflare.hyperdrive`](../../integrations/cloudflare.md#databases-and-secrets).
+
 ## Schema Definition
 
 Import schema helpers from `void/schema-pg`:

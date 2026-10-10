@@ -208,6 +208,34 @@ describe('email admission payload digest', () => {
     );
   });
 
+  it('unfolds boundary headers on SP or HTAB only and keeps other leading whitespace', async () => {
+    const folded = (fold: string, boundary: string) =>
+      encoder.encode(
+        [
+          'From: acme@mail.example.com',
+          'MIME-Version: 1.0',
+          'Content-Type: multipart/alternative;',
+          `${fold}boundary="${boundary}"`,
+          '',
+          `--${boundary}`,
+          'Content-Type: text/plain; charset=UTF-8',
+          '',
+          'hello',
+          `--${boundary}--`,
+          '',
+        ].join('\r\n'),
+      );
+    const digest = (raw: Uint8Array) =>
+      emailPayloadDigest('direct', 'acme@mail.example.com', ['recipient@example.com'], raw);
+
+    const ideographicSpace = String.fromCodePoint(0x3000);
+
+    const space = await digest(folded(' ', '=_void_alternative_AAAA'));
+    expect(await digest(folded('\t', '=_void_alternative_BBBB'))).toBe(space);
+    expect(await digest(folded('  \t ', '=_void_alternative_CCCC'))).toBe(space);
+    expect(await digest(folded(` ${ideographicSpace}`, '=_void_alternative_DDDD'))).not.toBe(space);
+  });
+
   it('normalizes deeply nested generated boundaries without normalizing dense body lines', async () => {
     const a = nestedMessage('1', 'same body');
     const b = nestedMessage('2', 'same body');
