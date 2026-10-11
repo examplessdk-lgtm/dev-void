@@ -22,6 +22,17 @@ const REACT_OPTIMIZE_DEPS = [
 ];
 const WORKER_OPTIMIZE_DEPS = [...REACT_OPTIMIZE_DEPS, 'void/live/client'];
 
+// SSR HTML bypasses transformIndexHtml, so @vitejs/plugin-react cannot inject
+// its Fast Refresh preamble. Without it, the dev client entry fails to load.
+export const REACT_REFRESH_PREAMBLE = `
+<script type="module">
+  import RefreshRuntime from "/@react-refresh"
+  RefreshRuntime.injectIntoGlobalHook(window)
+  window.$RefreshReg$ = () => {}
+  window.$RefreshSig$ = () => (type) => type
+  window.__vite_plugin_react_preamble_installed__ = true
+</script>`;
+
 export type PrefetchConfig = {
   hoverDelay?: number;
   cacheFor?: number | string | [string, string];
@@ -217,20 +228,7 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
 }
 
 function generateRendererModule(scan: PageScanResult, pagesDir: string, isDev: boolean): string {
-  // In dev mode, inject the React Refresh preamble as an inline script.
-  // SSR-generated HTML bypasses Vite's transformIndexHtml, so @vitejs/plugin-react
-  // can't inject it automatically. Without this, React Fast Refresh breaks and
-  // the client entry module fails to load.
-  const preambleScript = isDev
-    ? `
-<script type="module">
-  import RefreshRuntime from "/@react-refresh"
-  RefreshRuntime.injectIntoGlobalHook(window)
-  window.$RefreshReg$ = () => {}
-  window.$RefreshSig$ = () => (type) => type
-  window.__vite_plugin_react_preamble_installed__ = true
-</script>`
-    : '';
+  const preambleScript = isDev ? REACT_REFRESH_PREAMBLE : '';
 
   return `
 import { renderReactPage } from "@void/react/pages-server";

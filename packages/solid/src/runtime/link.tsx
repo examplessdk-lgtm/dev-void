@@ -6,7 +6,7 @@ import { RouterContext } from './context.ts';
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type NavigateEvent = { preventDefault(): void };
-type PrefetchOptions = { cacheFor?: LinkProps['cacheFor']; method?: LinkMethod };
+type PrefetchOptions = { cacheFor?: LinkProps['cacheFor'] };
 
 type CommonProps = {
   href: string;
@@ -26,10 +26,6 @@ type CommonProps = {
 export type LinkProps = CommonProps &
   Omit<JSX.AnchorHTMLAttributes<HTMLAnchorElement>, keyof CommonProps> &
   Omit<JSX.ButtonHTMLAttributes<HTMLButtonElement>, keyof CommonProps>;
-
-function hasPrefetch(prefetch: LinkProps['prefetch']): boolean {
-  return prefetch !== false && prefetch !== undefined;
-}
 
 function mergeStyle(style: JSX.CSSProperties | string | undefined): JSX.CSSProperties | string {
   if (typeof style === 'string') {
@@ -80,7 +76,7 @@ export function Link(props: LinkProps): JSX.Element {
     const method = (local.method || 'GET').toUpperCase() as LinkMethod;
     const isGet = method === 'GET';
 
-    if (hasPrefetch(local.prefetch) && !isGet) {
+    if (local.prefetch !== false && local.prefetch !== undefined && !isGet) {
       throw new Error(
         'Link: prefetch only supports GET links. Remove `prefetch` or use method="GET".',
       );
@@ -123,9 +119,6 @@ export function Link(props: LinkProps): JSX.Element {
     const options: PrefetchOptions = {};
     if (local.cacheFor !== undefined) {
       options.cacheFor = local.cacheFor;
-    }
-    if (normalizedMethod()) {
-      options.method = normalizedMethod();
     }
     router.prefetch(hrefWithData(), options);
   }

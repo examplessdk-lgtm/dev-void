@@ -69,8 +69,7 @@ export function useForm(
   // that returns the current global errors object. This allows useForm to
   // derive errors from the global state, surviving component re-creation
   // during Solid's reactive tree rebuild after router.visit().
-  const globalErrors: Record<string, string> | (() => Record<string, string>) | null =
-    useContext(ErrorsContext);
+  const globalErrors = useContext(ErrorsContext);
   const [data, setDataStore] = createStore<Record<string, unknown>>({ ...defaults });
   const [localErrors, setLocalErrors] = createSignal<Record<string, string>>({});
   const errors = createMemo(() => {
@@ -86,7 +85,7 @@ export function useForm(
     if (typeof globalErrors === 'function') {
       return globalErrors();
     }
-    return globalErrors as unknown as Record<string, string>;
+    return globalErrors;
   });
   const [pending, setPending] = createSignal(false);
   const [error, setError] = createSignal<VoidActionError | null>(null);

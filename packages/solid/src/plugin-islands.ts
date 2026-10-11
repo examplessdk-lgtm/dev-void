@@ -49,7 +49,6 @@ export function islandsPlugin(
   const root = options?.root ?? dirname(pagesDir);
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
-  // Metadata for virtual wrapper modules — keyed by wrapper URL
   const wrapperMeta = new Map<string, WrapperMeta>();
   let wrapperId = 0;
   let viteRoot = '';
@@ -93,7 +92,6 @@ export function islandsPlugin(
           // Pre-scan island pages to populate the manifest eagerly.
           // This is needed because the client build may load the virtual
           // islands-client entry before island page transforms run.
-          // Scan both pages AND layouts for island imports
           const filesToScan: ReadonlyArray<ScannableEntry> = [
             ...pageScan.pages.map((page) => ({
               filePath: page.componentPath,
@@ -148,8 +146,6 @@ export function islandsPlugin(
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
             return '\0' + source;
           }
-          // Virtual wrapper modules — resolve without \0 prefix so
-          // vite-plugin-solid processes them as .tsx files
           if (source.startsWith(WRAPPER_PREFIX)) {
             return source;
           }
@@ -195,14 +191,12 @@ export function islandsPlugin(
             }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
           }
-          // Virtual wrapper component — generates a .tsx wrapper
           if (id.startsWith(WRAPPER_PREFIX)) {
             const meta = wrapperMeta.get(id);
             if (meta) {
               return generateWrapperComponent(meta);
             }
           }
-          // Virtual island CSS module — resolveId returns absolute path
           if (id.endsWith('.css') && !id.startsWith('\0')) {
             const srcPath = id.slice(0, -4);
             if (islandCssFiles.has(srcPath)) {
@@ -212,10 +206,6 @@ export function islandsPlugin(
         },
       },
 
-      // Rewrite island imports to point to virtual wrapper components.
-      // The wrapper module is a generated .tsx file that vite-plugin-solid
-      // compiles normally, wrapping the original component with
-      // data-island/data-props/data-hydrate attributes.
       transform: {
         filter: { id: /\.island\.(tsx|jsx)$/ },
         handler(code, id) {
@@ -235,9 +225,6 @@ export function islandsPlugin(
 
             const { absPath, islandId } = registerIsland(spec, importerDir, strategy);
 
-            // Rewrite import to point to virtual wrapper component.
-            // Use a clean .tsx path (no query params) so rolldown can detect the
-            // language. Store metadata in a Map for the load hook.
             const wrapperUrl = WRAPPER_PREFIX + 'island_' + wrapperId++ + '.tsx';
             wrapperMeta.set(wrapperUrl, { src: absPath || spec, islandId, hydrate: strategy });
             const replacement = `import ${name} from ${JSON.stringify(wrapperUrl)}`;
@@ -254,7 +241,6 @@ export function islandsPlugin(
         if (!existsSync(pagesDir)) {
           return;
         }
-        // Only add the islands client entry when content needs it
         if (
           env.command !== 'serve' &&
           needsIslandClientBundle(pagesDir, /\.island\.(tsx|jsx)$/, false)
@@ -273,10 +259,6 @@ export function islandsPlugin(
   ];
 }
 
-/**
- * Generate a virtual TSX wrapper component.
- * vite-plugin-solid compiles the JSX for both SSR and client.
- */
 function generateWrapperComponent(meta: WrapperMeta): string {
   return `import _Cmp from ${JSON.stringify(meta.src)};
 export default function _IslandWrap(props) {

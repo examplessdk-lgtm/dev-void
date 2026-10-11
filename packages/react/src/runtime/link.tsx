@@ -13,7 +13,7 @@ import { RouterContext } from './context.ts';
 
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-type PrefetchOptions = { cacheFor?: LinkProps['cacheFor']; method?: LinkMethod };
+type PrefetchOptions = { cacheFor?: LinkProps['cacheFor'] };
 
 type CommonProps = {
   href: string;
@@ -32,10 +32,6 @@ type CommonProps = {
 export type LinkProps = CommonProps &
   Omit<AnchorHTMLAttributes<HTMLAnchorElement>, keyof CommonProps> &
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, keyof CommonProps>;
-
-function hasPrefetch(prefetch: LinkProps['prefetch']): boolean {
-  return prefetch !== false;
-}
 
 export function Link({
   href,
@@ -82,7 +78,7 @@ export function Link({
   }, [prefetchProp, reloadDocument]);
   const hoverDelay = router?._hoverDelay ?? 75;
 
-  if (hasPrefetch(prefetchProp) && !isGet) {
+  if (prefetchProp !== false && !isGet) {
     throw new Error(
       'Link: prefetch only supports GET links. Remove `prefetch` or use method="GET".',
     );
@@ -103,11 +99,8 @@ export function Link({
     if (cacheFor !== undefined) {
       options.cacheFor = cacheFor;
     }
-    if (normalizedMethod) {
-      options.method = normalizedMethod;
-    }
     router.prefetch(hrefWithData, options);
-  }, [cacheFor, hrefWithData, normalizedMethod, router]);
+  }, [cacheFor, hrefWithData, router]);
 
   const shouldHandleClick = useCallback(
     (event: MouseEvent): boolean => {

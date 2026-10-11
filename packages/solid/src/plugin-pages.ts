@@ -150,9 +150,6 @@ export function pagesPlugin(pagesDir: string, options?: PagesPluginOptions): Plu
         isDev = true;
         return {
           optimizeDeps: {
-            // Exclude @void/solid so the virtual module and user
-            // components share the same Solid context objects (identity).
-            exclude: ['@void/solid'],
             // Pre-include Solid entries discovered late via dynamic imports
             include: ['solid-js', 'solid-js/web', 'solid-js/store'],
           },

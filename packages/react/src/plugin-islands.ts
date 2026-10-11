@@ -18,6 +18,7 @@ import {
   type IslandSourceEdit,
 } from 'void/pages-islands-plugin';
 import type { IslandEntry } from 'void/pages-islands-plugin';
+import { REACT_REFRESH_PREAMBLE } from './plugin-pages.ts';
 
 const COMPONENT_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 type MdPluginWithApi = Plugin & {
@@ -264,16 +265,7 @@ function generateIslandRenderer(
   mdScriptIds: Set<string>,
   pagesNeedingClientJS: Set<string>,
 ): string {
-  const preambleScript = isDev
-    ? `
-<script type="module">
-  import RefreshRuntime from "/@react-refresh"
-  RefreshRuntime.injectIntoGlobalHook(window)
-  window.$RefreshReg$ = () => {}
-  window.$RefreshSig$ = () => (type) => type
-  window.__vite_plugin_react_preamble_installed__ = true
-</script>`
-    : '';
+  const preambleScript = isDev ? REACT_REFRESH_PREAMBLE : '';
 
   const mdScriptIdsCode = `const __mdClientScriptIds = new Set(${JSON.stringify([...mdScriptIds])});`;
   const needsJSCode = `const __pagesNeedingClientJS = new Set(${JSON.stringify([...pagesNeedingClientJS])});`;
