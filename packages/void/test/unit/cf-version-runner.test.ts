@@ -931,6 +931,126 @@ it('uploads live secrets and multiple asset batches when the latest upload is in
 it('uploads live secrets and multiple asset batches for atomic publication', () =>
   verifyPinnedUpload(true));
 
+it('uploads Worker limits, placement and cache with pinned secrets', async () => {
+  const prepared = await output({
+    secrets: { required: ['AUTH_SECRET'] },
+    limits: { cpu_ms: 30_000 },
+    placement: { mode: 'smart' },
+    cache: { enabled: true, cross_version_cache: true },
+    logpush: true,
+    tail_consumers: [{ service: 'tail-worker' }],
+  });
+  try {
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: '11111111-1111-4111-8111-111111111111',
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    });
+    const uploads: Array<Record<string, unknown>> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Array<Buffer> = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      if (request.method === 'POST') {
+        uploads.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result:
+            request.method === 'GET'
+              ? {
+                  id: '11111111-1111-4111-8111-111111111111',
+                  bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+                }
+              : { id: '22222222-2222-4222-8222-222222222222', urls: [] },
+        }),
+      );
+    });
+    const uploaded = await uploadPinnedCloudflareVersion({
+      output: prepared,
+      accountId: 'account-id',
+      apiBaseUrl: await listen(server),
+      workerName: 'void-test',
+      token: 'synthetic-token',
+      atomic: false,
+      verifyUploader: () => true,
+    });
+    expect(uploaded.id).toBe('22222222-2222-4222-8222-222222222222');
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]).toMatchObject({
+      limits: { cpu_ms: 30_000 },
+      placement: { mode: 'smart' },
+      cache_options: { enabled: true, cross_version_cache: true },
+      bindings: [
+        {
+          name: 'AUTH_SECRET',
+          type: 'inherit',
+          version_id: '11111111-1111-4111-8111-111111111111',
+        },
+      ],
+    });
+    expect(uploads[0]).not.toHaveProperty('logpush');
+    expect(uploads[0]).not.toHaveProperty('tail_consumers');
+  } finally {
+    prepared.dispose();
+  }
+});
+
+it.each([
+  { region: 'aws:us-east-1' },
+  { host: 'db.example.test:5432' },
+  { hostname: 'api.example.test' },
+])('rejects targeted placement with pinned secrets before any upload: %j', async (placement) => {
+  const prepared = await output({ secrets: { required: ['AUTH_SECRET'] }, placement });
+  try {
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: '11111111-1111-4111-8111-111111111111',
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    });
+    const requests: Array<string> = [];
+    const server = createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result:
+            request.method === 'GET'
+              ? {
+                  id: '11111111-1111-4111-8111-111111111111',
+                  bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+                }
+              : { id: '22222222-2222-4222-8222-222222222222', urls: [] },
+        }),
+      );
+    });
+    await expect(
+      uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: await listen(server),
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: true,
+        verifyUploader: () => true,
+      }),
+    ).rejects.toThrow(
+      `Cloudflare placement.${Object.keys(placement)[0]} cannot be deployed while the Worker has secrets. Remove cloudflare.placement from void.config.ts, or set it to { mode: 'smart' }.`,
+    );
+    expect(requests).toEqual([]);
+  } finally {
+    prepared.dispose();
+  }
+});
+
 it.each(['missing name', 'duplicate name', 'external collision', 'class collision'] as const)(
   'rejects an invalid local Workflow declaration before any provider request: %s',
   async (mode) => {

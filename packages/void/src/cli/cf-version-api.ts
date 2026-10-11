@@ -8,6 +8,7 @@ import {
   getWorkerBundleDir,
   readBuildOutput,
 } from '@cloudflare/build-output-utils';
+import type { ParsedOutputWorkerConfig } from '@cloudflare/config';
 import type { CloudflareCommandResult } from '@void/deploy-cloudflare';
 import ignore from 'ignore';
 import mime from 'mime';
@@ -388,6 +389,31 @@ function assetConfigFromOutput(value: unknown): Json | undefined {
       : { not_found_handling: config.notFoundHandling }),
     ...(config.runWorkerFirst === undefined ? {} : { run_worker_first: config.runWorkerFirst }),
   };
+}
+
+/**
+ * The version API placement. Smart placement is normalized the same way as cf's own version
+ * uploads. Targeted placement is rejected: the Workers beta version endpoint can drop its
+ * target, and an atomic upload is live before a read-back could catch that.
+ */
+function placementFromOutput(placement: ParsedOutputWorkerConfig['placement']): Json | undefined {
+  if (!placement) {
+    return undefined;
+  }
+  const hint = 'hint' in placement ? placement.hint : undefined;
+  if (hint || placement.mode === 'smart') {
+    return { mode: 'smart', ...(hint ? { hint } : {}) };
+  }
+  const target =
+    ('region' in placement && placement.region && 'region') ||
+    ('host' in placement && placement.host && 'host') ||
+    ('hostname' in placement && placement.hostname && 'hostname');
+  if (target) {
+    throw new Error(
+      `Cloudflare placement.${target} cannot be deployed while the Worker has secrets. Remove cloudflare.placement from void.config.ts, or set it to { mode: 'smart' }.`,
+    );
+  }
+  return undefined;
 }
 
 async function apiResult(
@@ -1016,6 +1042,13 @@ export async function uploadPinnedCloudflareVersion(options: {
         'exports',
         'manifest',
         'triggers',
+        'limits',
+        'placement',
+        'cache',
+        // Worker-level settings that version uploads cannot set. Like observability, the
+        // live Worker keeps its current values.
+        'logpush',
+        'tailConsumers',
       ]).has(key),
   );
   if (unsupported.length) {
@@ -1023,6 +1056,7 @@ export async function uploadPinnedCloudflareVersion(options: {
       `Cloudflare Worker setting ${unsupported[0]} cannot be uploaded with pinned secrets.`,
     );
   }
+  const placement = placementFromOutput(config.placement);
   const unsafe = object(config.unsafe);
   const metadata = object(unsafe?.metadata);
   if (
@@ -1145,6 +1179,18 @@ export async function uploadPinnedCloudflareVersion(options: {
       compatibility_date: config.compatibilityDate,
       compatibility_flags: config.compatibilityFlags,
       bindings,
+      ...(config.limits
+        ? { limits: { cpu_ms: config.limits.cpuMs, subrequests: config.limits.subrequests } }
+        : {}),
+      ...(placement ? { placement } : {}),
+      ...(config.cache
+        ? {
+            cache_options: {
+              enabled: config.cache.enabled,
+              cross_version_cache: config.cache.crossVersionCache,
+            },
+          }
+        : {}),
       ...(exports ? { exports } : {}),
       ...(containers.length ? { containers } : {}),
       ...(jwt ? { assets: { jwt, ...(assetConfig ? { config: assetConfig } : {}) } } : {}),
