@@ -17,11 +17,11 @@ export interface Attachment {
 
 export interface SendEmailOptions {
   /**
-   * Sender envelope address. Optional — when omitted, the framework uses
-   * `email.from` from void.config.ts when it is set, otherwise
-   * `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>` on a Void
-   * platform. Without either, `sendEmail` returns `INVALID_FROM` — it never
-   * falls back to a baked-in domain.
+   * Sender envelope address. Optional. When omitted, `void dev` and
+   * `void deploy --platform cloudflare` use `email.from` from void.config.ts,
+   * and a Void platform deploy uses `<project-slug>+noreply@<mail-domain>`.
+   * Without either, `sendEmail` returns `INVALID_FROM`; it never falls back
+   * to a baked-in domain.
    */
   from?: Address;
   to: Address | Array<Address>;

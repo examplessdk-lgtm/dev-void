@@ -73,8 +73,9 @@ export const DEV_INBOX_ACK_VALUE: string = 'captured';
 
 /**
  * Capture body cap. 6x covers the base64 MIME plus the JSON copy of every
- * caller string for a max-size message, so dev never refuses a send that
- * production accepts.
+ * rendered caller string for a max-size message. Strings with no MIME
+ * footprint (a bcc name, a reserved header, folded-away whitespace) are not
+ * bounded by it, so a message padded with them is still refused.
  */
 export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 6 * MAX_MESSAGE_BYTES;
 
