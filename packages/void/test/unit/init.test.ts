@@ -3596,6 +3596,41 @@ export default config;
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('keeps the existing pnpm build approvals when adding the Void defaults', async () => {
+    const roots: Array<string> = [];
+    const initWithWorkspaceYaml = async (yaml: string): Promise<string> => {
+      const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+      roots.push(root);
+      writeExistingViteApp(root);
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), yaml);
+      mockSelect.mockResolvedValueOnce('none');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+      await runInitCommand(root);
+      return readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
+    };
+    try {
+      expect(
+        await initWithWorkspaceYaml(
+          'allowBuilds:\n  "@parcel/watcher": true\n  better-sqlite3: true\nonlyBuiltDependencies:\n  - bcrypt\n',
+        ),
+      ).toBe(
+        'allowBuilds:\n  "@parcel/watcher": true\n  better-sqlite3: true\n  bcrypt: true\n  esbuild: true\n  sharp: true\n  workerd: true\n',
+      );
+      expect(await initWithWorkspaceYaml('onlyBuiltDependencies:\n- bcrypt\n')).toBe(
+        'allowBuilds:\n  bcrypt: true\n  better-sqlite3: false\n  esbuild: true\n  sharp: true\n  workerd: true\n',
+      );
+
+      const flow = 'allowBuilds: {"@parcel/watcher": true}\n';
+      expect(await initWithWorkspaceYaml(flow)).toBe(flow);
+      expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('esbuild: true'));
+    } finally {
+      for (const root of roots) {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe('detectProjectState', () => {
