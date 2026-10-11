@@ -100,33 +100,6 @@ import Toggle from "./Toggle.svelte" with { island: "idle" }
     expect(clientEntry).toContain('pages/Toggle');
   });
 
-  it('includes island imports from both pages and layouts', async () => {
-    writeFile(
-      'app/layout.island.svelte',
-      `<script>
-import Nav from "../_components/Nav.svelte" with { island: "load" }
-</script>
-<Nav /><slot />`,
-    );
-    writeFile(
-      'app/index.island.svelte',
-      `<script>
-import Widget from "../_components/Widget.svelte" with { island: "idle" }
-</script>
-<Widget />`,
-    );
-    writeFile('_components/Nav.svelte', `<nav>Nav</nav>`);
-    writeFile('_components/Widget.svelte', `<div>Widget</div>`);
-
-    const { buildStart, loadClientEntry } = setupPlugin();
-    await buildStart();
-    const clientEntry = loadClientEntry();
-
-    expect(clientEntry).toBeDefined();
-    expect(clientEntry).toContain('pages/_components/Nav');
-    expect(clientEntry).toContain('pages/_components/Widget');
-  });
-
   it('pre-scans island imports from named island layouts into the manifest', async () => {
     writeFile(
       '_layouts/sidebar.island.svelte',

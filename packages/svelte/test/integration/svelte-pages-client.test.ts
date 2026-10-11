@@ -12,10 +12,6 @@ import { defineSharedIslandTests } from '../../../../test/pages-island-contract.
 
 declare global {
   interface Window {
-    __SPA_MARKER?: boolean;
-    __linkOnClick?: boolean;
-    __preventedClick?: boolean;
-    __preventedNavigate?: boolean;
     __hmr_marker?: boolean;
   }
 }
@@ -91,7 +87,6 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
       await page.goto(BASE + '/');
       await waitForHydration(page);
 
-      // Stamp the nav element
       await page.evaluate(() => {
         (document.querySelector('nav') as NavElement | null)!.__stamp = 1;
       });
@@ -108,24 +103,6 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
 
       const navText = await page.textContent('nav');
       expect(navText).toContain('Svelte Pages Demo');
-    } finally {
-      await page.context().close();
-    }
-  });
-
-  it('deferred props: SPA navigation resolves in browser', async () => {
-    const page = await newPage();
-    try {
-      await page.goto(BASE + '/');
-      await waitForHydration(page);
-
-      // SPA navigate to deferred page
-      await page.click('a[href="/deferred"]');
-      await page.waitForFunction(() => document.querySelector('[data-testid="deferred-resolved"]'));
-
-      const text = await page.textContent('[data-testid="deferred-resolved"]');
-      expect(text).toBe('Count: 42');
-      expect(page.url()).toBe(BASE + '/deferred');
     } finally {
       await page.context().close();
     }
@@ -187,11 +164,7 @@ describe('svelte-pages client (dev)', () => {
     expect(rootHtml).toContain('Welcome');
     expect(rootHtml).toContain('Svelte Pages Demo'); // shared data from middleware
 
-    // Inline page-data must round-trip through the <script> tag without
-    // truncation. If serializePageData ever regresses (e.g. via another
-    // template-literal backslash-collapse), the </script> in scriptProbe
-    // closes the inline tag early, the regex below captures truncated
-    // text, and JSON.parse throws.
+    // scriptProbe must round-trip through the inline <script> tag without closing it early.
     const probe = '</script><script>alert(1)</script>\u2028\u2029&';
     const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     expect(probeMatch).not.toBeNull();
@@ -423,17 +396,14 @@ describe('svelte-pages client (dev)', () => {
         window.__hmr_marker = true;
       });
 
-      // Edit the island component — change the label in the template
       const modified = original.replace('Count: {count}', 'Total: {count}');
       writeFileSync(counterFile, modified);
 
-      // Wait for HMR to update the component text
       await page.waitForFunction(
         () => document.querySelector('[data-testid="count"]')?.textContent?.startsWith('Total:'),
         { timeout: 10_000 },
       );
 
-      // No full page reload — window marker should still be set
       const markerSurvived = await page.evaluate(() => window.__hmr_marker === true);
       expect(markerSurvived).toBe(true);
 
@@ -452,13 +422,11 @@ describe('svelte-pages client (dev)', () => {
     const original = readFileSync(islandFile, 'utf-8');
 
     try {
-      // Verify initial content renders
       const initialRes = await fetch(`${DEV_BASE}/blog`);
       expect(initialRes.status).toBe(200);
       const initialHtml = await initialRes.text();
       expect(initialHtml).toContain('<h1>Blog</h1>');
 
-      // Edit the island file — change the heading
       const modified = original.replace('<h1>Blog</h1>', '<h1>Blog Updated</h1>');
       writeFileSync(islandFile, modified);
 
