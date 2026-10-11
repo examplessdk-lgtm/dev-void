@@ -7,10 +7,10 @@ import {
 } from '@void/platform';
 import { resolvePlatformRuntime } from '@void/platform/installer';
 import { afterEach, expect, it, vi } from 'vite-plus/test';
+import { verifyPlatformDeploymentExecutionDrain } from '../../src/cli/platform-installer-health.ts';
 import {
   installPlatform,
   createPlatformInstallationSecrets,
-  verifyPlatformDeploymentExecutionDrain,
 } from '../../src/cli/platform-installer.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { writeInstallationManifest } from '../../src/cli/platform-registry.ts';

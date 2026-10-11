@@ -15,6 +15,7 @@ import {
   type CloudflareNamedResource,
   type CloudflareWorkerCustomDomainOrigin,
 } from './platform-cloudflare.ts';
+import { writePlatformTiming } from './platform-installer-process.ts';
 import {
   type PlatformInstallationSecrets,
   type PlatformInstallerDependencies,
@@ -183,11 +184,7 @@ export async function writeRemoteInstallationCheckpointWithoutDatabase(
 ): Promise<void> {
   const startedAt = performance.now();
   await databaseLock?.checkpoint?.(manifest);
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] database checkpoint ${(performance.now() - startedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming('database checkpoint', startedAt);
   const routing = manifest.resources.find(
     (resource) =>
       resource.key === 'routing-kv' &&
@@ -205,11 +202,7 @@ export async function writeRemoteInstallationCheckpointWithoutDatabase(
     REMOTE_INSTALLATION_MANIFEST_KEY,
     JSON.stringify(manifest),
   );
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] remote checkpoint ${(performance.now() - kvStartedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming('remote checkpoint', kvStartedAt);
 }
 
 export function recordProvisionIntent(

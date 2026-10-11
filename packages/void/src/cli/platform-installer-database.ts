@@ -13,9 +13,9 @@ import type {
 } from '@void/platform/installer';
 import { platformDatabaseSchemaDigest } from '@void/platform/installer';
 import { join } from 'pathslash';
+import type { Pool } from 'pg';
 import { verifyPlatformDatabaseArtifacts } from './platform-installer-runtime.ts';
 import {
-  type PlatformInstallationSecrets,
   type PlatformInstallerDependencies,
   type PlatformDatabaseLifecycleLock,
   type InstallationCheckpointWriter,
@@ -42,7 +42,6 @@ export async function preparePlatformDatabaseSchema(
   sourcePlatformVersion: string | null,
   hadPriorWorkers: boolean,
   plan: PlatformInstallPlan,
-  secrets: PlatformInstallationSecrets,
   dependencies: PlatformInstallerDependencies,
   releaseDatabaseLock: PlatformDatabaseLifecycleLock,
   now: () => string,
@@ -70,25 +69,18 @@ export async function preparePlatformDatabaseSchema(
     await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
   } else if (!manifest.steps.some((step) => step.key === migrationStep)) {
     dependencies.onProgress?.('Applying platform database migrations');
-    const legacyMigrationStep = `database-migrations:${runtime.database.journalSha256}`;
-    if (dependencies.migrateDatabase) {
-      if (!manifest.steps.some((step) => step.key === legacyMigrationStep)) {
-        await dependencies.migrateDatabase(secrets.databaseUrl, join(runtimeDirectory, 'drizzle'));
-      }
-    } else {
-      const prepareDatabase = dependencies.prepareDatabase ?? releaseDatabaseLock.prepareDatabase;
-      if (!prepareDatabase) {
-        throw new Error(
-          'platform: The PostgreSQL lifecycle lock cannot verify or migrate this database.',
-        );
-      }
-      await prepareDatabase(
-        runtimeDirectory,
-        runtime.database,
-        sourcePlatformVersion,
-        hadPriorWorkers,
+    const prepareDatabase = dependencies.prepareDatabase ?? releaseDatabaseLock.prepareDatabase;
+    if (!prepareDatabase) {
+      throw new Error(
+        'platform: The PostgreSQL lifecycle lock cannot verify or migrate this database.',
       );
     }
+    await prepareDatabase(
+      runtimeDirectory,
+      runtime.database,
+      sourcePlatformVersion,
+      hadPriorWorkers,
+    );
     manifest = recordInstallationStep(
       manifest,
       {
@@ -182,20 +174,32 @@ export function platformDatabaseClientUrl(databaseUrl: string): string {
   return url.toString();
 }
 
-export async function claimPlatformDatabase(
+async function withPlatformDatabasePool<T>(
+  databaseUrl: string,
+  use: (pool: Pool) => Promise<T>,
+): Promise<T> {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
+  try {
+    return await use(pool);
+  } finally {
+    await pool.end();
+  }
+}
+
+export function claimPlatformDatabase(
   databaseUrl: string,
   installationId: string,
   ownershipNonce: string,
 ): Promise<void> {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
-  const client = await pool.connect();
-  try {
-    await claimPlatformDatabaseConnection(client, installationId, ownershipNonce);
-  } finally {
-    client.release();
-    await pool.end();
-  }
+  return withPlatformDatabasePool(databaseUrl, async (pool) => {
+    const client = await pool.connect();
+    try {
+      await claimPlatformDatabaseConnection(client, installationId, ownershipNonce);
+    } finally {
+      client.release();
+    }
+  });
 }
 
 export async function acquirePlatformDatabaseLifecycleLock(
@@ -235,64 +239,66 @@ export async function readPlatformDatabaseLifecycleManifest(
   installationId: string,
   ownershipNonce: string,
 ): Promise<PlatformInstallationManifest | null> {
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
-  try {
-    return await readPlatformDatabaseLifecycleManifestConnection(
-      pool,
-      installationId,
-      ownershipNonce,
-    );
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('platform:')) {
-      throw error;
+  return withPlatformDatabasePool(databaseUrl, async (pool) => {
+    try {
+      return await readPlatformDatabaseLifecycleManifestConnection(
+        pool,
+        installationId,
+        ownershipNonce,
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('platform:')) {
+        throw error;
+      }
+      throw new Error(
+        `platform: Could not read the PostgreSQL lifecycle checkpoint: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    throw new Error(
-      `platform: Could not read the PostgreSQL lifecycle checkpoint: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  } finally {
-    await pool.end();
-  }
+  });
 }
 
-/** Read project Zero Trust state for a plan, which holds no lifecycle lock. */
-export async function readPlatformProjectZeroTrustState(
+/** Plans hold no lifecycle lock, so verify the installation claim before reading. */
+async function readClaimedPlatformDatabase<T>(
+  databaseUrl: string,
+  installationId: string,
+  ownershipNonce: string,
+  read: (pool: Pool) => Promise<T>,
+): Promise<T> {
+  if (!databaseUrl) {
+    throw new Error('the installation database URL is not recorded on this machine');
+  }
+  return withPlatformDatabasePool(databaseUrl, async (pool) => {
+    await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
+    return read(pool);
+  });
+}
+
+/** Read project Zero Trust state for a plan. */
+export function readPlatformProjectZeroTrustState(
   databaseUrl: string,
   installationId: string,
   ownershipNonce: string,
 ): Promise<PlatformProjectZeroTrustState> {
-  if (!databaseUrl) {
-    throw new Error('the installation database URL is not recorded on this machine');
-  }
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
-  try {
-    // Throws unless the database is claimed by this installation.
-    await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
-    return await readPlatformProjectZeroTrustStateConnection(pool);
-  } finally {
-    await pool.end();
-  }
+  return readClaimedPlatformDatabase(
+    databaseUrl,
+    installationId,
+    ownershipNonce,
+    readPlatformProjectZeroTrustStateConnection,
+  );
 }
 
-/** Read project slugs for a --purge-resources plan, which holds no lifecycle lock. */
-export async function readPlatformProjectSlugs(
+/** Read project slugs for a --purge-resources plan. */
+export function readPlatformProjectSlugs(
   databaseUrl: string,
   installationId: string,
   ownershipNonce: string,
 ): Promise<ReadonlyArray<string>> {
-  if (!databaseUrl) {
-    throw new Error('the installation database URL is not recorded on this machine');
-  }
-  const { Pool } = await import('pg');
-  const pool = new Pool({ connectionString: platformDatabaseClientUrl(databaseUrl), max: 1 });
-  try {
-    // Throws unless the database is claimed by this installation.
-    await readPlatformDatabaseLifecycleManifestConnection(pool, installationId, ownershipNonce);
-    return await readPlatformProjectSlugsConnection(pool);
-  } finally {
-    await pool.end();
-  }
+  return readClaimedPlatformDatabase(
+    databaseUrl,
+    installationId,
+    ownershipNonce,
+    readPlatformProjectSlugsConnection,
+  );
 }
 
 type DatabaseClaimConnection = Readonly<{
@@ -332,14 +338,9 @@ export async function inspectPlatformDatabaseStateConnection(
     );
   }
   let previousTimestamp = -1;
-  const seenTimestamps = new Set<number>();
   for (const [position, row] of result.rows.entries()) {
     const timestampMillis = databaseInteger(row.created_at);
-    if (
-      timestampMillis === null ||
-      timestampMillis <= previousTimestamp ||
-      seenTimestamps.has(timestampMillis)
-    ) {
+    if (timestampMillis === null || timestampMillis <= previousTimestamp) {
       throw new Error(
         'platform: PostgreSQL migration history is duplicated or not strictly ordered.',
       );
@@ -351,7 +352,6 @@ export async function inspectPlatformDatabaseStateConnection(
       );
     }
     previousTimestamp = timestampMillis;
-    seenTimestamps.add(timestampMillis);
   }
   const applied = database.migrations.slice(0, result.rows.length);
   return {
@@ -626,17 +626,26 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
   return release;
 }
 
-export async function preparePlatformSandboxDrainConnection(
+type SandboxDrainCheckpointRow = {
+  admission_protocol: number;
+  completed_at: string | null;
+  cursor: unknown;
+  generation: string;
+  phase: string;
+  started_at: string;
+  state: string;
+  updated_at: string;
+};
+
+/** Null when the sandbox-drain checkpoint table does not exist. */
+async function readSandboxDrainTable(
   client: DatabaseClaimConnection,
-  requiredAdmissionProtocol: 0 | 2 | 3 = 0,
-): Promise<PlatformSandboxDrainPreparation> {
+): Promise<{ hasAdmissionColumn: boolean } | null> {
   const relation = await client.query<{ relation: string | null }>(
     `SELECT to_regclass('"sandbox_drain_checkpoints"')::text AS "relation"`,
   );
   if (!relation.rows[0]?.relation) {
-    throw new Error(
-      'platform: Runtime declares sandbox-drain safety but its database checkpoint table is missing.',
-    );
+    return null;
   }
   const admissionColumn = await client.query<{ present: boolean }>(
     `SELECT EXISTS(
@@ -647,40 +656,33 @@ export async function preparePlatformSandboxDrainConnection(
          AND column_name = 'admission_protocol'
      ) AS "present"`,
   );
-  const hasAdmissionColumn = admissionColumn.rows[0]?.present === true;
+  return { hasAdmissionColumn: admissionColumn.rows[0]?.present === true };
+}
+
+export async function preparePlatformSandboxDrainConnection(
+  client: DatabaseClaimConnection,
+  requiredAdmissionProtocol: 0 | 2 | 3 = 0,
+): Promise<PlatformSandboxDrainPreparation> {
+  const table = await readSandboxDrainTable(client);
+  if (!table) {
+    throw new Error(
+      'platform: Runtime declares sandbox-drain safety but its database checkpoint table is missing.',
+    );
+  }
+  const { hasAdmissionColumn } = table;
   if (requiredAdmissionProtocol >= 2 && !hasAdmissionColumn) {
     throw new Error(
       'platform: The runtime database does not include the sandbox deployment admission barrier.',
     );
   }
   const readCheckpoint = () =>
-    client.query<{
-      admission_protocol: number;
-      completed_at: string | null;
-      cursor: unknown;
-      generation: string;
-      phase: string;
-      started_at: string;
-      state: string;
-      updated_at: string;
-    }>(
+    client.query<SandboxDrainCheckpointRow>(
       `SELECT ${hasAdmissionColumn ? '"admission_protocol"' : '0 AS "admission_protocol"'}, "generation", "state", "phase", "cursor", "started_at", "updated_at", "completed_at"
        FROM "sandbox_drain_checkpoints"
        WHERE "singleton" = true`,
     );
   const classify = (
-    row:
-      | {
-          admission_protocol: number;
-          completed_at: string | null;
-          cursor: unknown;
-          generation: string;
-          phase: string;
-          started_at: string;
-          state: string;
-          updated_at: string;
-        }
-      | undefined,
+    row: SandboxDrainCheckpointRow | undefined,
   ): PlatformSandboxDrainPreparation | null => {
     if (!row) {
       return null;
@@ -831,7 +833,7 @@ export async function preparePlatformSandboxDrainConnection(
   return preparedState;
 }
 
-export async function verifyPlatformDatabaseConnection(
+async function verifyPlatformDatabaseConnection(
   client: DatabaseClaimConnection,
   runtimeDirectory: string,
   database: PlatformRuntimeDatabaseManifest,
@@ -848,22 +850,11 @@ export async function verifyPlatformDatabaseConnection(
 async function readRequiredPlatformSafetyProtocols(
   client: DatabaseClaimConnection,
 ): Promise<Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>> {
-  const relation = await client.query<{ relation: string | null }>(
-    `SELECT to_regclass('"sandbox_drain_checkpoints"')::text AS "relation"`,
-  );
-  if (!relation.rows[0]?.relation) {
+  const table = await readSandboxDrainTable(client);
+  if (!table) {
     return { sandboxDrain: 0 };
   }
-  const admissionColumn = await client.query<{ present: boolean }>(
-    `SELECT EXISTS(
-       SELECT 1
-       FROM information_schema.columns
-       WHERE table_schema = 'public'
-         AND table_name = 'sandbox_drain_checkpoints'
-         AND column_name = 'admission_protocol'
-     ) AS "present"`,
-  );
-  if (admissionColumn.rows[0]?.present === true) {
+  if (table.hasAdmissionColumn) {
     const admission = await client.query<{ required: boolean; protocol: number | null }>(
       `SELECT EXISTS(
          SELECT 1
@@ -895,10 +886,7 @@ export function assertPlatformRuntimeSafety(
   installed: Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>,
   database: Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }> = { sandboxDrain: 0 },
 ): void {
-  const requiredSandboxDrain = Math.max(
-    installed?.sandboxDrain ?? 0,
-    database?.sandboxDrain ?? 0,
-  ) as 0 | 1 | 2;
+  const requiredSandboxDrain = Math.max(installed.sandboxDrain, database.sandboxDrain);
   if ((runtime.safetyProtocols?.sandboxDrain ?? 0) < requiredSandboxDrain) {
     throw new Error(
       `platform: Void Platform ${runtime.platformVersion} predates the required sandbox-drain safety protocol. Refusing to upload or activate a runtime that could reopen sandbox creation after drain.`,

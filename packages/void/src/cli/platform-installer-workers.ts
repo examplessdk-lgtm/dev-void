@@ -33,7 +33,6 @@ import {
   type CloudflareWorkerCustomDomainOrigin,
 } from './platform-cloudflare.ts';
 import {
-  interruptedWorkerCutover,
   readTriggerConfigFromObject,
   recordWorkerCutoverResolution,
   recordWorkerTrafficState,
@@ -55,6 +54,7 @@ import {
   readPlatformWorkerVersionSnapshot,
   readPlatformWorkerOwnershipMarker,
   classifyPlatformWorkerDeploymentLineage,
+  PlatformWorkerOwnershipError,
   samePlatformWorkerTraffic,
 } from './platform-installer-inspection.ts';
 import {
@@ -76,6 +76,7 @@ import {
 import {
   type PlatformInstallerDependencies,
   type InstallationCheckpointWriter,
+  type InterruptedWorkerCutover,
   type PlatformWorkerKey,
   type PlatformWorkerDeploymentOptions,
   type PlatformWorkerRollback,
@@ -91,25 +92,43 @@ import { resolveCloudflareOperationArgv } from './preset.ts';
 // Restore staged Workers before starting a new generation, then replan any
 // newly created Worker that recovery had to retain.
 export async function recoverInterruptedPlatformWorkerCutover(
-  manifest: PlatformInstallationManifest,
-  interruptedCutover: NonNullable<ReturnType<typeof interruptedWorkerCutover>> | null,
-  workerActions: ReadonlyArray<PlatformInstallPlanAction>,
-  configs: ReturnType<typeof createPlatformWorkerConfigs>,
-  previousConfigs: ReturnType<typeof createPlatformWorkerConfigs>,
-  plan: PlatformInstallPlan,
-  dependencies: PlatformInstallerDependencies,
-  ids: Record<string, string>,
-  zoneId: string,
-  previousPublicEndpoints: boolean,
-  hasEmailGatewayArtifact: boolean,
-  runPinnedPlatformWrangler: typeof runPlatformWrangler,
-  now: () => string,
-  writeRemoteInstallationCheckpoint: InstallationCheckpointWriter,
-  onManifestChange: (manifest: PlatformInstallationManifest) => void,
+  input: Readonly<{
+    manifest: PlatformInstallationManifest;
+    interruptedCutover: InterruptedWorkerCutover | null;
+    workerActions: ReadonlyArray<PlatformInstallPlanAction>;
+    configs: ReturnType<typeof createPlatformWorkerConfigs>;
+    previousConfigs: ReturnType<typeof createPlatformWorkerConfigs>;
+    plan: PlatformInstallPlan;
+    dependencies: PlatformInstallerDependencies;
+    ids: Record<string, string>;
+    zoneId: string;
+    previousPublicEndpoints: boolean;
+    hasEmailGatewayArtifact: boolean;
+    runPinnedPlatformWrangler: typeof runPlatformWrangler;
+    now: () => string;
+    writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
+    onManifestChange: (manifest: PlatformInstallationManifest) => void;
+  }>,
 ): Promise<{
   manifest: PlatformInstallationManifest;
   workerActions: ReadonlyArray<PlatformInstallPlanAction>;
 }> {
+  const {
+    interruptedCutover,
+    configs,
+    previousConfigs,
+    plan,
+    dependencies,
+    ids,
+    zoneId,
+    previousPublicEndpoints,
+    hasEmailGatewayArtifact,
+    runPinnedPlatformWrangler,
+    now,
+    writeRemoteInstallationCheckpoint,
+    onManifestChange,
+  } = input;
+  let { manifest, workerActions } = input;
   if (interruptedCutover) {
     const recoveryOrder: ReadonlyArray<PlatformWorkerKey> = [
       'dispatch',
@@ -165,7 +184,7 @@ export async function recoverInterruptedPlatformWorkerCutover(
             inspectNewPlatformWorker(
               dependencies.client,
               plan.account.id,
-              manifest!,
+              manifest,
               key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`,
               snapshot.workerName,
             ),
@@ -176,7 +195,7 @@ export async function recoverInterruptedPlatformWorkerCutover(
             await dependencies.client.removeRoutes(
               plan.account.id,
               zoneId,
-              trackedPlatformWorkerTraffic(manifest!, new Set([snapshot.workerName])),
+              trackedPlatformWorkerTraffic(manifest, new Set([snapshot.workerName])),
             );
           },
           publishCustomDomains: (workerName, origins) =>
@@ -212,17 +231,14 @@ export async function recoverInterruptedPlatformWorkerCutover(
       previousPublicEndpoints && interruptedCutover.unsafeTraffic.size === 0,
       now(),
     );
-    let retainedNewWorker = false;
-    for (const [, snapshot] of interruptedCutover.staged) {
-      if (snapshot.previousVersionId !== null) {
-        continue;
-      }
-      retainedNewWorker = true;
-    }
     onManifestChange(manifest);
     writeInstallationManifest(manifest);
     await writeRemoteInstallationCheckpoint(dependencies.client, plan, manifest);
-    if (retainedNewWorker) {
+    if (
+      [...interruptedCutover.staged.values()].some(
+        (snapshot) => snapshot.previousVersionId === null,
+      )
+    ) {
       if (!dependencies.replanWorkers) {
         throw new Error(
           'platform: Recovering retained Workers requires a fresh Cloudflare installation plan.',
@@ -607,11 +623,7 @@ export async function deployPlatformWorker(
           candidate = { deploymentId: after[0]!.id, snapshot };
         }
       } catch (error) {
-        if (
-          error instanceof Error &&
-          (error.message.includes('changed concurrently') ||
-            error.message.includes('does not belong to this installation'))
-        ) {
+        if (error instanceof PlatformWorkerOwnershipError) {
           throw error;
         }
         // A read error is not evidence of equality; use the established upload path.
@@ -740,7 +752,7 @@ export async function deployPlatformWorker(
     }
     if (!uploadedVersionId) {
       throw new Error(
-        `platform: Wrangler uploaded ${workerName} without reporting its immutable version id.`,
+        `platform: Cloudflare uploaded ${workerName} without reporting its immutable version id.`,
       );
     }
     await options.onStaged(previousVersionId, uploadedVersionId, previousTriggers);
@@ -895,7 +907,7 @@ export async function deployPlatformWorker(
               activatedDeploymentId,
               activatedVersionId: rollbackVersionId,
               config,
-              nextTriggers: readTriggerConfigFromObject(nextTraffic.wranglerConfig),
+              nextTriggers,
               previousConfig: options.previousConfig,
               previousCustomDomains: previousTraffic.customDomains,
               previousDeployment,
@@ -1182,14 +1194,9 @@ export async function restorePlatformWorkerDeployment(input: {
   }
 }
 
-export {
-  runPlatformWrangler,
-  runPlatformWranglerAtApiBase,
-  withConditionalPlatformWorkerCreate,
-} from './platform-installer-process.ts';
+export { runPlatformWrangler, runPlatformWranglerAtApiBase } from './platform-installer-process.ts';
 
 export {
-  withoutCompletedPlatformWorkerMigrations,
   nextTrafficGeneration,
   nextWorkerCutoverGeneration,
   recordWorkerSecretUpdateState,
@@ -1200,14 +1207,6 @@ export {
   verifyPlatformWorkerCutoverVersions,
   recordWorkerTrafficState,
   stablePublicEndpointState,
-  resolvePlatformPreviousTriggerConfig,
 } from './platform-installer-cutover.ts';
 
-export {
-  readPlatformWorkerDeployments,
-  classifyPlatformWorkerDeploymentLineage,
-  inspectNewPlatformWorker,
-  readActivePlatformWorkerSnapshot,
-} from './platform-installer-inspection.ts';
-
-export { errorMessage } from './platform-installer-errors.ts';
+export { inspectNewPlatformWorker } from './platform-installer-inspection.ts';

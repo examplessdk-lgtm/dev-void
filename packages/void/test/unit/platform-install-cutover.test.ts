@@ -8,11 +8,11 @@ import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import { PLATFORM_DISABLED_KEY, type PlatformInstallationManifest } from '@void/platform';
 import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test';
 import { hyperdriveOriginFromConnectionString } from '../../src/cli/platform-cloudflare.ts';
+import { verifyPlatformWorkerCutoverVersions } from '../../src/cli/platform-installer-cutover.ts';
+import { type PlatformInstallerDependencies } from '../../src/cli/platform-installer-types.ts';
 import {
   createPlatformInstallationSecrets,
   installPlatform,
-  verifyPlatformWorkerCutoverVersions,
-  type PlatformInstallerDependencies,
 } from '../../src/cli/platform-installer.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { listInstallationManifests } from '../../src/cli/platform-registry.ts';
@@ -367,7 +367,11 @@ async function runInstall(
       }),
     claimDatabase: async () => {},
     client: cloud.client,
-    migrateDatabase: async () => {},
+    prepareDatabase: async () => ({
+      appliedMigrations: 0,
+      previousSchemaDigest: '',
+      schemaDigest: '',
+    }),
     revalidateBeforeWorkerDeploy: async () => {},
     verifyHealth: async () => {},
     ...(options.bootstrapEmail ? { bootstrapEmail: options.bootstrapEmail } : {}),

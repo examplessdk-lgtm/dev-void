@@ -5,7 +5,7 @@ import {
 import type { PlatformRuntime, PlatformRuntimeMigration } from '@void/platform/installer';
 import { describe, expect, it } from 'vite-plus/test';
 import { parsePlatformInstallationManifest } from '../../../platform/src/installation.ts';
-import { assertPlatformRuntimeSafety } from '../../src/cli/platform-installer.ts';
+import { assertPlatformRuntimeSafety } from '../../src/cli/platform-installer-database.ts';
 import { assertPlatformRollbackCompatibility } from '../../src/cli/platform-management.ts';
 
 const firstMigration: PlatformRuntimeMigration = {

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vite-plus/test';
 import {
   inspectPlatformDatabaseStateConnection,
   preparePlatformDatabaseConnection,
-} from '../../src/cli/platform-installer.ts';
+} from '../../src/cli/platform-installer-database.ts';
 
 let database: PGlite | undefined;
 

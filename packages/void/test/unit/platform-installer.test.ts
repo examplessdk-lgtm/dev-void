@@ -36,43 +36,57 @@ import {
   PlatformCloudflareClient,
 } from '../../src/cli/platform-cloudflare.ts';
 import {
+  resolvePlatformPreviousTriggerConfig,
+  stablePublicEndpointState,
+  withoutCompletedPlatformWorkerMigrations,
+} from '../../src/cli/platform-installer-cutover.ts';
+import {
   acquirePlatformDatabaseLifecycleLockConnection,
-  apiWorkerSecrets,
-  bootstrapPlatformSharedEmail,
-  platformWorkerSecretPayload,
-  platformWorkerUploadFingerprint,
-  assertRequiredPlatformSecrets,
-  classifyPlatformWorkerDeploymentLineage,
-  installPlatform as installPlatformImplementation,
   claimPlatformDatabaseConnection,
-  createPlatformHealthProbeToken,
-  createPlatformInstallationSecrets,
-  inspectNewPlatformWorker,
   inspectPlatformDatabaseStateConnection,
+  preparePlatformDatabaseConnection,
+  preparePlatformSandboxDrainConnection,
+  readPlatformDatabaseLifecycleManifestConnection,
+} from '../../src/cli/platform-installer-database.ts';
+import {
+  bootstrapPlatformSharedEmail,
+  verifyPlatformHealth,
+  verifyPlatformSandboxDrain,
+} from '../../src/cli/platform-installer-health.ts';
+import {
+  classifyPlatformWorkerDeploymentLineage,
+  inspectNewPlatformWorker,
+  readActivePlatformWorkerSnapshot,
+  readPlatformWorkerDeployments,
+} from '../../src/cli/platform-installer-inspection.ts';
+import { withConditionalPlatformWorkerCreate } from '../../src/cli/platform-installer-process.ts';
+import {
   inventoryUnmanagedPlatformWorkerTraffic,
   isolatePlatformWorkerCustomDomains,
   mergePlatformWorkerTrafficConfig,
-  mergePlatformLiveAuthenticationDeployment,
   mergePreservedTriggerRoutes,
-  preparePlatformDatabaseConnection,
-  preparePlatformSandboxDrainConnection,
-  PlatformWorkerRecoveryIncompleteError,
   r2BucketConfigHash,
-  readPlatformWorkerDeployments,
-  readPlatformDatabaseLifecycleManifestConnection,
-  readActivePlatformWorkerSnapshot,
-  recoverFailedPlatformWorkerDeployment,
   retainReplacedInstallationResource,
-  resolvePlatformPreviousTriggerConfig,
-  resolveBootstrapGitHubId,
-  restorePlatformWorkerDeployment,
-  stablePublicEndpointState,
-  verifyPlatformHealth,
-  verifyPlatformSandboxDrain,
-  withConditionalPlatformWorkerCreate,
-  withoutCompletedPlatformWorkerMigrations,
   withoutPlatformWorkerTrafficAttachments,
-} from '../../src/cli/platform-installer.ts';
+} from '../../src/cli/platform-installer-resources.ts';
+import {
+  apiWorkerSecrets,
+  assertRequiredPlatformSecrets,
+  createPlatformHealthProbeToken,
+  createPlatformInstallationSecrets,
+  platformWorkerSecretPayload,
+  resolveBootstrapGitHubId,
+} from '../../src/cli/platform-installer-secrets.ts';
+import {
+  mergePlatformLiveAuthenticationDeployment,
+  PlatformWorkerRecoveryIncompleteError,
+} from '../../src/cli/platform-installer-types.ts';
+import {
+  platformWorkerUploadFingerprint,
+  recoverFailedPlatformWorkerDeployment,
+  restorePlatformWorkerDeployment,
+} from '../../src/cli/platform-installer-workers.ts';
+import { installPlatform as installPlatformImplementation } from '../../src/cli/platform-installer.ts';
 import { resolvePlatformInstallDatabaseUrl } from '../../src/cli/platform-lifecycle.ts';
 import {
   createPlatformInstallPlan,
@@ -126,6 +140,10 @@ function installPlatform(
 const TEST_PLATFORM_JWT_SECRET = 'test-only-platform-jwt-secret-material';
 const TEST_PLATFORM_EMAIL_SIGNING_SECRET = 'test-only-email-signing-secret-material';
 const TEST_PLATFORM_PROJECT_SECRET_KEY = Buffer.alloc(32, 5).toString('base64');
+
+async function prepareDatabase() {
+  return { appliedMigrations: 0, previousSchemaDigest: '', schemaDigest: '' };
+}
 
 function sandboxDrainPreparation(state: 'complete' | 'pending') {
   return {
@@ -431,7 +449,7 @@ describe('platform installer', () => {
           }
           deployed.push({ config, secrets: payload });
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
         initializeAuthentication: async (url, id, token, json) => {
@@ -578,8 +596,9 @@ describe('platform installer', () => {
           }
           configs.push(config);
         },
-        migrateDatabase: async () => {
+        prepareDatabase: async () => {
           expect(progress.at(-1)).toBe('Applying platform database migrations');
+          return prepareDatabase();
         },
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async (
@@ -701,7 +720,7 @@ describe('platform installer', () => {
           putR2Object: async () => {},
         },
         deployWorker: async () => {},
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
       },
@@ -784,7 +803,7 @@ describe('platform installer', () => {
         deployWorker: async (config) => async () => {
           rollbacks.push(String(config.name));
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
       }),
@@ -4513,7 +4532,7 @@ describe('platform installer', () => {
                 apiSecrets = secrets;
               }
             },
-            migrateDatabase: async () => {},
+            prepareDatabase,
             prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
             revalidateBeforeWorkerDeploy: async () => {},
             verifyHealth: async () => {
@@ -4689,7 +4708,7 @@ describe('platform installer', () => {
             expect(disabled).toBe(true);
             throw new Error('Worker upload response was lost');
           },
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
         },
       ),
@@ -4868,7 +4887,7 @@ describe('platform installer', () => {
         deployWorker: async () => {
           throw new Error('stop after resources');
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
       };
 
@@ -5125,7 +5144,7 @@ describe('platform installer', () => {
           deployWorker: async () => {
             throw new Error('stop after resources');
           },
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
         },
       ),
@@ -5218,7 +5237,7 @@ describe('platform installer', () => {
               'platform: Automatic recovery for proxy was incomplete.',
             );
           },
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
         },
       ),
@@ -5435,7 +5454,7 @@ describe('platform installer', () => {
       bootstrapEmail: async () => {
         throw new Error('email bootstrap must stay disabled');
       },
-      migrateDatabase: async () => {},
+      prepareDatabase,
       revalidateBeforeWorkerDeploy: async () => {},
       verifyHealth: async () => {},
     });
@@ -5599,7 +5618,7 @@ describe('platform installer', () => {
             interruptedProtocolEvents.push(`rollback:${name}`);
           };
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
           throw new Error('health must not run before every Worker is staged');
@@ -5669,7 +5688,7 @@ describe('platform installer', () => {
           emptyCoreUpgradeConfigs.push(config);
           resumedSecretPayloads.push(secretPayload);
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         prepareSandboxDrain: async () => sandboxDrainPreparation('complete'),
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
@@ -5728,7 +5747,7 @@ describe('platform installer', () => {
         deployWorker: async (_config, secretPayload) => {
           nextRotationPayloads.push(secretPayload);
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
       },
@@ -5775,7 +5794,7 @@ describe('platform installer', () => {
             (config.vars as Record<string, unknown> | undefined)?.PLATFORM_TRAFFIC_STATE,
           );
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
@@ -5840,7 +5859,7 @@ describe('platform installer', () => {
             )}`,
           );
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         prepareSandboxDrain: async () =>
           sandboxDrainPreparation(resumedDrainPreparations++ === 0 ? 'pending' : 'complete'),
         revalidateBeforeWorkerDeploy: async () => {},
@@ -5895,7 +5914,7 @@ describe('platform installer', () => {
         claimDatabase,
         client: upgradeClient,
         deployWorker: async () => async () => {},
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async (_api, _id, _proxy, _domain, platformVersion) => {
           verifiedTargetVersion = platformVersion;
@@ -5918,8 +5937,9 @@ describe('platform installer', () => {
         expect(secretPayload).toBeNull();
         deployed.push(String(config.name));
       },
-      migrateDatabase: async () => {
+      prepareDatabase: async () => {
         migrations++;
+        return prepareDatabase();
       },
       revalidateBeforeWorkerDeploy: async () => {},
       runtime: resolvePlatformRuntime(getPlatformRuntimeDirectory()),
@@ -6069,7 +6089,7 @@ describe('platform installer', () => {
       deployWorker: async (config) => {
         downgradeEvents.push(`deploy:${String(config.name)}`);
       },
-      migrateDatabase: async () => {},
+      prepareDatabase,
       revalidateBeforeWorkerDeploy: async () => {},
       runtime: {
         ...currentRuntime,
@@ -6127,7 +6147,7 @@ describe('platform installer', () => {
         repairedWorkerConfigs.push(config);
         repairEvents.push(`deploy:${String(config.name)}`);
       },
-      migrateDatabase: async () => {},
+      prepareDatabase,
       revalidateBeforeWorkerDeploy: async () => {},
       verifyHealth: async () => {
         repairEvents.push('health');
@@ -6167,7 +6187,7 @@ describe('platform installer', () => {
       claimDatabase,
       client: upgradeClient,
       deployWorker: async () => {},
-      migrateDatabase: async () => {},
+      prepareDatabase,
       prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
       revalidateBeforeWorkerDeploy: async () => {},
       verifySandboxDrain: async () => {
@@ -6202,7 +6222,7 @@ describe('platform installer', () => {
         deployWorker: async (config) => {
           legacyEnableConfigs.push(config);
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         prepareSandboxDrain: async () => sandboxDrainPreparation('pending'),
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {},
@@ -6234,8 +6254,9 @@ describe('platform installer', () => {
         deployWorker: async (config) => {
           disabledConfigs.push(config);
         },
-        migrateDatabase: async () => {
+        prepareDatabase: async () => {
           migrations++;
+          return prepareDatabase();
         },
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
@@ -6262,7 +6283,7 @@ describe('platform installer', () => {
           interrupted = true;
           throw new Error('interrupted deployment');
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
       }),
     ).rejects.toThrow('interrupted deployment');
@@ -6283,7 +6304,7 @@ describe('platform installer', () => {
         deployWorker: async (config) => {
           resumedConfigs.push(config);
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
       },
     );
@@ -6321,7 +6342,7 @@ describe('platform installer', () => {
             },
           },
           deployWorker: async () => async () => {},
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
           verifyHealth: async () => {},
           verifyWorkerCutover: async () => {
@@ -6367,7 +6388,7 @@ describe('platform installer', () => {
               }
             };
           },
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
           verifyHealth: async () => {},
         },
@@ -6388,7 +6409,7 @@ describe('platform installer', () => {
       deployWorker: async (_config, _secrets, previousConfig) => {
         retryPreviousConfigs.push(previousConfig);
       },
-      migrateDatabase: async () => {},
+      prepareDatabase,
       revalidateBeforeWorkerDeploy: async () => {},
       verifyHealth: async () => {},
     });
@@ -6430,7 +6451,7 @@ describe('platform installer', () => {
         deployWorker: async (config) => {
           enabledConfigs.push(config);
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
           enabledHealthChecks++;
@@ -6486,7 +6507,7 @@ describe('platform installer', () => {
             }
             return async () => {};
           },
-          migrateDatabase: async () => {},
+          prepareDatabase,
           revalidateBeforeWorkerDeploy: async () => {},
         },
       ),
@@ -6502,7 +6523,7 @@ describe('platform installer', () => {
         deployWorker: async () => {
           replacedWorkerDeploys++;
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {
           throw new Error('platform: Worker ownership marker changed after planning.');
         },
@@ -6528,7 +6549,7 @@ describe('platform installer', () => {
             partialEvents.push(`rollback:${name}`);
           };
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
       }),
     ).rejects.toThrow('third Worker failed');
@@ -6553,7 +6574,7 @@ describe('platform installer', () => {
             healthEvents.push(`rollback:${name}`);
           };
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
           throw new Error('health check failed');
@@ -6580,7 +6601,7 @@ describe('platform installer', () => {
             throw new Error('rollback unavailable');
           }
         },
-        migrateDatabase: async () => {},
+        prepareDatabase,
         revalidateBeforeWorkerDeploy: async () => {},
         verifyHealth: async () => {
           throw new Error('health check failed');
@@ -6649,7 +6670,7 @@ describe('platform installer', () => {
       deployWorker: async (config) => {
         recoveryEvents.push(`deploy:${String(config.name)}`);
       },
-      migrateDatabase: async () => {},
+      prepareDatabase,
       recoverWorkerCutover: async (snapshot) => {
         recoveryEvents.push(
           `recover:${snapshot.key}:${snapshot.previousVersionId}:${snapshot.stagedVersionId}:${snapshot.preserveCustomDomains}`,
@@ -6706,7 +6727,7 @@ describe('platform installer', () => {
         },
       },
       deployWorker: async () => {},
-      migrateDatabase: async () => {},
+      prepareDatabase,
       recoverWorkerCutover: async () => {},
       replanWorkers: async (manifest) => {
         replannedResourceState = manifest.resources.find(

@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from 'vite-plus/test';
-import { runPlatformWranglerAtApiBase } from '../../src/cli/platform-installer-process.ts';
-import { runPlatformWrangler } from '../../src/cli/platform-installer.ts';
+import {
+  runPlatformWrangler,
+  runPlatformWranglerAtApiBase,
+} from '../../src/cli/platform-installer-process.ts';
 
 const mocks = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock('../../src/cli/provision.ts', async (importOriginal) => ({

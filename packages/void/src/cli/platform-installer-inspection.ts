@@ -15,6 +15,8 @@ import {
   type WorkerInspectionClient,
 } from './platform-installer-types.ts';
 
+export class PlatformWorkerOwnershipError extends Error {}
+
 export async function readActivePlatformWorkerVersion(
   configPath: string,
   accountId: string,
@@ -36,7 +38,7 @@ export async function readActivePlatformWorkerVersion(
     typeof value !== 'object' ||
     !Array.isArray((value as { versions?: unknown }).versions)
   ) {
-    throw new Error(`platform: Wrangler returned malformed deployment status for ${workerName}.`);
+    throw new Error(`platform: Cloudflare returned malformed deployment status for ${workerName}.`);
   }
   const active = (value as { versions: Array<unknown> }).versions.filter(
     (entry) =>
@@ -70,7 +72,9 @@ export async function readPlatformWorkerDeployments(
   }
   const value = result.data;
   if (!Array.isArray(value)) {
-    throw new Error(`platform: Wrangler returned malformed deployment history for ${workerName}.`);
+    throw new Error(
+      `platform: Cloudflare returned malformed deployment history for ${workerName}.`,
+    );
   }
   return value
     .map((entry, index) => {
@@ -82,13 +86,13 @@ export async function readPlatformWorkerDeployments(
         !Array.isArray((entry as { versions?: unknown }).versions)
       ) {
         throw new Error(
-          `platform: Wrangler returned malformed deployment history for ${workerName}.`,
+          `platform: Cloudflare returned malformed deployment history for ${workerName}.`,
         );
       }
       const createdAt = Date.parse((entry as { created_on: string }).created_on);
       if (!Number.isFinite(createdAt)) {
         throw new Error(
-          `platform: Wrangler returned malformed deployment history for ${workerName}.`,
+          `platform: Cloudflare returned malformed deployment history for ${workerName}.`,
         );
       }
       const versions = (entry as { versions: Array<unknown> }).versions.map((version) => {
@@ -99,7 +103,7 @@ export async function readPlatformWorkerDeployments(
           !Number.isFinite(Number((version as { percentage?: unknown }).percentage))
         ) {
           throw new Error(
-            `platform: Wrangler returned malformed deployment history for ${workerName}.`,
+            `platform: Cloudflare returned malformed deployment history for ${workerName}.`,
           );
         }
         return {
@@ -275,7 +279,7 @@ export async function readPlatformWorkerVersionSnapshot(
   assertCleanPlatformWrangler(result, `read rollback metadata for ${workerName}`);
   const value = result.data;
   if (!value || typeof value !== 'object') {
-    throw new Error(`platform: Wrangler returned malformed version metadata for ${workerName}.`);
+    throw new Error(`platform: Cloudflare returned malformed version metadata for ${workerName}.`);
   }
   const resources = (value as { resources?: unknown }).resources;
   const bindings =
@@ -296,7 +300,7 @@ export async function readPlatformWorkerVersionSnapshot(
     ownershipBindings.length !== 1 ||
     (ownershipBindings[0] as { text: string }).text !== expectedOwnershipMarker
   ) {
-    throw new Error(
+    throw new PlatformWorkerOwnershipError(
       `platform: Active Worker version ${versionId} for ${workerName} does not belong to this installation.`,
     );
   }

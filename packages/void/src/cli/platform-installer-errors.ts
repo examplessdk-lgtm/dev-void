@@ -14,7 +14,7 @@ export function assertCleanPlatformWrangler(
       stderr: result.stderr.trim() || result.errors?.map((error) => error.message).join('\n') || '',
     });
     throw new Error(
-      `platform: Wrangler failed to ${operation} (${diagnostic || `exit ${result.status}`}).`,
+      `platform: Cloudflare failed to ${operation} (${diagnostic || `exit ${result.status}`}).`,
     );
   }
 }

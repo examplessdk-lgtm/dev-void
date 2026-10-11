@@ -203,7 +203,7 @@ export type InstallerClient = Pick<
       | 'publishWorkerRoutesSafely'
       | 'removeRoutes'
     >
-  > & { readonly apiBaseUrl?: string };
+  >;
 
 export type WorkerInspectionClient = Partial<
   Pick<PlatformCloudflareClient, 'getWorkerPlainTextBindings' | 'listWorkerNames'>
@@ -261,7 +261,6 @@ export type PlatformInstallerDependencies = Readonly<{
     secrets: Record<string, string> | null,
     previousConfig: Record<string, unknown>,
   ) => Promise<PlatformWorkerRollback | void>;
-  migrateDatabase?: (databaseUrl: string, migrationsFolder: string) => Promise<void>;
   now?: () => string;
   onProgress?: (message: string) => void;
   operation?: PlatformLifecycleOperation['action'];

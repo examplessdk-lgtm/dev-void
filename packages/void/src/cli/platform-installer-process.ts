@@ -37,6 +37,15 @@ export async function runPlatformWrangler(
 
 const PLATFORM_WRANGLER_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Opt-in maintainer diagnostics, enabled with VOID_PLATFORM_TIMINGS=1. */
+export function writePlatformTiming(label: string, startedAt: number): void {
+  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
+    process.stderr.write(
+      `[platform timing] ${label} ${(performance.now() - startedAt).toFixed(0)} ms\n`,
+    );
+  }
+}
+
 export async function runPlatformWranglerAtApiBase(
   operation: CloudflareOperation,
   accountId: string,
@@ -58,11 +67,7 @@ export async function runPlatformWranglerAtApiBase(
     apiToken,
     cwd,
   });
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] Cloudflare ${operation.type} ${(performance.now() - startedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming(`Cloudflare ${operation.type}`, startedAt);
   const stdout = result.stdout || '';
   const stderr = result.stderr || '';
   // Void owns progress output. Successful commands may still emit banners and
@@ -271,12 +276,12 @@ export async function withConditionalPlatformWorkerCreate<T>(
   }
   if (proxy.state.rejectedMutation) {
     throw new Error(
-      `platform: Wrangler attempted unexpected mutation ${proxy.state.rejectedMutation} while conditionally creating new Worker ${workerName}; the mutation was blocked.`,
+      `platform: The Cloudflare upload attempted unexpected mutation ${proxy.state.rejectedMutation} while conditionally creating new Worker ${workerName}; the mutation was blocked.`,
     );
   }
   if (!proxy.state.attempted || !proxy.state.forwarded) {
     throw new Error(
-      `platform: Wrangler did not use the guarded create endpoint for new Worker ${workerName}; refusing an unverified deployment.`,
+      `platform: The Cloudflare upload did not use the guarded create endpoint for new Worker ${workerName}; refusing an unverified deployment.`,
     );
   }
   if (proxy.state.conflictStatus !== null) {

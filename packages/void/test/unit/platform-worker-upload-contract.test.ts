@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { toSlash } from 'pathslash';
 import { expect, it } from 'vite-plus/test';
 import { encodeCloudflareOperation } from '../../src/cli/cloudflare-process.ts';
-import { withConditionalPlatformWorkerCreate } from '../../src/cli/platform-installer.ts';
+import { withConditionalPlatformWorkerCreate } from '../../src/cli/platform-installer-process.ts';
 import { resolveCloudflareOperationArgv } from '../../src/cli/preset.ts';
 
 it('accepts the bundled uploader query while preserving the create-only precondition', async () => {

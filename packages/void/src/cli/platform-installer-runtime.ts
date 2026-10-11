@@ -6,8 +6,8 @@ import type {
 } from '@void/platform/installer';
 import { resolvePlatformRuntime } from '@void/platform/installer';
 import { join } from 'pathslash';
+import { errorMessage } from './platform-installer-errors.ts';
 import { hash } from './platform-installer-resources.ts';
-import { errorMessage } from './platform-installer-workers.ts';
 
 export function loadPlatformRuntime(customRuntimeDirectory: string): PlatformRuntime {
   const runtime = resolvePlatformRuntime(customRuntimeDirectory || undefined);

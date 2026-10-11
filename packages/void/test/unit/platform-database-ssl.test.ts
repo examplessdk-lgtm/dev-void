@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { claimPlatformDatabase } from '../../src/cli/platform-installer-database.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
-  claimPlatformDatabase,
   platformDatabaseClientUrl,
   readPlatformDatabaseLifecycleManifest,
 } from '../../src/cli/platform-installer.ts';

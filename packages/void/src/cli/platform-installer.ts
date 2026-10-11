@@ -5,7 +5,6 @@ import {
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
   recordInstallationStep,
-  setInstallationDesiredState,
   setInstallationEndpoints,
   platformDashboardUrl,
   transitionInstallation,
@@ -34,6 +33,7 @@ import {
   claimPlatformDatabase,
   assertPlatformRuntimeSafety,
 } from './platform-installer-database.ts';
+import { errorMessage } from './platform-installer-errors.ts';
 import { verifyPlatformHealth, verifyPlatformSandboxDrain } from './platform-installer-health.ts';
 import {
   requireId,
@@ -61,7 +61,6 @@ import {
   type PlatformHealthCheckContext,
 } from './platform-installer-types.ts';
 import {
-  errorMessage,
   recordWorkerCutoverResolution,
   recordWorkerTrafficState,
   runPlatformWrangler,
@@ -91,20 +90,37 @@ export { PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY as REMOTE_INSTALLATION_MANIFE
 // follow while the database lifecycle lock is still held by the caller.
 async function recoverFailedPlatformInstallation(
   error: unknown,
-  manifest: PlatformInstallationManifest,
-  plan: PlatformInstallPlan,
-  dependencies: PlatformInstallerDependencies,
-  workerTrafficGuarded: boolean,
-  workerDeploymentCommitted: boolean,
-  workerRollbacks: Array<PlatformWorkerRollback>,
-  authenticationEnforcementActive: boolean,
-  authenticationProtocolTransition: boolean,
-  workerCutoverGeneration: number,
-  previousPublicEndpoints: boolean,
-  operationStarted: boolean,
-  now: () => string,
-  writeRemoteInstallationCheckpoint: InstallationCheckpointWriter,
+  state: Readonly<{
+    manifest: PlatformInstallationManifest;
+    plan: PlatformInstallPlan;
+    dependencies: PlatformInstallerDependencies;
+    workerTrafficGuarded: boolean;
+    workerDeploymentCommitted: boolean;
+    workerRollbacks: Array<PlatformWorkerRollback>;
+    authenticationEnforcementActive: boolean;
+    authenticationProtocolTransition: boolean;
+    workerCutoverGeneration: number;
+    previousPublicEndpoints: boolean;
+    operationStarted: boolean;
+    now: () => string;
+    writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
+  }>,
 ): Promise<unknown> {
+  const {
+    plan,
+    dependencies,
+    workerTrafficGuarded,
+    workerDeploymentCommitted,
+    workerRollbacks,
+    authenticationEnforcementActive,
+    authenticationProtocolTransition,
+    workerCutoverGeneration,
+    previousPublicEndpoints,
+    operationStarted,
+    now,
+    writeRemoteInstallationCheckpoint,
+  } = state;
+  let { manifest } = state;
   let failure: unknown = error;
   const currentWorkerRecoveryIncomplete = error instanceof PlatformWorkerRecoveryIncompleteError;
   if (workerTrafficGuarded) {
@@ -125,6 +141,8 @@ async function recoverFailedPlatformInstallation(
       );
     }
   }
+  // With authentication enforced mid-transition, traffic stays closed and a
+  // retry resumes toward a fully compatible Worker set instead of rolling back.
   if (
     !workerDeploymentCommitted &&
     workerRollbacks.length > 0 &&
@@ -138,7 +156,6 @@ async function recoverFailedPlatformInstallation(
         rollbackFailures.push(errorMessage(rollbackError));
       }
     }
-    workerRollbacks = [];
     if (rollbackFailures.length > 0 || currentWorkerRecoveryIncomplete) {
       failure = new Error(
         rollbackFailures.length > 0
@@ -161,9 +178,6 @@ async function recoverFailedPlatformInstallation(
       );
       writeInstallationManifest(manifest);
     }
-  } else if (authenticationEnforcementActive && authenticationProtocolTransition) {
-    // Traffic remains closed and retry resumes toward a fully compatible Worker set.
-    workerRollbacks = [];
   }
   if (manifest.status !== 'uninstalled' && (manifest.status !== 'failed' || operationStarted)) {
     try {
@@ -184,6 +198,10 @@ async function recoverFailedPlatformInstallation(
   return failure;
 }
 
+function workersDevUrl(plan: PlatformInstallPlan, workerName: string): string {
+  return `https://${workerName}.${plan.workersSubdomain}.workers.dev`;
+}
+
 export async function installPlatform(
   plan: PlatformInstallPlan,
   secrets: PlatformInstallationSecrets,
@@ -197,36 +215,20 @@ export async function installPlatform(
   }
   const now = dependencies.now ?? (() => new Date().toISOString());
   const cloudflareApiBaseUrl = dependencies.client.apiBaseUrl ?? resolvePinnedApiBaseUrl();
-  const runPinnedPlatformWrangler: typeof runPlatformWrangler = (
-    operation,
-    accountId,
-    cwd,
-    capture,
-  ) =>
-    runPlatformWranglerAtApiBase(
-      operation,
-      accountId,
-      cwd,
-      capture,
-      cloudflareApiBaseUrl,
-      false,
-      dependencies.operatorApiToken,
-    );
-  const runParallelPinnedPlatformWrangler: typeof runPlatformWrangler = (
-    operation,
-    accountId,
-    cwd,
-    capture,
-  ) =>
-    runPlatformWranglerAtApiBase(
-      operation,
-      accountId,
-      cwd,
-      capture,
-      cloudflareApiBaseUrl,
-      true,
-      dependencies.operatorApiToken,
-    );
+  const pinnedPlatformWrangler =
+    (parallelWorkerUpload: boolean): typeof runPlatformWrangler =>
+    (operation, accountId, cwd, capture) =>
+      runPlatformWranglerAtApiBase(
+        operation,
+        accountId,
+        cwd,
+        capture,
+        cloudflareApiBaseUrl,
+        parallelWorkerUpload,
+        dependencies.operatorApiToken,
+      );
+  const runPinnedPlatformWrangler = pinnedPlatformWrangler(false);
+  const runParallelPinnedPlatformWrangler = pinnedPlatformWrangler(true);
   const resolvedRuntime = dependencies.runtime ?? resolvePlatformRuntime();
   const runtimeDirectory = resolvedRuntime.directory;
   const runtime = resolvedRuntime.manifest;
@@ -323,8 +325,8 @@ export async function installPlatform(
   let workerDeploymentCommitted = false;
   let workerTrafficGuarded = false;
   let authenticationEnforcementActive = false;
-  let manifest = existing;
-  if (!manifest) {
+  let manifest: PlatformInstallationManifest;
+  if (!existing) {
     const createdAt = now();
     manifest = createPlatformInstallationManifest({
       account: plan.account,
@@ -336,8 +338,10 @@ export async function installPlatform(
     });
     manifest = transitionInstallation(manifest, 'planned', now());
     writeInstallationManifest(manifest);
-  } else if (manifest.status === 'uninstalled') {
-    throw new Error(`platform: Installation ${manifest.id} has already been uninstalled.`);
+  } else if (existing.status === 'uninstalled') {
+    throw new Error(`platform: Installation ${existing.id} has already been uninstalled.`);
+  } else {
+    manifest = existing;
   }
   const explicitWorkerSecretUpdates = sanitizeWorkerSecretUpdates(secrets.workerSecretUpdates);
   const hasExplicitWorkerSecretUpdates = Object.keys(explicitWorkerSecretUpdates).length > 0;
@@ -360,10 +364,6 @@ export async function installPlatform(
           },
         }
       : resumedWorkerSecretUpdateIntent;
-  if (preserveDisabled && manifest.desiredState !== 'disabled') {
-    manifest = setInstallationDesiredState(manifest, 'disabled', now());
-    writeInstallationManifest(manifest);
-  }
   assertRequiredPlatformSecrets(plan, manifest, secrets, !!dependencies.prepareAuthentication);
   if (hyperdriveAction?.action === 'create') {
     // Reject a URL Hyperdrive can never accept before the claim binds it to this installation.
@@ -434,17 +434,10 @@ export async function installPlatform(
     await releaseDatabaseLock();
     throw error;
   }
-  if (
-    workerSecretUpdateIntent &&
-    !hasExplicitWorkerSecretUpdates &&
-    platformWorkerSecretUpdateIntentState(manifest, workerSecretUpdateIntent) !== 'active'
-  ) {
-    workerSecretUpdateIntent = null;
-  }
   // Progress is checkpointed under the same lifecycle lock as mutations. Do not
   // update it from parallel Worker upload callbacks.
   const checkpointOperation = async (phase: PlatformLifecycleOperation['phase']) => {
-    if (!manifest?.operation) {
+    if (!manifest.operation) {
       return;
     }
     const updatedAt = now();
@@ -492,27 +485,27 @@ export async function installPlatform(
     await prepareInstallationAuthentication({
       releaseDatabaseLock,
       get authenticationEnforcementActive() {
-        return authenticationEnforcementActive!;
+        return authenticationEnforcementActive;
       },
       set authenticationEnforcementActive(value: boolean) {
         authenticationEnforcementActive = value;
       },
       runtime,
       get plan() {
-        return plan!;
+        return plan;
       },
       set plan(value: PlatformInstallPlan) {
         plan = value;
       },
       authenticationProtocolTransition,
       get manifest() {
-        return manifest!;
+        return manifest;
       },
       set manifest(value: PlatformInstallationManifest) {
         manifest = value;
       },
       get secrets() {
-        return secrets!;
+        return secrets;
       },
       set secrets(value: PlatformInstallationSecrets) {
         secrets = value;
@@ -524,10 +517,10 @@ export async function installPlatform(
 
     // Establish the durable installation checkpoint before creating any
     // resource that may need to be reconciled or removed after interruption.
-    const provisionInstallationServicesResult = await provisionInstallationServices({
+    const provisioned = await provisionInstallationServices({
       plan,
       get manifest() {
-        return manifest!;
+        return manifest;
       },
       set manifest(value: PlatformInstallationManifest) {
         manifest = value;
@@ -544,17 +537,18 @@ export async function installPlatform(
       sourcePlatformVersion,
       hadPriorWorkers,
     });
-    if ('waitingForDns' in provisionInstallationServicesResult) {
-      return provisionInstallationServicesResult;
+    if ('waitingForDns' in provisioned) {
+      return provisioned;
     }
-    const zone = provisionInstallationServicesResult.zone;
-    const zoneId = provisionInstallationServicesResult.zoneId;
-    const targetSandboxDrainProtocol =
-      provisionInstallationServicesResult.targetSandboxDrainProtocol;
-    const prepareSandboxDrain = provisionInstallationServicesResult.prepareSandboxDrain;
-    const sandboxDrainState = provisionInstallationServicesResult.sandboxDrainState;
-    const ids = provisionInstallationServicesResult.ids;
-    const entrypoints = provisionInstallationServicesResult.entrypoints;
+    const {
+      zone,
+      zoneId,
+      targetSandboxDrainProtocol,
+      prepareSandboxDrain,
+      sandboxDrainState,
+      ids,
+      entrypoints,
+    } = provisioned;
     let interruptedCutover = interruptedWorkerCutover(manifest);
     if (interruptedCutover && authenticationProtocolTransition && authenticationEnforcementActive) {
       manifest = recordWorkerCutoverResolution(
@@ -629,7 +623,7 @@ export async function installPlatform(
       ownershipNonce: manifest.ownershipNonce,
       platformVersion: version,
       proxyUrl: plan.proxyUrl,
-      emailGatewayUrl: `https://${plan.deployment.resources.emailGatewayWorker}.${plan.workersSubdomain}.workers.dev`,
+      emailGatewayUrl: workersDevUrl(plan, plan.deployment.resources.emailGatewayWorker),
       resources: {
         hyperdrive: requireId(ids, 'hyperdrive'),
         isrCacheKv: requireId(ids, 'isr-cache-kv'),
@@ -674,7 +668,7 @@ export async function installPlatform(
         action.kind === 'worker' &&
         (hasEmailGatewayArtifact || action.key !== 'email-gateway-worker'),
     );
-    ({ manifest, workerActions } = await recoverInterruptedPlatformWorkerCutover(
+    ({ manifest, workerActions } = await recoverInterruptedPlatformWorkerCutover({
       manifest,
       interruptedCutover,
       workerActions,
@@ -689,10 +683,10 @@ export async function installPlatform(
       runPinnedPlatformWrangler,
       now,
       writeRemoteInstallationCheckpoint,
-      (next) => {
+      onManifestChange: (next) => {
         manifest = next;
       },
-    ));
+    }));
     workerCutoverGeneration = nextWorkerCutoverGeneration(manifest);
     if (workerSecretUpdateIntent) {
       manifest = recordWorkerSecretUpdateState(
@@ -724,7 +718,7 @@ export async function installPlatform(
       plan,
       zoneId,
       get manifest() {
-        return manifest!;
+        return manifest;
       },
       set manifest(value: PlatformInstallationManifest) {
         manifest = value;
@@ -835,7 +829,7 @@ export async function installPlatform(
             authenticationStep =
               'authentication-initialized:v1:' + hash(replacement.authenticationSetupJson);
             writePendingInstallationSecrets(
-              manifest!,
+              manifest,
               secretCheckpoint(secrets, workerSecretUpdateIntent),
             );
           },
@@ -902,7 +896,7 @@ export async function installPlatform(
     dependencies.onProgress?.('Verifying platform health');
     const emailGatewayUrl =
       hasEmailGatewayArtifact && plan.deployment.capabilities.email
-        ? `https://${plan.deployment.resources.emailGatewayWorker}.${plan.workersSubdomain}.workers.dev`
+        ? workersDevUrl(plan, plan.deployment.resources.emailGatewayWorker)
         : undefined;
     if (plan.deployment.authentication.accessProtection) {
       ensurePlatformAccessToken(plan.apiUrl, false, true);
@@ -930,7 +924,7 @@ export async function installPlatform(
       createPlatformHealthProbeToken(manifest.ownershipNonce),
       undefined,
       !plan.deployment.application.zoneName
-        ? `https://${plan.deployment.resources.dispatchWorker}.${plan.workersSubdomain}.workers.dev`
+        ? workersDevUrl(plan, plan.deployment.resources.dispatchWorker)
         : undefined,
       healthCheckContext,
     );
@@ -981,13 +975,13 @@ export async function installPlatform(
       requiresStagedCommit,
       authenticationCutoverCommitted,
       get manifest() {
-        return manifest!;
+        return manifest;
       },
       set manifest(value: PlatformInstallationManifest) {
         manifest = value;
       },
       get workerCutoverGeneration() {
-        return workerCutoverGeneration!;
+        return workerCutoverGeneration;
       },
       set workerCutoverGeneration(value: number) {
         workerCutoverGeneration = value;
@@ -997,13 +991,13 @@ export async function installPlatform(
       dependencies,
       plan,
       get workerRollbacks() {
-        return workerRollbacks!;
+        return workerRollbacks;
       },
       set workerRollbacks(value: Array<PlatformWorkerRollback>) {
         workerRollbacks = value;
       },
       get workerSecretUpdateIntent() {
-        return workerSecretUpdateIntent!;
+        return workerSecretUpdateIntent;
       },
       set workerSecretUpdateIntent(value: PlatformWorkerSecretUpdateIntent | null) {
         workerSecretUpdateIntent = value;
@@ -1021,7 +1015,7 @@ export async function installPlatform(
       runPinnedPlatformWrangler,
       shouldBootstrapSharedEmail,
       get workerDeploymentCommitted() {
-        return workerDeploymentCommitted!;
+        return workerDeploymentCommitted;
       },
       set workerDeploymentCommitted(value: boolean) {
         workerDeploymentCommitted = value;
@@ -1052,8 +1046,7 @@ export async function installPlatform(
       zoneNameServers: zone?.nameServers ?? [],
     };
   } catch (error) {
-    throw await recoverFailedPlatformInstallation(
-      error,
+    throw await recoverFailedPlatformInstallation(error, {
       manifest,
       plan,
       dependencies,
@@ -1067,90 +1060,31 @@ export async function installPlatform(
       operationStarted,
       now,
       writeRemoteInstallationCheckpoint,
-    );
+    });
   } finally {
     await releaseDatabaseLock();
   }
 }
 
-export {
-  type PlatformInstallationSecrets,
-  type PlatformDatabaseLifecycleLock,
-  mergePlatformLiveAuthenticationDeployment,
-  type PlatformDatabaseState,
-  type PlatformSandboxDrainPreparation,
-  type PlatformDatabaseMigrationResult,
-  PlatformWorkerRecoveryIncompleteError,
-  type PlatformInstallerDependencies,
-  type PlatformInstallationResult,
-  type PlatformWorkerDeployment,
-  type PlatformHealthCheckContext,
-} from './platform-installer-types.ts';
+export { type PlatformDatabaseLifecycleLock } from './platform-installer-types.ts';
 
 export {
   createPlatformInstallationSecrets,
-  apiWorkerSecrets,
-  platformWorkerSecretPayload,
   resolveBootstrapGitHubId,
-  assertRequiredPlatformSecrets,
   createPlatformHealthProbeToken,
 } from './platform-installer-secrets.ts';
 
-export {
-  recordResource,
-  r2BucketConfigHash,
-  retainReplacedInstallationResource,
-  inventoryUnmanagedPlatformWorkerTraffic,
-  mergePlatformWorkerTrafficConfig,
-  mergePreservedTriggerRoutes,
-  isolatePlatformWorkerCustomDomains,
-  withoutPlatformWorkerTrafficAttachments,
-} from './platform-installer-resources.ts';
+export { recordResource } from './platform-installer-resources.ts';
 
 export {
   platformDatabaseClientUrl,
-  claimPlatformDatabase,
   acquirePlatformDatabaseLifecycleLock,
+  acquirePlatformDatabaseLifecycleLockConnection,
   readPlatformDatabaseLifecycleManifest,
   readPlatformProjectSlugs,
   readPlatformProjectZeroTrustState,
-  inspectPlatformDatabaseStateConnection,
-  preparePlatformDatabaseConnection,
-  readPlatformDatabaseLifecycleManifestConnection,
-  acquirePlatformDatabaseLifecycleLockConnection,
-  preparePlatformSandboxDrainConnection,
-  verifyPlatformDatabaseConnection,
-  assertPlatformRuntimeSafety,
-  claimPlatformDatabaseConnection,
 } from './platform-installer-database.ts';
 
-export {
-  platformWorkerUploadFingerprint,
-  deployPlatformWorker,
-  recoverFailedPlatformWorkerDeployment,
-  runPlatformWrangler,
-  withConditionalPlatformWorkerCreate,
-  readPlatformWorkerDeployments,
-  restorePlatformWorkerDeployment,
-  classifyPlatformWorkerDeploymentLineage,
-  inspectNewPlatformWorker,
-  readActivePlatformWorkerSnapshot,
-  withoutCompletedPlatformWorkerMigrations,
-  verifyPlatformWorkerCutoverVersions,
-  stablePublicEndpointState,
-  resolvePlatformPreviousTriggerConfig,
-} from './platform-installer-workers.ts';
+export { loadPlatformRuntime } from './platform-installer-runtime.ts';
 
-export {
-  loadPlatformRuntime,
-  verifyRuntimeArtifacts,
-  verifyPlatformDatabaseArtifacts,
-} from './platform-installer-runtime.ts';
-
-export {
-  PlatformAccessBlockedError,
-  verifyPlatformHealth,
-  verifyPlatformSandboxDrain,
-  verifyPlatformDeploymentExecutionDrain,
-  bootstrapPlatformSharedEmail,
-} from './platform-installer-health.ts';
+export { PlatformAccessBlockedError } from './platform-installer-health.ts';

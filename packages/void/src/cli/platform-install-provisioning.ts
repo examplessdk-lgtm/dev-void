@@ -185,7 +185,6 @@ export async function provisionInstallationServices(input: {
     sourcePlatformVersion,
     hadPriorWorkers,
     plan,
-    secrets,
     dependencies,
     releaseDatabaseLock,
     now,
