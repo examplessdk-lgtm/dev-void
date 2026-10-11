@@ -33,6 +33,10 @@ export type ResolvedDatabase = {
 };
 
 type ResolveDatabase = (env: VoidAuthEnv) => Promise<ResolvedDatabase>;
+type ApplyMigrations = (
+  env: VoidAuthEnv,
+  migrationSchema: VoidAuthMigrationSchema,
+) => Promise<void>;
 type EmailPasswordOptions = NonNullable<BetterAuthOptions['emailAndPassword']>;
 type PasswordOptions = NonNullable<EmailPasswordOptions['password']>;
 type VoidAuthPasswordOptions = PasswordOptions & {
@@ -46,34 +50,29 @@ export type VoidAuthRuntimeApi = {
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }>;
   createVoidAuth(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }>;
   resolveVoidAuthState(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<AuthState | null>;
   runVoidAuthMiddleware(
     c: Context,
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<void>;
   handleVoidAuthRequest(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<Response>;
   runVoidAuthMigrations(
     request: Request,
@@ -400,34 +399,27 @@ function applyCloudflareRateLimitDefaults(options: BetterAuthOptions): BetterAut
   };
 }
 
-export function assertRuntimeDialect(
-  runtime: VoidAuthRuntimeOptions,
-  dialect: VoidAuthDialect,
-): void {
-  if (runtime.dialect !== dialect) {
-    throw new Error(`auth: Runtime mismatch. Expected ${dialect}, received '${runtime.dialect}'.`);
-  }
-}
-
 export function createVoidAuthRuntime(
   dialect: VoidAuthDialect,
   resolveDatabase: ResolveDatabase,
-  runVoidAuthMigrations: VoidAuthRuntimeApi['runVoidAuthMigrations'],
+  applyMigrations: ApplyMigrations,
 ): VoidAuthRuntimeApi {
+  function assertDialect(received: VoidAuthDialect): void {
+    if (received !== dialect) {
+      throw new Error(`auth: Runtime mismatch. Expected ${dialect}, received '${received}'.`);
+    }
+  }
+
   async function resolveVoidAuthOptions(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }> {
-    assertRuntimeDialect(runtime, dialect);
+    assertDialect(runtime.dialect);
 
     const { database, dispose } = databaseOverride
-      ? {
-          database: databaseOverride,
-          dispose: disposeOverride ?? (async () => {}),
-        }
+      ? { database: databaseOverride, async dispose() {} }
       : await resolveDatabase(env);
     const origin = new URL(request.url).origin;
     const emailAndPassword = resolveEmailAndPassword(runtime.providers);
@@ -458,14 +450,12 @@ export function createVoidAuthRuntime(
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }> {
     const { options, dispose } = await resolveVoidAuthOptions(
       request,
       env,
       runtime,
       databaseOverride,
-      disposeOverride,
     );
     return {
       auth: betterAuth(options),
@@ -478,15 +468,8 @@ export function createVoidAuthRuntime(
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<AuthState | null> {
-    const { auth, dispose } = await createVoidAuth(
-      request,
-      env,
-      runtime,
-      databaseOverride,
-      disposeOverride,
-    );
+    const { auth, dispose } = await createVoidAuth(request, env, runtime, databaseOverride);
 
     try {
       const result = await auth.api.getSession({
@@ -506,7 +489,6 @@ export function createVoidAuthRuntime(
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<void> {
     // Skip auth for internal routes (cron, queue, migration, binding proxy).
     // Still set user/session to null so downstream middleware that checks
@@ -522,7 +504,6 @@ export function createVoidAuthRuntime(
       c.env as VoidAuthEnv,
       runtime,
       databaseOverride,
-      disposeOverride,
     );
     c.set('__voidAuth', auth);
 
@@ -558,7 +539,6 @@ export function createVoidAuthRuntime(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
     databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-    disposeOverride?: () => Promise<void>,
   ): Promise<Response> {
     const existingAuth = c.get('__voidAuth') as ReturnType<typeof betterAuth> | undefined;
     if (existingAuth) {
@@ -570,13 +550,26 @@ export function createVoidAuthRuntime(
       c.env as VoidAuthEnv,
       runtime,
       databaseOverride,
-      disposeOverride,
     );
     try {
       return await auth.handler(c.req.raw);
     } finally {
       await dispose();
     }
+  }
+
+  async function runVoidAuthMigrations(
+    _request: Request,
+    env: VoidAuthEnv,
+    runtime: VoidAuthRuntimeOptions,
+    migrationSchema: VoidAuthMigrationSchema,
+  ): Promise<void> {
+    if (!migrationSchema) {
+      throw new Error('auth: Migration schema is unavailable.');
+    }
+    assertDialect(runtime.dialect);
+    assertDialect(migrationSchema.dialect);
+    await applyMigrations(env, migrationSchema);
   }
 
   return {

@@ -286,19 +286,13 @@ async function responseFromResult(result: unknown): Promise<Response> {
   return Response.json(result);
 }
 
-function splitImageOptions(options: unknown): {
-  endpoint: string;
-  runOptions: Record<string, unknown> | undefined;
-} {
+function imageRunOptions(options: unknown): Record<string, unknown> | undefined {
   if (typeof options !== 'object' || options === null) {
-    return { endpoint: 'images/generations', runOptions: undefined };
+    return undefined;
   }
 
-  const { endpoint, ...runOptions } = options as Record<string, unknown>;
-  return {
-    endpoint: typeof endpoint === 'string' ? endpoint : 'images/generations',
-    runOptions: Object.keys(runOptions).length > 0 ? runOptions : undefined,
-  };
+  const { endpoint: _endpoint, ...runOptions } = options as Record<string, unknown>;
+  return Object.keys(runOptions).length > 0 ? runOptions : undefined;
 }
 
 function resolveProviderKey(
@@ -475,9 +469,7 @@ function makeProxyBackend(send: ProxySend, runtimeEnv: RuntimeEnv): AiBackend {
       return readProxyResult(res);
     },
     async image(model, inputs, options) {
-      const { runOptions } = splitImageOptions(options);
-
-      return proxyFetch('run', { model, inputs, options: runOptions });
+      return proxyFetch('run', { model, inputs, options: imageRunOptions(options) });
     },
     async providerFetch(provider, path, init, options) {
       return proxyFetch(
@@ -568,8 +560,7 @@ function makeDirectBackend(
   return {
     run,
     async image(model, inputs, options) {
-      const { runOptions } = splitImageOptions(options);
-      return responseFromResult(await run(model, inputs, runOptions));
+      return responseFromResult(await run(model, inputs, imageRunOptions(options)));
     },
     async providerFetch(provider, path, init, options) {
       if (!gatewayId) {

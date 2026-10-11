@@ -1,10 +1,11 @@
-import { join } from 'pathslash';
 import { readConfig } from '../config.ts';
 import { getMiniflareDatabasePath } from '../migrations/runner.ts';
 import {
   applyMySqlAuthMigrations,
   applyPgAuthMigrations,
   applySqliteAuthMigrations,
+  mysqlMigrationRunner,
+  pgMigrationRunner,
 } from '../runtime/auth-migrations.ts';
 import type { VoidAuthDialect, VoidAuthEnv } from '../runtime/better-auth-shared.ts';
 import { loadLocalEnv } from '../shared/env.ts';
@@ -14,8 +15,8 @@ import { resolveVoidAuthMigrationSchema } from './drizzle.ts';
 export async function runLocalVoidAuthMigrations(
   root: string,
   dialect: VoidAuthDialect,
-  persistRoot: string = join(root, '.void'),
-  databaseId: string = 'local',
+  persistRoot: string,
+  databaseId: string,
   configPath: string | null = findVoidAuthConfig(root),
 ): Promise<void> {
   const authConfig = await loadVoidAuthConfig(configPath);
@@ -61,18 +62,7 @@ export async function runLocalVoidAuthMigrations(
     const { createConnection } = await import('mysql2/promise');
     const connection = await createConnection(connectionString);
     try {
-      await applyMySqlAuthMigrations(
-        {
-          async all<T extends Record<string, unknown>>(sql: string, params?: Array<unknown>) {
-            const [rows] = await connection.query(sql, params);
-            return rows as Array<T>;
-          },
-          async run(sql: string, params?: Array<unknown>) {
-            await connection.query(sql, params);
-          },
-        },
-        migrationSchema,
-      );
+      await applyMySqlAuthMigrations(mysqlMigrationRunner(connection), migrationSchema);
     } finally {
       await connection.end();
     }
@@ -83,18 +73,7 @@ export async function runLocalVoidAuthMigrations(
   const client = new Client({ connectionString });
   await client.connect();
   try {
-    await applyPgAuthMigrations(
-      {
-        async all<T extends Record<string, unknown>>(sql: string, params?: Array<unknown>) {
-          const result = await client.query(sql, params);
-          return result.rows as Array<T>;
-        },
-        async run(sql: string, params?: Array<unknown>) {
-          await client.query(sql, params);
-        },
-      },
-      migrationSchema,
-    );
+    await applyPgAuthMigrations(pgMigrationRunner(client), migrationSchema);
   } finally {
     await client.end();
   }
