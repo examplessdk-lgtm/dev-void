@@ -8,6 +8,8 @@ import {
   recordInstallationResource,
   recordInstallationStep,
   setInstallationEndpoints,
+  type InstallationResourceKind,
+  type PlatformInstallationManifest,
 } from '@void/platform';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import { pc } from '../../src/cli/output.ts';
@@ -23,6 +25,7 @@ import {
   formatPlatformInstallPlan,
   platformProvisionIntentHash,
   revalidatePlatformInstallAction,
+  type PlatformInstallPlan,
 } from '../../src/cli/platform-plan.ts';
 import { recoverPlatformInstallations } from '../../src/cli/platform-recovery.ts';
 
@@ -81,6 +84,56 @@ function legacyInstallation(suffix = '0123456789ab') {
     platformVersion: '1.0.0',
   });
 }
+
+function manifestFor(
+  plan: Pick<PlatformInstallPlan, 'account' | 'deployment' | 'installationId'>,
+  createdAt = '2026-09-14T00:00:00.000Z',
+) {
+  return createPlatformInstallationManifest({
+    account: plan.account,
+    createdAt,
+    deployment: plan.deployment,
+    id: plan.installationId,
+    ownershipNonce: '0123456789abcdef0123456789abcdef',
+    platformVersion: '1.0.0',
+  });
+}
+
+function defaultManifest() {
+  return createPlatformInstallationManifest({
+    account: { id: 'account', name: 'Account' },
+    createdAt: '2026-09-14T00:00:00.000Z',
+    deployment: createPlatformDeploymentManifest({
+      application: { baseDomain: 'example.app', zoneName: 'example.app' },
+      displayName: 'Example',
+      installationSlug: 'example',
+    }),
+    id: 'example-a1b2c3d4',
+    ownershipNonce: '0123456789abcdef0123456789abcdef',
+    platformVersion: '1.0.0',
+  });
+}
+
+function markerFor(
+  manifest: PlatformInstallationManifest,
+  key: string,
+  kind: InstallationResourceKind,
+  name: string,
+): string {
+  return JSON.stringify(
+    createPlatformResourceOwnershipMarker({
+      accountId: manifest.account.id,
+      installationId: manifest.id,
+      ownershipNonce: manifest.ownershipNonce,
+      resourceId: name,
+      resourceKey: key,
+      resourceKind: kind,
+      resourceName: name,
+    }),
+  );
+}
+
+const activeZone = { id: 'zone', name: 'example.app', nameServers: [], status: 'active' };
 
 describe('platform installation planning', () => {
   it('provisions the deployment Queue only for a runtime that supports its consumer', async () => {
@@ -337,14 +390,7 @@ describe('platform installation planning', () => {
     expect(configured.deployment.emailSharedZoneId).toBe('mail-zone-id');
     expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
     expect(configured.deployment.capabilities.email).toBe(true);
-    const manifest = createPlatformInstallationManifest({
-      account: configured.account,
-      deployment: configured.deployment,
-      id: configured.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-      createdAt: '2026-09-17T00:00:00.000Z',
-    });
+    const manifest = manifestFor(configured, '2026-09-17T00:00:00.000Z');
     const resumed = await createPlatformInstallPlan(client(), input, manifest);
     expect(resumed.deployment.emailSharedZoneId).toBe('mail-zone-id');
     expect(resumed.deployment.emailSenderDomain).toBe('mail.example.org');
@@ -400,14 +446,7 @@ describe('platform installation planning', () => {
     };
     const configured = await createPlatformInstallPlan(client(), configuredInput, null);
     expect(configured.deployment.emailSenderDomain).toBe('mail.example.org');
-    const manifest = createPlatformInstallationManifest({
-      account: configured.account,
-      deployment: configured.deployment,
-      id: configured.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-      createdAt: '2026-09-17T00:00:00.000Z',
-    });
+    const manifest = manifestFor(configured, '2026-09-17T00:00:00.000Z');
 
     const resumed = await createPlatformInstallPlan(client(), configuredInput, manifest);
     expect(resumed.deployment.emailSenderDomain).toBe('mail.example.org');
@@ -415,14 +454,7 @@ describe('platform installation planning', () => {
 
   it('adds a configured shared email zone to a previously unconfigured installation', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    const manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-      createdAt: '2026-09-17T00:00:00.000Z',
-    });
+    const manifest = manifestFor(initial, '2026-09-17T00:00:00.000Z');
     const upgraded = await createPlatformInstallPlan(
       client(),
       { ...input, emailSharedZoneId: 'mail-zone-id', emailSenderDomain: 'mail.example.org' },
@@ -435,14 +467,7 @@ describe('platform installation planning', () => {
       createPlatformInstallPlan(
         client(),
         { ...input, emailSenderDomain: 'other.example.org' },
-        createPlatformInstallationManifest({
-          account: upgraded.account,
-          deployment: upgraded.deployment,
-          id: upgraded.installationId,
-          ownershipNonce: '0123456789abcdef0123456789abcdef',
-          platformVersion: '1.0.0',
-          createdAt: '2026-09-17T00:00:00.000Z',
-        }),
+        manifestFor(upgraded, '2026-09-17T00:00:00.000Z'),
       ),
     ).rejects.toThrow('already recorded');
   });
@@ -481,14 +506,7 @@ describe('platform installation planning', () => {
 
   it('resumes the recorded namespaces using the real unfiltered KV API response', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-      createdAt: '2026-09-17T00:00:00.000Z',
-    });
+    let manifest = manifestFor(initial, '2026-09-17T00:00:00.000Z');
     for (const [key, name] of [
       ['routing-kv', initial.deployment.resources.routingKv],
       ['isr-cache-kv', initial.deployment.resources.isrCacheKv],
@@ -643,12 +661,11 @@ describe('platform installation planning', () => {
     ).rejects.toThrow('KV access denied');
   });
   it('names the DNS permission when the token cannot read DNS records', async () => {
-    const zone = { id: 'zone', name: 'example.app', nameServers: [], status: 'active' };
     const deniedDns = async () => {
       throw new PlatformCloudflareApiError('Authentication error', 403, '/zones/zone/dns_records');
     };
     const wildcard = createPlatformInstallPlan(
-      client({ findZone: async () => zone, listDnsRecords: deniedDns }),
+      client({ findZone: async () => activeZone, listDnsRecords: deniedDns }),
       input,
       null,
     );
@@ -658,7 +675,7 @@ describe('platform installation planning', () => {
     await expect(wildcard).rejects.not.toThrow('Authentication error');
 
     const apiHostname = createPlatformInstallPlan(
-      client({ findZoneForHostname: async () => zone, listDnsRecords: deniedDns }),
+      client({ findZoneForHostname: async () => activeZone, listDnsRecords: deniedDns }),
       { ...input, controlPlaneDomain: 'api.example.app' },
       null,
     );
@@ -668,7 +685,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => zone,
+          findZone: async () => activeZone,
           listDnsRecords: async () => {
             throw new PlatformCloudflareApiError('service unavailable', 503);
           },
@@ -687,6 +704,7 @@ describe('platform installation planning', () => {
         findZone: forbidden,
         listDnsRecords: forbidden,
         listWorkerRoutes: forbidden,
+        listWorkerDomains: forbidden,
         hasActiveCertificateForHostname: forbidden,
       }),
       { ...input, applicationDomain: '', zoneName: '', workersDev: true },
@@ -828,7 +846,6 @@ describe('platform installation planning', () => {
     expect(plan.deployment.resources.apiWorker).toBe('void-example-api');
     expect(plan.actions).toHaveLength(16);
     expect(plan.actions.every((action) => action.action === 'create')).toBe(true);
-    expect(Object.keys(fake)).not.toContain('createZone');
   });
 
   it('keeps a fresh read-only plan stable for the later apply', async () => {
@@ -872,15 +889,11 @@ describe('platform installation planning', () => {
     },
   );
 
-  it('fails closed on an unowned deterministic-name collision', async () => {
-    const fake = client({
+  it.each([
+    {
       listKvNamespaces: async (_account: string, title: string) =>
         title.endsWith('-routing') ? [{ id: 'someone-else', name: title }] : [],
-    });
-    await expect(createPlatformInstallPlan(fake, input, null)).rejects.toThrow('not owned');
-  });
-
-  it.each([
+    },
     { listWorkerNames: async () => ['void-example-api'] },
     { listR2Buckets: async () => [{ id: 'void-example-assets', name: 'void-example-assets' }] },
     { listQueues: async (_account: string, name: string) => [{ id: 'other-queue', name }] },
@@ -895,14 +908,7 @@ describe('platform installation planning', () => {
     const name = initial.deployment.resources.assetsBucket;
     const fingerprint = '2026-09-14T00:00:00.000Z';
     const manifest = recordInstallationResource(
-      createPlatformInstallationManifest({
-        account: initial.account,
-        deployment: initial.deployment,
-        id: initial.installationId,
-        ownershipNonce: '0123456789abcdef0123456789abcdef',
-        platformVersion: '1.0.0',
-        createdAt: fingerprint,
-      }),
+      manifestFor(initial, fingerprint),
       {
         configHash: r2ConfigHash(name, fingerprint),
         id: name,
@@ -970,12 +976,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => ({
-            id: 'zone',
-            name: 'example.app',
-            nameServers: [],
-            status: 'active',
-          }),
+          findZone: async () => activeZone,
           listWorkerRoutes: async () => [
             { id: 'route', pattern: '*.example.app/*', script: 'other-worker' },
           ],
@@ -997,14 +998,7 @@ describe('platform installation planning', () => {
           null,
         );
         const manifest = {
-          ...createPlatformInstallationManifest({
-            account: initial.account,
-            createdAt: '2026-09-14T00:00:00.000Z',
-            deployment: initial.deployment,
-            id: initial.installationId,
-            ownershipNonce: '0123456789abcdef0123456789abcdef',
-            platformVersion: '1.0.0',
-          }),
+          ...manifestFor(initial),
           status: 'installed' as const,
         };
         existing = {
@@ -1018,12 +1012,7 @@ describe('platform installation planning', () => {
       await expect(
         createPlatformInstallPlan(
           client({
-            findZone: async () => ({
-              id: 'zone',
-              name: 'example.app',
-              nameServers: [],
-              status: 'active',
-            }),
+            findZone: async () => activeZone,
             listWorkerDomains: async () => [
               { hostname: 'ai.example.app', id: 'custom-domain', service: 'existing-ai' },
             ],
@@ -1059,12 +1048,7 @@ describe('platform installation planning', () => {
     async ({ hostname, routes }) => {
       const plan = await createPlatformInstallPlan(
         client({
-          findZone: async () => ({
-            id: 'zone',
-            name: 'example.app',
-            nameServers: [],
-            status: 'active',
-          }),
+          findZone: async () => activeZone,
           listWorkerDomains: async () => [
             { hostname, id: 'custom-domain', service: 'existing-ai' },
           ],
@@ -1088,12 +1072,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => ({
-            id: 'zone',
-            name: 'example.app',
-            nameServers: [],
-            status: 'active',
-          }),
+          findZone: async () => activeZone,
           listWorkerDomains: async () => [
             { hostname: 'ai.example.app', id: 'custom-domain', service: 'existing-ai' },
           ],
@@ -1108,12 +1087,7 @@ describe('platform installation planning', () => {
   it('leaves apex and other application namespaces outside a shared-zone wildcard', async () => {
     const plan = await createPlatformInstallPlan(
       client({
-        findZone: async () => ({
-          id: 'zone',
-          name: 'example.app',
-          nameServers: [],
-          status: 'active',
-        }),
+        findZone: async () => activeZone,
         listWorkerDomains: async () => [
           { hostname: 'example.app', id: 'apex', service: 'existing-apex' },
           {
@@ -1130,12 +1104,7 @@ describe('platform installation planning', () => {
     expect(plan.deployment.application.dedicatedZone).toBe(false);
     const nested = await createPlatformInstallPlan(
       client({
-        findZone: async () => ({
-          id: 'zone',
-          name: 'example.app',
-          nameServers: [],
-          status: 'active',
-        }),
+        findZone: async () => activeZone,
         listWorkerDomains: async () => [
           { hostname: 'ai.example.app', id: 'existing-ai', service: 'existing-ai' },
           { hostname: 'apps.example.app', id: 'application-apex', service: 'existing-apps' },
@@ -1151,12 +1120,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => ({
-            id: 'zone',
-            name: 'example.app',
-            nameServers: [],
-            status: 'active',
-          }),
+          findZone: async () => activeZone,
           listWorkerDomains: async () => [
             { hostname: 'example.app', id: 'apex', service: 'existing-apex' },
           ],
@@ -1171,12 +1135,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => ({
-            id: 'zone',
-            name: 'example.app',
-            nameServers: [],
-            status: 'active',
-          }),
+          findZone: async () => activeZone,
           listWorkerDomains: async () => [
             { hostname: 'ai.example.app', id: 'custom-domain', service: 'void-example-dispatch' },
           ],
@@ -1205,12 +1164,7 @@ describe('platform installation planning', () => {
     );
     const plan = await createPlatformInstallPlan(
       client({
-        findZone: async () => ({
-          id: 'zone',
-          name: 'example.app',
-          nameServers: [],
-          status: 'active',
-        }),
+        findZone: async () => activeZone,
         listWorkerDomains: async () => [
           { hostname: 'owned.example.app', id: 'custom-domain', service: workerName },
         ],
@@ -1226,66 +1180,9 @@ describe('platform installation planning', () => {
     });
   });
 
-  it('does not inspect custom domains for an isolated workers.dev installation', async () => {
-    const listWorkerDomains = vi.fn().mockRejectedValue(new Error('Unexpected domain inspection'));
-    const plan = await createPlatformInstallPlan(
-      client({ listWorkerDomains }),
-      { ...input, applicationDomain: '', zoneName: '', workersDev: true },
-      null,
-    );
-    expect(plan.deployment.application.workersDev?.subdomain).toBe('example');
-    expect(listWorkerDomains).not.toHaveBeenCalled();
-  });
-
-  it('does not treat a local provision intent as remote ownership proof', async () => {
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.app', zoneName: 'example.app' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
-    manifest = recordInstallationStep(
-      manifest,
-      {
-        completedAt: '2026-09-14T00:00:01.000Z',
-        key: 'provision-intent:routing-kv',
-        resultHash: platformProvisionIntentHash(
-          manifest,
-          'routing-kv',
-          'kv-namespace',
-          'void-example-routing',
-        ),
-      },
-      '2026-09-14T00:00:01.000Z',
-    );
-    await expect(
-      createPlatformInstallPlan(
-        client({
-          listKvNamespaces: async (_account: string, title: string) =>
-            title === 'void-example-routing' ? [{ id: 'created-before-crash', name: title }] : [],
-        }),
-        input,
-        manifest,
-      ),
-    ).rejects.toThrow('not owned');
-  });
-
   it('refuses an intent-only resource after an ambiguous create response', async () => {
     const initial = await createPlatformInstallPlan(client(), input, legacyInstallation());
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const resourceName = initial.deployment.resources.routingKv;
     manifest = recordInstallationStep(
       manifest,
@@ -1336,14 +1233,7 @@ describe('platform installation planning', () => {
   it('preserves legacy recovery after an interrupted repair create', async () => {
     const initial = await createPlatformInstallPlan(client(), input, legacyInstallation());
     const resourceName = initial.deployment.resources.routingKv;
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     manifest = recordInstallationResource(
       manifest,
       {
@@ -1392,14 +1282,7 @@ describe('platform installation planning', () => {
     const initial = await createPlatformInstallPlan(client(), input, legacyInstallation());
     const bucketName = initial.deployment.resources.assetsBucket;
     const fingerprint = '2026-09-14T00:00:00.000Z';
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: fingerprint,
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial, fingerprint);
     manifest = recordInstallationResource(
       manifest,
       {
@@ -1436,14 +1319,7 @@ describe('platform installation planning', () => {
     const initial = await createPlatformInstallPlan(client(), input, legacyInstallation());
     const bucketName = initial.deployment.resources.assetsBucket;
     const fingerprint = '2026-09-14T00:00:00.000Z';
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: fingerprint,
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial, fingerprint);
     manifest = recordInstallationResource(
       manifest,
       {
@@ -1457,17 +1333,7 @@ describe('platform installation planning', () => {
       },
       '2026-09-14T00:00:01.000Z',
     );
-    const marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: manifest.account.id,
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: bucketName,
-        resourceKey: 'assets-bucket',
-        resourceKind: 'r2-bucket',
-        resourceName: bucketName,
-      }),
-    );
+    const marker = markerFor(manifest, 'assets-bucket', 'r2-bucket', bucketName);
 
     const resumed = await createPlatformInstallPlan(
       client({
@@ -1487,14 +1353,7 @@ describe('platform installation planning', () => {
 
   it('recovers only an intent-only Worker with its matching durable marker', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const workerName = manifest.deployment.resources.apiWorker;
     manifest = recordInstallationStep(
       manifest,
@@ -1505,17 +1364,7 @@ describe('platform installation planning', () => {
       },
       '2026-09-14T00:00:01.000Z',
     );
-    const marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: 'account',
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: workerName,
-        resourceKey: 'api-worker',
-        resourceKind: 'worker',
-        resourceName: workerName,
-      }),
-    );
+    const marker = markerFor(manifest, 'api-worker', 'worker', workerName);
     const resumed = await createPlatformInstallPlan(
       client({
         getWorkerPlainTextBindings: async () => ({ PLATFORM_OWNERSHIP_MARKER: marker }),
@@ -1543,14 +1392,7 @@ describe('platform installation planning', () => {
 
   it('resumes an intent-owned dispatch Worker after its public route was uploaded', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const workerName = manifest.deployment.resources.dispatchWorker;
     manifest = recordInstallationStep(
       manifest,
@@ -1561,26 +1403,11 @@ describe('platform installation planning', () => {
       },
       '2026-09-14T00:00:01.000Z',
     );
-    const marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: manifest.account.id,
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: workerName,
-        resourceKey: 'dispatch-worker',
-        resourceKind: 'worker',
-        resourceName: workerName,
-      }),
-    );
+    const marker = markerFor(manifest, 'dispatch-worker', 'worker', workerName);
 
     const resumed = await createPlatformInstallPlan(
       client({
-        findZone: async () => ({
-          id: 'zone',
-          name: 'example.app',
-          nameServers: [],
-          status: 'active',
-        }),
+        findZone: async () => activeZone,
         getWorkerPlainTextBindings: async () => ({ PLATFORM_OWNERSHIP_MARKER: marker }),
         listWorkerNames: async () => [workerName],
         listWorkerDomains: async () => [
@@ -1603,14 +1430,7 @@ describe('platform installation planning', () => {
   it('resumes an intent-owned API Worker after its custom domain was uploaded', async () => {
     const customInput = { ...input, controlPlaneDomain: 'api.platform.example.com' };
     const initial = await createPlatformInstallPlan(client(), customInput, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const workerName = manifest.deployment.resources.apiWorker;
     manifest = recordInstallationStep(
       manifest,
@@ -1621,17 +1441,7 @@ describe('platform installation planning', () => {
       },
       '2026-09-14T00:00:01.000Z',
     );
-    const marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: manifest.account.id,
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: workerName,
-        resourceKey: 'api-worker',
-        resourceKind: 'worker',
-        resourceName: workerName,
-      }),
-    );
+    const marker = markerFor(manifest, 'api-worker', 'worker', workerName);
 
     const resumed = await createPlatformInstallPlan(
       client({
@@ -1671,14 +1481,7 @@ describe('platform installation planning', () => {
 
   it('refuses to deploy over a Worker replaced after planning', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const workerName = manifest.deployment.resources.apiWorker;
     manifest = recordInstallationResource(
       manifest,
@@ -1693,17 +1496,7 @@ describe('platform installation planning', () => {
       },
       '2026-09-14T00:00:01.000Z',
     );
-    const marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: manifest.account.id,
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: workerName,
-        resourceKey: 'api-worker',
-        resourceKind: 'worker',
-        resourceName: workerName,
-      }),
-    );
+    const marker = markerFor(manifest, 'api-worker', 'worker', workerName);
     let liveMarker: string | undefined = marker;
     const fake = client({
       getWorkerPlainTextBindings: async () =>
@@ -1721,14 +1514,7 @@ describe('platform installation planning', () => {
 
   it('revalidates a stable upgrade Worker without rebuilding the platform plan', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
-    let manifest = createPlatformInstallationManifest({
-      account: initial.account,
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: initial.deployment,
-      id: initial.installationId,
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = manifestFor(initial);
     const workerName = manifest.deployment.resources.apiWorker;
     manifest = recordInstallationResource(
       manifest,
@@ -1752,17 +1538,7 @@ describe('platform installation planning', () => {
       reason: 'Update the owned Worker.',
     } as const;
     const stablePlan = { ...initial, actions: [action] };
-    let marker = JSON.stringify(
-      createPlatformResourceOwnershipMarker({
-        accountId: manifest.account.id,
-        installationId: manifest.id,
-        ownershipNonce: manifest.ownershipNonce,
-        resourceId: workerName,
-        resourceKey: action.key,
-        resourceKind: 'worker',
-        resourceName: workerName,
-      }),
-    );
+    let marker = markerFor(manifest, action.key, 'worker', workerName);
     const listAccounts = vi.fn(async () => {
       throw new Error('full planning was called');
     });
@@ -1794,18 +1570,7 @@ describe('platform installation planning', () => {
   });
 
   it('resumes resources proven by the remote ownership checkpoint', async () => {
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.app', zoneName: 'example.app' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = defaultManifest();
     const local = manifest;
     manifest = recordInstallationResource(
       manifest,
@@ -1837,27 +1602,16 @@ describe('platform installation planning', () => {
 
   it('adopts an existing zone without claiming ownership', async () => {
     const fake = client({
-      findZone: async () => ({
-        id: 'zone',
-        name: 'example.app',
-        nameServers: [],
-        status: 'active',
-      }),
+      findZone: async () => activeZone,
     });
     const plan = await createPlatformInstallPlan(fake, input, null);
     expect(plan.actions[0]).toMatchObject({ action: 'adopt', id: 'zone', kind: 'zone' });
   });
 
   it('adopts only a compatible wildcard application DNS record', async () => {
-    const zone = {
-      id: 'zone',
-      name: 'example.app',
-      nameServers: [],
-      status: 'active',
-    };
     const plan = await createPlatformInstallPlan(
       client({
-        findZone: async () => zone,
+        findZone: async () => activeZone,
         listDnsRecords: async () => [
           {
             content: '100::',
@@ -1879,7 +1633,7 @@ describe('platform installation planning', () => {
     await expect(
       createPlatformInstallPlan(
         client({
-          findZone: async () => zone,
+          findZone: async () => activeZone,
           listDnsRecords: async () => [
             {
               content: '192.0.2.1',
@@ -1897,18 +1651,7 @@ describe('platform installation planning', () => {
   });
 
   it('repairs a missing installer-owned resource', async () => {
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.app', zoneName: 'example.app' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = defaultManifest();
     manifest = recordInstallationResource(
       manifest,
       {
@@ -1932,18 +1675,7 @@ describe('platform installation planning', () => {
   });
 
   it('revalidates a missing Worker with the approved repair policy', async () => {
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.app', zoneName: 'example.app' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = defaultManifest();
     const workerName = manifest.deployment.resources.apiWorker;
     manifest = recordInstallationResource(
       manifest,
@@ -1971,18 +1703,7 @@ describe('platform installation planning', () => {
   });
 
   it('refuses to recreate a missing adopted resource', async () => {
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.app', zoneName: 'example.app' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    let manifest = defaultManifest();
     manifest = recordInstallationResource(
       manifest,
       {

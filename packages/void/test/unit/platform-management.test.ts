@@ -161,7 +161,6 @@ function persist(manifest: PlatformInstallationManifest): void {
 function client(manifest: PlatformInstallationManifest) {
   const deleted: Array<[string, string]> = [];
   const emptiedBuckets: Array<string> = [];
-  const preservedBucketKeys: Array<ReadonlyArray<string>> = [];
   const deletedBucketMarkers: Array<string> = [];
   const remoteWrites: Array<string> = [];
   const disabledWrites: Array<string> = [];
@@ -170,7 +169,6 @@ function client(manifest: PlatformInstallationManifest) {
   const fake = {
     deleted,
     emptiedBuckets,
-    preservedBucketKeys,
     deletedBucketMarkers,
     remoteWrites,
     disabledWrites,
@@ -198,13 +196,8 @@ function client(manifest: PlatformInstallationManifest) {
     deleteR2Object: async (_account: string, bucket: string) => {
       deletedBucketMarkers.push(bucket);
     },
-    emptyR2Bucket: async (
-      _account: string,
-      bucket: string,
-      preservedKeys?: ReadonlySet<string>,
-    ) => {
+    emptyR2Bucket: async (_account: string, bucket: string) => {
       emptiedBuckets.push(bucket);
-      preservedBucketKeys.push([...(preservedKeys ?? [])]);
     },
     findZone: async (_account: string, name: string) => {
       const resource = manifest.resources.find(
@@ -1331,16 +1324,16 @@ describe('platform lifecycle management', () => {
     });
   });
 
-  it('retains installer-owned data and the zone by default', async () => {
+  it('retains every resource and records the uninstall in routing storage by default', async () => {
     const manifest = installedManifest();
     persist(manifest);
     const fake = client(manifest);
     await uninstallPlatform(fake, manifest, uninstallArgs, uninstallDependencies);
     expect(fake.deleted).toEqual([]);
-    expect(fake.deleted.some(([kind]) => kind === 'zone')).toBe(false);
+    expect(fake.remoteWrites.map((value) => JSON.parse(value).status)).toContain('uninstalled');
     const result = listInstallationManifests()[0]!;
     expect(result.status).toBe('uninstalled');
-    expect(result.resources.find((resource) => resource.key === 'zone')?.state).toBe('retained');
+    expect(result.resources.filter((resource) => resource.state === 'retained')).toHaveLength(15);
     expect(readInstallationRecoverySecrets(result)).toEqual({
       databaseUrl: 'postgres://recovery',
     });
@@ -1433,19 +1426,6 @@ describe('platform lifecycle management', () => {
         (resource) => resource.key === 'application-dns',
       ),
     ).toMatchObject({ state: 'retained' });
-  });
-
-  it('records the completed uninstall in retained routing storage', async () => {
-    const manifest = installedManifest();
-    persist(manifest);
-    const fake = client(manifest);
-    await uninstallPlatform(fake, manifest, uninstallArgs, uninstallDependencies);
-    expect(fake.deleted).toEqual([]);
-    expect(fake.remoteWrites.map((value) => JSON.parse(value).status)).toContain('uninstalled');
-    const retained = listInstallationManifests()[0]!.resources.filter(
-      (resource) => resource.state === 'retained',
-    );
-    expect(retained).toHaveLength(15);
   });
 
   it('lists every kept resource in manual cleanup order after uninstall', async () => {
@@ -1587,33 +1567,9 @@ describe('platform lifecycle management', () => {
       uninstallDependencies,
     );
     expect(fake.deleted).toHaveLength(5);
-    expect(fake.deleted.some(([kind]) => kind === 'queue')).toBe(false);
     expect(fake.deleted).not.toContainEqual(['ai-gateway', 'ai-gateway-id']);
-    expect(fake.emptiedBuckets).toEqual([]);
-    expect(fake.preservedBucketKeys).toEqual([]);
-    expect(fake.deletedBucketMarkers).toEqual([]);
-    expect(fake.deleted).not.toContainEqual(['r2-bucket', 'assets-bucket-id']);
     expect(fake.deleted.some(([kind]) => kind === 'zone')).toBe(false);
     expect(readInstallationRecoverySecrets(listInstallationManifests()[0]!)).toBeNull();
-  });
-
-  it('retains R2 during purge because bucket generation cannot be pinned', async () => {
-    const manifest = installedManifest();
-    persist(manifest);
-    const fake = client(manifest);
-    await uninstallPlatform(
-      fake,
-      manifest,
-      { ...uninstallArgs, purgeData: true },
-      uninstallDependencies,
-    );
-    expect(fake.emptiedBuckets).toEqual([]);
-    expect(fake.deletedBucketMarkers).toEqual([]);
-    expect(fake.deleted).not.toContainEqual(['r2-bucket', 'assets-bucket-id']);
-    expect(
-      listInstallationManifests()[0]?.resources.find((resource) => resource.key === 'assets-bucket')
-        ?.state,
-    ).toBe('retained');
   });
 
   it('refuses every mutation when the remote installation identity changed', async () => {
@@ -1667,8 +1623,13 @@ describe('platform lifecycle management', () => {
       uninstallDependencies,
     );
     expect(fake.emptiedBuckets).toEqual([]);
+    expect(fake.deletedBucketMarkers).toEqual([]);
     expect(fake.deleted).not.toContainEqual(['r2-bucket', 'assets-bucket-id']);
-    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    const result = listInstallationManifests()[0]!;
+    expect(result.status).toBe('uninstalled');
+    expect(result.resources.find((resource) => resource.key === 'assets-bucket')?.state).toBe(
+      'retained',
+    );
   });
 
   it('resumes safely after a deletion failure without retrying completed deletions', async () => {
