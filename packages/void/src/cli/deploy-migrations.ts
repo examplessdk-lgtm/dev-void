@@ -6,14 +6,16 @@ import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import { type DatabaseDialect } from '../config.ts';
 import { openMigrationValidationDatabase } from '../migrations/sqlite-validation.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
+import { isCleanCloudflareExit } from './cloudflare-process.ts';
 import { hasDeploySchemaDrift, getDeploySchemaDriftMessage } from './deploy-drift.ts';
-import { getErrorMessage, log } from './deploy-helpers.ts';
-import { CLOUDFLARE_RESOURCE_LABELS, isCleanWranglerExit } from './deploy-resources.ts';
+import { log } from './deploy-helpers.ts';
+import { CLOUDFLARE_RESOURCE_LABELS } from './deploy-resources.ts';
 import {
   type RequiredAuthTable,
   type TableInfoRow,
   type DeployWranglerRun,
 } from './deploy-types.ts';
+import { getErrorMessage } from './output.ts';
 import type { ProvisionDriftEntry } from './provision.ts';
 
 /**
@@ -614,7 +616,7 @@ export async function applyAndVerifyRemoteD1Migrations(
         { capture: false },
       ),
     );
-    if (!isCleanWranglerExit(migrate)) {
+    if (!isCleanCloudflareExit(migrate)) {
       log.error(
         `deploy: remote D1 migrations failed for "${d1MigrateToken}" (exit ${String(migrate.status)}). ` +
           'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
@@ -633,7 +635,7 @@ export async function applyAndVerifyRemoteD1Migrations(
         { capture: true },
       ),
     );
-    if (!isCleanWranglerExit(migrateList)) {
+    if (!isCleanCloudflareExit(migrateList)) {
       log.error(
         `deploy: could not verify the remote migration state for "${d1MigrateToken}" ` +
           `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +

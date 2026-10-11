@@ -27,6 +27,7 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { dirname, join, resolve } from 'pathslash';
+import { getErrorMessage } from './output.ts';
 import {
   PlatformWorkerCustomDomainsChangedError,
   PlatformWorkerRoutesChangedError,
@@ -41,7 +42,6 @@ import {
 } from './platform-installer-cutover.ts';
 import {
   assertPlatformTriggerStabilization,
-  errorMessage,
   assertCleanPlatformWrangler,
 } from './platform-installer-errors.ts';
 import {
@@ -577,7 +577,7 @@ export async function deployPlatformWorker(
           unsafeTraffic: true,
         });
         throw new PlatformWorkerRecoveryIncompleteError(
-          `platform: Worker ${workerName} traffic reconciliation failed: ${errorMessage(error)}${
+          `platform: Worker ${workerName} traffic reconciliation failed: ${getErrorMessage(error)}${
             failures.length > 0 ? ` Safety recovery also failed: ${failures.join('; ')}` : ''
           }`,
           { cause: error },
@@ -839,7 +839,7 @@ export async function deployPlatformWorker(
           unsafeTraffic: true,
         });
         throw new PlatformWorkerRecoveryIncompleteError(
-          `platform: Worker ${workerName} changed concurrently during activation, and restoring intervening deployment ${interveningDeployment.id} failed: ${errorMessage(recoveryError)}${
+          `platform: Worker ${workerName} changed concurrently during activation, and restoring intervening deployment ${interveningDeployment.id} failed: ${getErrorMessage(recoveryError)}${
             recoveryFailures.length > 0
               ? ` Safety recovery also failed: ${recoveryFailures.join('; ')}`
               : ''
@@ -927,13 +927,13 @@ export async function deployPlatformWorker(
     });
     if (recoveryFailures.length > 0) {
       throw new PlatformWorkerRecoveryIncompleteError(
-        `platform: ${errorMessage(error)} Automatic recovery for ${workerName} was incomplete: ${recoveryFailures.join('; ')}`,
+        `platform: ${getErrorMessage(error)} Automatic recovery for ${workerName} was incomplete: ${recoveryFailures.join('; ')}`,
         { cause: error },
       );
     }
     if (unsafeTraffic) {
       throw new PlatformWorkerRecoveryIncompleteError(
-        `platform: ${errorMessage(error)} The routing gate remains closed and live Custom Domains were retained for safe reconciliation on retry.`,
+        `platform: ${getErrorMessage(error)} The routing gate remains closed and live Custom Domains were retained for safe reconciliation on retry.`,
         { cause: error },
       );
     }
@@ -954,7 +954,7 @@ export async function recoverFailedPlatformWorkerDeployment(input: {
     try {
       await operation();
     } catch (error) {
-      failures.push(`${label}: ${errorMessage(error)}`);
+      failures.push(`${label}: ${getErrorMessage(error)}`);
     }
   };
   if (input.unsafeTraffic) {

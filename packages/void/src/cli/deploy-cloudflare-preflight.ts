@@ -17,6 +17,7 @@ import { assertSandboxNamespaceConfig, resolveSandboxConfig } from '../sandbox/c
 import { classifyCloudflareDeployApp } from './cloudflare-deploy/classify.ts';
 import { approvedCloudflareIsrBinding, chooseCloudflareIsr } from './cloudflare-isr.ts';
 import { readCloudflareLink, type CloudflareLink } from './cloudflare-link.ts';
+import { isCleanCloudflareExit } from './cloudflare-process.ts';
 import { resolveEnvSchemaFactsDefault } from './deploy-artifact-validation.ts';
 import {
   snapshotBindingIdentities,
@@ -35,7 +36,7 @@ import {
   connectCloudflareDeployAccount,
   discoverRootWranglerConfig,
 } from './deploy-cloudflare-helpers.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
+import { log } from './deploy-helpers.ts';
 import {
   resolveWranglerMigrationPattern,
   formatCloudflareDriftMessage,
@@ -43,7 +44,6 @@ import {
 import {
   computeDesiredCloudflareResources,
   deriveWorkerName,
-  isCleanWranglerExit,
   formatCloudflareSandboxUnavailable,
   CLOUDFLARE_RESOURCE_LABELS,
 } from './deploy-resources.ts';
@@ -58,6 +58,7 @@ import { createNodeEmailDns, SEND_EMAIL_BINDING } from './email-cloudflare.ts';
 import type { EnvSchemaProbeResult } from './env-schema-probe.ts';
 import { selfHostSchemaFailureMessage, type SelfHostSchemaFacts } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
+import { getErrorMessage } from './output.ts';
 import {
   assertValidResourceName,
   checkCloudflareProvisionDrift,
@@ -451,7 +452,7 @@ export async function preflightCloudflareWorker(input: {
         { capture: true },
       ),
     );
-    if (!isCleanWranglerExit(containers)) {
+    if (!isCleanCloudflareExit(containers)) {
       log.error(formatCloudflareSandboxUnavailable({ preflight: true }));
       return exit(1);
     }

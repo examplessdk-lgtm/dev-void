@@ -20,13 +20,10 @@ import {
   uploadPinnedCloudflareVersion,
   type CfCommand,
 } from './cf-version-api.ts';
+import { isCleanCloudflareExit } from './cloudflare-process.ts';
 
 function failed(message: string): CloudflareCommandResult {
   return { status: 1, stdout: '', stderr: message };
-}
-
-function commandFailed(result: CloudflareCommandResult): boolean {
-  return result.status !== 0 || Boolean(result.signal) || Boolean(result.error);
 }
 
 function parseJson(value: string): unknown {
@@ -154,7 +151,7 @@ export function createCfResourceVerifier(options: {
             },
           ),
         );
-        if (commandFailed(found) || !record(found.data) || found.data.name !== name) {
+        if (!isCleanCloudflareExit(found) || !record(found.data) || found.data.name !== name) {
           return failed(
             `Cloudflare Queue ${name} is unavailable; refusing automatic provisioning.`,
           );
@@ -211,7 +208,7 @@ export function createCfResourceVerifier(options: {
         { cwd: directory, capture: true },
       );
       const body = result.data ?? parseJson(result.stdout);
-      if (commandFailed(result) || !record(body) || body[resource.response] !== name) {
+      if (!isCleanCloudflareExit(result) || !record(body) || body[resource.response] !== name) {
         return failed(
           `Cloudflare ${resource.kind} ${name} is unavailable; refusing automatic provisioning.`,
         );
@@ -381,7 +378,7 @@ export function createCfVersionRunner(options: {
     return { ...result, data: result.data ?? parseJson(result.stdout) };
   };
   const uploadedResult = (result: CloudflareCommandResult): CloudflareCommandResult => {
-    if (commandFailed(result)) {
+    if (!isCleanCloudflareExit(result)) {
       return result;
     }
     if (record(result.data) && typeof result.data.versionId === 'string') {
@@ -419,7 +416,7 @@ export function createCfVersionRunner(options: {
       return failed(targetChanged);
     }
     const verified = await verifyResources(output.directory);
-    return commandFailed(verified) ? verified : null;
+    return isCleanCloudflareExit(verified) ? null : verified;
   };
 
   const uploadPinnedVersion = async (
@@ -461,7 +458,7 @@ export function createCfVersionRunner(options: {
   return async (operation, command) => {
     if (operation.type === 'deployments.status') {
       const result = await run(['workers', 'deployments', 'list', '--worker', workerName], true);
-      if (commandFailed(result)) {
+      if (!isCleanCloudflareExit(result)) {
         return result;
       }
       const body = result.data;
@@ -508,7 +505,7 @@ export function createCfVersionRunner(options: {
         };
       };
       const first = await readPage(1);
-      if (commandFailed(first.result)) {
+      if (!isCleanCloudflareExit(first.result)) {
         return first.result;
       }
       if (!first.versions) {
@@ -517,7 +514,7 @@ export function createCfVersionRunner(options: {
       const versions = [...first.versions];
       if (versions.length === pageSize) {
         const second = await readPage(2);
-        if (commandFailed(second.result)) {
+        if (!isCleanCloudflareExit(second.result)) {
           return second.result;
         }
         if (!second.versions) {
@@ -531,7 +528,7 @@ export function createCfVersionRunner(options: {
             let last = Math.max(...secondNumbers);
             for (let page = 3; page <= 1000 && second.versions.length === pageSize; page++) {
               const next = await readPage(page);
-              if (commandFailed(next.result)) {
+              if (!isCleanCloudflareExit(next.result)) {
                 return next.result;
               }
               if (!next.versions) {
@@ -583,7 +580,7 @@ export function createCfVersionRunner(options: {
           })
         : await run(args, true);
       const result = { ...called, data: called.data ?? parseJson(called.stdout) };
-      if (commandFailed(result)) {
+      if (!isCleanCloudflareExit(result)) {
         return result;
       }
       const version = result.data;
@@ -766,7 +763,7 @@ export function createCfVersionRunner(options: {
         writeFileSync(workerPath, JSON.stringify(worker), { mode: 0o600 });
         await readBuildOutput(directory);
         const verified = await verifyResources(directory);
-        if (commandFailed(verified)) {
+        if (!isCleanCloudflareExit(verified)) {
           return verified;
         }
         return await run(
@@ -785,7 +782,7 @@ export function createCfVersionRunner(options: {
         return failed('The Cloudflare Queue consumer target changed.');
       }
       const queues = await run(['queues', 'list'], true);
-      if (commandFailed(queues)) {
+      if (!isCleanCloudflareExit(queues)) {
         return queues;
       }
       const allQueues = queues.data;
@@ -800,7 +797,7 @@ export function createCfVersionRunner(options: {
         ['queues', 'consumers', 'list', '--queue-id', queue.queue_id],
         true,
       );
-      if (commandFailed(consumers)) {
+      if (!isCleanCloudflareExit(consumers)) {
         return consumers;
       }
       const allConsumers = consumers.data;

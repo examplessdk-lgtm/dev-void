@@ -7,11 +7,12 @@ import {
 import { ensureCloudflareAuthSecret } from './deploy-cloudflare-auth.ts';
 import type { CloudflareBuild } from './deploy-cloudflare-build.ts';
 import type { CloudflareDeploySource, CloudflarePreflight } from './deploy-cloudflare-preflight.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
+import { log } from './deploy-helpers.ts';
 import { applyAndVerifyRemoteD1Migrations } from './deploy-migrations.ts';
 import { CloudflareAuthSecretError } from './deploy-resources.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
 import { type CliLogger } from './log-file.ts';
+import { getErrorMessage } from './output.ts';
 
 export type CloudflareMigration = Awaited<ReturnType<typeof migrateCloudflareWorker>>;
 

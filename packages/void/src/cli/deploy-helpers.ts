@@ -23,7 +23,7 @@ import {
 } from './deploy-types.ts';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
-import { formatCount, pc } from './output.ts';
+import { formatCount, getErrorMessage, pc } from './output.ts';
 import {
   detectPreset,
   formatProjectCommand,
@@ -85,10 +85,6 @@ const EMPTY_BINDINGS = {
   needsAI: false,
   needsSandbox: false,
 };
-
-export function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function readLiveBindingConfigFromDeployment(
   deployment: DeploymentResponse | undefined,

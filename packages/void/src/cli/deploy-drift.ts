@@ -8,18 +8,17 @@ import {
   readdirSync,
   rmSync,
 } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
 import { type DatabaseDialect } from '../config.ts';
-import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { listDrizzleArtifacts } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
-
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
+import { log } from './deploy-helpers.ts';
+import { getErrorMessage } from './output.ts';
+import { drizzleKitBin } from './yarn-pnp.ts';
 
 const deployDriftCheckDir = join('.void', 'deploy-drift-check');
 
@@ -68,11 +67,7 @@ export function hasDeploySchemaDrift(root: string, dialect: DatabaseDialect): bo
     const driftAuthSchemaPath = join(driftProjectRoot, '.void', 'better-auth-schema.ts');
     const driftConfigPath = writeDrizzleConfig(
       driftProjectRoot,
-      dialect === 'postgresql'
-        ? 'postgresql://dummy'
-        : dialect === 'mysql'
-          ? 'mysql://dummy'
-          : ':memory:',
+      PLACEHOLDER_DB_URL[dialect],
       dialect,
       {
         additionalSchemas: existsSync(driftAuthSchemaPath) ? [driftAuthSchemaPath] : undefined,

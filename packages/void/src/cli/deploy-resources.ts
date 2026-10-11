@@ -12,10 +12,7 @@ import { type DatabaseDialect, type VoidConfig } from '../config.ts';
 import { collectRevalidate, hasRevalidate } from '../isr-config.ts';
 import { hasEmailHandlers, type EmailHandlersScan } from '../router/email.ts';
 import { DEFAULT_VOID_AI_BINDING } from './deploy-binding-snapshot.ts';
-import {
-  type CloudflareAuthSecretFailureReason,
-  type DeployWranglerRunResult,
-} from './deploy-types.ts';
+import { type CloudflareAuthSecretFailureReason } from './deploy-types.ts';
 import {
   isRealD1Id,
   isRealKvId,
@@ -42,13 +39,6 @@ export class CloudflareAuthSecretError extends Error {
     super(message);
     this.reason = reason;
   }
-}
-
-/** True only for a wrangler child that ran to completion with a clean exit 0. */
-export function isCleanWranglerExit(result: DeployWranglerRunResult): boolean {
-  return (
-    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
-  );
 }
 
 const CLOUDFLARE_WORKERS_PAID_URL = 'https://dash.cloudflare.com/?to=/:account/workers/plans';

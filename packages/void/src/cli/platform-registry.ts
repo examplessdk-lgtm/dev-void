@@ -5,7 +5,6 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -16,6 +15,7 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { join, resolve } from 'pathslash';
+import { writeFileAtomic } from '../shared/atomic-write.ts';
 import { readKeyringPassword, writeKeyringPassword } from './keyring.ts';
 
 const PLATFORM_REGISTRY_SCHEMA_VERSION = 1 as const;
@@ -180,13 +180,7 @@ function withRegistryLock<T>(directory: string, operation: () => T): T {
 }
 
 function writeJsonAtomically(path: string, value: unknown): void {
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+  writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`, 0o600);
 }
 
 export function acquirePlatformLifecycleLock(

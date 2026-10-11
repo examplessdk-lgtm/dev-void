@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
 import { log } from '@voidzero-dev/vite-plus-prompts';
-import { join } from 'pathslash';
 import { accountSubcommands, parseAccountArgs } from './account-args.ts';
-import { getPackageDir } from './agents.ts';
+import { getOwnVersion } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';
 import { buildSubcommands, parseBuildArgs } from './build-args.ts';
@@ -268,8 +266,7 @@ if (helpPath) {
     });
   });
 } else if (command === '-v' || command === '--version') {
-  const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
-  console.log(version);
+  console.log(getOwnVersion());
 } else if (command) {
   log.error(`cli: Unknown command '${command}'. Run \`void --help\` for usage.`);
   process.exit(1);

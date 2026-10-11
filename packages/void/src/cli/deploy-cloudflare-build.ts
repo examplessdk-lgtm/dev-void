@@ -22,7 +22,7 @@ import {
 import { DEPLOY_BINDING_IDENTITY_FIELDS, bindingIdentityKey } from './deploy-binding-snapshot.ts';
 import type { CloudflareDeploySource, CloudflarePreflight } from './deploy-cloudflare-preflight.ts';
 import { prepareCloudflareFrameworkArtifact } from './deploy-cloudflare-static.ts';
-import { log, getErrorMessage, getExitCode } from './deploy-helpers.ts';
+import { log, getExitCode } from './deploy-helpers.ts';
 import {
   validateAuthMigrationSchema,
   assertRemoteMigrationsDeployable,
@@ -34,6 +34,7 @@ import {
   deployChildEnv,
 } from './deploy-transport.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
+import { getErrorMessage } from './output.ts';
 import { resolveProjectCommand, type FrameworkPreset } from './preset.ts';
 import { deleteEnvVarCaseAware } from './provision.ts';
 

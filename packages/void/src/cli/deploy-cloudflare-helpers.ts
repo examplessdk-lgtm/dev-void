@@ -52,11 +52,11 @@ import {
   createDeployWranglerRunner,
   runWranglerAuthToken,
 } from './deploy-cloudflare-auth.ts';
-import { getErrorMessage, log } from './deploy-helpers.ts';
+import { log } from './deploy-helpers.ts';
 import { deployChildEnv, resolveDeployTransport } from './deploy-transport.ts';
 import type { CloudflareDeployDeps, DeployWranglerRun } from './deploy-types.ts';
 import { type CliLogger } from './log-file.ts';
-import { createSpinner } from './output.ts';
+import { createSpinner, getErrorMessage } from './output.ts';
 import {
   acknowledgeWranglerManagedQueueRemovals,
   readWranglerPublishedTrafficSnapshot,

@@ -25,7 +25,7 @@ import {
   normalizeContainerImagePaths,
   collectEmittedQueueGroupNames,
 } from './deploy-binding-snapshot.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
+import { log } from './deploy-helpers.ts';
 import { BETTER_AUTH_SECRET_NAME } from './deploy-resources.ts';
 import { buildSchemaProbeEnv } from './deploy-transport.ts';
 import { type BindingIdentitySnapshot, type CloudflareDeployDeps } from './deploy-types.ts';
@@ -46,6 +46,7 @@ import {
   type SelfHostSchemaFacts,
 } from './env-validation.ts';
 import { readGeneratedWranglerConfigFile } from './generated-wrangler-config.ts';
+import { getErrorMessage } from './output.ts';
 import type { DesiredResourceSet } from './provision.ts';
 import { bindingEntriesForField } from './wrangler.ts';
 

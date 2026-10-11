@@ -14,6 +14,7 @@ import {
 import { PLATFORM_ADMIN_ASSETS_DIRECTORY, resolvePlatformRuntime } from '@void/platform/installer';
 import { join } from 'pathslash';
 import { ensurePlatformAccessToken } from './cf-access.ts';
+import { getErrorMessage } from './output.ts';
 import {
   initializeInstalledAppAccess,
   PlatformAppAccessCredentialError,
@@ -33,7 +34,6 @@ import {
   claimPlatformDatabase,
   assertPlatformRuntimeSafety,
 } from './platform-installer-database.ts';
-import { errorMessage } from './platform-installer-errors.ts';
 import { verifyPlatformHealth, verifyPlatformSandboxDrain } from './platform-installer-health.ts';
 import {
   requireId,
@@ -140,7 +140,7 @@ async function recoverFailedPlatformInstallation(
       );
     } catch (guardError) {
       failure = new Error(
-        `platform: ${errorMessage(error)} The installation also failed to retain its routing safety gate: ${errorMessage(guardError)}`,
+        `platform: ${getErrorMessage(error)} The installation also failed to retain its routing safety gate: ${getErrorMessage(guardError)}`,
         { cause: error },
       );
     }
@@ -157,14 +157,14 @@ async function recoverFailedPlatformInstallation(
       try {
         await rollback();
       } catch (rollbackError) {
-        rollbackFailures.push(errorMessage(rollbackError));
+        rollbackFailures.push(getErrorMessage(rollbackError));
       }
     }
     if (rollbackFailures.length > 0 || currentWorkerRecoveryIncomplete) {
       failure = new Error(
         rollbackFailures.length > 0
-          ? `platform: ${errorMessage(error)} Automatic Worker rollback was incomplete: ${rollbackFailures.join('; ')} Inspect the installation before retrying.`
-          : `platform: ${errorMessage(error)} The current Worker rollback was incomplete. The cutover remains unresolved and will be recovered on retry.`,
+          ? `platform: ${getErrorMessage(error)} Automatic Worker rollback was incomplete: ${rollbackFailures.join('; ')} Inspect the installation before retrying.`
+          : `platform: ${getErrorMessage(error)} The current Worker rollback was incomplete. The cutover remains unresolved and will be recovered on retry.`,
         { cause: error },
       );
     } else if (workerCutoverGeneration > 0) {

@@ -17,6 +17,7 @@ import { join } from 'pathslash';
 import { materializeCloudflareConfig, persistCloudflareConfig } from '../cloudflare-config.ts';
 import { createCloudflareProcessRunner } from './cloudflare-process.ts';
 import { findAmbientConfigOverride, findWranglerCiOverrideDotenvFile } from './deploy-transport.ts';
+import { getErrorMessage } from './output.ts';
 import {
   assertNoTransportRedirectInProjectDotenv,
   deleteEnvVarCaseAware,
@@ -252,7 +253,7 @@ export async function readCloudflareD1Migrations(
       .map((row) => (typeof row.name === 'string' ? row.name : null))
       .filter((name): name is string => name !== null);
   } catch (error) {
-    if (/no such table/i.test(errorMessage(error))) {
+    if (/no such table/i.test(getErrorMessage(error))) {
       return [];
     }
     throw error;
@@ -536,7 +537,7 @@ export async function activateCloudflareExistingVersion(
       recordPublishedTraffic(context.configPath, currentTriggerConfig);
     }
   } catch (error) {
-    recoveryFailure = errorMessage(error);
+    recoveryFailure = getErrorMessage(error);
   }
   throw new Error(
     recoveryFailure
@@ -616,11 +617,11 @@ export async function changeCloudflareDomain(
       throw new Error(
         `Cloudflare rejected the domain trigger update and also rejected the automatic remote restore. ` +
           `The local Wrangler config was restored, but remote route state may be partially applied. ` +
-          `${errorMessage(error)} Restore failed: ${errorMessage(restoreError)}`,
+          `${getErrorMessage(error)} Restore failed: ${getErrorMessage(restoreError)}`,
       );
     }
     throw new Error(
-      `Cloudflare rejected the domain trigger update; both the local config and remote triggers were restored. ${errorMessage(error)}`,
+      `Cloudflare rejected the domain trigger update; both the local config and remote triggers were restored. ${getErrorMessage(error)}`,
     );
   } finally {
     rmSync(triggerConfigDir, { recursive: true, force: true });
@@ -785,9 +786,5 @@ function requireData(value: unknown, label: string): unknown {
 }
 
 function failedOperationResult(error: unknown): CloudflareCommandResult {
-  return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return { status: 1, stdout: '', stderr: getErrorMessage(error), error: getErrorMessage(error) };
 }

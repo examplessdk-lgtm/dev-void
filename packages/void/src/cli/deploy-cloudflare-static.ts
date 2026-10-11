@@ -46,7 +46,6 @@ import {
   hasNonPageBackend,
   resolveFullDeployBuildCommand,
   log,
-  getErrorMessage,
   getExitCode,
 } from './deploy-helpers.ts';
 import { mergeAndLintRoutingRules } from './deploy-managed-events.ts';
@@ -59,7 +58,7 @@ import {
 } from './deploy-transport.ts';
 import { type RunDeployOptions, type CloudflareDeployDeps } from './deploy-types.ts';
 import { type CliLogger } from './log-file.ts';
-import { note } from './output.ts';
+import { getErrorMessage, note } from './output.ts';
 import { buildStaticManifest } from './package.ts';
 import { detectPreset, type StaticPreset, type FrameworkPreset } from './preset.ts';
 import { deleteEnvVarCaseAware } from './provision.ts';

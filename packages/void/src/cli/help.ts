@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { outro } from '@voidzero-dev/vite-plus-prompts';
-import { join } from 'pathslash';
-import { getPackageDir } from './agents.ts';
+import { getOwnVersion } from './agents.ts';
 import { asciiArts } from './ascii.ts';
 import { operatorCommands, operatorGroups } from './operator-args.ts';
 import { categoryTitle, helpLine, note, pc, sectionTitle } from './output.ts';
@@ -1476,7 +1474,7 @@ export function printGlobalHelp(): void {
 }
 
 export function printVoidHeader(): void {
-  const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
+  const version = getOwnVersion();
   const art = asciiArts[Math.floor(Math.random() * asciiArts.length)];
   console.log(pc.blue(`${art}  v${version}\n`));
 }

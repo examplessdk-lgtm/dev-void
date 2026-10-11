@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   parsePlatformInstallationManifest,
   PLATFORM_DISABLED_KEY,
@@ -1544,7 +1545,7 @@ async function verifyPlatformMutationOwnership(
       }
     }
     if (attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+      await delay(50 * 2 ** attempt);
     }
   }
   if (rawRemote === null) {

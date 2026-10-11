@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { confirm, isCancel, outro, log, text } from '@voidzero-dev/vite-plus-prompts';
 import { basename, dirname, extname, join, relative, resolve } from 'pathslash';
 import {
@@ -26,6 +26,7 @@ import {
   stripSqlExt,
   writeJournal,
 } from '../migrations/collect.ts';
+import type { MySqlClient } from '../migrations/runner-mysql.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
@@ -48,10 +49,10 @@ import {
   quoteSqlString,
 } from './db-export-sequences.ts';
 import { formatTimestamp } from './gen.ts';
-import { printSuccess, dim, formatCount, pc } from './output.ts';
+import { printSuccess, dim, formatCount, getErrorMessage, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
+import { drizzleKitBin } from './yarn-pnp.ts';
 
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const DEFAULT_SEED_FILES = [
   'db/seed.ts',
   'db/seed.mts',
@@ -126,18 +127,6 @@ type PgClient = {
   ): Promise<{ rows: Array<T> }>;
 };
 
-type MySqlClient = {
-  end(): Promise<void>;
-  query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
-    sql: string,
-    params?: Array<unknown>,
-  ): Promise<T>;
-};
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function getLocalDatabaseUrl(root: string, dialect: 'postgresql' | 'mysql'): string {
   const url = loadLocalEnv(root).DATABASE_URL;
   if (!url) {
@@ -164,27 +153,16 @@ async function withMySqlClient<T>(
   root: string,
   fn: (client: MySqlClient) => Promise<T>,
 ): Promise<T> {
+  const { toMySqlClient } = await import('../migrations/runner-mysql.ts');
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection({
     uri: getLocalDatabaseUrl(root, 'mysql'),
     multipleStatements: true,
   });
-  const client: MySqlClient = {
-    async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
-      sql: string,
-      params?: Array<unknown>,
-    ): Promise<T> {
-      const [rows] = await connection.query(sql, params);
-      return (Array.isArray(rows) ? rows : []) as T;
-    },
-    async end() {
-      await connection.end();
-    },
-  };
   try {
-    return await fn(client);
+    return await fn(toMySqlClient(connection));
   } finally {
-    await client.end();
+    await connection.end();
   }
 }
 
@@ -403,7 +381,7 @@ async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
 
 async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void> {
   const { prepareProject } = await import('../codegen/prepare.ts');
-  const { writeDrizzleConfig } = await import('../drizzle/config.ts');
+  const { PLACEHOLDER_DB_URL, writeDrizzleConfig } = await import('../drizzle/config.ts');
 
   // Generate the auth schema, then include those tables in Drizzle Kit's schema input. This makes
   // Better Auth tables ordinary, reviewable migration SQL instead of a deploy-time
@@ -412,16 +390,9 @@ async function runGenerate(root: string, dialect: DatabaseDialect): Promise<void
   const authSchemaPath = join(root, '.void', 'better-auth-schema.ts');
   const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
 
-  const configPath = writeDrizzleConfig(
-    root,
-    dialect === 'postgresql'
-      ? 'postgresql://dummy'
-      : dialect === 'mysql'
-        ? 'mysql://dummy'
-        : ':memory:',
-    dialect,
-    { additionalSchemas },
-  );
+  const configPath = writeDrizzleConfig(root, PLACEHOLDER_DB_URL[dialect], dialect, {
+    additionalSchemas,
+  });
 
   try {
     if (dialect === 'sqlite') {

@@ -16,6 +16,10 @@ export function getPackageDir(): string {
   throw new Error('Could not find void package root');
 }
 
+export function getOwnVersion(): string {
+  return JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
+}
+
 // Agent configs: project-local skillsDir and how to detect presence in the project root.
 // Skill directory locations are aligned with:
 // https://github.com/vercel-labs/skills/blob/main/README.md

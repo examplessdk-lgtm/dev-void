@@ -1,6 +1,12 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'pathslash';
+
+export const drizzleKitBin: string = join(
+  fileURLToPath(import.meta.resolve('drizzle-kit')),
+  '..',
+  'bin.cjs',
+);
 
 /** Read the PnP runtime files in `dir` only, or `undefined` when neither exists. */
 function readPnpRuntimeAt(dir: string): { pnpCjs?: string; pnpLoader?: string } | undefined {

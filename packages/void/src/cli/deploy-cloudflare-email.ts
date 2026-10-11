@@ -1,6 +1,6 @@
 import { basename } from 'pathslash';
 import { runWranglerAuthToken } from './deploy-cloudflare-auth.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
+import { log } from './deploy-helpers.ts';
 import {
   type CloudflareEmailStepInput,
   type CloudflareEmailStepResult,
@@ -16,6 +16,7 @@ import {
   type EmailCloudflareInputs,
   type EmailPreflight,
 } from './email-cloudflare.ts';
+import { getErrorMessage } from './output.ts';
 import { writeProvisionedWranglerConfig, type ProvisionedWranglerPatch } from './wrangler.ts';
 
 /** Whether the root config carries the `send_email` binding Void writes. */

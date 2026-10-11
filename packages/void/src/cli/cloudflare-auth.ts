@@ -4,6 +4,7 @@ import {
   createCloudflareProcessRunner,
   encodeCloudflareOperation,
   decodeCloudflareOperationResult,
+  isCleanCloudflareExit,
 } from './cloudflare-process.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
 
@@ -99,7 +100,7 @@ export async function ensureCloudflareAuthentication(
   };
   const readSession = async (): Promise<CloudflareAuthSession | null> => {
     const result = await run(whoami, true);
-    if (!isCleanExit(result)) {
+    if (!isCleanCloudflareExit(result)) {
       return null;
     }
     const session = parseCloudflareAuthSession(result.data);
@@ -123,7 +124,7 @@ export async function ensureCloudflareAuthentication(
   }
 
   const login = await run({ type: 'auth.login' }, false);
-  if (!isCleanExit(login)) {
+  if (!isCleanCloudflareExit(login)) {
     throw new CloudflareAuthenticationError(
       'Cloudflare browser sign-in did not complete. Run `void cloudflare login` to try again.',
       'login',
@@ -280,10 +281,4 @@ export function cloudflareAuthEnvironment(
   // store: cf migrates plaintext credentials into it and removes the old file.
   env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
   return env;
-}
-
-function isCleanExit(result: CloudflareAuthRunResult): boolean {
-  return (
-    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
-  );
 }

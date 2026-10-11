@@ -24,6 +24,15 @@ type OperationEnvelopeFields = {
   error?: string | null;
 };
 
+/** True only for a child that ran to completion with a clean exit 0. */
+export function isCleanCloudflareExit(
+  result: Pick<ProcessResult, 'status' | 'signal' | 'error'>,
+): boolean {
+  return (
+    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
+  );
+}
+
 /** Decode the private process envelope once, retaining cancellation provenance. */
 export function decodeCloudflareOperationResult<T extends ProcessResult>(
   result: T,

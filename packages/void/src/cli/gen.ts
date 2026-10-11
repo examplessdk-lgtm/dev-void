@@ -1,26 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { log, select, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
 import { join, dirname, relative } from 'pathslash';
 import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
-import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
+import { snapshotDrizzleOutputs } from '../drizzle/generate.ts';
 import { collectMigrations, readJournal } from '../migrations/collect.ts';
 import { assertJournalCoherence } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { GenArgs } from './gen-args.ts';
 import { printSuccess } from './output.ts';
-import { buildDrizzleKitSpawnEnv } from './yarn-pnp.ts';
-
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
+import { buildDrizzleKitSpawnEnv, drizzleKitBin } from './yarn-pnp.ts';
 
 export async function runGenCommand(root: string, args: GenArgs): Promise<void> {
   console.log();
@@ -538,11 +529,7 @@ function runMigration(root: string, name: string): void {
       process.exit(1);
     }
 
-    const journalPath = join(metaDir, '_journal.json');
-    const originalJournalBytes = readFileSync(journalPath);
-    const snapshotsBefore = new Set(
-      readdirSync(metaDir).filter((f) => f.endsWith('_snapshot.json')),
-    );
+    const rollBack = snapshotDrizzleOutputs(migrationsDir);
     const sqlFilesBefore = new Set(readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')));
 
     // The existing snapshot chain was built for the journal's dialect. Refuse
@@ -577,11 +564,7 @@ function runMigration(root: string, name: string): void {
     const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
     const configPath = writeDrizzleConfig(
       root,
-      journalDialect === 'postgresql'
-        ? 'postgresql://dummy'
-        : journalDialect === 'mysql'
-          ? 'mysql://dummy'
-          : ':memory:',
+      PLACEHOLDER_DB_URL[journalDialect],
       journalDialect,
       { additionalSchemas },
     );
@@ -600,33 +583,7 @@ function runMigration(root: string, name: string): void {
     );
 
     if (result.error || result.status !== 0) {
-      // Best-effort rollback of anything drizzle-kit wrote; its error below is
-      // the one worth reporting.
-      try {
-        writeFileSync(journalPath, originalJournalBytes);
-      } catch {
-        // Ignore rollback failures.
-      }
-      if (existsSync(metaDir)) {
-        for (const f of readdirSync(metaDir)) {
-          if (f.endsWith('_snapshot.json') && !snapshotsBefore.has(f)) {
-            try {
-              unlinkSync(join(metaDir, f));
-            } catch {
-              // Ignore rollback failures.
-            }
-          }
-        }
-      }
-      for (const f of readdirSync(migrationsDir)) {
-        if (f.endsWith('.sql') && !sqlFilesBefore.has(f)) {
-          try {
-            unlinkSync(join(migrationsDir, f));
-          } catch {
-            // Ignore rollback failures.
-          }
-        }
-      }
+      rollBack();
       const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
       log.error(
         [

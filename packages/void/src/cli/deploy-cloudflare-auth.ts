@@ -13,13 +13,9 @@ import {
   parseCloudflareAuthSession,
 } from './cloudflare-auth.ts';
 import { prepareExistingCloudflareDeploy } from './cloudflare-link.ts';
-import { createCloudflareProcessRunner } from './cloudflare-process.ts';
+import { createCloudflareProcessRunner, isCleanCloudflareExit } from './cloudflare-process.ts';
 import { log } from './deploy-helpers.ts';
-import {
-  isCleanWranglerExit,
-  CloudflareAuthSecretError,
-  BETTER_AUTH_SECRET_NAME,
-} from './deploy-resources.ts';
+import { CloudflareAuthSecretError, BETTER_AUTH_SECRET_NAME } from './deploy-resources.ts';
 import { deployChildEnv } from './deploy-transport.ts';
 import { type DeployWranglerRun, type DeployWranglerRunResult } from './deploy-types.ts';
 import {
@@ -66,7 +62,7 @@ export async function prepareExistingCloudflareDeployWithAuth(
       { type: 'auth.whoami', configPath },
       { capture: true },
     );
-    const session = isCleanWranglerExit(identity)
+    const session = isCleanCloudflareExit(identity)
       ? parseCloudflareAuthSession(identity.data)
       : null;
     const wrongAccount =
@@ -196,7 +192,7 @@ export async function runWranglerAuthToken(
   } catch {
     return null;
   }
-  if (!isCleanWranglerExit(result)) {
+  if (!isCleanCloudflareExit(result)) {
     return null;
   }
   const parsed = result.data as { type?: unknown; token?: unknown } | null | undefined;
@@ -291,7 +287,7 @@ export async function ensureCloudflareAuthSecret(options: {
       'put-failed',
     );
   }
-  if (!isCleanWranglerExit(put)) {
+  if (!isCleanCloudflareExit(put)) {
     throw new CloudflareAuthSecretError(
       `deploy: could not create the remote ${BETTER_AUTH_SECRET_NAME} ` +
         `(Cloudflare command exit ${String(put.status)}). No worker was uploaded. ` +

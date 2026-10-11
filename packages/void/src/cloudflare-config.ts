@@ -1,11 +1,11 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { isRecord } from '@void/deploy-core';
 import { join } from 'pathslash';
 import { parseJsoncObject } from './cli/generated-wrangler-config.ts';
 import { TYPED_CONFIG_FILE } from './config-loader.ts';
 import { readConfig } from './config.ts';
+import { writeFileAtomic } from './shared/atomic-write.ts';
 
 export const MATERIALIZED_CLOUDFLARE_FILE = '.void-wrangler.jsonc';
 export const VOID_LOCK_FILE = 'void.lock.json';
@@ -119,16 +119,6 @@ function readState(root: string): CloudflareState | undefined {
   return state;
 }
 
-function writeAtomic(path: string, content: string): void {
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, content, { flag: 'wx' });
-  try {
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
-}
-
 function writeState(root: string, state: CloudflareState): void {
   const path = join(root, VOID_LOCK_FILE);
   const content = `${JSON.stringify(state, null, 2)}\n`;
@@ -141,7 +131,7 @@ function writeState(root: string, state: CloudflareState): void {
       // Replace an invalid lock only after the caller has validated its state.
     }
   }
-  writeAtomic(path, content);
+  writeFileAtomic(path, content);
 }
 
 /** Keep Vite preview usable without leaving Wrangler's implicit deploy pointer after a build. */
@@ -152,7 +142,7 @@ export function stashCloudflareDeployPointer(root: string): void {
   }
   const directory = join(root, '.void');
   mkdirSync(directory, { recursive: true });
-  writeAtomic(join(directory, PREVIEW_POINTER_FILE), readFileSync(pointer, 'utf8'));
+  writeFileAtomic(join(directory, PREVIEW_POINTER_FILE), readFileSync(pointer, 'utf8'));
   rmSync(pointer, { force: true });
 }
 
@@ -163,7 +153,7 @@ export function restoreCloudflarePreviewPointer(root: string): boolean {
   }
   const directory = join(root, '.wrangler', 'deploy');
   mkdirSync(directory, { recursive: true });
-  writeAtomic(join(directory, 'config.json'), readFileSync(saved, 'utf8'));
+  writeFileAtomic(join(directory, 'config.json'), readFileSync(saved, 'utf8'));
   return true;
 }
 
@@ -204,7 +194,7 @@ export function materializeCloudflareConfig(root: string): string {
       : `${provenance(state?.text ?? '')}${JSON.stringify(resolved, null, 2)}\n`;
   const path = join(root, MATERIALIZED_CLOUDFLARE_FILE);
   if (!existsSync(path) || readFileSync(path, 'utf8') !== text) {
-    writeAtomic(path, text);
+    writeFileAtomic(path, text);
   }
   if (state) {
     writeState(root, { version: 1, source: authored, resolved, text });

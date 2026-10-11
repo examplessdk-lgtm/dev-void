@@ -139,7 +139,7 @@ export function helpLine(command: string, description: string): string {
  * DB timestamps lack timezone info — appends 'Z' only when no
  * existing indicator (Z, z, or numeric offset) is present.
  */
-export function ensureUtc(s: string): string {
+function ensureUtc(s: string): string {
   const last = s.at(-1);
   if (last === 'Z' || last === 'z') {
     return s;
@@ -151,6 +151,26 @@ export function ensureUtc(s: string): string {
     return s;
   }
   return s + 'Z';
+}
+
+export function formatRelativeTime(iso: string): string {
+  const diffMs = Date.now() - new Date(ensureUtc(iso)).getTime();
+  if (diffMs < 60_000) {
+    return 'just now';
+  }
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+export function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

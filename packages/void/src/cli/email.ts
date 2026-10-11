@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parseRootWranglerConfig, readWranglerTopLevelString } from '@void/deploy-cloudflare';
 import { confirm, isCancel, log, password } from '@voidzero-dev/vite-plus-prompts';
 import { join } from 'pathslash';
@@ -416,8 +417,7 @@ async function reconcileEmailOperation(
   projectId: string,
   attemptId: string,
   title: string,
-  sleep: (ms: number) => Promise<void> = (ms) =>
-    new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  sleep: (ms: number) => Promise<void> = delay,
 ): Promise<EmailOperationResponse | undefined> {
   if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
     throw error;

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { canonicalJson, isRecord } from '@void/deploy-core';
 import { join } from 'pathslash';
@@ -1322,7 +1323,7 @@ async function activateCloudflareVersionWithSecretsFile(
       authenticatedWorkersDevSubdomain,
       stagedVersionOverride ? versionId : undefined,
       options.fetch ?? globalThis.fetch,
-      options.sleep ?? defaultSleep,
+      options.sleep ?? delay,
       options.readinessAttempts ?? 6,
       Number.POSITIVE_INFINITY,
       options.requireVersionMetadata ? versionId : undefined,
@@ -2105,7 +2106,7 @@ async function bootstrapFirstDeployment(
     extractWorkersDevSubdomain(previewUrl),
     undefined,
     options.fetch ?? globalThis.fetch,
-    options.sleep ?? defaultSleep,
+    options.sleep ?? delay,
     // A first Custom Domain needs DNS and certificate propagation. Existing
     // previews and explicitly atomic releases retain their shorter window.
     // Keep an overall deadline even when requests time out individually.
@@ -2458,9 +2459,9 @@ async function probeReadiness(
       }
     }
     if (attempt + 1 < attempts) {
-      const delay = Math.min(250 * 2 ** attempt, 2_000, deadline - Date.now());
-      if (delay > 0) {
-        await sleep(delay);
+      const waitMs = Math.min(250 * 2 ** attempt, 2_000, deadline - Date.now());
+      if (waitMs > 0) {
+        await sleep(waitMs);
       }
     }
   }
@@ -2666,8 +2667,4 @@ export function extractWorkersDevSubdomain(url: string): string | undefined {
 function workersDevSubdomainResult(url: string): { workersDevSubdomain?: string } {
   const workersDevSubdomain = extractWorkersDevSubdomain(url);
   return workersDevSubdomain ? { workersDevSubdomain } : {};
-}
-
-function defaultSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

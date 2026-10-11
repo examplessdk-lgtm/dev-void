@@ -1,15 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  unlinkSync,
-} from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { isRecord } from '@void/deploy-core';
 import type { PlatformDiscoveryDocument } from '@void/platform';
@@ -22,7 +13,8 @@ import { createProjectTsconfig, ensureProjectTsconfig } from '../codegen/project
 import { TYPED_CONFIG_FILE } from '../config-loader.ts';
 import { canRewriteVoidProjectConfig, writeVoidProjectConfig } from '../config-write.ts';
 import { getDatabaseDialect, readConfig, type DatabaseDialect } from '../config.ts';
-import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
+import { snapshotDrizzleOutputs } from '../drizzle/generate.ts';
 import { detectFramework, type DetectedFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import {
@@ -30,7 +22,7 @@ import {
   readPackageJson,
   type PackageDependencyField,
 } from '../shared/package-json.ts';
-import { detectAgents, getPackageDir } from './agents.ts';
+import { detectAgents, getOwnVersion, getPackageDir } from './agents.ts';
 import { connectCloudflare } from './cloudflare-connect.ts';
 import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
@@ -63,6 +55,7 @@ import { patchViteConfigWithVoidPlugin } from './vite-config-patch.ts';
 import { LATEST_KNOWN_COMPAT_DATE, writeProvisionedWranglerConfig } from './wrangler.ts';
 import {
   buildDrizzleKitSpawnEnv,
+  drizzleKitBin,
   findInstalledYarnPnpRuntime,
   hasLocalLockfile,
 } from './yarn-pnp.ts';
@@ -140,7 +133,6 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
 ]);
 
 const PNPM_ALLOWED_BUILDS = ['esbuild', 'sharp', 'workerd'] as const;
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 
 // Packages a previous Void Pages starter can leave behind, so re-running init
 // after deleting the app files still takes the starter path.
@@ -1912,66 +1904,12 @@ function installProjectDependencies(
   log.step(`Installed dependencies with ${packageManager}`);
 }
 
-function listFiles(dir: string, suffix: string): Set<string> {
-  return new Set(existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith(suffix)) : []);
-}
-
-/**
- * Record the Drizzle outputs under `migrationsDir` and return a rollback for a
- * failed `drizzle-kit generate`, so partial files cannot fail the journal check
- * of later `void db` commands.
- */
-function snapshotDrizzleOutputs(migrationsDir: string): () => void {
-  const metaDir = join(migrationsDir, 'meta');
-  const journalPath = join(metaDir, '_journal.json');
-  const metaDirExisted = existsSync(metaDir);
-  const journal = existsSync(journalPath) ? readFileSync(journalPath) : null;
-  const snapshots = listFiles(metaDir, '_snapshot.json');
-  const sqlFiles = listFiles(migrationsDir, '.sql');
-
-  const bestEffort = (step: () => void): void => {
-    try {
-      step();
-    } catch {
-      // The drizzle-kit failure is the error worth reporting.
-    }
-  };
-  const removeNewFiles = (dir: string, suffix: string, before: Set<string>): void => {
-    for (const file of listFiles(dir, suffix)) {
-      if (!before.has(file)) {
-        bestEffort(() => unlinkSync(join(dir, file)));
-      }
-    }
-  };
-
-  return () => {
-    if (metaDirExisted) {
-      if (journal !== null) {
-        bestEffort(() => writeFileSync(journalPath, journal));
-      }
-      bestEffort(() => removeNewFiles(metaDir, '_snapshot.json', snapshots));
-    } else {
-      bestEffort(() => rmSync(metaDir, { recursive: true, force: true }));
-    }
-    // Keep a new migrations directory so a retry can reuse it.
-    bestEffort(() => removeNewFiles(migrationsDir, '.sql', sqlFiles));
-  };
-}
-
 export function generateStarterMigration(
   root: string,
   starterMode: Exclude<ScaffoldStarterMode, 'static'>,
 ): void {
   const dialect = starterMode;
-  const configPath = writeDrizzleConfig(
-    root,
-    dialect === 'postgresql'
-      ? 'postgresql://dummy'
-      : dialect === 'mysql'
-        ? 'mysql://dummy'
-        : ':memory:',
-    dialect,
-  );
+  const configPath = writeDrizzleConfig(root, PLACEHOLDER_DB_URL[dialect], dialect);
 
   const rollBack = snapshotDrizzleOutputs(readProjectPaths(root).migrationsDir);
 
@@ -2375,11 +2313,6 @@ console.log(posts);
       'Try changing the migration or handler — types update automatically.',
     'Type Safety Demo',
   );
-}
-
-function getOwnVersion(): string {
-  const pkg = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8'));
-  return pkg.version;
 }
 
 const MARKER_VERSION_SOURCE =

@@ -1,14 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'pathslash';
-import { getPackageDir } from './agents.ts';
+import { getOwnVersion } from './agents.ts';
 
 let voidUserAgent: string | undefined;
 let cfCliVersion: string | undefined;
 
 export function getVoidUserAgent(): string {
   if (voidUserAgent === undefined) {
-    const pkg = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf8'));
-    voidUserAgent = `void/${pkg.version}`;
+    voidUserAgent = `void/${getOwnVersion()}`;
   }
   return voidUserAgent;
 }
