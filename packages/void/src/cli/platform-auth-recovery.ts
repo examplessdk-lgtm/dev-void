@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -246,7 +245,7 @@ export async function runPlatformAuthRecovery(args: PlatformConfigArgs): Promise
         url.searchParams.set('proof', proof);
         console.log(`Complete the recovery login in your browser: ${url.href}`);
         if (process.stdin.isTTY) {
-          openBrowser(url.href, execFile);
+          openBrowser(url.href);
         }
         let tested: { issuer: string; subject: string; login: string } | undefined;
         while (Date.now() < Date.parse(expiresAt)) {

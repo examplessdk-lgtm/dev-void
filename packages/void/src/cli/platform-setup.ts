@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import type { PlatformDeploymentManifest } from '@void/platform';
 import { type CANCEL_SYMBOL, isCancel, log } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
@@ -401,7 +400,7 @@ export function openPlatformSetupPage(
   }
   if (dependencies.interactive ?? process.stdin.isTTY === true) {
     try {
-      (dependencies.open ?? ((url) => openBrowser(url, execFile)))(page.url);
+      (dependencies.open ?? openBrowser)(page.url);
     } catch {
       log.info('Could not open the browser. Use the link above.');
     }

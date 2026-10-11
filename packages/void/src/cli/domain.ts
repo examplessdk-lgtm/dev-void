@@ -3,7 +3,8 @@ import { getToken } from './auth.ts';
 import { type DomainStatusResponse, PlatformClient } from './client.ts';
 import type { DomainArgs } from './domain-args.ts';
 import { printSuccess, note, pc } from './output.ts';
-import { readDeploymentPlatform, readProjectConfig } from './project.ts';
+import { readDeploymentPlatform } from './project.ts';
+import { resolveCommandProjectId } from './resolve-project.ts';
 
 export async function runDomainCommand(root: string, args: DomainArgs): Promise<void> {
   const platform = readDeploymentPlatform(root);
@@ -22,35 +23,17 @@ export async function runDomainCommand(root: string, args: DomainArgs): Promise<
 
   const client = new PlatformClient(token, { root });
 
-  const requestedSlug = args.projectSlug ?? process.env.VOID_PROJECT?.trim();
-  let projectId: string | undefined;
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const project = projects.find((p) => p.slug === requestedSlug);
-    if (!project) {
-      log.error(`project: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = project.id;
-  } else {
-    const config = readProjectConfig(root);
-    if (!config) {
-      log.error('No linked project. Run `void project link` or pass --project <name>.');
-      process.exit(1);
-    }
-    projectId = config.projectId;
-  }
+  const projectId = await resolveCommandProjectId(client, root, args.projectSlug);
 
   switch (args.subcommand) {
     case 'add':
-      return domainAdd(client, projectId!, args.hostname!);
+      return domainAdd(client, projectId, args.hostname!);
     case 'delete':
-      return domainRemove(client, projectId!, args.hostname!);
+      return domainRemove(client, projectId, args.hostname!);
     case 'list':
-      return domainList(client, projectId!);
+      return domainList(client, projectId);
     case 'status':
-      return domainStatus(client, projectId!, args.hostname!, args.verbose === true);
+      return domainStatus(client, projectId, args.hostname!, args.verbose === true);
   }
 }
 

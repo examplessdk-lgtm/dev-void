@@ -23,7 +23,7 @@ import * as output from '../../src/cli/output.ts';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 /**
- * `void email domain …` (design doc 0078, "Custom domains on Cloudflare").
+ * `void email domain …`.
  * Every browser, clipboard, DNS and stdin touch is a seam; credential values
  * here are inert placeholders and are never printed.
  */

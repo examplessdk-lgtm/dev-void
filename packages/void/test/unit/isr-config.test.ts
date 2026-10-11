@@ -2,7 +2,7 @@ import { resolvePathTtl } from '@void/isr/runtime';
 import { describe, expect, it } from 'vite-plus/test';
 import type { VoidConfig } from '../../src/config.ts';
 import { collectPages, collectRevalidate, hasRevalidate } from '../../src/isr-config.ts';
-import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
+import { makePage, makeScan } from '../helpers/page-scan.ts';
 
 describe('hasRevalidate', () => {
   it('treats null / undefined / 0 / negative / {} as no ISR', () => {
@@ -23,27 +23,6 @@ describe('hasRevalidate', () => {
     expect(hasRevalidate(true)).toBe(false);
   });
 });
-
-function makePage(pattern: string, revalidate?: number): PageDefinition {
-  return {
-    pattern,
-    params: [],
-    catchAll: false,
-    componentPath: `${pattern}.vue`,
-    serverPath: `${pattern}.server.ts`,
-    methods: ['GET'],
-    componentId: pattern.replace(/^\//, ''),
-    revalidate,
-    ssrMode: 'auto',
-    prerenderMode: 'auto',
-    renderMode: 'server',
-    shouldPrerender: false,
-  };
-}
-
-function makeScan(pages: Array<PageDefinition>): PageScanResult {
-  return { pages, layouts: [], namedLayouts: [] };
-}
 
 function configWith(revalidate: number | Record<string, number> | undefined): VoidConfig {
   return (revalidate === undefined ? {} : { routing: { revalidate } }) as VoidConfig;

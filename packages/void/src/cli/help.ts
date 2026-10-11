@@ -942,7 +942,7 @@ const HELP_TREE: HelpTree = {
           ),
         },
       },
-      // Mode B (design doc 0078): both read the local project + your wrangler session,
+      // Native Cloudflare email: both read the local project + your wrangler session,
       // never a Void project, so neither takes `--project`.
       status: {
         summary: 'Show the email setup state and address map. Exit 1 when not ready.',

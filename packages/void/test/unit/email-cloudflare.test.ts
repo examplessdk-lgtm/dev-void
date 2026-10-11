@@ -249,7 +249,7 @@ function routingGet(supportSubaddress: boolean) {
 }
 
 /**
- * The 0078 transcript scenario: `email/support+[ticket].ts` + `email/_default.ts`,
+ * The sample scenario: `email/support+[ticket].ts` + `email/_default.ts`,
  * `email.from = noreply@mail.acme.com`, zone `acme.com` (routing ready on the apex,
  * Google MX there), nothing yet on `mail.acme.com`.
  */
@@ -1082,7 +1082,7 @@ describe('preflightEmail', () => {
     expect(preMine.rules.mine).toEqual(['*@acme.com']);
   });
 
-  it('refuses a hand-written `addresses` array holding entries Void did not derive (decision 13)', async () => {
+  it('refuses a hand-written `addresses` array holding entries Void did not derive', async () => {
     const { inputs } = transcriptInputs({
       existingAddresses: ['support@mail.acme.com', 'billing@mail.acme.com'],
     });
@@ -1305,7 +1305,7 @@ describe('preflightEmail', () => {
 // ── Checklist ────────────────────────────────────────────────────────────────────
 
 describe('renderEmailChecklist', () => {
-  it('renders the 0078 transcript block for the first subdomain deploy', async () => {
+  it('renders the checklist for the first subdomain deploy', async () => {
     const who = structuredClone(whoamiResult().data) as {
       email: string;
       accounts: Array<{ id: string; name: string }>;

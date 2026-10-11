@@ -2268,7 +2268,7 @@ describe('writeProvisionedWranglerConfig', () => {
   });
 });
 
-describe('writeProvisionedWranglerConfig — email (Mode B): sendEmail / addresses / vars', () => {
+describe('writeProvisionedWranglerConfig — email: sendEmail / addresses / vars', () => {
   // Comments and trailing commas at every level, like a hand-edited file.
   const emailFixture = `{
   // Void manages this file — every comment below must survive.
@@ -2551,7 +2551,7 @@ describe('writeProvisionedWranglerConfig — email (Mode B): sendEmail / address
     expect(readRaw('wrangler.jsonc')).toBe(before);
   });
 
-  it('the full Mode B patch composes: send_email + addresses + vars in one write, every comment survives, idempotent', () => {
+  it('the full email patch composes: send_email + addresses + vars in one write, every comment survives, idempotent', () => {
     setup(
       'wrangler.jsonc',
       `{

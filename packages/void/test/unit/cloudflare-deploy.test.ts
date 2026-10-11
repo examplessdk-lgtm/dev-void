@@ -9158,12 +9158,12 @@ describe('assertWranglerUploaderUnchanged', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Mode B email (design doc 0078) — step 3b-ii. The email module itself is unit-tested in
+// Native Cloudflare email step. The email module itself is unit-tested in
 // email-cloudflare.test.ts on fakes; these tests pin the ORCHESTRATION: where the step sits,
 // what it spawns, what it writes, what it prints, and what it never leaks.
 // ---------------------------------------------------------------------------
 
-describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
+describe('runCloudflareDeploy — native Cloudflare email step', () => {
   const ZONE_ID = '5b66f5cb84fd7dcfdd0170515e622181';
   const BEARER = 'cfoa-SECRET-BEARER-TOKEN-0123456789abcdef';
   const BETA_WARNING = '▲ [WARNING] 🚧 `wrangler email x` is an open beta command.\n';
@@ -9251,8 +9251,8 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
 
   /**
    * A deploy runner keyed on the wrangler argv WITHOUT the `-c <cfg> --env=` context (asserted
-   * separately): the `whoami` / `auth token` / `email …` table for the first-deploy transcript
-   * of 0078, overridable per test. Unknown commands exit clean, as the base harness does.
+   * separately): the `whoami` / `auth token` / `email …` table for a first deploy,
+   * overridable per test. Unknown commands exit clean, as the base harness does.
    */
   function emailRunner(
     overrides: Record<string, DeployWranglerRunResult>,
@@ -9338,7 +9338,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     }) as typeof fetch;
   }
 
-  /** Public DNS for the transcript: Google MX on the apex, nothing on the subdomain yet. */
+  /** Public DNS for a first deploy: Google MX on the apex, nothing on the subdomain yet. */
   function emailDns(mx: Record<string, Array<string>> = {}): EmailDns {
     const noData = (): Error => Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
     const records: Record<string, Array<string>> = {
@@ -9387,7 +9387,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     };
   }
 
-  /** The harness, with the email seams wired to the transcript fakes. */
+  /** The harness, with the email seams wired to these fakes. */
   function emailHarness(
     options: {
       runner?: Record<string, DeployWranglerRunResult>;
@@ -9881,7 +9881,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
   });
 
-  it('a hand-written `addresses` array Void did not derive skips the step, array untouched (decision 13)', async () => {
+  it('a hand-written `addresses` array Void did not derive skips the step, array untouched', async () => {
     const root = emailProject({ ...PROVISIONED_D1, addresses: ['ceo@acme.com'] });
     const { deps, spawns, confirms, exitCalls } = emailHarness();
     const output = captureOutput();
@@ -9897,7 +9897,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(spawns.some((s) => s.args[0] === 'deploy')).toBe(true);
   });
 
-  /** The committed Mode B config a first deploy leaves behind. */
+  /** The committed email config a first deploy leaves behind. */
   const COMMITTED_EMAIL = {
     ...PROVISIONED_D1,
     send_email: [{ name: 'SEND_EMAIL' }],
@@ -10355,7 +10355,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(printed).toContain('outbound  sendEmail() from noreply@mail.acme.com');
   });
 
-  it('a committed `addresses` array Void did not derive stays untouched when routing is off too (decision 13)', async () => {
+  it('a committed `addresses` array Void did not derive stays untouched when routing is off too', async () => {
     const root = emailProject({ ...COMMITTED_EMAIL, addresses: ['ceo@acme.com'] });
     const { deps, spawns, confirms, exitCalls } = emailHarness({ isCI: true });
     const output = captureOutput();
@@ -10393,8 +10393,8 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
   });
 
   it('an app that stopped using email warns about the setup wrangler.jsonc still carries, and deploys as-is', async () => {
-    // No `email/` directory and no `void/email` import, but the root still has what a Mode B
-    // deploy wrote: wrangler keeps routing support@ to a worker with no `email()` export.
+    // No `email/` directory and no `void/email` import, but the root still has what an earlier
+    // email deploy wrote: wrangler keeps routing support@ to a worker with no `email()` export.
     const root = d1Project(COMMITTED_EMAIL, INIT_MIGRATION);
     const { deps, spawns, exitCalls } = emailHarness({
       confirm: async () => {

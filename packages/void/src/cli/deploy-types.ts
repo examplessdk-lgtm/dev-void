@@ -48,7 +48,7 @@ export type RunDeployOptions = {
   platform?: Exclude<DeploymentPlatform, 'none'>;
   provision?: boolean;
   /**
-   * Mode B email (0078): fail the deploy — before any upload — instead of continuing
+   * Native Cloudflare email: fail the deploy — before any upload — instead of continuing
    * without email when the mail domain is not set up and the step cannot finish it
    * (CI / non-TTY, a blocker, a declined prompt). `--platform cloudflare` only.
    */
@@ -165,7 +165,7 @@ export interface CloudflareDeployDeps {
    */
   readEmittedWorkerVars?: (root: string) => EmittedWorkerVarsResult;
   /**
-   * Override CI / non-interactive detection for the Mode B email prompt (default: wrangler's
+   * Override CI / non-interactive detection for the email step prompt (default: wrangler's
    * own {@link isWranglerNonInteractiveOrCI}, so Void and wrangler call the same run
    * interactive).
    */

@@ -39,8 +39,7 @@ import {
   type EmailWranglerRun,
 } from './email-cloudflare.ts';
 import { printSuccess, createSpinner, note, pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
-import { resolveProjectBySlug } from './resolve-project.ts';
+import { resolveCommandProjectId } from './resolve-project.ts';
 import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
 export async function runEmailCommand(root: string, args: EmailArgs): Promise<void> {
@@ -69,24 +68,7 @@ export async function runEmailCommand(root: string, args: EmailArgs): Promise<vo
 
   const client = new PlatformClient(token, { root });
 
-  const requestedSlug = args.projectSlug ?? process.env.VOID_PROJECT?.trim();
-  let projectId: string;
-
-  if (requestedSlug) {
-    const project = resolveProjectBySlug(await client.listProjects(), requestedSlug);
-    if (!project) {
-      log.error(`project: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = project.projectId;
-  } else {
-    const config = readProjectConfig(root);
-    if (!config) {
-      log.error('No linked project. Run `void project link` or pass --project <name>.');
-      process.exit(1);
-    }
-    projectId = config.projectId;
-  }
+  const projectId = await resolveCommandProjectId(client, root, args.projectSlug);
 
   switch (args.subcommand) {
     case 'usage':
@@ -551,11 +533,7 @@ export async function emailDomainAdd(
     const readClip = deps.readClipboard ?? readClipboard;
     const clearClip = deps.clearClipboard ?? clearClipboard;
     const verify = deps.verifyToken ?? verifyCfApiToken;
-    const openUrl =
-      deps.openUrl ??
-      ((u: string): void => {
-        void import('node:child_process').then(({ execFile }) => openBrowser(u, execFile));
-      });
+    const openUrl = deps.openUrl ?? openBrowser;
     const snapshot = readClip();
     if (snapshot === null) {
       log.info('No clipboard tool found here — paste the token instead.');

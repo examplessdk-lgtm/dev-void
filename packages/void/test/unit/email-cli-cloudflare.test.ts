@@ -14,7 +14,7 @@ import { runEmailCloudflareCommand, runEmailCommand } from '../../src/cli/email.
 import * as terminalOutput from '../../src/cli/output.ts';
 
 /**
- * `void email setup|status --platform cloudflare` on the 0078 transcript project:
+ * `void email setup|status --platform cloudflare` on a sample project:
  * `email/support+[ticket].ts` + `email/_default.ts`, `email.from = noreply@mail.acme.com`,
  * zone `acme.com` (routing ready on the apex, Google MX there), nothing on `mail.acme.com`.
  * Every Cloudflare touch is a fake returning structured account data.
@@ -222,7 +222,7 @@ function makeProject(overrides: { from?: string; wrangler?: string } = {}): stri
   return root;
 }
 
-/** The transcript project's fakes, with the apply-side entries overridable. */
+/** The sample project's fakes, with the apply-side entries overridable. */
 function transcriptDeps(
   extra: {
     runnerTable?: Record<string, EmailWranglerRunResult>;
@@ -937,7 +937,7 @@ describe('void email setup|status without --platform cloudflare', () => {
     exitSpy.mockRestore();
   });
 
-  it('explains that both are Mode B commands today and exits 1 before any platform call', async () => {
+  it('explains that both need --platform cloudflare and exits 1 before any platform call', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-email-cli-'));
     roots.push(root);
     for (const subcommand of ['setup', 'status'] as const) {

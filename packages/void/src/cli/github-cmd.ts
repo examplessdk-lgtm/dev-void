@@ -227,8 +227,7 @@ export async function runInstall(
   }
 
   log.message(`Open this URL to install the Void GitHub App:\n${pc.blue(url)}`);
-  const { execFile } = await import('node:child_process');
-  openBrowser(url, execFile);
+  openBrowser(url);
   log.message('After installing, run `void github connect` to link a repository to your project.');
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vite-plus/test';
 import { assembleVoidManifest } from '../../src/cli/deploy-managed-static.ts';
 import type { InferredBindings } from '../../src/inference/walk.ts';
-import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
+import { makePage, makeScan } from '../helpers/page-scan.ts';
 
 // Minimal all-false bindings — `manifest.pages` emission is independent of
 // bindings, so this is the smallest valid `buildVoidManifest` input.
@@ -32,27 +32,6 @@ it('disables managed ISR policies and edge prerendering with routing.isr false',
   expect(manifest.prerender).toBeUndefined();
   expect(manifest.pages).toEqual([{ pattern: '/' }]);
 });
-
-function makePage(pattern: string, revalidate?: number): PageDefinition {
-  return {
-    pattern,
-    params: [],
-    catchAll: false,
-    componentPath: `${pattern}.vue`,
-    serverPath: `${pattern}.server.ts`,
-    methods: ['GET'],
-    componentId: pattern.replace(/^\//, ''),
-    revalidate,
-    ssrMode: 'auto',
-    prerenderMode: 'auto',
-    renderMode: 'server',
-    shouldPrerender: false,
-  };
-}
-
-function makeScan(pages: Array<PageDefinition>): PageScanResult {
-  return { pages, layouts: [], namedLayouts: [] };
-}
 
 describe('assembleVoidManifest', () => {
   it('forwards the page scan into manifest.pages (ordered, raw patterns, ISR TTL preserved)', () => {

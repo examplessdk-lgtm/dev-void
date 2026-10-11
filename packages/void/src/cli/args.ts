@@ -84,7 +84,7 @@ export function parseDeployArgs(
     throw new Error('deploy: --provision requires --platform cloudflare.');
   }
 
-  // Mode B email (design doc 0078): fail the deploy — before any upload — instead of
+  // Native Cloudflare email: fail the deploy — before any upload — instead of
   // continuing without email when the domain is not set up and nobody can press Enter
   // (CI / non-TTY). Only the Cloudflare backend runs the email step.
   const requireEmail = parsed.values['require-email'] === true ? true : undefined;
