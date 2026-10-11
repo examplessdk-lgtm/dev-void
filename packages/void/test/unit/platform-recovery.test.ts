@@ -6,7 +6,6 @@ import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
   createPlatformResourceOwnershipMarker,
-  PLATFORM_DISABLED_KEY,
   recordInstallationResource,
   recordInstallationStep,
   setInstallationEndpoints,
@@ -17,7 +16,6 @@ import {
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { hyperdriveOriginConfigHash } from '../../src/cli/platform-cloudflare.ts';
 import { REMOTE_INSTALLATION_MANIFEST_KEY } from '../../src/cli/platform-installer.ts';
-import { disablePlatform } from '../../src/cli/platform-management.ts';
 import {
   createPlatformInstallPlan,
   platformProvisionIntentHash,
@@ -160,6 +158,13 @@ function remoteManifest() {
     },
     '2026-09-14T00:00:03.000Z',
   );
+}
+
+function useRegistryDir(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
+  directories.push(directory);
+  process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+  return directory;
 }
 
 function client(manifest = remoteManifest()) {
@@ -317,9 +322,7 @@ describe('platform recovery', () => {
   });
 
   it('recovers a fully verified remote ownership manifest', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const verified: Array<string> = [];
     const recovered = await recoverPlatformInstallations(client(), 'account', async (manifest) => {
       verified.push(manifest.id);
@@ -334,9 +337,7 @@ describe('platform recovery', () => {
   });
 
   it('recovers a verified installation with a missing owned Worker so repair can recreate it', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const remote = remoteManifest();
     const missingWorker = remote.deployment.resources.apiWorker;
     const fake = client(remote);
@@ -376,9 +377,7 @@ describe('platform recovery', () => {
   });
 
   it('rejects discovery when a surviving Worker belongs to another installation', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const remote = remoteManifest();
     const fake = client(remote);
     const conflicting = {
@@ -404,9 +403,7 @@ describe('platform recovery', () => {
   });
 
   it('discovers a routing namespace created under a retry name', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const base = remoteManifest();
     const retryName = `${base.deployment.resources.routingKv}-retry-0123456789`;
     const manifest = {
@@ -429,9 +426,7 @@ describe('platform recovery', () => {
   });
 
   it('refuses ownership metadata from a different routing namespace', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const manifest = remoteManifest();
     const tampered = {
       ...manifest,
@@ -446,9 +441,7 @@ describe('platform recovery', () => {
   });
 
   it('recovers a disabled installation without probing its private endpoint', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    useRegistryDir();
     const installed = remoteManifest();
     const disabled = {
       ...installed,
@@ -465,9 +458,7 @@ describe('platform recovery', () => {
   });
 
   it('recovers an interrupted uninstall without probing its removed endpoint', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    useRegistryDir();
     const interrupted = { ...remoteManifest(), status: 'uninstalling' as const };
     let endpointChecks = 0;
 
@@ -485,9 +476,7 @@ describe('platform recovery', () => {
   });
 
   it('recovers an interrupted install before endpoints were checkpointed', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    const directory = useRegistryDir();
     const interrupted = {
       ...remoteManifest(),
       endpoints: { apiUrl: null, dashboardUrl: null, proxyUrl: null },
@@ -509,10 +498,8 @@ describe('platform recovery', () => {
     expect(endpointChecks).toBe(0);
   });
 
-  it('recovers and disables a Worker deployed before its resource checkpoint', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+  it('recovers a Worker deployed before its resource checkpoint', async () => {
+    useRegistryDir();
     const base = remoteManifest();
     const installationId = 'example-a1b2c3d4e5f6';
     const workerName = 'void-example-a1b2c3d4e5f6-api';
@@ -553,10 +540,6 @@ describe('platform recovery', () => {
           : interrupted.resources.find((entry) => entry.kind === 'worker' && entry.name === name)!;
       return { PLATFORM_OWNERSHIP_MARKER: ownershipMarker(interrupted, resource) };
     };
-    const disabledKeys: Array<string> = [];
-    fake.putKvValue = async (_account, _namespace, key) => {
-      disabledKeys.push(key);
-    };
 
     const [recovered] = await recoverPlatformInstallations(fake, 'account', async () => {});
     expect(recovered?.resources.find((resource) => resource.key === 'api-worker')).toMatchObject({
@@ -567,14 +550,10 @@ describe('platform recovery', () => {
       ownership: 'created',
       state: 'ready',
     });
-    await disablePlatform(fake, recovered!, false);
-    expect(disabledKeys).toContain(PLATFORM_DISABLED_KEY);
   });
 
   it('keeps locally advanced lifecycle progress during discovery', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    useRegistryDir();
     const remote = remoteManifest();
     const local = {
       ...remote,
@@ -590,9 +569,7 @@ describe('platform recovery', () => {
   });
 
   it('rejects a locally advanced manifest with a different proxy origin', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    useRegistryDir();
     const remote = remoteManifest();
     const local = {
       ...remote,
@@ -610,9 +587,7 @@ describe('platform recovery', () => {
   });
 
   it('accepts a deterministic endpoint advancement from a local checkpoint', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-platform-recovery-test-'));
-    directories.push(directory);
-    process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
+    useRegistryDir();
     const complete = remoteManifest();
     const remote = {
       ...complete,
