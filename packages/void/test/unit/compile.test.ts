@@ -1,4 +1,4 @@
-import { compilePattern as sharedCompilePattern } from '@void/edge';
+import { compilePattern as sharedCompilePattern, matchPatternCaptures } from '@void/edge';
 /* oxlint-disable typescript-eslint/no-explicit-any -- these tests wire the void context augmentations by hand (`c.rewrite`, `c.originalUrl`, `c.isRewritten`) to exercise generated code paths directly; `as any` is the least noisy way to assign/read those members without re-declaring the full Hono context shape per test. */
 import { Hono } from 'hono';
 import { describe, expect, it } from 'vite-plus/test';
@@ -1178,16 +1178,17 @@ describe('compileNodeServer', () => {
 
 describe('shared pattern compiler in generated routes', () => {
   const compilePattern = (source: string) => {
-    const { regex, paramNames } = sharedCompilePattern(source);
-    return { regex, names: [...paramNames] };
+    const { paramNames } = sharedCompilePattern(source);
+    return { names: [...paramNames] };
   };
 
   it(':name and bare "*" do not clash even when both appear', () => {
-    const { regex, names } = compilePattern('/u/:id*/files/*');
+    const { names } = compilePattern('/u/:id*/files/*');
     expect(names).toEqual(['id', 'splat']);
-    const m = regex.exec('/u/42/extra/files/a/b');
-    expect(m?.groups?.id).toBe('42/extra');
-    expect(m?.groups?.splat).toBe('a/b');
+    expect(matchPatternCaptures('/u/:id*/files/*', '/u/42/extra/files/a/b')).toEqual({
+      id: '42/extra',
+      splat: 'a/b',
+    });
   });
 
   it('__compilePattern itself still throws on duplicate capture group names', () => {

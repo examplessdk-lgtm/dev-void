@@ -139,11 +139,28 @@ describe('applyRoutingRules', () => {
     }
   });
 
+  it('matches an oversized source instead of failing the request', () => {
+    const big = '/' + 'a'.repeat(40_000);
+    const rules = [
+      { source: big, destination: '/x', status: 301 },
+      { source: '/old', destination: '/new', status: 301 },
+    ];
+    expect(applyRoutingRules('/old', rules)).toEqual({
+      type: 'redirect',
+      destination: '/new',
+      status: 301,
+    });
+    expect(applyRoutingRules(big, rules)).toEqual({
+      type: 'redirect',
+      destination: '/x',
+      status: 301,
+    });
+  });
+
   // Percent-encoded / non-ASCII paths come in as-is from `new URL().pathname`
-  // (Cloudflare does not normalize them). `compilePattern` needs to produce a
-  // regex that matches the raw pathname byte-for-byte; non-ASCII characters
-  // are regex-literal and percent-triples have `%` which is not a regex
-  // special, so both cases should compile and match without special handling.
+  // (Cloudflare does not normalize them). Pattern text must match the raw
+  // pathname unit for unit; non-ASCII characters and percent-triples are plain
+  // literals, so both cases should match without special handling.
   it('matches non-ASCII path segments literally', () => {
     const rules = [{ source: '/café/*', destination: '/fr/café/:splat', status: 301 }];
     expect(applyRoutingRules('/café/menu', rules)).toEqual({

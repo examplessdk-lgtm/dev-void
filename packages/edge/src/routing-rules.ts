@@ -1,5 +1,5 @@
 import type { RedirectRule } from '@void/deploy-core';
-import { compilePattern, substituteParams } from './pattern.ts';
+import { compilePattern, matchPatternCaptures, substituteParams } from './pattern.ts';
 
 export type { RedirectRule } from '@void/deploy-core';
 
@@ -37,25 +37,24 @@ export function applyRoutingRules(
     if (rule.host && rule.host !== requestHost) {
       continue;
     }
-    let regex: RegExp;
     try {
-      ({ regex } = compilePattern(rule.source));
+      compilePattern(rule.source);
     } catch (err) {
-      // A malformed `source` (e.g. duplicate named params) throws inside
-      // `new RegExp`. Framework validation rejects those at build, but a
-      // hand-crafted manifest could still reach the edge. Skip the offending
-      // rule and continue rather than 500ing the whole request.
+      // A malformed `source` (e.g. duplicate named params) throws here.
+      // Framework validation rejects those at build, but a hand-crafted
+      // manifest could still reach the edge. Skip the offending rule and
+      // continue rather than 500ing the whole request.
       console.warn(
         `[dispatch] skipping routing rule with invalid source ${JSON.stringify(rule.source)}: ${err instanceof Error ? err.message : String(err)}`,
       );
       continue;
     }
-    const match = regex.exec(pathname);
-    if (!match) {
+    const params = matchPatternCaptures(rule.source, pathname);
+    if (!params) {
       continue;
     }
 
-    const destination = substituteParams(rule.destination, match.groups ?? {});
+    const destination = substituteParams(rule.destination, params);
 
     if (rule.status === 200) {
       return { type: 'rewrite', destination };

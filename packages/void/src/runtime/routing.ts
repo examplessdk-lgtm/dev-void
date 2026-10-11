@@ -1,5 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { compilePattern, mergeQueryIntoLocation, substituteParams } from '@void/edge';
+import {
+  compilePattern,
+  matchPattern,
+  matchPatternCaptures,
+  mergeQueryIntoLocation,
+  substituteParams,
+} from '@void/edge';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import type { RedirectStatusCode } from 'hono/utils/http-status';
 import { VoidAssetRewriteError } from './handler.ts';
@@ -91,17 +97,17 @@ export function createRoutingRuntime(
       if (rule.host && rule.host !== url.hostname) {
         continue;
       }
-      let match: RegExpExecArray | null;
       try {
-        match = compilePattern(rule.source).regex.exec(url.pathname);
+        compilePattern(rule.source);
       } catch (error) {
         warn(rule.source, error, 'routing');
         continue;
       }
-      if (!match) {
+      const params = matchPatternCaptures(rule.source, url.pathname);
+      if (!params) {
         continue;
       }
-      const destination = substituteParams(rule.destination, match.groups ?? {});
+      const destination = substituteParams(rule.destination, params);
       if (rule.status === 200) {
         const q = destination.indexOf('?');
         const rewriteUrl = new URL(c.req.url);
@@ -211,11 +217,13 @@ export function createRoutingRuntime(
       const matched: Array<[string, string]> = [];
       for (const rule of rules) {
         try {
-          if (compilePattern(rule.pattern).regex.test(pathname)) {
-            matched.push(...rule.headers);
-          }
+          compilePattern(rule.pattern);
         } catch (error) {
           warn(rule.pattern, error, 'header');
+          continue;
+        }
+        if (matchPattern(rule.pattern, pathname)) {
+          matched.push(...rule.headers);
         }
       }
       if (!matched.length) {
