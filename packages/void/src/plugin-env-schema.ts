@@ -385,5 +385,12 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
         }
       });
     },
+    async buildStart() {
+      // `config` runs once per `vite build --watch` session; re-import so
+      // each rebuild checks client code against the current env.ts.
+      if (envFile) {
+        await importUserEnv();
+      }
+    },
   };
 }
