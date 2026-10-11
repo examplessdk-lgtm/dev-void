@@ -36,6 +36,28 @@ vi.mock('pg', async (importOriginal) => {
   return { Client };
 });
 
+const mysqlQueries = vi.hoisted((): Array<string> => []);
+
+vi.mock('mysql2/promise', () => ({
+  createConnection: async () => ({
+    async end() {},
+    async query(sql: string) {
+      mysqlQueries.push(sql);
+      // MySQL 8 labels an unaliased information_schema column in upper case.
+      const tables = /^SELECT table_name(?: AS (\w+))? FROM information_schema\.tables/.exec(sql);
+      if (tables) {
+        const key = tables[1] ?? 'TABLE_NAME';
+        return [[{ [key]: '_void_migrations' }, { [key]: 'users' }], []];
+      }
+      if (sql === 'SELECT `name` FROM `_void_migrations`') {
+        const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
+        return [dropped ? [] : [{ name: '0000_init.sql' }], []];
+      }
+      return [[], []];
+    },
+  }),
+}));
+
 vi.mock('../../src/migrations/runner', async () => {
   const actual = await vi.importActual<typeof import('../../src/migrations/runner.ts')>(
     '../../src/migrations/runner',
@@ -407,6 +429,25 @@ describe('void db reset', () => {
     } finally {
       Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: stdinTty });
     }
+  });
+
+  it('MySQL: drops every table and re-applies migrations', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-reset-mysql-'));
+    rootsToClean.push(root);
+    mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+    writeFileSync(
+      join(root, 'db', 'migrations', '0000_init.sql'),
+      'CREATE TABLE `users` (id INT);',
+    );
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+
+    await runDbCommand(root, { action: 'reset' });
+
+    expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `_void_migrations`');
+    expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `users`');
+    expect(mysqlQueries).toContain('CREATE TABLE `users` (id INT);');
   });
 });
 

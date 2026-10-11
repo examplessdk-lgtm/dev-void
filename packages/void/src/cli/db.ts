@@ -596,8 +596,9 @@ async function resetDatabase(
     const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
     await confirmDropAllTables(hostname, target, yes);
     await withMySqlClient(root, async (client) => {
+      // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
       const tables = await client.query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+        "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
       );
       await client.query('SET FOREIGN_KEY_CHECKS = 0');
       try {
