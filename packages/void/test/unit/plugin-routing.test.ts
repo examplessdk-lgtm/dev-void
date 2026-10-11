@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { analyzeApplicationSync } from '../../src/application-analysis.ts';
 import { readConfig } from '../../src/config.ts';
 import { routingPlugin } from '../../src/plugin-routing.ts';
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 const tempDirs: Array<string> = [];
 
@@ -34,16 +35,6 @@ function createRoutingPlugin(
     getApplicationAnalysis: (environment) =>
       analyzeApplicationSync(root, { config: readConfig(root), environment }),
   });
-}
-
-function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
-  if (typeof hook === 'function') {
-    return hook;
-  }
-  if (hook && typeof hook === 'object' && 'handler' in hook) {
-    return hook.handler;
-  }
-  throw new Error('Expected Vite hook handler.');
 }
 
 function runConfig(plugin: RoutingPlugin, env: ConfigEnv): void {

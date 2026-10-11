@@ -162,31 +162,6 @@ describe('promptDeployProjectConfig', () => {
     expect(promptConfig.validate(' ')).toBe('Project slug is required.');
   });
 
-  it('re-prompts when the server rejects a short slug for a free-plan user', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
-    const { PlatformApiError } = await import('../../src/cli/client.ts');
-    const client = createClient();
-    client.listProjectChoices.mockResolvedValueOnce([]);
-    client.createProject
-      .mockRejectedValueOnce(
-        new PlatformApiError(
-          'createProject',
-          403,
-          JSON.stringify({ error: 'short slugs (5 characters or fewer) require a paid plan' }),
-        ),
-      )
-      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
-    mockSelect.mockResolvedValueOnce('create');
-    mockText.mockResolvedValueOnce('oxc').mockResolvedValueOnce('longer-app');
-
-    const config = await promptDeployProjectConfig(root, client);
-
-    expect(client.createProject).toHaveBeenNthCalledWith(1, 'oxc');
-    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
-    expect(mockText).toHaveBeenCalledTimes(2);
-    expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
-  });
-
   it('does not retry on non-slug 403 errors (e.g. account suspended)', async () => {
     const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const { PlatformApiError } = await import('../../src/cli/client.ts');

@@ -40,7 +40,6 @@ const mockGetToken = vi.fn();
 const mockGetApiUrl = vi.fn();
 const mockRunLogin = vi.fn();
 const mockSaveToken = vi.fn();
-const mockIsStagingMode = vi.fn();
 const mockListProjects = vi.fn();
 const mockCreateProject = vi.fn();
 const mockDiscoverPlatform = vi.fn();
@@ -206,7 +205,6 @@ vi.mock('../../src/cli/auth', () => ({
   getToken: (...args: Array<unknown>) => mockGetToken(...args),
   runPlatformLogin: (...args: Array<unknown>) => mockRunLogin(...args),
   savePlatformToken: (...args: Array<unknown>) => mockSaveToken(...args),
-  isStagingMode: (...args: Array<unknown>) => mockIsStagingMode(...args),
   getSiteDomain: () => 'void.app',
 }));
 
@@ -463,7 +461,6 @@ afterEach(() => {
   mockGetApiUrl.mockReset();
   mockRunLogin.mockReset();
   mockSaveToken.mockReset();
-  mockIsStagingMode.mockReset();
   mockListProjects.mockReset();
   mockCreateProject.mockReset();
   mockDiscoverPlatform.mockReset();
@@ -488,7 +485,6 @@ beforeEach(() => {
   mockGetToken.mockReturnValue(null);
   mockGetApiUrl.mockReturnValue('https://api.void.cloud');
   mockRunLogin.mockResolvedValue('token_123');
-  mockIsStagingMode.mockReturnValue(false);
   mockListProjects.mockResolvedValue([]);
   mockCreateProject.mockResolvedValue({ id: 'proj_123', slug: 'my-app' });
   mockDiscoverPlatform.mockResolvedValue({
@@ -3652,19 +3648,17 @@ describe('detectProjectState', () => {
 
 describe('generateStarterMigration', () => {
   // Partial drizzle-kit output would make the next journal coherence check refuse.
-  function seedStarterSchema(root: string, dialect: 'sqlite' | 'postgresql'): void {
+  function seedStarterSchema(root: string): void {
     mkdirSync(join(root, 'db'), { recursive: true });
     writeFileSync(
       join(root, 'db', 'schema.ts'),
-      dialect === 'postgresql'
-        ? 'import { sqliteTable } from "void/schema-pg";\nexport const messages = sqliteTable("messages", {});\n'
-        : 'import { sqliteTable } from "void/schema-d1";\nexport const messages = sqliteTable("messages", {});\n',
+      'import { sqliteTable } from "void/schema-d1";\nexport const messages = sqliteTable("messages", {});\n',
     );
   }
 
   it('rolls back partial artifacts when drizzle-kit fails and migrations/ did not exist before', () => {
     withTempDir((root) => {
-      seedStarterSchema(root, 'sqlite');
+      seedStarterSchema(root);
       mockSpawnSync.mockImplementationOnce((command, args, options) => {
         const cwd = drizzleGenerateCwd(command, args, options);
         if (cwd) {
@@ -3703,7 +3697,7 @@ describe('generateStarterMigration', () => {
 
   it('restores the journal and keeps prior entries when drizzle-kit fails and a journal existed before', () => {
     withTempDir((root) => {
-      seedStarterSchema(root, 'sqlite');
+      seedStarterSchema(root);
       const migrationsDir = join(root, 'db', 'migrations');
       const metaDir = join(migrationsDir, 'meta');
       mkdirSync(metaDir, { recursive: true });

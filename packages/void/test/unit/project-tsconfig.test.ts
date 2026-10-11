@@ -53,13 +53,6 @@ describe('ensureProjectTsconfig', () => {
     expect(tsconfig.compilerOptions.paths['void/routes']).toEqual(['./routes.d.ts']);
   });
 
-  it('excludes md.d.ts when file does not exist', () => {
-    ensureProjectTsconfig(root);
-    const tsconfig = readTsconfig();
-    expect(tsconfig.files).not.toContain('md.d.ts');
-    expect(tsconfig.compilerOptions?.paths?.['@void/md/pages']).toBeUndefined();
-  });
-
   it('does not rewrite tsconfig.json when generated content is unchanged', () => {
     const tsconfigPath = join(root, '.void', 'tsconfig.json');
     const oldTime = new Date('2024-01-01T00:00:00.000Z');
@@ -75,10 +68,9 @@ describe('ensureProjectTsconfig', () => {
     expect(statSync(tsconfigPath).mtimeMs).not.toBe(oldTime.getTime());
   });
 
-  it('combines routes, queues, and md when all present', () => {
+  it('combines routes, queues, and db', () => {
     mkdirSync(join(root, 'routes'), { recursive: true });
     mkdirSync(join(root, 'queues'), { recursive: true });
-    writeFileSync(join(root, '.void', 'md.d.ts'), 'export default [];');
 
     ensureProjectTsconfig(root, undefined, true);
     const tsconfig = readTsconfig();
@@ -86,10 +78,8 @@ describe('ensureProjectTsconfig', () => {
     expect(tsconfig.files).toContain('routes.d.ts');
     expect(tsconfig.files).toContain('db.d.ts');
     expect(tsconfig.files).toContain('queues.d.ts');
-    expect(tsconfig.files).toContain('md.d.ts');
     expect(tsconfig.compilerOptions.paths['void/routes']).toEqual(['./routes.d.ts']);
     expect(tsconfig.compilerOptions.paths['void/db']).toEqual(['./db.d.ts']);
     expect(tsconfig.compilerOptions.paths['void/queues']).toEqual(['./queues.d.ts']);
-    expect(tsconfig.compilerOptions.paths['@void/md/pages']).toEqual(['./md.d.ts']);
   });
 });

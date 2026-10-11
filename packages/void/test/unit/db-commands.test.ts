@@ -110,33 +110,6 @@ vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
   },
 }));
 
-describe('getAppliedMigrations', () => {
-  it('returns applied migrations sorted by name', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'void-applied-migrations-'));
-    try {
-      const dbPath = join(dir, 'migrations.sqlite');
-
-      const Database = (await import('better-sqlite3')).default;
-      const db = new Database(dbPath);
-      db.exec(`
-        CREATE TABLE _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
-        INSERT INTO _void_migrations (name, applied_at) VALUES ('002_second.sql', '2025-01-02T00:00:00Z');
-        INSERT INTO _void_migrations (name, applied_at) VALUES ('001_first.sql', '2025-01-01T00:00:00Z');
-      `);
-      db.close();
-
-      const { getAppliedMigrations } = await import('../../src/migrations/runner.ts');
-      const result = await getAppliedMigrations(dbPath);
-      expect(result).toEqual([
-        { name: '001_first.sql', applied_at: '2025-01-01T00:00:00Z' },
-        { name: '002_second.sql', applied_at: '2025-01-02T00:00:00Z' },
-      ]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
 const rootsToClean: Array<string> = [];
 
 function createRenameProjectRoot(options: {

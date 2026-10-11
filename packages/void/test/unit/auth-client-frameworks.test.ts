@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vite-plus/test';
 
 const mocks = vi.hoisted(() => ({
+  client: vi.fn((options?: unknown) => ({ framework: 'client', options })),
   react: vi.fn((options?: unknown) => ({ framework: 'react', options })),
   solid: vi.fn((options?: unknown) => ({ framework: 'solid', options })),
   svelte: vi.fn((options?: unknown) => ({ framework: 'svelte', options })),
   vue: vi.fn((options?: unknown) => ({ framework: 'vue', options })),
+}));
+
+vi.mock('better-auth/client', () => ({
+  createAuthClient: mocks.client,
 }));
 
 vi.mock('better-auth/react', () => ({
@@ -23,8 +28,9 @@ vi.mock('better-auth/solid', () => ({
   createAuthClient: mocks.solid,
 }));
 
-describe('framework-specific client runtimes', () => {
+describe('client runtimes', () => {
   it.each([
+    ['default', 'client', () => import('../../src/runtime/client.ts')],
     ['React', 'react', () => import('../../src/runtime/client-react.ts')],
     ['Vue', 'vue', () => import('../../src/runtime/client-vue.ts')],
     ['Svelte', 'svelte', () => import('../../src/runtime/client-svelte.ts')],

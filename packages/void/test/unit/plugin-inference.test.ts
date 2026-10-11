@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { LATEST_KNOWN_COMPAT_DATE } from '../../src/cli/wrangler.ts';
 import { voidPlugin } from '../../src/index.ts';
 import { inferProjectBindings, detectFramework } from '../../src/plugin-inference.ts';
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 const tempDirs: Array<string> = [];
 
@@ -20,16 +21,6 @@ function writeCompatConfig(root: string): void {
     join(root, 'void.json'),
     JSON.stringify({ worker: { compatibility_date: '2026-02-24' } }),
   );
-}
-
-function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
-  if (typeof hook === 'function') {
-    return hook;
-  }
-  if (hook && typeof hook === 'object' && 'handler' in hook) {
-    return hook.handler;
-  }
-  throw new Error('Expected Vite hook handler.');
 }
 
 describe('inferProjectBindings', () => {

@@ -1,18 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigEnv, Plugin, UserConfig } from 'vite';
+import type { ConfigEnv, UserConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 type MockCloudflareConfig = {
   config: (resolved: Record<string, unknown>) => Record<string, unknown>;
 };
 
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(config: MockCloudflareConfig): Array<Plugin> {
-    return [{ name: 'mock:cloudflare', api: { config } } as Plugin];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 
 // Binding inference must not consult a developer's system keychain.
 vi.mock('../../src/cli/auth.ts', async (importOriginal) => ({
@@ -69,7 +65,7 @@ async function generatedBindings(
   if (!cloudflarePlugin) {
     throw new Error('Expected mocked Cloudflare plugin.');
   }
-  return (cloudflarePlugin.api as { config: MockCloudflareConfig }).config.config({});
+  return (cloudflarePlugin.api as { pluginConfig: MockCloudflareConfig }).pluginConfig.config({});
 }
 
 describe('environment-specific route binding inference', () => {

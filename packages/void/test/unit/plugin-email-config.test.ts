@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plugin } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 // The Cloudflare plugin defu-merges the returned patch over `resolved`, so a key
 // can only be removed by mutating `resolved`.
@@ -24,16 +25,7 @@ type MockCloudflarePlugin = Plugin & {
   };
 };
 
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(pluginConfig: MockCloudflarePluginConfig): Array<MockCloudflarePlugin> {
-    return [
-      {
-        name: 'mock:cloudflare',
-        api: { pluginConfig },
-      },
-    ];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 
 const tempDirs: Array<string> = [];
 
@@ -79,16 +71,6 @@ export async function POST() {
     );
   }
   return root;
-}
-
-function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
-  if (typeof hook === 'function') {
-    return hook;
-  }
-  if (hook && typeof hook === 'object' && 'handler' in hook) {
-    return hook.handler;
-  }
-  throw new Error('Expected Vite hook handler.');
 }
 
 async function resolveCloudflareConfig(

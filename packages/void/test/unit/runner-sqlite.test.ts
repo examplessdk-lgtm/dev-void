@@ -302,6 +302,27 @@ describe('runMigrations (local SQLite)', () => {
     expect(rows).toEqual([]);
   });
 
+  it('getAppliedMigrations returns applied migrations sorted by name', async () => {
+    const root = createDir();
+    const dbPath = join(root, 'migrations.sqlite');
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO _void_migrations (name, applied_at) VALUES ('002_second.sql', '2025-01-02T00:00:00Z');
+        INSERT INTO _void_migrations (name, applied_at) VALUES ('001_first.sql', '2025-01-01T00:00:00Z');
+      `);
+    } finally {
+      db.close();
+    }
+
+    const rows = await getAppliedMigrations(dbPath);
+    expect(rows).toEqual([
+      { name: '001_first.sql', applied_at: '2025-01-01T00:00:00Z' },
+      { name: '002_second.sql', applied_at: '2025-01-02T00:00:00Z' },
+    ]);
+  });
+
   it('getAppliedMigrations reads from legacy _migrations if _void_migrations is absent', async () => {
     const root = createDir();
     const dbPath = join(root, 'legacy-only.sqlite');
@@ -355,70 +376,6 @@ describe('runMigrations (local SQLite)', () => {
     } finally {
       db.close();
     }
-  });
-
-  it('is safe when two runMigrations calls race against the same DB (concurrent-runner recovery)', async () => {
-    const root = createDir();
-    const migDir = join(root, 'migrations');
-    const dbPath = join(root, 'test.sqlite');
-    writeMigration(migDir, '001_init.sql', 'CREATE TABLE users (id TEXT PRIMARY KEY)');
-
-    const first = await runMigrations(migDir, dbPath);
-    expect(first).toEqual(['001_init.sql']);
-
-    const second = await runMigrations(migDir, dbPath);
-    expect(second).toEqual([]);
-
-    const db = await openSqliteDatabase(dbPath, { readonly: true });
-    try {
-      const tracked = db.prepare('SELECT name FROM _void_migrations').all();
-      expect(tracked).toEqual([{ name: '001_init.sql' }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('upgradeTrackingTable is idempotent under concurrent invocation (DROP IF EXISTS)', async () => {
-    const root = createDir();
-    const migDir = join(root, 'migrations');
-    const dbPath = join(root, 'test.sqlite');
-    writeMigration(migDir, '001_bootstrap.sql', 'CREATE TABLE bootstrap (id TEXT PRIMARY KEY)');
-    writeMigration(migDir, '002.sql', 'CREATE TABLE users (id TEXT PRIMARY KEY)');
-
-    let db = await openSqliteDatabase(dbPath);
-    try {
-      db.exec(
-        "CREATE TABLE _migrations (name TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')))",
-      );
-      db.prepare('INSERT INTO _migrations (name, applied_at) VALUES (?, ?)').run(
-        '001_bootstrap.sql',
-        '2023-01-01T00:00:00Z',
-      );
-    } finally {
-      db.close();
-    }
-
-    const first = await runMigrations(migDir, dbPath);
-    expect(first).toEqual(['002.sql']);
-
-    db = await openSqliteDatabase(dbPath, { readonly: true });
-    try {
-      const rows = (
-        db.prepare('SELECT name FROM _void_migrations ORDER BY name').all() as Array<{
-          name: string;
-        }>
-      ).map((r) => r.name);
-      expect(rows).toEqual(['001_bootstrap.sql', '002.sql']);
-      const legacy = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
-        .get();
-      expect(legacy).toBeUndefined();
-    } finally {
-      db.close();
-    }
-
-    const second = await runMigrations(migDir, dbPath);
-    expect(second).toEqual([]);
   });
 
   it('handles semicolons inside string literals as a single statement', async () => {

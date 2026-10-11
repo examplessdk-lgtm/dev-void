@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { captureOutput } from '../helpers/cli-command.ts';
 
 vi.mock('../../src/cli/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
@@ -28,24 +29,6 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-function captureOutput(): { output: () => string; restore: () => void } {
-  const chunks: Array<string> = [];
-  const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
-    chunks.push(String(chunk));
-    return true;
-  });
-  const log = vi.spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-    chunks.push(args.map(String).join(' ') + '\n');
-  });
-  return {
-    output: () => chunks.join(''),
-    restore: () => {
-      write.mockRestore();
-      log.mockRestore();
-    },
-  };
-}
 
 describe('void project delete', () => {
   it('reports the deletion once', async () => {
