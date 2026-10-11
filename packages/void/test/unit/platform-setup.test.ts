@@ -337,9 +337,7 @@ describe('platform credential setup links', () => {
         },
       };
       const runtimePermissions = (input: PlatformInstallPlan) =>
-        JSON.parse(
-          new URL(platformSetupPages(input).runtime.url).searchParams.get('permissionGroupKeys')!,
-        );
+        permissionGroupKeys(platformSetupPages(input).runtime.url);
       expect(runtimePermissions(selected)).toEqual([
         ...runtimePermissions(original),
         ...(sandbox
@@ -349,8 +347,8 @@ describe('platform credential setup links', () => {
             ]
           : []),
       ]);
-      expect(platformManagementSetupPage(selected).url).toBe(
-        platformManagementSetupPage(original).url,
+      expect(platformManagementSetupPage(selected, { access: false }).url).toBe(
+        platformManagementSetupPage(original, { access: false }).url,
       );
     },
   );
