@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
+import { applyEdits, modify, parse as parseJsoncConfig, type ParseError } from 'jsonc-parser';
 
 /** Parse a root Wrangler JSON/JSONC config without accepting a partial parse. */
 export function parseRootWranglerConfig(configPath: string): Record<string, unknown> {
@@ -19,6 +19,14 @@ export function parseRootWranglerConfig(configPath: string): Record<string, unkn
     return {};
   }
   return parsed as Record<string, unknown>;
+}
+
+/** Set one value in JSONC text, keeping comments and formatting elsewhere. */
+export function setJsoncValue(text: string, path: Array<string>, value: unknown): string {
+  return applyEdits(
+    text,
+    modify(text, path, value, { formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' } }),
+  );
 }
 
 export function readWranglerTopLevelString(

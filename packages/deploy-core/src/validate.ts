@@ -4,73 +4,130 @@ export const MANIFEST_REDIRECT_RULE_STATUSES: ReadonlySet<number> = new Set([
   200, 301, 302, 303, 307, 308,
 ]);
 
-// Caps on user-supplied routing rule lists. Each rule compiles a regex per
-// request in dispatch (see `routing-rules.ts`), so an unbounded list lets a
-// 100k-entry manifest exhaust CPU on every request to the project. The limit
-// is per-list (redirect + fallback are independent), well above what real
-// frameworks emit (Vercel/Netlify both ship in the low thousands at most),
-// and validated at deploy ingest so dispatch never sees an oversized list.
+// Each rule compiles a regex per request in dispatch, so cap every list at deploy ingest.
 export const MAX_ROUTING_RULES = 2000;
 export const MAX_REVALIDATE_QUERY_ALLOWLIST_ENTRIES: number = MAX_ROUTING_RULES;
 const MAX_PAGES = 5000;
-// Each distinct cron expression becomes one message on the platform's shared
-// cron queue, and one user-worker call, every minute it matches. The scheduler
-// dedupes only identical strings. 100 matches Vercel's per-project cap and is
-// far above what real apps declare.
+// Each distinct cron expression becomes one queue message and one Worker call per matching minute.
 const MAX_CRON_EXPRESSIONS = 100;
 // The scheduler parses every entry, shared expression or not, on each alarm.
 const MAX_SCHEDULES = 1000;
 
-/**
- * Strict literal-hostname regex used to validate `redirectRules[].host` /
- * `fallbackRules[].host` on the deploy manifest. Mirrors the regex in
- * `routes/domains.ts` (custom-domain create endpoint) — the source of truth
- * for what counts as a valid project-owned hostname. Rejects scheme prefixes,
- * ports, paths, whitespace, control chars, wildcards, single-label hosts,
- * IPv4 literals, and userinfo. Hostnames are lowercased before testing so
- * the same byte-exact form is what dispatch compares against `url.hostname`
- * (also lowercase per WHATWG).
- */
 const LITERAL_HOSTNAME_REGEX = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 
-/**
- * Validate and lowercase-normalize an optional `host` field on a redirect or
- * fallback rule. Mutates `ruleObject.host` in place so the persisted manifest carries
- * the canonical form. Returns an error message string on failure, or `null`
- * on success (including the absent-field case).
- */
+type RoutingRuleKind = 'redirectRules' | 'fallbackRules';
+
+// Lowercases `host` in place: dispatch compares the stored form with the lowercase `url.hostname`.
 function validateRuleHost(
-  ruleObject: Record<string, unknown>,
-  ruleKind: 'redirectRules' | 'fallbackRules',
+  rule: Record<string, unknown>,
+  kind: RoutingRuleKind,
   sourceRef: string,
 ): string | null {
-  if (ruleObject.host === undefined) {
+  if (rule.host === undefined) {
     return null;
   }
-  if (typeof ruleObject.host !== 'string') {
-    return `invalid manifest shape: ${ruleKind} entry ${sourceRef} host must be a string`;
+  if (typeof rule.host !== 'string') {
+    return `invalid manifest shape: ${kind} entry ${sourceRef} host must be a string`;
   }
-  const normalized = ruleObject.host.toLowerCase();
+  const normalized = rule.host.toLowerCase();
   if (!LITERAL_HOSTNAME_REGEX.test(normalized)) {
-    return `invalid manifest shape: ${ruleKind} entry ${sourceRef} host must be a literal hostname (e.g. "www.example.com"; no scheme, port, path, or wildcards): ${JSON.stringify(ruleObject.host)}`;
+    return `invalid manifest shape: ${kind} entry ${sourceRef} host must be a literal hostname (e.g. "www.example.com"; no scheme, port, path, or wildcards): ${JSON.stringify(rule.host)}`;
   }
-  ruleObject.host = normalized;
+  rule.host = normalized;
+  return null;
+}
+
+function validateRoutingRules(rules: unknown, kind: RoutingRuleKind): string | null {
+  if (rules === undefined) {
+    return null;
+  }
+  if (!Array.isArray(rules)) {
+    return `invalid manifest shape: ${kind} must be an array`;
+  }
+  if (rules.length > MAX_ROUTING_RULES) {
+    return `invalid manifest shape: ${kind} has ${rules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
+  }
+  const rewritesOnly = kind === 'fallbackRules';
+  for (const rule of rules) {
+    if (!isRecord(rule)) {
+      return `invalid manifest shape: ${kind} entries must be objects`;
+    }
+    if (
+      typeof rule.source !== 'string' ||
+      typeof rule.destination !== 'string' ||
+      typeof rule.status !== 'number'
+    ) {
+      return `invalid manifest shape: ${kind} entries must have string source, string destination, and numeric status`;
+    }
+    const sourceRef = JSON.stringify(rule.source);
+    if (rewritesOnly && rule.status !== 200) {
+      return `invalid manifest shape: ${kind} entry ${sourceRef} status must be 200 (fallbacks are rewrites only)`;
+    }
+    if (!rewritesOnly && !MANIFEST_REDIRECT_RULE_STATUSES.has(rule.status)) {
+      return `invalid manifest shape: ${kind} entry ${sourceRef} status must be one of ${[...MANIFEST_REDIRECT_RULE_STATUSES].join(', ')} (200 = rewrite, 3xx = redirect)`;
+    }
+    // Rewrites (status 200) must stay internal: dispatch merges the request query itself, and
+    // `//evil.com/x` parses cross-origin. 3xx redirects may carry a query and external Location.
+    if (rule.status === 200) {
+      const condition = rewritesOnly ? '' : ' when status is 200';
+      if (rule.destination.includes('?')) {
+        return `invalid manifest shape: ${kind} entry ${sourceRef} destination must not contain a query string${condition}`;
+      }
+      if (!rule.destination.startsWith('/')) {
+        return `invalid manifest shape: ${kind} entry ${sourceRef} destination must be path-absolute (start with "/")${condition}`;
+      }
+      if (rule.destination.startsWith('//')) {
+        return `invalid manifest shape: ${kind} entry ${sourceRef} destination must not start with "//" (protocol-relative URLs parse cross-origin; use a single-slash path-absolute destination)`;
+      }
+    }
+    const hostError = validateRuleHost(rule, kind, sourceRef);
+    if (hostError) {
+      return hostError;
+    }
+  }
+  return null;
+}
+
+function validateClassMigrations(
+  path: string,
+  migrations: unknown,
+  fields: ReadonlyArray<string>,
+  requireNonEmptyTag = false,
+): string | null {
+  if (migrations === undefined) {
+    return null;
+  }
+  if (!Array.isArray(migrations)) {
+    return `invalid manifest shape: ${path} must be an array`;
+  }
+  for (const migration of migrations) {
+    if (!isRecord(migration)) {
+      return `invalid manifest shape: ${path} entries must be objects`;
+    }
+    if (typeof migration.tag !== 'string' || (requireNonEmptyTag && migration.tag.length === 0)) {
+      return `invalid manifest shape: ${path} entries must have a ${requireNonEmptyTag ? 'non-empty ' : ''}string tag`;
+    }
+    for (const field of fields) {
+      const value = migration[field];
+      if (
+        value !== undefined &&
+        (!Array.isArray(value) || !value.every((className) => typeof className === 'string'))
+      ) {
+        return `invalid manifest shape: ${path} ${field} must be an array of strings`;
+      }
+    }
+  }
   return null;
 }
 
 /**
- * Runtime shape validation for incoming deploy manifests. Downstream code
- * indexes deeply into the manifest (bindings.d1, queues[i].name,
- * websocket.classes, etc.) without re-guarding, so a malformed-but-JSON-valid
- * payload would otherwise crash with a 500 — sometimes after a deployment row
- * or CF resources were created. Everything the deploy pipeline reads must be
- * validated here BEFORE createDeployment runs.
+ * Check the shape of an incoming deploy manifest. Returns an error message, or `null` when valid.
+ * Deploy code reads the manifest without re-checking, so run this before creating any deploy state.
  */
-export function validateManifestShape(parsed: unknown): string | null {
-  if (!isRecord(parsed)) {
+export function validateManifestShape(manifest: unknown): string | null {
+  if (!isRecord(manifest)) {
     return 'invalid manifest shape: expected a JSON object';
   }
-  const manifest = parsed;
   if (manifest.emailProtocolVersion !== undefined && manifest.emailProtocolVersion !== 1) {
     return 'invalid manifest shape: emailProtocolVersion must be 1';
   }
@@ -97,8 +154,7 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (!isRecord(queue)) {
         return 'invalid manifest shape: queues entries must be objects';
       }
-      const queueObject = queue;
-      if (typeof queueObject.name !== 'string' || typeof queueObject.bindingName !== 'string') {
+      if (typeof queue.name !== 'string' || typeof queue.bindingName !== 'string') {
         return 'invalid manifest shape: queues entries must have string name and bindingName';
       }
       for (const tuning of [
@@ -107,7 +163,7 @@ export function validateManifestShape(parsed: unknown): string | null {
         'maxRetries',
         'retryDelay',
       ] as const) {
-        const tuningValue = queueObject[tuning];
+        const tuningValue = queue[tuning];
         if (tuningValue === undefined) {
           continue;
         }
@@ -130,11 +186,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (!isRecord(schedule)) {
         return 'invalid manifest shape: schedules entries must be objects';
       }
-      const scheduleObject = schedule;
-      if (typeof scheduleObject.name !== 'string' || typeof scheduleObject.cron !== 'string') {
+      if (typeof schedule.name !== 'string' || typeof schedule.cron !== 'string') {
         return 'invalid manifest shape: schedules entries must have string name and cron';
       }
-      cronExpressions.add(scheduleObject.cron);
+      cronExpressions.add(schedule.cron);
     }
     if (cronExpressions.size > MAX_CRON_EXPRESSIONS) {
       return `invalid manifest shape: schedules has ${cronExpressions.size} distinct cron expressions, exceeds the ${MAX_CRON_EXPRESSIONS} per-project limit`;
@@ -283,16 +338,13 @@ export function validateManifestShape(parsed: unknown): string | null {
     }
   }
 
-  if (manifest.revalidate !== undefined) {
-    if (typeof manifest.revalidate === 'number') {
-      // ok
-    } else if (!isRecord(manifest.revalidate)) {
+  if (manifest.revalidate !== undefined && typeof manifest.revalidate !== 'number') {
+    if (!isRecord(manifest.revalidate)) {
       return 'invalid manifest shape: revalidate must be a number or object';
-    } else {
-      for (const [pathname, value] of Object.entries(manifest.revalidate)) {
-        if (typeof value !== 'number') {
-          return `invalid manifest shape: revalidate.${pathname} must be a number`;
-        }
+    }
+    for (const [pathname, value] of Object.entries(manifest.revalidate)) {
+      if (typeof value !== 'number') {
+        return `invalid manifest shape: revalidate.${pathname} must be a number`;
       }
     }
   }
@@ -305,14 +357,13 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (!isRecord(rule)) {
         return 'invalid manifest shape: headerRules entries must be objects';
       }
-      const ruleObject = rule;
-      if (typeof ruleObject.pattern !== 'string') {
+      if (typeof rule.pattern !== 'string') {
         return 'invalid manifest shape: headerRules entries must have a string pattern';
       }
-      if (!Array.isArray(ruleObject.headers)) {
+      if (!Array.isArray(rule.headers)) {
         return 'invalid manifest shape: headerRules entries must have a headers array';
       }
-      for (const pair of ruleObject.headers) {
+      for (const pair of rule.headers) {
         if (
           !Array.isArray(pair) ||
           pair.length !== 2 ||
@@ -325,60 +376,11 @@ export function validateManifestShape(parsed: unknown): string | null {
     }
   }
 
-  // redirectRules is the pre-asset rule list. `status: 200` means a force
-  // rewrite (internal URL rewrite, no Location header); `status: 3xx` means a
-  // redirect. Destinations may not contain `?` — request query is merged
-  // separately at dispatch time (see `mergeQueryIntoLocation`).
-  if (manifest.redirectRules !== undefined) {
-    if (!Array.isArray(manifest.redirectRules)) {
-      return 'invalid manifest shape: redirectRules must be an array';
-    }
-    if (manifest.redirectRules.length > MAX_ROUTING_RULES) {
-      return `invalid manifest shape: redirectRules has ${manifest.redirectRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
-    }
-    for (const rule of manifest.redirectRules) {
-      if (!isRecord(rule)) {
-        return 'invalid manifest shape: redirectRules entries must be objects';
-      }
-      const ruleObject = rule;
-      if (
-        typeof ruleObject.source !== 'string' ||
-        typeof ruleObject.destination !== 'string' ||
-        typeof ruleObject.status !== 'number'
-      ) {
-        return 'invalid manifest shape: redirectRules entries must have string source, string destination, and numeric status';
-      }
-      const sourceRef = JSON.stringify(ruleObject.source as string);
-      if (!MANIFEST_REDIRECT_RULE_STATUSES.has(ruleObject.status)) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} status must be one of ${[...MANIFEST_REDIRECT_RULE_STATUSES].join(', ')} (200 = rewrite, 3xx = redirect)`;
-      }
-      // Rewrites (status=200) must stay internal: no query string, path-absolute,
-      // and not protocol-relative (`//evil.com/x` parses cross-origin). 3xx
-      // redirects may include query strings and external Location values.
-      const destination = ruleObject.destination as string;
-      const isRewrite = ruleObject.status === 200;
-      if (isRewrite && destination.includes('?')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must not contain a query string when status is 200`;
-      }
-      if (isRewrite && !destination.startsWith('/')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must be path-absolute (start with "/") when status is 200`;
-      }
-      if (isRewrite && destination.startsWith('//')) {
-        return `invalid manifest shape: redirectRules entry ${sourceRef} destination must not start with "//" (protocol-relative URLs parse cross-origin; use a single-slash path-absolute destination)`;
-      }
-      const hostError = validateRuleHost(ruleObject, 'redirectRules', sourceRef);
-      if (hostError) {
-        return hostError;
-      }
-    }
+  const redirectRulesError = validateRoutingRules(manifest.redirectRules, 'redirectRules');
+  if (redirectRulesError) {
+    return redirectRulesError;
   }
 
-  // revalidateQueryAllowlist gates which query params participate in the
-  // ISR variant key on a rewrite. Shape: `{ "<pathPattern>": ["param", …] }`.
-  // The default (no entry / no allowlist) drops every param so a fanout
-  // attack via `?utm=…`/`?cb=…` can't multiply cache slots. The validator
-  // only enforces shape; semantic correctness (does the pattern match a
-  // real route?) is the user's responsibility.
   if (manifest.revalidateQueryAllowlist !== undefined) {
     if (!isRecord(manifest.revalidateQueryAllowlist)) {
       return 'invalid manifest shape: revalidateQueryAllowlist must be an object';
@@ -402,10 +404,6 @@ export function validateManifestShape(parsed: unknown): string | null {
     }
   }
 
-  // pages is the ordered route table (`[{ pattern, revalidate? }]`) the
-  // framework emits so dispatch can resolve a per-route ISR TTL by segment
-  // pattern. Validator only enforces shape; the framework owns the ordering
-  // and pattern semantics.
   if (manifest.pages !== undefined) {
     if (!Array.isArray(manifest.pages)) {
       return 'invalid manifest shape: pages must be an array';
@@ -417,20 +415,15 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (!isRecord(entry)) {
         return 'invalid manifest shape: each pages entry must be an object';
       }
-      const e = entry;
-      if (typeof e.pattern !== 'string' || e.pattern === '') {
+      if (typeof entry.pattern !== 'string' || entry.pattern === '') {
         return 'invalid manifest shape: pages entry pattern must be a string';
       }
-      if (e.revalidate !== undefined && typeof e.revalidate !== 'number') {
+      if (entry.revalidate !== undefined && typeof entry.revalidate !== 'number') {
         return 'invalid manifest shape: pages entry revalidate must be a number';
       }
     }
   }
 
-  // pathRevalidate is the RAW per-path OBJECT config shipped alongside `pages`
-  // so dispatch can resolve an inherit-eligible page (a pages entry with no
-  // baked revalidate) against the real request path. Same shape as the object
-  // form of `revalidate`: a map of pattern → number.
   if (manifest.pathRevalidate !== undefined) {
     if (!isRecord(manifest.pathRevalidate)) {
       return 'invalid manifest shape: pathRevalidate must be an object';
@@ -442,47 +435,9 @@ export function validateManifestShape(parsed: unknown): string | null {
     }
   }
 
-  // fallbackRules fire after the static asset resolver 404s. Rewrites only,
-  // so every entry carries the same internal-destination constraints as a
-  // status=200 redirectRule.
-  if (manifest.fallbackRules !== undefined) {
-    if (!Array.isArray(manifest.fallbackRules)) {
-      return 'invalid manifest shape: fallbackRules must be an array';
-    }
-    if (manifest.fallbackRules.length > MAX_ROUTING_RULES) {
-      return `invalid manifest shape: fallbackRules has ${manifest.fallbackRules.length} entries, exceeds the ${MAX_ROUTING_RULES} per-list limit`;
-    }
-    for (const rule of manifest.fallbackRules) {
-      if (!isRecord(rule)) {
-        return 'invalid manifest shape: fallbackRules entries must be objects';
-      }
-      const ruleObject = rule;
-      if (
-        typeof ruleObject.source !== 'string' ||
-        typeof ruleObject.destination !== 'string' ||
-        typeof ruleObject.status !== 'number'
-      ) {
-        return 'invalid manifest shape: fallbackRules entries must have string source, string destination, and numeric status';
-      }
-      const sourceRef = JSON.stringify(ruleObject.source as string);
-      if (ruleObject.status !== 200) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} status must be 200 (fallbacks are rewrites only)`;
-      }
-      const destination = ruleObject.destination as string;
-      if (destination.includes('?')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must not contain a query string`;
-      }
-      if (!destination.startsWith('/')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must be path-absolute (start with "/")`;
-      }
-      if (destination.startsWith('//')) {
-        return `invalid manifest shape: fallbackRules entry ${sourceRef} destination must not start with "//" (protocol-relative URLs parse cross-origin; use a single-slash path-absolute destination)`;
-      }
-      const hostError = validateRuleHost(ruleObject, 'fallbackRules', sourceRef);
-      if (hostError) {
-        return hostError;
-      }
-    }
+  const fallbackRulesError = validateRoutingRules(manifest.fallbackRules, 'fallbackRules');
+  if (fallbackRulesError) {
+    return fallbackRulesError;
   }
 
   if (manifest.websocket !== undefined) {
@@ -497,11 +452,10 @@ export function validateManifestShape(parsed: unknown): string | null {
       if (!isRecord(route)) {
         return 'invalid manifest shape: websocket.routes entries must be objects';
       }
-      const routeObject = route;
-      if (typeof routeObject.className !== 'string') {
+      if (typeof route.className !== 'string') {
         return 'invalid manifest shape: websocket.routes entries must have a string className';
       }
-      if (routeObject.bindingName !== undefined && typeof routeObject.bindingName !== 'string') {
+      if (route.bindingName !== undefined && typeof route.bindingName !== 'string') {
         return 'invalid manifest shape: websocket.routes entry bindingName must be a string';
       }
     }
@@ -511,38 +465,19 @@ export function validateManifestShape(parsed: unknown): string | null {
     ) {
       return 'invalid manifest shape: websocket.classes must be an array of strings';
     }
-    if (websocket.migrations !== undefined) {
-      if (!Array.isArray(websocket.migrations)) {
-        return 'invalid manifest shape: websocket.migrations must be an array';
-      }
-      for (const migration of websocket.migrations) {
-        if (!isRecord(migration)) {
-          return 'invalid manifest shape: websocket.migrations entries must be objects';
-        }
-        const migrationObject = migration;
-        if (typeof migrationObject.tag !== 'string' || migrationObject.tag.length === 0) {
-          return 'invalid manifest shape: websocket.migrations entries must have a non-empty string tag';
-        }
-        for (const field of ['newClasses', 'newSqliteClasses', 'deletedClasses'] as const) {
-          const value = migrationObject[field];
-          if (
-            value !== undefined &&
-            (!Array.isArray(value) || !value.every((className) => typeof className === 'string'))
-          ) {
-            return `invalid manifest shape: websocket.migrations ${field} must be an array of strings`;
-          }
-        }
-      }
+    const migrationsError = validateClassMigrations(
+      'websocket.migrations',
+      websocket.migrations,
+      ['newClasses', 'newSqliteClasses', 'deletedClasses'],
+      true,
+    );
+    if (migrationsError) {
+      return migrationsError;
     }
   }
 
   if (manifest.sandbox !== undefined) {
-    // sandbox is meaningless without a user worker. Static/SPA deploys are
-    // served straight from KV/R2 by dispatch — no script is created, so a
-    // `sandbox` block can't be wired to anything. Reject up-front rather
-    // than silently dropping the block; a stale manifest carrying `sandbox`
-    // after the project type flips would otherwise surface as a confusing
-    // runtime no-op rather than a clear deploy-time error.
+    // Static and SPA deploys create no Worker script, so a sandbox could never be wired.
     if (manifest.type === 'static' || manifest.type === 'spa') {
       return 'sandbox is not supported for static/spa deployments';
     }
@@ -569,33 +504,12 @@ export function validateManifestShape(parsed: unknown): string | null {
     ) {
       return 'invalid manifest shape: sandbox.maxInstances must be a positive integer';
     }
-    if (sandbox.migrations !== undefined) {
-      if (!Array.isArray(sandbox.migrations)) {
-        return 'invalid manifest shape: sandbox.migrations must be an array';
-      }
-      for (const migration of sandbox.migrations) {
-        if (!isRecord(migration)) {
-          return 'invalid manifest shape: sandbox.migrations entries must be objects';
-        }
-        const migrationObject = migration;
-        if (typeof migrationObject.tag !== 'string') {
-          return 'invalid manifest shape: sandbox.migrations entries must have a string tag';
-        }
-        if (
-          migrationObject.newSqliteClasses !== undefined &&
-          (!Array.isArray(migrationObject.newSqliteClasses) ||
-            !migrationObject.newSqliteClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: sandbox.migrations newSqliteClasses must be an array of strings';
-        }
-        if (
-          migrationObject.deletedClasses !== undefined &&
-          (!Array.isArray(migrationObject.deletedClasses) ||
-            !migrationObject.deletedClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: sandbox.migrations deletedClasses must be an array of strings';
-        }
-      }
+    const migrationsError = validateClassMigrations('sandbox.migrations', sandbox.migrations, [
+      'newSqliteClasses',
+      'deletedClasses',
+    ]);
+    if (migrationsError) {
+      return migrationsError;
     }
   }
 
@@ -615,26 +529,11 @@ export function validateManifestShape(parsed: unknown): string | null {
     if (!Array.isArray(live.classes) || !live.classes.every((x) => typeof x === 'string')) {
       return 'invalid manifest shape: live.classes must be an array of strings';
     }
-    if (live.migrations !== undefined) {
-      if (!Array.isArray(live.migrations)) {
-        return 'invalid manifest shape: live.migrations must be an array';
-      }
-      for (const migration of live.migrations) {
-        if (!isRecord(migration)) {
-          return 'invalid manifest shape: live.migrations entries must be objects';
-        }
-        const migrationObject = migration;
-        if (typeof migrationObject.tag !== 'string') {
-          return 'invalid manifest shape: live.migrations entries must have a string tag';
-        }
-        if (
-          migrationObject.newSqliteClasses !== undefined &&
-          (!Array.isArray(migrationObject.newSqliteClasses) ||
-            !migrationObject.newSqliteClasses.every((value) => typeof value === 'string'))
-        ) {
-          return 'invalid manifest shape: live.migrations newSqliteClasses must be an array of strings';
-        }
-      }
+    const migrationsError = validateClassMigrations('live.migrations', live.migrations, [
+      'newSqliteClasses',
+    ]);
+    if (migrationsError) {
+      return migrationsError;
     }
   }
 
