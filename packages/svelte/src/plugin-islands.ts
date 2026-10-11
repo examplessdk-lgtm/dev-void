@@ -7,7 +7,6 @@ import {
   resolveSpecifier,
   needsIslandClientBundle,
   rewriteCssImportForVirtualModule,
-  extractCssImports,
   computePagesNeedingClientJS,
   watchPagesForRescan,
   ISLANDS_RENDERER_ID,
@@ -42,10 +41,8 @@ export function islandsPlugin(
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
   let isDev = false;
-  let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
-  /** Resolve an island import and record it in the client manifest. */
   function registerIsland(
     spec: string,
     importerDir: string,
@@ -67,7 +64,6 @@ export function islandsPlugin(
 
       configResolved(config) {
         resolvedConfig = config;
-        viteRoot = config.root;
         isDev = config.command === 'serve';
       },
 
@@ -83,7 +79,6 @@ export function islandsPlugin(
           // Pre-scan island pages to populate the manifest eagerly.
           // This is needed because the client build may load the virtual
           // islands-client entry before island page transforms run.
-          // Scan both pages AND layouts for island imports
           const filesToScan: ReadonlyArray<ScannableEntry> = [
             ...pageScan.pages.map((page) => ({
               filePath: page.componentPath,
@@ -110,7 +105,6 @@ export function islandsPlugin(
             }
           }
 
-          // Collect page and layout files needing CSS for island pages
           for (const page of pageScan.pages) {
             if (!page.island) {
               continue;
@@ -132,7 +126,7 @@ export function islandsPlugin(
 
       resolveId: {
         filter: {
-          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.svelte\.css$/,
+          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
@@ -143,27 +137,13 @@ export function islandsPlugin(
           if (source.startsWith(WRAPPER_PREFIX)) {
             return source;
           }
-          // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
-          // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith('.css')) {
-            const srcPath = normalizePath(source.slice(0, -4));
-            if (islandCssFiles.has(srcPath)) {
-              return srcPath + '.css';
-            }
-            if (srcPath.startsWith('/')) {
-              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
-              if (islandCssFiles.has(absPath)) {
-                return absPath + '.css';
-              }
-            }
-          }
         },
       },
 
       load: {
         filter: {
           // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
-          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.svelte\.css$/,
+          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(id) {
           if (id === '\0' + ISLANDS_RENDERER_ID) {
@@ -185,16 +165,8 @@ export function islandsPlugin(
             }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
           }
-          // Virtual wrapper component — generates a .svelte wrapper
           if (id.startsWith(WRAPPER_PREFIX)) {
             return generateWrapperComponent(id);
-          }
-          // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith('.css') && !id.startsWith('\0')) {
-            const srcPath = id.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) {
-              return extractCssImports(srcPath);
-            }
           }
         },
       },
@@ -222,7 +194,6 @@ export function islandsPlugin(
 
             const { absPath, islandId } = registerIsland(spec, importerDir, strategy);
 
-            // Rewrite import to point to virtual wrapper component
             const wrapperUrl =
               WRAPPER_PREFIX +
               encodeURIComponent(islandId) +
@@ -249,7 +220,6 @@ export function islandsPlugin(
         if (env.command === 'serve') {
           return { optimizeDeps: { include: ['svelte'] } };
         }
-        // Only add the islands client entry when content needs it
         if (needsIslandClientBundle(pagesDir, /\.island\.svelte$/, true)) {
           return {
             environments: {
@@ -304,10 +274,6 @@ export function islandsPlugin(
   ];
 }
 
-/**
- * Generate a virtual Svelte wrapper component from a wrapper URL.
- * The URL encodes: src (absolute component path), island (ID), hydrate (strategy).
- */
 function generateWrapperComponent(id: string): string {
   const url = new URL(id, 'file://');
   const src = decodeURIComponent(url.searchParams.get('src') || '');
@@ -359,7 +325,6 @@ export async function renderIslandPage(pageObj, assetTags) {
       layouts: layoutComponents,
       pageProps: pageObj.props,
       shared: pageObj.shared || {},
-      errors: pageObj.errors || {},
       params: pageObj.params || {},
       router: null,
       stores: null,
@@ -406,7 +371,6 @@ function generateIslandClientEntry(
     for (const file of cssFiles) {
       const content = readFileSync(file, 'utf-8');
 
-      // Extract <style> blocks → emit ?island-style imports
       const styleRe = /<style\b([^>]*)>/g;
       styleRe.lastIndex = 0;
       let styleIndex = 0;
@@ -421,7 +385,6 @@ function generateIslandClientEntry(
         styleIndex++;
       }
 
-      // Extract CSS imports from <script> blocks
       for (const item of findStaticCssImports(content, file)) {
         lines.push(rewriteCssImportForVirtualModule(item.statement, item.specifier, file));
       }
