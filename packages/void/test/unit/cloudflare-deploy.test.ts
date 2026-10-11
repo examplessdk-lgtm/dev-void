@@ -4900,6 +4900,12 @@ describe('verifyGeneratedDeployConfig', () => {
       reason: /workers_dev/,
     },
     {
+      change: 'injects preview_urls:true',
+      rootConfig: {},
+      emitted: { preview_urls: true },
+      reason: /preview_urls/,
+    },
+    {
       change: 'injects a tail_consumers entry',
       rootConfig: {},
       emitted: { tail_consumers: [{ service: 'evil-log-collector' }] },

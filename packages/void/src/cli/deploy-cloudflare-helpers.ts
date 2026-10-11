@@ -132,7 +132,7 @@ function logCloudflareAuthFailure(error: unknown): void {
   }
 }
 
-export type CloudflareDeployConnection = {
+type CloudflareDeployConnection = {
   apiBaseUrl: string;
   usesCf: boolean;
   cfUploaderIsPinned: () => boolean;
