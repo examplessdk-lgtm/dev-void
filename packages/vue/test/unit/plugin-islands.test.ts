@@ -153,6 +153,33 @@ const on = ref(false)
     expect(clientEntry).toContain('pages/Toggle');
   });
 
+  it('includes island imports from both pages and layouts', async () => {
+    writeFile(
+      'app/layout.island.vue',
+      `<script setup>
+import Nav from "../_components/Nav.vue" with { island: "load" }
+</script>
+<template><Nav /><slot /></template>`,
+    );
+    writeFile(
+      'app/index.island.vue',
+      `<script setup>
+import Widget from "../_components/Widget.vue" with { island: "idle" }
+</script>
+<template><Widget /></template>`,
+    );
+    writeFile('_components/Nav.vue', `<template><nav>Nav</nav></template>`);
+    writeFile('_components/Widget.vue', `<template><div>Widget</div></template>`);
+
+    const { buildStart, loadClientEntry } = setupPlugin();
+    await buildStart();
+    const clientEntry = loadClientEntry();
+
+    expect(clientEntry).toBeDefined();
+    expect(clientEntry).toContain('pages/_components/Nav');
+    expect(clientEntry).toContain('pages/_components/Widget');
+  });
+
   it('pre-scans island imports from named island layouts into the manifest', async () => {
     writeFile(
       '_layouts/sidebar.island.vue',

@@ -8,13 +8,12 @@ describe('client package exports', () => {
       readFileSync(join(import.meta.dirname, '../../package.json'), 'utf-8'),
     );
 
-    expect(Object.keys(packageJson.exports)).toEqual(
-      expect.arrayContaining([
-        './client/react',
-        './client/vue',
-        './client/svelte',
-        './client/solid',
-      ]),
-    );
+    for (const framework of ['react', 'vue', 'svelte', 'solid']) {
+      expect(packageJson.exports[`./client/${framework}`]).toEqual({
+        import: `./dist/runtime/client-${framework}.mjs`,
+        require: `./dist/runtime/client-${framework}.mjs`,
+        types: `./dist/runtime/client-${framework}.d.mts`,
+      });
+    }
   });
 });

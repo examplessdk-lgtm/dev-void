@@ -322,6 +322,19 @@ describe('cross-origin cookie sessions', () => {
     ).resolves.toBeNull();
   });
 
+  it('leaves a cross-origin WebSocket upgrade without a user in the middleware', async () => {
+    mockAuth();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const app = routeApp();
+    app.get('/chat/general', (c) => c.json({ user: c.get('user') }));
+    const response = await app.request(
+      upgradeRequest({ origin: 'https://evil.void.app' }),
+      undefined,
+      env,
+    );
+    await expect(response.json()).resolves.toEqual({ user: null });
+  });
+
   it('does not sign in a cross-origin POST but keeps its raw cookies', async () => {
     mockAuth();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

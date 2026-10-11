@@ -406,6 +406,7 @@ describe('runtime ai', () => {
     it.each([
       ['anthropic', 'ANTHROPIC_API_KEY', 'x-api-key', 'sk-test', null],
       ['deepgram', 'DEEPGRAM_API_KEY', 'authorization', 'Token sk-test', 'Token sk-test'],
+      ['parallel', 'PARALLEL_API_KEY', 'x-api-key', 'sk-test', null],
     ] as const)(
       'sends the provider-native auth header for %s',
       async (provider, keyEnv, header, value, authorization) => {
