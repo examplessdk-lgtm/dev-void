@@ -4,6 +4,7 @@ import {
   type PlatformInstallationManifest,
   type PlatformLifecycleOperation,
 } from '@void/platform';
+import type { PlatformRuntimeManifest } from '@void/platform/installer';
 import { join } from 'pathslash';
 import { verifyPlatformAuthenticationDatabase } from './platform-auth-database.ts';
 import { preparePlatformDatabaseSchema } from './platform-installer-database.ts';
@@ -18,10 +19,11 @@ import {
   hash,
 } from './platform-installer-resources.ts';
 import {
+  type InstallationCheckpointWriter,
+  type PlatformDatabaseLifecycleLock,
   type PlatformInstallerDependencies,
   type PlatformInstallationSecrets,
   type PlatformInstallationResult,
-  type InstallerClient,
 } from './platform-installer-types.ts';
 import { type PlatformInstallPlan } from './platform-plan.ts';
 import { writeInstallationManifest } from './platform-registry.ts';
@@ -30,17 +32,13 @@ export async function provisionInstallationServices(input: {
   readonly plan: PlatformInstallPlan;
   manifest: PlatformInstallationManifest;
   readonly now: () => string;
-  readonly releaseDatabaseLock: import('./platform-installer-types.ts').PlatformDatabaseLifecycleLock;
+  readonly releaseDatabaseLock: PlatformDatabaseLifecycleLock;
   readonly dependencies: PlatformInstallerDependencies;
   readonly secrets: PlatformInstallationSecrets;
-  readonly writeRemoteInstallationCheckpoint: (
-    client: InstallerClient,
-    checkpointPlan: PlatformInstallPlan,
-    checkpointManifest: PlatformInstallationManifest,
-  ) => Promise<void>;
+  readonly writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
   readonly checkpointOperation: (phase: PlatformLifecycleOperation['phase']) => Promise<void>;
   readonly externalHyperdriveOriginHash: string | undefined;
-  readonly runtime: import('@void/platform/installer').PlatformRuntimeManifest;
+  readonly runtime: PlatformRuntimeManifest;
   readonly runtimeDirectory: string;
   readonly sourcePlatformVersion: string | null;
   readonly hadPriorWorkers: boolean;
@@ -195,7 +193,7 @@ export async function provisionInstallationServices(input: {
   );
 
   dependencies.onProgress?.('Checking platform safety');
-  const targetSandboxDrainProtocol = runtime.safetyProtocols?.sandboxDrain ?? 0;
+  const targetSandboxDrainProtocol = runtime.safetyProtocols.sandboxDrain;
   const prepareSandboxDrain =
     dependencies.prepareSandboxDrain ?? releaseDatabaseLock.prepareSandboxDrain;
   if (targetSandboxDrainProtocol >= 1 && !prepareSandboxDrain) {

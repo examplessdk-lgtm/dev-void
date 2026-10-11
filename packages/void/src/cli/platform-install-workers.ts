@@ -14,12 +14,14 @@ import {
 } from './platform-installer-resources.ts';
 import { platformWorkerSecretPayload } from './platform-installer-secrets.ts';
 import {
+  type InstallationCheckpointWriter,
+  type InstallerClient,
   type PlatformInstallerDependencies,
+  type PlatformWorkerDeploymentOptions,
   type PlatformWorkerRollback,
   type PlatformInstallationSecrets,
   type PlatformWorkerKey,
   type PlatformWorkerSecretUpdateIntent,
-  type InstallerClient,
 } from './platform-installer-types.ts';
 import {
   runPlatformWrangler,
@@ -36,6 +38,134 @@ import {
   trackedPlatformWorkerTraffic,
 } from './platform-traffic.ts';
 
+export function platformWorkerAction(
+  workerActions: ReadonlyArray<PlatformInstallPlanAction>,
+  key: PlatformWorkerKey,
+): PlatformInstallPlanAction {
+  return workerActions.find(
+    (entry) => entry.key === (key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`),
+  )!;
+}
+
+/** Deploy callbacks shared by the upload and enable phases for one platform Worker. */
+export function platformWorkerDeployCallbacks(input: {
+  readonly client: InstallerClient;
+  readonly plan: PlatformInstallPlan;
+  readonly zoneId: string;
+  readonly ids: { [k: string]: string };
+  readonly key: PlatformWorkerKey;
+  readonly action: PlatformInstallPlanAction;
+  readonly generation: number;
+  readonly now: () => string;
+  readonly readManifest: () => PlatformInstallationManifest;
+  readonly writeManifest: (manifest: PlatformInstallationManifest) => Promise<void>;
+  readonly checkpoint: (update: () => Promise<void>, safetyRecovery?: boolean) => Promise<void>;
+}): Pick<
+  PlatformWorkerDeploymentOptions,
+  | 'readCloudflare'
+  | 'onStaged'
+  | 'onTrafficPublished'
+  | 'onUnsafeTraffic'
+  | 'publishCustomDomains'
+  | 'publishRoutes'
+  | 'inspectNewWorker'
+  | 'removeCustomDomains'
+  | 'retainNewWorker'
+> {
+  const {
+    client,
+    plan,
+    zoneId,
+    ids,
+    key,
+    action,
+    generation,
+    now,
+    readManifest,
+    writeManifest,
+    checkpoint,
+  } = input;
+  return {
+    ...(client.request ? { readCloudflare: (path) => client.request!(path) } : {}),
+    onStaged: async (previousVersionId, stagedVersionId, previousTriggers) => {
+      await checkpoint(async () => {
+        await writeManifest(
+          recordWorkerCutoverStage(
+            readManifest(),
+            generation,
+            key,
+            previousVersionId,
+            stagedVersionId,
+            action.name,
+            previousTriggers,
+            now(),
+          ),
+        );
+      });
+    },
+    onTrafficPublished: async () => {
+      if (!client.listWorkerDomains || !client.listWorkerRoutes) {
+        throw new Error('platform: Cloudflare traffic inventory is unavailable.');
+      }
+      const [customDomains, routes] = await Promise.all([
+        client.listWorkerDomains(plan.account.id),
+        zoneId ? client.listWorkerRoutes(zoneId) : Promise.resolve([]),
+      ]);
+      await checkpoint(async () => {
+        const manifest = readManifest();
+        const next = recordPlatformWorkerTraffic(
+          manifest,
+          action.name,
+          { customDomains, routes },
+          now(),
+        );
+        if (JSON.stringify(next.resources) !== JSON.stringify(manifest.resources)) {
+          await writeManifest(next);
+        }
+      });
+    },
+    onUnsafeTraffic: async () => {
+      await checkpoint(async () => {
+        await writeManifest(
+          recordWorkerUnsafeTraffic(readManifest(), generation, key, action.name, now()),
+        );
+      }, true);
+    },
+    publishCustomDomains: (workerName, origins) =>
+      publishPlatformWorkerCustomDomains(client, plan.account.id, workerName, origins),
+    publishRoutes: async (workerName, patterns) => {
+      if (!client.publishWorkerRoutesSafely) {
+        throw new Error('platform: Safe Cloudflare Worker route publication is unavailable.');
+      }
+      if (zoneId) {
+        await client.publishWorkerRoutesSafely(zoneId, workerName, patterns);
+      } else if (patterns.length > 0) {
+        throw new Error('platform: Cannot publish zone routes in workers.dev mode.');
+      }
+    },
+    inspectNewWorker: () =>
+      inspectNewPlatformWorker(client, plan.account.id, readManifest(), action.key, action.name),
+    removeCustomDomains: async () => {
+      if (!client.removeRoutes) {
+        throw new Error('platform: Cloudflare route removal is unavailable.');
+      }
+      await client.removeRoutes(
+        plan.account.id,
+        zoneId,
+        trackedPlatformWorkerTraffic(readManifest(), new Set([action.name])),
+      );
+    },
+    retainNewWorker: async () => {
+      await client.putKvValue(
+        plan.account.id,
+        requireId(ids, 'routing-kv'),
+        PLATFORM_DISABLED_KEY,
+        PLATFORM_DISABLED_VALUE,
+      );
+    },
+  };
+}
+
 export async function uploadInstallationWorkers(input: {
   readonly dependencies: PlatformInstallerDependencies;
   readonly requiresStagedCommit: boolean;
@@ -48,11 +178,7 @@ export async function uploadInstallationWorkers(input: {
   readonly zoneId: string;
   manifest: PlatformInstallationManifest;
   readonly now: () => string;
-  readonly writeRemoteInstallationCheckpoint: (
-    client: InstallerClient,
-    checkpointPlan: PlatformInstallPlan,
-    checkpointManifest: PlatformInstallationManifest,
-  ) => Promise<void>;
+  readonly writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
   readonly configs: ReturnType<typeof createPlatformWorkerConfigs>;
   readonly previousConfigs: ReturnType<typeof createPlatformWorkerConfigs>;
   readonly cloudflareApiBaseUrl: string;
@@ -125,6 +251,11 @@ export async function uploadInstallationWorkers(input: {
     );
     return result;
   };
+  const writeManifest = async (next: PlatformInstallationManifest): Promise<void> => {
+    input.manifest = next;
+    writeInstallationManifest(next);
+    await writeRemoteInstallationCheckpoint(dependencies.client, plan, next);
+  };
   let availableUploadSlots = 2;
   let uploadFailure: unknown;
   const uploadWaiters: Array<{
@@ -174,18 +305,7 @@ export async function uploadInstallationWorkers(input: {
     onReadyForActivation?: () => Promise<void>,
   ): Promise<void> => {
     dependencies.onProgress?.(`Deploying the ${key} service`);
-    let workerStepStarted = performance.now();
-    const markWorkerStep = (step: string) => {
-      if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-        process.stderr.write(
-          `[platform timing] worker ${key} ${step} ${(performance.now() - workerStepStarted).toFixed(0)} ms\n`,
-        );
-      }
-      workerStepStarted = performance.now();
-    };
-    const action = workerActions.find(
-      (entry) => entry.key === (key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`),
-    )!;
+    const action = platformWorkerAction(workerActions, key);
     const workerSecrets = platformWorkerSecretPayload(
       key,
       workerDeploymentSecrets,
@@ -194,21 +314,17 @@ export async function uploadInstallationWorkers(input: {
       action.action !== 'create',
     );
     await checkpointWorkerManifest(async () => {
-      const intended = recordProvisionIntent(input.manifest!, action, now());
+      const intended = recordProvisionIntent(input.manifest, action, now());
       if (intended !== input.manifest) {
-        input.manifest = intended;
-        writeInstallationManifest(input.manifest);
-        await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+        await writeManifest(intended);
       }
     });
-    await dependencies.revalidateBeforeWorkerDeploy(input.manifest!, action);
-    markWorkerStep('revalidate');
+    await dependencies.revalidateBeforeWorkerDeploy(input.manifest, action);
     const preservedRoutes = dependencies.deployWorker
       ? []
       : action.action === 'create'
         ? []
         : await inventoryUnmanagedPlatformWorkerTraffic(dependencies.client, plan, action.name);
-    markWorkerStep('traffic inventory');
     const workerConfig = mergePlatformWorkerTrafficConfig(configs[key], preservedRoutes);
     const previousWorkerConfig = mergePlatformWorkerTrafficConfig(
       previousConfigs[key],
@@ -217,138 +333,50 @@ export async function uploadInstallationWorkers(input: {
     const rollback = dependencies.deployWorker
       ? await dependencies.deployWorker(workerConfig, workerSecrets, previousWorkerConfig)
       : await deployPlatformWorker(workerConfig, workerSecrets, {
+          ...platformWorkerDeployCallbacks({
+            client: dependencies.client,
+            plan,
+            zoneId,
+            ids,
+            key,
+            action,
+            generation: workerCutoverGeneration,
+            now,
+            readManifest: () => input.manifest,
+            writeManifest,
+            checkpoint: checkpointWorkerManifest,
+          }),
           apiBaseUrl: cloudflareApiBaseUrl,
           operatorApiToken: dependencies.operatorApiToken,
           ...(parallelWorkerUploads
             ? { acquireUploadSlot, onReadyForActivation, waitForPriorWorker }
             : {}),
-          ...(dependencies.client.request
-            ? { readCloudflare: (path) => dependencies.client.request!(path) }
-            : {}),
-          onStaged: async (previousVersionId, stagedVersionId, previousTriggers) => {
-            await checkpointWorkerManifest(async () => {
-              input.manifest = recordWorkerCutoverStage(
-                input.manifest!,
-                workerCutoverGeneration,
-                key,
-                previousVersionId,
-                stagedVersionId,
-                action.name,
-                previousTriggers,
-                now(),
-              );
-              writeInstallationManifest(input.manifest);
-              await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-            });
-          },
-          onTrafficPublished: async () => {
-            if (!dependencies.client.listWorkerDomains || !dependencies.client.listWorkerRoutes) {
-              throw new Error('platform: Cloudflare traffic inventory is unavailable.');
-            }
-            const [customDomains, routes] = await Promise.all([
-              dependencies.client.listWorkerDomains(plan.account.id),
-              zoneId ? dependencies.client.listWorkerRoutes(zoneId) : Promise.resolve([]),
-            ]);
-            await checkpointWorkerManifest(async () => {
-              const next = recordPlatformWorkerTraffic(
-                input.manifest!,
-                action.name,
-                { customDomains, routes },
-                now(),
-              );
-              if (JSON.stringify(next.resources) !== JSON.stringify(input.manifest!.resources)) {
-                input.manifest = next;
-                writeInstallationManifest(input.manifest);
-                await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-              }
-            });
-          },
-          onUnsafeTraffic: async () => {
-            await checkpointWorkerManifest(async () => {
-              input.manifest = recordWorkerUnsafeTraffic(
-                input.manifest!,
-                workerCutoverGeneration,
-                key,
-                action.name,
-                now(),
-              );
-              writeInstallationManifest(input.manifest);
-              await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-            }, true);
-          },
           managedRoutes: preserveDisabled
             ? []
             : managedRoutes
                 .filter((route) => route.script === action.name)
                 .map((route) => route.pattern),
           preservedRoutes,
-          publishCustomDomains: (workerName, origins) =>
-            publishPlatformWorkerCustomDomains(
-              dependencies.client,
-              plan.account.id,
-              workerName,
-              origins,
-            ),
-          publishRoutes: async (workerName, patterns) => {
-            if (!dependencies.client.publishWorkerRoutesSafely) {
-              throw new Error('platform: Safe Cloudflare Worker route publication is unavailable.');
-            }
-            if (zoneId) {
-              await dependencies.client.publishWorkerRoutesSafely(zoneId, workerName, patterns);
-            } else if (patterns.length > 0) {
-              throw new Error('platform: Cannot publish zone routes in workers.dev mode.');
-            }
-          },
           previousConfig: previousWorkerConfig,
           previousPublicEndpoints: previousPublicEndpoints,
-          inspectNewWorker: () =>
-            inspectNewPlatformWorker(
-              dependencies.client,
-              plan.account.id,
-              input.manifest!,
-              action.key,
-              action.name,
-            ),
-          removeCustomDomains: async () => {
-            if (!dependencies.client.removeRoutes) {
-              throw new Error('platform: Cloudflare route removal is unavailable.');
-            }
-            await dependencies.client.removeRoutes(
-              plan.account.id,
-              zoneId,
-              trackedPlatformWorkerTraffic(input.manifest!, new Set([action.name])),
-            );
-          },
-          retainNewWorker: async () => {
-            await dependencies.client.putKvValue(
-              plan.account.id,
-              requireId(ids, 'routing-kv'),
-              PLATFORM_DISABLED_KEY,
-              PLATFORM_DISABLED_VALUE,
-            );
-          },
           runner: parallelWorkerUploads
             ? runParallelPinnedPlatformWrangler
             : runPinnedPlatformWrangler,
           workerExisted: action.action !== 'create',
         });
-    markWorkerStep('deploy');
     if (rollback) {
       workerRollbacks.push(rollback);
     }
     await checkpointWorkerManifest(async () => {
-      const recorded = recordResource(input.manifest!, action, action.name, 'created', now());
+      const recorded = recordResource(input.manifest, action, action.name, 'created', now());
       if (
         rollback ||
         dependencies.deployWorker ||
-        JSON.stringify(recorded.resources) !== JSON.stringify(input.manifest!.resources)
+        JSON.stringify(recorded.resources) !== JSON.stringify(input.manifest.resources)
       ) {
-        input.manifest = recorded;
-        writeInstallationManifest(input.manifest);
-        await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+        await writeManifest(recorded);
       }
     });
-    markWorkerStep('record');
   };
   if (parallelWorkerUploads) {
     const tasks: Array<Promise<void>> = [];

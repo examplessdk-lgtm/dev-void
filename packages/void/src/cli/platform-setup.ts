@@ -6,7 +6,7 @@ import { pc } from './output.ts';
 import type { PlatformManagementAccess } from './platform-auth.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
 
-export type PlatformSetupPage = Readonly<{
+type PlatformSetupPage = Readonly<{
   title: string;
   url: string;
   instructions: string;
@@ -109,17 +109,12 @@ function plansZoneCreation(plan: PlatformInstallPlan): boolean {
 
 export function platformManagementSetupPage(
   plan: PlatformInstallPlan,
-  options: { access?: PlatformManagementAccess | false } = {},
+  options: { access: PlatformManagementAccess | false },
 ): PlatformSetupPage {
   const createsZone = plansZoneCreation(plan);
   const zoneName = plan.deployment.application.zoneName;
   const apiHostname = plan.deployment.controlPlane.apiHostname;
-  const access =
-    options.access ??
-    (plan.deployment.authentication.accessProtection ||
-    plan.deployment.authentication.providers.includes('cloudflare-access')
-      ? { protection: !!plan.deployment.authentication.accessProtection, readOnly: false }
-      : undefined);
+  const { access } = options;
   const zones = [
     ...(zoneName ? [zoneName] : []),
     ...(apiHostname && apiHostname !== zoneName && !apiHostname.endsWith(`.${zoneName}`)

@@ -59,7 +59,9 @@ describe('platform credential setup links', () => {
           },
         },
       };
-      const page = platformManagementSetupPage(selected);
+      const page = platformManagementSetupPage(selected, {
+        access: { protection, readOnly: false },
+      });
       const permissions = JSON.parse(new URL(page.url).searchParams.get('permissionGroupKeys')!);
       expect(permissions).toContainEqual({ key: 'access', type: 'edit' });
       expect(permissions).toContainEqual({ key: 'access_acct', type: 'read' });
@@ -102,7 +104,7 @@ describe('platform credential setup links', () => {
   });
   it('prefills a separate management token with account provisioning and zone permissions', () => {
     const original = plan('example.com');
-    const page = platformManagementSetupPage(original);
+    const page = platformManagementSetupPage(original, { access: false });
     const url = new URL(page.url);
     expect(url.searchParams.get('to')).toBe('/account/api-tokens');
     expect(url.searchParams.get('name')).toBe('Test & Team Management');
@@ -131,19 +133,22 @@ describe('platform credential setup links', () => {
         'Change the zone policy from All Domains to Specified Domains → example.com.',
       ].join('\n'),
     );
-    const createZone = platformManagementSetupPage({
-      ...original,
-      actions: [
-        {
-          kind: 'zone',
-          key: 'zone',
-          action: 'create',
-          id: null,
-          name: 'example.com',
-          reason: 'test',
-        },
-      ],
-    });
+    const createZone = platformManagementSetupPage(
+      {
+        ...original,
+        actions: [
+          {
+            kind: 'zone',
+            key: 'zone',
+            action: 'create',
+            id: null,
+            name: 'example.com',
+            reason: 'test',
+          },
+        ],
+      },
+      { access: false },
+    );
     expect(
       JSON.parse(new URL(createZone.url).searchParams.get('permissionGroupKeys')!),
     ).toContainEqual({ key: 'zone', type: 'edit' });
@@ -151,30 +156,36 @@ describe('platform credential setup links', () => {
       'Keep the zone policy on All Domains so Void can create example.com.',
     );
     expect(createZone.instructions).not.toContain('Specified Domains');
-    const separateApi = platformManagementSetupPage({
-      ...original,
-      deployment: {
-        ...original.deployment,
-        controlPlane: { ...original.deployment.controlPlane, apiHostname: 'api.company.net' },
+    const separateApi = platformManagementSetupPage(
+      {
+        ...original,
+        deployment: {
+          ...original.deployment,
+          controlPlane: { ...original.deployment.controlPlane, apiHostname: 'api.company.net' },
+        },
       },
-    });
+      { access: false },
+    );
     expect(separateApi.instructions).toContain(
       'Change the zone policy from All Domains to Specified Domains → example.com and the zone for api.company.net.',
     );
-    const workersDevApi = platformManagementSetupPage({
-      ...plan(),
-      deployment: {
-        ...plan().deployment,
-        controlPlane: { ...plan().deployment.controlPlane, apiHostname: 'api.company.net' },
+    const workersDevApi = platformManagementSetupPage(
+      {
+        ...plan(),
+        deployment: {
+          ...plan().deployment,
+          controlPlane: { ...plan().deployment.controlPlane, apiHostname: 'api.company.net' },
+        },
       },
-    });
+      { access: false },
+    );
     expect(workersDevApi.instructions).toContain(
       'Change the zone policy from All Domains to Specified Domains → the zone for api.company.net.',
     );
   });
   it('cannot preselect a zone in the account token link, so it names the dashboard change', () => {
     // Account token template links accept only permissionGroupKeys and name.
-    const url = new URL(platformManagementSetupPage(plan('example.com')).url);
+    const url = new URL(platformManagementSetupPage(plan('example.com'), { access: false }).url);
     expect([...url.searchParams.keys()]).toEqual(['to', 'name', 'permissionGroupKeys']);
     const runtime = new URL(platformSetupPages(plan('example.com')).runtime.url);
     expect([...runtime.searchParams.keys()]).toEqual(['to', 'name', 'permissionGroupKeys']);

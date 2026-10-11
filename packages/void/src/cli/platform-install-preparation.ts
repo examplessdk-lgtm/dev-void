@@ -3,9 +3,11 @@ import {
   createPlatformDeploymentManifest,
   platformDashboardUrl,
   transitionInstallation,
+  type PlatformDeploymentManifest,
   type PlatformInstallationManifest,
   parsePlatformAuthenticationSetup,
 } from '@void/platform';
+import type { PlatformRuntimeManifest } from '@void/platform/installer';
 import { ensurePlatformAccessHealthChecks } from './platform-access-health.ts';
 import { verifyInstalledPlatformAccessProtection } from './platform-access-preflight.ts';
 import {
@@ -22,6 +24,7 @@ import {
   createPlatformHealthProbeToken,
 } from './platform-installer-secrets.ts';
 import {
+  type PlatformDatabaseLifecycleLock,
   type PlatformInstallerDependencies,
   type PlatformInstallationSecrets,
   type PlatformWorkerSecretUpdateIntent,
@@ -34,10 +37,25 @@ import {
   writePendingInstallationSecrets,
 } from './platform-registry.ts';
 
+function withAuthentication(
+  deployment: PlatformDeploymentManifest,
+  authentication: PlatformDeploymentManifest['authentication'],
+): PlatformDeploymentManifest {
+  return createPlatformDeploymentManifest({
+    ...deployment,
+    authentication,
+    capabilities: {
+      ...deployment.capabilities,
+      githubOAuth: authentication.providers.includes('github'),
+      googleOAuth: authentication.providers.includes('google'),
+    },
+  });
+}
+
 export async function prepareInstallationAuthentication(input: {
-  readonly releaseDatabaseLock: import('./platform-installer-types.ts').PlatformDatabaseLifecycleLock;
+  readonly releaseDatabaseLock: PlatformDatabaseLifecycleLock;
   authenticationEnforcementActive: boolean;
-  readonly runtime: import('@void/platform/installer').PlatformRuntimeManifest;
+  readonly runtime: PlatformRuntimeManifest;
   plan: PlatformInstallPlan;
   readonly authenticationProtocolTransition: boolean;
   manifest: PlatformInstallationManifest;
@@ -77,33 +95,22 @@ export async function prepareInstallationAuthentication(input: {
     input.manifest.deployment.authentication.configurable &&
     !input.plan.deployment.authentication.configurable
   ) {
-    const authentication = input.manifest.deployment.authentication;
-    const providers = authentication.providers;
     input.plan = {
       ...input.plan,
-      deployment: createPlatformDeploymentManifest({
-        ...input.plan.deployment,
-        authentication,
-        capabilities: {
-          ...input.plan.deployment.capabilities,
-          githubOAuth: providers.includes('github'),
-          googleOAuth: providers.includes('google'),
-        },
-      }),
+      deployment: withAuthentication(
+        input.plan.deployment,
+        input.manifest.deployment.authentication,
+      ),
     };
   }
   if (authenticationProtocolTransition && !input.plan.deployment.authentication.configurable) {
-    const providers = input.plan.deployment.authentication.providers;
-    const deployment = createPlatformDeploymentManifest({
-      ...input.plan.deployment,
-      authentication: { providers, configurable: true },
-      capabilities: {
-        ...input.plan.deployment.capabilities,
-        githubOAuth: providers.includes('github'),
-        googleOAuth: providers.includes('google'),
-      },
-    });
-    input.plan = { ...input.plan, deployment };
+    input.plan = {
+      ...input.plan,
+      deployment: withAuthentication(input.plan.deployment, {
+        providers: input.plan.deployment.authentication.providers,
+        configurable: true,
+      }),
+    };
   }
   const activateAccessCredentials = () => {
     if (!input.secrets.accessCredentialsJson) {
@@ -142,7 +149,6 @@ export async function prepareInstallationAuthentication(input: {
     writeInstallationManifest(input.manifest);
     await releaseDatabaseLock.checkpoint?.(input.manifest);
   }
-  await releaseDatabaseLock.checkpoint?.(input.manifest);
   if (input.manifest.status !== 'provisioning') {
     input.manifest = transitionInstallation(input.manifest, 'provisioning', now());
     writeInstallationManifest(input.manifest);
@@ -319,7 +325,7 @@ export async function prepareInstallationAuthentication(input: {
         checkpoint: secretCheckpoint(input.secrets, workerSecretUpdateIntent),
         save: (accessHealthProvisioningJson) => {
           input.secrets = { ...input.secrets, accessHealthProvisioningJson };
-          input.manifest = checkpointAuthenticationResources(input.manifest!, input.secrets, now());
+          input.manifest = checkpointAuthenticationResources(input.manifest, input.secrets, now());
           writePendingInstallationSecrets(input.manifest, {
             ...secretCheckpoint(input.secrets, workerSecretUpdateIntent),
             databaseClaimState: 'claimed',

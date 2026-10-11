@@ -18,7 +18,7 @@ import {
 import { join, resolve } from 'pathslash';
 import { readKeyringPassword, writeKeyringPassword } from './keyring.ts';
 
-export const PLATFORM_REGISTRY_SCHEMA_VERSION = 1 as const;
+const PLATFORM_REGISTRY_SCHEMA_VERSION = 1 as const;
 
 export type PlatformConnection = Readonly<{
   accountId: string | null;
@@ -80,7 +80,7 @@ export function normalizePlatformApiUrl(value: string): string {
   return url.origin;
 }
 
-export function platformConnectionId(apiUrl: string): string {
+function platformConnectionId(apiUrl: string): string {
   return createHash('sha256').update(normalizePlatformApiUrl(apiUrl)).digest('hex').slice(0, 20);
 }
 
@@ -372,7 +372,7 @@ export function selectPlatformConnection(
   });
 }
 
-export function installationManifestPath(
+function installationManifestPath(
   accountId: string,
   installationId: string,
   directory: string = platformRegistryDirectory(),
