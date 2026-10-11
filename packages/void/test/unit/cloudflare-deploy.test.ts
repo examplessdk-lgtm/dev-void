@@ -9173,7 +9173,7 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
 
   it('fails closed when a required secret is shipped EMPTY in the REAL vars (shadows the remote secret)', async () => {
     const root = d1Project(PROVISIONED_D1);
-    // Use the REAL discharge (dischargeSelfHostEnv undefined) so the present-empty fence runs.
+    // The plaintext server-key gate checks presence, so an empty value still fails closed.
     const { deps, trace, wranglerArgs, exitCalls } = harness({
       resolveSchemaFacts: (() =>
         okSchemaFacts({
@@ -9198,9 +9198,7 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
 
   it('fails closed when a required secret is shipped NULL in the REAL vars (shadows like empty)', async () => {
     const root = d1Project(PROVISIONED_D1);
-    // A parsed wrangler.json var can be `null`; the schema validators bucket null as "missing"
-    // (not "invalid"), so without the empty-shadow fence it would slip past every gate while
-    // still shadowing the remote secret. Use the REAL discharge so the fence runs.
+    // A parsed wrangler.json var can be `null`; the presence check rejects it like an empty value.
     const { deps, trace, wranglerArgs, exitCalls } = harness({
       resolveSchemaFacts: (() =>
         okSchemaFacts({

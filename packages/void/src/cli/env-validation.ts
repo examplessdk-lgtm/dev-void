@@ -251,7 +251,7 @@ export class SelfHostSchemaError extends Error {
   override name = 'SelfHostSchemaError';
   readonly reason: SelfHostSchemaFailureReason;
   // Explicit fields (not TS parameter properties) so this module type-strips under
-  // plain Node — the build-context probe imports it in a subprocess.
+  // plain Node — the env-schema probe child imports it.
   constructor(message: string, reason: SelfHostSchemaFailureReason) {
     super(message);
     this.reason = reason;
