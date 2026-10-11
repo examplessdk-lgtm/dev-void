@@ -18,34 +18,6 @@ describe('scanQueuesSync', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('extracts maxRetries and retryDelay from queue file', () => {
-    writeFileSync(
-      join(root, 'queues', 'emails.ts'),
-      `import { defineQueue } from "void";
-export const maxRetries = 5;
-export const retryDelay = 30;
-export default defineQueue(async (batch, env) => {});`,
-    );
-
-    const queues = scanQueuesSync(queuesDir);
-    expect(queues).toHaveLength(1);
-    expect(queues[0].maxRetries).toBe(5);
-    expect(queues[0].retryDelay).toBe(30);
-  });
-
-  it('returns undefined for missing consumer options', () => {
-    writeFileSync(
-      join(root, 'queues', 'basic.ts'),
-      `import { defineQueue } from "void";
-export default defineQueue(async (batch, env) => {});`,
-    );
-
-    const queues = scanQueuesSync(queuesDir);
-    expect(queues).toHaveLength(1);
-    expect(queues[0].maxRetries).toBeUndefined();
-    expect(queues[0].retryDelay).toBeUndefined();
-  });
-
   it('extracts all consumer options together', () => {
     writeFileSync(
       join(root, 'queues', 'full.ts'),

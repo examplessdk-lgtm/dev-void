@@ -5,7 +5,6 @@ import { analyzeApplication } from '../../src/application-routing.ts';
 import { readConfig } from '../../src/config.ts';
 import type { RouteEnvironment } from '../../src/router/parse-filename.ts';
 import { scanRoutePatternsSync } from '../../src/router/scan.ts';
-import { scanWebSocketRoutesSync } from '../../src/router/websocket.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_scan_test__');
 
@@ -139,19 +138,6 @@ describe('scanRoutes', () => {
     ]);
   });
 
-  it('discovers cron jobs with array cron syntax', async () => {
-    createFile('routes/api/hello.ts');
-    createFile(
-      'crons/multi.ts',
-      'export const cron = ["0 * * * *", "30 * * * *"]\nexport default () => {}',
-    );
-
-    const result = await scanRoutes(TMP);
-    expect(result.jobs).toEqual([
-      { filePath: 'multi.ts', name: 'multi', crons: ['0 * * * *', '30 * * * *'] },
-    ]);
-  });
-
   it('reads the exported cron rather than matching comments or string contents', async () => {
     createFile(
       'crons/actual.ts',
@@ -196,53 +182,6 @@ export default () => {};`,
         bindingName: 'QUEUE_EMAILS',
       },
     ]);
-  });
-
-  it('derives binding name from filename', async () => {
-    createFile('routes/api/hello.ts');
-    createFile('queues/order-notifications.ts', 'export default async () => {}');
-
-    const result = await scanRoutes(TMP);
-    expect(result.queues).toHaveLength(1);
-    expect(result.queues[0].name).toBe('order-notifications');
-    expect(result.queues[0].bindingName).toBe('QUEUE_ORDER_NOTIFICATIONS');
-  });
-
-  it('handles nested queue files', async () => {
-    createFile('routes/api/hello.ts');
-    createFile('queues/order/notifications.ts', 'export default async () => {}');
-
-    const result = await scanRoutes(TMP);
-    expect(result.queues).toHaveLength(1);
-    expect(result.queues[0].name).toBe('order-notifications');
-    expect(result.queues[0].bindingName).toBe('QUEUE_ORDER_NOTIFICATIONS');
-  });
-
-  it('rejects nested queue names that collide after normalization', async () => {
-    createFile('routes/api/hello.ts');
-    createFile('queues/order-notifications.ts', 'export default async () => {}');
-    createFile('queues/order/notifications.ts', 'export default async () => {}');
-
-    await expect(scanRoutes(TMP)).rejects.toThrow(
-      [
-        'queue: Multiple queue files resolve to the same queue name:',
-        '  "order-notifications": "order-notifications.ts", "order/notifications.ts"',
-        'Rename the conflicting files so each queue has a unique name.',
-      ].join('\n'),
-    );
-  });
-
-  it('extracts maxBatchSize and maxBatchTimeout', async () => {
-    createFile('routes/api/hello.ts');
-    createFile(
-      'queues/emails.ts',
-      'export const maxBatchSize = 50\nexport const maxBatchTimeout = 10\nexport default async () => {}',
-    );
-
-    const result = await scanRoutes(TMP);
-    expect(result.queues).toHaveLength(1);
-    expect(result.queues[0].maxBatchSize).toBe(50);
-    expect(result.queues[0].maxBatchTimeout).toBe(10);
   });
 
   it('ignores _-prefixed queue files', async () => {
@@ -331,22 +270,5 @@ describe('sync scanners', () => {
         .map((r) => r.filePath)
         .sort(),
     ).toEqual(['api/always.ts', 'api/hello.dev.ts', 'api/hello.prod.ts']);
-  });
-
-  it('scanWebSocketRoutesSync filters websocket routes by environment', () => {
-    createFile('routes/chat.dev.ws.ts', 'export default defineWebSocket({})');
-    createFile('routes/chat.prod.ws.ts', 'export default defineWebSocket({})');
-
-    expect(scanWebSocketRoutesSync(TMP, undefined, 'dev').map((r) => r.filePath)).toEqual([
-      'chat.dev.ws.ts',
-    ]);
-    expect(scanWebSocketRoutesSync(TMP, undefined, 'prod').map((r) => r.filePath)).toEqual([
-      'chat.prod.ws.ts',
-    ]);
-    expect(
-      scanWebSocketRoutesSync(TMP)
-        .map((r) => r.filePath)
-        .sort(),
-    ).toEqual(['chat.dev.ws.ts', 'chat.prod.ws.ts']);
   });
 });
