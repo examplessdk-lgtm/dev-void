@@ -1,28 +1,12 @@
 /**
- * In-memory capture sink for emails during local dev / tests.
- *
- * Two consumers:
- *   1. The Vite dev-server middleware (`/__void/inbox`) — owns the buffer that
- *      backs the browsable inbox during `void dev`.
- *   2. The test harness (`void/email/testing`) — registers a sink so
- *      assertions like `expect(harness.messages).toHaveLength(1)` work without
- *      mocking the SEND_EMAIL binding.
- *
- * The sink registry lives on globalThis, but it is only ever an IN-ISOLATE
- * channel. It is NOT a bridge between the dev server and user code: under
- * `void dev` the Vite plugin runs in Node while user code runs in workerd — a
- * separate OS process started by miniflare — so each has its own globalThis and
- * its own (empty) registry. A `sendEmail` call inside the worker therefore
- * never sees the plugin's sink.
- *
- * The cross-process hop is explicit instead: the worker POSTs the captured
- * message to {@link DEV_INBOX_CAPTURE_URL} through its dev assets binding
- * (which `@cloudflare/vite-plugin` wires straight into the Vite dev server's
- * Node middleware stack), and the plugin's middleware pushes it into the
- * buffer. See `runtime/email.ts` and `plugin-email-dev-inbox.ts`.
+ * In-memory email capture for `void dev` and tests. The inbox buffer lives in
+ * the Vite dev server's Node process; `sendEmail` runs in workerd, a separate
+ * process, so it POSTs each capture to {@link DEV_INBOX_CAPTURE_URL} over the
+ * dev assets binding. The sink registry serves only sends in the same
+ * isolate, such as `createEmailTestHarness`.
  */
 
-import { MAX_MESSAGE_BYTES } from './mime.ts';
+import { base64, base64Decode, MAX_MESSAGE_BYTES, newId } from './mime.ts';
 import type { NormalizedEmail, NormalizedAttachment } from './types.ts';
 
 export interface CapturedMessage {
@@ -62,104 +46,41 @@ export const DEV_INBOX_CAPTURE_PATH: string = '/_capture';
 export const DEV_INBOX_CAPTURE_URL: string = `${DEV_INBOX_PREFIX}${DEV_INBOX_CAPTURE_PATH}`;
 
 /**
- * Serve-only var naming the fetcher binding that loops back to the Vite dev
- * server. Its presence is also the dev gate: `sendEmail` only attempts the dev
- * inbox when this var is set, and it is injected exclusively when
- * `viteCommand === 'serve'` (see `shouldInjectEmailDevInboxVar` in index.ts),
- * so a production build never carries it.
+ * Serve-only var naming the binding that loops back to the Vite dev server.
+ * Its presence is the dev gate (`shouldInjectEmailDevInboxVar` in index.ts).
  */
 export const DEV_INBOX_ENV_VAR: string = '__VOID_EMAIL_DEV_INBOX';
 
 /**
- * Serve-only var carrying the project's dev-trigger token — the same
- * per-project secret `/__void/scheduled` and `/__void/queue` require — so the
- * worker can authenticate its capture POST. Injected together with
- * {@link DEV_INBOX_ENV_VAR} under the same gate. The compiled router embeds
- * the token as a module-local const the `void/email` runtime cannot import,
- * so a var is the only transport into `sendEmail`.
+ * Serve-only var carrying the dev-trigger token for the capture POST: the
+ * router's token const is not importable from `void/email`.
  */
 export const DEV_INBOX_TOKEN_ENV_VAR: string = '__VOID_EMAIL_DEV_INBOX_TOKEN';
 
 /**
- * How a caller proves it holds the dev-trigger token. Every `/__void/inbox`
- * route — browse, raw download, clear, and the worker's capture POST —
- * requires one of these, mirroring the `x-void-dev-trigger` check on the
- * cron/queue dev routes. The query form exists for the browser: a link
- * printed in the terminal cannot carry a header, and the inbox pages render
- * their own links with it. Responses send `Referrer-Policy: no-referrer`, so
- * the token never leaves the inbox through a Referer.
+ * Every inbox route requires the dev-trigger token, as this header or, for
+ * browser links, this query parameter.
  */
 export const DEV_INBOX_TOKEN_HEADER: string = 'x-void-dev-trigger';
 export const DEV_INBOX_TOKEN_QUERY: string = 'token';
 
 /**
- * Acknowledgement marker on the capture response. The transport rides the
- * assets binding, so a 200 alone proves nothing — if that binding ever stops
- * being a dev-server loopback, a plain static/SPA response would also be 200.
- * The worker treats a capture as delivered only when this header comes back.
+ * Marks a capture response: over the assets binding, a plain 200 could also
+ * be a static asset.
  */
 export const DEV_INBOX_ACK_HEADER: string = 'x-void-email-inbox';
 export const DEV_INBOX_ACK_VALUE: string = 'captured';
 
 /**
- * Upper bound on a capture body. Dev-only, but an unbounded read is still a
- * footgun.
- *
- * Derived from `MAX_MESSAGE_BYTES`, not chosen: a message `buildMime` accepts
- * must never be refused here, or `void dev` fails a send that production
- * delivers. `serializeCapturedMessage` carries the raw MIME as base64 (4/3 of
- * its octets) AND every caller string a second time as JSON, where the
- * expansion over the MIME rendering of the same string is at most 3.75x. That
- * worst case is a control character in a value `encodeWord` renders — the
- * subject, a display name, a custom header value: JSON writes it as `\u0001`
- * (6 bytes) while the encoded-word spends at least 1.6 octets per UTF-8 byte
- * (4/3 of base64 plus 12 octets of `=?UTF-8?B?…?=` per 45-byte word). A body
- * expands at most 2x: the same control is `=01` (3) in quoted-printable, a
- * CRLF (2) is `\r\n` (4), and a `"`, `\` or HTAB (1) is 2. An attachment's
- * filename, media type and Content-ID refuse controls (`rejectControls`), so
- * their worst is `"` or `\` at 2x (verbatim in the media type and Content-ID;
- * escaped, and twice, in the quoted filename), as is a custom header NAME,
- * which is printable ASCII. The MIME holds at most
- * `MAX_MESSAGE_BYTES` of those strings, so the JSON is under
- * `(4/3 + 3.75) * MAX_MESSAGE_BYTES` (5.09x) plus what has no MIME footprint of
- * its own — the JSON framing, ids, timestamps, and the `bcc` addresses
- * (`MAX_RECIPIENTS * MAX_ADDRESS_LENGTH`, 32 KB). 6x is the smallest integer
- * multiple that covers it.
- *
- * Three caller strings have NO MIME footprint, so no multiple of
- * `MAX_MESSAGE_BYTES` bounds them: a `bcc` display name (never rendered), a
- * custom header whose name is reserved (dropped), and a whitespace run inside
- * a long foldable header value (collapsed by folding). They are captured as
- * given, and a message that pads one of them past this cap is still refused.
+ * Capture body cap. 6x covers the base64 MIME plus the JSON copy of every
+ * caller string for a max-size message, so dev never refuses a send that
+ * production accepts.
  */
 export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 6 * MAX_MESSAGE_BYTES;
 
-export function bytesToBase64(bytes: Uint8Array): string {
-  // 8KB chunks keep us well under the typical V8 fromCharCode arg limit.
-  const CHUNK = 0x2000;
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, bytes.byteLength)));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array | undefined {
-  try {
-    const binary = atob(value);
-    const out = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      out[i] = binary.charCodeAt(i);
-    }
-    return out;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Encode a captured message for the worker -> dev-server hop (`raw` as base64). */
 export function serializeCapturedMessage(message: CapturedMessage): string {
-  return JSON.stringify({ ...message, raw: bytesToBase64(message.raw) });
+  return JSON.stringify({ ...message, raw: base64(message.raw) });
 }
 
 function asAddress(value: unknown): { email: string; name?: string } | undefined {
@@ -201,12 +122,17 @@ export function parseCapturedMessage(value: unknown): CapturedMessage | undefine
   if (typeof v.id !== 'string' || typeof v.raw !== 'string') {
     return undefined;
   }
-  const raw = base64ToBytes(v.raw);
+  let raw: Uint8Array;
+  try {
+    raw = base64Decode(v.raw);
+  } catch {
+    return undefined;
+  }
   const from = asAddress(v.from);
   const to = asAddressList(v.to);
   const cc = asAddressList(v.cc);
   const bcc = asAddressList(v.bcc);
-  if (!raw || !from || !to || !cc || !bcc) {
+  if (!from || !to || !cc || !bcc) {
     return undefined;
   }
   const attachments: CapturedMessage['attachments'] = [];
@@ -257,15 +183,7 @@ const SINK_KEY = '__voidEmailSinks__';
 const BUFFER_KEY = '__voidEmailDevBuffer__';
 const DEFAULT_BUFFER_LIMIT = 100;
 
-/**
- * Retained-byte budget for the buffer, alongside the count cap.
- *
- * A count cap alone does not bound the buffer: every item holds its full raw
- * MIME plus the decoded `text`/`html`, and a single message may reach
- * `MAX_MESSAGE_BYTES` (5 MiB), so 100 html-heavy messages is on the order of
- * gigabytes. This buffer lives in the Vite dev server's Node process — not in
- * workerd — so that is the dev server's own heap.
- */
+/** Retained-byte budget: 100 messages of up to 5 MiB each would fill the dev server's heap. */
 const DEFAULT_BUFFER_BYTES = 64 * 1024 * 1024;
 
 interface DevBuffer {
@@ -370,7 +288,7 @@ export function captureMessage(
   messageId: string,
 ): CapturedMessage {
   return {
-    id: generateCaptureId(),
+    id: newId('dev'),
     capturedAt: Date.now(),
     raw,
     messageId,
@@ -391,15 +309,4 @@ export function captureMessage(
       disposition: a.disposition,
     })),
   };
-}
-
-function generateCaptureId(): string {
-  // Compact ULID-like id: timestamp + 8 random bytes hex.
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  let hex = '';
-  for (const b of bytes) {
-    hex += b.toString(16).padStart(2, '0');
-  }
-  return `dev_${Date.now().toString(36)}${hex}`;
 }

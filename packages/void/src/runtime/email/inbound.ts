@@ -9,21 +9,24 @@ import {
   EMAIL_MAX_METADATA_BYTES,
   EMAIL_MAX_REPLY_BYTES,
   EMAIL_MAX_RESPONSE_BYTES,
+  type EmailWireAction,
 } from '@void/platform/email-protocol';
 import type { Email as PostalMimeEmail } from 'postal-mime';
+import { withTimeout } from '../email-protocol.ts';
 import { getRawRuntimeEnv } from '../env-raw.ts';
-import { buildMime, MimeError, normalizeEmail, validateAddressParts } from './mime.ts';
+import {
+  base64Decode,
+  buildMime,
+  indexOfControl,
+  MimeError,
+  normalizeEmail,
+  validateAddressParts,
+} from './mime.ts';
 import type { Address, Attachment } from './types.ts';
-
-// Mirror the slug-validity rule from runtime/email.ts so a malformed
-// __VOID_PROJECT_SLUG injection can't smuggle invalid characters into
-// the default reply `from` address.
-const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
 
 // SDK limits give handlers early errors. The gateway independently validates
 // untrusted tenant responses before admitting any action.
 const MAX_ACTIONS = EMAIL_MAX_ACTIONS;
-const MAX_ACTION_ADDRESS_LENGTH = 320;
 const MAX_ACTION_METADATA_BYTES = EMAIL_MAX_METADATA_BYTES;
 
 /** Bounds on a forward's headers. */
@@ -40,6 +43,8 @@ export const MAX_INBOUND_HEADERS: number = EMAIL_MAX_INBOUND_HEADERS;
 const MAX_REPLY_BYTES = EMAIL_MAX_REPLY_BYTES;
 const EMAIL_STREAM_DEADLINE_MS = 15_000;
 const EMAIL_ACTION_TERMINAL_BYTES = 5;
+const INBOUND_PROVIDER_DEADLINE_MS = 30_000;
+const INBOUND_ACTION_BATCH_DEADLINE_MS = 60_000;
 const actionEncoder = new TextEncoder();
 
 function emailActionWireSize(action: EmailAction): number {
@@ -51,39 +56,32 @@ function emailActionWireSize(action: EmailAction): number {
   return 5 + metadata.byteLength + (action.type === 'reply' ? 5 + action.raw.byteLength : 0);
 }
 
-function readRawProjectSlug(): string | undefined {
-  let raw: unknown;
+/** The raw env, or `undefined` outside a worker or SSR request. */
+export function tryGetRawRuntimeEnv(): Record<string, unknown> | undefined {
   try {
-    raw = getRawRuntimeEnv()?.__VOID_PROJECT_SLUG;
+    return getRawRuntimeEnv();
   } catch {
     return undefined;
   }
+}
+
+/** A non-empty string env var. */
+export function readEnvString(name: string): string | undefined {
+  const raw = tryGetRawRuntimeEnv()?.[name];
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
-function tryReadProjectSlug(): string | undefined {
-  const raw = readRawProjectSlug();
+// At most 56 characters, so `<slug>+noreply` fits RFC 5321's 64-octet local part.
+const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
+
+/** `__VOID_PROJECT_SLUG` when it can head a sender address. */
+export function readProjectSlug(): string | undefined {
+  const raw = readEnvString('__VOID_PROJECT_SLUG');
   return raw !== undefined && VALID_SLUG.test(raw) ? raw : undefined;
 }
 
-// The platform mail domain for this environment, injected per deployment
-// (production uses `mail.example.com`, staging its own zone). Mirrors
-// `readEmailDomain` in runtime/email.ts — no baked-in default, so a
-// staging reply is never built against the production zone.
-function tryReadEmailDomain(): string | undefined {
-  let raw: unknown;
-  try {
-    raw = getRawRuntimeEnv()?.__VOID_EMAIL_DOMAIN;
-  } catch {
-    return undefined;
-  }
-  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
-}
-
-// The relay-lane marker `createMessageProxy` sets from `envelope.viaDomain`
-// — the registered custom domain the message arrived on. Undefined for a
-// platform-lane or own-account message, and for a hand-built message in a
-// test that never went through the proxy.
+// The relay-lane marker `createMessageProxy` sets from `envelope.viaDomain`;
+// undefined for platform-lane, own-account and hand-built messages.
 function readRelayDomain(message: ForwardableEmailMessage): string | undefined {
   const raw: unknown = (message as { __voidRelayDomain?: unknown }).__voidRelayDomain;
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
@@ -132,13 +130,9 @@ export class ParseEmailError extends Error {
 }
 
 /**
- * Parse a `ForwardableEmailMessage` into structured fields. postal-mime is
- * loaded lazily so workers that never call this don't bundle it.
- *
- * For proxy messages (built via `createMessageProxy`) the raw bytes are
- * cached on first read so subsequent `parseEmail`/`message.raw` accesses
- * still work. For real CF `ForwardableEmailMessage`s the raw stream is
- * one-shot.
+ * Parse a `ForwardableEmailMessage` into structured fields with postal-mime,
+ * loaded on first use. A native Cloudflare message's `raw` stream is
+ * one-shot, so parse it once.
  */
 export async function parseEmail(message: ForwardableEmailMessage): Promise<ParsedEmail> {
   if (message.rawSize > MAX_INBOUND_BYTES) {
@@ -150,15 +144,10 @@ export async function parseEmail(message: ForwardableEmailMessage): Promise<Pars
   const { default: PostalMime } = await import('postal-mime');
   const cached = proxyRawCache.get(message);
   try {
-    // Acquire inside the guard: on an own-account deploy the generated
-    // handler wraps Cloudflare's native one-shot `raw`, so a mid-delivery
-    // stream failure must also surface as `ParseEmailError`.
+    // Inside the try: a native one-shot `raw` stream can fail mid-read.
     const source = cached ? await cached.read() : message.raw;
     return await PostalMime.parse(source);
   } catch (cause) {
-    // postal-mime is lenient — binary garbage, truncated parts and bad
-    // header bytes all parse. What it does reject is a nesting bomb (>256
-    // levels), and a one-shot `raw` stream can fail on a real CF message.
     throw new ParseEmailError(
       'PARSE_FAILED',
       `parseEmail: could not parse the message body. ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -167,12 +156,7 @@ export async function parseEmail(message: ForwardableEmailMessage): Promise<Pars
   }
 }
 
-/**
- * Per-proxy raw-bytes cache. Keyed by the proxy `ForwardableEmailMessage`
- * so `parseEmail()` (and any other reader) can replay the bytes without
- * consuming the underlying ReadableStream. Real CF messages are not in
- * the map, so they fall through to the one-shot stream behaviour.
- */
+/** Replayable raw bytes of proxy messages; native messages are not in the map. */
 interface RawCache {
   read(): Promise<Uint8Array>;
 }
@@ -197,10 +181,7 @@ export interface EmailEnvelope {
 }
 
 /** Handler intents, validated and admitted by the gateway before delivery. */
-export type EmailAction =
-  | { type: 'reject'; reason: string }
-  | { type: 'forward'; to: string; headers?: Record<string, string> }
-  | { type: 'reply'; from: string; to: string; raw: Uint8Array };
+export type EmailAction = EmailWireAction;
 
 export interface MessageProxy {
   message: ForwardableEmailMessage;
@@ -209,24 +190,13 @@ export interface MessageProxy {
 
 export interface CreateMessageProxyOptions {
   /**
-   * Project slug stripped from the `<slug>+<tag>` recipient by the
-   * dispatcher. When set, `message.to` is rewritten to the bare
-   * `<tag>@<domain>` form so user handlers see clean addresses (the slug
-   * is platform-internal). The original `<slug>+<tag>@<domain>` is
-   * preserved on a non-enumerable `__voidPlatformTo` property for
-   * diagnostics.
+   * Project slug the platform prefixes recipients with
+   * (`<slug>+<tag>@<domain>`). When set, `message.to` drops the `<slug>+`.
    */
   slug?: string;
 }
 
-/**
- * Remove the platform-injected `<slug>+` prefix from a recipient address.
- * The platform's shared sender (e.g. `mail.example.com`) rewrites every recipient to
- * `<slug>+<tag>@<domain>`; user handlers expect `<tag>@<domain>`. If the
- * slug is unknown, missing, or doesn't match the local-part prefix, the
- * address is returned unchanged so callers without slug context (e.g. the
- * test harness when no slug is set) don't accidentally mangle the address.
- */
+/** Remove a leading `<slug>+` (case-insensitive) from the local part. */
 function stripSlugFromAddress(address: string, slug: string | undefined): string {
   if (!slug) {
     return address;
@@ -237,8 +207,6 @@ function stripSlugFromAddress(address: string, slug: string | undefined): string
   }
   const localPart = address.slice(0, atIdx);
   const domain = address.slice(atIdx);
-  // Match `<slug>+...` case-insensitively. If the local-part starts with
-  // the slug followed by `+`, drop the `<slug>+` segment.
   const slugLower = slug.toLowerCase();
   const prefix = `${slugLower}+`;
   if (localPart.toLowerCase().startsWith(prefix)) {
@@ -269,29 +237,16 @@ function queueFull(): MimeError {
   );
 }
 
-function addressTooLong(field: 'from' | 'to', length: number): MimeError {
-  return new MimeError(
-    field === 'from' ? 'INVALID_FROM' : 'INVALID_TO',
-    `${field} address is ${length} characters, over the ${MAX_ACTION_ADDRESS_LENGTH}-character limit.`,
-  );
-}
-
 function invalidForwardHeaders(cause: unknown): MimeError {
-  // The runtime's own message names the offending name or value. A handler
-  // may have built that value from the inbound message, so it is bounded.
+  // The detail may echo inbound-derived text, so it is bounded.
   const detail = cause instanceof Error ? cause.message.slice(0, 320) : 'not a valid header set';
   return new MimeError('MIME_ERROR', `forward: invalid header — ${detail}`);
 }
 
 /**
- * The router's `forwardHeadersWithinBounds`, as a throw. It runs on the
- * record about to be recorded — the very object the router receives, so the
- * count is the router's count: a `Headers` folded its duplicate names before
- * it got here, and a record keeps `X-A` and `x-a` as two, both there and
- * here. Runs after the `new Headers()` validity check, so every name is a
- * token and every value is header-safe; what is left is size. The router
- * drops the WHOLE list on any of these — a handler that passed here and
- * failed there deployed as one whose managed delivery performed no actions.
+ * The router's `forwardHeadersWithinBounds`, as a throw: the router drops the
+ * whole action list on a violation, so refuse it at the handler's own call.
+ * Counts the record as stored (a `Headers` has already folded duplicates).
  */
 function assertForwardHeadersWithinBounds(headers: Record<string, string>): void {
   const names = Object.keys(headers);
@@ -308,9 +263,8 @@ function assertForwardHeadersWithinBounds(headers: Record<string, string>): void
         `forward: header name is ${name.length} characters, over the ${MAX_FORWARD_HEADER_LENGTH}-character limit.`,
       );
     }
-    // The declared value type is `string`, and the router refuses anything
-    // else: `new Headers()` coerces an Array with `String()`, so a non-string
-    // value has no `length` the bound below could measure.
+    // The router refuses a non-string value, which `new Headers()` would
+    // have coerced.
     const value: unknown = headers[name];
     if (typeof value !== 'string') {
       throw new MimeError(
@@ -328,25 +282,9 @@ function assertForwardHeadersWithinBounds(headers: Record<string, string>): void
 }
 
 /**
- * The router's rule for a reject reason (`validateActions` in
- * `email-router.ts`: `sanitize(raw, MAX_REJECT_REASON_LENGTH)`, and
- * `'rejected by handler'` for an empty one), applied when the reason is
- * RECORDED so the native replay carries the string the managed one does.
- *
- * The reason goes into the SMTP reply to the connecting client, and a
- * handler may build it from the inbound message: a remote sender's CRLF is
- * then a line injected into that reply, and a multi-megabyte reason is a
- * transient-heap amplifier. The router already refuses both; normalizing at
- * record time covers the native `setReject()` replay on your own account
- * too. NORMALIZED rather than refused, unlike the forward bounds
- * above: a reject is the handler's terminal decision, and throwing out of
- * it would drop that decision and bounce the message as a dispatch error
- * (see the `MAX_ACTIONS` note in `setReject`). Slice FIRST, then replace: a
- * global replace materializes ~66 bytes per match, so the slice is what
- * bounds the work (see `prefixReplySubject`). The result can be SHORTER
- * than the cap: a run of controls inside the window collapses to one space
- * and the window is not refilled from beyond it — the router's own trade,
- * and it is DSN text.
+ * The router's reject-reason rule, applied at record time so native replay
+ * sends the same string. Normalized rather than refused, since a throw would
+ * drop the reject; slice before replace to bound the work.
  */
 function normalizeRejectReason(reason: string): string {
   // A JS handler can pass anything; the router treats a non-string as empty.
@@ -365,10 +303,7 @@ function normalizeRejectReason(reason: string): string {
 async function readStreamToBytes(
   stream: ReadableStream<Uint8Array>,
   limit = Infinity,
-  // The caller decides what crossing `limit` MEANS: a single reply over
-  // `MAX_MESSAGE_BYTES`, or the cumulative budget running out mid-stream.
-  // Without this the second case would be reported as the first, naming a
-  // limit the reply never reached.
+  // Names the limit that was crossed: one reply's cap or the shared budget.
   onOverflow: (total: number) => MimeError = replyTooLarge,
 ): Promise<Uint8Array> {
   const reader = stream.getReader();
@@ -377,24 +312,11 @@ async function readStreamToBytes(
   const deadline = Date.now() + EMAIL_STREAM_DEADLINE_MS;
   try {
     for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        throw new MimeError('MIME_ERROR', 'email stream timed out');
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const { value, done } = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new MimeError('MIME_ERROR', 'email stream timed out')),
-            remaining,
-          );
-        }),
-      ]).finally(() => {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      });
+      const { value, done } = await withTimeout(
+        deadline - Date.now(),
+        () => reader.read(),
+        () => new MimeError('MIME_ERROR', 'email stream timed out'),
+      );
       if (done) {
         break;
       }
@@ -405,8 +327,7 @@ async function readStreamToBytes(
       chunks.push(value);
     }
   } catch (error) {
-    // Cancellation is cleanup, not part of the stream deadline. A custom
-    // handler stream may never settle its underlying cancel algorithm.
+    // Do not await cancel: a custom handler stream may never settle it.
     void reader.cancel().catch(() => {});
     throw error;
   } finally {
@@ -435,23 +356,10 @@ export function bytesToReadableStream(bytes: Uint8Array): ReadableStream<Uint8Ar
 }
 
 /**
- * Build a proxy `ForwardableEmailMessage` from an envelope. The proxy's
- * `setReject` / `forward` / `reply` methods don't dispatch directly — they
- * record `EmailAction` entries that the router (which holds the real
- * message) enacts after the handler returns.
- *
- * `reply()` accepts a duck-typed `{ from, to, raw }` with `raw` a
- * `Uint8Array` or `ReadableStream` — what `replyEmail()` passes. It does NOT
- * accept a native `EmailMessage` from `cloudflare:email`: that class exposes
- * only `from` and `to` (workers-types declares nothing else, and the body
- * has no public accessor), so its bytes cannot be recorded here, and nothing
- * could encode them for the gateway. The reply MIME bytes are
- * buffered before being recorded so the action is fully self-contained.
- *
- * When `opts.slug` is provided, `message.to` is rewritten to remove the
- * platform-injected `<slug>+` prefix so handlers see `<tag>@<domain>`
- * instead of `<slug>+<tag>@<domain>`. The original wire-form recipient is
- * preserved on a non-enumerable `__voidPlatformTo` property.
+ * Build the message a handler sees from an envelope. `setReject`, `forward`
+ * and `reply` record `EmailAction`s instead of dispatching; the caller enacts
+ * them after the handler returns. `reply()` takes `{ from, to, raw }`, which
+ * `replyEmail()` passes: a native `EmailMessage` has no readable body.
  */
 export function createMessageProxy(
   envelope: EmailEnvelope,
@@ -460,26 +368,14 @@ export function createMessageProxy(
   const actions: Array<EmailAction> = [];
   const headers = new Headers(envelope.headers);
 
-  // A relayed recipient carries no `<slug>+` prefix (the relay lane is
-  // authenticated by the domain's relay secret, and `viaDomain` names that
-  // domain), so the slug is inert here even if a caller passed one — the
-  // generated `handleEmail` already suppresses it, and this keeps a
-  // coincidental `<slug>+` local-part prefix from being stripped off a
-  // customer-domain address.
+  // A relayed recipient (on `viaDomain`) carries no `<slug>+` prefix, so a
+  // coincidental one on a customer address is never stripped.
   const slug =
     envelope.viaDomain === undefined || envelope.viaDomain === '' ? opts.slug : undefined;
 
-  // Strip the platform-injected `<slug>+` prefix from message.to so handler
-  // authors see the same address shape they wrote in `email/<addr>.ts`. The
-  // dispatcher strips the same prefix for routing; mirroring it here keeps
-  // the user-visible envelope consistent with the routing surface.
   const userVisibleTo = stripSlugFromAddress(envelope.to, slug);
 
-  // Cache raw bytes lazily so repeated reads (e.g. parseEmail() followed by
-  // anything touching message.raw) work. Real CF messages are one-shot, but
-  // the proxy is what user handlers see in tests + the platform router, and
-  // they reasonably expect raw to be replayable since the envelope is
-  // already pre-buffered by the router.
+  // Buffer `raw` once so it can be read repeatedly.
   let cachedRaw: Uint8Array | undefined;
   let bufferingPromise: Promise<Uint8Array> | undefined;
   function readRawOnce(): Promise<Uint8Array> {
@@ -501,8 +397,6 @@ export function createMessageProxy(
     return bufferingPromise;
   }
 
-  // If the envelope already gave us bytes, expose them eagerly via the cache
-  // so the WeakMap lookup in parseEmail short-circuits to a sync resolve.
   if (envelope.raw instanceof Uint8Array) {
     cachedRaw = envelope.raw;
   }
@@ -530,8 +424,8 @@ export function createMessageProxy(
     return true;
   }
 
-  // `actions` only ever grows through forward/reply, and `setReject` purges
-  // both, so length IS the queue depth.
+  // `actions` only grows through forward/reply, and `setReject` purges both,
+  // so its length is the queue depth.
   function assertQueueHasRoom(): void {
     if (actions.length + pendingReplies >= MAX_ACTIONS) {
       throw queueFull();
@@ -542,16 +436,11 @@ export function createMessageProxy(
     from: envelope.from,
     to: userVisibleTo,
     headers,
-    // `raw` is accessed as a property by user code and postal-mime. Return a
-    // fresh ReadableStream each access, backed by the cached bytes (or
-    // buffering on first read for stream envelopes).
+    // A fresh stream per access, backed by the buffered bytes.
     get raw(): ReadableStream<Uint8Array> {
       if (cachedRaw) {
         return bytesToReadableStream(cachedRaw);
       }
-      // Stream envelope, not yet buffered. Tee-style: kick off buffering
-      // and return a stream that pulls from the eventual bytes. This keeps
-      // synchronous getter semantics while ensuring later accesses replay.
       const pending = readRawOnce();
       return new ReadableStream({
         async start(controller) {
@@ -564,7 +453,7 @@ export function createMessageProxy(
     rawSize: envelope.rawSize,
     setReject(reason: string) {
       if (rejected) {
-        return; // already rejected; ignore second reject
+        return;
       }
       rejected = true;
       // Reject is terminal and replaces queued deliveries, so it must remain
@@ -597,22 +486,13 @@ export function createMessageProxy(
         return;
       }
       assertQueueHasRoom();
-      if (to.length > MAX_ACTION_ADDRESS_LENGTH) {
-        throw addressTooLong('to', to.length);
-      }
-      // Validate the bare address before recording any delivery intent.
       validateAddressParts('to', to);
-      // Accept both `Headers` (matches CF's runtime signature) and a plain
-      // `Record<string, string>`. `Headers.entries()` lowercases keys per
-      // spec; users who care about preserving header casing in the wire
-      // form (e.g. for diagnostic headers like `X-Void-Trace`) can pass
-      // the record form instead.
+      // `Headers` lowercases names; a plain record keeps the caller's casing.
       let headersObj: Record<string, string> | undefined;
       if (fwdHeaders instanceof Headers) {
         headersObj = Object.fromEntries(fwdHeaders.entries());
       } else if (fwdHeaders) {
-        // Validate now to avoid partial delivery during native replay. Keep
-        // the record itself so caller-provided header casing is preserved.
+        // Validate now so native replay cannot fail after earlier actions fired.
         try {
           void new Headers(fwdHeaders);
         } catch (e) {
@@ -620,9 +500,6 @@ export function createMessageProxy(
         }
         headersObj = { ...fwdHeaders };
       }
-      // Size, after validity, on the record that is stored — for both forms.
-      // The router applies these bounds to that record and drops the whole
-      // list; here they fail the handler's own call, recording nothing.
       if (headersObj) {
         assertForwardHeadersWithinBounds(headersObj);
       }
@@ -649,17 +526,7 @@ export function createMessageProxy(
       }
       // Everything cheap first, so a doomed reply never buffers its stream.
       assertQueueHasRoom();
-      if (reply.from.length > MAX_ACTION_ADDRESS_LENGTH) {
-        throw addressTooLong('from', reply.from.length);
-      }
-      if (reply.to.length > MAX_ACTION_ADDRESS_LENGTH) {
-        throw addressTooLong('to', reply.to.length);
-      }
-      // Same rule as `forward(to)` above, for the hand-built reply form:
-      // `replyEmail()` already goes through `normalizeEmail`, but a caller
-      // who passes `{ from, to, raw }` bypasses it, and otherwise only
-      // Cloudflare's native `reply()` would refuse a malformed address —
-      // after every earlier action had fired. Both are bare addresses.
+      // A hand-built `{ from, to, raw }` bypasses `normalizeEmail`.
       validateAddressParts('from', reply.from);
       validateAddressParts('to', reply.to);
       pendingReplies++;
@@ -677,8 +544,7 @@ export function createMessageProxy(
           );
           return;
         }
-        // `replyEmail()` is bounded by `buildMime`; a hand-built reply is not, so
-        // bound it here before the bytes travel to the proxy (or to native reply).
+        // A hand-built reply is not bounded by `buildMime`.
         const metadataOnlyAction = {
           type: 'reply' as const,
           from: reply.from,
@@ -702,10 +568,8 @@ export function createMessageProxy(
           }
           rawBytes = reply.raw;
         } else {
-          // A native `EmailMessage` lands here: `from` and `to` only, no `raw`.
-          // Name the problem instead of failing on `undefined.getReader()`,
-          // which in platform mode is a generic "project handler error" bounce
-          // with nothing a handler author could act on.
+          // A native `EmailMessage` has no `raw`: name that rather than fail
+          // with a generic handler error.
           const raw: unknown = reply.raw;
           if (
             typeof raw !== 'object' ||
@@ -719,10 +583,8 @@ export function createMessageProxy(
                 'no public accessor. Use replyEmail() from void/email, or pass the MIME bytes as raw.',
             );
           }
-          // The REMAINING budget, not the per-reply cap — an earlier reply has
-          // already spent part of it, and the stream must stop where the budget
-          // does. Whichever bound is lower is the one that fires, so the
-          // callback names the one that actually bound this read.
+          // Stop at the lower of the per-reply cap and the remaining budget,
+          // and name that one.
           const limit = Math.min(MAX_REPLY_BYTES, remaining);
           rawBytes = await readStreamToBytes(reply.raw, limit, (total) =>
             limit === MAX_REPLY_BYTES
@@ -743,11 +605,8 @@ export function createMessageProxy(
     },
   } as unknown as ForwardableEmailMessage;
 
-  // Preserve the original wire-form `<slug>+<tag>@<domain>` recipient for
-  // platform-side diagnostics without surfacing it to user handlers (most
-  // handlers should never need this — they read `message.to` and expect the
-  // clean form they wrote in `email/<addr>.ts`). Non-enumerable so JSON
-  // serialization, structured-clone, and `Object.entries` don't leak it.
+  // The wire-form recipient, for diagnostics; non-enumerable so it never
+  // serializes.
   if (envelope.to !== userVisibleTo) {
     Object.defineProperty(message, '__voidPlatformTo', {
       value: envelope.to,
@@ -757,13 +616,8 @@ export function createMessageProxy(
     });
   }
 
-  // Mark the relay lane: the platform proved the domain's relay secret, so
-  // `viaDomain` names the one registered domain this message arrived on.
-  // `buildReplyMessage` reads the marker to default `from` to the address
-  // that received the message (on the customer domain) instead of the
-  // shared-sender `<slug>+noreply@<platform domain>` default — the platform
-  // pins a relayed reply to the receiving project's registered domains.
-  // Non-enumerable for the same reason as `__voidPlatformTo` above.
+  // Relay-lane marker: `buildReplyMessage` then defaults `from` to the
+  // receiving address on the customer domain.
   if (typeof envelope.viaDomain === 'string' && envelope.viaDomain.length > 0) {
     Object.defineProperty(message, '__voidRelayDomain', {
       value: envelope.viaDomain,
@@ -773,40 +627,22 @@ export function createMessageProxy(
     });
   }
 
-  // Register cache entry so parseEmail() can replay bytes without consuming
-  // the proxy's `raw` getter (which would otherwise hand out a fresh stream
-  // per access — fine for correctness but wasteful for large messages).
   proxyRawCache.set(message, { read: readRawOnce });
 
   return { message, getActions: () => [...actions] };
 }
 
 /**
- * Whether `Name: value` can be emitted without breaking RFC 5322 §2.1.1.
- *
- * Folding only happens at whitespace (§3.2.2), so the widest unbreakable run
- * is what decides it — a `References` chain of ordinary ids folds fine however
- * long, while one oversized id inside it does not.
+ * Whether `Name: value` fits RFC 5322's 998-octet line. Folding happens only
+ * at SP or HTAB, so the widest unbroken run decides.
  */
 function fitsHeaderLine(name: string, value: string | undefined): value is string {
   if (!value) {
     return false;
   }
-  // A predicate, not a maximum, in one pass that allocates nothing. Spreading
-  // the token list into `Math.max` throws `RangeError` past ~123k arguments
-  // (measured on workerd), and `split(/\s+/)` materializes every token before
-  // `.some()` looks at the first — over 30 bytes of heap each, so 10 MiB of
-  // two-character ids (3.5M tokens, inside MAX_INBOUND_BYTES) measured 134 MB
-  // and terminates a 128 MB isolate before the predicate can answer. This
-  // guard exists to stop a hostile header making the app's reply throw, so it
-  // must be neither the thing that throws nor the thing that runs out of
-  // memory.
-  //
-  // A run ends only at SP or HTAB. That is the whitespace `foldHeader` folds
-  // at (§3.2.2 FWS), and a threading value is emitted verbatim, so treating
-  // the rest of `\s` (NBSP, FF, VT …) as a break would pass a value the
-  // folder cannot break. Counting through them is the strict direction: it
-  // can only refuse a value, never pass one that fails.
+  // One pass without allocation: tokenizing a hostile 10 MiB header could
+  // exhaust the isolate. Other `\s` characters do not end a run, because
+  // `foldHeader` cannot fold at them.
   const budget = 998 - (name.length + 2);
   let run = 0;
   for (let i = 0; i < value.length; i++) {
@@ -815,8 +651,7 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
       run = 0;
       continue;
     }
-    // UTF-8 octets, as `TextEncoder` would count them: a surrogate pair is one
-    // 4-octet code point, and a lone surrogate encodes as U+FFFD (3 octets).
+    // UTF-8 octets: a surrogate pair is 4, a lone surrogate (U+FFFD) is 3.
     if (c < 0x80) {
       run += 1;
     } else if (c < 0x800) {
@@ -840,39 +675,11 @@ function fitsHeaderLine(name: string, value: string | undefined): value is strin
 }
 
 /**
- * Whether `value` carries a C0 control other than HTAB, or DEL. The
- * sibling of `fitsHeaderLine` for the other way a remote-controlled id can
- * be unrepresentable: a threading value is emitted verbatim, so a control
- * inside it would reach the reply's `In-Reply-To` / `References` line raw —
- * `\x01` and DEL pass a WHATWG `Headers`, which refuses only CR, LF and
- * NUL — and an RFC 5322 §3.6.4 `msg-id` is `dot-atom-text`, which admits no
- * control at all. HTAB is not one here: it is the whitespace that separates
- * ids (§3.2.2 FWS), the same break `fitsHeaderLine` and `replyReferences`
- * cut at. One pass, no allocation, so it costs nothing a hostile header can
- * multiply; never a throw, for the same reason as the line guard.
- */
-function hasControl(value: string): boolean {
-  for (let i = 0; i < value.length; i++) {
-    const c = value.charCodeAt(i);
-    if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * `chain` without any id that `hasControl` refuses, the rest in their order
- * and joined by single spaces; the chain itself when there is nothing to
- * drop, without allocating. Only ONE id is lost — the others still thread —
- * whereas an id no line can carry drops the whole chain for the parent's id
- * (`replyReferences`), because that guard is about the rendered line and
- * this one is about one token. Called only on a chain already cut to
- * `MAX_REPLY_REFERENCES_CHARS`, so the per-id slices in the rare bad case
- * are bounded by that budget, not by the header a remote sender delivered.
+ * `chain` without the ids that hold a control character, joined by single
+ * spaces. Called only on a chain already cut to `MAX_REPLY_REFERENCES_CHARS`.
  */
 function dropControlIds(chain: string): string {
-  if (!hasControl(chain)) {
+  if (indexOfControl(chain) === -1) {
     return chain;
   }
   const kept: Array<string> = [];
@@ -941,55 +748,18 @@ export interface ReplyEmailOptions {
 }
 
 /**
- * Longest decoded inbound `Subject` the default reply subject is built from;
- * anything longer falls back to a bare `Re:`.
- *
- * RFC 5322 §2.1.1 caps a header LINE at 998 octets, and only folding lets a
- * header run past it — so a subject is something that fits on a line or
- * two. Real ones are tens to hundreds of characters; the longest automated
- * ones (a ticket title under a stack of list tags) reach a few hundred, and
- * Exchange rejects past 255. Four thousand keeps every one of those with an
- * order of magnitude to spare and refuses the shape that is only a subject
- * in name. What the bound buys is proportional cost: the control-character
- * replacements below cost 66 bytes of heap per match, so at this size they
- * cost at most 135 KB, and the reply's own `Subject` line is at most ~20 KB
- * — 4096 code units x 3 UTF-8 octets, base64'd in 45-octet encoded-words
- * with their framing — against a `MAX_MESSAGE_BYTES` of 5 MiB, so the
- * subject alone can never push the reply over the limit.
+ * Longest decoded inbound subject the default reply subject is built from;
+ * longer falls back to a bare `Re:`. Real subjects are far shorter, and the
+ * bound keeps the control-character replacement cheap.
  */
 const MAX_REPLY_SUBJECT_CHARS = 4096;
 
 function prefixReplySubject(original: string): string {
-  // Decode RFC 2047 encoded-words first so we (a) detect existing
-  // `Re:` prefixes inside encoded subjects (avoids `Re: =?UTF-8?B?...?=`
-  // becoming `Re: Re: foo` after the recipient's mailer decodes), and
-  // (b) re-encode cleanly via buildMime's encodeWord on the prefixed
-  // string instead of stacking encoded-words.
-  //
-  // The inbound subject is remote-sender controlled, and two things
-  // downstream throw on it: `normalizeEmail` rejects CR, LF and NUL, and
-  // `buildMime` rejects a header line over 998 octets or a message over
-  // `MAX_MESSAGE_BYTES`. A throw here is not the app's fault, and in
-  // production it rejects the whole delivery — the reply AND any forward
-  // the handler queued. So, as with the threading headers below, the
-  // subject is best-effort: C0 controls (a decoded `=00`, `=0A`, or a
-  // B-encoded NUL) become a single space, and three shapes fall back to a
-  // bare `Re:` — an empty subject, one over `MAX_REPLY_SUBJECT_CHARS`, and
-  // an ASCII one no line can carry.
-  //
-  // The bound is checked BEFORE the replacements, on the decoded string.
-  // A global `replace` materializes one part per match before it builds the
-  // result — about 66 bytes each — and the inbound header can be the whole
-  // 10 MiB message: 5 MiB of alternating tab and letter measured 165 MB on
-  // the first replacement alone and terminated a 128 MB isolate, which is
-  // the tenant's. It is the DECODED length that is bounded, not the raw
-  // header's: an encoded-word is always at least as long as what it decodes
-  // to (base64 is 4/3 of its bytes plus `=?UTF-8?B?…?=` per 45 of them, and
-  // a Q-encoded 3-octet character is nine characters), so a raw bound would
-  // refuse a CJK subject of under a thousand characters whose decoded form
-  // fits. The decode is one linear pass that holds only its output, already
-  // made to survive the 10 MiB case (see `quotedPrintableDecode` below) —
-  // accuracy for a pass that is paid either way.
+  // Decode first so an encoded `Re:` is detected and the result is encoded
+  // once. The subject is remote-controlled and a throw here would reject the
+  // whole delivery, so it is best-effort: controls become a space, and an
+  // empty, over-long or unfoldable ASCII subject becomes a bare `Re:`. The
+  // decoded length is checked before any replace.
   const decoded = decodeRfc2047(original);
   if (decoded.length > MAX_REPLY_SUBJECT_CHARS) {
     return 'Re:';
@@ -1003,9 +773,7 @@ function prefixReplySubject(original: string): string {
     return 'Re:';
   }
   const prefixed = /^re:/i.test(cleaned) ? cleaned : `Re: ${cleaned}`;
-  // Only a pure-ASCII subject can fail to fold: anything else goes through
-  // `encodeWord`, which splits it into 75-character encoded-words joined
-  // by spaces, and those fold. An ASCII token wider than a line cannot.
+  // Non-ASCII goes through `encodeWord`, whose words always fold.
   if (/^[\x20-\x7e]*$/.test(prefixed) && !fitsHeaderLine('Subject', prefixed)) {
     return 'Re:';
   }
@@ -1013,46 +781,23 @@ function prefixReplySubject(original: string): string {
 }
 
 /**
- * Longest `References` value a reply carries, in UTF-16 code units — the
- * measure `MAX_REPLY_SUBJECT_CHARS` uses. It is checked on `length` alone,
- * so a chain the size of the inbound message costs one property read before
- * anything is scanned or sliced.
- *
- * RFC 5322 puts no limit on the field, but everything downstream does. RFC
- * 5537 §3.4.4 has a followup agent trim it to 998 characters, and Postfix's
- * `header_size_limit` discards header bytes past 100 KiB. A message-id is
- * tens of characters, so 8 KiB carries a chain over a hundred replies deep
- * with every id intact — an order of magnitude past any conversation — and
- * a value this size, folded and encoded, is at most ~25 KB of a 5 MiB
- * reply, so the chain alone can never push the reply over the limit.
- * Unbounded, it could: the inbound header can be the whole 10 MiB message,
- * and short ids pass the line guard — every id folds — yet `foldHeader`'s
- * continuations would put the rendered reply over `MAX_MESSAGE_BYTES`.
- *
- * Past the bound the NEWEST ids are kept, whole, and the parent's id still
- * ends the chain. That is what a mail client threads on: it links the reply
- * under any id it recognises, and the parent is also `In-Reply-To`. The
- * root id RFC 5537 keeps is a Netnews convention (a newsreader identifies a
- * thread by it); in mail it would spend the budget on an id older than
- * every client in the conversation.
+ * Longest `References` value a reply carries, in UTF-16 code units. 8 KiB
+ * keeps any real thread whole; past it the newest ids are kept, since mail
+ * clients thread on any id they recognise and the parent is `In-Reply-To`.
  */
 const MAX_REPLY_REFERENCES_CHARS = 8192;
 
 /**
- * The `References` value a reply carries, or `''` when nothing can be
- * threaded. In order: the whole inbound chain continued by the parent's
- * `messageId` when it fits `MAX_REPLY_REFERENCES_CHARS`; otherwise the
- * newest ids of the chain that fit, none of them split; and the parent's id
- * alone (which may be empty) when even those hold an id no line can carry.
+ * The reply's `References`, or `''`: the inbound chain plus the parent's id,
+ * trimmed to its newest whole ids, or the parent's id alone when an id
+ * cannot fit a line.
  */
 function replyReferences(originalReferences: string, messageId: string): string {
   const parent = messageId ? ` ${messageId}` : '';
   let chain = originalReferences;
   const budget = MAX_REPLY_REFERENCES_CHARS - parent.length;
   if (chain.length > budget) {
-    // Keep the tail, from the first SP or HTAB at or after the cut so no id
-    // is split — the breaks `foldHeader` folds at, as in `fitsHeaderLine`.
-    // The scan and the slice are bounded by the budget, not by the header.
+    // Cut at the next SP or HTAB so no id is split.
     let cut = chain.length - budget;
     while (cut < chain.length) {
       const c = chain.charCodeAt(cut);
@@ -1063,49 +808,31 @@ function replyReferences(originalReferences: string, messageId: string): string 
     }
     chain = chain.slice(cut);
   }
-  // After the cut, so the only chain this ever walks is one the budget
-  // already bounds. `parent` was checked by the caller and is never dropped.
+  // After the cut, so the walk is bounded; `parent` was already checked.
   chain = dropControlIds(chain);
   chain = `${chain}${parent}`.trim();
-  // A chain folds at its spaces, so one this long is fine; it is a single
-  // oversized id inside it that is not.
   return fitsHeaderLine('References', chain) ? chain : messageId;
 }
 
 /**
- * Minimal RFC 2047 encoded-word decoder. Handles `=?charset?B?base64?=`
- * and `=?charset?Q?quoted-printable?=` segments separated by optional
- * whitespace. Unknown charsets pass through (best-effort UTF-8 decode);
- * malformed inputs return the original.
- *
- * Scope is intentionally narrow — used only for cosmetic subject
- * normalization in `prefixReplySubject`. Anything that needs robust
- * decoding (e.g. searching subject text) should use postal-mime's
- * parsed view via `parseEmail`.
+ * Minimal RFC 2047 decoder for the reply subject: B and Q encoded-words,
+ * unknown charsets read as UTF-8, malformed input returned unchanged.
  */
 function decodeRfc2047(value: string): string {
   if (!value.includes('=?')) {
     return value;
   }
   try {
-    // One encoded-word at a time. `replace` with a callback collects every
-    // match — result array, captures and all — before the callback runs
-    // once, so a 10 MiB subject of tiny encoded-words (750k of them, inside
-    // MAX_INBOUND_BYTES) needed 138 MB on the reply path and terminated a
-    // 128 MB isolate. `matchAll` is lazy: the same path needs 35 MB, and what
-    // is kept is the decoded output.
+    // `matchAll`, not `replace` with a callback: replace collects every match
+    // first, which a subject of tiny encoded-words turns into a heap blowup.
     const parts: Array<string> = [];
     let last = 0;
     for (const m of value.matchAll(/=\?([\w-]+)\?([BbQq])\?([^?]*)\?=(?:\s+(?==\?))?/g)) {
       const [match, charset, enc, payload] = m;
       const bytes =
         enc.toUpperCase() === 'B' ? base64Decode(payload) : quotedPrintableDecode(payload);
-      // Honor the charset declared in the encoded-word. Q-encoded
-      // ISO-8859-1 / Windows-1252 subjects are still common in mail
-      // from older systems; decoding them as UTF-8 mojibakes any
-      // byte ≥ 0x80. TextDecoder rejects unknown labels by throwing,
-      // so fall back to UTF-8 only when the requested charset isn't
-      // supported (better than leaving the raw encoded-word in place).
+      // Honor the declared charset; fall back to UTF-8 for a label
+      // TextDecoder rejects.
       let decoder: TextDecoder;
       try {
         decoder = new TextDecoder(charset || 'utf-8', { fatal: false });
@@ -1122,24 +849,9 @@ function decodeRfc2047(value: string): string {
   }
 }
 
-function base64Decode(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
-}
-
 function quotedPrintableDecode(qp: string): Uint8Array {
-  // RFC 2047 Q-encoding: `_` = space, `=XX` = hex byte, otherwise literal.
-  //
-  // Decode straight into a typed array. The payload regex in `decodeRfc2047`
-  // accepts whitespace, so an unfolded 10 MiB `Subject` is ONE encoded-word
-  // and this loop sees every character of it. An `Array<number>` would hold
-  // one boxed element per character (about 200 MB for 10 MiB of Q text). Every
-  // input character yields at most one output byte, so `qp.length` is the
-  // exact upper bound and the decode holds nothing but the output.
+  // RFC 2047 Q-encoding: `_` is a space, `=XX` a hex byte. Each input
+  // character yields at most one byte, so a typed array of `qp.length` fits.
   const out = new Uint8Array(qp.length);
   let kept = 0;
   for (let i = 0; i < qp.length; i++) {
@@ -1147,9 +859,8 @@ function quotedPrintableDecode(qp: string): Uint8Array {
     if (ch === 0x5f /* _ */) {
       out[kept++] = 0x20;
     } else if (ch === 0x3d /* = */ && i + 2 < qp.length) {
-      // Both characters must be hex: `parseInt('0G', 16)` is 0, not NaN. A
-      // malformed escape stays literal, which is what RFC 2045 §6.7 asks of a
-      // robust decoder and what postal-mime does.
+      // Both must be hex (`parseInt('0G', 16)` is 0); a malformed escape
+      // stays literal.
       const hex = qp.slice(i + 1, i + 3);
       if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
         out[kept++] = parseInt(hex, 16);
@@ -1165,13 +876,8 @@ function quotedPrintableDecode(qp: string): Uint8Array {
 }
 
 /**
- * Pure helper: build the reply MIME from an inbound message + reply opts,
- * with `Subject: Re: …` (no double-prefix), `In-Reply-To`, and `References`
- * threaded from the original. Threading is best-effort (the inbound values
- * are remote-sender controlled): an id no header line can carry is dropped,
- * and a `References` chain over `MAX_REPLY_REFERENCES_CHARS` is trimmed to
- * its newest ids. Exposed separately so the dispatch step (`message.reply`)
- * can be tested without `cloudflare:email`.
+ * Build the reply MIME for `replyEmail`: `Re:` subject and best-effort
+ * `In-Reply-To` / `References` threading from the inbound message.
  */
 export async function buildReplyMessage(
   message: ForwardableEmailMessage,
@@ -1182,36 +888,18 @@ export async function buildReplyMessage(
   const originalMessageId = headers.get('Message-ID') ?? '';
   const originalReferences = headers.get('References') ?? '';
 
-  // Default `from` for the reply. On the platform (a slug is injected),
-  // build `<slug>+noreply@<domain>` from the slug and mail domain. Falling
-  // back to `message.to` there would reply from the user-visible
-  // (slug-stripped) address, which the platform's slug-pin rejects — every
-  // outbound on the shared sender must carry `<slug>+...@<domain>`. If the
-  // domain binding is missing and the caller didn't provide an explicit
-  // `from`, surface a clear error rather than building an invalid
-  // envelope. There is deliberately no baked-in domain default: guessing
-  // the production zone is exactly the bug the binding exists to prevent.
-  //
-  // With no slug there is no shared sender to pin to: the message was
-  // delivered to a real address on the developer's own zone, and replying
-  // from that address is what a reply means.
-  //
-  // A relayed message (a custom domain on the customer's own Cloudflare
-  // zone — the `__voidRelayDomain` marker from `createMessageProxy`) is the
-  // same shape as the own-account case even though a slug IS injected:
-  // `message.to` is a real address on the customer's domain, the platform
-  // pins relayed replies to the receiving project's registered domains, and
-  // the send leaves through the customer account's REST send. The shared
-  // `<slug>+noreply@<platform domain>` default would fail that pin.
+  // Default `from`: the receiving address on your own zone or a relayed
+  // custom domain; `<slug>+noreply@<domain>` on the platform's shared sender,
+  // which pins replies to the slug. A domain is never guessed.
   let fromAddr: Address;
   if (opts.from !== undefined) {
     fromAddr = opts.from;
   } else if (readRelayDomain(message) !== undefined) {
     fromAddr = message.to;
   } else {
-    const slug = tryReadProjectSlug();
+    const slug = readProjectSlug();
     if (slug) {
-      const domain = tryReadEmailDomain();
+      const domain = readEnvString('__VOID_EMAIL_DOMAIN');
       if (!domain) {
         throw new Error(
           "replyEmail: 'from' is required when __VOID_PROJECT_SLUG is set " +
@@ -1221,13 +909,9 @@ export async function buildReplyMessage(
         );
       }
       fromAddr = `${slug}+noreply@${domain}`;
-    } else if (readRawProjectSlug() !== undefined) {
-      // A slug IS injected, so this is a platform deployment — it just
-      // cannot be a sender, because `<slug>+noreply@` must stay inside RFC
-      // 5321's 64-octet local part, which caps the slug at 56 characters.
-      // Falling through to `message.to` would build the slug-stripped
-      // `<tag>@<domain>` shape that the platform's reply pin drops, with no
-      // error reaching the handler.
+    } else if (readEnvString('__VOID_PROJECT_SLUG') !== undefined) {
+      // A platform slug too long for `<slug>+noreply@`: `message.to` would
+      // build a sender the platform drops without telling the handler.
       throw new Error(
         "replyEmail: 'from' is required — this project's slug cannot build a " +
           'default reply sender (`<slug>+noreply@<domain>` must stay within the ' +
@@ -1241,24 +925,12 @@ export async function buildReplyMessage(
   const toAddr: Address = opts.to ?? message.from;
   const subject = opts.subject ?? prefixReplySubject(originalSubject);
 
-  // User-supplied `headers` go through the normal (reserved-header
-  // filtered) channel; threading headers ride the dedicated `threading`
-  // field that buildMime emits unconditionally. This keeps the
-  // RESERVED_HEADERS guard against `In-Reply-To`/`References` spoofing
-  // from user input intact while letting the trusted reply path emit
-  // them.
-  //
-  // Both values come off the INBOUND message, so a remote sender controls
-  // them. `buildMime` rejects any header line over RFC 5322's 998-octet
-  // limit, and a message-id has no whitespace to fold at — so threading a
-  // hostile one verbatim would let anyone make this app's reply throw, with
-  // the app at fault for nothing. Threading is best-effort: drop a value
-  // that cannot be represented and still send the reply. A control
-  // character is the other way an id is unrepresentable (`hasControl`), and
-  // it is dropped the same way rather than refused by `normalizeEmail`.
+  // Threading rides `threading`, since `headers` reserve these names. Both
+  // ids are remote-controlled: drop one that cannot fit a line or holds a
+  // control character rather than fail the reply.
   const threading: { inReplyTo?: string; references?: string } = {};
   const messageId =
-    fitsHeaderLine('In-Reply-To', originalMessageId) && !hasControl(originalMessageId)
+    fitsHeaderLine('In-Reply-To', originalMessageId) && indexOfControl(originalMessageId) === -1
       ? originalMessageId
       : '';
   if (messageId) {
@@ -1327,72 +999,41 @@ export function isForwardableEmailMessage(value: unknown): value is ForwardableE
   );
 }
 
-const INBOUND_PROVIDER_DEADLINE_MS = 30_000;
-const INBOUND_ACTION_BATCH_DEADLINE_MS = 60_000;
-
-function createInboundProviderDeadline() {
-  const deadline = Date.now() + INBOUND_ACTION_BATCH_DEADLINE_MS;
-  return {
-    async run<T>(submit: () => Promise<T>): Promise<T> {
-      const remaining = Math.min(INBOUND_PROVIDER_DEADLINE_MS, deadline - Date.now());
-      if (remaining <= 0) {
-        throw new Error('email action batch deadline elapsed before provider submission');
-      }
-      const work = submit();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          work,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    'email action provider timed out; outcome unknown, do not retry automatically',
-                  ),
-                ),
-              remaining,
-            );
-          }),
-        ]);
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    },
-  };
-}
-
 /**
- * Replay recorded `EmailAction`s on a real `ForwardableEmailMessage`, in
- * order. The proxy already made `setReject` terminal (earlier forward/reply
- * entries are purged, later ones dropped), so a reject is never followed by
- * anything. `reply` needs a genuine `EmailMessage` — Cloudflare rejects a
- * duck-typed object — so `cloudflare:email` is loaded here, and only when
- * a reply was recorded.
- *
- * The proxy already validated forward headers and normalized reject reasons.
- * Provider refusals still propagate to the native event caller.
+ * Replay recorded actions on a native message, in order. The proxy already
+ * made `setReject` terminal and validated the rest. `reply` needs a real
+ * `EmailMessage`, so `cloudflare:email` loads only when one was recorded.
  */
 export async function enactEmailActions(
   message: ForwardableEmailMessage,
   actions: ReadonlyArray<EmailAction>,
 ): Promise<void> {
-  const providerDeadline = createInboundProviderDeadline();
+  const deadline = Date.now() + INBOUND_ACTION_BATCH_DEADLINE_MS;
+  const submit = async (run: () => Promise<unknown>): Promise<unknown> => {
+    const remaining = Math.min(INBOUND_PROVIDER_DEADLINE_MS, deadline - Date.now());
+    if (remaining <= 0) {
+      throw new Error('email action batch deadline elapsed before provider submission');
+    }
+    return withTimeout(
+      remaining,
+      run,
+      () =>
+        new Error('email action provider timed out; outcome unknown, do not retry automatically'),
+    );
+  };
   for (const action of actions) {
     switch (action.type) {
       case 'reject':
         message.setReject(action.reason);
         break;
       case 'forward':
-        await providerDeadline.run(() =>
+        await submit(() =>
           message.forward(action.to, action.headers ? new Headers(action.headers) : undefined),
         );
         break;
       case 'reply': {
         const { EmailMessage } = await import('cloudflare:email');
-        await providerDeadline.run(() =>
+        await submit(() =>
           message.reply(
             new EmailMessage(action.from, action.to, bytesToReadableStream(action.raw)),
           ),

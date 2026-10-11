@@ -17,12 +17,11 @@ export interface Attachment {
 
 export interface SendEmailOptions {
   /**
-   * Sender envelope address. Optional — when omitted, the framework
-   * substitutes `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>`
-   * from the two platform-injected bindings (the project slug and the
-   * mail domain configured for this environment). Outside a deployed
-   * worker, or whenever either binding is missing, `sendEmail` returns
-   * `INVALID_FROM` — it never falls back to a baked-in domain.
+   * Sender envelope address. Optional — when omitted, the framework uses
+   * `email.from` from void.config.ts when it is set, otherwise
+   * `<__VOID_PROJECT_SLUG>+noreply@<__VOID_EMAIL_DOMAIN>` on a Void
+   * platform. Without either, `sendEmail` returns `INVALID_FROM` — it never
+   * falls back to a baked-in domain.
    */
   from?: Address;
   to: Address | Array<Address>;

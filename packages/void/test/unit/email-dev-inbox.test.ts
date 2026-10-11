@@ -4,7 +4,7 @@
  *   Node (Vite dev server)                 workerd (miniflare child)
  *   ----------------------                 -------------------------
  *   emailDevInboxPlugin                    user route -> void/email
- *     registers the buffer sink              sendEmail() -> hasActiveSink()
+ *     owns the inbox buffer                  sendEmail() -> hasActiveSink()
  *     serves GET /__void/inbox               globalThis.__voidEmailSinks__ is
  *                                            EMPTY here (different isolate)
  *

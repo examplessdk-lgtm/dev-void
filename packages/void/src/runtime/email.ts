@@ -1,25 +1,12 @@
-// void/email — outbound email via the platform proxy or a direct binding.
-//
-// On the managed platform, user worker code never holds a `send_email`
-// binding directly. The framework builds MIME locally, then POSTs to
-// `__VOID_PROXY/email/send`. The platform gateway enforces authoritative
-// project policy and quotas and records each provider submission's outcome.
-//
-// On the developer's own Cloudflare account (`void deploy --platform
-// cloudflare`) there is no proxy: the deploy provisions a `send_email`
-// binding named `SEND_EMAIL` on the worker itself and the same MIME goes
-// straight through `cloudflare:email`, one `EmailMessage` per recipient.
-// Transports are tried in order: dev inbox, `SEND_EMAIL`, `__VOID_PROXY`.
-//
-// In `void dev` (no `__VOID_PROXY`) sends are captured by the dev inbox;
-// pass `sendInDev: true` for a single call to bypass. The dev inbox buffer
-// lives in the Vite dev server's NODE process while this code runs in
-// workerd, so the capture is an explicit HTTP hop over the dev assets
-// binding — see `resolveDevInbox` below and `plugin-email-dev-inbox.ts`.
+// void/email — outbound email. MIME is built here, then sent through the
+// first available transport: the `void dev` inbox, the worker's own
+// `SEND_EMAIL` binding (`void deploy --platform cloudflare`, one
+// `EmailMessage` per recipient), or the Void platform proxy, which enforces
+// project policy and quotas.
 
 import { isRecord } from '@void/deploy-core';
+import { readBoundedJson, withTimeout } from './email-protocol.ts';
 import {
-  bytesToBase64,
   captureMessage,
   DEV_INBOX_ACK_HEADER,
   DEV_INBOX_ACK_VALUE,
@@ -32,8 +19,13 @@ import {
   serializeCapturedMessage,
   type CapturedMessage,
 } from './email/dev-inbox.ts';
-import { bytesToReadableStream } from './email/inbound.ts';
-import { buildMime, MimeError, normalizeEmail } from './email/mime.ts';
+import {
+  bytesToReadableStream,
+  readEnvString,
+  readProjectSlug,
+  tryGetRawRuntimeEnv,
+} from './email/inbound.ts';
+import { base64, buildMime, MimeError, newId, normalizeEmail } from './email/mime.ts';
 import type {
   EmailDeliveryState,
   NormalizedEmail,
@@ -44,7 +36,6 @@ import type {
   SendEmailRecipientResult,
   SendEmailResult,
 } from './email/types.ts';
-import { getRawRuntimeEnv } from './env-raw.ts';
 
 export type {
   Address,
@@ -79,72 +70,12 @@ export type {
   ReplyEmailOptions,
 } from './email/inbound.ts';
 
-// `createEmail` below throws `MimeError`, and `sendEmail` reports its `code`.
-// The barrel is the only supported entry point (`package.json` exposes
-// `./email` and `./email/testing`, with no wildcard subpath), so the error
-// classes have to ship with the functions that throw them.
+// `createEmail` throws `MimeError`; export it with the functions that throw it.
 export { MimeError } from './email/mime.ts';
 export type { MimeErrorCode } from './email/mime.ts';
 
-// Slug shape we'll accept when substituting into the default `from`. The
-// platform owns slug allocation and validates at create-time, but we don't
-// trust the value blindly — a slug containing `@`, `+`, or whitespace
-// would corrupt the resulting address. RFC 5321/2 atom char-class
-// restricted further to lowercase + digits + hyphen, matching the typical
-// project-slug shape.
-//
-// Length cap: 56 chars. The default `from` we build is
-// `<slug>+noreply@<__VOID_EMAIL_DOMAIN>`; the SMTP local-part limit
-// (RFC 5321 § 4.5.3.1.1) is 64 octets, and `+noreply` already eats 8.
-// Capping the slug at `64 - 8 = 56` keeps the assembled local-part
-// within spec. The cap is domain-independent — only the local-part is
-// bounded here.
-const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$/;
-
 function makeError(code: SendEmailErrorCode, message: string, cause?: unknown): SendEmailError {
   return cause === undefined ? { code, message } : { code, message, cause };
-}
-
-// `getRawRuntimeEnv()` throws outside a worker/SSR context. `sendEmail` needs
-// graceful degradation in those settings (local Node tools, tests), so resolve
-// once via this helper.
-function tryGetRawRuntimeEnv(): Record<string, unknown> | undefined {
-  try {
-    return getRawRuntimeEnv();
-  } catch {
-    return undefined;
-  }
-}
-
-function readProjectSlug(): string | undefined {
-  const raw = tryGetRawRuntimeEnv()?.__VOID_PROJECT_SLUG;
-  if (typeof raw !== 'string' || raw.length === 0) {
-    return undefined;
-  }
-  // Defense-in-depth: refuse to substitute an obviously malformed slug
-  // into the address. Returning undefined causes the caller to surface
-  // `INVALID_FROM` rather than build a corrupt envelope.
-  return VALID_SLUG.test(raw) ? raw : undefined;
-}
-
-// The platform mail domain for this environment (production uses
-// `mail.example.com`, staging its own zone). It is injected per
-// deployment rather than baked in, so a staging send is not rejected by
-// the proxy's sender check. There is deliberately no built-in default:
-// silently falling back to the production zone is the bug this binding
-// exists to prevent.
-function readEmailDomain(): string | undefined {
-  const raw = tryGetRawRuntimeEnv()?.__VOID_EMAIL_DOMAIN;
-  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
-}
-
-// The project's own default sender, written into the worker's `vars` by
-// `void deploy --platform cloudflare` from `email.from` in void.config.ts. It is a
-// full address on a zone the developer owns, so there is no slug to
-// substitute; `normalizeEmail` validates it like any explicit `from`.
-function readEmailFrom(): string | undefined {
-  const raw = tryGetRawRuntimeEnv()?.__VOID_EMAIL_FROM;
-  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
 }
 
 interface ProxyEnv {
@@ -166,33 +97,6 @@ class EmailBindingTimeoutError extends Error {
   }
 }
 
-function createBindingSendDeadline() {
-  const deadline = Date.now() + PLATFORM_SEND_DEADLINE_MS;
-  return {
-    expired: () => Date.now() >= deadline,
-    async run<T>(submit: () => Promise<T>): Promise<T> {
-      const remaining = Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadline - Date.now());
-      if (remaining <= 0) {
-        throw new EmailBindingTimeoutError();
-      }
-      const work = submit();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          work,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new EmailBindingTimeoutError()), remaining);
-          }),
-        ]);
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    },
-  };
-}
-
 // The legacy `EmailMessage` overload of `SendEmail.send`. Only `messageId`
 // is read, and defensively: some builds have returned nothing.
 interface SendEmailBinding {
@@ -212,15 +116,10 @@ function resolveSendEmailBinding(
 }
 
 /**
- * Map an error thrown by the `send_email` binding to a framework code.
- *
- * Email Service throws `Error`s carrying a `code` (the `E_*` table in
- * Cloudflare's Workers API reference); the older Email Routing sender
- * throws message-only errors, so the destination-verification phrasing the
- * platform proxy already keys on is kept as a fallback. Anything else is
- * `OUTCOME_UNKNOWN` with the original error as `cause`: once `send()` has
- * started, an undocumented rejection does not prove the provider declined
- * the message before accepting it.
+ * Map a `send_email` binding error to a framework code: Email Service `E_*`
+ * codes, then the older Email Routing message. Anything else is
+ * `OUTCOME_UNKNOWN`: once `send()` started, a rejection does not prove the
+ * provider declined the message.
  */
 function classifyBindingError(e: unknown): SendEmailError {
   const message = e instanceof Error ? e.message : String(e);
@@ -251,11 +150,9 @@ const UNVERIFIED_DESTINATION_RE =
   /^[^\n]{0,200}destination address[^\n]{0,200}not (?:yet )?verified/i;
 
 /**
- * Deliver through the worker's own `SEND_EMAIL` binding. One `EmailMessage`
- * per recipient, within one bounded batch, and the same `deliveries` shape
- * the proxy returns so a caller can inspect each attempted or cancelled
- * outcome in either mode. The stream is rebuilt per send because a
- * `ReadableStream` is one-shot.
+ * Send one `EmailMessage` per recipient through the worker's own binding,
+ * within one bounded batch, reporting `deliveries` as the proxy does. The
+ * stream is rebuilt per send: a `ReadableStream` is one-shot.
  */
 async function sendViaBinding(
   binding: SendEmailBinding,
@@ -275,10 +172,11 @@ async function sendViaBinding(
     );
   }
   const deliveries: Array<SendEmailRecipientResult> = [];
-  const deadline = createBindingSendDeadline();
+  const deadline = Date.now() + PLATFORM_SEND_DEADLINE_MS;
+  const remaining = () => Math.min(EMAIL_PROVIDER_DEADLINE_MS, deadline - Date.now());
   for (let index = 0; index < recipients.length; index++) {
     const recipient = recipients[index];
-    if (deadline.expired()) {
+    if (remaining() <= 0) {
       for (const unstarted of recipients.slice(index)) {
         deliveries.push({
           recipient: unstarted,
@@ -293,8 +191,10 @@ async function sendViaBinding(
       break;
     }
     try {
-      const result = await deadline.run(() =>
-        binding.send(new EmailMessage(from, recipient, bytesToReadableStream(raw))),
+      const result = await withTimeout(
+        remaining(),
+        () => binding.send(new EmailMessage(from, recipient, bytesToReadableStream(raw))),
+        () => new EmailBindingTimeoutError(),
       );
       const mid = typeof result?.messageId === 'string' ? result.messageId : '';
       deliveries.push({ recipient, ok: true, messageId: mid || fallbackId });
@@ -328,10 +228,8 @@ async function sendViaBinding(
 }
 
 /**
- * Dedup recipients by lowercased email (CF won't collapse duplicate
- * envelopes for us, and double-billing the quota for the same recipient
- * is worse than the rare case where a user actually wanted Cc + Bcc to
- * the same address — which doesn't change delivery semantics anyway).
+ * Recipients deduplicated by lowercased address: Cloudflare does not
+ * collapse duplicate envelopes, and each one costs quota.
  */
 function uniqueRecipients(normalized: NormalizedEmail): Array<string> {
   const seen = new Set<string>();
@@ -347,22 +245,10 @@ function uniqueRecipients(normalized: NormalizedEmail): Array<string> {
   return recipients;
 }
 
-function newRequestId(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  let hex = '';
-  for (const b of bytes) {
-    hex += b.toString(16).padStart(2, '0');
-  }
-  return `req_${Date.now().toString(36)}${hex}`;
-}
-
 function resolveDefaultFrom(opts: SendEmailOptions): SendEmailOptions {
   const supplied = opts.from;
-  // Treat literal `null` the same as undefined here. Passing `null`
-  // through to `normalizeEmail` makes `parseAddress` throw a TypeError
-  // that gets surfaced as the opaque MIME_ERROR code; callers expect
-  // INVALID_FROM for "from is missing/empty".
+  // `null` counts as missing: `parseAddress` would throw a TypeError,
+  // reported as MIME_ERROR rather than INVALID_FROM.
   const isEmpty =
     supplied === undefined ||
     supplied === null ||
@@ -371,18 +257,16 @@ function resolveDefaultFrom(opts: SendEmailOptions): SendEmailOptions {
   if (!isEmpty) {
     return opts;
   }
-  // `__VOID_EMAIL_FROM` (own-account deploys) wins over the platform's
-  // `<slug>+noreply@<domain>`: a project that carries both is one whose
-  // void.config.ts names a sender on purpose.
-  const configured = readEmailFrom();
+  // `__VOID_EMAIL_FROM` (`email.from` in void.config.ts) wins over the
+  // platform's `<slug>+noreply@<domain>`: it names a sender on purpose.
+  const configured = readEnvString('__VOID_EMAIL_FROM');
   if (configured) {
     return { ...opts, from: configured };
   }
   const slug = readProjectSlug();
-  const domain = readEmailDomain();
+  const domain = readEnvString('__VOID_EMAIL_DOMAIN');
   if (!slug || !domain) {
-    // Strip the empty value so the downstream `from === undefined` check
-    // surfaces a clean INVALID_FROM rather than passing `null` along.
+    // Drop `null` so the caller reports a clean INVALID_FROM.
     if (supplied === null) {
       const next = { ...opts };
       delete (next as { from?: unknown }).from;
@@ -430,11 +314,9 @@ function coerceErrorCode(code: unknown): SendEmailErrorCode {
 }
 
 /**
- * The text of a refusal the proxy's middleware sent instead of a send
- * response: `{ error: string, message?: string }`. `message` is the
- * sentence written for a person (the capability gate's "This Void platform
- * does not enable email."); `error` is the short code every such refusal
- * carries. `null` when the body is not that shape.
+ * Text of the `{ error, message? }` refusal the proxy's middleware sends
+ * ahead of the email handler, preferring the human `message`; `null` for any
+ * other shape.
  */
 function readProxyRefusal(body: unknown): string | null {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -479,10 +361,9 @@ function readProxyResponse(value: unknown): ProxyResponse | null {
 type RecipientListRead<T> = { ok: true; entries: Array<T> } | { ok: false; reason: string };
 
 /**
- * Require exactly one valid outcome per requested recipient in either list
- * shape. A missing, duplicate, or foreign entry makes the whole result unknown;
- * trimming it could hide a submission. Order is not part of the contract.
- * Diagnostics identify entries by index rather than echoing corrupt addresses.
+ * Require exactly one valid outcome per requested recipient, in any order. A
+ * missing, duplicate or foreign entry makes the whole result unknown, since
+ * trimming it could hide a submission. Diagnostics name entries by index.
  */
 function readRecipientList<T>(
   raw: Array<unknown>,
@@ -519,11 +400,8 @@ function readRecipientList<T>(
 }
 
 /**
- * The `ids` list of an `ok: true` response. The proxy answers `ok: true` only
- * after every requested recipient has an accepted provider outcome. Each entry
- * is `{ recipient, messageId }`; the framework's own Message-ID stands in for
- * an empty provider reference. A missing delivery would leave no safe retry
- * decision, so the whole response is rejected as malformed.
+ * The `ids` of an `ok: true` response, one accepted outcome per recipient.
+ * The framework's Message-ID stands in for an empty provider reference.
  */
 function readDeliveryList(
   raw: Array<unknown>,
@@ -603,162 +481,63 @@ function readDeliveryState(value: unknown): EmailDeliveryState | undefined {
 
 const MAX_PROXY_RESPONSE_BYTES = 64 * 1024;
 
-function createPlatformSendDeadline(): {
-  signal: AbortSignal;
-  beforeDeadline: <T>(run: () => Promise<T>) => Promise<T>;
-} {
-  const controller = new AbortController();
-  const deadline = Date.now() + PLATFORM_SEND_DEADLINE_MS;
-  return {
-    signal: controller.signal,
-    async beforeDeadline<T>(run: () => Promise<T>): Promise<T> {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        controller.abort();
-        throw new Error('email platform send timed out');
-      }
-      const promise = run();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          promise,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-              controller.abort();
-              reject(new Error('email platform send timed out'));
-            }, remaining);
-          }),
-        ]);
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-    },
-  };
-}
-
-async function readBoundedProxyJson(
-  response: Response,
-  beforeDeadline: <T>(run: () => Promise<T>) => Promise<T>,
-): Promise<unknown> {
-  const declared = response.headers.get('content-length');
-  if (
-    declared !== null &&
-    (!/^\d+$/.test(declared) || Number(declared) > MAX_PROXY_RESPONSE_BYTES)
-  ) {
-    void response.body?.cancel().catch(() => {});
-    throw new Error('email proxy response too large');
-  }
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('email proxy response is empty');
-  }
-  const bytes = new Uint8Array(MAX_PROXY_RESPONSE_BYTES);
-  let size = 0;
-  try {
-    for (;;) {
-      const chunk = await beforeDeadline(() => reader.read());
-      if (chunk.done) {
-        break;
-      }
-      if (size + chunk.value.byteLength > bytes.byteLength) {
-        throw new Error('email proxy response too large');
-      }
-      bytes.set(chunk.value, size);
-      size += chunk.value.byteLength;
-    }
-    if (declared !== null && size !== Number(declared)) {
-      throw new Error('email proxy response length mismatch');
-    }
-    return JSON.parse(
-      new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes.subarray(0, size)),
-    ) as unknown;
-  } finally {
-    void reader.cancel().catch(() => {});
-    try {
-      reader.releaseLock();
-    } catch {
-      // A timed-out read may still be settling after cancellation.
-    }
-  }
-}
-
 async function readResponseAsResult(
   res: Response,
   recipients: ReadonlyArray<string>,
   fallbackId: string,
   beforeDeadline: <T>(run: () => Promise<T>) => Promise<T>,
 ): Promise<SendEmailResult> {
+  let body: unknown;
   try {
-    let body: unknown;
-    try {
-      body = await readBoundedProxyJson(res, beforeDeadline);
-    } catch {
-      return err(
-        'OUTCOME_UNKNOWN',
-        `email: could not establish the send outcome (status ${res.status}); check email logs or repeat the same idempotency key`,
-      );
-    }
-    const response = readProxyResponse(body);
-    if (response === null) {
-      // The proxy's own middleware — auth, platform lifecycle, capability
-      // gates — answers ahead of the email handler with a flat
-      // `{ error: string, message?: string }` and a non-2xx status. That
-      // is a well-formed refusal, not a malformed send response, so carry
-      // its text through the way the handler's `{ ok: false, error }` is
-      // carried above; a platform without the email module otherwise reads
-      // as "malformed response (status 501)" with the reason buried in
-      // `cause`.
-      const refusal = readProxyRefusal(body);
-      if (!res.ok && refusal !== null) {
-        return err('UPSTREAM_ERROR', `email: proxy returned ${res.status}: ${refusal}`, body);
-      }
-      return err(
-        'OUTCOME_UNKNOWN',
-        `email: proxy returned malformed response (status ${res.status})`,
-        body,
-      );
-    }
-    // Both list-bearing shapes are validated as a whole against the
-    // recipients this send asked for; their entries remain unknown until
-    // the whole list passes validation.
-    const malformedList = (reason: string): SendEmailResult =>
-      err(
-        'OUTCOME_UNKNOWN',
-        `email: proxy returned a malformed delivery list (${reason}); do not retry with a new idempotency key`,
-        body,
-      );
-    const operation =
-      typeof response.operationId === 'string' && response.operationId.length <= 128
-        ? { operationId: response.operationId }
-        : {};
-    if (response.ok === true) {
-      const list = readDeliveryList(response.ids, recipients, fallbackId);
-      return list.ok ? { ok: true, ids: list.entries, ...operation } : malformedList(list.reason);
-    }
-    if ('deliveries' in response) {
-      const list = readFailureDeliveries(response.deliveries, recipients, fallbackId);
-      return list.ok
-        ? { ok: false, deliveries: list.entries, ...operation }
-        : malformedList(list.reason);
-    }
-    const e = response.error;
-    return {
-      ...err(
-        coerceErrorCode(e.code),
-        typeof e.message === 'string' ? e.message : 'email: upstream send failed',
-      ),
-      ...operation,
-    };
-  } catch (e) {
-    // Parsing failures must not imply that no provider submission occurred.
+    body = await readBoundedJson(res, MAX_PROXY_RESPONSE_BYTES, beforeDeadline);
+  } catch {
     return err(
       'OUTCOME_UNKNOWN',
-      `email: failed to parse proxy response (status ${res.status}): ${e instanceof Error ? e.message : String(e)}`,
-      e,
+      `email: could not establish the send outcome (status ${res.status}); check email logs or repeat the same idempotency key`,
     );
   }
+  const response = readProxyResponse(body);
+  if (response === null) {
+    // A `{ error, message? }` refusal from the proxy's middleware is
+    // well-formed: report its text.
+    const refusal = readProxyRefusal(body);
+    if (!res.ok && refusal !== null) {
+      return err('UPSTREAM_ERROR', `email: proxy returned ${res.status}: ${refusal}`, body);
+    }
+    return err(
+      'OUTCOME_UNKNOWN',
+      `email: proxy returned malformed response (status ${res.status})`,
+      body,
+    );
+  }
+  const malformedList = (reason: string): SendEmailResult =>
+    err(
+      'OUTCOME_UNKNOWN',
+      `email: proxy returned a malformed delivery list (${reason}); do not retry with a new idempotency key`,
+      body,
+    );
+  const operation =
+    typeof response.operationId === 'string' && response.operationId.length <= 128
+      ? { operationId: response.operationId }
+      : {};
+  if (response.ok === true) {
+    const list = readDeliveryList(response.ids, recipients, fallbackId);
+    return list.ok ? { ok: true, ids: list.entries, ...operation } : malformedList(list.reason);
+  }
+  if ('deliveries' in response) {
+    const list = readFailureDeliveries(response.deliveries, recipients, fallbackId);
+    return list.ok
+      ? { ok: false, deliveries: list.entries, ...operation }
+      : malformedList(list.reason);
+  }
+  const e = response.error;
+  return {
+    ...err(
+      coerceErrorCode(e.code),
+      typeof e.message === 'string' ? e.message : 'email: upstream send failed',
+    ),
+    ...operation,
+  };
 }
 
 interface DevInboxFetcher {
@@ -768,23 +547,16 @@ interface DevInboxFetcher {
 interface DevInbox {
   fetcher: DevInboxFetcher;
   /**
-   * The dev-trigger token the inbox middleware requires. Injected under the
-   * same gate as the binding var; when it is somehow absent the POST still
-   * goes out and the dev server's 401 is reported verbatim — the inbox is
-   * never skipped in favour of a real send transport.
+   * Dev-trigger token. When absent the POST still goes out and the 401 is
+   * reported; the inbox is never skipped for a real transport.
    */
   token: string | undefined;
 }
 
 /**
- * Resolve the loopback into the `void dev` inbox, or `undefined` outside dev.
- *
- * `DEV_INBOX_ENV_VAR` is injected only when `viteCommand === 'serve'` and it
- * names the worker's assets binding. In dev, `@cloudflare/vite-plugin` binds
- * that name to a miniflare service whose implementation is the Vite dev
- * server's Node middleware stack, so a fetch through it lands on the inbox
- * middleware in the dev-server process — the only place the buffer exists.
- * In a production build neither the var nor that wiring is present.
+ * The loopback into the `void dev` inbox: `DEV_INBOX_ENV_VAR` names the
+ * assets binding, which in dev reaches the Vite dev server. Undefined
+ * outside dev.
  */
 function resolveDevInbox(env: Record<string, unknown> | undefined): DevInbox | undefined {
   const bindingName = env?.[DEV_INBOX_ENV_VAR];
@@ -814,10 +586,8 @@ const DEV_INBOX_ERROR_EXCERPT_CHARS = 200;
 const DEV_INBOX_ERROR_EXCERPT_TIMEOUT_MS = 1000;
 
 /**
- * First line of a refusal, so a 401 names the header it wanted. Reads ONE
- * chunk under its own deadline: the main 5s race has already settled by the
- * time the status is known, and a body that never arrives must not turn a
- * clean error into a hung `sendEmail`.
+ * First line of a refusal, so a 401 names the header it wanted. One chunk
+ * under its own deadline: a stalled body must not hang `sendEmail`.
  */
 async function readErrorExcerpt(res: Response): Promise<string> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -884,8 +654,6 @@ async function postToDevInbox(
     }
     const { res } = settled;
     if (!res.ok) {
-      // A 401 names the header it wanted; surface that instead of a bare
-      // status so a missing token is diagnosable from the worker's console.
       const excerpt = await readErrorExcerpt(res);
       return {
         ok: false,
@@ -907,24 +675,11 @@ async function postToDevInbox(
   }
 }
 
-/**
- * Shared result shape for both capture paths (in-process sink and dev inbox).
- *
- * `ids` is built from the same deduplicated, lowercased list the two
- * production transports send to, so code written against a captured result
- * sees exactly what a deploy returns: one entry per unique address, keyed the
- * way `sendViaBinding` and the proxy report it. The captured message itself
- * keeps the original fields; the inbox displays what was asked for, the
- * result reports what would be sent.
- */
+/** A captured send's result: one id per unique recipient, as a deployed send reports. */
 function capturedResult(normalized: NormalizedEmail, captureId: string): SendEmailResult {
-  const recipients = uniqueRecipients(normalized);
-  if (recipients.length === 0) {
-    return err('INVALID_TO', "email: 'to' must include at least one recipient.");
-  }
   return {
     ok: true,
-    ids: recipients.map((recipient) => ({ recipient, messageId: captureId })),
+    ids: uniqueRecipients(normalized).map((recipient) => ({ recipient, messageId: captureId })),
   };
 }
 
@@ -962,21 +717,11 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
   };
 
   let normalized: NormalizedEmail;
-  try {
-    normalized = await normalizeEmail(optsWithFrom);
-  } catch (e) {
-    if (e instanceof MimeError) {
-      return err(e.code, e.message, e);
-    }
-    return err('MIME_ERROR', e instanceof Error ? e.message : String(e), e);
-  }
-
   let raw: Uint8Array;
   let messageId: string;
   try {
-    const built = buildMime(normalized);
-    raw = built.raw;
-    messageId = built.messageId;
+    normalized = await normalizeEmail(optsWithFrom);
+    ({ raw, messageId } = buildMime(normalized));
   } catch (e) {
     if (e instanceof MimeError) {
       return err(e.code, e.message, e);
@@ -986,10 +731,8 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
 
   const rawEnv = tryGetRawRuntimeEnv();
 
-  // Each sink owns its storage; sendEmail must NOT also push to the dev
-  // buffer or every dev send ends up captured twice. This path only fires
-  // for a send that runs in the SAME isolate as the sink — the test harness,
-  // or a prerender pass inside the dev server's own process.
+  // A sink in this isolate (`createEmailTestHarness`) owns the capture; do
+  // not also post it to the dev inbox.
   if (!opts.sendInDev && hasActiveSink()) {
     const captured = captureMessage(normalized, raw, messageId);
     dispatchToSinks(captured);
@@ -1011,9 +754,6 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
   }
 
   const recipients = uniqueRecipients(normalized);
-  if (recipients.length === 0) {
-    return err('INVALID_TO', "email: 'to' must include at least one recipient.");
-  }
 
   // Own-account deploy: the worker holds the binding itself, so there is no
   // proxy hop and no platform quota — Cloudflare's own limits apply.
@@ -1036,34 +776,39 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     return err(
       'BINDING_MISSING',
       'email: neither SEND_EMAIL nor __VOID_PROXY is available, so nothing was sent. Deploy via Void to bind the platform proxy, ' +
-        'or set `email.from` in void.json so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
+        'or set `email.from` in void.config.ts so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
         'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
         'that path was bypassed (`sendInDev: true`, which does not deliver: `void dev` binds no send transport at all, so there is ' +
         'nothing to fall through to) or unavailable (the worker has no assets binding to reach the dev server through).',
     );
   }
 
-  const requestId = newRequestId();
   const body: ProxySendBody = {
     projectId,
     aiToken: proxyToken,
     from: normalized.from.email,
     recipients,
-    mimeBase64: bytesToBase64(raw),
-    requestId,
+    mimeBase64: base64(raw),
+    requestId: newId('req'),
     ...(opts.idempotencyKey === undefined ? {} : { idempotencyKey: opts.idempotencyKey }),
   };
 
   const requestBody = JSON.stringify(body);
-  const deadline = createPlatformSendDeadline();
+  const controller = new AbortController();
+  const deadline = Date.now() + PLATFORM_SEND_DEADLINE_MS;
+  const beforeDeadline = <T>(run: () => Promise<T>): Promise<T> =>
+    withTimeout(deadline - Date.now(), run, () => {
+      controller.abort();
+      return new Error('email platform send timed out');
+    });
   let res: Response;
   try {
-    res = await deadline.beforeDeadline(() =>
+    res = await beforeDeadline(() =>
       proxy.fetch('https://email-proxy/email/send', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: requestBody,
-        signal: deadline.signal,
+        signal: controller.signal,
       }),
     );
   } catch (e) {
@@ -1073,7 +818,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       e,
     );
   }
-  return readResponseAsResult(res, recipients, messageId, deadline.beforeDeadline);
+  return readResponseAsResult(res, recipients, messageId, beforeDeadline);
 }
 
 /**

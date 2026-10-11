@@ -1244,16 +1244,14 @@ describe('harness enforces the proxy action bounds, like production', () => {
     expect(thrown).toBeInstanceOf(MimeError);
     expect((thrown as MimeError).code).toBe('INVALID_TO');
     expect((thrown as MimeError).message).toBe(
-      `to address is ${over.length} characters, over the 320-character limit.`,
+      `to: address is ${over.length} characters, over the 320-character limit.`,
     );
     expect(harness.forwards).toEqual([]);
   });
 
   it('refuses a forward address over the 254-character path limit, by the sendEmail rule', async () => {
-    // Under the 320 total above, so `forward()`'s own pre-check passes and
-    // the refusal comes from `validateAddressParts` — the rule an outbound
-    // `to` gets, inherited rather than mirrored (`email-validator` checks
-    // 254 before its regex).
+    // Under the 320 bound above, so the refusal is `email-validator`'s 254
+    // check — the rule an outbound `to` gets.
     let thrown: unknown;
     const label = 'b'.repeat(63);
     const over = `a@${[label, label, label, label].join('.')}`;
