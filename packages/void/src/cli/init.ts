@@ -2610,11 +2610,10 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       }
       if (scaffold) {
         scaffoldDemo(root);
-        // The demo migration needs `void` installed.
+        // The existing-project step already queued any install or workspace deferral the demo needs.
         const voidResolvable = isVoidResolvableFrom(root);
         const deferral = resolveWorkspaceDeferral(root, readPackageJson(root));
         if (deferral && !voidResolvable) {
-          workspaceSubpackageSkip = true;
           const relRoot = relative(deferral.workspaceRoot, root) || '.';
           note(
             `Scaffolded the starter demo in ./${relRoot}.\n\n` +
@@ -2622,8 +2621,6 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
               `then run \`void db generate\` from ./${relRoot} to create the initial migration.`,
             'Workspace subpackage',
           );
-        } else if (!voidResolvable) {
-          scaffoldAddedDependencies = true;
         }
         scaffoldedStarterMode = 'sqlite';
       }

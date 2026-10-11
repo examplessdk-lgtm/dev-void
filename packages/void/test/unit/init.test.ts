@@ -1778,42 +1778,46 @@ jobs:
     }
   });
 
-  it('prints a Nuxt-specific manual config step for existing Nuxt projects', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
-    try {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'existing-nuxt-app',
-            private: true,
-            dependencies: {
-              nuxt: '^4.0.0',
-              void: '^0.6.0',
+  it.each(['peerDependencies', 'optionalDependencies'] as const)(
+    'prints a Nuxt-specific manual config step and keeps void declared in %s',
+    async (field) => {
+      const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+      try {
+        writeFileSync(
+          join(root, 'package.json'),
+          JSON.stringify(
+            {
+              name: 'existing-nuxt-app',
+              private: true,
+              dependencies: { nuxt: '^4.0.0' },
+              [field]: { void: '^0.6.0' },
             },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-      mockSelect.mockResolvedValueOnce('none');
-      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+            null,
+            2,
+          ) + '\n',
+        );
+        mockSelect.mockResolvedValueOnce('none');
+        mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
 
-      await runInitCommand(root);
+        await runInitCommand(root);
 
-      expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
-      expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining('Add `voidPlugin()` to the Nuxt Vite plugins option'),
-        'Manual Nuxt config step',
-      );
-      expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining('export default defineNuxtConfig'),
-        'Manual Nuxt config step',
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+        const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+        expect(pkg[field].void).toBe('^0.6.0');
+        expect(pkg.devDependencies?.void).toBeUndefined();
+        expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
+        expect(mockNote).toHaveBeenCalledWith(
+          expect.stringContaining('Add `voidPlugin()` to the Nuxt Vite plugins option'),
+          'Manual Nuxt config step',
+        );
+        expect(mockNote).toHaveBeenCalledWith(
+          expect.stringContaining('export default defineNuxtConfig'),
+          'Manual Nuxt config step',
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('adds voidPlugin to an existing Vite plugins array without replacing scripts', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
@@ -3164,7 +3168,7 @@ export default config;
     },
   );
 
-  it('emits a lockfile-sync note when void is hoisted and scaffoldDemo mutated package.json in a workspace subpackage', async () => {
+  it('emits a lockfile-sync note when init adds void to a workspace subpackage with void hoisted', async () => {
     // The workspace lockfile must pick up the new `void` entry before the next frozen install.
     const wsroot = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
