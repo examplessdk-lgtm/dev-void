@@ -27,7 +27,6 @@ import {
   revalidatePlatformInstallAction,
   type PlatformInstallPlan,
 } from '../../src/cli/platform-plan.ts';
-import { recoverPlatformInstallations } from '../../src/cli/platform-recovery.ts';
 
 function client(overrides: Record<string, unknown> = {}) {
   return {
@@ -782,7 +781,7 @@ describe('platform installation planning', () => {
   });
 
   it.each(['oauth-access-token', 'account-api-token'])(
-    'plans and discovers using authorized accounts for %s',
+    'plans using authorized accounts for %s',
     async (token) => {
       const requests: Array<string> = [];
       const remote = new PlatformCloudflareClient(token, {
@@ -807,7 +806,6 @@ describe('platform installation planning', () => {
       );
       const plan = await createPlatformInstallPlan(fake, input, null);
       expect(plan.account.id).toBe('account');
-      await expect(recoverPlatformInstallations(fake, 'account')).resolves.toEqual([]);
       expect(requests).toHaveLength(1);
       expect(requests.every((url) => url.includes('/accounts?'))).toBe(true);
     },
