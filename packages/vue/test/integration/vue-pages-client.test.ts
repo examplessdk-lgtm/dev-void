@@ -1,13 +1,13 @@
-import { execSync } from 'node:child_process';
+import { execSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import {
   killChild,
-  startPlaygroundServer,
+  spawnPlaygroundServer,
+  startServer,
   waitForServer,
-  type StartedServer,
 } from '../../../../test/integration-helpers.ts';
 import { launchPagesBrowser } from '../../../../test/pages-browser.ts';
 import {
@@ -195,20 +195,23 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
 }
 
 describe('vue-pages client (dev)', () => {
-  let server: StartedServer | undefined;
+  let child: ChildProcess | undefined;
 
   beforeAll(
     async () => {
       const serverTimeout = process.platform === 'win32' ? 45_000 : 20_000;
-      server = await startPlaygroundServer(ROOT, 'vue-pages', 'dev', serverTimeout);
+      const server = await startServer(
+        (port) => (child = spawnPlaygroundServer(ROOT, 'vue-pages', 'dev', port)),
+        serverTimeout,
+      );
       DEV_BASE = server.base;
     },
     process.platform === 'win32' ? 60_000 : 30_000,
   );
 
   afterAll(async () => {
-    if (server) {
-      await killChild(server.child);
+    if (child) {
+      await killChild(child);
     }
   });
 
@@ -312,7 +315,7 @@ describe('vue-pages client (dev)', () => {
 });
 
 describe('vue-pages client (preview)', { retry: 2 }, () => {
-  let server: StartedServer | undefined;
+  let child: ChildProcess | undefined;
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/vue-pages/dist'))) {
@@ -322,13 +325,16 @@ describe('vue-pages client (preview)', { retry: 2 }, () => {
       });
     }
 
-    server = await startPlaygroundServer(ROOT, 'vue-pages', 'preview', 30_000);
+    const server = await startServer(
+      (port) => (child = spawnPlaygroundServer(ROOT, 'vue-pages', 'preview', port)),
+      30_000,
+    );
     PREVIEW_BASE = server.base;
   });
 
   afterAll(async () => {
-    if (server) {
-      await killChild(server.child);
+    if (child) {
+      await killChild(child);
     }
   });
 

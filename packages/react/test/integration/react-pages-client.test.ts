@@ -1,15 +1,13 @@
-import { execSync } from 'node:child_process';
+import { execSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import spawn from 'cross-spawn';
 import { type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import {
   killChild,
-  startPlaygroundServer,
+  spawnPlaygroundServer,
   startServer,
   waitForServer,
-  type StartedServer,
 } from '../../../../test/integration-helpers.ts';
 import { launchPagesBrowser } from '../../../../test/pages-browser.ts';
 import {
@@ -599,7 +597,7 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
 }
 
 describe('react-pages client (dev)', () => {
-  let child: ReturnType<typeof spawn>;
+  let child: ChildProcess | undefined;
   let stderr = '';
   let originalLayout: string | undefined;
   const coldStartResponses: Array<{ path: string; status: number; body: string }> = [];
@@ -613,28 +611,7 @@ describe('react-pages client (dev)', () => {
 
       const serverTimeout = process.platform === 'win32' ? 45_000 : 20_000;
       const server = await startServer((port) => {
-        child = spawn(
-          'vp',
-          [
-            'run',
-            '--filter',
-            './playground/react-pages',
-            'dev',
-            '--host',
-            '127.0.0.1',
-            '--port',
-            String(port),
-            '--strictPort',
-          ],
-          {
-            cwd: ROOT,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: {
-              ...process.env,
-              VOID_INSPECTOR_PORT: 'false',
-            },
-          },
-        );
+        child = spawnPlaygroundServer(ROOT, 'react-pages', 'dev', port);
         stderr = '';
         child.stderr!.on('data', (chunk: Buffer) => {
           stderr += String(chunk);
@@ -921,7 +898,7 @@ describe('react-pages client (dev)', () => {
 });
 
 describe('react-pages client (preview)', { retry: 2 }, () => {
-  let server: StartedServer | undefined;
+  let child: ChildProcess | undefined;
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/react-pages/dist'))) {
@@ -931,13 +908,16 @@ describe('react-pages client (preview)', { retry: 2 }, () => {
       });
     }
 
-    server = await startPlaygroundServer(ROOT, 'react-pages', 'preview', 30_000);
+    const server = await startServer(
+      (port) => (child = spawnPlaygroundServer(ROOT, 'react-pages', 'preview', port)),
+      30_000,
+    );
     PREVIEW_BASE = server.base;
   });
 
   afterAll(async () => {
-    if (server) {
-      await killChild(server.child);
+    if (child) {
+      await killChild(child);
     }
   });
 

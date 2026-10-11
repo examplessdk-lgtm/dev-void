@@ -236,37 +236,31 @@ export async function startServer(
   }
 }
 
-/** Starts a workspace playground's `dev` or `preview` script with {@link startServer}. */
-export function startPlaygroundServer(
+/** Spawns a workspace playground's `dev` or `preview` script; pass it to {@link startServer}. */
+export function spawnPlaygroundServer(
   workspaceRoot: string,
   playground: string,
   script: 'dev' | 'preview',
-  timeoutMs: number,
-  options?: StartServerOptions,
-): Promise<StartedServer> {
-  return startServer(
-    (port) =>
-      crossSpawn(
-        'vp',
-        [
-          'run',
-          '--filter',
-          `./playground/${playground}`,
-          script,
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(port),
-          '--strictPort',
-        ],
-        {
-          cwd: workspaceRoot,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
-        },
-      ),
-    timeoutMs,
-    options,
+  port: number,
+): ReturnType<typeof spawn> {
+  return crossSpawn(
+    'vp',
+    [
+      'run',
+      '--filter',
+      `./playground/${playground}`,
+      script,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--strictPort',
+    ],
+    {
+      cwd: workspaceRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+    },
   );
 }
 

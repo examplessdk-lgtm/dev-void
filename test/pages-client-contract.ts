@@ -32,7 +32,7 @@ export function registerSharedDevSsrTest({
     expect(rootHtml).toContain(appName); // shared data from middleware
 
     // scriptProbe tries to close the inline page-data <script> tag early.
-    const probe = '</script><script>alert(1)</script>  &';
+    const probe = '</script><script>alert(1)</script>\u2028\u2029&';
     const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     expect(probeMatch).not.toBeNull();
     const probeJson = probeMatch![1];

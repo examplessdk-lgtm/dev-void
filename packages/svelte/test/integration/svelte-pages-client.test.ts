@@ -1,12 +1,12 @@
-import { execSync } from 'node:child_process';
+import { execSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
 import {
   killChild,
-  startPlaygroundServer,
-  type StartedServer,
+  spawnPlaygroundServer,
+  startServer,
 } from '../../../../test/integration-helpers.ts';
 import { launchPagesBrowser } from '../../../../test/pages-browser.ts';
 import {
@@ -112,16 +112,19 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
 }
 
 describe('svelte-pages client (dev)', () => {
-  let server: StartedServer | undefined;
+  let child: ChildProcess | undefined;
 
   beforeAll(async () => {
-    server = await startPlaygroundServer(ROOT, 'svelte-pages', 'dev', 20_000);
+    const server = await startServer(
+      (port) => (child = spawnPlaygroundServer(ROOT, 'svelte-pages', 'dev', port)),
+      20_000,
+    );
     DEV_BASE = server.base;
   });
 
   afterAll(async () => {
-    if (server) {
-      await killChild(server.child);
+    if (child) {
+      await killChild(child);
     }
   });
 
@@ -144,7 +147,7 @@ describe('svelte-pages client (dev)', () => {
 });
 
 describe('svelte-pages client (preview)', { retry: 2 }, () => {
-  let server: StartedServer | undefined;
+  let child: ChildProcess | undefined;
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/svelte-pages/dist'))) {
@@ -154,13 +157,16 @@ describe('svelte-pages client (preview)', { retry: 2 }, () => {
       });
     }
 
-    server = await startPlaygroundServer(ROOT, 'svelte-pages', 'preview', 30_000);
+    const server = await startServer(
+      (port) => (child = spawnPlaygroundServer(ROOT, 'svelte-pages', 'preview', port)),
+      30_000,
+    );
     PREVIEW_BASE = server.base;
   });
 
   afterAll(async () => {
-    if (server) {
-      await killChild(server.child);
+    if (child) {
+      await killChild(child);
     }
   });
 
