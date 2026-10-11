@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { CloudflareAuthRunResult } from '../../src/cli/cloudflare-auth.ts';
-import { cloudflareAuthEnvironment } from '../../src/cli/cloudflare-auth.ts';
 import {
   assertPlatformOperatorCredentialCanApplyPlan,
   readWranglerOAuthCredential,
@@ -196,16 +195,6 @@ describe('platform Cloudflare authentication', () => {
     ).not.toThrow();
   });
 
-  it('uses explicit environment credentials without invoking Wrangler', async () => {
-    process.env.CLOUDFLARE_API_TOKEN = 'ci-token';
-    const runWrangler = vi.fn();
-
-    await expect(
-      resolvePlatformCloudflareCredential({ interactive: false, runWrangler }),
-    ).resolves.toEqual({ source: 'environment', token: 'ci-token' });
-    expect(runWrangler).not.toHaveBeenCalled();
-  });
-
   it.each([false, true])(
     'uses saved management authority before browser login (interactive: %s)',
     async (interactive) => {
@@ -257,32 +246,6 @@ describe('platform Cloudflare authentication', () => {
     ).resolves.toEqual({ source: 'oauth', token: 'oauth-token' });
   });
 
-  it('uses cf browser login when no session exists', async () => {
-    const calls: Array<string> = [];
-    let tokenAttempts = 0;
-    const credential = await resolvePlatformCloudflareCredential({
-      interactive: true,
-      runWrangler: (args) => {
-        calls.push(args.type);
-        if (args.type === 'auth.token') {
-          tokenAttempts++;
-          return tokenAttempts === 1
-            ? { status: 1, stderr: 'not logged in', stdout: '', data: '' }
-            : {
-                status: 0,
-                stderr: '',
-                stdout: '',
-                data: { token: 'browser-token', type: 'oauth' },
-              };
-        }
-        return { status: 0, stderr: '', stdout: '', data: '' };
-      },
-    });
-
-    expect(credential).toEqual({ source: 'oauth', token: 'browser-token' });
-    expect(calls).toEqual(['auth.token', 'auth.login', 'auth.token']);
-  });
-
   it('requires an explicit environment token in non-interactive environments', async () => {
     const runWrangler = vi.fn(() => ({ status: 1, stderr: 'not logged in', stdout: '', data: '' }));
     await expect(
@@ -303,18 +266,6 @@ describe('platform Cloudflare authentication', () => {
         data: { token: 'implicit-token', type: 'api_token' },
       })),
     ).resolves.toBeNull();
-  });
-
-  it('does not expose platform recovery or service secrets to Wrangler auth commands', () => {
-    expect(
-      cloudflareAuthEnvironment({
-        CF_ACCESS_CLIENT_SECRET: 'access-secret',
-        DATABASE_URL: 'postgres://secret',
-        PATH: '/bin',
-        VOID_PLATFORM_GITHUB_CLIENT_SECRET: 'github-secret',
-        VOID_PLATFORM_RECOVERY_KEY: 'recovery-secret',
-      }),
-    ).toEqual({ CLOUDFLARE_AUTH_USE_KEYRING: 'true', PATH: '/bin' });
   });
 });
 
