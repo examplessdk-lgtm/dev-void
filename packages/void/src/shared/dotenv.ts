@@ -187,10 +187,6 @@ const WRANGLER_DOTENV_LINE =
 
 /**
  * The set of declared dotenv KEYS in `filePath`, parsed the way wrangler does.
- * Lives in this leaf module (no `proper-lockfile` / lifecycle side effects) so both
- * the provisioner's transport fence and the deploy orchestrator's config-override
- * fence can read keys exactly as wrangler's per-command reload would, without either
- * caller pulling in the provision lifecycle just to parse dotenv keys.
  */
 export function scanWranglerDotenvKeys(filePath: string): Set<string> {
   const keys = new Set<string>();
