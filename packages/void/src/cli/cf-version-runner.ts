@@ -12,6 +12,7 @@ import type {
 import { isRecord as record } from '@void/deploy-core';
 import { dirname, join } from 'pathslash';
 import type { CfBuildOutput } from './cf-build-output.ts';
+import { readCfUploadOutput, safePositional } from './cf-command-values.ts';
 import { migrateBuiltWranglerConfig } from './cf-config-migrate.ts';
 import { getCfCliVersion } from './cf-user-agent.ts';
 import {
@@ -34,18 +35,6 @@ function parseJson(value: string): unknown {
   } catch {
     return null;
   }
-}
-
-function safePositional(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    value.length > 0 &&
-    !value.startsWith('-') &&
-    ![...value].some((character) => {
-      const code = character.charCodeAt(0);
-      return code < 32 || code === 127;
-    })
-  );
 }
 
 /** Existing-Worker handoffs retain their separate link and binding checks. */
@@ -236,7 +225,6 @@ export function createCfResourceVerifier(options: {
 export function createCfCommand(options: {
   accountId: string;
   apiBaseUrl: string;
-  token?: string;
   env: (accountId: string, apiBaseUrl: string) => NodeJS.ProcessEnv;
   verifyUploader: () => boolean;
 }): CfCommand {
@@ -258,9 +246,6 @@ export function createCfCommand(options: {
     };
     if (env.HTTP_PROXY || env.HTTPS_PROXY || env.http_proxy || env.https_proxy) {
       env.NODE_USE_ENV_PROXY = '1';
-    }
-    if (options.token) {
-      env.CLOUDFLARE_API_TOKEN = options.token;
     }
     return await new Promise<CloudflareCommandResult>((resolve) => {
       const bounded = run.timeoutMs !== undefined;
@@ -402,15 +387,7 @@ export function createCfVersionRunner(options: {
     if (record(result.data) && typeof result.data.versionId === 'string') {
       return result;
     }
-    const versionId = result.stdout.match(
-      /(?:Worker|Current) Version ID:\s*([0-9a-f]{8}-[0-9a-f-]{27})/i,
-    )?.[1];
-    const previewUrl = result.stdout.match(
-      /Version Preview(?: Alias)? URL:\s*(https:\/\/\S+)/i,
-    )?.[1];
-    const workersDevUrl = result.stdout.match(
-      /(https:\/\/[a-z0-9.-]+\.workers\.dev(?:\/[^\s]*)?)/i,
-    )?.[1];
+    const { versionId, previewUrl, workersDevUrl } = readCfUploadOutput(result.stdout);
     return {
       ...result,
       data: versionId

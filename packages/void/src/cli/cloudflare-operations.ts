@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import type { CloudflareOperation } from '@void/deploy-cloudflare';
+import type { CloudflareCommandResult, CloudflareOperation } from '@void/deploy-cloudflare';
 import {
   encodeCloudflareVersionMessage,
   deployCloudflareVersionTraffic,
@@ -31,21 +31,10 @@ import {
   type WranglerCustomDomain,
 } from './wrangler.ts';
 
-export type CloudflareOperationResult = {
-  status: number;
-  stdout: string;
-  stderr: string;
-  signal?: NodeJS.Signals | null;
-  error?: string | null;
-  data?: unknown;
-  errorCode?: number;
-  failure?: 'not-found' | 'durable-migration' | 'containers-unavailable';
-};
-
 export type CloudflareOperationRunner = (
   args: CloudflareOperation,
   options: { capture: boolean; input?: string },
-) => CloudflareOperationResult | Promise<CloudflareOperationResult>;
+) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
 
 export type CloudflareOperationContext = {
   accountId: string;
@@ -127,7 +116,7 @@ export async function listCloudflareSecrets(
     configPath: context.configPath,
     workerName: context.workerName,
   });
-  const parsed = parseJson(result.data, 'Cloudflare secret list');
+  const parsed = requireData(result.data, 'Cloudflare secret list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare secret list returned an unexpected response.');
   }
@@ -235,7 +224,7 @@ export async function executeCloudflareD1Sql(
     sql: sql,
     configPath: context.operation.configPath,
   });
-  const parsed = parseJson(result.data, 'Cloudflare D1 execute');
+  const parsed = requireData(result.data, 'Cloudflare D1 execute');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare D1 execute returned an unexpected response.');
   }
@@ -321,7 +310,7 @@ export async function readCloudflareWorkerStatus(
 
 /** Return only versions that Cloudflare records as members of a production deployment. */
 export function parseCloudflareDeployedVersionIds(value: unknown): Array<string> {
-  const parsed = parseJson(value, 'Cloudflare deployment list');
+  const parsed = requireData(value, 'Cloudflare deployment list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare deployment list returned an unexpected response.');
   }
@@ -358,7 +347,7 @@ export function parseCloudflareDeployedVersionIds(value: unknown): Array<string>
 }
 
 export function parseCloudflareVersions(value: unknown): Array<CloudflareWorkerVersion> {
-  const parsed = parseJson(value, 'Cloudflare version list');
+  const parsed = requireData(value, 'Cloudflare version list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare version list returned an unexpected response.');
   }
@@ -386,7 +375,7 @@ export function parseCloudflareVersions(value: unknown): Array<CloudflareWorkerV
 }
 
 export function parseActiveVersionId(value: unknown): string | null {
-  const parsed = parseJson(value, 'Cloudflare deployment status');
+  const parsed = requireData(value, 'Cloudflare deployment status');
   if (typeof parsed !== 'object' || parsed === null) {
     throw new Error('Cloudflare deployment status returned an unexpected response.');
   }
@@ -675,7 +664,7 @@ export async function publishEmptyCloudflareCustomDomainSet(
 /** Adapt the direct empty-domain API call to the deployment package's result contract. */
 export function createCloudflareEmptyDomainPublisher(
   context: CloudflareOperationContext,
-): () => Promise<CloudflareOperationResult> {
+): () => Promise<CloudflareCommandResult> {
   return async () => {
     try {
       await publishEmptyCloudflareCustomDomainSet(context);
@@ -689,7 +678,7 @@ export function createCloudflareEmptyDomainPublisher(
 /** Publish an explicit empty Cron Trigger set through Void's pinned cf transport. */
 export function createCloudflareEmptyCronPublisher(
   context: CloudflareOperationContext,
-): () => Promise<CloudflareOperationResult> {
+): () => Promise<CloudflareCommandResult> {
   return async () => {
     try {
       return await run(context, {
@@ -738,7 +727,7 @@ async function run(
   context: CloudflareOperationContext,
   args: CloudflareOperation,
   options?: { capture?: boolean; input?: string },
-): Promise<CloudflareOperationResult> {
+): Promise<CloudflareCommandResult> {
   const result = await Promise.resolve(
     context.runWrangler(args, {
       capture: options?.capture ?? true,
@@ -798,14 +787,14 @@ function assertNoOperationConfigOverride(root: string): void {
   }
 }
 
-function parseJson(value: unknown, label: string): unknown {
+function requireData(value: unknown, label: string): unknown {
   if (value === undefined) {
     throw new Error(label + ' did not return structured data.');
   }
   return value;
 }
 
-function failedOperationResult(error: unknown): CloudflareOperationResult {
+function failedOperationResult(error: unknown): CloudflareCommandResult {
   return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
 }
 

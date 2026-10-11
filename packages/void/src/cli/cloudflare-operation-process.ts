@@ -8,9 +8,13 @@ import { fileURLToPath } from 'node:url';
  * Execute typed Cloudflare operations using the pinned provider CLI and API.
  * Secret values arrive on stdin; captured results use one structured envelope.
  */
-import type { CloudflareOperation } from '@void/deploy-cloudflare';
+import type {
+  CloudflareCommandResult as Result,
+  CloudflareOperation,
+} from '@void/deploy-cloudflare';
 import { parse } from 'jsonc-parser';
 import { dirname, join, resolve } from 'pathslash';
+import { readCfUploadOutput, safePositional } from './cf-command-values.ts';
 import { persistCfKeyringPreference, readCfSessionCredential } from './cf-session.ts';
 import { getCfCliVersion, getVoidUserAgent } from './cf-user-agent.ts';
 import {
@@ -21,16 +25,6 @@ import {
 } from './cloudflare-login-output.ts';
 import { sanitizeTerminalLogText } from './terminal-log-text.ts';
 
-type Result = {
-  status: number;
-  stdout: string;
-  stderr: string;
-  data?: unknown;
-  errorCode?: number;
-  signal?: NodeJS.Signals | null;
-  error?: string;
-  failure?: 'not-found' | 'durable-migration' | 'containers-unavailable';
-};
 type Json = Record<string, unknown>;
 
 const cf = join(dirname(fileURLToPath(import.meta.resolve('cf/package.json'))), 'bin', 'cf');
@@ -478,7 +472,15 @@ async function readVersionResources(worker: string, versionId: string): Promise<
   return resources;
 }
 
-async function apiHeaders(): Promise<Record<string, string>> {
+let cachedApiHeaders: Promise<Record<string, string>> | undefined;
+
+/** This process runs one operation, so the credential is read once. */
+function apiHeaders(): Promise<Record<string, string>> {
+  cachedApiHeaders ??= readApiHeaders();
+  return cachedApiHeaders;
+}
+
+async function readApiHeaders(): Promise<Record<string, string>> {
   const key = process.env.CLOUDFLARE_API_KEY ?? process.env.CF_API_KEY;
   const email = process.env.CLOUDFLARE_EMAIL ?? process.env.CF_EMAIL;
   if (key && email) {
@@ -998,14 +1000,8 @@ async function workerChanges(): Promise<Result> {
     }
     for (const item of matching) {
       if (
-        typeof item.consumer_id !== 'string' ||
-        !item.consumer_id ||
-        item.consumer_id.startsWith('-') ||
+        !safePositional(item.consumer_id) ||
         /\s/.test(item.consumer_id) ||
-        [...item.consumer_id].some((character) => {
-          const code = character.charCodeAt(0);
-          return code < 32 || code === 127;
-        }) ||
         (item.type !== undefined && item.type !== 'worker')
       ) {
         throw new Error('Queue consumer ID or type is invalid.');
@@ -1072,23 +1068,17 @@ async function workerChanges(): Promise<Result> {
     } catch {
       /* Human upload presentation. */
     }
-    const output = called.stdout;
-    const versionId =
-      uploaded.version_id ??
-      uploaded.id ??
-      uploaded.versionId ??
-      output.match(/(?:Worker|Current) Version ID:\s*([0-9a-f]{8}-[0-9a-f-]{27})/i)?.[1];
+    const printed = readCfUploadOutput(called.stdout);
+    const versionId = uploaded.version_id ?? uploaded.id ?? uploaded.versionId ?? printed.versionId;
     if (typeof versionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(versionId)) {
       throw new Error('Cloudflare did not return the uploaded Worker version ID.');
     }
     const previewUrl =
-      typeof uploaded.preview_url === 'string'
-        ? uploaded.preview_url
-        : output.match(/Version Preview(?: Alias)? URL:\s*(https:\/\/\S+)/i)?.[1];
+      typeof uploaded.preview_url === 'string' ? uploaded.preview_url : printed.previewUrl;
     const workersDevUrl =
       typeof uploaded.workers_dev_url === 'string'
         ? uploaded.workers_dev_url
-        : output.match(/(https:\/\/[a-z0-9.-]+\.workers\.dev(?:\/[^\s]*)?)/i)?.[1];
+        : printed.workersDevUrl;
     return result(0, '', called.stderr, {
       versionId,
       ...(previewUrl ? { previewUrl } : {}),

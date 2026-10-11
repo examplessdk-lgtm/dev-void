@@ -1,9 +1,9 @@
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import {
+  createCloudflareProcessRunner,
   encodeCloudflareOperation,
   decodeCloudflareOperationResult,
-  writeUncapturedOperationOutput,
 } from './cloudflare-process.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
 
@@ -184,37 +184,12 @@ export function parseCloudflareAuthSession(value: unknown): CloudflareAuthSessio
 }
 
 export function createBundledCloudflareAuthRunner(root: string): CloudflareAuthRunner {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(root);
-  return (operation, capture) => {
-    const args = encodeCloudflareOperation(operation);
-    const env = cloudflareAuthEnvironment();
-    const streaming = cloudflareAuthNeedsTerminal(operation);
-    const result = spawnSync(command!, [...prefix, ...args], {
-      cwd: root,
-      encoding: 'utf8',
-      env,
-      maxBuffer: 10 * 1024 * 1024,
-      shell: false,
-      stdio: streaming ? 'inherit' : ['ignore', 'pipe', 'pipe'],
-      timeout: 10 * 60 * 1000,
-      windowsHide: true,
-    });
-    const raw = {
-      status: result.status,
-      stderr: streaming ? '' : result.stderr || '',
-      stdout: streaming ? '' : result.stdout || '',
-      signal: result.signal,
-      error: result.error?.message,
-    };
-    if (streaming) {
-      return raw;
-    }
-    const decoded = decodeCloudflareOperationResult(raw);
-    if (!capture) {
-      writeUncapturedOperationOutput(decoded);
-    }
-    return decoded;
-  };
+  const run = createCloudflareProcessRunner({
+    root,
+    env: cloudflareAuthEnvironment,
+    timeoutMs: 10 * 60 * 1000,
+  });
+  return (operation, capture) => run(operation, { capture });
 }
 
 /** Run a captured auth command without blocking terminal input or exposing credentials. */

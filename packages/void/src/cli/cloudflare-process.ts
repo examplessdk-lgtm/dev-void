@@ -103,6 +103,7 @@ export function createCloudflareProcessRunner(options: {
   accountId?: string;
   apiBaseUrl?: string;
   env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv);
+  timeoutMs?: number;
 }) {
   const [command, ...prefix] = resolveCloudflareOperationArgv(options.root);
   return (
@@ -124,6 +125,7 @@ export function createCloudflareProcessRunner(options: {
       shell: false,
       windowsHide: true,
       maxBuffer: 32 * 1024 * 1024,
+      timeout: options.timeoutMs,
       stdio: streaming ? ['inherit', 'inherit', 'inherit'] : ['pipe', 'pipe', 'pipe'],
     });
     const raw = {

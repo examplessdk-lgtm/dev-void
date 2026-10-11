@@ -2795,12 +2795,12 @@ export default config;
             configPath: toSlash(join(root, '.void-wrangler.jsonc')),
           }),
         ]),
-        expect.objectContaining({ cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }),
+        expect.objectContaining({ cwd: root, stdio: ['pipe', 'pipe', 'pipe'] }),
       );
       expect(mockSpawnSync).toHaveBeenCalledWith(
         process.execPath,
         expect.arrayContaining([JSON.stringify({ type: 'auth.login' })]),
-        expect.objectContaining({ cwd: root, stdio: 'inherit' }),
+        expect.objectContaining({ cwd: root, stdio: ['inherit', 'inherit', 'inherit'] }),
       );
       expect(mockNote).toHaveBeenCalledWith(
         expect.stringContaining('Run `void connect --platform cloudflare`'),
@@ -2879,7 +2879,7 @@ export default config;
       expect(mockSpawnSync).toHaveBeenCalledWith(
         process.execPath,
         expect.arrayContaining([JSON.stringify({ type: 'auth.login' })]),
-        expect.objectContaining({ cwd: root, stdio: 'inherit' }),
+        expect.objectContaining({ cwd: root, stdio: ['inherit', 'inherit', 'inherit'] }),
       );
       const accountPrompt = mockSelect.mock.calls.find(
         ([options]) => options.message === 'Choose a Cloudflare account:',

@@ -99,7 +99,7 @@ describe('cf browser login', () => {
       false,
     );
     expect(result).toMatchObject({ status: 0, data: { removed: true } });
-    expect(vi.mocked(spawnSync).mock.calls[0]?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+    expect(vi.mocked(spawnSync).mock.calls[0]?.[2]?.stdio).toEqual(['pipe', 'pipe', 'pipe']);
     expect(stdout).toHaveBeenCalledWith('Session removed.\n');
     expect(stderr).toHaveBeenCalledWith('Provider note.\n');
   });
