@@ -7068,9 +7068,9 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
           serverKeys: ['API_TOKEN'],
           requiredKeys: ['API_TOKEN'],
         })) as CloudflareDeployDeps['resolveSchemaFacts'],
-      prepareFrameworkArtifact: (async (...args) => {
+      prepareFrameworkArtifact: (async (options) => {
         trace.push('prepare-framework');
-        requiredSecretNames = args[7];
+        requiredSecretNames = options.requiredSecretNames;
       }) as CloudflareDeployDeps['prepareFrameworkArtifact'],
     });
     await runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps);
@@ -7206,17 +7206,17 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
       ].join('\n'),
     });
 
-    await prepareCloudflareFrameworkArtifact(
+    await prepareCloudflareFrameworkArtifact({
       root,
-      join(root, 'wrangler.jsonc'),
-      'acc123',
-      'skapp',
-      readConfig(root),
-      { name: 'sveltekit', class: 'b' },
-      FRAMEWORK_PRESETS.sveltekit,
-      ['API_TOKEN'],
-      { binding: 'AI' },
-    );
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'skapp',
+      voidConfig: readConfig(root),
+      framework: { name: 'sveltekit', class: 'b' },
+      preset: FRAMEWORK_PRESETS.sveltekit,
+      requiredSecretNames: ['API_TOKEN'],
+      ai: { binding: 'AI' },
+    });
 
     const wrapper = readFileSync(join(root, '.svelte-kit/cloudflare/_worker.js'), 'utf-8');
     expect(wrapper).toContain('import original from "./__original.js";');
@@ -7267,15 +7267,15 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
     });
     const pointerBefore = readFileSync(join(root, '.wrangler/deploy/config.json'), 'utf-8');
 
-    await prepareCloudflareFrameworkArtifact(
+    await prepareCloudflareFrameworkArtifact({
       root,
-      join(root, 'wrangler.jsonc'),
-      'acc123',
-      'tanstack-app',
-      readConfig(root),
-      { name: 'tanstack-start', class: 'a' },
-      FRAMEWORK_PRESETS['tanstack-start'],
-    );
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'tanstack-app',
+      voidConfig: readConfig(root),
+      framework: { name: 'tanstack-start', class: 'a' },
+      preset: FRAMEWORK_PRESETS['tanstack-start'],
+    });
 
     expect(readFileSync(join(root, '.wrangler/deploy/config.json'), 'utf-8')).toBe(pointerBefore);
     expect(readFileSync(join(root, 'dist/server/index.js'), 'utf-8')).toContain(
@@ -7311,13 +7311,13 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
         [`${preset.assetsDir}/client.js`]: 'console.log("client");',
       });
 
-      await prepareCloudflareFrameworkArtifact(
+      await prepareCloudflareFrameworkArtifact({
         root,
-        join(root, 'wrangler.jsonc'),
-        'acc123',
-        'framework-app',
-        readConfig(root),
-        {
+        configPath: join(root, 'wrangler.jsonc'),
+        accountId: 'acc123',
+        workerName: 'framework-app',
+        voidConfig: readConfig(root),
+        framework: {
           name,
           class: ['tanstack-start', 'react-router', 'vinext-app', 'vinext-pages'].includes(name)
             ? 'a'
@@ -7326,7 +7326,7 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
               : 'c',
         },
         preset,
-      );
+      });
 
       const entry = readFileSync(join(root, preset.workerDir, preset.workerMain), 'utf8');
       expect(entry).toContain('handleFrameworkIsr');
@@ -7354,15 +7354,15 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
         'export default { fetch() { return new Response("page"); } };',
       [`${preset.assetsDir}/client.js`]: 'console.log("client");',
     });
-    await prepareCloudflareFrameworkArtifact(
+    await prepareCloudflareFrameworkArtifact({
       root,
-      join(root, 'wrangler.jsonc'),
-      'acc123',
-      'framework-app',
-      readConfig(root),
-      { name: 'tanstack-start', class: 'a' },
+      configPath: join(root, 'wrangler.jsonc'),
+      accountId: 'acc123',
+      workerName: 'framework-app',
+      voidConfig: readConfig(root),
+      framework: { name: 'tanstack-start', class: 'a' },
       preset,
-    );
+    });
     const entry = readFileSync(join(root, preset.workerDir, preset.workerMain), 'utf8');
     expect(entry).not.toContain('handleFrameworkIsr');
   });
@@ -7374,15 +7374,15 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
       'wrangler.jsonc': JSON.stringify({ account_id: 'acc123', name: 'nuxt-app' }),
     });
     const prepare = () =>
-      prepareCloudflareFrameworkArtifact(
+      prepareCloudflareFrameworkArtifact({
         root,
-        join(root, 'wrangler.jsonc'),
-        'acc123',
-        'nuxt-app',
-        readConfig(root),
-        { name: 'nuxt', class: 'c' },
-        FRAMEWORK_PRESETS.nuxt,
-      );
+        configPath: join(root, 'wrangler.jsonc'),
+        accountId: 'acc123',
+        workerName: 'nuxt-app',
+        voidConfig: readConfig(root),
+        framework: { name: 'nuxt', class: 'c' },
+        preset: FRAMEWORK_PRESETS.nuxt,
+      });
     await expect(prepare()).rejects.toThrow('did not emit its Worker entry');
 
     mkdirSync(join(root, '.output/server'), { recursive: true });
@@ -10466,7 +10466,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(trace.indexOf('probe')).toBeLessThan(trace.indexOf('build'));
   });
 
-  it('borrows the bearer via `auth token --json` with WRANGLER_WRITE_LOGS=false and never leaks it', async () => {
+  it('borrows the bearer via `auth token --json` and never leaks it', async () => {
     const root = emailProject();
     const { deps, spawns, fetchCalls } = emailHarness();
     const output = captureOutput();
@@ -10479,22 +10479,18 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
     expect(authSpawns.length).toBeGreaterThan(0);
     for (const spawn of authSpawns) {
       expect(spawn.args).toEqual(['auth', 'token', '--json', ...configArgs(root)]);
-      expect(spawn.opts).toEqual({ capture: true, env: { WRANGLER_WRITE_LOGS: 'false' } });
+      expect(spawn.opts).toEqual({ capture: true });
     }
     // The token reached the Authorization header — and NOTHING else.
     expect(fetchCalls.some((c) => c.auth === `Bearer ${BEARER}`)).toBe(true);
     expect(output.lines.join('\n')).not.toContain(BEARER);
     for (const spawn of spawns) {
       expect(JSON.stringify(spawn.args)).not.toContain(BEARER);
-      expect(JSON.stringify(spawn.opts.env ?? {})).not.toContain(BEARER);
+      expect(spawn.opts.env).toBeUndefined();
     }
     expect(
       Object.values(process.env).some((v) => typeof v === 'string' && v.includes(BEARER)),
     ).toBe(false);
-    // Only `auth token` gets the log pin; no other spawn carries any extra env.
-    for (const spawn of spawns.filter((s) => s.args[0] !== 'auth')) {
-      expect(spawn.opts.env).toBeUndefined();
-    }
   });
 
   it('a failed `auth token` yields no bearer: the dashboard fallback is printed, addresses withheld, deploy continues', async () => {
@@ -11464,7 +11460,7 @@ describe('runCloudflareDeploy — Mode B email step (3b-ii)', () => {
 });
 
 describe('runWranglerAuthToken — the session-bearer bridge, on its own', () => {
-  type AuthCall = { args: Array<string>; opts: { capture: boolean; env?: Record<string, string> } };
+  type AuthCall = { args: Array<string>; opts: { capture: boolean } };
   const bridge = (result: DeployWranglerRunResult | (() => never)) => {
     const calls: Array<AuthCall> = [];
     const run: DeployWranglerRun = operationFixture((args, opts) => {
@@ -11474,7 +11470,7 @@ describe('runWranglerAuthToken — the session-bearer bridge, on its own', () =>
     return { calls, token: runWranglerAuthToken(run, '/p/wrangler.jsonc') };
   };
 
-  it('spawns exactly `auth token --json` in the deploy config context, captured, logs off', async () => {
+  it('spawns exactly `auth token --json` in the deploy config context, captured', async () => {
     const { calls, token } = bridge({
       status: 0,
       stdout: `{\n  "type": "oauth",\n  "token": "cfoa.abc"\n}\n`,
@@ -11486,7 +11482,7 @@ describe('runWranglerAuthToken — the session-bearer bridge, on its own', () =>
     expect(calls).toEqual([
       {
         args: ['auth', 'token', '--json', '-c', '/p/wrangler.jsonc', '--env='],
-        opts: { capture: true, env: { WRANGLER_WRITE_LOGS: 'false' } },
+        opts: { capture: true },
       },
     ]);
   });

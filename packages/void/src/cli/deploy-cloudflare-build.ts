@@ -4,12 +4,9 @@ import {
   readStoredResourceName,
   resolveD1MigrateTarget,
   assertCloudflareDurableObjectLifecycleSupported,
-  type ExistingCloudflareWorker,
-  type ApprovedCloudflareKvBinding,
 } from '@void/deploy-cloudflare';
 import { dirname } from 'pathslash';
 import { type VoidConfig } from '../config.ts';
-import type { DatabaseDialect } from '../config.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { SqliteMigrationError } from '../migrations/sqlite-validation.ts';
 import { detectFramework } from '../plugin-inference.ts';
@@ -22,11 +19,8 @@ import {
   validateCloudflarePostBuildEnv,
   resolveGeneratedDeployConfigPathDefault,
 } from './deploy-artifact-validation.ts';
-import {
-  snapshotBindingIdentities,
-  DEPLOY_BINDING_IDENTITY_FIELDS,
-  bindingIdentityKey,
-} from './deploy-binding-snapshot.ts';
+import { DEPLOY_BINDING_IDENTITY_FIELDS, bindingIdentityKey } from './deploy-binding-snapshot.ts';
+import type { CloudflareDeploySource, CloudflarePreflight } from './deploy-cloudflare-preflight.ts';
 import { prepareCloudflareFrameworkArtifact } from './deploy-cloudflare-static.ts';
 import { log, getErrorMessage, getExitCode } from './deploy-helpers.ts';
 import {
@@ -41,64 +35,42 @@ import {
   deployChildEnv,
 } from './deploy-transport.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
-import { type SelfHostSchemaFacts } from './env-validation.ts';
-import { resolveProjectCommand } from './preset.ts';
+import { resolveProjectCommand, type FrameworkPreset } from './preset.ts';
 
+export type CloudflareBuild = Awaited<ReturnType<typeof buildCloudflareWorker>>;
+
+/** Build the Worker without Cloudflare credentials, then run the post-build gates. */
 export async function buildCloudflareWorker(input: {
-  readonly accountId: string;
-  readonly apiBaseUrl: string;
-  readonly existingWorker: ExistingCloudflareWorker | null;
-  readonly deps: CloudflareDeployDeps;
-  readonly frameworkPreset: import('./preset.ts').FrameworkPreset | undefined;
-  readonly voidConfig: VoidConfig;
   readonly root: string;
+  readonly voidConfig: VoidConfig;
+  readonly deps: CloudflareDeployDeps;
   readonly exit: (code: number) => never;
-  readonly detectedFramework: ReturnType<typeof detectFramework>;
-  readonly configPath: string;
-  readonly workerName: string;
-  readonly schemaFacts: SelfHostSchemaFacts;
-  readonly needsAI: boolean;
-  readonly aiBindingName: string;
-  readonly assertUploaderStillPinned: () => boolean;
-  readonly migrationsDir: string;
-  readonly dialect: DatabaseDialect;
   readonly atomic: boolean;
-  readonly runWrangler: NonNullable<CloudflareDeployDeps['runWrangler']>;
-  readonly authEnabled: boolean;
-  readonly approvedHandoffKv: Array<ApprovedCloudflareKvBinding>;
-  readonly desired: import('./provision.ts').DesiredResourceSet;
-  readonly bindingIdentitySnapshot: ReturnType<typeof snapshotBindingIdentities>;
+  readonly frameworkPreset: FrameworkPreset | undefined;
+  readonly detectedFramework: ReturnType<typeof detectFramework>;
+  readonly source: CloudflareDeploySource;
+  readonly preflight: CloudflarePreflight;
 }): Promise<{
   migrations: ReturnType<typeof collectMigrations>;
   d1MigrateToken: string | undefined;
   generatedConfigPath: string;
   prepareBuildOutput: () => ReturnType<typeof prepareCfBuildOutput>;
 }> {
+  const { root, voidConfig, deps, exit, atomic, frameworkPreset, detectedFramework } = input;
+  const { configPath, needsAI, aiBindingName, migrationsDir, dialect, authEnabled, desired } =
+    input.source;
   const {
     accountId,
     apiBaseUrl,
+    usesCf,
     existingWorker,
-    deps,
-    frameworkPreset,
-    voidConfig,
-    root,
-    exit,
-    detectedFramework,
-    configPath,
     workerName,
     schemaFacts,
-    needsAI,
-    aiBindingName,
     assertUploaderStillPinned,
-    migrationsDir,
-    dialect,
-    atomic,
     runWrangler,
-    authEnabled,
     approvedHandoffKv,
-    desired,
     bindingIdentitySnapshot,
-  } = input;
+  } = input.preflight;
 
   const buildChildEnv = scrubManagedDeployBuildMarkers(
     scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl)),
@@ -115,12 +87,8 @@ export async function buildCloudflareWorker(input: {
   if (existingWorker) {
     buildChildEnv[CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV] = '1';
   }
-  // Pin NODE_ENV=production for the build too, so the build and the env-schema probes evaluate
-  // env.ts under the SAME environment. `vite build` only DEFAULTS NODE_ENV to production when it
-  // is unset (`if (!isNodeEnvSet) process.env.NODE_ENV = defaultNodeEnv`), so an ambient
-  // NODE_ENV=development would otherwise build a development schema while the probes (pinned
-  // production) derive a production one — the exact divergence the probe pin exists to close.
-  // Scrub any ambient spelling first (case-aware on win32) so it cannot shadow the pin.
+  // The env-schema probes run with NODE_ENV=production; `vite build` keeps an ambient value, so
+  // pin it here too.
   requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
   buildChildEnv.NODE_ENV = 'production';
   const runBuild =
@@ -131,13 +99,8 @@ export async function buildCloudflareWorker(input: {
         : resolveProjectCommand(root, 'vite build');
       execSync(command, { cwd: root, stdio: 'inherit', env });
     });
-  // The wrangler UPLOADER was pinned into `wranglerUploaderHashBefore` at the START of the deploy
-  // (before the env-schema probe and the pre-build credentialed runs), and `assertUploaderStillPinned`
-  // re-checks it against that ONE baseline before every credentialed spawn — never re-baselined. The
-  // build below runs untrusted project code with the parent's Cloudflare creds scrubbed, so it can
-  // only edit FILES — but that INCLUDES the `wrangler-dist` bundle every post-build credentialed
-  // wrangler run (the secret list, the remote D1 migrate, and the deploy) executes — so re-verify
-  // against the same baseline right after it, and again immediately before each spawn.
+  // The build runs project code without credentials, but it can edit files, including the
+  // pinned uploader. The uploader is re-checked after it and before every credentialed run.
   try {
     runBuild(buildChildEnv);
   } catch (err) {
@@ -147,18 +110,18 @@ export async function buildCloudflareWorker(input: {
   log.step('Preparing deployment...');
   if (detectedFramework && frameworkPreset) {
     try {
-      await (deps.prepareFrameworkArtifact ?? prepareCloudflareFrameworkArtifact)(
+      await (deps.prepareFrameworkArtifact ?? prepareCloudflareFrameworkArtifact)({
         root,
         configPath,
         accountId,
         workerName,
         voidConfig,
-        detectedFramework,
-        frameworkPreset,
-        schemaFacts.requiredKeys,
-        needsAI ? { binding: aiBindingName } : undefined,
-        existingWorker !== null,
-      );
+        framework: detectedFramework,
+        preset: frameworkPreset,
+        requiredSecretNames: schemaFacts.requiredKeys,
+        ai: needsAI ? { binding: aiBindingName } : undefined,
+        preserveBindings: existingWorker !== null,
+      });
     } catch (error) {
       log.error(
         `deploy: could not prepare ${detectedFramework.name} for Cloudflare — ${getErrorMessage(error)}`,
@@ -166,19 +129,12 @@ export async function buildCloudflareWorker(input: {
       return exit(1);
     }
   }
-  // Early fail — re-check right after the build, before the ground-truth gates do any work. No
-  // remote mutation has happened since the baseline was pinned, so a changed/unverifiable uploader
-  // here leaves nothing half-done. Each credentialed spawn below re-checks again immediately.
   if (!assertUploaderStillPinned()) {
     return exit(1);
   }
 
-  // Re-collect the checked-in migrations from disk AFTER the build. `vite build` runs
-  // arbitrary project plugins that could add or rewrite `db/migrations` SQL (or the
-  // `migrations_dir` presence), and step 9's `wrangler d1 migrations apply` reads the
-  // LIVE post-build files — so every migration that can reach remote D1 must be validated
-  // against exactly what is on disk now, not a pre-build snapshot. This one set feeds both
-  // the auth-schema check (8c) and the local migration gates (8d).
+  // Build plugins can add or rewrite migrations, and the remote apply reads the files on disk,
+  // so every gate below uses this post-build set.
   const migrations = collectMigrations(migrationsDir);
   if (existingWorker && migrations.length) {
     throw new Error(
@@ -196,9 +152,8 @@ export async function buildCloudflareWorker(input: {
     return exit(1);
   }
 
-  // Wrangler Versions cannot apply a new Durable Object class migration to an existing Worker.
-  // Inspect the active migration tag after the build has produced the exact config, but before
-  // remote database migration or secret mutation. First deployments remain supported.
+  // Worker Versions cannot apply a new Durable Object class migration to an existing Worker.
+  // Check the active migration tag before any remote database or secret change.
   const lifecycleConfigPath = (
     deps.resolveGeneratedConfigPath ??
     ((projectRoot) => readGeneratedDeployConfig(projectRoot).path)
@@ -225,7 +180,7 @@ export async function buildCloudflareWorker(input: {
   }
 
   if (
-    !(await validateCloudflarePostBuildEnv(
+    !(await validateCloudflarePostBuildEnv({
       root,
       configPath,
       accountId,
@@ -237,19 +192,13 @@ export async function buildCloudflareWorker(input: {
       approvedHandoffKv,
       deps,
       assertUploaderStillPinned,
-    ))
+    }))
   ) {
     return exit(1);
   }
 
-  // 8c. Auth-schema check — the managed platform creates Void-managed Better Auth tables at
-  // RUNTIME (POST /__void/migrate/auth) after dispatch; this self-host backend never calls it,
-  // it only applies checked-in `db/migrations/*.sql`. So verify the checked-in migrations
-  // PRODUCE the required Better Auth schema (tables + columns, incl. configured renames + plugin
-  // tables) by reading the schema the BUILD generated (`.void/better-auth-schema.ts` — ground
-  // truth) and applying the migrations to in-memory SQLite. PostgreSQL uses the same generated
-  // schema as the drift gate below; applying its SQL to SQLite would be invalid, so only the D1
-  // dialect needs this additional structural simulation.
+  // This backend never creates the Better Auth tables at runtime, so the checked-in D1
+  // migrations must produce the schema the build generated.
   if (authEnabled && dialect === 'sqlite') {
     try {
       await (deps.validateAuthMigrations ?? validateAuthMigrationSchema)(root, migrations);
@@ -277,20 +226,11 @@ export async function buildCloudflareWorker(input: {
     }
   }
 
-  // 8d. Local migration gates — run POST-build,
-  // immediately before the remote apply, against the RE-COLLECTED post-build migrations. Moving
-  // them here (from pre-build) closes the window where a build plugin could add/rewrite migration
-  // SQL that step 9 would then apply to remote D1 ungated: `wrangler d1 migrations apply` reads
-  // the live post-build files, and these gates now validate exactly that set. Nothing between the
-  // build and here mutates remote state, so a failed gate never leaves a half-migrated account.
+  // Nothing remote has changed yet, so a failed migration gate leaves no half-migrated account.
   let d1MigrateToken: string | undefined;
   if (desired.d1 || desired.hyperdrive) {
-    // 8d-i. Run the SAME gates the managed deploy runs — schema drift, journal coherence,
-    // destructive-op-without-pragma — for EVERY D1 app REGARDLESS of migration count. A
-    // `db/schema.ts` with no generated migration is drift the old count-gated check silently
-    // skipped (shipping a schemaless remote DB); wrangler also auto-applies destructive SQL in CI
-    // (its confirmation defaults to "yes" non-interactively). `validateMigrations` self-guards on
-    // an empty set.
+    // The managed deploy's gates (schema drift, journal coherence, destructive SQL) run even with
+    // no migrations, since a schema without migrations is drift too.
     try {
       (deps.assertMigrationsDeployable ?? assertRemoteMigrationsDeployable)(
         root,
@@ -303,12 +243,9 @@ export async function buildCloudflareWorker(input: {
       return exit(1);
     }
 
-    // Resolve + validate the D1 migrate target ONLY when there ARE checked-in migrations: a D1
-    // desired purely from DB-use or auth can have no `db/migrations`, and wrangler 4.131
-    // HARD-FAILS `d1 migrations apply` on a missing/empty folder (it never no-ops).
+    // A D1 database used only for queries or auth may have no migrations folder at all.
     if (desired.d1 && migrations.length > 0) {
-      // `migrations_dir` must be present in the config: wrangler defaults a missing value to
-      // `./migrations` (relative to the config) and would apply an unrelated folder.
+      // A missing `migrations_dir` defaults to `./migrations`, which may be an unrelated folder.
       const migrateConfig = parseRootWranglerConfig(configPath);
       const d1MigrationsDir = readStoredResourceName(
         migrateConfig,
@@ -328,12 +265,8 @@ export async function buildCloudflareWorker(input: {
         );
         return exit(1);
       }
-      // wrangler 4.131 resolves the migrate target by FIRST-matching the passed token
-      // against `database_name` OR `binding` (getDatabaseInfoFromConfig, src/d1/utils.ts)
-      // and reads THAT entry's `migrations_dir`. The gate validated the entry matched by
-      // BINDING, so migrate by a token that resolves to exactly that entry — fail closed
-      // when an earlier alias entry would shadow it (else wrangler could migrate the wrong
-      // DB / an unrelated folder though the gate passed).
+      // The apply resolves its target by the first entry whose id, database_name or binding
+      // matches the token, so use a token that resolves only to the validated binding.
       const migrateTarget = resolveD1MigrateTarget(migrateConfig, desired.d1.binding);
       if (!migrateTarget.ok) {
         log.error(
@@ -348,14 +281,8 @@ export async function buildCloudflareWorker(input: {
         return exit(1);
       }
 
-      // 8d-iii. Pin check — the remote apply below resolves its target from THIS post-build
-      // `migrateConfig` (the root config wrangler re-reads to map the token → database_id), so
-      // assert that database_id still equals what was snapshotted at step 6 BEFORE the build.
-      // A tampered build that rewrote `d1_databases[<binding>].database_id` — keeping the binding
-      // + database_name so the token still resolves — would otherwise redirect this privileged
-      // `--remote` migration to a DIFFERENT same-account database. Fail closed, mirroring the
-      // account_id pin. A binding never pinned (no real id pre-build, which the drift check
-      // already rejects) is not asserted.
+      // The apply reads its database id from this post-build config; a build that rewrote it
+      // would redirect the remote migration to another database.
       const { field: d1Field, idField: d1IdField } = DEPLOY_BINDING_IDENTITY_FIELDS.d1;
       const pinnedD1Id = bindingIdentitySnapshot.get(
         bindingIdentityKey(d1Field, desired.d1.binding),
@@ -378,12 +305,8 @@ export async function buildCloudflareWorker(input: {
         return exit(1);
       }
 
-      // 8d-ii. The EXACT files wrangler will apply (its own `migrations_dir` + `migrations_pattern`
-      // resolution) must EQUAL the gated source set by normalized name AND content. Otherwise
-      // a stray/extra `.sql` (e.g. `seed.sql`, which the gate's `collectMigrations` skips but
-      // wrangler's `*.sql` glob matches), a differing dir, or a divergent file would be applied
-      // to REMOTE D1 unvalidated. The gate above only checked `migrations`; this makes the
-      // applied set == the validated set.
+      // The files the apply will read must equal the validated set; a stray `seed.sql` matches
+      // its `*.sql` glob but not the gates.
       const applyCheck = await (deps.checkMigrationApplySet ?? checkWranglerMigrationApplySet)(
         configPath,
         migrateConfig,
@@ -410,7 +333,7 @@ export async function buildCloudflareWorker(input: {
           accountId,
         })
       : prepareCfBuildOutput(dirname(generatedConfigPath), accountId);
-  if (!deps.activateVersion && !deps.runWrangler) {
+  if (usesCf) {
     // Validate the exact upload format before changing a remote database or secret.
     const preflight = await prepareBuildOutput();
     if (!preflight) {
