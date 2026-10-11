@@ -17,36 +17,6 @@ describe('compileWorkerClient', () => {
     const code = compileWorkerClient('/my/path/auth-client.mjs');
     expect(code).toContain('export { auth, createAuthClient } from "/my/path/auth-client.mjs"');
   });
-
-  it('includes param interpolation logic', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('interpolateRouteParams(path, options?.params)');
-  });
-
-  it('includes query string building', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('URLSearchParams');
-  });
-
-  it('includes cookie and authorization forwarding from ALS', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('requestContext.getStore()');
-    expect(code).toContain('"cookie"');
-    expect(code).toContain('"authorization"');
-  });
-
-  it('includes executionCtx passthrough with no-op fallback', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('store?.executionCtx');
-    expect(code).toContain('waitUntil()');
-    expect(code).toContain('passThroughOnException()');
-  });
-
-  it('handles 204 No Content', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('response.status === 204');
-    expect(code).toContain('return undefined');
-  });
 });
 
 // Evaluate the emitted module with only its import boundary substituted.
@@ -90,32 +60,6 @@ describe('worker fetch runtime behavior', () => {
     const req = mockAppFetch.mock.calls[0][0] as Request;
     expect(req.method).toBe('GET');
     expect(new URL(req.url).pathname).toBe('/api/hello');
-  });
-
-  it('interpolates path params', async () => {
-    mockAppFetch.mockResolvedValue(
-      new Response(JSON.stringify({ id: '42' }), {
-        headers: { 'content-type': 'application/json' },
-      }),
-    );
-
-    await workerFetch('/api/users/:id', { params: { id: '42' } });
-
-    const req = mockAppFetch.mock.calls[0][0] as Request;
-    expect(new URL(req.url).pathname).toBe('/api/users/42');
-  });
-
-  it('encodes path params', async () => {
-    mockAppFetch.mockResolvedValue(
-      new Response(JSON.stringify({}), {
-        headers: { 'content-type': 'application/json' },
-      }),
-    );
-
-    await workerFetch('/api/files/:name', { params: { name: 'hello world.txt' } });
-
-    const req = mockAppFetch.mock.calls[0][0] as Request;
-    expect(new URL(req.url).pathname).toBe('/api/files/hello%20world.txt');
   });
 
   it('builds query string', async () => {

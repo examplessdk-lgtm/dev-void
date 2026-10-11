@@ -8,46 +8,7 @@ import {
   SseStreamClosedError,
   type SseStream,
 } from '../../src/runtime/sse.ts';
-
-class MockEventSource {
-  static instances: Array<MockEventSource> = [];
-
-  readonly listeners = new Map<string, Set<(event: Event) => void>>();
-  closed = false;
-
-  constructor(
-    readonly url: string,
-    readonly options?: { withCredentials?: boolean },
-  ) {
-    MockEventSource.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: (event: Event) => void): void {
-    const listeners = this.listeners.get(type) ?? new Set();
-    listeners.add(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  removeEventListener(type: string, listener: (event: Event) => void): void {
-    this.listeners.get(type)?.delete(listener);
-  }
-
-  emit(type: string, data: string, lastEventId = ''): void {
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener({ data, lastEventId } as MessageEvent);
-    }
-  }
-
-  emitError(event: Event): void {
-    for (const listener of this.listeners.get('error') ?? []) {
-      listener(event);
-    }
-  }
-
-  close(): void {
-    this.closed = true;
-  }
-}
+import { MockEventSource } from '../helpers/mock-event-source.ts';
 
 const decoder = new TextDecoder();
 const originalEventSource = (globalThis as { EventSource?: unknown }).EventSource;
@@ -260,9 +221,9 @@ describe('connectEventStream', () => {
     stream.on('log', messageHandler);
     const offError = stream.onError(errorHandler);
     source.emit('log', 'hello');
-    source.emitError({ type: 'error' } as Event);
+    source.emit('error', { type: 'error' } as Event);
     offError();
-    source.emitError({ type: 'error' } as Event);
+    source.emit('error', { type: 'error' } as Event);
     stream.close();
 
     expect(messageHandler.mock.calls[0]?.[0].data).toBe('hello');

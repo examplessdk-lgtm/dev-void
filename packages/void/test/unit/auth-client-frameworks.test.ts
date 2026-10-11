@@ -24,35 +24,15 @@ vi.mock('better-auth/solid', () => ({
 }));
 
 describe('framework-specific client runtimes', () => {
-  it('re-exports the React Better Auth client', async () => {
-    const { auth: reactAuth, createAuthClient: createReactAuthClient } =
-      await import('../../src/runtime/client-react.ts');
-    expect(createReactAuthClient).toBe(mocks.react);
-    expect(mocks.react).toHaveBeenCalledWith({ basePath: '/api/auth' });
-    expect(reactAuth).toEqual({ framework: 'react', options: { basePath: '/api/auth' } });
-  });
-
-  it('re-exports the Vue Better Auth client', async () => {
-    const { auth: vueAuth, createAuthClient: createVueAuthClient } =
-      await import('../../src/runtime/client-vue.ts');
-    expect(createVueAuthClient).toBe(mocks.vue);
-    expect(mocks.vue).toHaveBeenCalledWith({ basePath: '/api/auth' });
-    expect(vueAuth).toEqual({ framework: 'vue', options: { basePath: '/api/auth' } });
-  });
-
-  it('re-exports the Svelte Better Auth client', async () => {
-    const { auth: svelteAuth, createAuthClient: createSvelteAuthClient } =
-      await import('../../src/runtime/client-svelte.ts');
-    expect(createSvelteAuthClient).toBe(mocks.svelte);
-    expect(mocks.svelte).toHaveBeenCalledWith({ basePath: '/api/auth' });
-    expect(svelteAuth).toEqual({ framework: 'svelte', options: { basePath: '/api/auth' } });
-  });
-
-  it('re-exports the Solid Better Auth client', async () => {
-    const { auth: solidAuth, createAuthClient: createSolidAuthClient } =
-      await import('../../src/runtime/client-solid.ts');
-    expect(createSolidAuthClient).toBe(mocks.solid);
-    expect(mocks.solid).toHaveBeenCalledWith({ basePath: '/api/auth' });
-    expect(solidAuth).toEqual({ framework: 'solid', options: { basePath: '/api/auth' } });
+  it.each([
+    ['React', 'react', () => import('../../src/runtime/client-react.ts')],
+    ['Vue', 'vue', () => import('../../src/runtime/client-vue.ts')],
+    ['Svelte', 'svelte', () => import('../../src/runtime/client-svelte.ts')],
+    ['Solid', 'solid', () => import('../../src/runtime/client-solid.ts')],
+  ] as const)('re-exports the %s Better Auth client', async (_name, framework, load) => {
+    const { auth, createAuthClient } = await load();
+    expect(createAuthClient).toBe(mocks[framework]);
+    expect(mocks[framework]).toHaveBeenCalledWith({ basePath: '/api/auth' });
+    expect(auth).toEqual({ framework, options: { basePath: '/api/auth' } });
   });
 });

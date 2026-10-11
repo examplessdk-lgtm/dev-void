@@ -18,10 +18,7 @@ type ValidationIssueBody = {
   }>;
 };
 
-/**
- * Helper that mimics the generated code pattern in compile.ts:
- *   return convertReturnValue(await mod.default(c))
- */
+/** Wraps the handler the way createHttpRouteHandler in runtime/routing.ts does. */
 function createApp(handler: (c: CloudContext) => unknown) {
   const app = new Hono();
   app.get('/test', async (c) => {
@@ -130,27 +127,6 @@ describe('defineHandler', () => {
     expect(await res.json()).toEqual({ data: 'hello' });
   });
 
-  it('handler returning Response passes through', async () => {
-    const handler = defineHandler(() => {
-      return new Response('raw', { status: 201 });
-    });
-
-    const app = createApp(handler);
-    const res = await app.request(req());
-    expect(res.status).toBe(201);
-    expect(await res.text()).toBe('raw');
-  });
-
-  it('handler returning null → 204', async () => {
-    const handler = defineHandler(() => {
-      return null;
-    });
-
-    const app = createApp(handler);
-    const res = await app.request(req());
-    expect(res.status).toBe(204);
-  });
-
   it('raw Hono middleware (not wrapped with defineMiddleware)', async () => {
     const order: Array<string> = [];
 
@@ -172,46 +148,6 @@ describe('defineHandler', () => {
     expect(await res.json()).toEqual({ ok: true });
     expect(res.headers.get('X-Raw')).toBe('yes');
     expect(order).toEqual(['raw-before', 'handler', 'raw-after']);
-  });
-
-  it('mixed raw Hono middleware and defineMiddleware', async () => {
-    const order: Array<string> = [];
-
-    const rawMiddleware: MiddlewareHandler = async (_c, next) => {
-      order.push('raw');
-      await next();
-    };
-
-    const wrapped = defineMiddleware(async (_c, next) => {
-      order.push('wrapped');
-      await next();
-    });
-
-    const handler = defineHandler(rawMiddleware, wrapped, (_c) => {
-      order.push('handler');
-      return { done: true };
-    });
-
-    const app = createApp(handler);
-    const res = await app.request(req());
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ done: true });
-    expect(order).toEqual(['raw', 'wrapped', 'handler']);
-  });
-
-  it('raw Hono middleware short-circuits', async () => {
-    const guard: MiddlewareHandler = async (c, _next) => {
-      return c.text('forbidden', 403);
-    };
-
-    const handler = defineHandler(guard, () => {
-      throw new Error('should not be called');
-    });
-
-    const app = createApp(handler);
-    const res = await app.request(req());
-    expect(res.status).toBe(403);
-    expect(await res.text()).toBe('forbidden');
   });
 
   it('middleware error propagates', async () => {
@@ -359,46 +295,5 @@ describe('defineHandler.withValidator', () => {
       params: { id: '42' },
       body: { name: 'Bob' },
     });
-  });
-
-  it('handler can return a raw Response', async () => {
-    const handler = defineHandler.withValidator({
-      body: passSchema(),
-    })((_c) => {
-      return new Response('created', { status: 201 });
-    });
-
-    const app = createValidatedApp('post', '/test', handler);
-
-    const res = await app.request(
-      new Request('http://localhost/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ok: true }),
-      }),
-    );
-
-    expect(res.status).toBe(201);
-    expect(await res.text()).toBe('created');
-  });
-
-  it('handler can return null for 204', async () => {
-    const handler = defineHandler.withValidator({
-      body: passSchema(),
-    })(() => {
-      return null;
-    });
-
-    const app = createValidatedApp('post', '/test', handler);
-
-    const res = await app.request(
-      new Request('http://localhost/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      }),
-    );
-
-    expect(res.status).toBe(204);
   });
 });

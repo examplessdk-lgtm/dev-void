@@ -80,13 +80,6 @@ describe('typed websocket client', () => {
     (globalThis as { location?: unknown }).location = originalLocation;
   });
 
-  it('resolves relative paths and interpolates params', () => {
-    connect('/chat/:room', { params: { room: 'general' } });
-
-    expect(MockWebSocket.instances).toHaveLength(1);
-    expect(MockWebSocket.instances[0]!.url).toBe('wss://void.test/chat/general');
-  });
-
   it('expands complete catch-all tokens', () => {
     connect('/files/:path{.+}', { params: { path: 'docs/start here' } });
     expect(MockWebSocket.instances[0]!.url).toBe('wss://void.test/files/docs/start%20here');

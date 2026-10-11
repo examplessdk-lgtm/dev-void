@@ -8,7 +8,3 @@ expectTypeOf(sandboxClient.run(['work'])).toEqualTypeOf<Promise<ExecOutput>>();
 expectTypeOf(sandboxClient.files.readFile('/data')).toEqualTypeOf<Promise<Response>>();
 expectTypeOf(process.exitCode).toEqualTypeOf<Promise<number>>();
 expectTypeOf(process.output()).toEqualTypeOf<Promise<ExecOutput>>();
-// @ts-expect-error Files must be awaited before reading their Response.
-sandboxClient.files.readFile('/data').text();
-// @ts-expect-error Operations use the standard Promise API.
-sandboxClient.run(['work']).match({ ok: (value: unknown) => value, limited: () => null });

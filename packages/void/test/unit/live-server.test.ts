@@ -83,34 +83,18 @@ describe('live Durable Object runtime', () => {
     const topic = harness.stub('live:app:topic:topic-key');
     const limits = { ...LIMITS, maxSubscriptionsPerTopic: 1 };
 
-    const stale = await topic.fetch(
-      jsonRequest('/register', {
-        streamId: 'app',
-        topic: 'post:12',
-        topicKey: 'topic-key',
-        connectionId: 'stale-connection-0001',
-        subscriptionId: 'comments',
-        generation: 1,
-        revision: 1,
-        lastSeenAt: Date.now(),
-        limits,
-      }),
-    );
+    const stale = await register(topic, {
+      connectionId: 'stale-connection-0001',
+      subscriptionId: 'comments',
+      limits,
+    });
     expect(stale.ok).toBe(true);
 
-    const current = await topic.fetch(
-      jsonRequest('/register', {
-        streamId: 'app',
-        topic: 'post:12',
-        topicKey: 'topic-key',
-        connectionId: 'current-connection-001',
-        subscriptionId: 'comments',
-        generation: 1,
-        revision: 1,
-        lastSeenAt: Date.now(),
-        limits,
-      }),
-    );
+    const current = await register(topic, {
+      connectionId: 'current-connection-001',
+      subscriptionId: 'comments',
+      limits,
+    });
     expect(current.ok).toBe(true);
   });
 
@@ -134,19 +118,11 @@ describe('live Durable Object runtime', () => {
     const topic = new LiveDurableObject(state, env);
     const limits = { ...LIMITS, deliveryAttemptTimeoutMs: 10 };
 
-    await topic.fetch(
-      jsonRequest('/register', {
-        streamId: 'app',
-        topic: 'post:12',
-        topicKey: 'topic-key',
-        connectionId: 'slow-connection-0001',
-        subscriptionId: 'comments',
-        generation: 1,
-        revision: 1,
-        lastSeenAt: Date.now(),
-        limits,
-      }),
-    );
+    await register(topic, {
+      connectionId: 'slow-connection-0001',
+      subscriptionId: 'comments',
+      limits,
+    });
 
     const startedAt = Date.now();
     const response = await topic.fetch(
@@ -185,19 +161,10 @@ describe('live Durable Object runtime', () => {
         }
       },
     });
-    const connectionId = 'connection-transient-0001';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const message = { streamId: 'app', connectionId, owner: 'user:1', limits: LIMITS };
-    const response = await connection.fetch(jsonRequest('/connect', message));
-    const reader = response.body!.getReader();
-    await readFrame(reader);
+    const { reader } = await connectAndSubscribe(harness, 'connection-transient-0001', [
+      { kind: 'subscribe', id: 'card', topic: 'post:12' },
+    ]);
     try {
-      await connection.fetch(
-        jsonRequest('/control', {
-          ...message,
-          operations: [{ kind: 'subscribe', id: 'card', topic: 'post:12' }],
-        }),
-      );
       const topicName = `live:app:topic:${await topicDigest('app', 'post:12')}`;
       failing = true;
       vi.useFakeTimers();
@@ -348,41 +315,15 @@ describe('live Durable Object runtime', () => {
     });
     const topicKey = await topicDigest('app', 'post:12');
     const topic = harness.stub(`live:app:topic:${topicKey}`);
-    await topic.fetch(
-      jsonRequest('/register', {
-        streamId: 'app',
-        topic: 'post:12',
-        topicKey,
-        connectionId: 'slow-connection-0001',
-        subscriptionId: 'slow-card',
-        generation: 1,
-        revision: 1,
-        lastSeenAt: Date.now(),
-        limits: LIMITS,
-      }),
-    );
+    await register(topic, {
+      topicKey,
+      connectionId: 'slow-connection-0001',
+      subscriptionId: 'slow-card',
+    });
 
-    const connectionId = 'connection-order-001';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const response = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-      }),
-    );
-    const reader = response.body!.getReader();
-    await readFrame(reader);
-    await connection.fetch(
-      jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-        operations: [{ kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
-      }),
-    );
+    const { reader } = await connectAndSubscribe(harness, 'connection-order-001', [
+      { kind: 'subscribe', id: 'post-card', topic: 'post:12' },
+    ]);
 
     const firstPublish = harness.publish('app', 'post:12', { seq: 1 });
     await slowFirstStarted;
@@ -399,27 +340,9 @@ describe('live Durable Object runtime', () => {
 
   it('rejects oversized live events instead of reporting successful publish', async () => {
     const harness = createHarness();
-    const connectionId = 'connection-large-001';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const response = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-      }),
-    );
-    const reader = response.body!.getReader();
-    await readFrame(reader);
-    await connection.fetch(
-      jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-        operations: [{ kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
-      }),
-    );
+    const { reader } = await connectAndSubscribe(harness, 'connection-large-001', [
+      { kind: 'subscribe', id: 'post-card', topic: 'post:12' },
+    ]);
 
     const publishResponse = await harness.publish(
       'app',
@@ -449,34 +372,15 @@ describe('live Durable Object runtime', () => {
         }
       },
     });
-    const connectionId = 'connection-replace-1';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const response = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-      }),
-    );
-    const reader = response.body!.getReader();
-    await readFrame(reader);
-    await connection.fetch(
-      jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-        operations: [{ kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
-      }),
+    const { connection, message, reader } = await connectAndSubscribe(
+      harness,
+      'connection-replace-1',
+      [{ kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
     );
 
     const replaceResponse = await connection.fetch(
       jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
+        ...message,
         operations: [{ kind: 'subscribe', id: 'post-card', topic: 'post:13' }],
       }),
     );
@@ -496,30 +400,13 @@ describe('live Durable Object runtime', () => {
 
   it('delivers multiple topics over one connection and unsubscribes individually', async () => {
     const harness = createHarness();
-    const connectionId = 'connection-0000000001';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const response = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-      }),
-    );
-    const reader = response.body!.getReader();
-    await readFrame(reader);
-
-    await connection.fetch(
-      jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
-        operations: [
-          { kind: 'subscribe', id: 'post-card', topic: 'post:12' },
-          { kind: 'subscribe', id: 'comments', topic: 'comment:2323' },
-        ],
-      }),
+    const { connection, message, reader } = await connectAndSubscribe(
+      harness,
+      'connection-0000000001',
+      [
+        { kind: 'subscribe', id: 'post-card', topic: 'post:12' },
+        { kind: 'subscribe', id: 'comments', topic: 'comment:2323' },
+      ],
     );
 
     const postPublish = harness.publish('app', 'post:12', { title: 'Updated' });
@@ -541,10 +428,7 @@ describe('live Durable Object runtime', () => {
 
     await connection.fetch(
       jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits: LIMITS,
+        ...message,
         operations: [{ kind: 'unsubscribe', id: 'post-card' }],
       }),
     );
@@ -565,46 +449,24 @@ describe('live Durable Object runtime', () => {
   it('removes previous generation topic rows when a connection reconnects', async () => {
     const harness = createHarness();
     const limits = { ...LIMITS, maxSubscriptionsPerTopic: 1 };
-    const connectionId = 'connection-0000000002';
-    const connection = harness.stub(`live:app:connection:${connectionId}`);
-    const first = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits,
-      }),
-    );
-    const firstReader = first.body!.getReader();
-    await readFrame(firstReader);
-
-    await connection.fetch(
-      jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits,
-        operations: [{ kind: 'subscribe', id: 'old-card', topic: 'post:12' }],
-      }),
+    const {
+      connection,
+      message,
+      reader: firstReader,
+    } = await connectAndSubscribe(
+      harness,
+      'connection-0000000002',
+      [{ kind: 'subscribe', id: 'old-card', topic: 'post:12' }],
+      limits,
     );
 
-    const second = await connection.fetch(
-      jsonRequest('/connect', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits,
-      }),
-    );
+    const second = await connection.fetch(jsonRequest('/connect', message));
     const secondReader = second.body!.getReader();
     await readFrame(secondReader);
 
     const controlResponse = await connection.fetch(
       jsonRequest('/control', {
-        streamId: 'app',
-        connectionId,
-        owner: 'user:1',
-        limits,
+        ...message,
         operations: [{ kind: 'subscribe', id: 'new-card', topic: 'post:12' }],
       }),
     );
@@ -847,23 +709,45 @@ function createHarness(options?: {
   };
 }
 
+function register(
+  topic: { fetch(request: Request): Promise<Response> },
+  overrides: Record<string, unknown>,
+): Promise<Response> {
+  return topic.fetch(
+    jsonRequest('/register', {
+      streamId: 'app',
+      topic: 'post:12',
+      topicKey: 'topic-key',
+      subscriptionId: 'card',
+      generation: 1,
+      revision: 1,
+      lastSeenAt: Date.now(),
+      limits: LIMITS,
+      ...overrides,
+    }),
+  );
+}
+
 async function registerSubscribers(topic: DurableObjectStub, count: number): Promise<void> {
   for (let index = 0; index < count; index++) {
-    const response = await topic.fetch(
-      jsonRequest('/register', {
-        streamId: 'app',
-        topic: 'post:12',
-        topicKey: 'topic-key',
-        connectionId: `connection-${index}`,
-        subscriptionId: 'card',
-        generation: 1,
-        revision: 1,
-        lastSeenAt: Date.now(),
-        limits: LIMITS,
-      }),
-    );
+    const response = await register(topic, { connectionId: `connection-${index}` });
     expect(response.ok).toBe(true);
   }
+}
+
+async function connectAndSubscribe(
+  harness: ReturnType<typeof createHarness>,
+  connectionId: string,
+  operations: Array<Record<string, unknown>>,
+  limits: LiveLimits = LIMITS,
+) {
+  const connection = harness.stub(`live:app:connection:${connectionId}`);
+  const message = { streamId: 'app', connectionId, owner: 'user:1', limits };
+  const response = await connection.fetch(jsonRequest('/connect', message));
+  const reader = response.body!.getReader();
+  await readFrame(reader);
+  await connection.fetch(jsonRequest('/control', { ...message, operations }));
+  return { connection, message, reader };
 }
 
 function liveContext(env: unknown, url: string, body?: unknown): CloudContext {

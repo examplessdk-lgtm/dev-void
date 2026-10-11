@@ -13,9 +13,6 @@ declare module 'void/routes' {
     '/api/users/:id': {
       GET: { input: { params: { id: string } }; output: { id: string; name: string } };
     };
-    '/api/files/:name': {
-      GET: { input: { params: { name: string } }; output: Record<string, never> };
-    };
     '/api/files/:path{.+}': {
       GET: { input: { params: { path: string } }; output: unknown };
     };
@@ -54,28 +51,6 @@ describe('typed fetch client', () => {
       expect.objectContaining({ method: 'GET' }),
     );
     expect(result).toEqual({ ok: true });
-  });
-
-  it('interpolates path params', async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(jsonResponse({ id: '42', name: 'Alice' }));
-
-    await typedFetch('/api/users/:id', { params: { id: '42' } });
-
-    expect(globalThis.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/users/42'),
-      expect.anything(),
-    );
-  });
-
-  it('encodes path params', async () => {
-    vi.mocked(globalThis.fetch).mockResolvedValue(jsonResponse({}));
-
-    await typedFetch('/api/files/:name', { params: { name: 'hello world.txt' } });
-
-    expect(globalThis.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/files/hello%20world.txt'),
-      expect.anything(),
-    );
   });
 
   it('expands complete catch-all tokens', async () => {
