@@ -544,7 +544,6 @@ function cloudflare(manifest: PlatformInstallationManifest) {
         remote = value;
       }
     },
-    removeRoutes: async () => {},
     listEmailRoutingRules: async (zone: string) => {
       calls.push(`GET email-rules ${zone}`);
       return [...live.emailRules];

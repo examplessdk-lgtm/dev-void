@@ -557,36 +557,6 @@ describe('platform Cloudflare client', () => {
     await expect(failure).rejects.not.toThrow('Required permission or scope');
   });
 
-  it.each([
-    {
-      kind: 'custom-domain',
-      traffic: {
-        customDomains: [{ hostname: 'api.example.com', id: 'domain-id', service: 'void-api' }],
-        routes: [],
-      },
-    },
-    {
-      kind: 'route',
-      traffic: {
-        customDomains: [],
-        routes: [{ id: 'route-id', pattern: 'apps.example.com/*', script: 'void-api' }],
-      },
-    },
-  ])('refuses unattended $kind deletion without calling Cloudflare', async ({ traffic }) => {
-    const requests: Array<string> = [];
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async (input) => {
-        requests.push(String(input));
-        return Response.json({ result: [], success: true });
-      },
-    });
-
-    await expect(client.removeRoutes('account', 'zone', traffic)).rejects.toThrow(
-      'does not support conditional Worker traffic deletion',
-    );
-    expect(requests).toEqual([]);
-  });
-
   it('filters KV namespaces by exact title instead of trusting an unsupported API filter', async () => {
     const entries = [
       { id: 'routing-id', title: 'void-example-routing' },

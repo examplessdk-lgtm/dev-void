@@ -118,10 +118,6 @@ export type PlatformManagedWorkerTraffic = Readonly<{
   customDomains: ReadonlyArray<Readonly<{ hostname: string; service: string }>>;
   routes: ReadonlyArray<Readonly<{ pattern: string; script: string }>>;
 }>;
-export type PlatformTrackedWorkerTraffic = Readonly<{
-  customDomains: ReadonlyArray<CloudflareWorkerDomain>;
-  routes: ReadonlyArray<Readonly<{ id: string; pattern: string; script: string }>>;
-}>;
 
 export type PlatformRuntimeTokenPreflightClient = Pick<
   PlatformCloudflareClient,
@@ -1270,18 +1266,6 @@ export class PlatformCloudflareClient {
         enabled: false,
       }),
     });
-  }
-
-  async removeRoutes(
-    _accountId: string,
-    _zoneId: string | null,
-    tracked: PlatformTrackedWorkerTraffic,
-  ): Promise<void> {
-    if (tracked.routes.length > 0 || tracked.customDomains.length > 0) {
-      throw new Error(
-        'platform: Cloudflare does not support conditional Worker traffic deletion. Retaining routes and custom domains for explicit dashboard cleanup.',
-      );
-    }
   }
 }
 

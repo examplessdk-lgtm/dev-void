@@ -258,7 +258,10 @@ async function createFakeCloudflare() {
     putR2Object: async (_account: string, bucket: string, key: string, value: string) => {
       r2.set(`${bucket}/${key}`, value);
     },
-    removeRoutes: async () => {},
+    // Worker reads fall back to the provider process, which this fake models.
+    request: async (path: string): Promise<never> => {
+      throw new Error(`No Cloudflare API read expected: ${path}`);
+    },
   };
   const planningClient = {
     findZone: async (): Promise<never> => {

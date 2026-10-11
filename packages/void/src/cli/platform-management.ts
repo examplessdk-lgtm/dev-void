@@ -81,7 +81,6 @@ import {
   type PurgeResourcesClient,
   type PurgeResourcesCredential,
 } from './platform-teardown.ts';
-import { trackedPlatformWorkerTraffic } from './platform-traffic.ts';
 import {
   assertProjectZeroTrustAllowsUninstall,
   type PlatformProjectZeroTrustState,
@@ -105,7 +104,6 @@ type PlatformManagementClient = Pick<
   | 'listR2Buckets'
   | 'listWorkerNames'
   | 'putKvValue'
-  | 'removeRoutes'
 >;
 
 type PlatformUninstallClient = PlatformManagementClient &
@@ -793,7 +791,7 @@ export async function disablePlatform(
     writeInstallationManifest(manifest);
   }
   const alreadyDisabled = manifest.status === 'disabled';
-  const missing = await verifyPlatformMutationOwnership(
+  await verifyPlatformMutationOwnership(
     client,
     manifest,
     new Set([
@@ -813,7 +811,6 @@ export async function disablePlatform(
   }
   try {
     await saveRemoteManifest(next);
-    const zone = next.resources.find((resource) => resource.key === 'zone');
     const routing = requireResource(next, 'routing-kv');
     const trafficGeneration = currentTrafficGeneration(next);
     await client.putKvValue(
@@ -821,12 +818,6 @@ export async function disablePlatform(
       routing.id,
       PLATFORM_DISABLED_KEY,
       PLATFORM_DISABLED_VALUE,
-    );
-    const trackedTraffic = trackedPlatformWorkerTraffic(next);
-    await client.removeRoutes(
-      next.account.id,
-      !zone || missing.has(zone.key) ? null : zone.id,
-      trackedTraffic,
     );
     next = markTrafficAttachmentsRetained(next);
     if (!hasLifecycleStep(next, `disable:${trafficGeneration}:routes`)) {
@@ -1083,8 +1074,6 @@ export async function uninstallPlatform(
           { databaseUrl: dependencies.databaseUrl },
         );
         if (!missing.has(worker.key)) {
-          const trackedTraffic = trackedPlatformWorkerTraffic(next, new Set([worker.name]));
-          await client.removeRoutes(next.account.id, zone.id, trackedTraffic);
           next = markTrafficAttachmentsRetained(next);
           next = recordLifecycleStep(next, `uninstall:routes:${worker.key}`);
           await saveCheckpoint(next);
@@ -1897,6 +1886,9 @@ function updateResourceState(
   return recordInstallationResource(manifest, { ...resource, state }, new Date().toISOString());
 }
 
+// Cloudflare has no precondition for route or custom domain deletion, so even a
+// checked record id can be reused before DELETE. The routing KV gate blocks
+// traffic instead, and attachments stay for dashboard cleanup.
 function markTrafficAttachmentsRetained(
   manifest: PlatformInstallationManifest,
 ): PlatformInstallationManifest {

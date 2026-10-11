@@ -211,7 +211,6 @@ function client(manifest = remoteManifest()) {
         ? JSON.stringify(manifest)
         : null,
     putKvValue: async (_account: string, _namespace: string, _key: string, _value: string) => {},
-    removeRoutes: async () => {},
     getR2Object: async () => {
       const resource = manifest.resources.find((entry) => entry.kind === 'r2-bucket')!;
       return ownershipMarker(manifest, resource);

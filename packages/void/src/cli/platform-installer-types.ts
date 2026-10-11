@@ -175,6 +175,7 @@ export type PlatformDatabaseMigrationResult = Readonly<{
 
 export type InstallerClient = Pick<
   PlatformCloudflareClient,
+  | 'apiBaseUrl'
   | 'createDispatchNamespace'
   | 'createDnsRecord'
   | 'createAiGateway'
@@ -185,28 +186,22 @@ export type InstallerClient = Pick<
   | 'createQueue'
   | 'createR2Bucket'
   | 'createZone'
+  | 'deleteKvValue'
+  | 'getWorkerPlainTextBindings'
+  | 'listWorkerDomains'
+  | 'listWorkerNames'
+  | 'listWorkerRoutes'
+  | 'listWorkerServiceRoutes'
+  | 'publishWorkerCustomDomainsSafely'
+  | 'publishWorkerRoutesSafely'
   | 'putKvValue'
   | 'putR2Object'
-> &
-  Partial<
-    Pick<
-      PlatformCloudflareClient,
-      | 'request'
-      | 'apiBaseUrl'
-      | 'deleteKvValue'
-      | 'getWorkerPlainTextBindings'
-      | 'listWorkerDomains'
-      | 'listWorkerNames'
-      | 'listWorkerServiceRoutes'
-      | 'listWorkerRoutes'
-      | 'publishWorkerCustomDomainsSafely'
-      | 'publishWorkerRoutesSafely'
-      | 'removeRoutes'
-    >
-  >;
+  | 'request'
+>;
 
-export type WorkerInspectionClient = Partial<
-  Pick<PlatformCloudflareClient, 'getWorkerPlainTextBindings' | 'listWorkerNames'>
+export type WorkerInspectionClient = Pick<
+  PlatformCloudflareClient,
+  'getWorkerPlainTextBindings' | 'listWorkerNames'
 >;
 
 export type PlatformWorkerRollback = () => Promise<void>;
@@ -303,6 +298,18 @@ export type PlatformInstallerDependencies = Readonly<{
   ) => Promise<void>;
 }>;
 
+/** What installPlatform and its phases update while an installation runs. */
+export type PlatformInstallRunState = {
+  manifest: PlatformInstallationManifest;
+  plan: PlatformInstallPlan;
+  secrets: PlatformInstallationSecrets;
+  workerSecretUpdateIntent: PlatformWorkerSecretUpdateIntent | null;
+  workerCutoverGeneration: number;
+  workerRollbacks: Array<PlatformWorkerRollback>;
+  workerDeploymentCommitted: boolean;
+  authenticationEnforcementActive: boolean;
+};
+
 export type PlatformInstallationResult = Readonly<{
   emailOperationId?: string;
   manifest: PlatformInstallationManifest;
@@ -342,7 +349,6 @@ export type PlatformWorkerDeploymentOptions = Readonly<{
     origins: ReadonlyArray<CloudflareWorkerCustomDomainOrigin>,
   ) => Promise<void>;
   publishRoutes: (workerName: string, patterns: ReadonlyArray<string>) => Promise<void>;
-  removeCustomDomains: () => Promise<void>;
   retainNewWorker: () => Promise<void>;
   /** False uploads a new version even when the active one has identical input. */
   reuseMatchingVersion?: boolean;

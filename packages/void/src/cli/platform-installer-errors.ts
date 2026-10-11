@@ -19,10 +19,6 @@ export function assertCleanPlatformWrangler(
   }
 }
 
-export function cleanPlatformCommandResult(): CloudflareCommandResult {
-  return { status: 0, stderr: '', stdout: '' };
-}
-
 export function assertPlatformTriggerStabilization(
   result: Awaited<ReturnType<typeof stabilizeCloudflareVersionTriggers>>,
   workerName: string,

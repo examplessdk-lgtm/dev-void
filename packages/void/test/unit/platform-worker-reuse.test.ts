@@ -200,7 +200,6 @@ async function attemptReuse(input: {
       previousPublicEndpoints: true,
       publishCustomDomains: async () => {},
       publishRoutes: async () => {},
-      removeCustomDomains: async () => {},
       retainNewWorker,
       runner,
       workerExisted: true,

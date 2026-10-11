@@ -1,7 +1,6 @@
 import {
   recordInstallationStep,
   transitionInstallation,
-  type PlatformInstallationManifest,
   type PlatformLifecycleOperation,
 } from '@void/platform';
 import type { PlatformRuntimeManifest } from '@void/platform/installer';
@@ -22,19 +21,17 @@ import {
   type InstallationCheckpointWriter,
   type PlatformDatabaseLifecycleLock,
   type PlatformInstallerDependencies,
-  type PlatformInstallationSecrets,
   type PlatformInstallationResult,
+  type PlatformInstallRunState,
 } from './platform-installer-types.ts';
 import { type PlatformInstallPlan } from './platform-plan.ts';
 import { writeInstallationManifest } from './platform-registry.ts';
 
 export async function provisionInstallationServices(input: {
-  readonly plan: PlatformInstallPlan;
-  manifest: PlatformInstallationManifest;
+  readonly state: PlatformInstallRunState;
   readonly now: () => string;
   readonly releaseDatabaseLock: PlatformDatabaseLifecycleLock;
   readonly dependencies: PlatformInstallerDependencies;
-  readonly secrets: PlatformInstallationSecrets;
   readonly writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
   readonly checkpointOperation: (phase: PlatformLifecycleOperation['phase']) => Promise<void>;
   readonly externalHyperdriveOriginHash: string | undefined;
@@ -56,11 +53,10 @@ export async function provisionInstallationServices(input: {
     }
 > {
   const {
-    plan,
+    state,
     now,
     releaseDatabaseLock,
     dependencies,
-    secrets,
     writeRemoteInstallationCheckpoint,
     checkpointOperation,
     externalHyperdriveOriginHash,
@@ -69,6 +65,7 @@ export async function provisionInstallationServices(input: {
     sourcePlatformVersion,
     hadPriorWorkers,
   } = input;
+  const { plan, secrets } = state;
 
   const routingAction = plan.actions.find((action) => action.key === 'routing-kv')!;
   if (routingAction.action === 'adopt') {
@@ -76,22 +73,22 @@ export async function provisionInstallationServices(input: {
   }
   if (routingAction.action === 'reuse') {
     if (
-      !input.manifest.resources.some((resource) => resource.key === routingAction.key) &&
+      !state.manifest.resources.some((resource) => resource.key === routingAction.key) &&
       routingAction.id
     ) {
-      input.manifest = recordResource(
-        input.manifest,
+      state.manifest = recordResource(
+        state.manifest,
         routingAction,
         routingAction.id,
         'created',
         now(),
       );
-      writeInstallationManifest(input.manifest);
+      writeInstallationManifest(state.manifest);
     }
   } else {
-    input.manifest = recordProvisionIntent(input.manifest, routingAction, now());
-    writeInstallationManifest(input.manifest);
-    await releaseDatabaseLock.checkpoint?.(input.manifest);
+    state.manifest = recordProvisionIntent(state.manifest, routingAction, now());
+    writeInstallationManifest(state.manifest);
+    await releaseDatabaseLock.checkpoint?.(state.manifest);
     const routing = await createResource(
       dependencies.client,
       plan,
@@ -99,48 +96,48 @@ export async function provisionInstallationServices(input: {
       secrets.databaseUrl,
       '',
     );
-    input.manifest = recordResource(input.manifest, routingAction, routing.id, 'created', now());
-    writeInstallationManifest(input.manifest);
+    state.manifest = recordResource(state.manifest, routingAction, routing.id, 'created', now());
+    writeInstallationManifest(state.manifest);
   }
-  await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+  await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
 
   const zoneAction = plan.actions.find((action) => action.key === 'zone');
   let zone = plan.zone;
   if (zoneAction) {
     if (zoneAction.action === 'create') {
-      input.manifest = recordProvisionIntent(input.manifest, zoneAction, now());
-      writeInstallationManifest(input.manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+      state.manifest = recordProvisionIntent(state.manifest, zoneAction, now());
+      writeInstallationManifest(state.manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
       zone = await dependencies.client.createZone(plan.account.id, zoneAction.name);
     }
     if (!zone) {
       throw new Error('platform: Cloudflare did not return the platform zone.');
     }
     if (zoneAction.action === 'adopt') {
-      input.manifest = recordAdoptionIntent(input.manifest, zoneAction, zone.id, now());
-      writeInstallationManifest(input.manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+      state.manifest = recordAdoptionIntent(state.manifest, zoneAction, zone.id, now());
+      writeInstallationManifest(state.manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
     }
-    input.manifest = recordResource(
-      input.manifest,
+    state.manifest = recordResource(
+      state.manifest,
       zoneAction,
       zone.id,
       zoneAction.action === 'adopt'
         ? 'adopted'
-        : zoneAction.action === 'create' || hasProvisionIntent(input.manifest, zoneAction)
+        : zoneAction.action === 'create' || hasProvisionIntent(state.manifest, zoneAction)
           ? 'created'
           : undefined,
       now(),
     );
-    writeInstallationManifest(input.manifest);
-    await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+    writeInstallationManifest(state.manifest);
+    await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
     if (zone.status !== 'active') {
-      input.manifest = transitionInstallation(input.manifest, 'waiting-for-dns', now());
+      state.manifest = transitionInstallation(state.manifest, 'waiting-for-dns', now());
       await checkpointOperation('waiting-for-dns');
-      writeInstallationManifest(input.manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+      writeInstallationManifest(state.manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
       return {
-        manifest: input.manifest,
+        manifest: state.manifest,
         waitingForDns: true,
         waitingForSandboxDrain: false,
         zoneNameServers: zone.nameServers,
@@ -148,8 +145,8 @@ export async function provisionInstallationServices(input: {
     }
   }
   const zoneId = zone?.id ?? '';
-  input.manifest = await reconcilePlatformInstallationResources(
-    input.manifest,
+  state.manifest = await reconcilePlatformInstallationResources(
+    state.manifest,
     plan,
     secrets,
     zoneId,
@@ -158,12 +155,12 @@ export async function provisionInstallationServices(input: {
     now,
     writeRemoteInstallationCheckpoint,
     (next) => {
-      input.manifest = next;
+      state.manifest = next;
     },
   );
 
   dependencies.onProgress?.('Verifying uncached authentication database reads');
-  const authenticationDatabase = input.manifest.resources.find(
+  const authenticationDatabase = state.manifest.resources.find(
     (resource) => resource.key === 'hyperdrive',
   );
   if (!authenticationDatabase) {
@@ -176,8 +173,8 @@ export async function provisionInstallationServices(input: {
     secrets.databaseUrl,
   );
 
-  input.manifest = await preparePlatformDatabaseSchema(
-    input.manifest,
+  state.manifest = await preparePlatformDatabaseSchema(
+    state.manifest,
     runtime,
     runtimeDirectory,
     sourcePlatformVersion,
@@ -188,7 +185,7 @@ export async function provisionInstallationServices(input: {
     now,
     writeRemoteInstallationCheckpoint,
     (next) => {
-      input.manifest = next;
+      state.manifest = next;
     },
   );
 
@@ -218,25 +215,25 @@ export async function provisionInstallationServices(input: {
   const sandboxDrainState = sandboxDrainPreparation?.state ?? 'complete';
   if (
     targetSandboxDrainProtocol >= 1 &&
-    (input.manifest.safetyProtocols?.sandboxDrain ?? 0) < targetSandboxDrainProtocol
+    (state.manifest.safetyProtocols?.sandboxDrain ?? 0) < targetSandboxDrainProtocol
   ) {
-    input.manifest = {
-      ...input.manifest,
+    state.manifest = {
+      ...state.manifest,
       safetyProtocols: { sandboxDrain: targetSandboxDrainProtocol },
       updatedAt: now(),
     };
-    writeInstallationManifest(input.manifest);
-    await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
+    writeInstallationManifest(state.manifest);
+    await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
   }
 
-  input.manifest = transitionInstallation(input.manifest, 'deploying', now());
+  state.manifest = transitionInstallation(state.manifest, 'deploying', now());
   await checkpointOperation('deploying');
-  writeInstallationManifest(input.manifest);
+  writeInstallationManifest(state.manifest);
   const ids = Object.fromEntries(
-    input.manifest.resources.map((resource) => [resource.key, resource.id]),
+    state.manifest.resources.map((resource) => [resource.key, resource.id]),
   );
   const bootstrapStep = 'bootstrap-access:v1';
-  if (!input.manifest.steps.some((step) => step.key === bootstrapStep)) {
+  if (!state.manifest.steps.some((step) => step.key === bootstrapStep)) {
     const routingKv = requireId(ids, 'routing-kv');
     await dependencies.client.putKvValue(plan.account.id, routingKv, 'signup:enabled', 'true');
     await dependencies.client.putKvValue(
@@ -245,8 +242,8 @@ export async function provisionInstallationServices(input: {
       'signup:allowlist',
       JSON.stringify([]),
     );
-    input.manifest = recordInstallationStep(
-      input.manifest,
+    state.manifest = recordInstallationStep(
+      state.manifest,
       {
         completedAt: now(),
         key: bootstrapStep,
@@ -254,7 +251,7 @@ export async function provisionInstallationServices(input: {
       },
       now(),
     );
-    writeInstallationManifest(input.manifest);
+    writeInstallationManifest(state.manifest);
   }
   const entrypoints = Object.fromEntries(
     Object.entries(runtime.artifacts).map(([key, artifact]) => [

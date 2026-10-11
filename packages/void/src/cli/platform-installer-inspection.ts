@@ -168,9 +168,6 @@ export async function inspectNewPlatformWorker(
   resourceKey: string,
   workerName: string,
 ): Promise<'missing' | 'owned'> {
-  if (!client.listWorkerNames || !client.getWorkerPlainTextBindings) {
-    throw new Error('platform: Cloudflare Worker ownership inspection is unavailable.');
-  }
   const workerNames = await client.listWorkerNames(accountId);
   if (!workerNames.includes(workerName)) {
     return 'missing';

@@ -401,11 +401,6 @@ export async function inventoryUnmanagedPlatformWorkerTraffic(
   plan: PlatformInstallPlan,
   workerName: string,
 ): Promise<ReadonlyArray<unknown>> {
-  if (!client.listWorkerDomains || !client.listWorkerServiceRoutes) {
-    throw new Error(
-      `platform: Cloudflare traffic inventory is required before updating Worker ${JSON.stringify(workerName)}.`,
-    );
-  }
   const [routes, domains] = await Promise.all([
     client.listWorkerServiceRoutes(plan.account.id, workerName),
     client.listWorkerDomains(plan.account.id),
@@ -537,18 +532,6 @@ function requiredBoolean(value: unknown, field: string): boolean {
     throw new Error(`platform: ${field} must be a boolean.`);
   }
   return value;
-}
-
-export async function publishPlatformWorkerCustomDomains(
-  client: InstallerClient,
-  accountId: string,
-  workerName: string,
-  origins: ReadonlyArray<CloudflareWorkerCustomDomainOrigin>,
-): Promise<void> {
-  if (!client.publishWorkerCustomDomainsSafely) {
-    throw new Error('platform: Safe Cloudflare Custom Domain publication is unavailable.');
-  }
-  await client.publishWorkerCustomDomainsSafely(accountId, workerName, origins);
 }
 
 function uniqueTriggerRoutes(routes: ReadonlyArray<unknown>): ReadonlyArray<unknown> {

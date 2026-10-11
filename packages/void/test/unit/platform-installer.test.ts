@@ -103,14 +103,34 @@ import {
   completePlatformSetupDraft,
   savePlatformSetupDraft,
 } from '../../src/cli/platform-setup-draft.ts';
+import { resolvePinnedApiBaseUrl } from '../../src/cli/provision.ts';
 
 const directories: Array<string> = [];
 type InstallArguments = Parameters<typeof installPlatformImplementation>;
 type InstallClient = InstallArguments[3]['client'];
+type DefaultedClientMethods =
+  | 'apiBaseUrl'
+  | 'deleteKvValue'
+  | 'disableHyperdriveCaching'
+  | 'getHyperdriveConfig'
+  | 'getWorkerPlainTextBindings'
+  | 'listWorkerDomains'
+  | 'listWorkerNames'
+  | 'listWorkerRoutes'
+  | 'listWorkerServiceRoutes'
+  | 'publishWorkerCustomDomainsSafely'
+  | 'publishWorkerRoutesSafely'
+  | 'request';
 type TestInstallerDependencies = Omit<InstallArguments[3], 'client'> & {
-  client: Omit<InstallClient, 'getHyperdriveConfig' | 'disableHyperdriveCaching'> &
-    Partial<Pick<InstallClient, 'getHyperdriveConfig' | 'disableHyperdriveCaching'>>;
+  client: Omit<InstallClient, DefaultedClientMethods> &
+    Partial<Pick<InstallClient, DefaultedClientMethods>>;
 };
+
+function unexpectedCloudflareCall(name: string) {
+  return async (): Promise<never> => {
+    throw new Error(`Unexpected Cloudflare call: ${name}`);
+  };
+}
 
 // These lifecycle fixtures model an already uncached dedicated database. Cache
 // drift, adoption, and verification failures are exercised by platform-auth-database.test.ts.
@@ -123,6 +143,18 @@ function installPlatform(
   return installPlatformImplementation(plan, secrets, existing, {
     ...dependencies,
     client: {
+      apiBaseUrl: resolvePinnedApiBaseUrl(),
+      deleteKvValue: async () => {},
+      getWorkerPlainTextBindings: unexpectedCloudflareCall('getWorkerPlainTextBindings'),
+      listWorkerDomains: unexpectedCloudflareCall('listWorkerDomains'),
+      listWorkerNames: unexpectedCloudflareCall('listWorkerNames'),
+      listWorkerRoutes: unexpectedCloudflareCall('listWorkerRoutes'),
+      listWorkerServiceRoutes: unexpectedCloudflareCall('listWorkerServiceRoutes'),
+      publishWorkerCustomDomainsSafely: unexpectedCloudflareCall(
+        'publishWorkerCustomDomainsSafely',
+      ),
+      publishWorkerRoutesSafely: unexpectedCloudflareCall('publishWorkerRoutesSafely'),
+      request: unexpectedCloudflareCall('request'),
       ...dependencies.client,
       getHyperdriveConfig:
         dependencies.client.getHyperdriveConfig ??
