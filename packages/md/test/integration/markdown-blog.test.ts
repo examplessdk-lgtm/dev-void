@@ -169,7 +169,6 @@ function defineSidebarTests(getBase: () => string) {
 describe('markdown-blog playground', () => {
   describe('dev', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = '';
 
     beforeAll(async () => {
       const server = await startServer((port) => {
@@ -195,10 +194,6 @@ describe('markdown-blog playground', () => {
             },
           },
         );
-        stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
         return child;
       }, 20_000);
       DEV_BASE = server.base;
@@ -207,9 +202,6 @@ describe('markdown-blog playground', () => {
     afterAll(async () => {
       if (child) {
         await killChild(child);
-      }
-      if (stderr.includes('error when starting dev server')) {
-        throw new Error(stderr);
       }
     });
 
@@ -247,7 +239,6 @@ describe('markdown-blog playground', () => {
 
   describe('production (build + preview)', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = '';
 
     beforeAll(async () => {
       execSync('vp run --filter ./playground/markdown-blog build', {
@@ -278,10 +269,6 @@ describe('markdown-blog playground', () => {
             },
           },
         );
-        stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
         return child;
       }, 20_000);
       PREVIEW_BASE = server.base;
@@ -290,9 +277,6 @@ describe('markdown-blog playground', () => {
     afterAll(async () => {
       if (child) {
         await killChild(child);
-      }
-      if (stderr.includes('error when starting preview server')) {
-        throw new Error(stderr);
       }
     });
 

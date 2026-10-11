@@ -8,6 +8,79 @@ type TestWindow = Window & {
   __preventedNavigate?: boolean;
 };
 
+/**
+ * Check the adapter's dev SSR output. The JSON, mutation and NDJSON responses come from void
+ * core, so only the React suite checks them.
+ */
+export function registerSharedDevSsrTest({
+  getBase,
+  framework,
+}: {
+  getBase: () => string;
+  /** The playground's framework name, as in `Vue Pages Demo`. */
+  framework: string;
+}): void {
+  it('dev: SSR renders pages, island pages and deferred props', async () => {
+    const base = getBase();
+    const appName = `${framework} Pages Demo`;
+
+    const rootRes = await fetch(`${base}/`);
+    expect(rootRes.status).toBe(200);
+    const rootHtml = await rootRes.text();
+    expect(rootHtml).toContain('__VOID_PAGE_DATA__');
+    expect(rootHtml).toContain('Welcome');
+    expect(rootHtml).toContain(appName); // shared data from middleware
+
+    // scriptProbe tries to close the inline page-data <script> tag early.
+    const probe = '</script><script>alert(1)</script>  &';
+    const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    expect(probeMatch).not.toBeNull();
+    const probeJson = probeMatch![1];
+    expect(probeJson).not.toMatch(/<\/script/i);
+    expect(JSON.parse(probeJson).shared.scriptProbe).toBe(probe);
+    expect(rootHtml).toContain(`This is the ${framework} Pages playground.`);
+
+    const usersRes = await fetch(`${base}/users`);
+    expect(usersRes.status).toBe(200);
+    const usersHtml = await usersRes.text();
+    expect(usersHtml).toContain('__VOID_PAGE_DATA__');
+    expect(usersHtml).toContain('Alice');
+    expect(usersHtml).toContain('Bob');
+    expect(usersHtml).toContain(appName); // layout with shared data
+
+    const userRes = await fetch(`${base}/users/1`);
+    expect(userRes.status).toBe(200);
+    const userHtml = await userRes.text();
+    expect(userHtml).toContain('Alice');
+    expect(userHtml).toContain('alice@example.com');
+
+    const blogRes = await fetch(`${base}/blog`);
+    expect(blogRes.status).toBe(200);
+    const blogHtml = await blogRes.text();
+    expect(blogHtml).toContain('data-island=');
+    expect(blogHtml).toContain('data-props=');
+    expect(blogHtml).toContain('data-hydrate=');
+    expect(blogHtml).not.toContain('__VOID_PAGE_DATA__');
+    expect(blogHtml).toContain('Hello World');
+    expect(blogHtml).toContain('Second Post');
+    expect(blogHtml).toContain('Count:');
+
+    const detailRes = await fetch(`${base}/blog/hello-world`);
+    expect(detailRes.status).toBe(200);
+    const detailHtml = await detailRes.text();
+    expect(detailHtml).toContain('Hello World');
+    expect(detailHtml).toContain('First post');
+    expect(detailHtml).not.toContain('__VOID_PAGE_DATA__');
+
+    const deferredSsr = await fetch(`${base}/deferred`);
+    const deferredHtml = await deferredSsr.text();
+    expect(deferredHtml).toContain('__VOID_PAGE_DATA__');
+    expect(deferredHtml).toContain('Deferred Page');
+    expect(deferredHtml).toContain('window.__resolveDeferred("stats"');
+    expect(deferredHtml).toContain('"count":42');
+  });
+}
+
 /** Run the full browser contract in preview and navigation/history smoke tests in dev. */
 export function registerSharedClientTests({
   getBase,

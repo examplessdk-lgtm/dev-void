@@ -16,6 +16,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { basename, join, relative } from 'node:path/posix';
 import { setTimeout as delay } from 'node:timers/promises';
 import { stripVTControlCharacters } from 'node:util';
+import crossSpawn from 'cross-spawn';
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower
@@ -233,6 +234,40 @@ export async function startServer(
       console.warn(`Another process took port ${port}; starting the server on a new port.`);
     }
   }
+}
+
+/** Starts a workspace playground's `dev` or `preview` script with {@link startServer}. */
+export function startPlaygroundServer(
+  workspaceRoot: string,
+  playground: string,
+  script: 'dev' | 'preview',
+  timeoutMs: number,
+  options?: StartServerOptions,
+): Promise<StartedServer> {
+  return startServer(
+    (port) =>
+      crossSpawn(
+        'vp',
+        [
+          'run',
+          '--filter',
+          `./playground/${playground}`,
+          script,
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--strictPort',
+        ],
+        {
+          cwd: workspaceRoot,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+        },
+      ),
+    timeoutMs,
+    options,
+  );
 }
 
 export async function waitForServer(

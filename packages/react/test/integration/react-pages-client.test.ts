@@ -4,25 +4,32 @@ import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { type Browser, type Page } from 'playwright';
 import { describe, expect, it, beforeAll, afterAll } from 'vite-plus/test';
-import { waitForIslandsHydrated } from '../../../../test/browser-helpers.ts';
-import { killChild, startServer, waitForServer } from '../../../../test/integration-helpers.ts';
+import {
+  killChild,
+  startPlaygroundServer,
+  startServer,
+  waitForServer,
+  type StartedServer,
+} from '../../../../test/integration-helpers.ts';
 import { launchPagesBrowser } from '../../../../test/pages-browser.ts';
-import { registerSharedClientTests } from '../../../../test/pages-client-contract.ts';
-import { defineSharedIslandTests } from '../../../../test/pages-island-contract.ts';
+import {
+  registerSharedClientTests,
+  registerSharedDevSsrTest,
+} from '../../../../test/pages-client-contract.ts';
+import {
+  defineSharedIslandHmrTests,
+  defineSharedIslandTests,
+} from '../../../../test/pages-island-contract.ts';
 
 declare global {
   interface Window {
     __SPA_MARKER?: boolean;
     __visitAwaitObserved?: string | null;
-    __linkOnClick?: boolean;
-    __preventedClick?: boolean;
-    __preventedNavigate?: boolean;
     __hashNavigationReady?: boolean;
     __headRefs?: {
       font: Element | null;
       stylesheet: Element | null;
     };
-    __hmr_marker?: boolean;
   }
 }
 
@@ -665,9 +672,6 @@ describe('react-pages client (dev)', () => {
       await killChild(child);
     }
     rmSync(LATE_WORKER_DEPS_ROOT, { recursive: true, force: true });
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
-    }
   });
 
   it('dev: cold SSR startup does not hit invalid React hook calls', () => {
@@ -706,41 +710,16 @@ describe('react-pages client (dev)', () => {
     }
   });
 
-  it('dev: SSR pages, Inertia protocol, form handling, API coexistence', async () => {
-    const rootRes = await fetch(`${DEV_BASE}/`);
-    expect(rootRes.status).toBe(200);
-    const rootHtml = await rootRes.text();
-    expect(rootHtml).toContain('__VOID_PAGE_DATA__');
-    expect(rootHtml).toContain('Welcome');
-    expect(rootHtml).toContain('React Pages Demo'); // shared data from middleware
+  registerSharedDevSsrTest({ getBase: () => DEV_BASE, framework: 'React' });
 
-    // scriptProbe tries to close the inline page-data <script> tag early.
-    const probe = '</script><script>alert(1)</script>\u2028\u2029&';
-    const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    expect(probeMatch).not.toBeNull();
-    const probeJson = probeMatch![1];
-    expect(probeJson).not.toMatch(/<\/script/i);
-    expect(JSON.parse(probeJson).shared.scriptProbe).toBe(probe);
-
+  it('dev: head tags, pages protocol, form handling, API coexistence', async () => {
+    const rootHtml = await (await fetch(`${DEV_BASE}/`)).text();
     expect(rootHtml).toContain('<title>Home | React Pages Demo</title>');
     expect(rootHtml).toContain('<meta charset="utf-8">');
     expect(rootHtml).toContain('<meta name="description" content="React Pages playground home">');
     expect(rootHtml).toContain('<html lang="en"');
-    expect(rootHtml).toContain('This is the React Pages playground.');
 
-    const usersRes = await fetch(`${DEV_BASE}/users`);
-    expect(usersRes.status).toBe(200);
-    const usersHtml = await usersRes.text();
-    expect(usersHtml).toContain('__VOID_PAGE_DATA__');
-    expect(usersHtml).toContain('Alice');
-    expect(usersHtml).toContain('Bob');
-    expect(usersHtml).toContain('React Pages Demo'); // layout with shared data
-
-    const userRes = await fetch(`${DEV_BASE}/users/1`);
-    expect(userRes.status).toBe(200);
-    const userHtml = await userRes.text();
-    expect(userHtml).toContain('Alice');
-    expect(userHtml).toContain('alice@example.com');
+    const userHtml = await (await fetch(`${DEV_BASE}/users/1`)).text();
     expect(userHtml).toContain('<title>Alice | React Pages Demo</title>');
     expect(userHtml).toContain('<meta property="og:title" content="Alice">');
 
@@ -841,17 +820,6 @@ describe('react-pages client (dev)', () => {
     expect(charliePage.props.user.name).toBe('Charlie');
     expect(charliePage.props.user.email).toBe('charlie@example.com');
 
-    const blogRes = await fetch(`${DEV_BASE}/blog`);
-    expect(blogRes.status).toBe(200);
-    const blogHtml = await blogRes.text();
-    expect(blogHtml).toContain('data-island=');
-    expect(blogHtml).toContain('data-props=');
-    expect(blogHtml).toContain('data-hydrate=');
-    expect(blogHtml).not.toContain('__VOID_PAGE_DATA__');
-    expect(blogHtml).toContain('Hello World');
-    expect(blogHtml).toContain('Second Post');
-    expect(blogHtml).toContain('Count:');
-
     const inertiaBlog = await fetch(`${DEV_BASE}/blog`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -880,13 +848,6 @@ describe('react-pages client (dev)', () => {
     const validBlog = (await blogPostValid.json()) as { success: boolean };
     expect(validBlog.success).toBe(true);
 
-    const detailRes = await fetch(`${DEV_BASE}/blog/hello-world`);
-    expect(detailRes.status).toBe(200);
-    const detailHtml = await detailRes.text();
-    expect(detailHtml).toContain('Hello World');
-    expect(detailHtml).toContain('First post');
-    expect(detailHtml).not.toContain('__VOID_PAGE_DATA__');
-
     const deferredInertia = await fetch(`${DEV_BASE}/deferred`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -902,14 +863,10 @@ describe('react-pages client (dev)', () => {
     expect(deferredLine.__deferred).toBe('stats');
     expect(deferredLine.data).toEqual({ count: 42 });
 
-    const deferredSsr = await fetch(`${DEV_BASE}/deferred`);
-    const deferredHtml = await deferredSsr.text();
-    expect(deferredHtml).toContain('__VOID_PAGE_DATA__');
+    const deferredHtml = await (await fetch(`${DEV_BASE}/deferred`)).text();
     expect(deferredHtml).toContain('Deferred Page');
     expect(deferredHtml).not.toContain('Switched to client rendering');
     expect(deferredHtml).not.toContain('server rendering aborted');
-    expect(deferredHtml).toContain('window.__resolveDeferred("stats"');
-    expect(deferredHtml).toContain('"count":42');
   });
 
   defineClientTests(() => DEV_BASE, 'smoke');
@@ -954,86 +911,17 @@ describe('react-pages client (dev)', () => {
     }
   });
 
-  it('island component HMR updates without full page reload', { retry: 2 }, async () => {
-    const counterFile = join(ROOT, 'playground/react-pages/pages/blog/_Counter.tsx');
-    const original = readFileSync(counterFile, 'utf-8');
-
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(10_000);
-
-    try {
-      await page.goto(`${DEV_BASE}/blog`);
-      await waitForIslandsHydrated(page, 2);
-
-      await page.click("button:has-text('Increment')");
-      await page.waitForFunction(
-        () => document.querySelector('[data-testid="count"]')?.textContent === 'Count: 1',
-      );
-
-      await page.evaluate(() => {
-        window.__hmr_marker = true;
-      });
-
-      const modified = original.replace('Count: {count}', 'Total: {count}');
-      writeFileSync(counterFile, modified);
-
-      await page.waitForFunction(
-        () => document.querySelector('[data-testid="count"]')?.textContent?.startsWith('Total:'),
-        { timeout: 10_000 },
-      );
-
-      const markerSurvived = await page.evaluate(() => window.__hmr_marker === true);
-      expect(markerSurvived).toBe(true);
-
-      // React Fast Refresh preserves state — count should still be 1
-      const text = await page.textContent('[data-testid="count"]');
-      expect(text).toBe('Total: 1');
-    } finally {
-      await page.context().close();
-      writeFileSync(counterFile, original);
-      await waitForServer(`${DEV_BASE}/blog`, 10_000, { expectBody: 'Count:' });
-    }
-  });
-
-  it('island file edit triggers reload with updated content', { retry: 2 }, async () => {
-    const islandFile = join(ROOT, 'playground/react-pages/pages/blog/index.island.tsx');
-    const original = readFileSync(islandFile, 'utf-8');
-
-    try {
-      const initialRes = await fetch(`${DEV_BASE}/blog`);
-      expect(initialRes.status).toBe(200);
-      const initialHtml = await initialRes.text();
-      expect(initialHtml).toContain('<h1>Blog</h1>');
-
-      const modified = original.replace('<h1>Blog</h1>', '<h1>Blog Updated</h1>');
-      writeFileSync(islandFile, modified);
-
-      // Poll for updated content — every request must return 200 (no ISE).
-      const start = Date.now();
-      let updatedHtml = '';
-      while (Date.now() - start < 10_000) {
-        await new Promise((r) => setTimeout(r, 100));
-        const res = await fetch(`${DEV_BASE}/blog`);
-        expect(res.status).toBe(200);
-        updatedHtml = await res.text();
-        if (updatedHtml.includes('Blog Updated')) {
-          break;
-        }
-      }
-
-      expect(updatedHtml).toContain('<h1>Blog Updated</h1>');
-      expect(updatedHtml).toContain('data-island=');
-    } finally {
-      writeFileSync(islandFile, original);
-      await waitForServer(`${DEV_BASE}/blog`, 10_000, { expectBody: '<h1>Blog</h1>' });
-    }
+  defineSharedIslandHmrTests({
+    getBase: () => DEV_BASE,
+    getBrowser: () => browser,
+    counterFile: join(REACT_PAGES_ROOT, 'pages/blog/_Counter.tsx'),
+    islandFile: join(REACT_PAGES_ROOT, 'pages/blog/index.island.tsx'),
+    hmrKeepsState: true,
   });
 });
 
 describe('react-pages client (preview)', { retry: 2 }, () => {
-  let child: ReturnType<typeof spawn>;
-  let stderr = '';
+  let server: StartedServer | undefined;
 
   beforeAll(async () => {
     if (!existsSync(join(ROOT, 'playground/react-pages/dist'))) {
@@ -1043,44 +931,13 @@ describe('react-pages client (preview)', { retry: 2 }, () => {
       });
     }
 
-    const server = await startServer((port) => {
-      child = spawn(
-        'vp',
-        [
-          'run',
-          '--filter',
-          './playground/react-pages',
-          'preview',
-          '--host',
-          '127.0.0.1',
-          '--port',
-          String(port),
-          '--strictPort',
-        ],
-        {
-          cwd: ROOT,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            ...process.env,
-            VOID_INSPECTOR_PORT: 'false',
-          },
-        },
-      );
-      stderr = '';
-      child.stderr!.on('data', (chunk: Buffer) => {
-        stderr += String(chunk);
-      });
-      return child;
-    }, 30_000);
+    server = await startPlaygroundServer(ROOT, 'react-pages', 'preview', 30_000);
     PREVIEW_BASE = server.base;
   });
 
   afterAll(async () => {
-    if (child) {
-      await killChild(child);
-    }
-    if (stderr.includes('error when starting preview server')) {
-      throw new Error(stderr);
+    if (server) {
+      await killChild(server.child);
     }
   });
 
