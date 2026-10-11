@@ -25,8 +25,8 @@ export function frameworkTriggersDispatchPath(root: string): string {
  */
 export function writeFrameworkTriggersDispatch(root: string, devTriggerToken: string): void {
   const paths = readProjectPaths(root);
-  const jobs = scanJobsSync(root, paths.cronsDir);
-  const queues = scanQueuesSync(root, paths.queuesDir);
+  const jobs = scanJobsSync(paths.cronsDir);
+  const queues = scanQueuesSync(paths.queuesDir);
   const target = frameworkTriggersDispatchPath(root);
   mkdirSync(dirname(target), { recursive: true });
   // Owner-only, like `.void/dev-trigger-token`: this module embeds the same

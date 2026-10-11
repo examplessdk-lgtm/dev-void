@@ -6,10 +6,12 @@ import { scanQueuesSync } from '../../src/queues/scan.ts';
 
 describe('scanQueuesSync', () => {
   let root: string;
+  let queuesDir: string;
 
   beforeEach(() => {
     root = join(tmpdir(), `queue-scan-test-${Date.now()}`);
-    mkdirSync(join(root, 'queues'), { recursive: true });
+    queuesDir = join(root, 'queues');
+    mkdirSync(queuesDir, { recursive: true });
   });
 
   afterEach(() => {
@@ -25,7 +27,7 @@ export const retryDelay = 30;
 export default defineQueue(async (batch, env) => {});`,
     );
 
-    const queues = scanQueuesSync(root);
+    const queues = scanQueuesSync(queuesDir);
     expect(queues).toHaveLength(1);
     expect(queues[0].maxRetries).toBe(5);
     expect(queues[0].retryDelay).toBe(30);
@@ -38,7 +40,7 @@ export default defineQueue(async (batch, env) => {});`,
 export default defineQueue(async (batch, env) => {});`,
     );
 
-    const queues = scanQueuesSync(root);
+    const queues = scanQueuesSync(queuesDir);
     expect(queues).toHaveLength(1);
     expect(queues[0].maxRetries).toBeUndefined();
     expect(queues[0].retryDelay).toBeUndefined();
@@ -55,7 +57,7 @@ export const retryDelay = 60;
 export default defineQueue(async (batch, env) => {});`,
     );
 
-    const queues = scanQueuesSync(root);
+    const queues = scanQueuesSync(queuesDir);
     expect(queues).toHaveLength(1);
     expect(queues[0].maxBatchSize).toBe(50);
     expect(queues[0].maxBatchTimeout).toBe(10);
@@ -71,7 +73,7 @@ const example = 'export const retryDelay = 50';
 export const maxRetries = 3 as const;
 export default async () => {};`,
     );
-    expect(scanQueuesSync(root)).toMatchObject([
+    expect(scanQueuesSync(queuesDir)).toMatchObject([
       { maxBatchSize: undefined, maxRetries: 3, retryDelay: undefined },
     ]);
   });
@@ -81,7 +83,7 @@ export default async () => {};`,
       join(root, 'queues', 'basic.ts'),
       'export const maxBatchSize = 2 + 3; export default async () => {};',
     );
-    expect(() => scanQueuesSync(root)).toThrow('maxBatchSize');
+    expect(() => scanQueuesSync(queuesDir)).toThrow('maxBatchSize');
   });
 
   it('normalizes nested paths while preserving binding derivation', () => {
@@ -91,7 +93,7 @@ export default async () => {};`,
       `export default async () => {};`,
     );
 
-    expect(scanQueuesSync(root)).toEqual([
+    expect(scanQueuesSync(queuesDir)).toEqual([
       {
         filePath: 'order/notifications.ts',
         name: 'order-notifications',
@@ -105,7 +107,7 @@ export default async () => {};`,
     writeFileSync(join(root, 'queues', 'order-notifications.ts'), 'export default {};');
     writeFileSync(join(root, 'queues', 'order', 'notifications.ts'), 'export default {};');
 
-    expect(() => scanQueuesSync(root)).toThrow(
+    expect(() => scanQueuesSync(queuesDir)).toThrow(
       [
         'queue: Multiple queue files resolve to the same queue name:',
         '  "order-notifications": "order-notifications.ts", "order/notifications.ts"',

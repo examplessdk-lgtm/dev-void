@@ -17,8 +17,8 @@ export function devTriggersHintPlugin(root: string, devTriggerToken: string): Pl
     apply: 'serve',
     configureServer(server) {
       const paths = readProjectPaths(root);
-      const jobs = scanJobsSync(root, paths.cronsDir);
-      const queues = scanQueuesSync(root, paths.queuesDir);
+      const jobs = scanJobsSync(paths.cronsDir);
+      const queues = scanQueuesSync(paths.queuesDir);
       if (jobs.length === 0 && queues.length === 0) {
         return;
       }

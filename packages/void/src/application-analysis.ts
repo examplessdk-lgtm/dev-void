@@ -71,8 +71,8 @@ export function analyzeApplicationSync(
   };
   const dialect = getDatabaseDialect(config);
   const migrations = collectMigrations(paths.migrationsDir);
-  const jobs = scanJobsSync(root, paths.cronsDir);
-  const queues = scanQueuesSync(root, paths.queuesDir);
+  const jobs = scanJobsSync(paths.cronsDir);
+  const queues = scanQueuesSync(paths.queuesDir);
   const allWebsockets = scanWebSocketRoutesSync(root, paths);
   const websockets = allWebsockets.filter((route) =>
     isRouteEnabledForEnvironment(route, environment),
