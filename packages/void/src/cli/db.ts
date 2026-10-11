@@ -1,9 +1,17 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { confirm, isCancel, outro, log } from '@voidzero-dev/vite-plus-prompts';
-import { basename, extname, join, relative, resolve } from 'pathslash';
+import { confirm, isCancel, outro, log, text } from '@voidzero-dev/vite-plus-prompts';
+import { basename, dirname, extname, join, relative, resolve } from 'pathslash';
 import {
   readConfig,
   getDatabaseDialect,
@@ -18,11 +26,7 @@ import {
   stripSqlExt,
   writeJournal,
 } from '../migrations/collect.ts';
-import {
-  assertJournalCoherence,
-  listDrizzleArtifacts,
-  validateMigrations,
-} from '../migrations/validate.ts';
+import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
 import { detectFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { SeedFn } from '../runtime/seed.ts';
@@ -63,12 +67,15 @@ export function getLocalD1Target(root: string): LocalD1Target {
     detected && (detected.class === 'b' || detected.class === 'c')
       ? join(root, '.wrangler', 'state')
       : join(root, '.void');
-  const bindingName = resolveBindingNames(readConfig(root).inference?.bindings)?.d1 ?? 'DB';
   return resolveLocalD1Target(root, {
-    bindingName,
+    bindingName: configuredD1Binding(root),
     defaultPersistRoot,
     readPersistState: true,
   });
+}
+
+function configuredD1Binding(root: string): string {
+  return resolveBindingNames(readConfig(root).inference?.bindings)?.d1 ?? 'DB';
 }
 
 function runDrizzleKit(root: string, args: Array<string>): void {
@@ -131,29 +138,18 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function getPgUrl(root: string): string {
-  const vars = loadLocalEnv(root);
-  const url = vars.DATABASE_URL;
-  if (!url) {
-    throw new Error(
-      'DATABASE_URL not found in .env. Add it to connect to your local PostgreSQL database.',
-    );
-  }
-  return url;
-}
-
-function getMySqlUrl(root: string): string {
+function getLocalDatabaseUrl(root: string, dialect: 'postgresql' | 'mysql'): string {
   const url = loadLocalEnv(root).DATABASE_URL;
   if (!url) {
     throw new Error(
-      'DATABASE_URL not found in .env. Add it to connect to your local MySQL database.',
+      `DATABASE_URL not found in .env. Add it to connect to your local ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} database.`,
     );
   }
   return url;
 }
 
 async function withPgClient<T>(root: string, fn: (client: PgClient) => Promise<T>): Promise<T> {
-  const url = getPgUrl(root);
+  const url = getLocalDatabaseUrl(root, 'postgresql');
   const { Client } = await import('pg');
   const client: PgClient = new Client({ connectionString: url });
   await client.connect();
@@ -169,7 +165,10 @@ async function withMySqlClient<T>(
   fn: (client: MySqlClient) => Promise<T>,
 ): Promise<T> {
   const { createConnection } = await import('mysql2/promise');
-  const connection = await createConnection({ uri: getMySqlUrl(root), multipleStatements: true });
+  const connection = await createConnection({
+    uri: getLocalDatabaseUrl(root, 'mysql'),
+    multipleStatements: true,
+  });
   const client: MySqlClient = {
     async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
       sql: string,
@@ -225,7 +224,7 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'studio') {
     await runStudio(root, dialect, args.remote);
   } else if (args.action === 'set-url') {
-    await runSetUrl(root);
+    await runSetUrl(root, dialect);
   } else if (args.action === 'connect') {
     await runConnect(root, dialect, args);
   } else if (args.action === 'rename-migrations') {
@@ -342,16 +341,14 @@ async function runConnect(
   }
 
   if (!connectionString) {
-    const { text: promptText, isCancel: isCancelCheck } =
-      await import('@voidzero-dev/vite-plus-prompts');
-    const answer = await promptText({
+    const answer = await text({
       message: `Enter your ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} connection string:`,
       placeholder:
         dialect === 'mysql'
           ? 'mysql://user:pass@host:3306/database'
           : 'postgresql://user:pass@host:5432/database',
     });
-    if (isCancelCheck(answer)) {
+    if (isCancel(answer)) {
       process.exit(0);
     }
     connectionString = answer as string;
@@ -385,15 +382,13 @@ async function runConnect(
 
 async function runPush(root: string, dialect: DatabaseDialect): Promise<void> {
   if (dialect !== 'sqlite') {
-    const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
+    const url = getLocalDatabaseUrl(root, dialect);
     await runDrizzleKitWithDatabaseUrl(root, url, dialect, 'push');
     printSuccess('Database schema pushed.');
     return;
   }
 
   const { writeDrizzleConfig } = await import('../drizzle/config.ts');
-  const { mkdirSync } = await import('node:fs');
-  const { dirname } = await import('pathslash');
   const { databasePath: dbPath } = getLocalD1Target(root);
   mkdirSync(dirname(dbPath), { recursive: true });
   const configPath = writeDrizzleConfig(root, dbPath);
@@ -462,42 +457,27 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
     return;
   }
 
-  let localApplied: Array<{ name: string }>;
+  let localApplied: Array<string>;
   if (dialect === 'postgresql') {
     try {
-      localApplied = await withPgClient(root, async (client) => {
-        try {
-          const result = await client.query<{ name: string }>(
-            'SELECT name FROM _void_migrations ORDER BY name',
-          );
-          return result.rows;
-        } catch {
-          return [];
-        }
-      });
+      const { readPgAppliedMigrations } = await import('../migrations/runner-pg.ts');
+      localApplied = await withPgClient(root, readPgAppliedMigrations);
     } catch {
       localApplied = [];
     }
   } else if (dialect === 'mysql') {
     try {
-      localApplied = await withMySqlClient(root, async (client) => {
-        try {
-          return (await client.query(
-            'SELECT `name` FROM `_void_migrations` ORDER BY `name`',
-          )) as Array<{ name: string }>;
-        } catch {
-          return [];
-        }
-      });
+      const { readMySqlAppliedMigrations } = await import('../migrations/runner-mysql.ts');
+      localApplied = await withMySqlClient(root, readMySqlAppliedMigrations);
     } catch {
       localApplied = [];
     }
   } else {
     const { getAppliedMigrations } = await import('../migrations/runner.ts');
     const { databasePath: dbPath } = getLocalD1Target(root);
-    localApplied = await getAppliedMigrations(dbPath);
+    localApplied = (await getAppliedMigrations(dbPath)).map((m) => m.name);
   }
-  const localSet = new Set(localApplied.map((m) => m.name));
+  const localSet = new Set(localApplied);
 
   let remoteApplied: Array<{ name: string; applied_at: string }> | null = null;
   const deploymentPlatform = readDeploymentPlatform(root);
@@ -518,8 +498,7 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
       } else {
         const { readCloudflareD1Migrations, resolveCloudflareD1Context } =
           await import('./cloudflare-operations.ts');
-        const configured = resolveBindingNames(readConfig(root).inference?.bindings);
-        const context = resolveCloudflareD1Context(root, configured?.d1 ?? 'DB');
+        const context = resolveCloudflareD1Context(root, configuredD1Binding(root));
         remoteApplied = (await readCloudflareD1Migrations(context)).map((name) => ({
           name,
           applied_at: '',
@@ -590,6 +569,7 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   }
 
   if (dialect === 'postgresql') {
+    const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
     await withPgClient(root, async (client) => {
       const tables = await client.query(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
@@ -597,28 +577,8 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
       for (const row of tables.rows) {
         await client.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
       }
+      await applyPgMigrations(client, migrations);
     });
-    if (migrations.length > 0) {
-      await withPgClient(root, async (client) => {
-        await client.query(
-          `CREATE TABLE IF NOT EXISTS _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`,
-        );
-        for (const m of migrations) {
-          await client.query('BEGIN');
-          try {
-            await client.query(m.sql);
-            await client.query('INSERT INTO _void_migrations (name, applied_at) VALUES ($1, $2)', [
-              m.name,
-              new Date().toISOString(),
-            ]);
-            await client.query('COMMIT');
-          } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-          }
-        }
-      });
-    }
     return migrations.length;
   }
 
@@ -712,37 +672,10 @@ async function runSeed(
 }
 
 /**
- * Returns true when the SQL is read-only (SELECT / EXPLAIN only).
- * Used to skip the destructive-statement safety prompt for safe queries.
- *
- * This is a fail-closed heuristic, not a real SQL parser:
- * - SQL comments (slash-star block and double-dash line) are stripped first,
- *   so commented variants like `EXPLAIN <block-comment> ANALYZE DELETE FROM
- *   users` or `EXPLAIN -- c\n ANALYZE ...` can't bypass the EXPLAIN ANALYZE
- *   check by hiding the `ANALYZE` keyword behind a comment that PostgreSQL
- *   treats as whitespace. This also handles leading comments, so
- *   `-- header\nSELECT 1` is classified as safe.
- * - The comment-stripping regex is naive and doesn't understand string
- *   literals: a string literal containing a block-comment marker will have its
- *   contents stripped. That's harmless here (still classified as SELECT, still
- *   safe), but worth knowing if this helper is ever reused.
- * - `WITH` (CTEs) is intentionally excluded: writable CTEs such as
- *   `WITH deleted AS (DELETE FROM users RETURNING *) SELECT * FROM deleted`
- *   are destructive but match a naive `WITH` prefix check. Users with
- *   read-only CTEs will see the safety prompt — minor friction, safe by default.
- * - Multi-statement SQL (`SELECT 1; DELETE FROM users`) is rejected: any `;`
- *   followed by non-whitespace content after stripping a trailing semicolon is
- *   treated as unsafe.
- * - `EXPLAIN ANALYZE` is explicitly excluded: in PostgreSQL, `EXPLAIN ANALYZE`
- *   actually executes the underlying statement (including DML) to collect runtime
- *   statistics. A naive `EXPLAIN` prefix check would treat it as safe when it is
- *   in fact destructive. Only plain `EXPLAIN` (without `ANALYZE`) is allowed.
- * - `EXPLAIN (...)` parenthesized option lists (PostgreSQL) are scanned for
- *   `ANALYZE`. The bare-keyword form `EXPLAIN ANALYZE ...` and the option-list
- *   form `EXPLAIN (ANALYZE) ...` / `EXPLAIN (ANALYZE TRUE) ...` both execute
- *   the underlying statement, so either shape is rejected. Even
- *   `EXPLAIN (ANALYZE FALSE)` is rejected (over-strict, but safer than
- *   guessing the boolean value of an arbitrary option expression).
+ * Fail-closed check for read-only SQL (SELECT or plain EXPLAIN), which skips the remote
+ * confirmation prompt. Comments are stripped first so they cannot hide `ANALYZE`.
+ * Multiple statements and `WITH` (a CTE can write) are rejected, and so is `EXPLAIN ANALYZE`
+ * in either form, because PostgreSQL executes the analyzed statement.
  */
 function isSafeStatement(sql: string): boolean {
   const decommented = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
@@ -826,7 +759,6 @@ async function confirmDestructiveRemote(sql: string): Promise<boolean> {
     return true;
   }
   if (!process.stdin.isTTY) {
-    // --yes flag (skip prompt under a TTY) is intentionally not wired here — non-TTY already bypasses; --yes can be added in a follow-up if scripted-TTY callers need it.
     return true;
   }
   const ok = await confirm({
@@ -866,9 +798,8 @@ async function runExecute(
       if (dialect === 'sqlite') {
         const { executeCloudflareD1Sql, resolveCloudflareD1Context } =
           await import('./cloudflare-operations.ts');
-        const configured = resolveBindingNames(readConfig(root).inference?.bindings);
         const rows = await executeCloudflareD1Sql(
-          resolveCloudflareD1Context(root, configured?.d1 ?? 'DB'),
+          resolveCloudflareD1Context(root, configuredD1Binding(root)),
           sql,
         );
         if (rows.length > 0) {
@@ -918,12 +849,7 @@ async function runExecute(
 
     // D1 remote: route through the platform proxy.
     const platformClient = new PlatformClient(token, { root });
-    // Resolve the locally-configured binding name (inference.bindings.db in void.config.ts) so that
-    // the fallback honours custom names instead of always hardcoding 'DB'.
-    const voidConfig = readConfig(root);
-    const configuredBindingNames = resolveBindingNames(voidConfig.inference?.bindings);
-    const configuredD1Binding = configuredBindingNames?.d1 ?? 'DB';
-    let binding = configuredD1Binding;
+    let binding = configuredD1Binding(root);
     try {
       const resources = await platformClient.getResources(projectConfig.projectId);
       // TODO: support --binding for projects with multiple D1 bindings (currently auto-selects the first).
@@ -1150,8 +1076,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
         readCloudflareD1Migrations,
         resolveCloudflareD1Context,
       } = await import('./cloudflare-operations.ts');
-      const configured = resolveBindingNames(readConfig(root).inference?.bindings);
-      const binding = configured?.d1 ?? 'DB';
+      const binding = configuredD1Binding(root);
       const context = resolveCloudflareD1Context(root, binding);
       const remoteBefore = new Set(await readCloudflareD1Migrations(context));
       const pending = rawMigrations.filter((migration) => !remoteBefore.has(migration.name));
@@ -1272,18 +1197,12 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (dialect === 'postgresql') {
-    const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
+    const { applyPgMigrations, readPgAppliedMigrations } =
+      await import('../migrations/runner-pg.ts');
     const applied = await withPgClient(root, async (client) => {
-      let existingRows: Array<{ name: string }> = [];
+      const appliedNames = await readPgAppliedMigrations(client);
       try {
-        const result = await client.query<{ name: string }>('SELECT name FROM _void_migrations');
-        existingRows = result.rows;
-      } catch {
-        existingRows = [];
-      }
-
-      try {
-        validatePendingMigrations(rawMigrations, new Set(existingRows.map((row) => row.name)));
+        validatePendingMigrations(rawMigrations, new Set(appliedNames));
       } catch (err: unknown) {
         log.error(getErrorMessage(err));
         process.exit(1);
@@ -1305,19 +1224,12 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   }
 
   if (dialect === 'mysql') {
-    const { applyMySqlMigrations } = await import('../migrations/runner-mysql.ts');
+    const { applyMySqlMigrations, readMySqlAppliedMigrations } =
+      await import('../migrations/runner-mysql.ts');
     const applied = await withMySqlClient(root, async (client) => {
-      let existingRows: Array<{ name: string }> = [];
+      const appliedNames = await readMySqlAppliedMigrations(client);
       try {
-        existingRows = await client.query<Array<{ name: string }>>(
-          'SELECT `name` FROM `_void_migrations`',
-        );
-      } catch {
-        existingRows = [];
-      }
-
-      try {
-        validatePendingMigrations(rawMigrations, new Set(existingRows.map((row) => row.name)));
+        validatePendingMigrations(rawMigrations, new Set(appliedNames));
       } catch (err: unknown) {
         log.error(getErrorMessage(err));
         process.exit(1);
@@ -1399,7 +1311,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   }
 
   if (dialect !== 'sqlite') {
-    const url = dialect === 'mysql' ? getMySqlUrl(root) : getPgUrl(root);
+    const url = getLocalDatabaseUrl(root, dialect);
 
     log.info('Opening Drizzle Studio...');
     await runDrizzleKitWithDatabaseUrl(root, url, dialect, 'studio');
@@ -1432,16 +1344,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     return;
   }
 
-  // Drift / partial-state gate. Mirrors the preflight used by `runStatus`,
-  // `runMigrate`, and `runReset` — one shared helper, one source of truth.
-  // Run BEFORE the bundled-mode guard and BEFORE computing files or
-  // touching anything remote, so a project in a partial drizzle-kit state
-  // (missing journal + leftover snapshots/`migrations.js`) or a project
-  // whose journal tags don't line up with its `.sql` files gets refused
-  // with the same message the rest of the CLI emits. Bare-legacy (no
-  // journal, no artifacts) silently passes through — those projects are
-  // the entire reason `rename-migrations` exists, and the journal/snapshot
-  // mutation steps below are already no-ops on that shape.
+  // Refuse drift or a partial drizzle-kit state before changing anything, local or remote.
   const currentMigrations = collectMigrations(migrationsDir);
   try {
     assertJournalCoherence(migrationsDir, currentMigrations);
@@ -1450,15 +1353,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     process.exit(1);
   }
 
-  // Refuse bundled-mode projects up front. A bundled project has a valid
-  // `_journal.json` AND a sibling `db/migrations/migrations.js` that
-  // statically imports every `.sql` file by filename. Renaming the files
-  // here would leave `migrations.js` pointing at nonexistent imports, so
-  // the next bundled migration run blows up at module resolution.
-  // Drizzle-kit owns the bundle format (import paths, padding, trailing
-  // comma) — replicating its emit here would silently break whenever
-  // drizzle-kit bumps that format. Fail fast with a concrete recovery path
-  // instead.
+  // The bundled `migrations.js` imports each `.sql` file by name, so renaming would break it.
   if (existsSync(join(migrationsDir, 'migrations.js'))) {
     log.error(
       "This project uses Drizzle's bundled migration format (db/migrations/migrations.js).\n" +
@@ -1481,13 +1376,11 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     return;
   }
 
-  // Find the earliest existing timestamp-prefixed migration so renamed files sort before them
+  // Renamed files sort just before the earliest existing timestamped migration.
   const timestampFiles = files.filter((f) => /^\d{14}_/.test(f));
-  const formatTs = formatTimestamp;
 
   let baseTime: Date;
   if (timestampFiles.length > 0) {
-    // Parse the earliest timestamp (always UTC) and place renamed files before it
     const earliest = timestampFiles[0].slice(0, 14);
     const year = +earliest.slice(0, 4);
     const monthIndex = +earliest.slice(4, 6) - 1;
@@ -1507,82 +1400,24 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     const oldName = oldStyleFiles[fileIndex];
     const description = oldName.replace(/^\d+_/, '');
     const ts = new Date(baseTime.getTime() + fileIndex * 1000);
-    const newName = `${formatTs(ts)}_${description}`;
+    const newName = `${formatTimestamp(ts)}_${description}`;
     renames.push({ from: oldName, to: newName });
   }
 
-  // Snapshot the raw journal bytes BEFORE the remote rename and BEFORE
-  // the snapshot preflight gate. Two reasons:
-  //   1. The preflight below uses `originalJournalBytes !== null` as
-  //      the "journal-backed project" signal, so it must be captured
-  //      first.
-  //   2. `restoreJournal` (defined further down) needs the pre-run
-  //      bytes to byte-restore after a rollback — capturing them here
-  //      guarantees we have the state from before ANY mutation.
-  // Legacy projects have no journal at all — `originalJournalBytes` stays
-  // `null` and `restoreJournal` becomes a no-op in that mode.
-  const journalPath = join(migrationsDir, 'meta', '_journal.json');
+  const metaDir = join(migrationsDir, 'meta');
+  const journalPath = join(metaDir, '_journal.json');
   const originalJournalBytes: Buffer | null = existsSync(journalPath)
     ? readFileSync(journalPath)
     : null;
-
-  // Drizzle-kit locates snapshot files by splitting the journal tag on the
-  // first underscore and appending `_snapshot.json`. When we rewrite tags,
-  // we must rename the matching snapshot alongside the .sql file so
-  // rollback/drop tooling keeps working. The old tag prefix is the numeric
-  // `NNNN` chunk before the first underscore; the new prefix is the
-  // 14-digit timestamp. Legacy projects without snapshots are skipped.
-  // These helpers are hoisted above the remote rename because the
-  // snapshot preflight below needs `snapshotPathFor` / `snapshotPrefix`.
-  const metaDir = join(migrationsDir, 'meta');
+  const journal = readJournal(migrationsDir);
+  // Drizzle-kit finds a snapshot by the part of the journal tag before the first underscore.
   const snapshotPrefix = (tag: string): string => tag.split('_')[0];
   const snapshotPathFor = (tag: string): string =>
     join(metaDir, `${snapshotPrefix(tag)}_snapshot.json`);
 
-  // If this is a journal-backed project, every tag we're
-  // about to rename MUST have its matching snapshot on disk. The rename
-  // loop below silently skips missing snapshots so bare-legacy projects
-  // (no journal, no snapshots at all) keep working — but a journal-backed
-  // project with a missing snapshot is a partial state. Proceeding would
-  // rename the .sql + journal entry to the new tag, then the next
-  // `void gen migration` (custom-migration path) or `void db generate`
-  // would be unable to locate the expected snapshot under the new
-  // filename. Refuse up front with a concrete recovery path.
-  //
-  // The "journal file exists on disk" signal
-  // (`originalJournalBytes !== null`) is not enough on its own. The
-  // kitchen-sink playground ships a placeholder journal of the form
-  // `{ "version": "7", "dialect": "sqlite", "entries": [] }` with no
-  // `meta/*_snapshot.json` files and no bundled `migrations.js`.
-  // `assertJournalCoherence` treats that exact shape as identical to
-  // "bare-legacy, no journal at all" and lets `void db status`, `migrate`,
-  // `reset`, and `deploy` fall through to the filename-based runner. The
-  // gate below must honor the same equivalence — otherwise
-  // `rename-migrations` rejects the playground outright, even though
-  // there is no snapshot chain to worry about. The
-  // `entries: [] + drizzle artifacts on disk` partial state is a real
-  // shape but `assertJournalCoherence` already rejected it long before
-  // this gate runs, so we don't need to re-handle it here.
-  //
-  // Order of operations note: this gate MUST run BEFORE
-  // `client.renameMigrations` below. Running it after the remote call
-  // means a failed gate leaves the remote mutated while the local
-  // filesystem is untouched; the best-effort `reverseRemote()` rollback
-  // can then fail on a transient network error and leave the project in
-  // divergent state that's hard to recover from. Running it up front
-  // guarantees "remote is mutated only after the local preflight
-  // passes," so there is nothing to reverse when the gate bails.
-  const preRenameJournal = readJournal(migrationsDir);
-  const drizzleArtifacts = listDrizzleArtifacts(migrationsDir);
-  const isBareLegacyPlaceholder =
-    preRenameJournal !== undefined &&
-    preRenameJournal !== null &&
-    typeof preRenameJournal === 'object' &&
-    Array.isArray((preRenameJournal as { entries?: unknown }).entries) &&
-    (preRenameJournal as { entries: Array<unknown> }).entries.length === 0 &&
-    drizzleArtifacts.length === 0;
-
-  if (originalJournalBytes !== null && !isBareLegacyPlaceholder) {
+  // Without its snapshot, drizzle-kit cannot find a renamed entry. Check before the remote
+  // rename, so a failure leaves nothing to undo.
+  if (journal && journal.entries.length > 0) {
     const missingSnapshots: Array<string> = [];
     for (const { from } of renames) {
       const fromTag = stripSqlExt(from);
@@ -1601,14 +1436,11 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       log.error(
         '\nRestore the missing snapshot(s) from version control, or reset the migration directory with `void db generate`, then retry.',
       );
-      // No reverseRemote() here — the remote has not been touched yet.
       process.exit(1);
     }
   }
 
-  // Update remote tracking — the snapshot preflight above has already
-  // verified that the local filesystem is in a state we can safely
-  // mutate. If this fails, nothing local has changed yet.
+  // Update remote tracking first. If this fails, nothing local has changed yet.
   const token = getToken(root);
   const config = readProjectConfig(root);
   let remoteRenamed = false;
@@ -1635,62 +1467,54 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     }
   }
 
-  // Best-effort reversal of remote renames when a later step fails
-  const reverseRemote = async () => {
-    if (!remoteRenamed || !token || !config) {
-      return;
-    }
-    try {
-      const client = new PlatformClient(token, { root });
-      const reversed = renames.map(({ from, to }) => ({ from: to, to: from }));
-      await client.renameMigrations(config.projectId, reversed);
-    } catch {
-      log.warn('db: Could not reverse remote rename. Run `void deploy` to sync remote records.');
-    }
-  };
-
-  // Tracks whether `_journal.json` was actually rewritten below, so
-  // `restoreJournal` knows when a byte-restore is needed on rollback.
-  // `originalJournalBytes` was captured above (before the remote call).
   let journalRewritten = false;
-
-  const restoreJournal = () => {
-    // Byte-restore the pre-run snapshot. No-op when nothing was rewritten
-    // or when no journal existed before the run (legacy path).
-    if (!journalRewritten || originalJournalBytes === null) {
-      return;
-    }
-    try {
-      writeFileSync(journalPath, originalJournalBytes);
-    } catch (err) {
-      log.warn(
-        'Could not restore db/migrations/meta/_journal.json after rollback. ' +
-          'The journal may be in a partial state.\n' +
-          'Regenerate it with `void db generate`, or restore it from version control.',
-      );
-      log.warn(String(err));
-    }
-  };
-
-  // Rename files — roll back completed renames (and remote) on any failure
   const renamed: Array<{ from: string; to: string }> = [];
-  // Parallel list tracking snapshot renames so rollback can reverse them
-  // with the same best-effort semantics as the .sql file renames.
   const renamedSnapshots: Array<{ from: string; to: string }> = [];
 
-  const reverseSnapshotRenames = () => {
+  // Best-effort undo of every completed step, then exit.
+  const rollback = async (message: string, err: unknown): Promise<never> => {
     for (const { from, to } of renamedSnapshots) {
       try {
         renameSync(to, from);
-      } catch (err) {
-        // best-effort rollback — warn but don't fail
+      } catch (error) {
         log.warn(
           `db: Could not reverse snapshot rename for '${from}'. ` +
             'The meta/ directory may be in a partial state.',
         );
-        log.warn(String(err));
+        log.warn(String(error));
       }
     }
+    for (const { from, to } of renamed) {
+      try {
+        renameSync(join(migrationsDir, to), join(migrationsDir, from));
+      } catch {
+        // Keep reverting the remaining files.
+      }
+    }
+    if (journalRewritten && originalJournalBytes !== null) {
+      try {
+        writeFileSync(journalPath, originalJournalBytes);
+      } catch (error) {
+        log.warn(
+          'Could not restore db/migrations/meta/_journal.json after rollback. ' +
+            'The journal may be in a partial state.\n' +
+            'Regenerate it with `void db generate`, or restore it from version control.',
+        );
+        log.warn(String(error));
+      }
+    }
+    if (remoteRenamed && token && config) {
+      try {
+        const client = new PlatformClient(token, { root });
+        const reversed = renames.map(({ from, to }) => ({ from: to, to: from }));
+        await client.renameMigrations(config.projectId, reversed);
+      } catch {
+        log.warn('db: Could not reverse remote rename. Run `void deploy` to sync remote records.');
+      }
+    }
+    log.error(message);
+    log.error(String(err));
+    process.exit(1);
   };
 
   try {
@@ -1699,49 +1523,20 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       renamed.push({ from, to });
       log.step(`${from} → ${to}`);
 
-      // Mirror the SQL rename onto the Drizzle snapshot when one exists.
-      const fromTag = stripSqlExt(from);
-      const toTag = stripSqlExt(to);
-      const snapshotFrom = snapshotPathFor(fromTag);
-      const snapshotTo = snapshotPathFor(toTag);
+      const snapshotFrom = snapshotPathFor(stripSqlExt(from));
+      const snapshotTo = snapshotPathFor(stripSqlExt(to));
       if (existsSync(snapshotFrom)) {
         renameSync(snapshotFrom, snapshotTo);
         renamedSnapshots.push({ from: snapshotFrom, to: snapshotTo });
       }
     }
   } catch (err) {
-    reverseSnapshotRenames();
-    for (const { from, to } of renamed) {
-      try {
-        renameSync(join(migrationsDir, to), join(migrationsDir, from));
-      } catch {
-        // best-effort rollback
-      }
-    }
-    restoreJournal();
-    await reverseRemote();
-    log.error('db: Failed to rename migration files. All changes have been reverted.');
-    log.error(String(err));
-    process.exit(1);
+    await rollback('db: Failed to rename migration files. All changes have been reverted.', err);
   }
 
-  // Rewrite `_journal.json` tags to match the new filenames BEFORE touching
-  // the tracking tables, so any tracking-table failure can roll the journal
-  // back alongside the file renames. Legacy projects with no journal skip
-  // this step entirely — there's nothing to rewrite, and the snapshot/
-  // tracking rollback sites already no-op via `journalRewritten === false`.
-  if (originalJournalBytes !== null) {
+  // Rewrite journal tags before the tracking tables, so a tracking failure also restores it.
+  if (journal) {
     try {
-      const journal = readJournal(migrationsDir);
-      if (!journal) {
-        // The journal existed when we snapshotted its bytes above but has
-        // since disappeared or become unreadable. Treat this as a hard
-        // failure so the rename flow rolls back rather than silently
-        // losing journal coherence.
-        throw new Error(
-          'db: db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
-        );
-      }
       const renameMap = new Map<string, string>();
       for (const { from, to } of renames) {
         renameMap.set(stripSqlExt(from), stripSqlExt(to));
@@ -1750,10 +1545,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         const next = renameMap.get(entry.tag);
         return next ? { ...entry, tag: next } : entry;
       });
-      // Mark the journal as mutated BEFORE the write, so rollback will
-      // byte-restore the snapshot even if `writeJournal` fails mid-write
-      // (disk full, EIO, process killed). The flag's semantic is "a
-      // mutation was attempted," which is what rollback correctness needs.
+      // Set before writing, so a partial write is still restored.
       journalRewritten = true;
       writeJournal(migrationsDir, {
         version: journal.version,
@@ -1761,22 +1553,10 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         entries: updatedEntries,
       });
     } catch (err) {
-      // Revert file renames so journal and filenames stay in sync
-      reverseSnapshotRenames();
-      for (const { from, to } of renames) {
-        try {
-          renameSync(join(migrationsDir, to), join(migrationsDir, from));
-        } catch {
-          // best-effort rollback
-        }
-      }
-      restoreJournal();
-      await reverseRemote();
-      log.error(
+      await rollback(
         'db: Failed to update db/migrations/meta/_journal.json. File renames have been reverted.',
+        err,
       );
-      log.error(String(err));
-      process.exit(1);
     }
   }
 
@@ -1801,23 +1581,11 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         }
       });
     } catch (err) {
-      // Roll back file renames so tracking and filenames stay in sync
-      reverseSnapshotRenames();
-      for (const { from, to } of renames) {
-        try {
-          renameSync(join(migrationsDir, to), join(migrationsDir, from));
-        } catch {
-          // best-effort rollback — ignore individual rename failures
-        }
-      }
-      restoreJournal();
-      await reverseRemote();
-      log.error(
+      await rollback(
         'db: Failed to update PostgreSQL tracking table. File renames have been reverted.\n' +
           'Fix the database connection and run `void db rename-migrations` again.',
+        err,
       );
-      log.error(String(err));
-      process.exit(1);
     }
   } else if (dialect === 'mysql') {
     try {
@@ -1836,22 +1604,11 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         }
       });
     } catch (err) {
-      reverseSnapshotRenames();
-      for (const { from, to } of renames) {
-        try {
-          renameSync(join(migrationsDir, to), join(migrationsDir, from));
-        } catch {
-          // best-effort rollback
-        }
-      }
-      restoreJournal();
-      await reverseRemote();
-      log.error(
+      await rollback(
         'db: Failed to update MySQL tracking table. File renames have been reverted.\n' +
           'Fix the database connection and run `void db rename-migrations` again.',
+        err,
       );
-      log.error(String(err));
-      process.exit(1);
     }
   } else {
     const { openSqliteDatabase } = await import('../migrations/runner.ts');
@@ -1882,23 +1639,11 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
           db.close();
         }
       } catch (err) {
-        // Roll back file renames so tracking and filenames stay in sync
-        reverseSnapshotRenames();
-        for (const { from, to } of renames) {
-          try {
-            renameSync(join(migrationsDir, to), join(migrationsDir, from));
-          } catch {
-            // best-effort rollback — ignore individual rename failures
-          }
-        }
-        restoreJournal();
-        await reverseRemote();
-        log.error(
+        await rollback(
           'db: Failed to update SQLite tracking table. File renames have been reverted.\n' +
             'Fix the database issue and run `void db rename-migrations` again.',
+          err,
         );
-        log.error(String(err));
-        process.exit(1);
       }
     }
   }
@@ -2230,12 +1975,7 @@ async function runExport(
   }
 }
 
-async function runSetUrl(root: string): Promise<void> {
-  const { readConfig: readVoidConfig, getDatabaseDialect: getDialect } =
-    await import('../config.ts');
-  const config = readVoidConfig(root);
-  const dialect = getDialect(config);
-
+async function runSetUrl(root: string, dialect: DatabaseDialect): Promise<void> {
   if (dialect === 'sqlite') {
     log.error(
       'db: This command is only for PostgreSQL and MySQL projects. Set "database" to "pg" or "mysql" in void.config.ts.',
@@ -2255,10 +1995,7 @@ async function runSetUrl(root: string): Promise<void> {
     process.exit(1);
   }
 
-  const { text: promptText, isCancel: isCancelCheck } =
-    await import('@voidzero-dev/vite-plus-prompts');
-
-  const connectionString = await promptText({
+  const connectionString = await text({
     message: `Enter your ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'} connection string:`,
     placeholder:
       dialect === 'mysql'
@@ -2275,7 +2012,7 @@ async function runSetUrl(root: string): Promise<void> {
     },
   });
 
-  if (isCancelCheck(connectionString)) {
+  if (isCancel(connectionString)) {
     process.exit(0);
   }
 
@@ -2353,7 +2090,7 @@ async function runSeedModule(
   if (dialect === 'mysql') {
     const { drizzle } = await import('drizzle-orm/mysql2');
     const { createConnection } = await import('mysql2/promise');
-    const connection = await createConnection(getMySqlUrl(root));
+    const connection = await createConnection(getLocalDatabaseUrl(root, 'mysql'));
     try {
       const options = getDrizzleSchemaOptions(schema);
       const db = options
