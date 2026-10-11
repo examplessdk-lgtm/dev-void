@@ -92,11 +92,12 @@ export function useForm(
   const [wasSuccessful, setWasSuccessful] = createSignal(false);
   const [recentlySuccessful, setRecentlySuccessful] = createSignal(false);
 
-  let defaults_ = { ...defaults };
+  const [defaults_, setDefaults] = createSignal<Record<string, unknown>>({ ...defaults });
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const hasChanges = createMemo(() => {
-    return Object.keys(defaults_).some((key) => !isEqualFormValue(data[key], defaults_[key]));
+    const current = defaults_();
+    return Object.keys(current).some((key) => !isEqualFormValue(data[key], current[key]));
   });
 
   function setData(field: string, value: unknown) {
@@ -105,10 +106,10 @@ export function useForm(
 
   function reset(...fields: ReadonlyArray<string>) {
     if (fields.length === 0) {
-      setDataStore(reconcile({ ...defaults_ }));
+      setDataStore(reconcile({ ...defaults_() }));
     } else {
       for (const field of fields) {
-        setDataStore(field, defaults_[field]);
+        setDataStore(field, defaults_()[field]);
       }
     }
   }
@@ -166,7 +167,7 @@ export function useForm(
 
       setWasSuccessful(true);
       setRecentlySuccessful(true);
-      defaults_ = { ...data };
+      setDefaults({ ...data });
       successTimeout = setTimeout(() => {
         setRecentlySuccessful(false);
       }, 2000);

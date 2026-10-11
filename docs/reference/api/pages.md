@@ -218,6 +218,8 @@ Imported from `"@void/solid"`.
 
 Solid `Link` GET `data` is merged into the rendered `href` query string. Primitive values are serialized with `String(value)`, arrays become repeated keys, `null` and `undefined` are omitted, and nested objects throw. `prefetch` and `reloadDocument` are GET-only and throw for mutation links.
 
+Solid re-creates the page on GET navigation and whenever the route or its params change, so `useForm()` picks up the destination record's URL and defaults; layouts persist. Within the same record, back/forward, mutations, and `router.refresh()` keep the page and update its props in place, as do resolved deferred props, so read props inside JSX or memos instead of copying them in the component body. Set `preserveState` explicitly to override the default for navigation within the same record.
+
 ## Markdown Package {#markdown-package}
 
 The optional `@void/md` package adds Markdown pages to Pages Routing. Install it alongside a Pages adapter and add `voidMarkdown()` to your Vite plugins.

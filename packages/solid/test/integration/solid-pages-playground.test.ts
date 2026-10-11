@@ -25,6 +25,8 @@ declare global {
   }
 }
 
+type StampedElement = HTMLElement & { __stamp?: number };
+
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 let DEV_BASE: string;
 let PREVIEW_BASE: string;
@@ -82,6 +84,81 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
       const text = await page.textContent('body');
       expect(text).toContain('Welcome');
       expect(errors).toEqual([]);
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('layout and page state persist across navigation and validation errors', async () => {
+    const page = await newPage();
+    const stampOf = (selector: string) =>
+      page.evaluate((s) => document.querySelector<StampedElement>(s)?.__stamp, selector);
+    try {
+      await page.goto(BASE + '/');
+      await waitForHydration(page);
+      await page.evaluate(() => {
+        document.querySelector<StampedElement>('nav')!.__stamp = 1;
+      });
+
+      await page.click('nav a[href="/users"]');
+      await page.waitForFunction(() =>
+        document.querySelector('h1')?.textContent?.includes('Users'),
+      );
+      expect(await stampOf('nav')).toBe(1);
+
+      await page.evaluate(() => {
+        document.querySelector<StampedElement>('h1')!.__stamp = 1;
+      });
+      await page.locator('form input').nth(0).fill('Typed Name');
+      await page.click('button[type="submit"]');
+      await page.waitForFunction(() => document.body?.textContent?.includes('Email is required'));
+
+      expect(await page.locator('form input').nth(0).inputValue()).toBe('Typed Name');
+      expect(await stampOf('h1')).toBe(1);
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('back/forward to another record of the same page re-creates the page', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/users/1');
+      await waitForHydration(page);
+      await page.evaluate(() => {
+        document.querySelector<StampedElement>('h1')!.__stamp = 1;
+        history.pushState(null, '', '/users/2');
+        history.pushState(null, '', '/users');
+        history.back();
+      });
+      await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('Bob'));
+
+      expect(
+        await page.evaluate(() => document.querySelector<StampedElement>('h1')?.__stamp),
+      ).toBeUndefined();
+    } finally {
+      await page.context().close();
+    }
+  });
+
+  it('back/forward to another route that shares the page component re-creates the page', async () => {
+    const page = await newPage();
+    try {
+      await page.goto(BASE + '/twins/a');
+      await waitForHydration(page);
+      await page.evaluate(() => {
+        document.querySelector<StampedElement>('h1')!.__stamp = 1;
+        history.pushState(null, '', '/twins/b');
+        history.pushState(null, '', '/');
+        history.back();
+      });
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="twin-path"]')?.textContent === '/twins/b',
+      );
+
+      expect(
+        await page.evaluate(() => document.querySelector<StampedElement>('h1')?.__stamp),
+      ).toBeUndefined();
     } finally {
       await page.context().close();
     }
