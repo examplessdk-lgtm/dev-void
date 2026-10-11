@@ -614,7 +614,7 @@ export async function runConnect(
     repoFullName = await promptRepoFullName(root);
   }
 
-  const branchDefault = collectGitDeployMetadata(root, null).gitRef ?? 'main';
+  const branchDefault = args.branch ?? collectGitDeployMetadata(root, null).gitRef ?? 'main';
 
   let branch: string;
   if (args.branch) {

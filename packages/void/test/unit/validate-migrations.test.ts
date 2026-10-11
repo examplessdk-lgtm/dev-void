@@ -312,6 +312,7 @@ describe('assertJournalCoherence', () => {
     expect(message).toContain('has no entries');
     expect(message).toContain('db/migrations/meta/0000_snapshot.json');
     expect(message).toContain('partial drizzle-kit state');
+    expect(message).toContain('void db generate');
   });
 
   it('throws on an empty-entries journal with a snapshot even when no .sql files remain', () => {
