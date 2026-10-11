@@ -1,6 +1,6 @@
 import { PLATFORM_LOGIN_KINDS, parsePlatformLoginId } from '@void/platform';
 
-export const PLATFORM_AUTH_ACTIONS = [
+const PLATFORM_AUTH_ACTIONS = [
   'list',
   'show',
   'initialize',
@@ -14,7 +14,7 @@ export const PLATFORM_AUTH_ACTIONS = [
   'protection',
   'recover',
 ] as const;
-export type PlatformAuthAction = (typeof PLATFORM_AUTH_ACTIONS)[number];
+type PlatformAuthAction = (typeof PLATFORM_AUTH_ACTIONS)[number];
 export type PlatformConfigArgs = Readonly<{
   subcommand: 'config';
   action: PlatformAuthAction | '';
@@ -34,36 +34,14 @@ export function parsePlatformConfigArgs(args: ReadonlyArray<string>): PlatformCo
   if (args.length && args[0] !== 'auth') {
     throw new Error('platform: Usage: void platform config auth [command] [options].');
   }
-  const positional: Array<string> = [];
-  const flags = new Set<string>();
-  const values = new Map<string, string>();
-  const valueFlags = ['connection', 'installation', 'id', 'file', 'client-secret-env', 'test-id'];
-  for (let index = 1; index < args.length; index++) {
-    const arg = args[index]!;
-    if (!arg.startsWith('-')) {
-      positional.push(arg);
-      continue;
-    }
-    const name = arg.slice(2);
-    if (
-      !arg.startsWith('--') ||
-      (!['json', 'plan', 'yes'].includes(name) && !valueFlags.includes(name))
-    ) {
-      throw new Error(`platform: Unknown config auth flag ${arg}.`);
-    }
-    if (flags.has(name) || values.has(name)) {
-      throw new Error(`platform: Duplicate flag ${arg}.`);
-    }
-    if (!valueFlags.includes(name)) {
-      flags.add(name);
-      continue;
-    }
-    const value = args[++index];
-    if (!value || value.startsWith('-')) {
-      throw new Error(`platform: ${arg} requires a value.`);
-    }
-    values.set(name, value);
-  }
+  const { positional, flags, values } = parseConfigFlags(args, 'auth', [
+    'connection',
+    'installation',
+    'id',
+    'file',
+    'client-secret-env',
+    'test-id',
+  ]);
   const [action = '', target = '', ...extra] = positional;
   if (extra.length || (action && !PLATFORM_AUTH_ACTIONS.includes(action as PlatformAuthAction))) {
     throw new Error(
@@ -138,4 +116,42 @@ export function parsePlatformConfigArgs(args: ReadonlyArray<string>): PlatformCo
     plan: flags.has('plan'),
     yes: flags.has('yes'),
   };
+}
+
+/** Parses `config <group>` flags: --json, --plan, --yes, and the given value flags. */
+export function parseConfigFlags(
+  args: ReadonlyArray<string>,
+  group: 'auth' | 'plans',
+  valueFlags: ReadonlyArray<string>,
+): { positional: Array<string>; flags: Set<string>; values: Map<string, string> } {
+  const positional: Array<string> = [];
+  const flags = new Set<string>();
+  const values = new Map<string, string>();
+  for (let index = 1; index < args.length; index++) {
+    const arg = args[index]!;
+    if (!arg.startsWith('-')) {
+      positional.push(arg);
+      continue;
+    }
+    const name = arg.slice(2);
+    if (
+      !arg.startsWith('--') ||
+      (!['json', 'plan', 'yes'].includes(name) && !valueFlags.includes(name))
+    ) {
+      throw new Error(`platform: Unknown config ${group} flag ${arg}.`);
+    }
+    if (flags.has(name) || values.has(name)) {
+      throw new Error(`platform: Duplicate flag ${arg}.`);
+    }
+    if (!valueFlags.includes(name)) {
+      flags.add(name);
+      continue;
+    }
+    const value = args[++index];
+    if (!value || value.startsWith('-')) {
+      throw new Error(`platform: ${arg} requires a value.`);
+    }
+    values.set(name, value);
+  }
+  return { positional, flags, values };
 }

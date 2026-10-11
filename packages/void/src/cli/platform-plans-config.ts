@@ -48,6 +48,32 @@ function limitValue(value: number, key?: (typeof PLAN_EDITABLE_LIMIT_KEYS)[numbe
   return value === 0 ? 'unlimited' : value.toLocaleString('en-US');
 }
 
+function shortSlugsLabel(allowed: boolean): string {
+  return allowed ? 'allowed' : 'not allowed';
+}
+
+function writePlanDiff(
+  from: PlatformPlanDefinition,
+  to: PlatformPlanDefinition,
+  write: (line: string) => void,
+): void {
+  if (from.buildInstanceType !== to.buildInstanceType) {
+    write(`Build size: ${from.buildInstanceType} → ${to.buildInstanceType}`);
+  }
+  if (from.allowShortSlugs !== to.allowShortSlugs) {
+    write(
+      `Short project slugs: ${shortSlugsLabel(from.allowShortSlugs)} → ${shortSlugsLabel(to.allowShortSlugs)}`,
+    );
+  }
+  for (const key of PLAN_EDITABLE_LIMIT_KEYS) {
+    if (from.limits[key] !== to.limits[key]) {
+      write(
+        `${limitLabels[key]}: ${limitValue(from.limits[key], key)} → ${limitValue(to.limits[key], key)}`,
+      );
+    }
+  }
+}
+
 function showListing(listing: Listing, json: boolean): void {
   if (json) {
     print(listing);
@@ -87,7 +113,7 @@ function showPreview(
       for (const key of PLAN_EDITABLE_LIMIT_KEYS) {
         write(`  ${limitLabels[key]}: ${limitValue(plan.limits[key], key)}`);
       }
-      write(`  Short project slugs: ${plan.allowShortSlugs ? 'allowed' : 'not allowed'}`);
+      write(`  Short project slugs: ${shortSlugsLabel(plan.allowShortSlugs)}`);
       continue;
     }
     if (previous.name !== plan.name) {
@@ -96,21 +122,7 @@ function showPreview(
     if (previous.archived !== plan.archived) {
       write(`${plan.id}: ${plan.archived ? 'archive for new assignments' : 'restore assignments'}`);
     }
-    if (previous.buildInstanceType !== plan.buildInstanceType) {
-      write(`Build size: ${previous.buildInstanceType} → ${plan.buildInstanceType}`);
-    }
-    if (previous.allowShortSlugs !== plan.allowShortSlugs) {
-      write(
-        `Short project slugs: ${previous.allowShortSlugs ? 'allowed' : 'not allowed'} → ${plan.allowShortSlugs ? 'allowed' : 'not allowed'}`,
-      );
-    }
-    for (const key of PLAN_EDITABLE_LIMIT_KEYS) {
-      if (previous.limits[key] !== plan.limits[key]) {
-        write(
-          `${limitLabels[key]}: ${limitValue(previous.limits[key], key)} → ${limitValue(plan.limits[key], key)}`,
-        );
-      }
-    }
+    writePlanDiff(previous, plan, write);
   }
   for (const plan of before.plans) {
     if (!after.plans.some((entry) => entry.id === plan.id)) {
@@ -118,21 +130,7 @@ function showPreview(
       const replacement = after.plans.find((entry) => entry.id === preview.replacementPlanId);
       if (replacement) {
         write(`Move accounts to ${label(replacement)}`);
-        if (plan.buildInstanceType !== replacement.buildInstanceType) {
-          write(`Build size: ${plan.buildInstanceType} → ${replacement.buildInstanceType}`);
-        }
-        if (plan.allowShortSlugs !== replacement.allowShortSlugs) {
-          write(
-            `Short project slugs: ${plan.allowShortSlugs ? 'allowed' : 'not allowed'} → ${replacement.allowShortSlugs ? 'allowed' : 'not allowed'}`,
-          );
-        }
-        for (const key of PLAN_EDITABLE_LIMIT_KEYS) {
-          if (plan.limits[key] !== replacement.limits[key]) {
-            write(
-              `${limitLabels[key]}: ${limitValue(plan.limits[key], key)} → ${limitValue(replacement.limits[key], key)}`,
-            );
-          }
-        }
+        writePlanDiff(plan, replacement, write);
       }
     }
   }
@@ -439,7 +437,7 @@ export async function runPlatformPlansConfig(args: PlatformPlansArgs): Promise<v
         const plan = result.plan as PlatformPlanDefinition;
         console.log(`${label(plan)}${result.default ? ' — default for new accounts' : ''}`);
         console.log(`Accounts: ${result.accounts}; build size: ${plan.buildInstanceType}`);
-        console.log(`Short project slugs: ${plan.allowShortSlugs ? 'allowed' : 'not allowed'}`);
+        console.log(`Short project slugs: ${shortSlugsLabel(plan.allowShortSlugs)}`);
         for (const key of PLAN_EDITABLE_LIMIT_KEYS) {
           console.log(`${limitLabels[key]}: ${limitValue(plan.limits[key], key)}`);
         }

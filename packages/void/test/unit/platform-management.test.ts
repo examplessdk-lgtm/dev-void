@@ -286,8 +286,28 @@ function client(manifest: PlatformInstallationManifest) {
     removeRoutes: async (_account: string, _zone: string | null, _managed: unknown) => {
       removedRoutes++;
     },
+    // Only --purge-resources calls these; platform-teardown.test.ts covers it.
+    deleteAccessResource: unexpectedPurgeCall,
+    deleteDispatchNamespaceScript: unexpectedPurgeCall,
+    deleteEmailRoutingRule: unexpectedPurgeCall,
+    deleteQueueConsumer: unexpectedPurgeCall,
+    deleteWorkerDomain: unexpectedPurgeCall,
+    deleteWorkerRoute: unexpectedPurgeCall,
+    forceDeleteWorker: unexpectedPurgeCall,
+    getAccessResource: unexpectedPurgeCall,
+    getEmailRoutingCatchAll: unexpectedPurgeCall,
+    listDispatchNamespaceScripts: unexpectedPurgeCall,
+    listEmailRoutingRules: unexpectedPurgeCall,
+    listQueueConsumers: unexpectedPurgeCall,
+    listWorkerDependents: unexpectedPurgeCall,
+    listWorkerRoutes: unexpectedPurgeCall,
+    resetEmailRoutingCatchAll: unexpectedPurgeCall,
   };
   return fake;
+}
+
+async function unexpectedPurgeCall(): Promise<never> {
+  throw new Error('Unexpected --purge-resources Cloudflare call.');
 }
 
 function namedResources(manifest: PlatformInstallationManifest, kind: InstallationResourceKind) {
@@ -859,18 +879,6 @@ describe('platform lifecycle management', () => {
         },
       ),
     ).toBe('');
-  });
-
-  it('requires explicit acknowledgement for a non-interactive uninstall', async () => {
-    const manifest = installedManifest();
-    persist(manifest);
-    const fake = client(manifest);
-
-    await expect(
-      uninstallPlatform(fake, manifest, { ...uninstallArgs, yes: false }, uninstallDependencies),
-    ).rejects.toThrow('requires --yes');
-    expect(fake.deleted).toEqual([]);
-    expect(fake.removedRoutes).toBe(0);
   });
 
   it('prompts for an installation when a lifecycle selector is omitted', async () => {

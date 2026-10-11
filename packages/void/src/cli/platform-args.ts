@@ -279,15 +279,8 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     }
     return { subcommand };
   }
-  if (subcommand === 'use') {
+  if (subcommand === 'use' || subcommand === 'status') {
     const { selector } = parseSelector(rest, subcommand);
-    return { subcommand, selector };
-  }
-  if (subcommand === 'status') {
-    const { selector, plan } = parseSelector(rest, subcommand);
-    if (plan) {
-      throw new Error("platform: Unknown flag '--plan'.");
-    }
     return { subcommand, selector };
   }
   if (subcommand === 'discover') {

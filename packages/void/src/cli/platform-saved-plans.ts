@@ -4,7 +4,7 @@ import { join } from 'pathslash';
 import { parsePlatformArgs, type PlatformArgs } from './platform-args.ts';
 import { platformRegistryDirectory } from './platform-registry.ts';
 
-export type SavedPlatformInstallPlan = Readonly<{
+type SavedPlatformInstallPlan = Readonly<{
   id: string;
   accountName: string;
   savedAt: string;
