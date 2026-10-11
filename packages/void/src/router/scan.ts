@@ -5,6 +5,7 @@ import { scanPages } from '../pages/scan.ts';
 import type { PageScanResult } from '../pages/types.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import type { QueueDefinition } from '../queues/scan.ts';
+import { listConventionFiles } from '../shared/convention-files.ts';
 import { detectHttpExports } from './detect-exports.ts';
 import type { EmailHandlersScan } from './email.ts';
 import {
@@ -31,9 +32,6 @@ export type MiddlewareDefinition = {
   /** Original filename */
   filePath: string;
 };
-
-const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
-const ROUTE_PATTERN = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
 
 function parseMiddlewareDefinitions(files: Array<string>): Array<MiddlewareDefinition> {
   return files
@@ -94,14 +92,7 @@ export function scanMiddlewareSync(
   root: string,
   paths: ProjectPaths = readProjectPaths(root),
 ): Array<MiddlewareDefinition> {
-  let middlewareFiles: Array<string>;
-  try {
-    middlewareFiles = globSync(ROUTE_PATTERN, { cwd: paths.middlewareDir, absolute: false });
-  } catch {
-    middlewareFiles = [];
-  }
-
-  return parseMiddlewareDefinitions(middlewareFiles);
+  return parseMiddlewareDefinitions(globSync('**/*.{ts,mts,js,mjs}', { cwd: paths.middlewareDir }));
 }
 
 export function scanRoutePatternsSync(
@@ -109,16 +100,8 @@ export function scanRoutePatternsSync(
   paths: ProjectPaths = readProjectPaths(root),
   environment?: RouteEnvironment,
 ): Array<RouteDefinition> {
-  let routeFiles: Array<string>;
-  try {
-    routeFiles = globSync(ROUTE_PATTERN, { cwd: paths.routesDir, absolute: false });
-  } catch {
-    routeFiles = [];
-  }
-
-  return routeFiles
+  return listConventionFiles(paths.routesDir)
     .filter((f) => !isWebSocketPatternFile(f))
-    .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
     .map((f) => parseRouteFilename(f))
     .filter((route) => isRouteEnabledForEnvironment(route, environment))
     .sort(compareRouteSpecificity);

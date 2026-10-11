@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'pathslash';
-import { globSync } from 'tinyglobby';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import {
   isIdentifier,
@@ -9,6 +8,7 @@ import {
   type AstNode,
   type AstProperty,
 } from '../shared/ast.ts';
+import { listConventionFiles } from '../shared/convention-files.ts';
 import { readResourceDefinition } from '../shared/resource-definition.ts';
 import { resourceNameWords } from '../shared/resource-name.ts';
 import {
@@ -18,7 +18,6 @@ import {
   type RouteEnvironment,
 } from './parse-filename.ts';
 
-const HANDLER_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 const WEBSOCKET_ROUTE_RE = /(?:\.(?:dev|prod))?\.ws\.(?:ts|mts|js|mjs)$/;
 
 export type WebSocketRouteDefinition = RouteDefinition & {
@@ -138,7 +137,6 @@ function parseWebSocketFiles(
 ): Array<WebSocketRouteDefinition> {
   const routes = files
     .filter((f) => isWebSocketRouteFile(f))
-    .filter((f) => !f.split('/').some((segment) => segment.startsWith('_')))
     .filter((filePath) =>
       isRouteEnabledForEnvironment(parseWebSocketFilename(filePath), environment),
     )
@@ -170,14 +168,7 @@ export function scanWebSocketRoutesSync(
   paths: ProjectPaths = readProjectPaths(root),
   environment?: RouteEnvironment,
 ): Array<WebSocketRouteDefinition> {
-  const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
-  let files: Array<string>;
-  try {
-    files = globSync(pattern, { cwd: paths.routesDir, absolute: false });
-  } catch {
-    files = [];
-  }
-  return parseWebSocketFiles(root, files, paths, environment);
+  return parseWebSocketFiles(root, listConventionFiles(paths.routesDir), paths, environment);
 }
 
 export function isWebSocketPatternFile(filePath: string): boolean {

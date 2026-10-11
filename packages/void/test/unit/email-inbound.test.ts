@@ -14,7 +14,6 @@ import { compileWorkerEntry } from '../../src/router/compile.ts';
 import {
   compileEmailPattern,
   hasEmailHandlers,
-  scanEmailHandlers,
   scanEmailHandlersSync,
 } from '../../src/router/email.ts';
 import * as emailBarrel from '../../src/runtime/email.ts';
@@ -67,62 +66,54 @@ afterEach(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
 
-describe('scanEmailHandlers', () => {
-  it('returns empty when no email/ files exist', async () => {
+describe('scanEmailHandlersSync', () => {
+  it('returns empty when no email/ files exist', () => {
     const root = setupRoot({});
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.addresses).toEqual([]);
     expect(scan.defaultHandler).toBeUndefined();
     expect(hasEmailHandlers(scan)).toBe(false);
   });
 
-  it('detects per-address handlers under email/', async () => {
+  it('detects per-address handlers under email/', () => {
     const root = setupRoot({
       'email/support.ts': 'export default () => {}',
       'email/billing.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.addresses.map((a) => a.address)).toEqual(['billing', 'support']);
     expect(scan.addresses[0].filePath).toBe('billing.ts');
     expect(hasEmailHandlers(scan)).toBe(true);
   });
 
-  it('detects email/_default.ts as fallback', async () => {
+  it('detects email/_default.ts as fallback', () => {
     const root = setupRoot({
       'email/support.ts': 'export default () => {}',
       'email/_default.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.defaultHandler).toBe('_default.ts');
     expect(scan.addresses.map((a) => a.address)).toEqual(['support']);
   });
 
-  it('lowercases address names for case-insensitive routing', async () => {
+  it('lowercases address names for case-insensitive routing', () => {
     const root = setupRoot({
       'email/Support.ts': 'export default () => {}',
-    });
-    const scan = await scanEmailHandlers(root);
-    expect(scan.addresses[0].address).toBe('support');
-  });
-
-  it('ignores nested folders', async () => {
-    const root = setupRoot({
-      'email/sub/nested.ts': 'export default () => {}',
-      'email/support.ts': 'export default () => {}',
-    });
-    const scan = await scanEmailHandlers(root);
-    expect(scan.addresses.map((a) => a.address)).toEqual(['support']);
-  });
-
-  it('sync variant returns the same shape', () => {
-    const root = setupRoot({
-      'email/support.ts': 'export default () => {}',
     });
     const scan = scanEmailHandlersSync(root);
     expect(scan.addresses[0].address).toBe('support');
   });
 
-  it('pins the full six-shape dispatch order', async () => {
+  it('ignores nested folders', () => {
+    const root = setupRoot({
+      'email/sub/nested.ts': 'export default () => {}',
+      'email/support.ts': 'export default () => {}',
+    });
+    const scan = scanEmailHandlersSync(root);
+    expect(scan.addresses.map((a) => a.address)).toEqual(['support']);
+  });
+
+  it('pins the full six-shape dispatch order', () => {
     const root = setupRoot({
       'email/[user].ts': 'export default () => {}',
       'email/[user]+[tag].ts': 'export default () => {}',
@@ -131,7 +122,7 @@ describe('scanEmailHandlers', () => {
       'email/support+[tag].ts': 'export default () => {}',
       'email/support+vip.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.addresses.map((a) => a.address)).toEqual([
       'support+vip',
       'support+[tag]',
@@ -156,40 +147,37 @@ describe('scanEmailHandlers', () => {
     expect(first?.address).toBe('support+vip');
   });
 
-  it('skips files with invalid pattern shapes', async () => {
+  it('skips files with invalid pattern shapes', () => {
     const root = setupRoot({
       'email/support+ticket+extra.ts': 'export default () => {}', // two `+`
       'email/Bad Name.ts': 'export default () => {}', // space
       'email/[bad-name].ts': 'export default () => {}', // hyphen in param
       'email/ok.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.addresses.map((a) => a.address)).toEqual(['ok']);
   });
 
-  it('rejects a second _default.<ext> file instead of letting glob order pick one', async () => {
+  it('rejects a second _default.<ext> file instead of letting glob order pick one', () => {
     const root = setupRoot({
       'email/_default.ts': 'export default () => {}',
       'email/_default.js': 'export default () => {}',
     });
     // Glob order is readdir order, so either file may be reported as the
     // "second" one — the error must name both regardless.
-    await expect(scanEmailHandlers(root)).rejects.toThrow(/is a second default handler next to/);
-    await expect(scanEmailHandlers(root)).rejects.toThrow(/"_default\.ts"/);
-    await expect(scanEmailHandlers(root)).rejects.toThrow(/"_default\.js"/);
-    await expect(scanEmailHandlers(root)).rejects.toThrow(
-      /keep exactly one email\/_default\.\* file/,
-    );
-    expect(() => scanEmailHandlersSync(root)).toThrow(/is a second default handler/);
+    expect(() => scanEmailHandlersSync(root)).toThrow(/is a second default handler next to/);
+    expect(() => scanEmailHandlersSync(root)).toThrow(/"_default\.ts"/);
+    expect(() => scanEmailHandlersSync(root)).toThrow(/"_default\.js"/);
+    expect(() => scanEmailHandlersSync(root)).toThrow(/keep exactly one email\/_default\.\* file/);
   });
 
-  it('matches _default exactly: _Default.ts and _default.test.ts are private helpers, not a collision', async () => {
+  it('matches _default exactly: _Default.ts and _default.test.ts are private helpers, not a collision', () => {
     const root = setupRoot({
       'email/_default.mjs': 'export default () => {}',
       'email/_Default.ts': 'export default () => {}',
       'email/_default.test.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     expect(scan.defaultHandler).toBe('_default.mjs');
     expect(scan.addresses).toEqual([]);
   });
@@ -674,7 +662,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
 
   it('runs the exact-tag handler for support+vip@ when a capturing sibling exists (real scan)', async () => {
     // Scanner → codegen → dispatch, end to end. The hand-built scans above
-    // fix their own order; this one takes the order `scanEmailHandlers`
+    // fix their own order; this one takes the order `scanEmailHandlersSync`
     // produces, which is the only thing the generated loop relies on.
     const root = setupRoot({
       'email/[user].ts': 'export default () => {}',
@@ -684,7 +672,7 @@ describe('generated __emailHandler dispatch (behavioural)', () => {
       'email/support+[tag].ts': 'export default () => {}',
       'email/support+vip.ts': 'export default () => {}',
     });
-    const scan = await scanEmailHandlers(root);
+    const scan = scanEmailHandlersSync(root);
     const hits: Array<string> = [];
     const dispatch = buildEmailDispatcher(compile(scan), {
       '/e/[user].ts': { default: () => hits.push('[user]') },

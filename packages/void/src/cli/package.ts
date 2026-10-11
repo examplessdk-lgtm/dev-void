@@ -10,6 +10,7 @@ import { buildMigrationPlanBundle } from '../migrations/plan.ts';
 import type { MigrationFile } from '../migrations/validate.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';
 import type { ResolvedSandboxConfig } from '../sandbox/config.ts';
+import { collectFiles } from '../shared/collect-files.ts';
 import type {
   AssetConfig,
   DeployAssetManifestEntry,
@@ -773,23 +774,6 @@ function isWorkerModule(relativePath: string): boolean {
   }
   // Only include CF-compatible module extensions
   return /\.(js|mjs|cjs|wasm|map|txt)$/.test(norm);
-}
-
-/**
- * Recursively collect all file paths in a directory.
- */
-function collectFiles(dir: string): Array<string> {
-  const files: Array<string> = [];
-  const entries = readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...collectFiles(fullPath));
-    } else {
-      files.push(fullPath);
-    }
-  }
-  return files;
 }
 
 /**

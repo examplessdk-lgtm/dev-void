@@ -12,10 +12,10 @@ import {
   type EmailWireAction,
 } from '@void/platform/email-protocol';
 import type { Email as PostalMimeEmail } from 'postal-mime';
+import { base64ToBytes } from '../base64.ts';
 import { withTimeout } from '../email-protocol.ts';
 import { getRawRuntimeEnv } from '../env-raw.ts';
 import {
-  base64Decode,
   buildMime,
   indexOfControl,
   MimeError,
@@ -830,7 +830,7 @@ function decodeRfc2047(value: string): string {
     for (const m of value.matchAll(/=\?([\w-]+)\?([BbQq])\?([^?]*)\?=(?:\s+(?==\?))?/g)) {
       const [match, charset, enc, payload] = m;
       const bytes =
-        enc.toUpperCase() === 'B' ? base64Decode(payload) : quotedPrintableDecode(payload);
+        enc.toUpperCase() === 'B' ? base64ToBytes(payload) : quotedPrintableDecode(payload);
       // Honor the declared charset; fall back to UTF-8 for a label
       // TextDecoder rejects.
       let decoder: TextDecoder;

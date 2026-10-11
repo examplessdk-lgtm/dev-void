@@ -1,14 +1,5 @@
 import { cfAccessHeaders } from '../../shared/cf-access.ts';
 
-/** Base64-encode binary values for JSON transport to the proxy. */
-export function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
 function readableMessage(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;

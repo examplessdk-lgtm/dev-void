@@ -2,6 +2,7 @@ import type { Context, Env, MiddlewareHandler } from 'hono';
 import type { RewriteDestination } from 'void/routes';
 import type { HeadDescriptor } from '../pages/head.ts';
 import type { AuthSession, AuthUser } from './auth.ts';
+import { base64ToBytes } from './base64.ts';
 import { convertReturnValue } from './response.ts';
 import { runValidation, type ValidatorSlots, type HandlerInput } from './validator.ts';
 
@@ -309,8 +310,7 @@ function parseBasicAuthHeader(authorization: string | null) {
 
   try {
     const encoded = authorization.slice(6).trim();
-    const binary = atob(encoded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const bytes = base64ToBytes(encoded);
     const decoded = basicAuthDecoder.decode(bytes);
     const separator = decoded.indexOf(':');
     if (separator === -1) {

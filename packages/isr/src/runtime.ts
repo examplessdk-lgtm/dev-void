@@ -73,6 +73,8 @@ export type HandleIsrOptions = Readonly<{
   queryAllowlist?: QueryAllowlist;
 }>;
 
+// Caps rewrite-variant entries per path, so random values of an allowlisted
+// query param cannot grow KV without bound. Existing variants still update.
 export const MAX_ISR_VARIANTS_PER_PATH = 200;
 // Match managed ISR: tolerate removal responses for 24 hours after expiry.
 const ISR_STALE_EVICT_GRACE_MS = 86_400_000;

@@ -6,7 +6,8 @@
  * isolate, such as `createEmailTestHarness`.
  */
 
-import { base64, base64Decode, MAX_MESSAGE_BYTES, newId } from './mime.ts';
+import { base64ToBytes, bytesToBase64 } from '../base64.ts';
+import { MAX_MESSAGE_BYTES, newId } from './mime.ts';
 import type { NormalizedEmail, NormalizedAttachment } from './types.ts';
 
 export interface CapturedMessage {
@@ -81,7 +82,7 @@ export const DEV_INBOX_MAX_CAPTURE_BYTES: number = 6 * MAX_MESSAGE_BYTES;
 
 /** Encode a captured message for the worker -> dev-server hop (`raw` as base64). */
 export function serializeCapturedMessage(message: CapturedMessage): string {
-  return JSON.stringify({ ...message, raw: base64(message.raw) });
+  return JSON.stringify({ ...message, raw: bytesToBase64(message.raw) });
 }
 
 function asAddress(value: unknown): { email: string; name?: string } | undefined {
@@ -125,7 +126,7 @@ export function parseCapturedMessage(value: unknown): CapturedMessage | undefine
   }
   let raw: Uint8Array;
   try {
-    raw = base64Decode(v.raw);
+    raw = base64ToBytes(v.raw);
   } catch {
     return undefined;
   }

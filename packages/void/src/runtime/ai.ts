@@ -5,6 +5,7 @@ import {
   type AiProviderFetchInit,
   type AiProviderOptions,
 } from './ai-types.ts';
+import { bytesToBase64 } from './base64.ts';
 import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw.ts';
 import { UsageLimit, limitFromResponse } from './limits.ts';
 
@@ -101,15 +102,6 @@ function copyBinaryView(value: ArrayBufferView): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer as ArrayBuffer;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

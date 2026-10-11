@@ -1,4 +1,5 @@
 import type { ProjectZeroTrustRouting } from '@void/edge';
+import { clientRevalidateResponse, isEventStreamResponse } from '@void/isr/runtime';
 import {
   PLATFORM_HEALTH_HOSTNAME_LABEL,
   platformHealthHostname,
@@ -164,13 +165,6 @@ function platformHealthExceptionPath(request: Request, url: URL): boolean {
   });
 }
 
-function clientRevalidateResponse(response: Response): Response {
-  const res = new Response(response.body, response);
-  res.headers.set('Cache-Control', CLIENT_REVALIDATE_CACHE_CONTROL);
-  res.headers.delete(SHARED_CACHE_POLICY_HEADER);
-  return res;
-}
-
 // Fast body-less response for an operation bounded by `withTimeout` that
 // stalled past the budget. `X-Void-Timeout` names the stalled operation for
 // observability; 503s advertise a short `Retry-After` so clients back off.
@@ -196,13 +190,6 @@ function staticAssetFailureResponse(kind: FailureKind): Response {
       'Retry-After': '5',
     },
   });
-}
-
-export function isEventStreamResponse(response: Response): boolean {
-  return (
-    response.headers.get('content-type')?.toLowerCase().split(';', 1)[0]?.trim() ===
-    'text/event-stream'
-  );
 }
 
 export function isHtmlResponse(response: Response): boolean {

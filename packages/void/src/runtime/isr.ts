@@ -50,7 +50,8 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
     ): Promise<void> => {
       await kv.delete(key);
       try {
-        // Node's ambient CacheStorage (no `.default`) shadows the Workers type here.
+        // The DOM lib that the pages client modules reference declares
+        // CacheStorage without `.default`, shadowing the Workers type here.
         const cache = (caches as unknown as { default: Cache }).default;
         await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'html', variantToken));
         await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'json', variantToken));

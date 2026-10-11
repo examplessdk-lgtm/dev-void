@@ -5,6 +5,7 @@
 // project policy and quotas.
 
 import { isRecord } from '@void/deploy-core';
+import { bytesToBase64 } from './base64.ts';
 import { readBoundedJson, withTimeout } from './email-protocol.ts';
 import {
   captureMessage,
@@ -25,7 +26,7 @@ import {
   readProjectSlug,
   tryGetRawRuntimeEnv,
 } from './email/inbound.ts';
-import { base64, buildMime, MimeError, newId, normalizeEmail } from './email/mime.ts';
+import { buildMime, MimeError, newId, normalizeEmail } from './email/mime.ts';
 import type {
   EmailDeliveryState,
   NormalizedEmail,
@@ -788,7 +789,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     aiToken: proxyToken,
     from: normalized.from.email,
     recipients,
-    mimeBase64: base64(raw),
+    mimeBase64: bytesToBase64(raw),
     requestId: newId('req'),
     ...(opts.idempotencyKey === undefined ? {} : { idempotencyKey: opts.idempotencyKey }),
   };

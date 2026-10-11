@@ -1,4 +1,5 @@
-import { bytesToBase64, type ProxyClient } from './client.ts';
+import { bytesToBase64 } from '../base64.ts';
+import type { ProxyClient } from './client.ts';
 
 /**
  * KVNamespace implementation backed by the remote proxy.

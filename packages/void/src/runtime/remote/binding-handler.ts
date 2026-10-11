@@ -1,9 +1,6 @@
 import { Hono, type Context } from 'hono';
+import { base64ToBytes } from '../base64.ts';
 import { parseR2Conditional } from './r2-conditions.ts';
-
-function decodeBase64(value: string): Uint8Array {
-  return Uint8Array.from(atob(value), (ch) => ch.charCodeAt(0));
-}
 
 type BindingRequest = { binding: string };
 
@@ -185,7 +182,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
 
     let value: string | ArrayBuffer;
     if (body.base64 && typeof body.value === 'string') {
-      value = decodeBase64(body.value).buffer as ArrayBuffer;
+      value = base64ToBytes(body.value).buffer as ArrayBuffer;
     } else {
       value = typeof body.value === 'string' ? body.value : JSON.stringify(body.value);
     }
@@ -279,7 +276,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     }
     const { body, binding: bucket } = request;
     const data = body.base64
-      ? decodeBase64(body.base64)
+      ? base64ToBytes(body.base64)
       : new TextEncoder().encode(body.value ?? '');
 
     let onlyIf: R2Conditional | Headers | undefined;

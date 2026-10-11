@@ -154,6 +154,11 @@ export function writePlatformSelection(
   return true;
 }
 
+/** The raw `projectId` field, without the slug and URL checks of `readProjectConfig`. */
+export function readProjectIdField(root: string): string | undefined {
+  return readProjectConfigFile(root)?.projectId as string | undefined;
+}
+
 export function readProjectPlatformUrl(root: string): string | null {
   const value = readProjectConfigFile(root)?.platformUrl;
   return typeof value === 'string' && value !== '' ? normalizePlatformApiUrl(value) : null;

@@ -1,7 +1,7 @@
+import { MAX_ISR_VARIANTS_PER_PATH } from '@void/isr/runtime';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import {
-  MAX_ISR_VARIANTS_PER_PATH,
   SHARED_CACHE_POLICY_VERSION,
   isrCacheKey,
   isStale,

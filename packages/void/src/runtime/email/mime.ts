@@ -7,6 +7,7 @@
  */
 
 import { validate as isValidEmailSyntax } from 'email-validator';
+import { bytesToBase64 } from '../base64.ts';
 import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from './types.ts';
 
 /** Encoded outbound MIME ceiling, separate from the 10 MiB inbound limit. */
@@ -670,7 +671,7 @@ function encodeWord(text: string): string {
   const words: Array<string> = [];
   const flush = () => {
     if (length > 0) {
-      words.push(`=?UTF-8?B?${base64(pending.subarray(0, length))}?=`);
+      words.push(`=?UTF-8?B?${bytesToBase64(pending.subarray(0, length))}?=`);
       length = 0;
     }
   };
@@ -877,20 +878,6 @@ function quoteParam(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-export function base64(bytes: Uint8Array): string {
-  return btoa(codeUnitsToString(bytes));
-}
-
-/** Decode base64; throws on invalid input. */
-export function base64Decode(value: string): Uint8Array {
-  const binary = atob(value);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
-}
-
 /** `<prefix>_<base36 time><16 random hex>`. */
 export function newId(prefix: string): string {
   const bytes = new Uint8Array(8);
@@ -903,7 +890,7 @@ export function newId(prefix: string): string {
 }
 
 function base64Wrapped(bytes: Uint8Array): string {
-  const encoded = base64(bytes);
+  const encoded = bytesToBase64(bytes);
   const lines: Array<string> = [];
   for (let i = 0; i < encoded.length; i += 76) {
     lines.push(encoded.slice(i, i + 76));
@@ -1116,7 +1103,7 @@ function makeBoundary(prefix: string): string {
   // 16 random bytes → 24-char base64. Workers + browsers expose crypto.
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `=_void_${prefix}_${base64(bytes).replace(/[+/=]/g, '')}`;
+  return `=_void_${prefix}_${bytesToBase64(bytes).replace(/[+/=]/g, '')}`;
 }
 
 function wrapMultipart(
@@ -1288,7 +1275,7 @@ function generateMessageId(fromEmail: string): string {
   const domain = fromEmail.split('@')[1] ?? 'localhost';
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
-  const id = base64(bytes).replace(/[+/=]/g, '');
+  const id = bytesToBase64(bytes).replace(/[+/=]/g, '');
   return `<${id}@${domain}>`;
 }
 

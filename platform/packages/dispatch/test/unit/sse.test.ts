@@ -1,6 +1,7 @@
+import { isEventStreamResponse } from '@void/isr/runtime';
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
-import app, { isEventStreamResponse } from '../../src/index.ts';
+import app from '../../src/index.ts';
 
 const edgeCacheStore = new Map<string, Response>();
 
