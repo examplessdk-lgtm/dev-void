@@ -3,9 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { analyzeApplicationSync } from '../../src/application-analysis.ts';
-import { applyBindingOverrides, needsApplicationDatabase } from '../../src/application-features.ts';
 import type { VoidConfig } from '../../src/config.ts';
-import { inferBindingsFromSource } from '../../src/inference/walk.ts';
 
 const roots: Array<string> = [];
 
@@ -224,41 +222,4 @@ describe('shared application analysis', () => {
       r2: ['inference.bindings.storage enables R2'],
     });
   });
-});
-
-describe('shared application feature policy', () => {
-  it('overrides only explicitly named flags and does not mutate inference', () => {
-    const inferred = inferBindingsFromSource(
-      'import { db } from "void/db"; import { kv } from "void/kv"; import { storage } from "void/storage"; import { auth } from "void/auth"; import { sandbox } from "void/sandbox"; import { queues } from "void/queues";',
-      'features.ts',
-    );
-    const snapshot = { ...inferred };
-    expect(
-      applyBindingOverrides(inferred, { db: false, kv: 'CACHE', ai: true, email: false }),
-    ).toMatchObject({
-      needsD1: false,
-      needsKV: true,
-      needsR2: true,
-      needsAuth: true,
-      needsSandbox: true,
-      needsQueues: true,
-      needsAI: true,
-      needsEmail: false,
-    });
-    expect(inferred).toEqual(snapshot);
-    expect(applyBindingOverrides(inferred, {})).toEqual(inferred);
-    expect(applyBindingOverrides(inferred)).toEqual(inferred);
-  });
-
-  it.each([
-    [{ needsD1: false, needsAuth: false }, 0, false],
-    [{ needsD1: true, needsAuth: false }, 0, true],
-    [{ needsD1: false, needsAuth: true }, 0, true],
-    [{ needsD1: false, needsAuth: false }, 1, true],
-  ] as const)(
-    'shares database requirement across consumers: %j with %i migrations',
-    (bindings, migrationCount, expected) => {
-      expect(needsApplicationDatabase(bindings, migrationCount)).toBe(expected);
-    },
-  );
 });

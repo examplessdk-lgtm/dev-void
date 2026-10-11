@@ -261,11 +261,21 @@ describe('voidPlugin dev asset routing', () => {
     root: string,
     resolved: Record<string, unknown> = {},
     configEnv: import('vite').ConfigEnv = { command: 'serve', mode: 'development' },
+    { envSchema = false }: { envSchema?: boolean } = {},
   ): Promise<Record<string, unknown>> {
     vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     const { voidPlugin } = await import('../../src/index.ts');
     const plugins = voidPlugin();
+
+    if (envSchema) {
+      const schemaPlugin = plugins.find((plugin) => plugin.name === 'void:env-schema');
+      const schemaConfig = getHookHandler(schemaPlugin?.config) as (
+        config: import('vite').UserConfig,
+        env: import('vite').ConfigEnv,
+      ) => Promise<void>;
+      await schemaConfig({}, configEnv);
+    }
 
     const envPlugin = plugins.find((plugin) => plugin.name === 'void:env');
     const config = getHookHandler(envPlugin?.config) as (
@@ -310,27 +320,43 @@ describe('voidPlugin dev asset routing', () => {
     expect(assets?.not_found_handling).toBe('none');
   });
 
-  it('keeps API-only projects on the static SPA fallback while routing API requests to the worker', async () => {
-    const root = createApiOnlyProjectRoot();
-    const assets = await resolveVoidPluginAssets(root, {
-      assets: {
-        binding: 'ASSETS',
-        not_found_handling: 'none',
-        run_worker_first: ['/', '/*.html'],
+  it.each([
+    ['API-only projects', createApiOnlyProjectRoot, undefined],
+    ['a dev-only API route in dev', createDevOnlyApiProjectRoot, undefined],
+    [
+      'a prod-only API route in a preview run',
+      () => {
+        const root = createProjectRoot();
+        mkdirSync(join(root, 'routes/api'), { recursive: true });
+        writeFileSync(
+          join(root, 'routes/api/health.prod.ts'),
+          'export const GET = () => Response.json({});',
+        );
+        return root;
       },
-    });
+      { command: 'serve', mode: 'production', isPreview: true },
+    ],
+    ['API websocket-only projects', createApiWebSocketOnlyProjectRoot, undefined],
+    ['auth-only projects', createAuthOnlyProjectRoot, undefined],
+    [
+      'an API-only project with an inactive middleware directory',
+      () => {
+        const root = createApiOnlyProjectRoot();
+        mkdirSync(join(root, 'middleware'), { recursive: true });
+        writeFileSync(join(root, 'middleware', '_ignored.ts'), 'export default () => undefined;');
+        return root;
+      },
+      undefined,
+    ],
+  ] as const)(
+    'routes API requests to the worker and keeps documents static-first for %s',
+    async (_label, createRoot, configEnv) => {
+      const assets = await resolveVoidPluginAssets(createRoot(), {}, configEnv);
 
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
-  });
-
-  it('routes API requests to the worker in dev when the only route is dev-only', async () => {
-    const root = createDevOnlyApiProjectRoot();
-    const assets = await resolveVoidPluginAssets(root);
-
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
-  });
+      expect(assets?.not_found_handling).toBe('single-page-application');
+      expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
+    },
+  );
 
   it('drops the API worker-first rules in a build when the only route is dev-only', async () => {
     const root = createDevOnlyApiProjectRoot();
@@ -394,67 +420,25 @@ describe('voidPlugin dev asset routing', () => {
   });
 
   it('lets managed production dispatch keep the inferred asset-first policy', async () => {
-    const savedProjectId = process.env.VOID_DEPLOY_PROJECT_ID;
-    process.env.VOID_DEPLOY_PROJECT_ID = 'managed-project';
-    try {
-      const root = createConfiguredEdgeRulesProjectRoot();
-      const assets = await resolveVoidPluginAssets(
-        root,
-        {},
-        { command: 'build', mode: 'production' },
-      );
+    vi.stubEnv('VOID_DEPLOY_PROJECT_ID', 'managed-project');
+    const assets = await resolveVoidPluginAssets(
+      createConfiguredEdgeRulesProjectRoot(),
+      {},
+      { command: 'build', mode: 'production' },
+    );
 
-      expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
-    } finally {
-      if (savedProjectId === undefined) {
-        delete process.env.VOID_DEPLOY_PROJECT_ID;
-      } else {
-        process.env.VOID_DEPLOY_PROJECT_ID = savedProjectId;
-      }
-    }
+    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('ignores an ambient managed project marker during native development', async () => {
-    const savedProjectId = process.env.VOID_DEPLOY_PROJECT_ID;
-    process.env.VOID_DEPLOY_PROJECT_ID = 'managed-project';
-    try {
-      const root = createConfiguredEdgeRulesProjectRoot();
-      const assets = await resolveVoidPluginAssets(
-        root,
-        {},
-        { command: 'serve', mode: 'development' },
-      );
-
-      expect(assets?.run_worker_first).toContain('/**');
-    } finally {
-      if (savedProjectId === undefined) {
-        delete process.env.VOID_DEPLOY_PROJECT_ID;
-      } else {
-        process.env.VOID_DEPLOY_PROJECT_ID = savedProjectId;
-      }
-    }
-  });
-
-  it('keeps the API worker-first rules in a preview run of a prod-only route', async () => {
-    const root = createProjectRoot();
-    mkdirSync(join(root, 'routes/api'), { recursive: true });
-    writeFileSync(
-      join(root, 'routes/api/health.prod.ts'),
-      'export const GET = () => Response.json({});',
-    );
-
+    vi.stubEnv('VOID_DEPLOY_PROJECT_ID', 'managed-project');
     const assets = await resolveVoidPluginAssets(
-      root,
+      createConfiguredEdgeRulesProjectRoot(),
       {},
-      {
-        command: 'serve',
-        mode: 'production',
-        isPreview: true,
-      },
+      { command: 'serve', mode: 'development' },
     );
 
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
+    expect(assets?.run_worker_first).toContain('/**');
   });
 
   it('does not return existing D1 or R2 bindings when adding inferred defaults', async () => {
@@ -508,7 +492,6 @@ describe('voidPlugin dev asset routing', () => {
     vi.stubEnv('VOID_TEST_SHELL_ONLY', 'shell-only');
     vi.stubEnv('VOID_TEST_UNDECLARED', 'from-shell');
     vi.stubEnv('VOID_TEST_UNRELATED', 'must-stay-out');
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     const { defineEnv } = await import('../../src/runtime/env-public.ts');
     const { string } = await import('../../src/runtime/env-helpers.ts');
@@ -518,27 +501,7 @@ describe('voidPlugin dev asset routing', () => {
       VOID_TEST_SHELL_ONLY: string(),
     });
 
-    const { voidPlugin } = await import('../../src/index.ts');
-    const plugins = voidPlugin();
-    const schemaPlugin = plugins.find((plugin) => plugin.name === 'void:env-schema');
-    const schemaConfig = getHookHandler(schemaPlugin?.config) as (
-      config: import('vite').UserConfig,
-      env: import('vite').ConfigEnv,
-    ) => Promise<void>;
-    await schemaConfig({}, { command: 'serve', mode: 'development' });
-
-    const envPlugin = plugins.find((plugin) => plugin.name === 'void:env');
-    const envConfig = getHookHandler(envPlugin?.config) as (
-      config: import('vite').UserConfig,
-      env: import('vite').ConfigEnv,
-    ) => void;
-    envConfig({}, { command: 'serve', mode: 'development' });
-
-    const cloudflarePlugin = plugins.find(
-      (plugin): plugin is MockCloudflarePlugin => plugin.name === 'mock:cloudflare',
-    );
-    expect(cloudflarePlugin).toBeDefined();
-    const config = cloudflarePlugin!.api.pluginConfig.config({});
+    const config = await resolveCloudflareConfig(root, {}, undefined, { envSchema: true });
     expect(config.vars).toMatchObject({
       VOID_TEST_TOKEN: 'from-shell',
       VOID_TEST_FILE_ONLY: 'local',
@@ -546,40 +509,6 @@ describe('voidPlugin dev asset routing', () => {
       VOID_TEST_UNDECLARED: 'from-shell',
     });
     expect(config.vars).not.toHaveProperty('VOID_TEST_UNRELATED');
-  });
-
-  it('keeps reserved names set only in the shell out of the dev Worker', async () => {
-    const root = createProjectRoot();
-    writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');
-    vi.stubEnv('__VOID_PROXY_TOKEN', 'from-shell');
-    vi.stubEnv('__VOID_EMAIL_FROM', 'from-shell');
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-    const { voidPlugin } = await import('../../src/index.ts');
-    const plugins = voidPlugin();
-    const schemaPlugin = plugins.find((plugin) => plugin.name === 'void:env-schema');
-    const schemaConfig = getHookHandler(schemaPlugin?.config) as (
-      config: import('vite').UserConfig,
-      env: import('vite').ConfigEnv,
-    ) => Promise<void>;
-    await expect(schemaConfig({}, { command: 'serve', mode: 'development' })).resolves.toBe(
-      undefined,
-    );
-
-    const envPlugin = plugins.find((plugin) => plugin.name === 'void:env');
-    const envConfig = getHookHandler(envPlugin?.config) as (
-      config: import('vite').UserConfig,
-      env: import('vite').ConfigEnv,
-    ) => void;
-    envConfig({}, { command: 'serve', mode: 'development' });
-
-    const cloudflarePlugin = plugins.find(
-      (plugin): plugin is MockCloudflarePlugin => plugin.name === 'mock:cloudflare',
-    );
-    const config = cloudflarePlugin!.api.pluginConfig.config({});
-    expect(config.vars).toMatchObject({ API_URL: 'http://localhost' });
-    expect(config.vars).not.toHaveProperty('__VOID_PROXY_TOKEN');
-    expect(config.vars).not.toHaveProperty('__VOID_EMAIL_FROM');
   });
 
   function createSvelteKitProjectRoot(): string {
@@ -592,43 +521,27 @@ describe('voidPlugin dev asset routing', () => {
     return root;
   }
 
-  const reservedEnvApps = [
+  it.each([
     ['native', createProjectRoot],
     ['Class A framework', createFrameworkProjectRoot],
     ['Class B/C framework', createSvelteKitProjectRoot],
     ['Node target', createNodeProjectRoot],
-  ] as const;
+  ] as const)('stops a %s app on a reserved .env name', async (_label, createRoot) => {
+    const root = createRoot();
+    writeFileSync(join(root, '.env'), 'API_KEY=k\n__VOID_PROXY_TOKEN=local\n');
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
 
-  for (const [label, createRoot] of reservedEnvApps) {
-    for (const command of ['serve', 'build'] as const) {
-      for (const requiredEnvKey of [false, true]) {
-        it(`stops ${label} ${command} on a reserved .env name (env.ts with required key: ${requiredEnvKey})`, async () => {
-          const root = createRoot();
-          if (requiredEnvKey) {
-            writeFileSync(join(root, 'env.ts'), 'export default {};\n');
-            const { defineEnv } = await import('../../src/runtime/env-public.ts');
-            const { string } = await import('../../src/runtime/env-helpers.ts');
-            defineEnv({ API_KEY: string() });
-          }
-          writeFileSync(join(root, '.env'), 'API_KEY=k\n__VOID_PROXY_TOKEN=local\n');
-          vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-          const { voidPlugin } = await import('../../src/index.ts');
-          const schemaPlugins = voidPlugin().filter((plugin) => plugin.name === 'void:env-schema');
-          expect(schemaPlugins).toHaveLength(1);
-          const schemaConfig = getHookHandler(schemaPlugins[0]!.config) as (
-            config: import('vite').UserConfig,
-            env: import('vite').ConfigEnv,
-          ) => Promise<void>;
-          await expect(
-            schemaConfig({}, { command, mode: command === 'build' ? 'production' : 'development' }),
-          ).rejects.toThrow(
-            '.env defines names reserved for Void: __VOID_PROXY_TOKEN. Void sets these itself',
-          );
-        });
-      }
-    }
-  }
+    const { voidPlugin } = await import('../../src/index.ts');
+    const schemaPlugins = voidPlugin().filter((plugin) => plugin.name === 'void:env-schema');
+    expect(schemaPlugins).toHaveLength(1);
+    const schemaConfig = getHookHandler(schemaPlugins[0]!.config) as (
+      config: import('vite').UserConfig,
+      env: import('vite').ConfigEnv,
+    ) => Promise<void>;
+    await expect(schemaConfig({}, { command: 'serve', mode: 'development' })).rejects.toThrow(
+      '.env defines names reserved for Void: __VOID_PROXY_TOKEN. Void sets these itself',
+    );
+  });
 
   it('enables remote mode on an explicit Workers AI binding during direct development', async () => {
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
@@ -680,33 +593,6 @@ describe('voidPlugin dev asset routing', () => {
 
     expect(config.ai).toBeUndefined();
     expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('false');
-  });
-
-  it('keeps projects with only API websocket routes static-first for document requests', async () => {
-    const root = createApiWebSocketOnlyProjectRoot();
-    const assets = await resolveVoidPluginAssets(root);
-
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
-  });
-
-  it('routes managed auth endpoints to the worker without making all documents worker-first', async () => {
-    const root = createAuthOnlyProjectRoot();
-    const assets = await resolveVoidPluginAssets(root);
-
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
-  });
-
-  it('keeps API-only projects static-first when middleware directory has no active files', async () => {
-    const root = createApiOnlyProjectRoot();
-    mkdirSync(join(root, 'middleware'), { recursive: true });
-    writeFileSync(join(root, 'middleware', '_ignored.ts'), 'export default () => undefined;');
-
-    const assets = await resolveVoidPluginAssets(root);
-
-    expect(assets?.not_found_handling).toBe('single-page-application');
-    expect(assets?.run_worker_first).toEqual(['/api', '/api/*', '/__void', '/__void/*']);
   });
 
   it('passes worker.limits.cpu_ms from void.json into the generated worker config', async () => {

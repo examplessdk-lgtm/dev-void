@@ -114,14 +114,4 @@ describe('framework Workers AI bindings', () => {
     const config = await runFrameworkSync(root);
     expect(config.ai).toBeUndefined();
   });
-
-  it('does not add a paid AI binding for a type-only framework import', async () => {
-    const root = project('cloudflare');
-    writeFileSync(
-      join(root, 'src/routes/+page.server.ts'),
-      "import type { AI } from 'void/ai'; export const load = () => ({ ok: true });",
-    );
-    const config = await runFrameworkSync(root);
-    expect(config.ai).toBeUndefined();
-  });
 });

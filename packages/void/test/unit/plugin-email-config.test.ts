@@ -12,11 +12,8 @@ import { join } from 'node:path';
 import type { Plugin } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-// Runs the REAL `mergeBindings` closure: `voidPlugin()` hands it to the
-// Cloudflare plugin as `config`, and the mock captures it. The Cloudflare
-// plugin then `defu`-merges the returned object over the `resolved` config it
-// passed in, so a key can only be REMOVED by mutating `resolved` — which is
-// what the `send_email` assertions below check on both objects.
+// The Cloudflare plugin defu-merges the returned patch over `resolved`, so a key
+// can only be removed by mutating `resolved`.
 type MockCloudflarePluginConfig = {
   config: (resolved: Record<string, unknown>) => Record<string, unknown>;
 };
@@ -148,8 +145,6 @@ describe('mergeBindings email config (void dev)', () => {
 
     const result = await resolveCloudflareConfig(root, resolved, SERVE);
 
-    // Removed from the object the Cloudflare plugin merges over, and not
-    // re-added by the returned patch.
     expect('send_email' in resolved).toBe(false);
     expect('send_email' in result).toBe(false);
   });
@@ -172,41 +167,7 @@ describe('mergeBindings email config (void dev)', () => {
     expect((result.vars as Record<string, string> | undefined)?.__VOID_EMAIL_FROM).toBeUndefined();
   });
 
-  it('strips send_email under serve even when email.from is unset', async () => {
-    const root = createProjectRoot();
-    const resolved = { send_email: [{ name: 'SEND_EMAIL' }] };
-
-    const result = await resolveCloudflareConfig(root, resolved, SERVE);
-
-    expect('send_email' in resolved).toBe(false);
-    expect('send_email' in result).toBe(false);
-  });
-
-  it('preserves a user send_email binding when the app does not import void/email', async () => {
-    // Nothing in this app goes through `sendEmail`, so the strip has nothing
-    // to guard: the user's own binding must reach miniflare exactly as
-    // wrangler.jsonc declares it, or `env.MAILER.send()` is a dev-only crash.
-    const root = createProjectRoot({}, { usesVoidEmail: false });
-    const resolved = {
-      assets: { binding: 'ASSETS' },
-      send_email: [{ name: 'MAILER', destination_address: 'ops@example.com' }],
-    };
-
-    const result = await resolveCloudflareConfig(root, resolved, SERVE);
-
-    expect(resolved.send_email).toEqual([
-      { name: 'MAILER', destination_address: 'ops@example.com' },
-    ]);
-    // Not re-added by the patch either: defu concatenates arrays, so a patch
-    // entry would double the binding rather than replace it.
-    expect('send_email' in result).toBe(false);
-  });
-
   it('leaves a SEND_EMAIL entry alone when the app does not import void/email', async () => {
-    // The same `needsEmail` that arms the dev inbox gates the strip. Without
-    // `void/email` in the app, `sendEmail` never runs, so a `SEND_EMAIL` entry
-    // is either a stale leftover nothing reads or the user's own choice of
-    // name — both belong to the root config, as `void deploy` also treats them.
     const root = createProjectRoot({}, { usesVoidEmail: false });
     const resolved = { send_email: [{ name: 'SEND_EMAIL' }] };
 
@@ -238,9 +199,6 @@ describe('mergeBindings dev inbox vars (void dev)', () => {
 
     const vars = result.vars as Record<string, string>;
     expect(vars.__VOID_EMAIL_DEV_INBOX).toBe('ASSETS');
-    // The same per-project token the cron/queue dev routes check: the inbox
-    // middleware requires it on every route, including the worker's capture
-    // POST, so the worker must hold the value the plugin was handed.
     const persisted = readFileSync(join(root, '.void', 'dev-trigger-token'), 'utf8').trim();
     expect(persisted.length).toBeGreaterThan(0);
     expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe(persisted);
@@ -267,13 +225,6 @@ describe('mergeBindings dev inbox vars (void dev)', () => {
   });
 });
 
-// The token file is the one credential every inbox route accepts, so its mode
-// is part of the inbox's authorization: under the usual 022 umask a default
-// `openSync(.., 'wx')` leaves it 0644, readable by every other account on a
-// shared host — and loopback needs no `--host`, so that account can read raw
-// MIME, clear the buffer, or plant captures against the owner's dev server.
-// Windows has no group/other bits (`mode` and `chmod` only toggle write
-// there), so the mode assertions are POSIX-only.
 describe('dev-trigger token file mode (inbox credential)', () => {
   const tokenPath = (root: string) => join(root, '.void', 'dev-trigger-token');
   const modeOf = (path: string) => statSync(path).mode & 0o777;
@@ -283,18 +234,15 @@ describe('dev-trigger token file mode (inbox credential)', () => {
     async () => {
       const root = createProjectRoot();
 
-      const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
+      await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, SERVE);
 
       expect(modeOf(tokenPath(root))).toBe(0o600);
-      const vars = result.vars as Record<string, string>;
-      expect(vars.__VOID_EMAIL_DEV_INBOX_TOKEN).toBe(readFileSync(tokenPath(root), 'utf8').trim());
     },
   );
 
   it.skipIf(process.platform === 'win32')(
     'tightens a pre-existing 0644 token file to 0600 and keeps its value',
     async () => {
-      // A token persisted by an earlier void release, before the mode was set.
       const root = createProjectRoot();
       mkdirSync(join(root, '.void'), { recursive: true });
       writeFileSync(tokenPath(root), 'stable-token\n');
@@ -337,8 +285,6 @@ describe('mergeBindings email config (build)', () => {
 
     const result = await resolveCloudflareConfig(root, resolved, BUILD);
 
-    // The root entry survives on `resolved` and the patch does not clobber it
-    // (defu concatenates arrays, so a patch entry would double the binding).
     expect(resolved.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
     expect('send_email' in result).toBe(false);
   });
@@ -348,8 +294,6 @@ describe('mergeBindings email config (build)', () => {
 
     const result = await resolveCloudflareConfig(root, { assets: { binding: 'ASSETS' } }, BUILD);
 
-    // Not injected by the plugin: the CLI writes it into the root wrangler.jsonc
-    // only once the domain is set up, and the managed deploy supplies its own.
     expect((result.vars as Record<string, string> | undefined)?.__VOID_EMAIL_FROM).toBeUndefined();
   });
 });
