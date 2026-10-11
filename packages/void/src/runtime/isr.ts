@@ -36,21 +36,12 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
   const rawEnv = getRawRuntimeEnv();
   const proxy = rawEnv.__VOID_PROXY as Fetcher | undefined;
   if (!proxy) {
-    // Self-host — no platform proxy. Purge this worker's own ISR cache: KV
-    // entries (global, authoritative) plus the caches.default edge variants.
-    // When ISR_CACHE / deployment id are absent (e.g. local dev with no ISR
-    // binding), this is a silent no-op.
     const kv = rawEnv.ISR_CACHE as KVNamespace | undefined;
     const id = rawEnv.__VOID_ISR_DEPLOYMENT_ID as string | undefined;
     if (!kv || !id) {
       return;
     }
     const requestHost = rawEnv.__VOID_ISR_HOST as string | undefined;
-    // Cache keys are deployment- and host-scoped, so a purge must
-    // target a concrete (host, path). Delete KV first and unconditionally — the
-    // authoritative purge must never depend on the Cache API — then best-effort
-    // purge the per-host edge variants, guarded so a degraded `caches.default`
-    // (scheduled/queue handlers, or no Cache API) cannot fail the KV delete.
     const purgeKey = async (
       host: string,
       path: string,
@@ -59,14 +50,12 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
     ): Promise<void> => {
       await kv.delete(key);
       try {
-        // Cast because this package has both @types/node and @cloudflare/workers-types
-        // in scope, and Node's ambient CacheStorage (which lacks `.default`)
-        // otherwise shadows the Workers one — same pattern as isr-cache.ts.
+        // Node's ambient CacheStorage (no `.default`) shadows the Workers type here.
         const cache = (caches as unknown as { default: Cache }).default;
         await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'html', variantToken));
         await cache.delete(isrEdgeCacheUrlForToken(host, path, id, 'json', variantToken));
       } catch {
-        // Fail open — a degraded Cache API must not fail the authoritative KV purge.
+        // Best effort: a degraded Cache API must not fail the KV purge.
       }
     };
     const purgePath = async (host: string, path: string): Promise<void> => {
@@ -82,9 +71,8 @@ export async function revalidate(options: RevalidateOptions): Promise<void> {
       } while (cursor);
     };
     if (options.all) {
-      // Enumerate the actual host-scoped cache keys (registry-independent, so it
-      // is complete even for a host that was never registered). Split the host
-      // off the key tail before denormalizing the remaining pathname.
+      // Scan KV keys instead of the host registry so hosts that were never
+      // registered are purged too.
       const prefix = isrPrefix(id);
       let cursor: string | undefined;
       do {

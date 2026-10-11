@@ -216,9 +216,9 @@ export function defineLiveStream(options: LiveStreamOptions): LiveStream {
     assertOptionalString('type', publishOptions.type);
     assertOptionalString('eventId', publishOptions.eventId);
     assertJsonSerializable(data);
-    const topicKey = await topicDigest(streamId, topic);
-    const id = binding.idFromName(topicInstanceName(streamId, topicKey));
-    const response = await binding.get(id).fetch(internalUrl('/publish'), {
+    const topicKey = await __topicDigest(streamId, topic);
+    const id = binding.idFromName(__topicInstanceName(streamId, topicKey));
+    const response = await binding.get(id).fetch(__internalUrl('/publish'), {
       method: 'POST',
       body: JSON.stringify({
         streamId,
@@ -257,8 +257,8 @@ export function defineLiveStream(options: LiveStreamOptions): LiveStream {
           return decision;
         }
         const binding = getLiveBinding(ctx.env);
-        const id = binding.idFromName(connectionInstanceName(streamId, connectionId));
-        return binding.get(id).fetch(internalUrl('/connect'), {
+        const id = binding.idFromName(__connectionInstanceName(streamId, connectionId));
+        return binding.get(id).fetch(__internalUrl('/connect'), {
           method: 'POST',
           body: JSON.stringify({ streamId, connectionId, owner, limits }),
         });
@@ -307,8 +307,8 @@ export function defineLiveStream(options: LiveStreamOptions): LiveStream {
         }
         if (authorized.length > 0) {
           const binding = getLiveBinding(ctx.env);
-          const id = binding.idFromName(connectionInstanceName(streamId, body.connectionId));
-          const response = await binding.get(id).fetch(internalUrl('/control'), {
+          const id = binding.idFromName(__connectionInstanceName(streamId, body.connectionId));
+          const response = await binding.get(id).fetch(__internalUrl('/control'), {
             method: 'POST',
             body: JSON.stringify({
               streamId,
@@ -594,22 +594,22 @@ function assertJsonSerializable(value: unknown): void {
   }
 }
 
-async function topicDigest(streamId: string, topic: string): Promise<string> {
+export async function __topicDigest(streamId: string, topic: string): Promise<string> {
   const bytes = new TextEncoder().encode(`${streamId}\u0000${topic}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   const binary = String.fromCharCode(...new Uint8Array(digest));
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
-function connectionInstanceName(streamId: string, connectionId: string): string {
+export function __connectionInstanceName(streamId: string, connectionId: string): string {
   return `live:${streamId}:connection:${connectionId}`;
 }
 
-function topicInstanceName(streamId: string, topicKey: string): string {
+export function __topicInstanceName(streamId: string, topicKey: string): string {
   return `live:${streamId}:topic:${topicKey}`;
 }
 
-function internalUrl(path: string): string {
+export function __internalUrl(path: string): string {
   return `https://void.live${path}`;
 }
 

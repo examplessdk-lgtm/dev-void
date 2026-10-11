@@ -1,5 +1,9 @@
 import {
+  __connectionInstanceName,
   __getLiveBindingName,
+  __internalUrl,
+  __topicDigest,
+  __topicInstanceName,
   type LiveClientEvent,
   type LiveControlErrorCode,
   type LiveControlOperation,
@@ -248,7 +252,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           continue;
         }
 
-        const topicKey = await topicDigest(message.streamId, operation.topic);
+        const topicKey = await __topicDigest(message.streamId, operation.topic);
         const existing = connection.subscriptions.get(operation.id);
         const revision = (existing?.revision ?? 0) + 1;
         const row: SubscriberRow = {
@@ -262,7 +266,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           lastSeenAt: Date.now(),
         };
         const response = await this.topicStub(message.streamId, topicKey).fetch(
-          internalUrl('/register'),
+          __internalUrl('/register'),
           {
             method: 'POST',
             body: JSON.stringify({ ...row, limits: message.limits }),
@@ -431,7 +435,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           batch.map(([connectionId, items]) =>
             fetchWithTimeout(
               this.connectionStub(message.streamId, connectionId),
-              internalUrl('/deliver'),
+              __internalUrl('/deliver'),
               {
                 method: 'POST',
                 body: JSON.stringify({
@@ -505,7 +509,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           batch.map(([connectionId, items]) =>
             fetchWithTimeout(
               this.connectionStub(items[0]!.row.streamId, connectionId),
-              internalUrl('/check'),
+              __internalUrl('/check'),
               {
                 method: 'POST',
                 body: JSON.stringify({
@@ -549,12 +553,12 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
 
     private topicStub(streamId: string, topicKey: string): DurableObjectStub {
       const binding = this.env[__getLiveBindingName()] as DurableObjectNamespace;
-      return binding.get(binding.idFromName(topicInstanceName(streamId, topicKey)));
+      return binding.get(binding.idFromName(__topicInstanceName(streamId, topicKey)));
     }
 
     private connectionStub(streamId: string, connectionId: string): DurableObjectStub {
       const binding = this.env[__getLiveBindingName()] as DurableObjectNamespace;
-      return binding.get(binding.idFromName(connectionInstanceName(streamId, connectionId)));
+      return binding.get(binding.idFromName(__connectionInstanceName(streamId, connectionId)));
     }
 
     private unregisterTopic(
@@ -562,7 +566,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
       connectionId: string,
       subscription: ActiveSubscription,
     ) {
-      return this.topicStub(streamId, subscription.topicKey).fetch(internalUrl('/unregister'), {
+      return this.topicStub(streamId, subscription.topicKey).fetch(__internalUrl('/unregister'), {
         method: 'POST',
         body: JSON.stringify({
           streamId,
@@ -678,23 +682,4 @@ function subscriberPrefix(streamId: string, topicKey: string): string {
 
 function subscriberKey(row: SubscriberRow): string {
   return `${subscriberPrefix(row.streamId, row.topicKey)}${row.connectionId}:${row.subscriptionId}:${row.generation}:${row.revision}`;
-}
-
-async function topicDigest(streamId: string, topic: string): Promise<string> {
-  const bytes = new TextEncoder().encode(`${streamId}\u0000${topic}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const binary = String.fromCharCode(...new Uint8Array(digest));
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-}
-
-function connectionInstanceName(streamId: string, connectionId: string): string {
-  return `live:${streamId}:connection:${connectionId}`;
-}
-
-function topicInstanceName(streamId: string, topicKey: string): string {
-  return `live:${streamId}:topic:${topicKey}`;
-}
-
-function internalUrl(path: string): string {
-  return `https://void.live${path}`;
 }

@@ -126,22 +126,9 @@ export function buildWebSocketInstanceId(
   return route.params.map((name) => `${name}=${params[name] ?? ''}`).join('&');
 }
 
-async function validateSchema(
-  schema: StandardSchemaV1,
-  value: unknown,
-): Promise<
-  { ok: true; value: unknown } | { ok: false; issues: ReadonlyArray<StandardSchemaV1.Issue> }
-> {
-  const result = await schema['~standard'].validate(value);
-  if (result.issues) {
-    return { ok: false, issues: result.issues };
-  }
-  return { ok: true, value: result.value };
-}
-
 async function serializeServerEvent(schema: StandardSchemaV1, event: unknown): Promise<string> {
-  const result = await validateSchema(schema, event);
-  if (!result.ok) {
+  const result = await schema['~standard'].validate(event);
+  if (result.issues) {
     throw new Error(
       `ws: Message validation failed: ${result.issues.map((issue) => issue.message).join('; ')}.`,
     );
@@ -393,8 +380,8 @@ export function createWebSocketDurableObject(
         return;
       }
 
-      const result = await validateSchema(definition.messages.client, parsed);
-      if (!result.ok) {
+      const result = await definition.messages.client['~standard'].validate(parsed);
+      if (result.issues) {
         webSocket.close(1007, 'Invalid message');
         return;
       }
@@ -471,30 +458,6 @@ function getStub(
   }
   const id = binding.idFromName(buildWebSocketInstanceId(route, params));
   return binding.get(id);
-}
-
-export async function handleWebSocketUpgrade(
-  request: Request,
-  env: Record<string, unknown>,
-  routes: Array<WebSocketRouteMeta>,
-): Promise<Response | null> {
-  if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
-    return null;
-  }
-
-  for (const route of routes) {
-    const params = getRouteMatch(request, route);
-    if (!params) {
-      continue;
-    }
-    const stub = getStub(env, route, params);
-    if (!stub) {
-      return new Response(`Missing Durable Object binding "${route.bindingName}"`, { status: 503 });
-    }
-    return stub.fetch(request);
-  }
-
-  return null;
 }
 
 export async function forwardWebSocketRequest(
