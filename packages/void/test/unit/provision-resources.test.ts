@@ -3402,7 +3402,6 @@ describe('assertNoTransportRedirectInProjectDotenv — the files and keys wrangl
       files: { '.env': `export ${redirect}` },
       error: /refusing to provision.*\.env.*CLOUDFLARE_API_BASE_URL.*redirect/s,
     },
-    // Every command passes `--env=`, so wrangler also loads the empty-env files.
     {
       name: 'a redirect in .env.',
       files: { '.env.': redirect },

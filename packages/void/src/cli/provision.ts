@@ -2030,6 +2030,8 @@ export async function acquireProvisionLock(
       const key = resolveProperLockfileKey(lockTarget);
       const tracked = locks[key];
       if (tracked) {
+        // Mark it released first: an in-flight heartbeat callback then skips it instead of
+        // reporting the retained lock as compromised (our onCompromised throws).
         tracked.released = true;
         if (tracked.updateTimeout !== undefined) {
           clearTimeout(tracked.updateTimeout);
