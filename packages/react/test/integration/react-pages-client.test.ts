@@ -329,7 +329,6 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
       await page.goto(BASE + '/');
       await waitForHydration(page);
 
-      // Stamp the nav element
       await page.evaluate(() => {
         (document.querySelector('nav') as NavElement | null)!.__stamp = 1;
       });
@@ -466,10 +465,8 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
       await page.goto(BASE + '/');
       await waitForHydration(page);
 
-      // Home page title from head() + titleTemplate
       expect(await page.title()).toBe('Home | React Pages Demo');
 
-      // Navigate to user detail — title should update
       await page.click('a[href="/users"]');
       await page.waitForFunction(() =>
         document.querySelector('h1')?.textContent?.includes('Users'),
@@ -480,7 +477,6 @@ function registerClientTests(getBase: () => string, coverage: 'smoke' | 'full') 
       );
       expect(await page.title()).toBe('Alice | React Pages Demo');
 
-      // Go back — title should restore
       await page.goBack();
       await page.waitForFunction(() =>
         document.querySelector('h1')?.textContent?.includes('Users'),
@@ -711,7 +707,6 @@ describe('react-pages client (dev)', () => {
   });
 
   it('dev: SSR pages, Inertia protocol, form handling, API coexistence', async () => {
-    // 1. Initial page load returns SSR HTML with embedded page data
     const rootRes = await fetch(`${DEV_BASE}/`);
     expect(rootRes.status).toBe(200);
     const rootHtml = await rootRes.text();
@@ -719,11 +714,7 @@ describe('react-pages client (dev)', () => {
     expect(rootHtml).toContain('Welcome');
     expect(rootHtml).toContain('React Pages Demo'); // shared data from middleware
 
-    // Inline page-data must round-trip through the <script> tag without
-    // truncation. If serializePageData ever regresses (e.g. via another
-    // template-literal backslash-collapse), the </script> in scriptProbe
-    // closes the inline tag early, the regex below captures truncated
-    // text, and JSON.parse throws.
+    // scriptProbe tries to close the inline page-data <script> tag early.
     const probe = '</script><script>alert(1)</script>\u2028\u2029&';
     const probeMatch = rootHtml.match(/<script id="__VOID_PAGE_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     expect(probeMatch).not.toBeNull();
@@ -731,16 +722,12 @@ describe('react-pages client (dev)', () => {
     expect(probeJson).not.toMatch(/<\/script/i);
     expect(JSON.parse(probeJson).shared.scriptProbe).toBe(probe);
 
-    // 1b. Head management — SSR HTML contains head tags from void.json + page head()
     expect(rootHtml).toContain('<title>Home | React Pages Demo</title>');
     expect(rootHtml).toContain('<meta charset="utf-8">');
     expect(rootHtml).toContain('<meta name="description" content="React Pages playground home">');
     expect(rootHtml).toContain('<html lang="en"');
-
-    // 2. SSR content contains server-rendered props
     expect(rootHtml).toContain('This is the React Pages playground.');
 
-    // 3. Users page SSR — server-rendered user list
     const usersRes = await fetch(`${DEV_BASE}/users`);
     expect(usersRes.status).toBe(200);
     const usersHtml = await usersRes.text();
@@ -749,18 +736,14 @@ describe('react-pages client (dev)', () => {
     expect(usersHtml).toContain('Bob');
     expect(usersHtml).toContain('React Pages Demo'); // layout with shared data
 
-    // 4. User detail page SSR
     const userRes = await fetch(`${DEV_BASE}/users/1`);
     expect(userRes.status).toBe(200);
     const userHtml = await userRes.text();
     expect(userHtml).toContain('Alice');
     expect(userHtml).toContain('alice@example.com');
-
-    // 4b. User detail head — dynamic title from head() export
     expect(userHtml).toContain('<title>Alice | React Pages Demo</title>');
     expect(userHtml).toContain('<meta property="og:title" content="Alice">');
 
-    // 5. Inertia navigation — GET / with X-VoidPages header returns JSON page object
     const inertiaRoot = await fetch(`${DEV_BASE}/`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -777,7 +760,6 @@ describe('react-pages client (dev)', () => {
     expect(rootPage.props).toHaveProperty('title', 'Home');
     expect(rootPage.shared).toHaveProperty('appName', 'React Pages Demo');
     expect(rootPage.url).toBe('/');
-    // Head in Inertia JSON
     expect(rootPage.head).toBeDefined();
     expect(rootPage.head.title).toBe('Home | React Pages Demo');
     expect(rootPage.head.meta).toEqual(
@@ -786,7 +768,6 @@ describe('react-pages client (dev)', () => {
       ]),
     );
 
-    // 6. Inertia navigation — GET /users returns user list in props
     const inertiaUsers = await fetch(`${DEV_BASE}/users`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -799,13 +780,11 @@ describe('react-pages client (dev)', () => {
     expect(usersPage.props.users).toHaveLength(2);
     expect(usersPage.props.users[0].name).toBe('Alice');
 
-    // 7. API coexistence — /api/health returns JSON (not a page object)
     const healthRes = await fetch(`${DEV_BASE}/api/health`);
     expect(healthRes.status).toBe(200);
     const healthBody = (await healthRes.json()) as { status: string };
     expect(healthBody.status).toBe('ok');
 
-    // 8. Form submission — POST /users with valid data
     const postValid = await fetch(`${DEV_BASE}/users`, {
       method: 'POST',
       headers: { 'X-VoidPages': 'true', 'Content-Type': 'application/json' },
@@ -821,7 +800,6 @@ describe('react-pages client (dev)', () => {
     expect(validPage.props.users).toHaveLength(3);
     expect(validPage.props.users[2].name).toBe('Charlie');
 
-    // 9. Form submission — POST /users with invalid data returns validation errors
     const postInvalid = await fetch(`${DEV_BASE}/users`, {
       method: 'POST',
       headers: { 'X-VoidPages': 'true', 'Content-Type': 'application/json' },
@@ -836,10 +814,8 @@ describe('react-pages client (dev)', () => {
     expect(invalidPage.errors).not.toBeNull();
     expect(invalidPage.errors!.name).toBe('Name is required');
     expect(invalidPage.errors!.email).toBe('Email is required');
-    // Props should still be populated (re-ran GET)
     expect(invalidPage.props.users.length).toBeGreaterThanOrEqual(2);
 
-    // 10. User detail via Inertia
     const inertiaUser = await fetch(`${DEV_BASE}/users/1`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -851,10 +827,8 @@ describe('react-pages client (dev)', () => {
     };
     expect(userPage.component).toBe('users/[id]');
     expect(userPage.props.user.name).toBe('Alice');
-    // Head in user detail Inertia JSON
     expect(userPage.head.title).toBe('Alice | React Pages Demo');
 
-    // 11. Newly added user is accessible via detail page
     const inertiaCharlie = await fetch(`${DEV_BASE}/users/3`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -867,9 +841,6 @@ describe('react-pages client (dev)', () => {
     expect(charliePage.props.user.name).toBe('Charlie');
     expect(charliePage.props.user.email).toBe('charlie@example.com');
 
-    // --- Island pages ---
-
-    // 12. Island page SSR — HTML with data-island markers, NOT embedded page data
     const blogRes = await fetch(`${DEV_BASE}/blog`);
     expect(blogRes.status).toBe(200);
     const blogHtml = await blogRes.text();
@@ -881,7 +852,6 @@ describe('react-pages client (dev)', () => {
     expect(blogHtml).toContain('Second Post');
     expect(blogHtml).toContain('Count:');
 
-    // 13. Island page always returns HTML even with X-VoidPages header
     const inertiaBlog = await fetch(`${DEV_BASE}/blog`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -891,7 +861,6 @@ describe('react-pages client (dev)', () => {
     const inertiaBlogHtml = await inertiaBlog.text();
     expect(inertiaBlogHtml).toContain('data-island=');
 
-    // 14. Island mutation — validation errors return JSON 422
     const blogPostInvalid = await fetch(`${DEV_BASE}/blog`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -902,7 +871,6 @@ describe('react-pages client (dev)', () => {
     expect(invalidBlog.errors.title).toBe('Title is required');
     expect(invalidBlog.errors.body).toBe('Body is required');
 
-    // 15. Island mutation — success returns JSON 200
     const blogPostValid = await fetch(`${DEV_BASE}/blog`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -912,7 +880,6 @@ describe('react-pages client (dev)', () => {
     const validBlog = (await blogPostValid.json()) as { success: boolean };
     expect(validBlog.success).toBe(true);
 
-    // 16. Island detail page with dynamic param
     const detailRes = await fetch(`${DEV_BASE}/blog/hello-world`);
     expect(detailRes.status).toBe(200);
     const detailHtml = await detailRes.text();
@@ -920,9 +887,6 @@ describe('react-pages client (dev)', () => {
     expect(detailHtml).toContain('First post');
     expect(detailHtml).not.toContain('__VOID_PAGE_DATA__');
 
-    // --- Deferred props ---
-
-    // 17. Deferred props: SPA navigation streams NDJSON
     const deferredInertia = await fetch(`${DEV_BASE}/deferred`, {
       headers: { 'X-VoidPages': 'true' },
     });
@@ -938,7 +902,6 @@ describe('react-pages client (dev)', () => {
     expect(deferredLine.__deferred).toBe('stats');
     expect(deferredLine.data).toEqual({ count: 42 });
 
-    // 18. Deferred props: SSR includes resolution script tags
     const deferredSsr = await fetch(`${DEV_BASE}/deferred`);
     const deferredHtml = await deferredSsr.text();
     expect(deferredHtml).toContain('__VOID_PAGE_DATA__');
@@ -1003,28 +966,23 @@ describe('react-pages client (dev)', () => {
       await page.goto(`${DEV_BASE}/blog`);
       await waitForIslandsHydrated(page, 2);
 
-      // Interact to establish client state — count becomes 1
       await page.click("button:has-text('Increment')");
       await page.waitForFunction(
         () => document.querySelector('[data-testid="count"]')?.textContent === 'Count: 1',
       );
 
-      // Set a window marker to detect full page reload
       await page.evaluate(() => {
         window.__hmr_marker = true;
       });
 
-      // Edit the island component — change the label
       const modified = original.replace('Count: {count}', 'Total: {count}');
       writeFileSync(counterFile, modified);
 
-      // Wait for HMR to update the component text
       await page.waitForFunction(
         () => document.querySelector('[data-testid="count"]')?.textContent?.startsWith('Total:'),
         { timeout: 10_000 },
       );
 
-      // No full page reload — window marker should still be set
       const markerSurvived = await page.evaluate(() => window.__hmr_marker === true);
       expect(markerSurvived).toBe(true);
 
@@ -1043,19 +1001,15 @@ describe('react-pages client (dev)', () => {
     const original = readFileSync(islandFile, 'utf-8');
 
     try {
-      // Verify initial content renders
       const initialRes = await fetch(`${DEV_BASE}/blog`);
       expect(initialRes.status).toBe(200);
       const initialHtml = await initialRes.text();
       expect(initialHtml).toContain('<h1>Blog</h1>');
 
-      // Edit the island file — change the heading
       const modified = original.replace('<h1>Blog</h1>', '<h1>Blog Updated</h1>');
       writeFileSync(islandFile, modified);
 
       // Poll for updated content — every request must return 200 (no ISE).
-      // The previous bug: sending full-reload to the workerd triggered a
-      // program reload that caused React dual-instance errors (500s).
       const start = Date.now();
       let updatedHtml = '';
       while (Date.now() - start < 10_000) {
