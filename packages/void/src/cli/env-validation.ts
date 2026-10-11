@@ -1,8 +1,11 @@
 /** Env-schema validation for `void env check`, `void secret`, and both deploy paths. */
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import type { CloudflareOperation } from '@void/deploy-cloudflare';
-import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+import {
+  parseRootWranglerConfig,
+  readWranglerTopLevelString,
+  type CloudflareOperation,
+} from '@void/deploy-cloudflare';
 import { dirname, join, resolve } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { loadUserEnvFile } from '../host/load-user-env.ts';
@@ -467,7 +470,10 @@ function reconcileSelfHostAccount(
   configPath: string,
   requestedAccountId: string | undefined,
 ): string | undefined {
-  const configAccountId = readConfigAccountId(configPath);
+  const configAccountId = readWranglerTopLevelString(
+    parseRootWranglerConfig(configPath),
+    'account_id',
+  );
   if (configAccountId && requestedAccountId && configAccountId !== requestedAccountId) {
     throw new SelfHostSecretListError(
       `env: Cloudflare account mismatch — "${configPath}" pins account_id ` +
@@ -491,7 +497,7 @@ function reconcileSelfHostWorkerName(
   configPath: string,
   pinnedWorkerName: string | undefined,
 ): void {
-  const configName = readConfigName(configPath);
+  const configName = readWranglerTopLevelString(parseRootWranglerConfig(configPath), 'name');
   if (configName && pinnedWorkerName && configName !== pinnedWorkerName) {
     throw new SelfHostSecretListError(
       `env: Cloudflare worker name mismatch — "${configPath}" declares name ` +
@@ -503,50 +509,6 @@ function reconcileSelfHostWorkerName(
         `checkout, then rerun.`,
     );
   }
-}
-
-const UTF8_BOM = '﻿';
-
-function isConfigRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Parse the root config as JSONC. An unreadable or malformed config skips the checks. */
-function parseRootConfig(configPath: string): Record<string, unknown> | undefined {
-  if (!existsSync(configPath)) {
-    return undefined;
-  }
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, 'utf-8');
-  } catch {
-    return undefined;
-  }
-  const content = raw.startsWith(UTF8_BOM) ? raw.slice(UTF8_BOM.length) : raw;
-  const errors: Array<ParseError> = [];
-  const parsed = parseJsonc(content, errors, { allowTrailingComma: true });
-  if (errors.length > 0 || !isConfigRecord(parsed)) {
-    return undefined;
-  }
-  return parsed;
-}
-
-function readConfigAccountId(configPath: string): string | undefined {
-  const parsed = parseRootConfig(configPath);
-  if (!parsed) {
-    return undefined;
-  }
-  const accountId = parsed.account_id;
-  return typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined;
-}
-
-function readConfigName(configPath: string): string | undefined {
-  const parsed = parseRootConfig(configPath);
-  if (!parsed) {
-    return undefined;
-  }
-  const name = parsed.name;
-  return typeof name === 'string' && name.length > 0 ? name : undefined;
 }
 
 /** Shown instead of validator messages, which can embed the rejected value. */

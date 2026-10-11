@@ -13,7 +13,7 @@ import {
 } from './asset-routing.ts';
 import { loadVoidAuthConfig } from './auth/config.ts';
 import { generateVoidAuthDatabaseModule, generateVoidAuthDrizzleSchema } from './auth/drizzle.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './cli/headers.ts';
+import { lintRoutingPhases, mergeRoutingRules } from './cli/headers.ts';
 import { stampClientAssetCachePolicy } from './client-asset-manifest.ts';
 import { findEnvFileForPaths } from './codegen/env-types.ts';
 import { generateQueueTypes } from './codegen/queue-types.ts';
@@ -229,10 +229,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   function reloadFileRules(): void {
     // Config rules still apply without a public dir, and stale preload rules are cleared.
     const merged = mergeRoutingRules({ dir: publicDir, routing: options.routing });
-    lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-    lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
-    lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-    lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+    lintRoutingPhases(merged);
     compileOptions.headerRules = merged.headerRules.length > 0 ? merged.headerRules : undefined;
     compileOptions.redirectRules =
       merged.redirectRules.length > 0 ? merged.redirectRules : undefined;

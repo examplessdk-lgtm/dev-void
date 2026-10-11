@@ -49,7 +49,7 @@ import {
   getErrorMessage,
   getExitCode,
 } from './deploy-helpers.ts';
-import { warnRedundantForceOn3xx } from './deploy-managed-events.ts';
+import { mergeAndLintRoutingRules } from './deploy-managed-events.ts';
 import { requireProvisionModule } from './deploy-provision.ts';
 import { deriveWorkerName } from './deploy-resources.ts';
 import { formatDeploySummary, printDeployContext, printDeploySuccess } from './deploy-summary.ts';
@@ -59,7 +59,6 @@ import {
   deployChildEnv,
 } from './deploy-transport.ts';
 import { type RunDeployOptions, type CloudflareDeployDeps } from './deploy-types.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
 import { note } from './output.ts';
 import { buildStaticManifest } from './package.ts';
@@ -332,12 +331,7 @@ export async function runCloudflareStaticDeploy(
     return exit(1);
   }
 
-  const merged = mergeRoutingRules({ dir: preset.outputDir, routing: voidConfig.routing });
-  warnRedundantForceOn3xx(merged.redundantForceOn3xx);
-  lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
-  lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+  const merged = mergeAndLintRoutingRules(preset.outputDir, voidConfig.routing);
   const manifest = buildStaticManifest({
     appType: preset.appType,
     hashedAssetsPrefix: 'assets',

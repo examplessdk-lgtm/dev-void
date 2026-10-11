@@ -11,6 +11,7 @@ import {
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isRecord } from '@void/deploy-core';
 import type { PlatformDiscoveryDocument } from '@void/platform';
 import { log, confirm, isCancel, cancel, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { parse, type ParseError } from 'jsonc-parser';
@@ -227,10 +228,7 @@ type TsconfigInheritancePatch = {
 };
 
 function asRecord(value: unknown): JsonObject | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as JsonObject;
+  return isRecord(value) ? value : null;
 }
 
 function parseJsoncFile(path: string): JsonObject | null {

@@ -73,6 +73,7 @@ import {
   type SelfHostSchemaFacts,
 } from '../../src/cli/env-validation.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
+import { migrateLegacyVoidConfig } from '../../src/cli/migrate.ts';
 import { FRAMEWORK_PRESETS } from '../../src/cli/preset.ts';
 import { provisionCloudflareResources, type ProvisionResult } from '../../src/cli/provision.ts';
 import {
@@ -555,8 +556,17 @@ describe('existing Cloudflare site handoff', () => {
       }),
     });
   }
+  /** The site after the deploy target moved its settings into void.config.ts. */
+  function migratedSite() {
+    const root = site();
+    migrateLegacyVoidConfig(root);
+    return root;
+  }
   function build(root: string) {
-    const config = parseRootWranglerConfig(join(root, 'wrangler.jsonc'));
+    const typed = existsSync(join(root, 'void.config.ts'));
+    const config = parseRootWranglerConfig(
+      join(root, typed ? '.void-wrangler.jsonc' : 'wrangler.jsonc'),
+    );
     config.triggers = { crons: [] };
     config.queues = { consumers: [], producers: [] };
     config.durable_objects = { bindings: [] };
@@ -826,7 +836,7 @@ describe('existing Cloudflare site handoff', () => {
     expect(readCloudflareLink(root)).toBeNull();
   });
   it('retains the link guard after a failed build and verifies the Worker again on retry', async () => {
-    const root = site();
+    const root = migratedSite();
     mkdirSync(join(root, 'pages'));
     writeFileSync(join(root, 'pages/index.tsx'), 'export default () => null;');
     writeFileSync(join(root, 'pages/index.server.ts'), 'export const prerender = true;');
@@ -1058,7 +1068,7 @@ describe('existing Cloudflare site handoff', () => {
   it.each(['prerender', 'markdown', 'revalidate'])(
     'keeps the declined ISR choice on subsequent deploys for a %s site',
     async (mode) => {
-      const root = site();
+      const root = migratedSite();
       mkdirSync(join(root, 'pages'));
       if (mode === 'markdown') {
         writeFileSync(join(root, 'pages/index.md'), '# Home');
@@ -1087,7 +1097,9 @@ describe('existing Cloudflare site handoff', () => {
       expect(wranglerArgs.some((args) => ['kv', 'containers', 'secret'].includes(args[0]!))).toBe(
         false,
       );
-      expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc')).kv_namespaces).toBeUndefined();
+      expect(
+        parseRootWranglerConfig(join(root, '.void-wrangler.jsonc')).kv_namespaces,
+      ).toBeUndefined();
       expect(
         parseRootWranglerConfig(join(root, 'dist/ssr/wrangler.json')).kv_namespaces,
       ).toBeUndefined();
@@ -1101,7 +1113,7 @@ describe('existing Cloudflare site handoff', () => {
       const { desired } = await computeDesiredCloudflareResources(
         root,
         readConfig(root),
-        join(root, 'wrangler.jsonc'),
+        join(root, '.void-wrangler.jsonc'),
       );
       expect(desired.kvNamespaces).toEqual([]);
     },
@@ -1156,7 +1168,7 @@ describe('existing Cloudflare site handoff', () => {
   });
 
   it('rejects an ISR namespace added by the build during handoff', async () => {
-    const root = site();
+    const root = migratedSite();
     mkdirSync(join(root, 'pages'));
     writeFileSync(join(root, 'pages/index.md'), '# Home');
     const { deps, trace } = harness({
@@ -1188,6 +1200,7 @@ describe('existing Cloudflare site handoff', () => {
       if (configured) {
         writeFileSync(join(root, 'void.json'), JSON.stringify({ routing: { isr: true } }));
       }
+      migrateLegacyVoidConfig(root);
       const confirmIsrSetup = vi.fn().mockResolvedValue(true);
       const provision = vi
         .fn<NonNullable<CloudflareDeployDeps['provision']>>()
@@ -1262,7 +1275,7 @@ describe('existing Cloudflare site handoff', () => {
   );
 
   it('reuses the cache recorded before a provisioning failure when retrying the handoff', async () => {
-    const root = site();
+    const root = migratedSite();
     mkdirSync(join(root, 'pages'));
     writeFileSync(join(root, 'pages/index.md'), '# Home');
     const confirmIsrSetup = vi.fn().mockResolvedValue(true);

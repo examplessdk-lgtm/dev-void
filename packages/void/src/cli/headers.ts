@@ -288,6 +288,20 @@ export function mergeRoutingRules(opts: {
 }
 
 /**
+ * Lint each phase on its own: only duplicates within a phase shadow each other,
+ * so a redirect and a fallback with the same source are fine.
+ */
+export function lintRoutingPhases(rules: {
+  redirectRules: Array<DevRedirectRule>;
+  fallbackRules: Array<DevRedirectRule> | undefined;
+}): void {
+  lintDuplicateSources(rules.redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDuplicateSources(rules.fallbackRules, 'fallbacks (post-asset)');
+  lintDestinationSplats(rules.redirectRules, 'redirects/rewrites (pre-asset)');
+  lintDestinationSplats(rules.fallbackRules, 'fallbacks (post-asset)');
+}
+
+/**
  * Warn about a literal `*` in a destination. Destinations substitute only
  * `:name` params such as `:splat`, so a `*` passes through unchanged.
  */

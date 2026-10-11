@@ -13,7 +13,7 @@ import { log, DeployEventError } from './deploy-helpers.ts';
 import { type ApplyDeployEventResult, type StreamDeployResult } from './deploy-types.ts';
 import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import { type GitDeployMetadata } from './git-metadata.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
+import { lintRoutingPhases, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
 import { formatCount } from './output.ts';
 import { type AssetManifestEntry } from './package.ts';
@@ -408,23 +408,14 @@ export function warnUnpublishedRouting(result: StreamDeployResult): void {
   );
 }
 
-/**
- * Merge `_headers` / `_redirects` in `dir` with `void.config.ts` routing rules
- * for a managed deploy, then lint each phase independently: duplicates across
- * phases (redirects vs fallbacks) don't shadow each other, only duplicates
- * within a phase do. Destinations with a literal `*` are flagged because only
- * `:name` tokens are substituted at dispatch time.
- */
+/** Merge `_headers` / `_redirects` in `dir` with `void.config.ts` routing rules, then lint them. */
 export function mergeAndLintRoutingRules(
   dir: string,
   routing: RoutingConfig | undefined,
 ): ReturnType<typeof mergeRoutingRules> {
   const merged = mergeRoutingRules({ dir, routing });
   warnRedundantForceOn3xx(merged.redundantForceOn3xx);
-  lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
-  lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+  lintRoutingPhases(merged);
   return merged;
 }
 

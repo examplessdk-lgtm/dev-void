@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import { isRecord } from '@void/deploy-core';
 import { join } from 'pathslash';
 import { parseJsoncObject } from './cli/generated-wrangler-config.ts';
 import { TYPED_CONFIG_FILE } from './config-loader.ts';
@@ -18,12 +19,8 @@ type CloudflareState = {
   text: string;
 };
 
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function arrayIdentity(value: unknown): string {
-  if (isObject(value)) {
+  if (isRecord(value)) {
     for (const key of ['binding', 'name', 'tag', 'class_name', 'pattern', 'route']) {
       if (typeof value[key] === 'string') {
         return `${key}:${value[key]}`;
@@ -55,7 +52,7 @@ function mergeConfig(previous: unknown, resolved: unknown, authored: unknown): u
       }),
     ];
   }
-  if (isObject(previous) && isObject(resolved) && isObject(authored)) {
+  if (isRecord(previous) && isRecord(resolved) && isRecord(authored)) {
     const result: JsonObject = {};
     for (const key of new Set([
       ...Object.keys(previous),
@@ -106,10 +103,10 @@ function readState(root: string): CloudflareState | undefined {
     throw new Error(`config: Invalid ${VOID_LOCK_FILE}. Fix or restore it before continuing.`);
   }
   if (
-    !isObject(value) ||
+    !isRecord(value) ||
     value.version !== 1 ||
-    !isObject(value.source) ||
-    !isObject(value.resolved) ||
+    !isRecord(value.source) ||
+    !isRecord(value.resolved) ||
     typeof value.text !== 'string'
   ) {
     throw new Error(`config: Invalid ${VOID_LOCK_FILE}. Fix or restore it before continuing.`);
