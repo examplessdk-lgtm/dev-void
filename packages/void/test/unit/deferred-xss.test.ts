@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vite-plus/test';
-import { safeJsonStringify, serializePageData } from '../../src/pages/serialize.ts';
+import { safeJsonStringify } from '../../src/pages/protocol.ts';
+import { serializePageData } from '../../src/pages/serialize.ts';
 
 describe.each([
   ['serializePageData', serializePageData],

@@ -9,14 +9,20 @@ import {
   type HeadDescriptor,
   type HeadConfig,
 } from './head.ts';
-import { safeJsonStringify, serializePageData } from './serialize.ts';
+import { escapeScriptJson } from './script-json.ts';
+import { serializePageData } from './serialize.ts';
 import type { DevCssAsset, PageRenderMode } from './types.ts';
 import { ValidationError } from './validation-error.ts';
 
-export { safeJsonStringify, ValidationError };
+export { ValidationError };
 
 const POWERED_BY = { 'X-Powered-By': 'Void' } as const;
 const RENDER_ERROR_ASSET_TAGS_KEY = '__voidPageAssetTags';
+
+/** Escape characters that are unsafe inside inline <script> tags to prevent XSS. */
+export function safeJsonStringify(value: unknown): string {
+  return escapeScriptJson(JSON.stringify(value) ?? 'null');
+}
 
 export type PageObject = {
   component: string;
