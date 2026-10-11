@@ -15,7 +15,9 @@ import { getRequestedProjectSlug, requireProjectBySlug } from './resolve-project
 type ProjectTeamArgs = Exclude<Extract<ProjectArgs, { subcommand: 'team' }>, { action: '' }>;
 
 function clean(value: string | null | undefined): string {
-  return sanitizeTerminalText(value ?? '—');
+  // Tenant text must not execute terminal control sequences.
+  // eslint-disable-next-line no-control-regex
+  return (value ?? '—').replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
 function memberLines(members: Array<ProjectMemberResponse>): string {
