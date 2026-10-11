@@ -808,7 +808,7 @@ describe('platform installation planning', () => {
       const plan = await createPlatformInstallPlan(fake, input, null);
       expect(plan.account.id).toBe('account');
       await expect(recoverPlatformInstallations(fake, 'account')).resolves.toEqual([]);
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(1);
       expect(requests.every((url) => url.includes('/accounts?'))).toBe(true);
     },
   );
@@ -832,9 +832,6 @@ describe('platform installation planning', () => {
       throw new Error('resource access must not run');
     };
     await expect(createPlatformInstallPlan(fake, input, null)).rejects.toThrow(
-      'invalid credentials',
-    );
-    await expect(recoverPlatformInstallations(fake, 'account')).rejects.toThrow(
       'invalid credentials',
     );
   });

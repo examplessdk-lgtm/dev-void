@@ -1340,11 +1340,7 @@ export async function verifyPlatformAiGatewayPlan(
       deploymentExecution: preview.actions.some((entry) => entry.key === 'deployment-queue'),
     });
   } catch (error) {
-    if (
-      error instanceof PlatformCloudflareApiError &&
-      (error.status === 401 || error.status === 403) &&
-      error.requestPath?.includes('/ai-gateway/')
-    ) {
+    if (isPlatformTokenAuthorizationError(error, '/ai-gateway/')) {
       throw new Error(
         'platform: The runtime token could not verify AI Gateway access. Include Account → AI Gateway → Edit for this account, then retry. No platform resources were created.',
         { cause: error },

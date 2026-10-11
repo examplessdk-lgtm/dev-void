@@ -17,12 +17,31 @@ const ZERO_TRUST_LOCK = "hashtext('zero-trust:configuration')";
 const UNINSTALL_SETTING = 'platform.uninstall';
 const LISTED_APPLICATIONS = 20;
 
-type QueryConnection = Readonly<{
+export type QueryConnection = Readonly<{
   query: <Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     values?: ReadonlyArray<unknown>,
   ) => Promise<{ rows: ReadonlyArray<Row> }>;
 }>;
+
+/** Runs an uninstall precheck read; any failure becomes the refusal `refuse` builds. */
+export async function readPlatformDatabase<T>(
+  read: (() => Promise<T>) | undefined,
+  refuse: (reason: string) => string,
+): Promise<T> {
+  try {
+    if (!read) {
+      throw new Error('no platform database connection is available');
+    }
+    return await read();
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(
+      /^platform: /,
+      '',
+    );
+    throw new Error(refuse(reason));
+  }
+}
 
 export type PlatformZeroTrustApplication = Readonly<{
   role: string;
@@ -280,25 +299,13 @@ function unfinishedDeletionLines(state: PlatformProjectZeroTrustState): Readonly
 export async function assertProjectZeroTrustAllowsUninstall(
   read: (() => Promise<PlatformProjectZeroTrustState>) | undefined,
 ): Promise<void> {
-  let state: PlatformProjectZeroTrustState;
-  try {
-    if (!read) {
-      throw new Error('no platform database connection is available');
-    }
-    state = await read();
-  } catch (error) {
-    const reason = (error instanceof Error ? error.message : String(error)).replace(
-      /^platform: /,
-      '',
-    );
-    throw new Error(
-      [
-        `platform: Refusing to uninstall because the project Zero Trust state could not be read from the platform database: ${reason}`,
-        'Uninstall turns off the platform API, which Void needs to remove the Cloudflare Access applications that project Zero Trust created.',
-        'Make the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry. If project Zero Trust was ever enabled, run `void platform zero-trust disable` first.',
-      ].join('\n'),
-    );
-  }
+  const state = await readPlatformDatabase(read, (reason) =>
+    [
+      `platform: Refusing to uninstall because the project Zero Trust state could not be read from the platform database: ${reason}`,
+      'Uninstall turns off the platform API, which Void needs to remove the Cloudflare Access applications that project Zero Trust created.',
+      'Make the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry. If project Zero Trust was ever enabled, run `void platform zero-trust disable` first.',
+    ].join('\n'),
+  );
   if (state.active) {
     const covered = state.destinations.length
       ? ` on ${state.destinations.join(' and ')}`

@@ -10,6 +10,7 @@ import {
   type PlatformCloudflareClient,
 } from './platform-cloudflare.ts';
 import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
+import { readPlatformDatabase, type QueryConnection } from './platform-zero-trust-uninstall.ts';
 
 /**
  * `void platform uninstall --purge-resources` deletes every Cloudflare resource the
@@ -558,13 +559,6 @@ export async function checkPurgeResourcesCredentials(
   }
 }
 
-type QueryConnection = Readonly<{
-  query: <Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    values?: ReadonlyArray<unknown>,
-  ) => Promise<{ rows: ReadonlyArray<Row> }>;
-}>;
-
 const LISTED_PROJECTS = 20;
 
 /** Slugs of every project row, including projects whose deletion stopped partway. */
@@ -591,21 +585,11 @@ export async function readPlatformProjectSlugsConnection(
 export async function assertNoPlatformProjects(
   read: (() => Promise<ReadonlyArray<string>>) | undefined,
 ): Promise<void> {
-  let slugs: ReadonlyArray<string>;
-  try {
-    if (!read) {
-      throw new Error('no platform database connection is available');
-    }
-    slugs = await read();
-  } catch (error) {
-    const reason = (error instanceof Error ? error.message : String(error)).replace(
-      /^platform: /,
-      '',
-    );
-    throw new Error(
+  const slugs = await readPlatformDatabase(
+    read,
+    (reason) =>
       `platform: Refusing --purge-resources because the project list could not be read from the platform database: ${reason}\nMake the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry.`,
-    );
-  }
+  );
   if (slugs.length) {
     throw new Error(
       [
