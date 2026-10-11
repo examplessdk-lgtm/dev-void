@@ -18,7 +18,7 @@ export type StaticCssImport = { statement: string; specifier: string };
 type ScriptBlock = { source: string; offset: number; filename: string };
 
 /** The whole JS/TS module, or each `<script>` block of a Vue/Svelte SFC with its offset in the file. */
-function scriptBlocks(code: string, filename: string): Array<ScriptBlock> {
+export function scriptBlocks(code: string, filename: string): Array<ScriptBlock> {
   if (!/\.(?:vue|svelte)$/.test(filename)) {
     return [{ source: code, offset: 0, filename }];
   }

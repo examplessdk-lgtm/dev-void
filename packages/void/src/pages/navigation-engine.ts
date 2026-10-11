@@ -775,9 +775,6 @@ export async function createPageNavigationEngine(
               buffer += decoder.decode(value, { stream: true });
               processLines();
             }
-            if (buffer.trim()) {
-              processLines();
-            }
           } catch (e: unknown) {
             if (!(e instanceof Error) || e.name !== 'AbortError') {
               deferredRegistry.rejectPending('Stream closed before resolution');

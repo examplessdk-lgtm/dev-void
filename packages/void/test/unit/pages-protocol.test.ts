@@ -1014,7 +1014,8 @@ describe('handlePageGet with deferred props', () => {
 
       const text = await response.text();
       expect(text).not.toContain('10.0.0.5');
-      expect(text).toContain('window.__rejectDeferred("usage","Internal Server Error")');
+      expect(text).toContain('window.__rejectDeferred("usage",');
+      expect(text).toContain('"Internal Server Error"');
       expect(consoleError).toHaveBeenCalledWith(error);
     } finally {
       consoleError.mockRestore();

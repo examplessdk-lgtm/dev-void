@@ -22,7 +22,6 @@ type DevCssRequestBody = {
 type OrderedEdgeStore = {
   version: number;
   set(importer: string, edges: Array<string>): void;
-  deleteForId(id: string): void;
   getForNode(node: EnvironmentModuleNode): Array<string> | undefined;
 };
 
@@ -187,15 +186,6 @@ function createOrderedEdgeStore(root: string): OrderedEdgeStore {
       version++;
       for (const key of aliasesForId(importer)) {
         byKey.set(key, edges);
-      }
-    },
-    deleteForId(id) {
-      let deleted = false;
-      for (const key of aliasesForId(id)) {
-        deleted = byKey.delete(key) || deleted;
-      }
-      if (deleted) {
-        version++;
       }
     },
     getForNode(node) {
