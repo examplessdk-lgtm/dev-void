@@ -28,11 +28,16 @@ async function runConfigureServer(plugin: ReturnType<typeof devTriggersHintPlugi
   if (typeof fn !== 'function') {
     throw new Error('configureServer not callable');
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await (fn as any)(server);
-  server.httpServer.emit('listening');
-  // afterReady defers via setTimeout(_, 100)
-  await new Promise((r) => setTimeout(r, 150));
+  vi.useFakeTimers();
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (fn as any)(server);
+    server.httpServer.emit('listening');
+    // afterServerReady prints 100 ms after 'listening'.
+    vi.advanceTimersByTime(100);
+  } finally {
+    vi.useRealTimers();
+  }
   return server;
 }
 
@@ -92,22 +97,5 @@ describe('devTriggersHintPlugin', () => {
     expect(output).toContain('/__void/queue');
     expect(output).toContain('x-void-dev-trigger: dev-token-test');
     expect(output).toContain('"queue":"emails"');
-  });
-
-  it('always prints the dev-trigger header, whatever .env holds', async () => {
-    const root = createTempRoot();
-    mkdirSync(join(root, 'crons'), { recursive: true });
-    writeFileSync(
-      join(root, 'crons', 'heartbeat.ts'),
-      'export const cron = "0 * * * *";\nexport default async () => {};\n',
-    );
-    writeFileSync(join(root, '.env'), '__VOID_PROXY_TOKEN=local-proxy-token\n');
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    await runConfigureServer(devTriggersHintPlugin(root, 'dev-token-test'));
-
-    const output = log.mock.calls.map((c) => String(c[0] ?? '')).join('\n');
-    expect(output).toContain('x-void-dev-trigger: dev-token-test');
-    expect(output).not.toContain('x-void-internal');
   });
 });

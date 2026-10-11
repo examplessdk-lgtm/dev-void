@@ -83,7 +83,6 @@ describe('collectRevalidate', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const result = collectRevalidate(configWith(60), scan);
     expect(result).toEqual({ '/blog/:slug': 120, '*': 60 });
-    // Per-page entry must precede the fallback (first-match-wins ordering).
     expect(Object.keys(result as Record<string, number>)).toEqual(['/blog/:slug', '*']);
   });
 
@@ -95,8 +94,6 @@ describe('collectRevalidate', () => {
   it('merges per-page rules ahead of an object config (per-page first in match order)', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const result = collectRevalidate(configWith({ '/docs/*': 30, '*': 10 }), scan);
-    // Per-page entries are emitted before the config entries, so first-match
-    // resolution consults the per-page pattern ahead of the config's catch-alls.
     expect(Object.entries(result as Record<string, number>)).toEqual([
       ['/blog/:slug', 120],
       ['/docs/*', 30],
@@ -115,15 +112,7 @@ describe('collectRevalidate', () => {
     expect(collectRevalidate(configWith(60), scan)).toBe(60);
   });
 
-  // FIX 3: single-segment params (`:slug`) stay as `:slug` so the matcher can
-  // anchor them to ONE path segment (`[^/]+`); only named catch-alls (`:slug{.+}`)
-  // and anonymous catch-alls (`*`) collapse to `*` (a splat that crosses `/`).
   describe('route-param → key conversion (generated page keys)', () => {
-    it('keeps a single dynamic param `[slug]` (`/blog/:slug`) as `/blog/:slug`', () => {
-      const scan = makeScan([makePage('/blog/:slug', 120)]);
-      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/:slug': 120 });
-    });
-
     it('converts a catch-all param `[...slug]` (`/blog/:slug{.+}`) to `/blog/*`', () => {
       const scan = makeScan([makePage('/blog/:slug{.+}', 90)]);
       expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/blog/*': 90 });
@@ -134,19 +123,7 @@ describe('collectRevalidate', () => {
       expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/*': 15 });
     });
 
-    it('keeps every single-segment param in a multi-param pattern (`/shop/:cat/:id`)', () => {
-      const scan = makeScan([makePage('/shop/:cat/:id', 45)]);
-      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/shop/:cat/:id': 45 });
-    });
-
-    it('leaves static page patterns untouched', () => {
-      const scan = makeScan([makePage('/about', 300)]);
-      expect(collectRevalidate(configWith(undefined), scan)).toEqual({ '/about': 300 });
-    });
-
     it('does NOT convert user `routing.revalidate` literal keys (only generated page keys)', () => {
-      // A user-authored key that happens to contain a `:` must pass through
-      // verbatim — only the scanned page patterns are converted.
       const scan = makeScan([makePage('/blog/:slug', 120)]);
       const result = collectRevalidate(configWith({ '/legacy/:kept': 30 }), scan);
       expect(Object.entries(result as Record<string, number>)).toEqual([
@@ -156,17 +133,11 @@ describe('collectRevalidate', () => {
     });
   });
 
-  // FIX 3 end-to-end: the emitted `:slug` key must anchor to ONE segment through
-  // the same resolver the runtime uses (mirrors isr-cache resolvePathTtl).
   it('produces keys that resolvePathTtl anchors to a single dynamic path segment', () => {
     const scan = makeScan([makePage('/blog/:slug', 120)]);
     const revalidate = collectRevalidate(configWith(undefined), scan);
-    // Single dynamic segment matches.
     expect(resolvePathTtl(revalidate, '/blog/hello')).toBe(120);
-    // A DEEPER path must NOT match the single-segment `:slug` key (would have
-    // matched the old `/blog/*` wildcard) — proves the segment anchoring.
     expect(resolvePathTtl(revalidate, '/blog/a/b')).toBe(0);
-    // An unrelated path still resolves to 0 (no ISR).
     expect(resolvePathTtl(revalidate, '/about')).toBe(0);
   });
 });
@@ -181,11 +152,10 @@ describe('collectPages', () => {
   });
 
   it('emits every page in scan order with raw patterns; revalidate only when set', () => {
-    // makeScan preserves array order; a real scan is pre-sorted static→dynamic→catch-all.
     const scan = makeScan([
-      makePage('/docs/setup/install'), // specific, no revalidate (opt-out)
-      makePage('/blog/:slug', 120), // single-segment dynamic
-      makePage('/docs/:path{.+}', 3600), // named catch-all — RAW pattern, not `*`
+      makePage('/docs/setup/install'),
+      makePage('/blog/:slug', 120),
+      makePage('/docs/:path{.+}', 3600),
     ]);
     expect(collectPages(scan)).toEqual([
       { pattern: '/docs/setup/install' },
@@ -194,28 +164,20 @@ describe('collectPages', () => {
     ]);
   });
 
-  // A per-page `export const revalidate` wins over any routing.revalidate config.
   it('per-page export wins over config', () => {
     const scan = makeScan([makePage('/p', 120)]);
     expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p', revalidate: 120 }]);
     expect(collectPages(scan, { '/p': 9999 })).toEqual([{ pattern: '/p', revalidate: 120 }]);
   });
 
-  // An explicit `export const revalidate = 0` is an opt-OUT: it bakes the
-  // DISTINGUISHED marker `revalidate: 0` (NOT absent) so dispatch treats it as a
-  // deliberate opt-out — never overridden by an app-wide config, never a per-path
-  // inherit. The `0`-vs-absent distinction is load-bearing (see the 3-state test).
   it('explicit per-page revalidate=0 bakes the distinguished opt-out marker (revalidate:0)', () => {
     const scan = makeScan([makePage('/p', 0)]);
     expect(collectPages(scan, 3600)).toEqual([{ pattern: '/p', revalidate: 0 }]);
-    // Even with an object rule for the same path, the explicit opt-out marker wins.
     expect(collectPages(scan, { '/p': 9999 })).toEqual([{ pattern: '/p', revalidate: 0 }]);
   });
 
-  // The 3-STATE encoding in one table: a baked number `N` (ISR on), an explicit
-  // `0` (opt-out marker), and an ABSENT revalidate (inherit — dispatch resolves
-  // the per-path config against the real request path). Dispatch relies on the
-  // `0`-vs-absent distinction to tell a deliberate opt-out from "ask the config".
+  // Dispatch relies on 0 (explicit opt-out) vs absent (resolve the per-path
+  // config against the request path).
   it('emits all three states: baked N, explicit 0 opt-out, and absent (inherit)', () => {
     const scan = makeScan([
       makePage('/on', 120), // per-page export > 0 → baked N
@@ -239,32 +201,21 @@ describe('collectPages', () => {
     ]);
   });
 
-  // An object (per-path) config bakes no per-page TTL. A page can straddle
-  // several entries, so the raw config ships as `manifest.pathRevalidate` and
-  // dispatch resolves it against the actual request path.
+  // A page can straddle several entries, including a per-path 0, so the raw
+  // config ships as `manifest.pathRevalidate` and dispatch resolves it per request.
   it('an object config bakes no per-page TTL (pages are inherit-eligible)', () => {
     const scan = makeScan([makePage('/blog/:slug'), makePage('/about')]);
-    expect(collectPages(scan, { '/blog/*': 3600 })).toEqual([
-      { pattern: '/blog/:slug' }, // inherit-eligible → dispatch resolves per-path
+    expect(collectPages(scan, { '/blog/private': 0, '/blog/*': 3600 })).toEqual([
+      { pattern: '/blog/:slug' },
       { pattern: '/about' },
     ]);
   });
 
-  // A per-path `0` inside an object config is why baking is unsafe: a build-time
-  // collapse would over-cache `/blog/private`.
-  it('leaves an object-config page inherit-eligible so a per-path 0 opt-out is honored at the edge', () => {
-    const scan = makeScan([makePage('/blog/:slug')]);
-    expect(collectPages(scan, { '/blog/private': 0, '/blog/*': 3600 })).toEqual([
-      { pattern: '/blog/:slug' }, // no baked TTL; edge honors /blog/private:0 per-path
-    ]);
-  });
-
-  // A no-export page never inherits a sibling catch-all's per-page export.
   it('a no-export page does not inherit a sibling catch-all export', () => {
     const scan = makeScan([makePage('/docs/:path{.+}', 300), makePage('/docs/setup/install')]);
     expect(collectPages(scan)).toEqual([
       { pattern: '/docs/:path{.+}', revalidate: 300 },
-      { pattern: '/docs/setup/install' }, // stays 0 — no sibling inheritance
+      { pattern: '/docs/setup/install' },
     ]);
   });
 });

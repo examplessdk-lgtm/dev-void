@@ -135,7 +135,6 @@ export function collectPrerenderWorkerModules(
 
 export type PrerenderBindingsInput = {
   wranglerVars: Record<string, unknown> | undefined;
-  env: Record<string, string>;
   voidToken: string | null | undefined;
   voidProjectId: string | undefined;
   voidProxyUrl?: string;
@@ -144,14 +143,10 @@ export type PrerenderBindingsInput = {
 };
 
 export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<string, unknown> {
-  const { sanitized: wranglerVars, stripped: wranglerStripped } = stripInternalEnvKeys(
-    input.wranglerVars,
-  );
-  const { sanitized: env, stripped: envStripped } = stripInternalEnvKeys(input.env);
-  const allStripped = [...new Set([...wranglerStripped, ...envStripped])];
-  if (allStripped.length > 0) {
+  const { sanitized: wranglerVars, stripped } = stripInternalEnvKeys(input.wranglerVars);
+  if (stripped.length > 0) {
     voidWarn(
-      `Ignoring internal env keys in prerender inputs: ${allStripped.join(', ')}. These are reserved for Void runtime use.`,
+      `Ignoring internal env keys in prerender inputs: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
     );
   }
 
@@ -173,7 +168,7 @@ export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<st
       voidBindings.__VOID_REMOTE = '1';
     }
   }
-  return { ...wranglerVars, ...env, ...voidBindings };
+  return { ...wranglerVars, ...voidBindings };
 }
 
 async function createCloudflarePrerenderRunner(options: {
@@ -194,10 +189,6 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8'));
   const wranglerCompat = ensureWranglerCompat(root, readConfig(root), workerDir);
   const workerMain = wranglerConfig.main ?? 'index.js';
-
-  // Local `.env` values never enter a production prerender. Code that needs
-  // production server configuration must read it at runtime from remote secrets.
-  const env: Record<string, string> = {};
 
   // Resolve Void projectId via a three-level chain:
   //   1. explicit options.projectId — passed from runFullDeploy so the
@@ -231,10 +222,11 @@ async function createCloudflarePrerenderRunner(options: {
   if (voidProxyUrl) {
     ensurePlatformProxyAccess(getApiUrl(root), voidProxyUrl);
   }
+  // Local `.env` values never enter a production prerender; production server
+  // configuration is read at runtime from remote secrets.
   const bindings = buildPrerenderBindings({
     accessEnv: process.env,
     wranglerVars: wranglerConfig.vars,
-    env,
     voidToken,
     voidProjectId,
     voidProxyUrl,

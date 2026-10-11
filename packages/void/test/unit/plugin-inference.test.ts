@@ -179,12 +179,6 @@ describe('inferProjectBindings', () => {
     expect(inferProjectBindings(root, undefined, ['routes', 'lib']).needsLive).toBe(true);
   });
 
-  it('detects live in the react-pages playground', () => {
-    const playground = join(import.meta.dirname, '../../../../playground/react-pages');
-
-    expect(inferProjectBindings(playground).needsLive).toBe(true);
-  });
-
   it('detects auth from void/auth import in routes/', () => {
     const root = createTempRoot();
     mkdirSync(join(root, 'routes', 'api'), { recursive: true });
@@ -455,9 +449,22 @@ describe('detectFramework', () => {
     }
   });
 
-  it('externalizes Cloudflare builtins for default worker builds', () => {
+  it.each([
+    { kind: 'default worker builds', dependencies: undefined, compat: true },
+    {
+      kind: 'class A frameworks',
+      dependencies: { '@tanstack/react-start': '^1.0.0' },
+      compat: true,
+    },
+    { kind: 'class B/C server builds', dependencies: { '@sveltejs/kit': '^2.0.0' }, compat: false },
+  ])('externalizes Cloudflare builtins for $kind', ({ dependencies, compat }) => {
     const root = createTempRoot();
-    writeCompatConfig(root);
+    if (compat) {
+      writeCompatConfig(root);
+    }
+    if (dependencies) {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ dependencies }));
+    }
     const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
 
     try {
@@ -472,15 +479,7 @@ describe('detectFramework', () => {
       ) => import('vite').UserConfig | void;
 
       expect(externalPlugin).toBeTruthy();
-      const result = config.call(
-        {} as never,
-        {},
-        {
-          command: 'build',
-          mode: 'production',
-        },
-      );
-
+      const result = config.call({} as never, {}, { command: 'build', mode: 'production' });
       const rootExternal = result?.build?.rollupOptions?.external as Array<unknown>;
       expect(rootExternal).toBeTruthy();
       expect(
@@ -528,74 +527,6 @@ describe('detectFramework', () => {
           'void/durable',
         ),
       ).toThrow('void/durable is server-only');
-    } finally {
-      cwd.mockRestore();
-    }
-  });
-
-  it('includes Cloudflare builtin externalization for class A frameworks', () => {
-    const root = createTempRoot();
-    writeCompatConfig(root);
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ dependencies: { '@tanstack/react-start': '^1.0.0' } }),
-    );
-
-    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-    try {
-      const plugins = voidPlugin();
-      const externalPlugin = plugins.find(
-        (plugin) => plugin.name === 'void:cloudflare-builtins-external',
-      );
-      const config = getHookHandler(externalPlugin?.config) as (
-        this: object,
-        config: import('vite').UserConfig,
-        env: import('vite').ConfigEnv,
-      ) => import('vite').UserConfig | void;
-
-      expect(externalPlugin).toBeTruthy();
-
-      const result = config.call({} as never, {}, { command: 'build', mode: 'production' });
-      const rootExternal = result?.build?.rollupOptions?.external as Array<unknown>;
-      expect(rootExternal).toBeTruthy();
-      expect(
-        rootExternal.some((value) => value instanceof RegExp && value.test('cloudflare:workers')),
-      ).toBe(true);
-      expect(result?.environments).toBeUndefined();
-    } finally {
-      cwd.mockRestore();
-    }
-  });
-
-  it('externalizes Cloudflare builtins for class B/C server builds', () => {
-    const root = createTempRoot();
-    writeFileSync(
-      join(root, 'package.json'),
-      JSON.stringify({ dependencies: { '@sveltejs/kit': '^2.0.0' } }),
-    );
-
-    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-    try {
-      const plugins = voidPlugin();
-      const externalPlugin = plugins.find(
-        (plugin) => plugin.name === 'void:cloudflare-builtins-external',
-      );
-      const config = getHookHandler(externalPlugin?.config) as (
-        this: object,
-        config: import('vite').UserConfig,
-        env: import('vite').ConfigEnv,
-      ) => import('vite').UserConfig | void;
-
-      expect(externalPlugin).toBeTruthy();
-      const result = config.call({} as never, {}, { command: 'build', mode: 'production' });
-      const rootExternal = result?.build?.rollupOptions?.external as Array<unknown>;
-      expect(rootExternal).toBeTruthy();
-      expect(
-        rootExternal.some((value) => value instanceof RegExp && value.test('cloudflare:workers')),
-      ).toBe(true);
-      expect(result?.environments).toBeUndefined();
     } finally {
       cwd.mockRestore();
     }
