@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   parsePlatformAccessProtection,
   type PlatformAccessProtection,
@@ -8,6 +7,7 @@ import { cfAccessHeaders } from '../shared/cf-access.ts';
 import {
   inspectPlatformAccess,
   PlatformAccessClient,
+  platformAccessNonce,
   platformAccessOverlapsOrigins,
   platformAccessPublicDestinations,
   verifyPlatformAccessApplication,
@@ -52,11 +52,7 @@ export async function verifyInstalledPlatformAccessProtection(input: {
   const spec = parsePlatformAccessSetupSpec(JSON.parse(specEncoded));
   if (
     state.accountId !== (spec.accountId ?? input.manifest.account.id) ||
-    state.nonce !==
-      createHash('sha256')
-        .update(`void-access:${input.manifest.ownershipNonce}`)
-        .digest('hex')
-        .slice(0, 32)
+    state.nonce !== platformAccessNonce(input.manifest.ownershipNonce)
   ) {
     throw new Error(
       'platform: The saved Access setup does not match this installation and identity account.',
