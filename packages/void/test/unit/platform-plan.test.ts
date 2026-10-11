@@ -3,7 +3,6 @@ import { stripVTControlCharacters } from 'node:util';
 import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
-  createPlatformResourceOwnershipMarker,
   createPlatformResourceNames,
   recordInstallationResource,
   recordInstallationStep,
@@ -27,6 +26,7 @@ import {
   revalidatePlatformInstallAction,
   type PlatformInstallPlan,
 } from '../../src/cli/platform-plan.ts';
+import { ownershipMarker } from '../helpers/platform-installation.ts';
 
 function client(overrides: Record<string, unknown> = {}) {
   return {
@@ -119,17 +119,7 @@ function markerFor(
   kind: InstallationResourceKind,
   name: string,
 ): string {
-  return JSON.stringify(
-    createPlatformResourceOwnershipMarker({
-      accountId: manifest.account.id,
-      installationId: manifest.id,
-      ownershipNonce: manifest.ownershipNonce,
-      resourceId: name,
-      resourceKey: key,
-      resourceKind: kind,
-      resourceName: name,
-    }),
-  );
+  return ownershipMarker(manifest, { id: name, key, kind, name });
 }
 
 const activeZone = { id: 'zone', name: 'example.app', nameServers: [], status: 'active' };

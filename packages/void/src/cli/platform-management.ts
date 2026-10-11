@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   parsePlatformInstallationManifest,
   PLATFORM_DISABLED_KEY,
@@ -28,7 +27,6 @@ import {
   PlatformCloudflareClient,
   verifyPlatformRuntimeTokenPermissions,
 } from './platform-cloudflare.ts';
-import { r2BucketConfigHash } from './platform-installer-resources.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
   createPlatformInstallationSecrets,
@@ -46,11 +44,13 @@ import {
 } from './platform-lifecycle.ts';
 import {
   createPlatformInstallPlan,
+  dnsRecordConfigHash,
   formatPlatformInstallPlan,
   hasProvisionIntentStep,
   legacyResourceConfigHash,
   matchesRecordedR2Fingerprint,
   platformAdoptionIntentHash,
+  r2BucketConfigHash,
   resourceMarkerProblem,
   revalidatePlatformInstallAction,
 } from './platform-plan.ts';
@@ -1826,17 +1826,6 @@ function hasNamedResource(
   resource: InstallationResource,
 ): boolean {
   return entries.some((entry) => entry.id === resource.id && entry.name === resource.name);
-}
-
-function dnsRecordConfigHash(
-  name: string,
-  type: string,
-  content: string,
-  proxied: boolean,
-): string {
-  return createHash('sha256')
-    .update(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }))
-    .digest('hex');
 }
 
 function verifyResourceMarker(

@@ -7,13 +7,8 @@ import {
   type PlatformAuthenticationRecovery,
   type PlatformLoginConfiguration,
 } from '@void/platform';
+import type { QueryConnection } from './platform-zero-trust-uninstall.ts';
 
-type Database = {
-  query: <T extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    values?: ReadonlyArray<unknown>,
-  ) => Promise<{ rows: ReadonlyArray<T> }>;
-};
 type Credential = { ciphertext: string; iv: string; keyVersion: string };
 export type Connection = {
   id: string;
@@ -135,7 +130,7 @@ export function encryptCredential(
     ciphertext: ciphertext.toString('base64'),
   };
 }
-export async function transaction<T>(db: Database, action: () => Promise<T>): Promise<T> {
+export async function transaction<T>(db: QueryConnection, action: () => Promise<T>): Promise<T> {
   await db.query('BEGIN');
   try {
     const result = await action();
@@ -146,7 +141,7 @@ export async function transaction<T>(db: Database, action: () => Promise<T>): Pr
     throw error;
   }
 }
-export async function requireAdministrator(db: Database, id: string): Promise<void> {
+export async function requireAdministrator(db: QueryConnection, id: string): Promise<void> {
   const row = (
     await db.query(
       "SELECT id FROM users WHERE id = $1 AND role = 'admin' AND (suspended_reason IS NULL OR suspended_reason IN ('requests_exceeded', 'sandbox_runtime_exceeded')) FOR UPDATE",
@@ -157,7 +152,10 @@ export async function requireAdministrator(db: Database, id: string): Promise<vo
     throw new Error('platform: Recovery can only restore an existing active administrator.');
   }
 }
-export async function readConnection(db: Database, id: string): Promise<Connection | undefined> {
+export async function readConnection(
+  db: QueryConnection,
+  id: string,
+): Promise<Connection | undefined> {
   return (
     await db.query<Connection>(
       'SELECT c.id, c.kind, c.revision, c.generation, r.configuration, r.secret FROM platform_login_connections c JOIN platform_login_revisions r ON r.connection_id = c.id AND r.revision = c.revision WHERE c.id = $1',
@@ -167,7 +165,7 @@ export async function readConnection(db: Database, id: string): Promise<Connecti
 }
 
 async function validateRecoveryAdmission(
-  db: Database,
+  db: QueryConnection,
   connectionId: string,
   revision: number,
 ): Promise<void> {
@@ -191,7 +189,7 @@ async function validateRecoveryAdmission(
 }
 
 export async function commitAuthenticationRecovery(
-  db: Database,
+  db: QueryConnection,
   input: {
     recovery: PlatformAuthenticationRecovery;
     identity: { issuer: string; subject: string };

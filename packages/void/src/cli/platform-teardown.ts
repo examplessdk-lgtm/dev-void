@@ -10,7 +10,7 @@ import {
   type PlatformCloudflareClient,
 } from './platform-cloudflare.ts';
 import { platformTrafficAttachmentWorker } from './platform-traffic.ts';
-import { readPlatformDatabase, type QueryConnection } from './platform-zero-trust-uninstall.ts';
+import { readPlatformDatabase } from './platform-zero-trust-uninstall.ts';
 
 /**
  * `void platform uninstall --purge-resources` deletes every Cloudflare resource the
@@ -560,22 +560,6 @@ export async function checkPurgeResourcesCredentials(
 }
 
 const LISTED_PROJECTS = 20;
-
-/** Slugs of every project row, including projects whose deletion stopped partway. */
-export async function readPlatformProjectSlugsConnection(
-  client: QueryConnection,
-): Promise<ReadonlyArray<string>> {
-  const table = await client.query<{ present: boolean }>(
-    `SELECT to_regclass('public.projects') IS NOT NULL AS "present"`,
-  );
-  if (table.rows[0]?.present !== true) {
-    return [];
-  }
-  const rows = await client.query<{ slug: string }>(
-    'SELECT "slug" FROM "projects" ORDER BY "slug"',
-  );
-  return rows.rows.map((row) => row.slug);
-}
 
 /**
  * Projects own Workers, storage, and domains that only the running platform

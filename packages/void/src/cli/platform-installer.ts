@@ -73,7 +73,11 @@ import {
   nextWorkerCutoverGeneration,
   recordWorkerSecretUpdateState,
 } from './platform-installer-workers.ts';
-import { type PlatformInstallPlan, type PlatformInstallPlanAction } from './platform-plan.ts';
+import {
+  platformWorkersDevUrl,
+  type PlatformInstallPlan,
+  type PlatformInstallPlanAction,
+} from './platform-plan.ts';
 import {
   latestPlatformWorkerCutoverGeneration,
   platformWorkerSecretUpdateIntentState,
@@ -196,10 +200,6 @@ async function recoverFailedPlatformInstallation(
     }
   }
   return failure;
-}
-
-function workersDevUrl(plan: PlatformInstallPlan, workerName: string): string {
-  return `https://${workerName}.${plan.workersSubdomain}.workers.dev`;
 }
 
 export async function installPlatform(
@@ -611,7 +611,7 @@ export async function installPlatform(
       ownershipNonce: state.manifest.ownershipNonce,
       platformVersion: version,
       proxyUrl: state.plan.proxyUrl,
-      emailGatewayUrl: workersDevUrl(
+      emailGatewayUrl: platformWorkersDevUrl(
         state.plan,
         state.plan.deployment.resources.emailGatewayWorker,
       ),
@@ -887,7 +887,7 @@ export async function installPlatform(
     dependencies.onProgress?.('Verifying platform health');
     const emailGatewayUrl =
       hasEmailGatewayArtifact && state.plan.deployment.capabilities.email
-        ? workersDevUrl(state.plan, state.plan.deployment.resources.emailGatewayWorker)
+        ? platformWorkersDevUrl(state.plan, state.plan.deployment.resources.emailGatewayWorker)
         : undefined;
     if (state.plan.deployment.authentication.accessProtection) {
       ensurePlatformAccessToken(state.plan.apiUrl, false, true);
@@ -915,7 +915,7 @@ export async function installPlatform(
       createPlatformHealthProbeToken(state.manifest.ownershipNonce),
       undefined,
       !state.plan.deployment.application.zoneName
-        ? workersDevUrl(state.plan, state.plan.deployment.resources.dispatchWorker)
+        ? platformWorkersDevUrl(state.plan, state.plan.deployment.resources.dispatchWorker)
         : undefined,
       healthCheckContext,
     );

@@ -24,8 +24,12 @@ import {
   type PlatformDatabaseLifecycleLock,
 } from './platform-installer-types.ts';
 import {
+  dnsRecordConfigHash,
+  hasProvisionIntentStep,
+  legacyResourceConfigHash,
   platformAdoptionIntentHash,
   platformProvisionIntentHash,
+  r2BucketConfigHash,
   type PlatformInstallPlan,
   type PlatformInstallPlanAction,
 } from './platform-plan.ts';
@@ -212,6 +216,9 @@ export function recordProvisionIntent(
 ): PlatformInstallationManifest {
   const previousResourceId =
     manifest.resources.find((resource) => resource.key === action.key)?.id ?? null;
+  if (hasProvisionIntentStep(manifest, action.key, action.kind, action.name, previousResourceId)) {
+    return manifest;
+  }
   const resultHash = platformProvisionIntentHash(
     manifest,
     action.key,
@@ -219,15 +226,6 @@ export function recordProvisionIntent(
     action.name,
     previousResourceId,
   );
-  const existing = manifest.steps.find(
-    (step) =>
-      (step.key === `provision-intent:${action.key}` ||
-        step.key.startsWith(`provision-intent:${action.key}:`)) &&
-      step.resultHash === resultHash,
-  );
-  if (existing) {
-    return manifest;
-  }
   return recordInstallationStep(
     manifest,
     {
@@ -262,19 +260,7 @@ export function hasProvisionIntent(
 ): boolean {
   const previousResourceId =
     manifest.resources.find((resource) => resource.key === action.key)?.id ?? null;
-  return manifest.steps.some(
-    (step) =>
-      (step.key === `provision-intent:${action.key}` ||
-        step.key.startsWith(`provision-intent:${action.key}:`)) &&
-      step.resultHash ===
-        platformProvisionIntentHash(
-          manifest,
-          action.key,
-          action.kind,
-          action.name,
-          previousResourceId,
-        ),
-  );
+  return hasProvisionIntentStep(manifest, action.key, action.kind, action.name, previousResourceId);
 }
 
 export async function createResource(
@@ -326,7 +312,7 @@ export function recordResource(
               ? hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl))
               : action.kind === 'r2-bucket' && resourceFingerprint
                 ? r2BucketConfigHash(action.name, resourceFingerprint)
-                : hash(JSON.stringify({ kind: action.kind, name: action.name })),
+                : legacyResourceConfigHash(action.kind, action.name),
       id,
       key: action.key,
       kind: action.kind,
@@ -336,10 +322,6 @@ export function recordResource(
     },
     now,
   );
-}
-
-export function r2BucketConfigHash(name: string, fingerprint: string): string {
-  return hash(JSON.stringify({ fingerprint, kind: 'r2-bucket', name }));
 }
 
 export function retainReplacedInstallationResource(
@@ -544,15 +526,6 @@ function uniqueTriggerRoutes(routes: ReadonlyArray<unknown>): ReadonlyArray<unkn
     seen.add(key);
     return true;
   });
-}
-
-function dnsRecordConfigHash(
-  name: string,
-  type: string,
-  content: string,
-  proxied: boolean,
-): string {
-  return hash(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }));
 }
 
 export function hash(value: string | Buffer): string {

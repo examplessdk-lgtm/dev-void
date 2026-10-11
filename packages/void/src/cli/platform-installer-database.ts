@@ -25,13 +25,13 @@ import {
 } from './platform-installer-types.ts';
 import { type PlatformInstallPlan } from './platform-plan.ts';
 import { writeInstallationManifest } from './platform-registry.ts';
-import { readPlatformProjectSlugsConnection } from './platform-teardown.ts';
 import {
   fencePlatformProjectZeroTrustConnection,
   liftPlatformProjectZeroTrustFenceConnection,
   lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
   type PlatformProjectZeroTrustState,
+  type QueryConnection,
 } from './platform-zero-trust-uninstall.ts';
 
 // onManifestChange keeps migration checkpoints visible to the outer failure handler.
@@ -301,12 +301,21 @@ export function readPlatformProjectSlugs(
   );
 }
 
-type DatabaseClaimConnection = Readonly<{
-  query: <Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    values?: ReadonlyArray<unknown>,
-  ) => Promise<{ rows: ReadonlyArray<Row> }>;
-}>;
+/** Slugs of every project row, including projects whose deletion stopped partway. */
+export async function readPlatformProjectSlugsConnection(
+  client: QueryConnection,
+): Promise<ReadonlyArray<string>> {
+  const table = await client.query<{ present: boolean }>(
+    `SELECT to_regclass('public.projects') IS NOT NULL AS "present"`,
+  );
+  if (table.rows[0]?.present !== true) {
+    return [];
+  }
+  const rows = await client.query<{ slug: string }>(
+    'SELECT "slug" FROM "projects" ORDER BY "slug"',
+  );
+  return rows.rows.map((row) => row.slug);
+}
 
 type PlatformDatabaseMigrationRow = Readonly<{
   created_at: unknown;
@@ -315,7 +324,7 @@ type PlatformDatabaseMigrationRow = Readonly<{
 }>;
 
 export async function inspectPlatformDatabaseStateConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   database: PlatformRuntimeDatabaseManifest,
 ): Promise<PlatformDatabaseState> {
   const relation = await client.query<{ relation: string | null }>(
@@ -361,7 +370,7 @@ export async function inspectPlatformDatabaseStateConnection(
 }
 
 export async function preparePlatformDatabaseConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   runtimeDirectory: string,
   database: PlatformRuntimeDatabaseManifest,
   sourcePlatformVersion: string | null,
@@ -441,7 +450,7 @@ export async function preparePlatformDatabaseConnection(
 }
 
 export async function readPlatformDatabaseLifecycleManifestConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   installationId: string,
   ownershipNonce: string,
 ): Promise<PlatformInstallationManifest | null> {
@@ -483,7 +492,7 @@ export async function readPlatformDatabaseLifecycleManifestConnection(
 }
 
 export async function acquirePlatformDatabaseLifecycleLockConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   installationId: string,
   ownershipNonce: string,
 ): Promise<PlatformDatabaseLifecycleLock> {
@@ -639,7 +648,7 @@ type SandboxDrainCheckpointRow = {
 
 /** Null when the sandbox-drain checkpoint table does not exist. */
 async function readSandboxDrainTable(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
 ): Promise<{ hasAdmissionColumn: boolean } | null> {
   const relation = await client.query<{ relation: string | null }>(
     `SELECT to_regclass('"sandbox_drain_checkpoints"')::text AS "relation"`,
@@ -660,7 +669,7 @@ async function readSandboxDrainTable(
 }
 
 export async function preparePlatformSandboxDrainConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   requiredAdmissionProtocol: 0 | 2 | 3 = 0,
 ): Promise<PlatformSandboxDrainPreparation> {
   const table = await readSandboxDrainTable(client);
@@ -834,7 +843,7 @@ export async function preparePlatformSandboxDrainConnection(
 }
 
 async function verifyPlatformDatabaseConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   runtimeDirectory: string,
   database: PlatformRuntimeDatabaseManifest,
 ): Promise<void> {
@@ -848,7 +857,7 @@ async function verifyPlatformDatabaseConnection(
 }
 
 async function readRequiredPlatformSafetyProtocols(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
 ): Promise<Readonly<{ sandboxDrain: 0 | 1 | 2 | 3 }>> {
   const table = await readSandboxDrainTable(client);
   if (!table) {
@@ -895,7 +904,7 @@ export function assertPlatformRuntimeSafety(
 }
 
 async function claimPlatformDatabaseConnection(
-  client: DatabaseClaimConnection,
+  client: QueryConnection,
   installationId: string,
   ownershipNonce: string,
 ): Promise<void> {

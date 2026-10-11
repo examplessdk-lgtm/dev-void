@@ -713,6 +713,10 @@ export async function createPlatformInstallPlan(
   };
 }
 
+export function platformWorkersDevUrl(plan: PlatformInstallPlan, workerName: string): string {
+  return `https://${workerName}.${plan.workersSubdomain}.workers.dev`;
+}
+
 export async function revalidatePlatformInstallAction(
   client: PlanningClient,
   original: PlatformInstallPlan,
@@ -1100,9 +1104,28 @@ function interruptedProvisionRetryName(
   return `${name.slice(0, 63 - suffix.length).replace(/-+$/, '')}${suffix}`;
 }
 
+// Installation manifests store these config hashes, so their JSON shape must not change.
+
 /** Name-only config hash, recorded for resources without a live fingerprint. */
 export function legacyResourceConfigHash(kind: InstallationResourceKind, name: string): string {
   return createHash('sha256').update(JSON.stringify({ kind, name })).digest('hex');
+}
+
+export function r2BucketConfigHash(name: string, fingerprint: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ fingerprint, kind: 'r2-bucket', name }))
+    .digest('hex');
+}
+
+export function dnsRecordConfigHash(
+  name: string,
+  type: string,
+  content: string,
+  proxied: boolean,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }))
+    .digest('hex');
 }
 
 /** Whether a live R2 bucket still matches the creation fingerprint recorded for it. */
@@ -1113,13 +1136,9 @@ export function matchesRecordedR2Fingerprint(
   if (!bucket.fingerprint) {
     return false;
   }
-  const liveHash = createHash('sha256')
-    .update(
-      JSON.stringify({ fingerprint: bucket.fingerprint, kind: 'r2-bucket', name: bucket.name }),
-    )
-    .digest('hex');
   return (
-    configHash === liveHash || configHash === legacyResourceConfigHash('r2-bucket', bucket.name)
+    configHash === r2BucketConfigHash(bucket.name, bucket.fingerprint) ||
+    configHash === legacyResourceConfigHash('r2-bucket', bucket.name)
   );
 }
 

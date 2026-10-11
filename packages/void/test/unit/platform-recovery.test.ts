@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
-  createPlatformResourceOwnershipMarker,
   recordInstallationResource,
   recordInstallationStep,
   setInstallationEndpoints,
@@ -29,6 +28,7 @@ import {
   listPlatformConnections,
   writeInstallationManifest,
 } from '../../src/cli/platform-registry.ts';
+import { ownershipMarker } from '../helpers/platform-installation.ts';
 
 const directories: Array<string> = [];
 
@@ -259,23 +259,6 @@ function client(manifest = remoteManifest()) {
     listWorkerDomains: async () => [],
     listWorkerRoutes: async () => [],
   };
-}
-
-function ownershipMarker(
-  manifest: ReturnType<typeof remoteManifest>,
-  resource: ReturnType<typeof remoteManifest>['resources'][number],
-): string {
-  return JSON.stringify(
-    createPlatformResourceOwnershipMarker({
-      accountId: manifest.account.id,
-      installationId: manifest.id,
-      ownershipNonce: manifest.ownershipNonce,
-      resourceId: resource.id,
-      resourceKey: resource.key,
-      resourceKind: resource.kind,
-      resourceName: resource.name,
-    }),
-  );
 }
 
 describe('platform recovery', () => {

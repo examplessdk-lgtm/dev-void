@@ -9,16 +9,15 @@ import {
   it,
   vi,
 } from 'vite-plus/test';
-import {
-  assertNoPlatformProjects,
-  readPlatformProjectSlugsConnection,
-} from '../../../../../packages/void/src/cli/platform-teardown.ts';
+import { readPlatformProjectSlugsConnection } from '../../../../../packages/void/src/cli/platform-installer-database.ts';
+import { assertNoPlatformProjects } from '../../../../../packages/void/src/cli/platform-teardown.ts';
 import {
   assertProjectZeroTrustAllowsUninstall,
   fencePlatformProjectZeroTrustConnection,
   liftPlatformProjectZeroTrustFenceConnection,
   lockPlatformProjectZeroTrustConnection,
   readPlatformProjectZeroTrustStateConnection,
+  type QueryConnection,
 } from '../../../../../packages/void/src/cli/platform-zero-trust-uninstall.ts';
 import type { ApiEnv } from '../../src/env.ts';
 import app from '../../src/index.ts';
@@ -151,8 +150,6 @@ async function settleOperation(platform: ApiEnv['Bindings']): Promise<void> {
   }
   throw new Error('The Zero Trust operation did not finish within its expected batches');
 }
-
-type QueryConnection = Parameters<typeof readPlatformProjectZeroTrustStateConnection>[0];
 
 describe('platform uninstall check against the API database', () => {
   it('lets uninstall proceed once a project deletion that stopped partway is rerun', async () => {

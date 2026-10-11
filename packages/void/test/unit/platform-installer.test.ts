@@ -64,7 +64,6 @@ import {
   isolatePlatformWorkerCustomDomains,
   mergePlatformWorkerTrafficConfig,
   mergePreservedTriggerRoutes,
-  r2BucketConfigHash,
   retainReplacedInstallationResource,
   withoutPlatformWorkerTrafficAttachments,
 } from '../../src/cli/platform-installer-resources.ts';
@@ -90,6 +89,7 @@ import { resolvePlatformInstallDatabaseUrl } from '../../src/cli/platform-lifecy
 import {
   createPlatformInstallPlan,
   platformProvisionIntentHash,
+  r2BucketConfigHash,
 } from '../../src/cli/platform-plan.ts';
 import {
   listInstallationManifests,

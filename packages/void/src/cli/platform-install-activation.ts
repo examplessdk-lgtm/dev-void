@@ -36,7 +36,7 @@ import {
   deployPlatformWorker,
   verifyPlatformWorkerCutoverVersions,
 } from './platform-installer-workers.ts';
-import { type PlatformInstallPlanAction } from './platform-plan.ts';
+import { platformWorkersDevUrl, type PlatformInstallPlanAction } from './platform-plan.ts';
 import { writeInstallationManifest, writePendingInstallationSecrets } from './platform-registry.ts';
 import { platformManagedWorkerTraffic } from './platform-traffic.ts';
 
@@ -256,7 +256,7 @@ export async function enableInstallationServices(input: {
       createPlatformHealthProbeToken(state.manifest.ownershipNonce),
       undefined,
       !plan.deployment.application.zoneName
-        ? `https://${plan.deployment.resources.dispatchWorker}.${plan.workersSubdomain}.workers.dev`
+        ? platformWorkersDevUrl(plan, plan.deployment.resources.dispatchWorker)
         : undefined,
       healthCheckContext,
     );
