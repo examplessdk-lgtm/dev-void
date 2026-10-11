@@ -1,9 +1,11 @@
 import {
-  __connectionInstanceName,
+  connectionInstanceName,
+  internalUrl,
+  topicDigest,
+  topicInstanceName,
+} from './live-names.ts';
+import {
   __getLiveBindingName,
-  __internalUrl,
-  __topicDigest,
-  __topicInstanceName,
   type LiveClientEvent,
   type LiveControlErrorCode,
   type LiveControlOperation,
@@ -252,7 +254,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           continue;
         }
 
-        const topicKey = await __topicDigest(message.streamId, operation.topic);
+        const topicKey = await topicDigest(message.streamId, operation.topic);
         const existing = connection.subscriptions.get(operation.id);
         const revision = (existing?.revision ?? 0) + 1;
         const row: SubscriberRow = {
@@ -266,7 +268,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           lastSeenAt: Date.now(),
         };
         const response = await this.topicStub(message.streamId, topicKey).fetch(
-          __internalUrl('/register'),
+          internalUrl('/register'),
           {
             method: 'POST',
             body: JSON.stringify({ ...row, limits: message.limits }),
@@ -435,7 +437,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           batch.map(([connectionId, items]) =>
             fetchWithTimeout(
               this.connectionStub(message.streamId, connectionId),
-              __internalUrl('/deliver'),
+              internalUrl('/deliver'),
               {
                 method: 'POST',
                 body: JSON.stringify({
@@ -509,7 +511,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
           batch.map(([connectionId, items]) =>
             fetchWithTimeout(
               this.connectionStub(items[0]!.row.streamId, connectionId),
-              __internalUrl('/check'),
+              internalUrl('/check'),
               {
                 method: 'POST',
                 body: JSON.stringify({
@@ -553,12 +555,12 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
 
     private topicStub(streamId: string, topicKey: string): DurableObjectStub {
       const binding = this.env[__getLiveBindingName()] as DurableObjectNamespace;
-      return binding.get(binding.idFromName(__topicInstanceName(streamId, topicKey)));
+      return binding.get(binding.idFromName(topicInstanceName(streamId, topicKey)));
     }
 
     private connectionStub(streamId: string, connectionId: string): DurableObjectStub {
       const binding = this.env[__getLiveBindingName()] as DurableObjectNamespace;
-      return binding.get(binding.idFromName(__connectionInstanceName(streamId, connectionId)));
+      return binding.get(binding.idFromName(connectionInstanceName(streamId, connectionId)));
     }
 
     private unregisterTopic(
@@ -566,7 +568,7 @@ export function createLiveDurableObject(): LiveDurableObjectClass {
       connectionId: string,
       subscription: ActiveSubscription,
     ) {
-      return this.topicStub(streamId, subscription.topicKey).fetch(__internalUrl('/unregister'), {
+      return this.topicStub(streamId, subscription.topicKey).fetch(internalUrl('/unregister'), {
         method: 'POST',
         body: JSON.stringify({
           streamId,
