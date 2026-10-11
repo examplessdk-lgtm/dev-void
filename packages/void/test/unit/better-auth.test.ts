@@ -1,26 +1,10 @@
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 import { voidAuthPassword } from '../../src/runtime/better-auth-shared.ts';
 import { resolveVoidAuthOptions } from '../../src/runtime/better-auth.ts';
 
 describe('resolveVoidAuthOptions', () => {
-  it('starts authentication on the primary for current revocation state', async () => {
-    const primary = { prepare: vi.fn() };
-    const binding = {
-      withSession: vi.fn().mockReturnValue(primary),
-    };
-
-    const { options } = await resolveVoidAuthOptions(
-      new Request('https://example.com/api/auth'),
-      { DB: binding as unknown as D1Database, BETTER_AUTH_SECRET: 'secret' },
-      { dialect: 'sqlite', providers: null },
-    );
-
-    expect(binding.withSession).toHaveBeenCalledExactlyOnceWith('first-primary');
-    expect(options.database).toBe(primary);
-  });
-
   it('defaults to email auth when no providers are configured', async () => {
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('https://example.com/api/auth'),
       {
         BETTER_AUTH_SECRET: 'secret',
@@ -40,7 +24,7 @@ describe('resolveVoidAuthOptions', () => {
   });
 
   it('resolves configured social providers from standardized env vars', async () => {
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('https://example.com/api/auth'),
       {
         BETTER_AUTH_SECRET: 'secret',
@@ -73,7 +57,7 @@ describe('resolveVoidAuthOptions', () => {
   });
 
   it('preserves the default password handler when email auth is customized', async () => {
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('https://example.com/api/auth'),
       {
         BETTER_AUTH_SECRET: 'secret',
@@ -128,7 +112,7 @@ describe('resolveVoidAuthOptions', () => {
       },
     };
 
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('https://example.com/api/auth'),
       {
         BETTER_AUTH_SECRET: 'secret',
@@ -169,7 +153,7 @@ describe('resolveVoidAuthOptions', () => {
   });
 
   it('uses the fallback only in dev, regardless of the request host', async () => {
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('https://example.com/api/auth'),
       {},
       {
@@ -184,7 +168,7 @@ describe('resolveVoidAuthOptions', () => {
   });
 
   it('prefers BETTER_AUTH_SECRET over the dev fallback', async () => {
-    const { options } = await resolveVoidAuthOptions(
+    const options = await resolveVoidAuthOptions(
       new Request('http://localhost:3000/api/auth'),
       { BETTER_AUTH_SECRET: 'configured-secret' },
       { dialect: 'sqlite', providers: null, dev: true },
@@ -264,20 +248,20 @@ describe('resolveVoidAuthOptions auth rate limits', () => {
   }
 
   it('limits auth requests per Cloudflare client IP on a deployed Worker', async () => {
-    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }));
+    const options = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }));
     expect(options.rateLimit?.enabled).toBe(true);
     expect(options.advanced?.ipAddress?.ipAddressHeaders).toEqual(['cf-connecting-ip']);
   });
 
   it('leaves the dev server unlimited', async () => {
-    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+    const options = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
       dev: true,
     });
     expect(options.rateLimit).toBeUndefined();
   });
 
   it('does not trust the Cloudflare IP header outside a Worker', async () => {
-    const { options } = await resolve(plainRequest({ 'cf-connecting-ip': '203.0.113.7' }));
+    const options = await resolve(plainRequest({ 'cf-connecting-ip': '203.0.113.7' }));
     expect(options.rateLimit).toBeUndefined();
     expect(options.advanced).toBeUndefined();
   });
@@ -285,27 +269,27 @@ describe('resolveVoidAuthOptions auth rate limits', () => {
   it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1'])(
     'leaves a local preview from %s unlimited',
     async (ip) => {
-      const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': ip }));
+      const options = await resolve(edgeRequest({ 'cf-connecting-ip': ip }));
       expect(options.rateLimit).toBeUndefined();
       expect(options.advanced).toBeUndefined();
     },
   );
 
   it('does not share one bucket for requests without a client IP', async () => {
-    const { options } = await resolve(edgeRequest({}));
+    const options = await resolve(edgeRequest({}));
     expect(options.rateLimit).toBeUndefined();
     expect(options.advanced).toBeUndefined();
   });
 
   it('keeps an explicit rateLimit setting', async () => {
-    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+    const options = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
       userConfig: { rateLimit: { enabled: false, window: 60 } },
     });
     expect(options.rateLimit).toEqual({ enabled: false, window: 60 });
   });
 
   it('adds the client IP header next to other advanced settings', async () => {
-    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+    const options = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
       userConfig: { advanced: { cookiePrefix: 'x' } },
     });
     expect(options.advanced).toEqual({
@@ -316,7 +300,7 @@ describe('resolveVoidAuthOptions auth rate limits', () => {
 
   it('keeps an explicit ipAddress setting', async () => {
     const ipAddress = { ipAddressHeaders: ['x-real-ip'], ipv6Subnet: 48 };
-    const { options } = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
+    const options = await resolve(edgeRequest({ 'cf-connecting-ip': '203.0.113.7' }), {
       userConfig: { advanced: { ipAddress } },
     });
     expect(options.advanced?.ipAddress).toBe(ipAddress);

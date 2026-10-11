@@ -168,11 +168,7 @@ describe('createMigrationHandler with missing D1 binding', () => {
   }
 
   it('returns error when env.DB is undefined', async () => {
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken },
-      sampleMigrations,
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken }, sampleMigrations);
 
     const response = await handler(makeRequest());
     const body = (await response.json()) as MigrationResponse;
@@ -187,7 +183,6 @@ describe('createMigrationHandler with missing D1 binding', () => {
     const handler = createMigrationHandler(
       { __VOID_PROXY_TOKEN: proxyToken, DB: null },
       sampleMigrations,
-      'sqlite',
     );
 
     const response = await handler(makeRequest());
@@ -199,11 +194,7 @@ describe('createMigrationHandler with missing D1 binding', () => {
   });
 
   it('rejects requests with wrong proxy token', async () => {
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken },
-      sampleMigrations,
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken }, sampleMigrations);
 
     const badRequest = new Request('https://example.com/__void/migrate', {
       method: 'POST',
@@ -218,11 +209,7 @@ describe('createMigrationHandler with missing D1 binding', () => {
   });
 
   it('rejects requests with no proxy token', async () => {
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken },
-      sampleMigrations,
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken }, sampleMigrations);
 
     const noAuthRequest = new Request('https://example.com/__void/migrate', {
       method: 'POST',
@@ -361,11 +348,9 @@ describe('createMigrationHandler D1 execution', () => {
           ? new Error('D1_EXEC_ERROR: Error in line 1: CREATE TABLE notes (: incomplete input')
           : undefined,
     });
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
-      [{ name: '0001_semicolon.sql', sql }],
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken, DB: db }, [
+      { name: '0001_semicolon.sql', sql },
+    ]);
 
     const response = await handler(
       new Request('https://example.com/__void/migrate', {
@@ -398,11 +383,9 @@ describe('createMigrationHandler D1 execution', () => {
       'END;',
     ].join('\n');
     const { calls, db } = createMockD1();
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
-      [{ name: '0001_trigger.sql', sql }],
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken, DB: db }, [
+      { name: '0001_trigger.sql', sql },
+    ]);
 
     const response = await handler(
       new Request('https://example.com/__void/migrate', {
@@ -431,7 +414,6 @@ describe('createMigrationHandler D1 execution', () => {
     const handler = createMigrationHandler(
       { __VOID_PROXY_TOKEN: proxyToken, DB: db },
       migrations,
-      'sqlite',
       undefined,
       buildMigrationPlanBundle(migrations),
     );
@@ -469,11 +451,9 @@ describe('createMigrationHandler D1 execution', () => {
           ? new Error('D1_EXEC_ERROR: Error in line 1: CREATE TABLE `posts` (: incomplete input')
           : undefined,
     });
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
-      [{ name: '0000_generated.sql', sql }],
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken, DB: db }, [
+      { name: '0000_generated.sql', sql },
+    ]);
 
     const response = await handler(
       new Request('https://example.com/__void/migrate', {
@@ -512,11 +492,9 @@ describe('createMigrationHandler D1 execution', () => {
       ');',
     ].join('\n');
     const { calls, db } = createMockD1();
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
-      [{ name: '0001_drizzle.sql', sql }],
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken, DB: db }, [
+      { name: '0001_drizzle.sql', sql },
+    ]);
 
     const response = await handler(
       new Request('https://example.com/__void/migrate', {
@@ -554,11 +532,9 @@ describe('createMigrationHandler D1 execution', () => {
       '/* --> statement-breakpoint */',
     ].join('\n');
     const { calls, db } = createMockD1();
-    const handler = createMigrationHandler(
-      { __VOID_PROXY_TOKEN: proxyToken, DB: db },
-      [{ name: '0001_literal_marker.sql', sql }],
-      'sqlite',
-    );
+    const handler = createMigrationHandler({ __VOID_PROXY_TOKEN: proxyToken, DB: db }, [
+      { name: '0001_literal_marker.sql', sql },
+    ]);
 
     const response = await handler(
       new Request('https://example.com/__void/migrate', {
@@ -591,7 +567,6 @@ describe('createMigrationHandler D1 execution', () => {
     const handler = createMigrationHandler(
       { __VOID_PROXY_TOKEN: proxyToken, DB: db },
       migrations,
-      'sqlite',
       undefined,
       buildMigrationPlanBundle(migrations),
     );
@@ -624,7 +599,6 @@ describe('createMigrationHandler D1 execution', () => {
     const handler = createMigrationHandler(
       { __VOID_PROXY_TOKEN: proxyToken, DB: db },
       migrations,
-      'sqlite',
       undefined,
       buildMigrationPlanBundle(migrations),
     );

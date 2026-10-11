@@ -3,21 +3,9 @@ import { applyMySqlAuthMigrations, mysqlMigrationRunner } from './auth-migration
 import {
   createVoidAuthRuntime,
   resolveConnectionString,
-  type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
 } from './better-auth-shared.ts';
-
-async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
-  const { createPool } = await import('mysql2/promise');
-  const pool = createPool({ uri: resolveConnectionString(env, 'MySQL'), connectionLimit: 1 });
-  return {
-    database: pool,
-    async dispose() {
-      await pool.end();
-    },
-  };
-}
 
 async function applyMigrations(
   env: VoidAuthEnv,
@@ -32,7 +20,7 @@ async function applyMigrations(
   }
 }
 
-const runtime = createVoidAuthRuntime('mysql', resolveDatabase, applyMigrations);
+const runtime = createVoidAuthRuntime('mysql', applyMigrations);
 
 export const resolveVoidAuthState: VoidAuthRuntimeApi['resolveVoidAuthState'] =
   runtime.resolveVoidAuthState;

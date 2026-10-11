@@ -27,12 +27,7 @@ export type VoidAuthEnv = Record<string, unknown> & {
   BETTER_AUTH_SECRET?: string;
 };
 
-export type ResolvedDatabase = {
-  database: NonNullable<BetterAuthOptions['database']>;
-  dispose(): Promise<void>;
-};
-
-type ResolveDatabase = (env: VoidAuthEnv) => Promise<ResolvedDatabase>;
+type AuthDatabase = NonNullable<BetterAuthOptions['database']>;
 type ApplyMigrations = (
   env: VoidAuthEnv,
   migrationSchema: VoidAuthMigrationSchema,
@@ -49,33 +44,32 @@ export type VoidAuthRuntimeApi = {
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-  ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }>;
+    database: AuthDatabase,
+  ): Promise<BetterAuthOptions>;
   createVoidAuth(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-  ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }>;
+    database: AuthDatabase,
+  ): Promise<ReturnType<typeof betterAuth>>;
   resolveVoidAuthState(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<AuthState | null>;
   runVoidAuthMiddleware(
     c: Context,
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<void>;
   handleVoidAuthRequest(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<Response>;
   runVoidAuthMigrations(
-    request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     migrationSchema: VoidAuthMigrationSchema,
@@ -401,7 +395,6 @@ function applyCloudflareRateLimitDefaults(options: BetterAuthOptions): BetterAut
 
 export function createVoidAuthRuntime(
   dialect: VoidAuthDialect,
-  resolveDatabase: ResolveDatabase,
   applyMigrations: ApplyMigrations,
 ): VoidAuthRuntimeApi {
   function assertDialect(received: VoidAuthDialect): void {
@@ -414,13 +407,10 @@ export function createVoidAuthRuntime(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-  ): Promise<{ options: BetterAuthOptions; dispose(): Promise<void> }> {
+    database: AuthDatabase,
+  ): Promise<BetterAuthOptions> {
     assertDialect(runtime.dialect);
 
-    const { database, dispose } = databaseOverride
-      ? { database: databaseOverride, async dispose() {} }
-      : await resolveDatabase(env);
     const origin = new URL(request.url).origin;
     const emailAndPassword = resolveEmailAndPassword(runtime.providers);
     const socialProviders = resolveSocialProviders(env, runtime.providers);
@@ -436,59 +426,41 @@ export function createVoidAuthRuntime(
     };
 
     const resolved = resolveUserConfig(runtime.userConfig, defaults, request, env, dialect);
-    return {
-      options:
-        runtime.dev !== true && cloudflareClientIp(request)
-          ? applyCloudflareRateLimitDefaults(resolved)
-          : resolved,
-      dispose,
-    };
+    return runtime.dev !== true && cloudflareClientIp(request)
+      ? applyCloudflareRateLimitDefaults(resolved)
+      : resolved;
   }
 
   async function createVoidAuth(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
-  ): Promise<{ auth: ReturnType<typeof betterAuth>; dispose(): Promise<void> }> {
-    const { options, dispose } = await resolveVoidAuthOptions(
-      request,
-      env,
-      runtime,
-      databaseOverride,
-    );
-    return {
-      auth: betterAuth(options),
-      dispose,
-    };
+    database: AuthDatabase,
+  ): Promise<ReturnType<typeof betterAuth>> {
+    return betterAuth(await resolveVoidAuthOptions(request, env, runtime, database));
   }
 
   async function resolveVoidAuthState(
     request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<AuthState | null> {
-    const { auth, dispose } = await createVoidAuth(request, env, runtime, databaseOverride);
+    const auth = await createVoidAuth(request, env, runtime, database);
+    const result = await auth.api.getSession({
+      headers: await sessionHeaders(request, auth),
+      asResponse: false,
+      returnHeaders: true,
+    });
 
-    try {
-      const result = await auth.api.getSession({
-        headers: await sessionHeaders(request, auth),
-        asResponse: false,
-        returnHeaders: true,
-      });
-
-      return (result.response ?? null) as AuthState | null;
-    } finally {
-      await dispose();
-    }
+    return (result.response ?? null) as AuthState | null;
   }
 
   async function runVoidAuthMiddleware(
     c: Context,
     next: () => Promise<void>,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<void> {
     // Skip auth for internal routes (cron, queue, migration, binding proxy).
     // Still set user/session to null so downstream middleware that checks
@@ -499,74 +471,52 @@ export function createVoidAuthRuntime(
       return next();
     }
 
-    const { auth, dispose } = await createVoidAuth(
-      c.req.raw,
-      c.env as VoidAuthEnv,
-      runtime,
-      databaseOverride,
-    );
+    const auth = await createVoidAuth(c.req.raw, c.env as VoidAuthEnv, runtime, database);
     c.set('__voidAuth', auth);
 
-    try {
-      const result = await auth.api.getSession({
-        headers: await sessionHeaders(c.req.raw, auth),
-        asResponse: false,
-        returnHeaders: true,
-      });
+    const result = await auth.api.getSession({
+      headers: await sessionHeaders(c.req.raw, auth),
+      asResponse: false,
+      returnHeaders: true,
+    });
 
-      const state = (result.response ?? null) as AuthState | null;
-      c.set('user', state?.user ?? null);
-      c.set('session', state?.session ?? null);
+    const state = (result.response ?? null) as AuthState | null;
+    c.set('user', state?.user ?? null);
+    c.set('session', state?.session ?? null);
 
-      await authContext.run({ user: state?.user ?? null, state }, async () => {
-        await next();
-      });
+    await authContext.run({ user: state?.user ?? null, state }, async () => {
+      await next();
+    });
 
-      const credentialed = ['cookie', 'authorization', 'cf-access-jwt-assertion'].some((header) =>
-        c.req.raw.headers.has(header),
-      );
-      appendAuthHeaders(
-        c,
-        result.headers,
-        state !== null || credentialed || result.headers?.has('set-cookie') === true,
-      );
-    } finally {
-      await dispose();
-    }
+    const credentialed = ['cookie', 'authorization', 'cf-access-jwt-assertion'].some((header) =>
+      c.req.raw.headers.has(header),
+    );
+    appendAuthHeaders(
+      c,
+      result.headers,
+      state !== null || credentialed || result.headers?.has('set-cookie') === true,
+    );
   }
 
   async function handleVoidAuthRequest(
     c: Context,
     runtime: VoidAuthRuntimeOptions,
-    databaseOverride?: NonNullable<BetterAuthOptions['database']>,
+    database: AuthDatabase,
   ): Promise<Response> {
     const existingAuth = c.get('__voidAuth') as ReturnType<typeof betterAuth> | undefined;
     if (existingAuth) {
       return existingAuth.handler(c.req.raw);
     }
 
-    const { auth, dispose } = await createVoidAuth(
-      c.req.raw,
-      c.env as VoidAuthEnv,
-      runtime,
-      databaseOverride,
-    );
-    try {
-      return await auth.handler(c.req.raw);
-    } finally {
-      await dispose();
-    }
+    const auth = await createVoidAuth(c.req.raw, c.env as VoidAuthEnv, runtime, database);
+    return auth.handler(c.req.raw);
   }
 
   async function runVoidAuthMigrations(
-    _request: Request,
     env: VoidAuthEnv,
     runtime: VoidAuthRuntimeOptions,
     migrationSchema: VoidAuthMigrationSchema,
   ): Promise<void> {
-    if (!migrationSchema) {
-      throw new Error('auth: Migration schema is unavailable.');
-    }
     assertDialect(runtime.dialect);
     assertDialect(migrationSchema.dialect);
     await applyMigrations(env, migrationSchema);

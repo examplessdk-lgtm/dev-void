@@ -2,22 +2,9 @@ import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import { applySqliteAuthMigrations } from './auth-migrations.ts';
 import {
   createVoidAuthRuntime,
-  type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
 } from './better-auth-shared.ts';
-
-async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
-  if (!env.DB) {
-    throw new Error('auth: Better Auth requires the "DB" D1 binding for sqlite apps.');
-  }
-  return {
-    // Auth must observe current revocations. Keep its first lookup on the
-    // primary, then preserve sequential consistency for the request.
-    database: env.DB.withSession('first-primary') as unknown as D1Database,
-    async dispose() {},
-  };
-}
 
 async function applyMigrations(
   env: VoidAuthEnv,
@@ -42,7 +29,7 @@ async function applyMigrations(
   );
 }
 
-const runtime = createVoidAuthRuntime('sqlite', resolveDatabase, applyMigrations);
+const runtime = createVoidAuthRuntime('sqlite', applyMigrations);
 
 export const resolveVoidAuthOptions: VoidAuthRuntimeApi['resolveVoidAuthOptions'] =
   runtime.resolveVoidAuthOptions;

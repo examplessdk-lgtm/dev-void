@@ -254,8 +254,8 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
             ? join(runtimeDir, 'better-auth-mysql.mjs')
             : join(runtimeDir, 'better-auth.mjs'),
       authConfigPath,
-      authDatabasePath: null,
-      authSchemaPath: null,
+      authDatabasePath: join(outDir, 'better-auth-db.ts'),
+      authSchemaPath: join(outDir, 'better-auth-schema.ts'),
       dialect,
       providers: config.auth?.providers ?? null,
     };
@@ -273,20 +273,17 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     };
     const local = resolvedConfig?.command === 'serve' ? loadLocalEnv(root) : {};
     const env = { ...local, ...process.env } as Record<string, unknown>;
-    const schemaPath = join(outDir, 'better-auth-schema.ts');
-    const databasePath = join(outDir, 'better-auth-db.ts');
+    const { authSchemaPath, authDatabasePath } = compileOptions.auth;
 
-    writeFileIfChanged(schemaPath, generateVoidAuthDrizzleSchema(authRuntime, env));
+    writeFileIfChanged(authSchemaPath, generateVoidAuthDrizzleSchema(authRuntime, env));
     writeFileIfChanged(
-      databasePath,
+      authDatabasePath,
       generateVoidAuthDatabaseModule({
         dialect: compileOptions.auth.dialect,
-        schemaImportPath: schemaPath,
+        schemaImportPath: authSchemaPath,
         drizzleAdapterPath,
       }),
     );
-    compileOptions.auth.authSchemaPath = schemaPath;
-    compileOptions.auth.authDatabasePath = databasePath;
   }
 
   let resolvedConfig: import('vite').ResolvedConfig | null = null;
@@ -557,7 +554,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           compileOptions.migrations = migrations;
           compileOptions.migrationPlanBundle =
             dialect === 'sqlite' ? buildMigrationPlanBundle(migrations) : undefined;
-          compileOptions.migrationDialect = dialect;
         }
       }
       // Re-write entries from the completed scan.

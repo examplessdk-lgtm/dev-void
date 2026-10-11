@@ -88,7 +88,6 @@ function createDatabase(
     createMigrationHandler(
       { DB: db, __VOID_PROXY_TOKEN: 'test-token' },
       migrations,
-      'sqlite',
       undefined,
       buildMigrationPlanBundle(migrations),
     );

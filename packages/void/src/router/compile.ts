@@ -24,8 +24,8 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
 export type AuthCompileOptions = {
   authRuntimePath: string;
   authConfigPath: string | null;
-  authDatabasePath: string | null;
-  authSchemaPath: string | null;
+  authDatabasePath: string;
+  authSchemaPath: string;
   dialect: 'sqlite' | 'postgresql' | 'mysql';
   providers: Array<VoidAuthProvider> | null;
 };
@@ -69,8 +69,6 @@ export type CompileOptions = {
   migrations?: Array<{ name: string; sql: string }>;
   /** Build-time migration execution plans for protocol v2 workers */
   migrationPlanBundle?: MigrationPlanBundle;
-  /** Migration dialect. */
-  migrationDialect?: 'sqlite' | 'postgresql' | 'mysql';
   /** Custom binding names configured through inference.bindings. */
   bindingNames?: { d1?: string; kv?: string; r2?: string };
   /** Header rules from routing.headers config. */
@@ -172,14 +170,10 @@ export function compileRouteTable(
     lines.push(
       `import { ${authImports.join(', ')} } from ${JSON.stringify(auth.authRuntimePath)};`,
     );
-    if (auth.authDatabasePath) {
-      lines.push(`import { __voidAuthDatabase } from ${JSON.stringify(auth.authDatabasePath)};`);
-    }
-    if (auth.authSchemaPath) {
-      lines.push(
-        `import { migrationSchema as __voidAuthMigrationSchema } from ${JSON.stringify(auth.authSchemaPath)};`,
-      );
-    }
+    lines.push(`import { __voidAuthDatabase } from ${JSON.stringify(auth.authDatabasePath)};`);
+    lines.push(
+      `import { migrationSchema as __voidAuthMigrationSchema } from ${JSON.stringify(auth.authSchemaPath)};`,
+    );
     if (auth.authConfigPath) {
       lines.push(`import __voidAuthConfig from ${JSON.stringify(auth.authConfigPath)};`);
     }
@@ -216,7 +210,7 @@ export function compileRouteTable(
     );
     if (webSockets.length > 0) {
       lines.push(
-        `const __resolveVoidAuthState = (request, env, runtime) => __resolveVoidAuthStateRuntime(request, env, runtime${auth.authDatabasePath ? ', __voidAuthDatabase' : ''});`,
+        'const __resolveVoidAuthState = (request, env, runtime) => __resolveVoidAuthStateRuntime(request, env, runtime, __voidAuthDatabase);',
       );
     }
     lines.push('');
@@ -269,9 +263,7 @@ export function compileRouteTable(
 
   if (auth) {
     lines.push('app.use(async (c, next) => {');
-    lines.push(
-      `  return runVoidAuthMiddleware(c, next, __voidAuthOptions${auth.authDatabasePath ? ', __voidAuthDatabase' : ''});`,
-    );
+    lines.push('  return runVoidAuthMiddleware(c, next, __voidAuthOptions, __voidAuthDatabase);');
     lines.push('});');
     lines.push('');
   }
@@ -305,15 +297,11 @@ export function compileRouteTable(
 
   if (auth) {
     lines.push('app.all("/api/auth", async (c) => {');
-    lines.push(
-      `  return handleVoidAuthRequest(c, __voidAuthOptions${auth.authDatabasePath ? ', __voidAuthDatabase' : ''});`,
-    );
+    lines.push('  return handleVoidAuthRequest(c, __voidAuthOptions, __voidAuthDatabase);');
     lines.push('});');
     lines.push('');
     lines.push('app.all("/api/auth/*", async (c) => {');
-    lines.push(
-      `  return handleVoidAuthRequest(c, __voidAuthOptions${auth.authDatabasePath ? ', __voidAuthDatabase' : ''});`,
-    );
+    lines.push('  return handleVoidAuthRequest(c, __voidAuthOptions, __voidAuthDatabase);');
     lines.push('});');
     lines.push('');
   }
@@ -658,9 +646,6 @@ export function compileRouteTable(
     );
     lines.push(`const __migrations = ${JSON.stringify(options.migrations)};`);
     lines.push(`const __migrationPlanBundle = ${JSON.stringify(options.migrationPlanBundle)};`);
-    lines.push(
-      `const __migrationDialect = ${JSON.stringify(options.migrationDialect ?? 'sqlite')};`,
-    );
     if (d1BindingName) {
       lines.push(
         `function __voidGetMigrationEnv() {
@@ -673,17 +658,14 @@ export function compileRouteTable(
       lines.push('function __voidGetMigrationEnv() { return __getRawEnv(); }');
     }
     lines.push(
-      'function __voidCreateMigrationRequestHandler(request, includeAuthMigrations, includePlanBundle) {',
+      'function __voidCreateMigrationRequestHandler(includeAuthMigrations, includePlanBundle) {',
     );
     lines.push('  return __createMigrationHandler(');
     lines.push('    __voidGetMigrationEnv(),');
     lines.push('    __migrations,');
-    lines.push('    __migrationDialect,');
     if (auth) {
       lines.push(
-        `    includeAuthMigrations ? () => runVoidAuthMigrations(new Request(request.url), __voidGetMigrationEnv(), __voidAuthOptions${
-          auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
-        }) : undefined,`,
+        '    includeAuthMigrations ? () => runVoidAuthMigrations(__voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema) : undefined,',
       );
     } else {
       lines.push('    undefined,');
@@ -695,46 +677,46 @@ export function compileRouteTable(
     lines.push('  const url = new URL(request.url);');
     lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate") {');
     lines.push(
-      `    return __voidCreateMigrationRequestHandler(request, ${auth ? 'true' : 'false'}, false)(request);`,
+      `    return __voidCreateMigrationRequestHandler(${auth ? 'true' : 'false'}, false)(request);`,
     );
     lines.push('  }');
     lines.push(
       '  if (request.method === "GET" && url.pathname === "/__void/migrate/capabilities") {',
     );
     lines.push(
-      `    return __voidCreateMigrationRequestHandler(request, ${auth ? 'true' : 'false'}, true)(request);`,
+      `    return __voidCreateMigrationRequestHandler(${auth ? 'true' : 'false'}, true)(request);`,
     );
     lines.push('  }');
     lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate/app") {');
-    lines.push('    return __voidCreateMigrationRequestHandler(request, false, true)(request);');
+    lines.push('    return __voidCreateMigrationRequestHandler(false, true)(request);');
     lines.push('  }');
     lines.push(
       '  if (request.method === "GET" && url.pathname.startsWith("/__void/migrate/app/attempt/")) {',
     );
-    lines.push('    return __voidCreateMigrationRequestHandler(request, false, true)(request);');
+    lines.push('    return __voidCreateMigrationRequestHandler(false, true)(request);');
     lines.push('  }');
     if (auth) {
       lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate/auth") {');
-      lines.push('    return __voidCreateMigrationRequestHandler(request, true, true)(request);');
+      lines.push('    return __voidCreateMigrationRequestHandler(true, true)(request);');
       lines.push('  }');
     }
     lines.push('  return null;');
     lines.push('}');
     lines.push(
-      `app.post("/__void/migrate", (c) => __voidCreateMigrationRequestHandler(c.req.raw, ${auth ? 'true' : 'false'}, false)(c.req.raw));`,
+      `app.post("/__void/migrate", (c) => __voidCreateMigrationRequestHandler(${auth ? 'true' : 'false'}, false)(c.req.raw));`,
     );
     lines.push(
-      `app.get("/__void/migrate/capabilities", (c) => __voidCreateMigrationRequestHandler(c.req.raw, ${auth ? 'true' : 'false'}, true)(c.req.raw));`,
+      `app.get("/__void/migrate/capabilities", (c) => __voidCreateMigrationRequestHandler(${auth ? 'true' : 'false'}, true)(c.req.raw));`,
     );
     lines.push(
-      'app.post("/__void/migrate/app", (c) => __voidCreateMigrationRequestHandler(c.req.raw, false, true)(c.req.raw));',
+      'app.post("/__void/migrate/app", (c) => __voidCreateMigrationRequestHandler(false, true)(c.req.raw));',
     );
     lines.push(
-      'app.get("/__void/migrate/app/attempt/:attemptId", (c) => __voidCreateMigrationRequestHandler(c.req.raw, false, true)(c.req.raw));',
+      'app.get("/__void/migrate/app/attempt/:attemptId", (c) => __voidCreateMigrationRequestHandler(false, true)(c.req.raw));',
     );
     if (auth) {
       lines.push(
-        'app.post("/__void/migrate/auth", (c) => __voidCreateMigrationRequestHandler(c.req.raw, true, true)(c.req.raw));',
+        'app.post("/__void/migrate/auth", (c) => __voidCreateMigrationRequestHandler(true, true)(c.req.raw));',
       );
     }
     lines.push('');

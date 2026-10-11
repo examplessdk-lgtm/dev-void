@@ -3,23 +3,10 @@ import { applyPgAuthMigrations, pgMigrationRunner } from './auth-migrations.ts';
 import {
   createVoidAuthRuntime,
   resolveConnectionString,
-  type ResolvedDatabase,
   type VoidAuthEnv,
   type VoidAuthRuntimeApi,
 } from './better-auth-shared.ts';
 import { disablePgPassFallback } from './pg.ts';
-
-async function resolveDatabase(env: VoidAuthEnv): Promise<ResolvedDatabase> {
-  const { default: pg } = await import('pg');
-  const connectionString = resolveConnectionString(env, 'PostgreSQL');
-  const pool = new pg.Pool({ connectionString, max: 1 });
-  return {
-    database: pool,
-    async dispose() {
-      await pool.end();
-    },
-  };
-}
 
 async function applyMigrations(
   env: VoidAuthEnv,
@@ -36,7 +23,7 @@ async function applyMigrations(
   }
 }
 
-const runtime = createVoidAuthRuntime('postgresql', resolveDatabase, applyMigrations);
+const runtime = createVoidAuthRuntime('postgresql', applyMigrations);
 
 export const resolveVoidAuthState: VoidAuthRuntimeApi['resolveVoidAuthState'] =
   runtime.resolveVoidAuthState;

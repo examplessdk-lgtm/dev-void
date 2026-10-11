@@ -561,9 +561,6 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'postgresql',
     });
 
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('"postgresql"');
-
     const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
     expect(handler).not.toContain('import("pg")');
     expect(
@@ -600,8 +597,8 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'mysql',
     });
 
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('"mysql"');
+    const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
+    expect(handler).toContain('VARCHAR(255)');
   });
 
   it('does not generate migration handler when hasMigrations is false', async () => {

@@ -538,6 +538,7 @@ describe('generateDeployWrapperIfNeeded', () => {
     expect(wrapper).toContain('import original from "./__original.js"');
     expect(wrapper).toContain('createMigrationHandler');
     expect(wrapper).toContain('/__void/migrate');
-    expect(wrapper).toContain('"postgresql"');
+    const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
+    expect(handler).toContain('VALUES ($1, $2)');
   });
 });

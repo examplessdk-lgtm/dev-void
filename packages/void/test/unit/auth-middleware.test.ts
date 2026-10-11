@@ -21,13 +21,7 @@ const authRuntimeOptions: VoidAuthRuntimeOptions = {
   providers: null,
 };
 
-const runtime = createVoidAuthRuntime(
-  'sqlite',
-  async () => {
-    throw new Error('Unexpected database resolution.');
-  },
-  async () => {},
-);
+const runtime = createVoidAuthRuntime('sqlite', async () => {});
 
 function createApp(sessionResult: { response: AuthState | null; headers: Headers }): Hono {
   mocks.getSession.mockResolvedValue(sessionResult);
