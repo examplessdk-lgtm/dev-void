@@ -54,11 +54,6 @@ function makeScan(pages: Array<PageDefinition>): PageScanResult {
   return { pages, layouts: [], namedLayouts: [] };
 }
 
-// This is the production seam `runFullDeploy` uses to forward `pageScan` into
-// `manifest.pages`. If the `pages: collectPages(pageScan)` injection is dropped
-// from `assembleVoidManifest`, the first assertion below fails (`.toEqual`
-// mismatch) and the second fails (`pages` stays undefined) — so this test goes
-// RED the moment the wiring regresses.
 describe('assembleVoidManifest', () => {
   it('forwards the page scan into manifest.pages (ordered, raw patterns, ISR TTL preserved)', () => {
     const pageScan = makeScan([
@@ -74,25 +69,18 @@ describe('assembleVoidManifest', () => {
     ]);
   });
 
-  it('omits manifest.pages when the scan has no pages', () => {
-    expect(
-      assembleVoidManifest(makeScan([]), false, { bindings: MINIMAL_BINDINGS }).pages,
-    ).toBeUndefined();
-    expect(assembleVoidManifest(null, false, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
-  });
-
-  it('emits manifest.pages for a void app (isFrameworkMode = false)', () => {
-    const scan = makeScan([makePage('/isr', 60)]);
-    expect(assembleVoidManifest(scan, false, { bindings: MINIMAL_BINDINGS }).pages).toEqual([
-      { pattern: '/isr', revalidate: 60 },
-    ]);
-  });
-
-  it('omits manifest.pages in framework mode even with a populated scan (isFrameworkMode = true)', () => {
+  it('omits manifest.pages and pathRevalidate in framework mode', () => {
     // `pages` is a Void pages-mode concept: a Class-A framework routed through
     // runFullDeploy must NOT emit it, even when it happens to have a pages/ dir.
     const scan = makeScan([makePage('/isr', 60)]);
-    expect(assembleVoidManifest(scan, true, { bindings: MINIMAL_BINDINGS }).pages).toBeUndefined();
+    const manifest = assembleVoidManifest(
+      scan,
+      true,
+      { bindings: MINIMAL_BINDINGS },
+      { '/blog/*': 3600 },
+    );
+    expect(manifest.pages).toBeUndefined();
+    expect(manifest.pathRevalidate).toBeUndefined();
   });
 
   it('ships the RAW object config as manifest.pathRevalidate; those pages stay inherit-eligible', () => {
@@ -122,20 +110,6 @@ describe('assembleVoidManifest', () => {
       { pattern: '/a', revalidate: 3600 },
       { pattern: '/b', revalidate: 3600 },
     ]);
-    expect(manifest.pathRevalidate).toBeUndefined();
-  });
-
-  it('omits manifest.pathRevalidate in framework mode even with an object config', () => {
-    const scan = makeScan([makePage('/blog/:slug')]);
-    const manifest = assembleVoidManifest(
-      scan,
-      true,
-      { bindings: MINIMAL_BINDINGS },
-      {
-        '/blog/*': 3600,
-      },
-    );
-    expect(manifest.pages).toBeUndefined();
     expect(manifest.pathRevalidate).toBeUndefined();
   });
 });

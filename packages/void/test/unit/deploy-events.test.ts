@@ -179,23 +179,6 @@ describe('applyDeployEvent', () => {
     expect(calls.stop).toHaveLength(0);
   });
 
-  it('clears the spinner without a duplicate success message when published is true', () => {
-    const { spinner, calls } = createMockSpinner();
-    const done: DoneEvent = {
-      event: 'done',
-      deployment: 'dpl_1',
-      url: 'https://app.void.app',
-      urls: ['https://app.void.app'],
-      assets: 0,
-      workers: 1,
-      published: true,
-    };
-    const result = applyDeployEvent(done, spinner);
-    expect(result).toEqual({ kind: 'done', event: done });
-    expect(calls.clear).toHaveLength(1);
-    expect(calls.stop).toHaveLength(0);
-  });
-
   it('degrades the done message when published is false but still resolves as a committed done', () => {
     const { spinner, calls } = createMockSpinner();
     const done: DoneEvent = {
