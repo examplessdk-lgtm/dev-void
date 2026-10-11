@@ -4,7 +4,7 @@ import { join } from 'pathslash';
 
 export type PM = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
-export const VOID_PNPM_ALLOWED_BUILDS = ['esbuild', 'sharp', 'workerd'] as const;
+const VOID_PNPM_ALLOWED_BUILDS = ['esbuild', 'sharp', 'workerd'] as const;
 
 /** Write the explicit build-script policy required by a new pnpm project. */
 export function writePnpmBuildPolicy(root: string, pm: PM): void {

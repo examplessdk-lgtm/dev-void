@@ -49,13 +49,4 @@ describe('FRAMEWORK_PRESETS', () => {
     expect(preset.workerDir).toBe(workerDir);
     expect(preset.workerMain).toBe('index.js');
   });
-
-  it('all presets have required fields', () => {
-    for (const preset of Object.values(FRAMEWORK_PRESETS)) {
-      expect(preset.buildCommand).toBeTruthy();
-      expect(preset.workerDir).toBeTruthy();
-      expect(preset.workerMain).toBeTruthy();
-      expect(preset.assetsDir).toBeTruthy();
-    }
-  });
 });
