@@ -216,6 +216,7 @@ describe('shared application analysis', () => {
       },
     });
     expect(analysis.bindingNames).toEqual({ d1: 'CUSTOM_DB' });
+    expect(analysis.bindings).toMatchObject({ needsAI: true, needsEmail: true });
     expect(analysis.reasons).toMatchObject({
       database: ['inference.bindings.db enables a D1 database'],
       kv: ['inference.bindings.kv enables KV'],
