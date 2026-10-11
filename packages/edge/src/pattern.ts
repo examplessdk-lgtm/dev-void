@@ -1,14 +1,13 @@
 /**
- * Shared path-pattern compiler used by header rules and routing rules.
+ * Path-pattern matchers shared by routing, header, and revalidate rules.
  *
- * Syntax:
+ * `compilePattern` syntax:
  *   `:name`   — single path segment, captured as `name`
  *   `:name*`  — zero or more path segments, captured as `name`
  *   `*`       — zero or more path segments, captured as `splat` (legacy)
  *
  * When a legacy pattern contains multiple anonymous `*`, the first captures
- * as `splat` and later wildcards are non-capturing. Boolean matching remains
- * backward compatible for existing header/revalidate patterns.
+ * as `splat` and later wildcards are non-capturing.
  */
 
 const MAX_CACHE = 256;
@@ -100,11 +99,8 @@ export function compilePattern(source: string): CompiledPattern {
 
 /**
  * Match a pattern against a pathname. Returns captured params, or null.
- *
- * Returns null (rather than throwing) when the pattern itself is malformed —
- * e.g. multiple `*` producing duplicate `splat` capture names. Framework and
- * API ingest both reject those, but a hand-crafted manifest could still reach
- * the edge, and a single bad rule shouldn't 500 unrelated traffic.
+ * A malformed pattern (e.g. a repeated name like `/:splat/*`) also returns
+ * null, so one bad rule cannot fail unrelated requests.
  */
 export function matchPatternCaptures(
   pattern: string,
@@ -150,17 +146,14 @@ const literalRegexCache = new Map<string, RegExp>();
 export function matchLiteralPattern(pattern: string, pathname: string): boolean {
   let regex = lruGet(literalRegexCache, pattern);
   if (!regex) {
-    try {
-      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
-      regex = new RegExp(`^${escaped}$`);
-    } catch {
-      return false;
-    }
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*');
+    regex = new RegExp(`^${escaped}$`);
     lruSet(literalRegexCache, pattern, regex);
   }
   try {
     return regex.test(pathname);
   } catch {
+    // V8 compiles on first use and throws for very large patterns.
     return false;
   }
 }
@@ -168,65 +161,33 @@ export function matchLiteralPattern(pattern: string, pathname: string): boolean 
 const segmentRegexCache = new Map<string, RegExp>();
 
 /**
- * Match a REVALIDATE ROUTE pattern against a pathname using SEGMENT-ANCHORED
- * semantics. Like `matchLiteralPattern` except a WHOLE-SEGMENT `:name` (a `:`
- * right after `/` or at the start of the pattern, whose name is any non-empty
- * run of non-`/` characters — NOT just JS-identifier chars, so `:post-id`,
- * `:post.id`, etc. all anchor — running up to the next `/` or end of string)
- * matches exactly ONE non-empty path segment (`[^/]+`). A whole-segment NAMED
- * CATCH-ALL `:name{.+}` (a named catch-all page `[...path]` → `/docs/:path{.+}`)
- * matches ONE-OR-MORE characters that MAY cross `/` (`.+`, so `/docs/a` and
- * `/docs/a/b` both match, but bare `/docs` / `/docs/` do NOT). Only the exact
- * `{.+}` constraint widens — a REGEX-constrained param like `:path{[0-9]+}`
- * keeps its single-segment `[^/]+` meaning. `*` still expands to a catch-all
- * that crosses `/`. A mid-segment `:` (e.g. `/api/v1:health`,
- * `/api/documents:batchGet`) stays a LITERAL — only whole-segment `:name` /
- * `:name{.+}` anchors.
- *
- * This is for `routing.revalidate` keys ONLY. Those keys are machine-generated
- * from page routes on the deploy write side (`[slug]` → `/blog/:slug`,
- * `[...path]` → `/docs/:path{.+}`), so the `:name` here is a real route param
- * and MUST bind the same way the framework's own client route matcher
- * (`patternToRegex` in `pages/manifest.ts`) binds it.
- *
- * It is intentionally NOT used for user-authored header rules
- * (`applyHeaderRules`) or `revalidateQueryAllowlist` keys
- * (`buildVariantOriginalUrl`), where `:name` must stay a literal — those keep
- * using `matchLiteralPattern`. Sharing the segment behaviour there would make a
- * user rule like `/:batchGet` over-match every single-segment path.
- *
- * NOTE: this matcher has its OWN regex cache — the same pattern string compiles
- * to a DIFFERENT regex than `matchLiteralPattern` produces, so the caches must
- * not be shared or they would cross-contaminate.
+ * Match a `routing.revalidate` key or page pattern against a pathname. Like
+ * `matchLiteralPattern`, except for whole-segment params:
+ *   `:name`      — exactly one non-empty path segment (any non-`/` name)
+ *   `:name{.+}`  — one or more characters that may cross `/`
+ * A mid-segment `:` (`/api/v1:health`) stays literal, and any other `{...}`
+ * constraint keeps the single-segment meaning. Uses its own regex cache because
+ * the same source compiles differently here.
  */
 export function matchSegmentPattern(pattern: string, pathname: string): boolean {
   let regex = lruGet(segmentRegexCache, pattern);
   if (!regex) {
-    try {
-      // Two private-use sentinels stand in for route params so the regex-special
-      // escape step below can't touch the classes we swap in last:
-      //   \uE000 - a whole-segment `:name`       -> one path segment (`[^/]+`)
-      //   \uE001 - a named catch-all `:name{.+}`  -> >=1 char, crosses `/` (`.+`)
-      // The named-catch-all rule runs FIRST so `:name{.+}` is consumed as a unit
-      // before the plain `:name` rule can grab `:name` and strand the `{.+}`. The
-      // `{.+}` name class is `[^/{}]+` (excludes braces) so a REGEX-constrained
-      // param like `:path{[0-9]+}` does NOT match and stays a single segment.
-      const escaped = pattern
-        .replace(/(^|\/):[^/{}]+\{\.\+\}(?=\/|$)/g, '$1\uE001') // named catch-all :name{.+} -> catch-all sentinel
-        .replace(/(^|\/):[^/]+(?=\/|$)/g, '$1\uE000') // whole-segment :name -> segment sentinel
-        .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex specials
-        .replaceAll('*', '.*') // legacy `*` crosses '/'
-        .replaceAll('\uE000', '[^/]+') // segment sentinel -> one segment
-        .replaceAll('\uE001', '.+'); // catch-all sentinel -> >=1 char, crosses '/'
-      regex = new RegExp(`^${escaped}$`);
-    } catch {
-      return false;
-    }
+    // Private-use sentinels survive the escape step. `:name{.+}` is replaced
+    // first so the plain `:name` rule cannot strand its `{.+}`.
+    const escaped = pattern
+      .replace(/(^|\/):[^/{}]+\{\.\+\}(?=\/|$)/g, '$1\uE001') // named catch-all :name{.+} -> catch-all sentinel
+      .replace(/(^|\/):[^/]+(?=\/|$)/g, '$1\uE000') // whole-segment :name -> segment sentinel
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&') // escape regex specials
+      .replaceAll('*', '.*') // legacy `*` crosses '/'
+      .replaceAll('\uE000', '[^/]+') // segment sentinel -> one segment
+      .replaceAll('\uE001', '.+'); // catch-all sentinel -> >=1 char, crosses '/'
+    regex = new RegExp(`^${escaped}$`);
     lruSet(segmentRegexCache, pattern, regex);
   }
   try {
     return regex.test(pathname);
   } catch {
+    // V8 compiles on first use and throws for very large patterns.
     return false;
   }
 }

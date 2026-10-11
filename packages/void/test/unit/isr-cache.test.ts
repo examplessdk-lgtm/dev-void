@@ -386,13 +386,8 @@ describe('writeIsrCache / readIsrCache / deleteIsrCache', () => {
 });
 
 // ===========================================================================
-// cloneWithoutVoidPages — the background-render request stripper
+// cloneWithoutVoidPages
 // ===========================================================================
-// A request that carries `X-VoidPages` takes the JSON branch in `handleIsr` and
-// returns before ever reaching the HTML stale path where the stripper runs, so
-// the public API cannot deliver an X-VoidPages request to it. Test it directly
-// so the mandated stripping is actually exercised (the stale-path test can only
-// ever hand it a request that already lacks the header — a tautology otherwise).
 
 describe('cloneWithoutVoidPages', () => {
   it('removes X-VoidPages while preserving method, url, and every other header', () => {
@@ -873,14 +868,7 @@ describe('handleIsr', () => {
     // Background re-render ran exactly once (queued via ctx.waitUntil).
     expect(spy).toHaveBeenCalledTimes(1);
     const rerender = requests[0]!;
-    // The re-render request is derived from the original (marker preserved, GET,
-    // same URL). X-VoidPages stripping itself is proven directly by the
-    // `cloneWithoutVoidPages` suite above (an X-VoidPages request cannot reach
-    // this HTML stale path through the public `handleIsr` API).
-    // NOTE: cloneWithoutVoidPages uses `new Request(request, { headers })`, which
-    // preserves `request.cf` on real workerd (verified empirically). These unit
-    // tests run on Node's default vitest pool where `request.cf` does not exist,
-    // so cf preservation is not representable here and is intentionally not asserted.
+    // The re-render uses the original request (marker preserved, GET, same URL).
     expect(rerender.headers.has('X-VoidPages')).toBe(false);
     expect(rerender.headers.get('X-Test-Marker')).toBe('keep');
     expect(rerender.method).toBe('GET');

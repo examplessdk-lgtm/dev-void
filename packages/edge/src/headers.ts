@@ -12,20 +12,10 @@ export type HeaderRulePolicy = Readonly<{
 }>;
 
 /**
- * Headers that user header rules may not set at all, because they are always a
- * cookie operation. On the shared *.void.app domain (not on the PSL) void.app
- * is the registrable domain, so a `Set-Cookie` with `Domain=.void.app` is
- * readable by every tenant's subdomain. Dropped wholesale.
- *
- * `Clear-Site-Data` is the other cookie trust-boundary header, but it is NOT a
- * blanket block — see {@link sanitizeClearSiteData}: only its cookie-clearing
- * directives are stripped, since its other directives are origin-scoped.
- *
- * HSTS and other per-host headers are safe — they don't cross subdomain
- * boundaries (includeSubDomains scopes to the responding host's subtree).
- *
- * TODO: Once void.app is registered on the Public Suffix List, these defenses
- * can be removed — browsers will scope cross-subdomain cookies automatically.
+ * Headers that rules may never set on a shared domain. void.app is not on the
+ * Public Suffix List, so a `Set-Cookie` with `Domain=.void.app` reaches every
+ * tenant. `Clear-Site-Data` is filtered per directive by
+ * {@link sanitizeClearSiteData}; per-host headers such as HSTS stay allowed.
  */
 const BLOCKED_HEADERS = new Set(['set-cookie']);
 
@@ -162,13 +152,8 @@ export function applyHeaderRules(
   }
 
   const newResponse = new Response(response.body, response);
-  // Fallback for a Clear-Site-Data rule that sanitizes to nothing: last-match-wins
-  // means such a rule discards an earlier rule's value, so we fall back to the
-  // origin's own Clear-Site-Data rather than leaving the earlier rule's value
-  // behind. It is sanitized too, so rule processing never *resurfaces* a
-  // cross-tenant cookie directive — not from a rule, and not from the origin
-  // response either. (The origin's own header is otherwise ungated here; gating
-  // it across the board is a separate dispatch-layer concern.)
+  // A Clear-Site-Data rule that sanitizes to nothing falls back to the origin's
+  // own value (also sanitized) instead of keeping an earlier rule's value.
   const isolateSharedDomainCookies = policy?.cookieIsolation !== 'origin';
   const rawOriginClearSiteData = isolateSharedDomainCookies
     ? response.headers.get('clear-site-data')

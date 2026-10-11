@@ -18,6 +18,10 @@ export function hasCurrentSharedCachePolicy(response: Response): boolean {
   return response.headers.get(SHARED_CACHE_POLICY_HEADER) === String(SHARED_CACHE_POLICY_VERSION);
 }
 
+/**
+ * KV metadata stored with every ISR cache entry. Writers should annotate it with
+ * `satisfies IsrCacheMetadata` so a renamed field fails typecheck.
+ */
 export type IsrCacheMetadata = Readonly<{
   /** HTTP status code. */
   s: number;
