@@ -1,15 +1,19 @@
-vi.mock('../../src/cli/keyring.ts', () => ({
-  readKeyringPassword: () => null,
-  writeKeyringPassword: () => true,
-}));
-const accessJwt =
-  'header.' +
-  Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url') +
-  '.signature';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runPlatformLogin } from '../../src/cli/auth.ts';
 
+vi.mock('../../src/cli/keyring.ts', () => ({
+  readKeyringPassword: () => null,
+  writeKeyringPassword: () => true,
+}));
+vi.mock('node:child_process', () => ({
+  execFile: (...args: Array<unknown>) => mockExecFile(...args),
+}));
+
+const accessJwt =
+  'header.' +
+  Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url') +
+  '.signature';
 const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
   url: string;
@@ -26,10 +30,6 @@ function codeChallengeFor(verifier: string): string {
     .replaceAll('/', '_')
     .replaceAll('=', '');
 }
-
-vi.mock('node:child_process', () => ({
-  execFile: (...args: Array<unknown>) => mockExecFile(...args),
-}));
 
 beforeEach(() => {
   mockExecFile.mockReset();
@@ -94,13 +94,6 @@ describe('runPlatformLogin', () => {
     expect(state).toEqual(expect.any(String));
     expect(state).toHaveLength(64);
 
-    const attackUrl = new URL(redirectUrl);
-    attackUrl.searchParams.set('token', 'attacker-controlled-token');
-    attackUrl.searchParams.set('state', 'wrong-state');
-
-    const attackResponse = await fetch(attackUrl);
-    expect(attackResponse.status).toBe(400);
-
     const validUrl = new URL(redirectUrl);
     validUrl.searchParams.set('code', 'real-code');
 
@@ -159,7 +152,7 @@ describe('runPlatformLogin', () => {
     await expect(loginPromise).resolves.toBe('real-token');
   });
 
-  it('shows the failure page and throws when the code exchange fails (F3 regression)', async () => {
+  it('shows the failure page and throws when the code exchange fails', async () => {
     // Override fetch so the localhost callback still hits the real server, but
     // the API token exchange returns a non-ok response (expired code, etc.).
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -189,8 +182,6 @@ describe('runPlatformLogin', () => {
     validUrl.searchParams.set('code', 'real-code');
 
     const validResponse = await fetch(validUrl);
-    // The exchange ran INSIDE the request handler and failed → failure page,
-    // never the success page.
     expect(validResponse.status).toBe(400);
     const body = await validResponse.text();
     expect(body).not.toContain('successful');

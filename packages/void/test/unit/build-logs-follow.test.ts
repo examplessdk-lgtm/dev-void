@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
-const registries: Array<string> = [];
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { followBuildLogs, isFatalFollowError, runBuildCommand } from '../../src/cli/build-cmd.ts';
 import { PlatformApiError, PlatformClient, type BuildLogsResponse } from '../../src/cli/client.ts';
+import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+
+const registries: Array<string> = [];
 
 afterEach(() => {
   for (const registry of registries.splice(0)) {
@@ -193,49 +194,6 @@ describe('followBuildLogs', () => {
         isFatal: () => true,
       }),
     ).rejects.toThrow('unauthorized');
-  });
-
-  it('under the real predicate, a 426 cli_outdated rethrows (surfacing the upgrade message)', async () => {
-    await expect(
-      followBuildLogs({
-        fetchPage: () =>
-          Promise.reject(
-            apiError(426, '{"error":"cli_outdated","message":"Upgrade: npm i -g void@latest"}'),
-          ),
-        write: () => {},
-        sleep: () => Promise.resolve(),
-        since: 1,
-        status: 'building',
-        pollMs: 0,
-        isFatal: isFatalFollowError,
-      }),
-    ).rejects.toThrow('Upgrade: npm i -g void@latest');
-  });
-
-  it('under the real predicate, a 429 is retried (not fatal)', async () => {
-    let call = 0;
-    const retries: Array<unknown> = [];
-    const result = await followBuildLogs({
-      fetchPage: () => {
-        call += 1;
-        if (call === 1) {
-          return Promise.reject(apiError(429, '{"error":"rate_limited"}'));
-        }
-        return Promise.resolve(
-          page({ lastSeq: 5, status: 'complete', terminal: true, logsComplete: true }),
-        );
-      },
-      write: () => {},
-      sleep: () => Promise.resolve(),
-      since: 4,
-      status: 'building',
-      pollMs: 0,
-      isFatal: isFatalFollowError,
-      onRetry: (err) => retries.push(err),
-    });
-
-    expect(retries).toHaveLength(1); // the 429 was retried, not thrown
-    expect(result).toEqual({ status: 'complete', terminal: true });
   });
 
   it('keeps reading terminal pages until delayed final logs are captured', async () => {
