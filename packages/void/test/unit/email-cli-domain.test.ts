@@ -17,7 +17,6 @@ import {
   emailDomainRotateSecret,
   isValidEmailDomainInput,
   normalizeEmailDomainInput,
-  resolveEmailDomainTarget,
   type EmailDomainAddDeps,
 } from '../../src/cli/email.ts';
 import * as output from '../../src/cli/output.ts';
@@ -179,28 +178,6 @@ describe('domain input helpers', () => {
     expect(isValidEmailDomainInput('-bad.com')).toBe(false);
     expect(isValidEmailDomainInput('nodot')).toBe(false);
   });
-
-  it('resolves --subdomain labels and hosts under the positional domain', () => {
-    expect(resolveEmailDomainTarget('acme.com', undefined)).toEqual({
-      emailDomain: 'acme.com',
-      forced: false,
-    });
-    expect(resolveEmailDomainTarget('acme.com', 'mx')).toEqual({
-      emailDomain: 'mx.acme.com',
-      forced: true,
-    });
-    expect(resolveEmailDomainTarget('acme.com', 'mail.acme.com.')).toEqual({
-      emailDomain: 'mail.acme.com',
-      forced: true,
-    });
-    expect(() => resolveEmailDomainTarget('acme.com', 'acme.com')).toThrow(
-      /must name a subdomain of acme.com/,
-    );
-    expect(() => resolveEmailDomainTarget('acme.com', 'other.com')).toThrow(
-      /must name a subdomain of acme.com/,
-    );
-    expect(() => resolveEmailDomainTarget('acme.com', '!!!')).toThrow(/invalid --subdomain value/);
-  });
 });
 
 describe('PlatformClient.getEmailSettings', () => {
@@ -274,7 +251,7 @@ describe('emailDomainAdd', () => {
     const api = client();
     const deps = addDeps();
     vi.spyOn(crypto, 'randomUUID').mockReturnValue(ATTEMPT_ID);
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    await emailDomainAdd(api, 'prj_1', 'acme.com', deps);
     expect(api.addEmailDomain).toHaveBeenCalledWith('prj_1', {
       domain: 'acme.com',
       apiToken: LEGACY_TOKEN,
@@ -292,13 +269,7 @@ describe('emailDomainAdd', () => {
   it('does not submit a token whose scope was not confirmed', async () => {
     const api = client();
     await expect(
-      emailDomainAdd(
-        api,
-        'prj_1',
-        'acme.com',
-        undefined,
-        addDeps({ confirmScope: async () => false }),
-      ),
+      emailDomainAdd(api, 'prj_1', 'acme.com', addDeps({ confirmScope: async () => false })),
     ).rejects.toThrow('exit 1');
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
@@ -308,21 +279,8 @@ describe('emailDomainAdd', () => {
     const deps = addDeps({
       dns: { resolveMx: async () => [{ exchange: 'mx.example.net', priority: 10 }] },
     });
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps)).rejects.toThrow(
-      'exit 1',
-    );
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', deps)).rejects.toThrow('exit 1');
     expect(printed(errorSpy)).toContain('unused Cloudflare zone apex');
-    expect(deps.openUrl).not.toHaveBeenCalled();
-    expect(api.addEmailDomain).not.toHaveBeenCalled();
-  });
-
-  it('refuses --subdomain before any credential prompt', async () => {
-    const api = client();
-    const deps = addDeps();
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', 'notifications', deps)).rejects.toThrow(
-      'exit 1',
-    );
-    expect(printed(errorSpy)).toContain('Omit --subdomain');
     expect(deps.openUrl).not.toHaveBeenCalled();
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
@@ -330,9 +288,7 @@ describe('emailDomainAdd', () => {
   it('rejects invalid domains before opening a browser', async () => {
     const api = client();
     const deps = addDeps();
-    await expect(emailDomainAdd(api, 'prj_1', 'https://acme.com', undefined, deps)).rejects.toThrow(
-      'exit 1',
-    );
+    await expect(emailDomainAdd(api, 'prj_1', 'https://acme.com', deps)).rejects.toThrow('exit 1');
     expect(deps.openUrl).not.toHaveBeenCalled();
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
@@ -341,9 +297,7 @@ describe('emailDomainAdd', () => {
     const api = client();
     const deps = addDeps();
     api.getEmailSettings.mockResolvedValue({ domains: { management: 'admin' } });
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps)).rejects.toThrow(
-      'exit 0',
-    );
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', deps)).rejects.toThrow('exit 0');
     expect(deps.openUrl).not.toHaveBeenCalled();
     expect(deps.pasteToken).not.toHaveBeenCalled();
     expect(printed(infoSpy)).toContain('void platform email domain-add acme.com --project prj_1');
@@ -354,7 +308,7 @@ describe('emailDomainAdd', () => {
     const deps = addDeps();
     api.getEmailSettings.mockResolvedValue({ domains: { management: 'admin' } });
     api.listEmailDomains.mockResolvedValue([domainRow({ managed_by: 'owner' })]);
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    await emailDomainAdd(api, 'prj_1', 'acme.com', deps);
     expect(api.addEmailDomain).toHaveBeenCalledWith(
       'prj_1',
       expect.objectContaining({ domain: 'acme.com', apiToken: LEGACY_TOKEN }),
@@ -365,16 +319,14 @@ describe('emailDomainAdd', () => {
   it('fails non-interactive setup without opening a browser', async () => {
     const api = client();
     const deps = addDeps({ isInteractive: false });
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps)).rejects.toThrow(
-      'exit 1',
-    );
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', deps)).rejects.toThrow('exit 1');
     expect(deps.openUrl).not.toHaveBeenCalled();
   });
 
   it('cancels masked paste without storing a credential', async () => {
     const api = client();
     const deps = addDeps({ pasteToken: async () => null });
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    await emailDomainAdd(api, 'prj_1', 'acme.com', deps);
     expect(api.addEmailDomain).not.toHaveBeenCalled();
     expect(deps.confirmScope).not.toHaveBeenCalled();
   });
@@ -384,9 +336,7 @@ describe('emailDomainAdd', () => {
     async (token) => {
       const api = client();
       const deps = addDeps({ pasteToken: async () => token });
-      await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps)).rejects.toThrow(
-        'exit 1',
-      );
+      await expect(emailDomainAdd(api, 'prj_1', 'acme.com', deps)).rejects.toThrow('exit 1');
       expect(deps.verifyToken).not.toHaveBeenCalled();
       expect(api.addEmailDomain).not.toHaveBeenCalled();
     },
@@ -395,26 +345,14 @@ describe('emailDomainAdd', () => {
   it('refuses an inactive token', async () => {
     const api = client();
     await expect(
-      emailDomainAdd(
-        api,
-        'prj_1',
-        'acme.com',
-        undefined,
-        addDeps({ verifyToken: async () => 'inactive' }),
-      ),
+      emailDomainAdd(api, 'prj_1', 'acme.com', addDeps({ verifyToken: async () => 'inactive' })),
     ).rejects.toThrow('exit 1');
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
 
   it('leaves authoritative verification to the API if the local token probe is unavailable', async () => {
     const api = client();
-    await emailDomainAdd(
-      api,
-      'prj_1',
-      'acme.com',
-      undefined,
-      addDeps({ verifyToken: async () => 'unknown' }),
-    );
+    await emailDomainAdd(api, 'prj_1', 'acme.com', addDeps({ verifyToken: async () => 'unknown' }));
     expect(api.addEmailDomain).toHaveBeenCalled();
   });
 
@@ -429,7 +367,7 @@ describe('emailDomainAdd', () => {
     // Fake time keeps the 40 ms watch window from closing on a slow machine
     // before the third read; the token arrives on the second 1 ms poll.
     vi.useFakeTimers();
-    const added = emailDomainAdd(api, 'prj_1', 'acme.com', undefined, deps);
+    const added = emailDomainAdd(api, 'prj_1', 'acme.com', deps);
     await vi.advanceTimersByTimeAsync(deps.watchTimeoutMs!);
     await added;
     expect(deps.verifyToken).toHaveBeenCalledTimes(1);
@@ -445,7 +383,7 @@ describe('emailDomainAdd', () => {
     const api = client();
     vi.spyOn(crypto, 'randomUUID').mockReturnValue(ATTEMPT_ID);
     api.addEmailDomain.mockRejectedValue(new Error('connection reset'));
-    await emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps());
+    await emailDomainAdd(api, 'prj_1', 'acme.com', addDeps());
     expect(api.getEmailOperation).toHaveBeenCalledWith('prj_1', ATTEMPT_ID);
     expect(api.getEmailDomain).not.toHaveBeenCalled();
     expect(notedBlocks()).toContain('Operation:   op_1');
@@ -457,9 +395,7 @@ describe('emailDomainAdd', () => {
     const api = client();
     api.addEmailDomain.mockRejectedValue(new Error('connection reset'));
     api.getEmailOperation.mockRejectedValue(new PlatformApiError('not found', 404, '{}'));
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps())).rejects.toThrow(
-      'exit 1',
-    );
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', addDeps())).rejects.toThrow('exit 1');
     expect(api.getEmailOperation).toHaveBeenCalledTimes(15);
     expect(printed(errorSpy)).toContain('outcome is unknown');
     expect(printed(errorSpy)).toContain('Nothing was revoked');
@@ -468,7 +404,7 @@ describe('emailDomainAdd', () => {
   it('does not poll after a definitive validation refusal', async () => {
     const api = client();
     api.addEmailDomain.mockRejectedValue(new PlatformApiError('invalid domain', 400, '{}'));
-    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps())).rejects.toThrow(
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', addDeps())).rejects.toThrow(
       'invalid domain',
     );
     expect(api.getEmailOperation).not.toHaveBeenCalled();
@@ -481,9 +417,7 @@ describe('emailDomainAdd', () => {
       api.addEmailDomain.mockResolvedValue(
         domainRow({ operationId: 'op_1', operationStatus, error: 'setup unfinished' }),
       );
-      await expect(emailDomainAdd(api, 'prj_1', 'acme.com', undefined, addDeps())).rejects.toThrow(
-        'exit 1',
-      );
+      await expect(emailDomainAdd(api, 'prj_1', 'acme.com', addDeps())).rejects.toThrow('exit 1');
       expect(printed(errorSpy)).toContain('setup unfinished');
       expect(notedBlocks()).toContain(`op_1 · ${operationStatus}`);
     },

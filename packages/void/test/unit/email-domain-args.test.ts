@@ -12,7 +12,6 @@ describe('parseEmailArgs — domain group', () => {
       subcommand: 'domain',
       domainVerb: 'add',
       domain: 'acme.com',
-      subdomain: undefined,
       projectSlug: undefined,
       limit: undefined,
       platform: undefined,
@@ -46,19 +45,18 @@ describe('parseEmailArgs — domain group', () => {
     });
   });
 
-  it('parses --subdomain on domain add (space and = forms)', () => {
-    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx'])).toMatchObject({
-      domainVerb: 'add',
-      domain: 'acme.com',
-      subdomain: 'mx',
-    });
-    expect(
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain=mail.acme.com']),
-    ).toMatchObject({
-      domainVerb: 'add',
-      domain: 'acme.com',
-      subdomain: 'mail.acme.com',
-    });
+  it('refuses --subdomain in every form, since custom email needs a zone apex', () => {
+    for (const args of [
+      ['domain', 'add', 'acme.com', '--subdomain', 'mx'],
+      ['domain', 'add', 'acme.com', '--subdomain=mail.acme.com'],
+      ['domain', 'add', 'acme.com', '--subdomain'],
+      ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
+      ['usage', '--subdomain', 'mx'],
+    ]) {
+      expect(() => parseEmailArgs(args)).toThrow(
+        /requires a Cloudflare zone apex.*Omit --subdomain/,
+      );
+    }
   });
 
   it('errors on a missing or unknown domain verb', () => {
@@ -93,43 +91,10 @@ describe('parseEmailArgs — domain group', () => {
     );
   });
 
-  it('rejects --subdomain on the other domain verbs and on non-domain subcommands', () => {
-    for (const args of [
-      ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
-      ['domain', 'list', '--subdomain=mx'],
-      ['domain', 'remove', 'acme.com', '--subdomain', 'mx'],
-    ]) {
-      expect(() => parseEmailArgs(args)).toThrow(
-        'email: --subdomain applies to `void email domain add` only.',
-      );
-    }
-    expect(() => parseEmailArgs(['usage', '--subdomain', 'mx'])).toThrow(
-      'email: --subdomain applies to `void email domain add` only.',
-    );
-    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--subdomain', 'mx'])).toThrow(
-      'email: --subdomain applies to `void email domain add` only.',
-    );
-  });
-
   it('rejects the removed force option instead of silently ignoring it', () => {
     expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toThrow(
       /takes exactly one domain argument/,
     );
-  });
-
-  it('rejects --subdomain without a value, with an empty value, or repeated', () => {
-    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain'])).toThrow(
-      'email: --subdomain requires a value (a subdomain label or host).',
-    );
-    expect(() =>
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', '--project', 'x']),
-    ).toThrow(/--subdomain requires a value/);
-    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain='])).toThrow(
-      /--subdomain requires a value/,
-    );
-    expect(() =>
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx', '--subdomain', 'mg']),
-    ).toThrow('email: --subdomain can only be specified once.');
   });
 
   // Mode B (0078): the developer's own zone needs none of this group — same

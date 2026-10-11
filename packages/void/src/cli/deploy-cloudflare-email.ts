@@ -9,7 +9,7 @@ import {
 import {
   applyEmailSetup,
   EMAIL_FROM_VAR,
-  findEmailConfigConflicts,
+  emailConfigInputs,
   preflightEmail,
   SEND_EMAIL_BINDING,
   renderEmailChecklist,
@@ -65,15 +65,11 @@ function isCommittedSubdomainPlanWaitingForDns(
 }
 
 /**
- * Step 3b-ii — Mode B email on the developer's own account (design doc 0078, "One keystroke").
- * Preflight is read-only; the checklist is shown; ONE `confirm` (default Yes) authorizes the
- * apply, which runs only the rows not ready and returns the root-config patch this writes.
- * Most branches that cannot finish return `satisfied: false`, leaving `--require-email` to
- * decide whether deployment continues. One ambiguous handoff fails closed for every deploy:
- * an exact committed subdomain plan whose new MX is still empty or unreadable. It is preserved,
- * and the caller stops before build/upload until DNS can be verified. No output of this step
- * ever contains the session bearer: the module borrows it through `getSessionBearer` inside its
- * own closures and drops it.
+ * The deploy's email step on the developer's own account: read-only preflight, checklist,
+ * one confirmation (default Yes), then apply and write the config patch. Branches that cannot
+ * finish return `satisfied: false` and leave `--require-email` to decide. A committed subdomain
+ * plan whose new MX is still empty or unreadable is preserved and aborts the deploy before
+ * build. The session bearer never appears in any output of this step.
  */
 export async function runCloudflareEmailStep(
   input: CloudflareEmailStepInput,
@@ -105,16 +101,7 @@ export async function runCloudflareEmailStep(
     from,
     workerName: input.workerName,
     accountId: input.accountId,
-    existingSendEmail: Array.isArray(rootConfig.send_email)
-      ? (rootConfig.send_email as Array<{ name?: unknown }>)
-      : undefined,
-    existingAddresses: rootConfig.addresses,
-    existingVars:
-      rootConfig.vars && typeof rootConfig.vars === 'object' && !Array.isArray(rootConfig.vars)
-        ? (rootConfig.vars as Record<string, unknown>)
-        : undefined,
-    configConflicts: findEmailConfigConflicts(rootConfig),
-    // The SAME `-c`/`--env=` context every other credentialed wrangler run gets.
+    ...emailConfigInputs(rootConfig),
     configPath: input.configPath,
     apiBaseUrl: input.apiBaseUrl,
     runWrangler: input.runWrangler,
@@ -141,9 +128,8 @@ export async function runCloudflareEmailStep(
     sendingReady,
     creating,
   });
-  // Pin `configPath` so read/parse/write hit the SAME file every other step uses. A refused
-  // write (e.g. an `addresses` array with a comment nested inside it) is the developer's
-  // territory (decision 13): surface it as-is; the caller decides what the deploy ships.
+  // Pin `configPath` so every step writes the same file. A refused write (e.g. a comment
+  // nested in `addresses`) is reported as-is; the caller decides what the deploy ships.
   const writeConfig = (patch: ProvisionedWranglerPatch): boolean => {
     try {
       writeProvisionedWranglerConfig(input.root, patch, { configPath: input.configPath });
@@ -154,28 +140,10 @@ export async function runCloudflareEmailStep(
     }
   };
 
-  // Every account row ready: no prompt, no account call, zero keystrokes (the second deploy).
-  // A sending row the committed binding remembers as refused (Workers Free) lands here too
-  // — the deploy never retries the onboarding; the map ends `(verified destinations only)`
-  // and `void email setup` is where the retry is offered (`preflightEmail`'s memory rule).
-  // The two CONFIG rows are reconciled here by a plain file write, because a stale one is
-  // not idle: an `addresses` entry no longer in the pruned set reaches wrangler's plan as a
-  // `conflict` (a takeover prompt in a TTY, a UserError after the upload in CI — decision
-  // 12), and a stale `__VOID_EMAIL_FROM` ships the OLD sender while the map prints the new.
-  //
-  // The `null` (key removed) branch below is reachable in exactly one shape: every derived
-  // address is routed elsewhere (a forward, another worker — a worker rename makes all of
-  // them so), so this worker OWNS none of those rules and `[]` would plan nothing either;
-  // the key goes because a plan on a stale entry is a `conflict`. A handler deleted while
-  // its entry stays never gets here: the preflight (step 8) has no provenance for entries
-  // Void wrote on an earlier deploy, so it reads that leftover as an entry Void did not
-  // derive — the decision-13 blocker, array untouched, rule still routed to this worker
-  // (guide: "Deleting a handler leaves its address in `addresses`"). Making the leftover
-  // Void-managed instead (a marker like `void:managed-queues`, then `[]` or a prune) is
-  // decision 13's other branch, and under `triggers deploy` a `[]` plan that deletes owned
-  // rules is destructive: wrangler asks (default No) in a TTY and throws in CI, which the
-  // activation reports as `triggers-failed` and compensates by restoring the previous
-  // version. A product call, not a deploy default.
+  // Ready: no prompt and no account call; a sending onboarding recorded as refused is never
+  // retried here. The config rows are still rewritten, because a stale `addresses` entry
+  // becomes a plan conflict and a stale `__VOID_EMAIL_FROM` ships the old sender. `null`
+  // removes the key when every derived address is routed elsewhere.
   if (pre.ready) {
     const patch: ProvisionedWranglerPatch = {};
     const rows: Array<string> = [];
@@ -236,13 +204,9 @@ export async function runCloudflareEmailStep(
       map: mapFor(existingAddresses(rootConfig, pre), pre.sending.state === 'ready'),
     };
   }
-  // The three exits below leave the account alone. What the worker then ships is whatever
-  // the config already carries — so when the binding is committed the deploy is WITH the
-  // existing setup (map printed, wording says so). A committed `addresses` array whose routing
-  // is verifiably off is withdrawn first: wrangler's plan on it 400s (`2062`) AFTER the upload,
-  // on every deploy, until the key goes (0078: "deleted, never `[]`, when a later preflight finds
-  // routing off"). The ambiguous post-setup DNS case returned above instead. Only Void's own
-  // array is touched (decision 13); deleting the KEY changes no rule — wrangler skips the plan.
+  // The exits below leave the account alone and ship whatever the config carries. Void's own
+  // `addresses` array is removed (never `[]`) when routing is off, since its plan would fail
+  // (`2062`) after the upload on every deploy.
   const shipsBinding = pre.binding.state === 'present';
   const leaveAccount = (reason: string): CloudflareEmailStepResult => {
     let configWritten = false;
@@ -294,47 +258,17 @@ export async function runCloudflareEmailStep(
   if (out.lines.length > 0) {
     log.message(out.lines.join('\n'));
   }
-  let configWritten = false;
-  if (
-    out.patch.sendEmail !== undefined ||
-    out.patch.addresses !== undefined ||
-    out.patch.vars !== undefined
-  ) {
-    if (
-      !writeConfig({
-        sendEmail: out.patch.sendEmail,
-        addresses: out.patch.addresses,
-        vars: out.patch.vars,
-      })
-    ) {
-      log.warn('deploy: deploying without email.');
-      return without;
-    }
-    configWritten = true;
+  if (!writeConfig(out.patch)) {
+    log.warn('deploy: deploying without email.');
+    return without;
   }
   const bindingPresent = shipsBinding || out.patch.sendEmail !== undefined;
   const written = out.patch.addresses ?? [];
-  // `satisfied` is post-apply READINESS, not binding presence. `applyEmailSetup` writes
-  // `patch.sendEmail` as soon as EITHER routing or sending came up, and withholds
-  // `addresses` when the bearer failed or routing is off — so a run whose subdomain
-  // routing POST failed ships the binding with no inbound rule behind it, which is
-  // exactly the end state the `leaveAccount` branch above already returns as
-  // `satisfied: false`. Gating `--require-email` on the binding alone would contradict
-  // both that branch and the error text ("not fully set up … refusing to deploy"), so
-  // this mirrors `preflightEmail`'s own `ready` predicate instead: the inbound rows
-  // (routing + subaddressing, with `addresses` actually written — `out.inboundReady`, the
-  // same field `void email setup` exits on) + the binding. The sending row needs no term
-  // of its own: apply has just made its one `sending enable` call (or found the row ready
-  // or blocked), and the binding it writes on that same run is what the NEXT preflight
-  // reads as the memory of a refusal — binding present + sending pending is settled there
-  // (Workers Free, `10105`; the memory rule in `preflightEmail`), so it is settled here,
-  // or the two would disagree on the very next deploy. `map` stays on `bindingPresent`:
-  // the worker DOES ship with email, and a deploy may ship with email while `satisfied`
-  // is false.
-  const satisfied = bindingPresent && out.inboundReady;
+  // `satisfied` mirrors preflight readiness (binding plus complete inbound), not binding
+  // presence; the map follows the binding, since the worker ships with email either way.
   return {
-    satisfied,
-    configWritten,
+    satisfied: bindingPresent && out.inboundReady,
+    configWritten: true,
     map: bindingPresent
       ? mapFor(
           written,

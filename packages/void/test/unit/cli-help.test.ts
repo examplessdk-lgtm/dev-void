@@ -181,13 +181,10 @@ describe('rendered help advertises the flags the parser honours', () => {
   // group entry is on the email page, and every verb keeps its own page so the
   // printed `void help email domain <command>` hint actually resolves.
   it('lists `email domain` on the email page and resolves the domain help pages', () => {
-    expect(
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mail', '--project', 'acme']),
-    ).toMatchObject({
+    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--project', 'acme'])).toMatchObject({
       subcommand: 'domain',
       domainVerb: 'add',
       domain: 'acme.com',
-      subdomain: 'mail',
       projectSlug: 'acme',
     });
 

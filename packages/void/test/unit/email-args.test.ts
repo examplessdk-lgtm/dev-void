@@ -296,7 +296,7 @@ describe('parseEmailArgs', () => {
     ['destinations'],
     ['allow', 'a@x.dev'],
     ['disallow', 'a@x.dev'],
-    ['domain', 'add', 'acme.com', '--project', 'my-app', '--subdomain', 'mx'],
+    ['domain', 'add', 'acme.com', '--project', 'my-app'],
     ['domain', 'list'],
   ])('rejects the removed alias before invoking %j', (...command) => {
     for (const flags of [['--backend'], ['--backend', 'cloudflare'], ['--backend=cloudflare']]) {

@@ -1490,7 +1490,6 @@ describe('applyEmailSetup', () => {
     expect(out.routingReady).toBe(true);
     expect(out.subaddressingReady).toBe(true);
     expect(out.sendingReady).toBe(true);
-    expect(out.addressesWithheld).toBe(false);
     expect(out.inboundReady).toBe(true);
     expect(out.patch).toEqual({
       sendEmail: { name: 'SEND_EMAIL' },
@@ -1638,7 +1637,6 @@ describe('applyEmailSetup', () => {
     expect(out.routingReady).toBe(true);
     expect(out.subaddressingReady).toBe(false);
     expect(out.sendingReady).toBe(true);
-    expect(out.addressesWithheld).toBe(true);
     expect(out.inboundReady).toBe(false);
     expect(out.patch).toEqual({
       sendEmail: { name: 'SEND_EMAIL' },
@@ -1666,7 +1664,6 @@ describe('applyEmailSetup', () => {
     calls.length = 0;
     const out = await applyEmailSetup(pre, inputs);
     expect(out.routingReady).toBe(false);
-    expect(out.addressesWithheld).toBe(true);
     expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     // Sending still onboarded → the binding is still written.
@@ -1697,7 +1694,7 @@ describe('applyEmailSetup', () => {
     fetchCalls.length = 0;
     const out = await applyEmailSetup(pre, inputs);
     expect(fetchCalls.map((c) => c.method)).toEqual(['POST']);
-    expect(out.addressesWithheld).toBe(true);
+    expect(out.lines.some((l) => l.includes('addresses withheld this run'))).toBe(true);
     expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     expect(out.lines[0]).toBe(
@@ -1755,7 +1752,6 @@ describe('applyEmailSetup', () => {
     expect(calls.map((c) => c.args)).toEqual([['email', 'sending', 'enable', 'mail.acme.com']]);
     expect(out.routingReady).toBe(false);
     expect(out.subaddressingReady).toBe(false);
-    expect(out.addressesWithheld).toBe(true);
     expect(out.inboundReady).toBe(false);
     expect(out.patch.addresses).toBeNull();
     expect(out.lines).toEqual([
