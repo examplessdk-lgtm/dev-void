@@ -17,10 +17,8 @@ const mockGetToken = vi.fn();
 const mockGetApiUrl = vi.fn();
 const mockGetTokenSource = vi.fn();
 const mockRemoveToken = vi.fn();
-const mockRunLogin = vi.fn();
 const mockRunPlatformLogin = vi.fn();
 const mockSavePlatformToken = vi.fn();
-const mockSaveToken = vi.fn();
 const mockWhoami = vi.fn();
 const mockIsExpiredTokenError = vi.fn();
 const mockDiscoverPlatform = vi.fn();
@@ -52,10 +50,8 @@ vi.mock('../../src/cli/auth', () => ({
   getApiUrl: (...args: Array<unknown>) => mockGetApiUrl(...args),
   getTokenSource: (...args: Array<unknown>) => mockGetTokenSource(...args),
   removeToken: (...args: Array<unknown>) => mockRemoveToken(...args),
-  runLogin: (...args: Array<unknown>) => mockRunLogin(...args),
   runPlatformLogin: (...args: Array<unknown>) => mockRunPlatformLogin(...args),
   savePlatformToken: (...args: Array<unknown>) => mockSavePlatformToken(...args),
-  saveToken: (...args: Array<unknown>) => mockSaveToken(...args),
   isStagingMode: () => false,
 }));
 
@@ -88,10 +84,8 @@ beforeEach(() => {
   mockGetApiUrl.mockReset().mockReturnValue('https://api.example.test');
   mockGetTokenSource.mockReset();
   mockRemoveToken.mockReset();
-  mockRunLogin.mockReset();
   mockRunPlatformLogin.mockReset().mockResolvedValue('platform-token');
   mockSavePlatformToken.mockReset();
-  mockSaveToken.mockReset();
   mockWhoami.mockReset();
   mockIsExpiredTokenError.mockReset();
   mockDiscoverPlatform.mockReset().mockResolvedValue({
@@ -100,7 +94,6 @@ beforeEach(() => {
   });
 
   mockGetTokenSource.mockReturnValue('manual');
-  mockRunLogin.mockResolvedValue('fresh-token');
   mockSelect.mockResolvedValue('github');
   mockRemoveToken.mockReturnValue(true);
   mockIsExpiredTokenError.mockReturnValue(false);
@@ -115,7 +108,6 @@ describe('runLoginCommand', () => {
       authenticationProviders: ['github'],
     });
     expect(mockSelect).not.toHaveBeenCalled();
-    expect(mockRunLogin).not.toHaveBeenCalled();
     expect(mockRunPlatformLogin).toHaveBeenCalledWith(
       'https://company.example.com',
       'github',
@@ -125,7 +117,6 @@ describe('runLoginCommand', () => {
       'platform-token',
       'https://company.example.com',
     );
-    expect(mockSaveToken).not.toHaveBeenCalled();
   });
 
   it('keeps the logout-first flow when the stored token is still valid', async () => {
@@ -137,7 +128,7 @@ describe('runLoginCommand', () => {
     expect(mockWhoami).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Already logged in.');
     expect(mockOutro).toHaveBeenCalledWith('To re-login, run `void account logout` first.');
-    expect(mockRunLogin).not.toHaveBeenCalled();
+    expect(mockRunPlatformLogin).not.toHaveBeenCalled();
     expect(mockRemoveToken).not.toHaveBeenCalled();
   });
 
@@ -151,8 +142,15 @@ describe('runLoginCommand', () => {
     expect(mockRemoveToken).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith('Stored auth token expired. Starting a new login.');
     expect(mockDiscoverPlatform).toHaveBeenCalledWith('https://api.example.test');
-    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
-    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
+    expect(mockRunPlatformLogin).toHaveBeenCalledWith(
+      'https://api.example.test',
+      'github',
+      expect.any(Function),
+    );
+    expect(mockSavePlatformToken).toHaveBeenCalledWith(
+      'platform-token',
+      'https://api.example.test',
+    );
     expect(mockInfo).toHaveBeenCalledWith('Logged in!');
   });
 
@@ -169,8 +167,15 @@ describe('runLoginCommand', () => {
       '`VOID_TOKEN` is invalid or expired. Continuing with a new login.',
     );
     expect(mockDiscoverPlatform).toHaveBeenCalledWith('https://api.example.test');
-    expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
-    expect(mockSaveToken).toHaveBeenCalledWith('fresh-token', root);
+    expect(mockRunPlatformLogin).toHaveBeenCalledWith(
+      'https://api.example.test',
+      'github',
+      expect.any(Function),
+    );
+    expect(mockSavePlatformToken).toHaveBeenCalledWith(
+      'platform-token',
+      'https://api.example.test',
+    );
     expect(mockOutro).toHaveBeenCalledWith(
       `\n${pc.green('✓ Token saved. Unset `VOID_TOKEN` to use it.')}`,
       { withGuide: false },

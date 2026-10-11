@@ -98,7 +98,7 @@ export async function runAiSetupPrompt(
   const { attachSelectedPlatform, writeProjectConfig } = await import('./cli/project.ts');
   const { inferDefaultSlug } = await import('./cli/resolve-project.ts');
 
-  const client = new PlatformClient(token, apiUrl);
+  const client = new PlatformClient(token, { apiUrl });
 
   let projects: Array<import('./cli/client.ts').ProjectResponse>;
   try {

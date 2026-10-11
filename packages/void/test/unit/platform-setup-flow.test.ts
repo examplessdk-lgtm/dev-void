@@ -72,7 +72,6 @@ vi.mock('../../src/cli/auth.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/auth.ts')>()),
   openBrowser: mocks.open,
 }));
-vi.mock('../../src/cli/prompt-password.ts', () => ({ passwordWithPlaceholder: mocks.password }));
 vi.mock('../../src/cli/output.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/output.ts')>()),
   createSpinner: mocks.spinner,

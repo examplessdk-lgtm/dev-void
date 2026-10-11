@@ -9,9 +9,10 @@ import {
 // Access challenge fails the way it does for a CLI that has none.
 vi.mock('../../src/cli/cf-access.ts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/cli/cf-access.ts')>()),
-  ensureCloudflaredToken: vi.fn(),
-  ensurePlatformAccessToken: vi.fn(() => {
-    throw new Error('platform: Cloudflare Access authentication is required.');
+  ensurePlatformAccessToken: vi.fn((_apiUrl: string, challenged?: boolean) => {
+    if (challenged) {
+      throw new Error('platform: Cloudflare Access authentication is required.');
+    }
   }),
 }));
 

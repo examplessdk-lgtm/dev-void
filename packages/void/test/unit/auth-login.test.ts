@@ -13,7 +13,7 @@ import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 let registry: string;
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { runLogin, runPlatformLogin } from '../../src/cli/auth.ts';
+import { runPlatformLogin } from '../../src/cli/auth.ts';
 
 const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
@@ -88,7 +88,7 @@ afterEach(() => {
   delete process.env.VOID_ACCESS_ORIGIN;
 });
 
-describe('runLogin', () => {
+describe('runPlatformLogin', () => {
   it('keeps explicit platform login and code exchange on the selected origin', async () => {
     let ready!: (url: string) => void;
     const urlReady = new Promise<string>((resolve) => {
@@ -109,7 +109,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -167,7 +167,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -205,7 +205,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
     // Attach the rejection assertion up front so the exchange failure doesn't
     // surface as an unhandled rejection.
     const rejection = expect(loginPromise).rejects.toThrow(/Failed to exchange login code/);
@@ -238,7 +238,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
     expect(redirect).toBeTruthy();

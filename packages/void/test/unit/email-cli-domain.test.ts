@@ -207,7 +207,7 @@ describe('PlatformClient.getEmailSettings', () => {
   function clientWith(status: number, body: string) {
     const fetchSpy = vi.fn(async () => new Response(body, { status }));
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchSpy));
-    return new PlatformClient('jwt-dummy', 'https://api.example.test');
+    return new PlatformClient('jwt-dummy', { apiUrl: 'https://api.example.test' });
   }
 
   it('reads the settings the platform reports', async () => {

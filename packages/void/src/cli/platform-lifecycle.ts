@@ -85,7 +85,6 @@ import {
   platformSetupPages,
   platformSetupFieldHelp,
 } from './platform-setup.ts';
-import { passwordWithPlaceholder } from './prompt-password.ts';
 
 export function resolvePlatformInstallDatabaseUrl(
   checkpoint: Record<string, string> | null,
@@ -1494,9 +1493,7 @@ async function promptSecret(
     validate: (input: string | undefined) => (input ? validate?.(input) : 'A value is required.'),
   };
   const value = masked
-    ? placeholder
-      ? await passwordWithPlaceholder({ ...options, placeholder })
-      : await password(options)
+    ? await password({ ...options, placeholder })
     : await text({ ...options, placeholder });
   if (isCancel(value) || typeof value === 'symbol') {
     throw new Error('platform: Cancelled.');

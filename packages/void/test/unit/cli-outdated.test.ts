@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { isCliOutdatedError, PlatformApiError, readCliVersion } from '../../src/cli/client.ts';
+import { isCliOutdatedError, PlatformApiError } from '../../src/cli/client.ts';
 import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
 
 const OUTDATED_BODY = JSON.stringify({
@@ -66,27 +66,5 @@ describe('formatStreamDeployError + cli_outdated', () => {
     expect(formatted.message).toContain('npm i -g void@latest');
     expect(formatted.message).toContain('Deployment: dep_abc');
     expect(formatted.message).toContain('Detailed log: /tmp/log.txt');
-  });
-});
-
-describe('readCliVersion', () => {
-  // The CLI must NEVER emit the literal string "unknown" as its version
-  // header — the platform's gate rejects unparseable headers as
-  // cli_outdated, which would brick the CLI on any packaging error.
-  // Failure path returns null and the ctor omits the header entirely.
-  it('returns a parseable semver triplet in the test environment', () => {
-    const v = readCliVersion();
-    // Test runs from a real package root, so version must be readable.
-    expect(v).not.toBeNull();
-    expect(v).toMatch(/^\d+\.\d+\.\d+/);
-    // Critical regression guard: never the literal string "unknown".
-    expect(v).not.toBe('unknown');
-  });
-
-  it('return type allows null (caller must handle missing version)', () => {
-    // This is a type-level assertion — if the return type ever drifts
-    // back to `string`, this assignment will fail typecheck.
-    const v: string | null = readCliVersion();
-    expect(v === null || typeof v === 'string').toBe(true);
   });
 });

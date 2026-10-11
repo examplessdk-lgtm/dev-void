@@ -1262,9 +1262,6 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
         log.step(name);
       }
     }
-    for (const warning of result.warnings ?? []) {
-      log.warn(warning);
-    }
     if (result.applied.length > 0) {
       printSuccess(
         `Applied ${formatCount(result.applied.length, 'migration')} to remote database.`,

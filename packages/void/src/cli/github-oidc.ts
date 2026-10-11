@@ -1,11 +1,5 @@
 /**
- * GitHub Actions OIDC → Void deploy-token exchange.
- *
- * When `void deploy` runs inside GitHub Actions with no explicit `VOID_TOKEN`,
- * the CLI mints a short-lived GitHub OIDC token (audience `void`) and exchanges
- * it at `POST $VOID_API_URL/auth/github-oidc` for a short-lived, project-scoped
- * Void deploy token. Doing the exchange in-process lets the scaffolded workflow
- * collapse to a single `void deploy` step — no curl/jq token-exchange step.
+ * GitHub Actions OIDC → Void deploy-token exchange for `void deploy` without `VOID_TOKEN`.
  *
  * Server contract (platform `POST /auth/github-oidc` handler):
  *   request  { oidcToken: string, project: string }   (project = slug)
@@ -13,15 +7,10 @@
  */
 
 import { cfAccessHeaders } from '../shared/cf-access.ts';
-import { ensureCloudflaredToken } from './cf-access.ts';
+import { ensurePlatformAccessToken } from './cf-access.ts';
 
 const OIDC_AUDIENCE = 'void';
 
-/**
- * True when the process is running inside GitHub Actions with the OIDC token
- * request endpoint available — i.e. the workflow granted
- * `permissions: id-token: write`, so GitHub injected the request URL + token.
- */
 export function isGithubActionsOidcAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
     env.GITHUB_ACTIONS === 'true' &&
@@ -32,19 +21,6 @@ export function isGithubActionsOidcAvailable(env: NodeJS.ProcessEnv = process.en
   );
 }
 
-/**
- * Mint a GitHub Actions OIDC token (audience `void`) and exchange it for a
- * short-lived, project-scoped Void deploy token.
- *
- * Two hops:
- *   1. GET  $ACTIONS_ID_TOKEN_REQUEST_URL&audience=void  (Bearer request token)
- *        → `.value` is the OIDC JWT.
- *   2. POST $apiUrl/auth/github-oidc  { oidcToken, project }
- *        → `.token` is the Void deploy token.
- *
- * Throws a clear, actionable error (including the HTTP status and server error
- * body when available) on any non-OK response or missing field.
- */
 export async function exchangeGithubOidcForDeployToken(
   apiUrl: string,
   project: string,
@@ -62,10 +38,7 @@ export async function exchangeGithubOidcForDeployToken(
   return exchangeOidcTokenAtApi(apiUrl, project, oidcToken);
 }
 
-/**
- * GET the GitHub Actions OIDC token for audience `void`. GitHub's request URL
- * already carries a query string, so `audience` is appended alongside it.
- */
+/** GitHub's request URL already has a query string, so `audience` is added to it. */
 async function requestGithubOidcToken(requestUrl: string, requestToken: string): Promise<string> {
   const url = new URL(requestUrl);
   url.searchParams.set('audience', OIDC_AUDIENCE);
@@ -108,16 +81,8 @@ async function exchangeOidcTokenAtApi(
   project: string,
   oidcToken: string,
 ): Promise<string> {
-  const base = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
-  const url = `${base}/auth/github-oidc`;
-
-  // This POST hits the Void API (which may be the Access-gated staging host)
-  // before any PlatformClient exists, so it must carry CF Access credentials
-  // itself — exactly like every other CLI → Void-API call (PlatformClient
-  // ctor, exchangeLoginCode). `ensureCloudflaredToken` no-ops for prod/ungated
-  // hosts and when the service-token pair or CF_ACCESS_TOKEN is already set;
-  // `cfAccessHeaders` returns {} when no CF Access env is present (prod path).
-  ensureCloudflaredToken(apiUrl);
+  const url = `${apiUrl}/auth/github-oidc`;
+  ensurePlatformAccessToken(apiUrl);
 
   let res: Response;
   try {
@@ -153,11 +118,7 @@ async function exchangeOidcTokenAtApi(
   return token;
 }
 
-/**
- * Emit a GitHub Actions `::add-mask::` workflow command so `value` is redacted
- * from workflow logs. No-op when not running inside GitHub Actions. GitHub reads
- * workflow commands from stdout.
- */
+/** Redact `value` from GitHub Actions logs; GitHub reads workflow commands from stdout. */
 export function maskGithubActionsSecret(value: string, env: NodeJS.ProcessEnv = process.env): void {
   if (env.GITHUB_ACTIONS !== 'true' || !value) {
     return;

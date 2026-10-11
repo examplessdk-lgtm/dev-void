@@ -217,16 +217,6 @@ describe('exchangeGithubOidcForDeployToken', () => {
     }
   });
 
-  it('strips a trailing slash from the API URL', async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
-      .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
-
-    await exchangeGithubOidcForDeployToken('https://api.test/', 'my-app', oidcEnv());
-    const [postUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(postUrl).toBe('https://api.test/auth/github-oidc');
-  });
-
   it('throws before any fetch when the request vars are absent', async () => {
     await expect(
       exchangeGithubOidcForDeployToken(

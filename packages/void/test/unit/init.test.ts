@@ -207,8 +207,8 @@ vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
 vi.mock('../../src/cli/auth', () => ({
   getApiUrl: (...args: Array<unknown>) => mockGetApiUrl(...args),
   getToken: (...args: Array<unknown>) => mockGetToken(...args),
-  runLogin: (...args: Array<unknown>) => mockRunLogin(...args),
-  saveToken: (...args: Array<unknown>) => mockSaveToken(...args),
+  runPlatformLogin: (...args: Array<unknown>) => mockRunLogin(...args),
+  savePlatformToken: (...args: Array<unknown>) => mockSaveToken(...args),
   isStagingMode: (...args: Array<unknown>) => mockIsStagingMode(...args),
   getSiteDomain: () => 'void.app',
 }));
@@ -2920,8 +2920,12 @@ export default config;
       expect(mockConfirm.mock.calls[1]?.[0]).toMatchObject({
         message: 'Log in now and link or create a Void project?',
       });
-      expect(mockRunLogin).toHaveBeenCalledWith(root, 'github', expect.any(Function));
-      expect(mockSaveToken).toHaveBeenCalledWith('token_123', root);
+      expect(mockRunLogin).toHaveBeenCalledWith(
+        'https://api.void.cloud',
+        'github',
+        expect.any(Function),
+      );
+      expect(mockSaveToken).toHaveBeenCalledWith('token_123', 'https://api.void.cloud');
       expect(mockListProjects).toHaveBeenCalledOnce();
       expect(mockCreateProject).toHaveBeenCalledWith('my-live-app');
       expect(JSON.parse(readFileSync(join(root, '.void', 'project.json'), 'utf-8'))).toEqual({
