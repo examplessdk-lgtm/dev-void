@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
-import { parse, type ParseError } from 'jsonc-parser';
 import { join } from 'pathslash';
+import { parseJsoncObject } from './cli/generated-wrangler-config.ts';
 import { TYPED_CONFIG_FILE } from './config-loader.ts';
 import { readConfig } from './config.ts';
 
@@ -87,9 +87,8 @@ function mergeConfig(previous: unknown, resolved: unknown, authored: unknown): u
 }
 
 function parseCloudflareText(text: string, path: string): JsonObject {
-  const errors: Array<ParseError> = [];
-  const value: unknown = parse(text.replace(/^\uFEFF/, ''), errors, { allowTrailingComma: true });
-  if (errors.length > 0 || !isObject(value)) {
+  const value = parseJsoncObject(text);
+  if (!value) {
     throw new Error(`config: ${path} must contain a valid JSON/JSONC object.`);
   }
   return value;

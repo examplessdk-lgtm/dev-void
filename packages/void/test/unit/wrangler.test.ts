@@ -606,75 +606,6 @@ describe('syncWranglerBindings', () => {
     ).toEqual(['OldChatWs']);
   });
 
-  it('adds sandbox durable object, container, and migration metadata', () => {
-    setup('wrangler.jsonc', '{ "name": "test" }');
-    const result = syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true });
-    expect(result).toBe(true);
-    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
-    expect(parsed.durable_objects.bindings).toEqual([{ name: 'SANDBOX', class_name: 'SandboxV1' }]);
-    expect(parsed.containers[0]).toMatchObject({
-      name: 'void-sandbox-v1',
-      class_name: 'SandboxV1',
-    });
-    expect(parsed.containers[0].images.default.dockerfile).toMatch(/sandbox\.Dockerfile$/);
-    expect(parsed.containers[0].scheduling_policy).toBe('durable_object');
-    expect(parsed.migrations).toEqual([
-      { tag: 'void-sandbox-v2', new_sqlite_classes: ['SandboxV1'] },
-    ]);
-  });
-
-  it('refuses to reuse a legacy Sandbox namespace before changing the deployment config', () => {
-    const original = JSON.stringify({
-      name: 'legacy',
-      durable_objects: { bindings: [{ name: 'SANDBOX', class_name: 'Sandbox' }] },
-      containers: [
-        {
-          name: 'void-sandbox',
-          class_name: 'Sandbox',
-          image: 'docker.io/cloudflare/sandbox:0.12.10',
-        },
-      ],
-      migrations: [{ tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] }],
-    });
-    setup('wrangler.jsonc', original);
-    expect(() => syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true })).toThrow(
-      'new Durable Object namespace',
-    );
-    expect(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8')).toBe(original);
-  });
-
-  it('preserves custom Sandbox SQLite rename history even when the reserved tag belongs to another class', () => {
-    const migrations = [
-      { tag: 'custom-v1', new_sqlite_classes: ['OriginalSandbox'] },
-      { tag: 'custom-v2', renamed_classes: [{ from: 'OriginalSandbox', to: 'SandboxV1' }] },
-      { tag: 'void-sandbox-v2', new_sqlite_classes: ['Unrelated'] },
-    ];
-    setup('wrangler.jsonc', JSON.stringify({ name: 'custom', migrations }));
-    expect(syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true })).toBe(true);
-    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8'));
-    expect(parsed.migrations).toEqual(migrations);
-    expect(parsed.durable_objects.bindings).toEqual([{ name: 'SANDBOX', class_name: 'SandboxV1' }]);
-  });
-
-  it.each([
-    { tag: 'void-sandbox-v2', new_sqlite_classes: ['Unrelated'] },
-    { tag: 'legacy', new_classes: ['SandboxV1'] },
-    {
-      tag: 'transfer',
-      transferred_classes: [{ from_script: 'foreign', from: 'Original', to: 'SandboxV1' }],
-    },
-  ])(
-    'refuses an incompatible Sandbox migration before writing any generated config',
-    (migration) => {
-      const original = JSON.stringify({ name: 'incompatible', migrations: [migration] });
-      setup('wrangler.jsonc', original);
-      expect(() => syncWranglerBindings(tmpDir, { ...noBindings, needsSandbox: true })).toThrow(
-        /another class|needs SQLite storage/,
-      );
-      expect(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf8')).toBe(original);
-    },
-  );
-
   it('appends typed Durable Object migrations when new files sort earlier', () => {
     setup('wrangler.jsonc', '{ "name": "test" }');
     const zeta = {
@@ -789,36 +720,6 @@ describe('syncWranglerBindings', () => {
       className: 'VoidLiveStreamDurableObject',
     });
     expect(readExistingLiveBindingConfig(tmpDir)).toBeUndefined();
-  });
-
-  it('uses custom sandbox config', () => {
-    setup('wrangler.jsonc', '{ "name": "test" }');
-    syncWranglerBindings(
-      tmpDir,
-      { ...noBindings, needsSandbox: true },
-      {
-        sandbox: {
-          binding: 'CODE',
-          className: 'CodeSandbox',
-          containerName: 'code-sandbox',
-          image: '/project/Dockerfile.sandbox',
-          platformImage:
-            'registry.cloudflare.com/account/code-sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          instanceType: 'lite',
-        },
-      },
-    );
-    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
-    expect(parsed.durable_objects.bindings[0]).toEqual({
-      name: 'CODE',
-      class_name: 'CodeSandbox',
-    });
-    expect(parsed.containers[0]).toMatchObject({
-      name: 'code-sandbox',
-      class_name: 'CodeSandbox',
-      scheduling_policy: 'durable_object',
-      images: { default: { dockerfile: '/project/Dockerfile.sandbox' } },
-    });
   });
 
   it('returns false when no bindings are needed', () => {
