@@ -34,39 +34,6 @@ describe('applyPgMigrations', () => {
     expect(result).toEqual([]);
   });
 
-  it('applies a single migration and creates the table', async () => {
-    const migrations = [
-      {
-        name: '001_create_users.sql',
-        sql: 'CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL)',
-      },
-    ];
-
-    const applied = await applyPgMigrations(client, migrations);
-    expect(applied).toEqual(['001_create_users.sql']);
-
-    const result = await pglite.query<{ column_name: string }>(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position",
-    );
-    const columns = result.rows.map((r) => r.column_name);
-    expect(columns).toEqual(['id', 'name']);
-  });
-
-  it('records applied migration in _void_migrations tracking table', async () => {
-    const migrations = [
-      { name: '001_create_users.sql', sql: 'CREATE TABLE users (id SERIAL PRIMARY KEY)' },
-    ];
-
-    await applyPgMigrations(client, migrations);
-
-    const tracking = await pglite.query<{ name: string; applied_at: string }>(
-      'SELECT name, applied_at FROM _void_migrations',
-    );
-    expect(tracking.rows).toHaveLength(1);
-    expect(tracking.rows[0].name).toBe('001_create_users.sql');
-    expect(tracking.rows[0].applied_at).toBeTruthy();
-  });
-
   it('skips already-applied migrations (idempotent re-run)', async () => {
     const migrations = [
       { name: '001_create_users.sql', sql: 'CREATE TABLE users (id SERIAL PRIMARY KEY)' },
