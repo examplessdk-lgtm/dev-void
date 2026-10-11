@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
+import { toSlash } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
 import {
   createIsolatedPlayground,
@@ -11,7 +12,6 @@ import { readConfig } from '../../src/config.ts';
 import { scanPages } from '../../src/pages/scan.ts';
 import { collectPrerenderPaths } from '../../src/prerender.ts';
 import { resolveProjectPaths } from '../../src/project-paths.ts';
-import { toSlash } from '../../src/shared/utils.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const SOURCE_PLAYGROUND = 'playground/kitchen-sink';

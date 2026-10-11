@@ -12,29 +12,12 @@ export type RuntimeEnv = Record<string, unknown>;
 export const INTERNAL_BINDING_PREFIXES = ['__VOID_', '__PROJECT_'] as const;
 
 /**
- * Exact binding names that must be hidden from user code even though they carry
- * no internal prefix. `ISR_CACHE` (the self-host ISR KV namespace) is a plain
- * binding name, but it is a framework internal — route handlers read the ISR
- * cache through `handleIsr`/`revalidate()` on the raw env, never via `c.env` or
- * the public `void/env` API. Single source of truth shared by the generated
- * `c.env` filter (`router/compile.ts`) and the runtime `env` filter (`env.ts`).
- *
- * Unlike the prefix internals, these are hidden ONLY when ISR is active for the
- * isolate (see {@link isIsrActive}). In a non-ISR app, `ISR_CACHE` is an
- * ordinary user binding and stays visible everywhere — matching the build-time
- * `isr` gate on the generated `c.env` filter.
+ * Framework bindings hidden from user code only while ISR is active, so a non-ISR
+ * app keeps its own `ISR_CACHE`. Shared with the generated `c.env` filter.
  */
 export const INTERNAL_BINDING_EXACT_NAMES = ['ISR_CACHE'] as const;
 
-/**
- * ISR is active for this isolate iff the framework has stamped the compile-time
- * deployment id onto the raw env (`__VOID_ISR_DEPLOYMENT_ID`). The generated
- * worker entry stamps it at the top of `fetch()` (and in cron/queue handlers)
- * only for ISR-emitting builds, so its presence is a reliable runtime signal
- * that `ISR_CACHE` should be treated as a framework internal. The id itself is a
- * `__VOID_`-prefixed binding that is always hidden and framework-controlled, so
- * a user cannot forge it.
- */
+/** Only ISR builds stamp the `__VOID_ISR_DEPLOYMENT_ID` binding onto the raw env. */
 export function isIsrActive(rawEnv: RuntimeEnv): boolean {
   return rawEnv.__VOID_ISR_DEPLOYMENT_ID != null;
 }

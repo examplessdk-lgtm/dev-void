@@ -1,8 +1,40 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { parseR2Conditional } from './r2-conditions.ts';
 
 function decodeBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (ch) => ch.charCodeAt(0));
+}
+
+type BindingRequest = { binding: string };
+
+/** Parse the body, answer 400 when `invalid` names a problem, and 404 for an unknown binding. */
+async function readBindingRequest<T, B extends BindingRequest>(
+  c: Context,
+  env: Record<string, unknown>,
+  invalid: (body: B) => string | undefined,
+): Promise<{ body: B; binding: T } | Response> {
+  const body = await c.req.json<B>();
+  const error = invalid(body);
+  if (error) {
+    return c.json({ error }, 400);
+  }
+  const binding = env[body.binding] as T | undefined;
+  if (!binding) {
+    return c.json({ error: `unknown binding "${body.binding}"` }, 404);
+  }
+  return { body, binding };
+}
+
+function requireBinding(body: BindingRequest): string | undefined {
+  return body.binding ? undefined : 'binding required';
+}
+
+function requireKey(body: BindingRequest & { key: string }): string | undefined {
+  return body.binding && body.key ? undefined : 'binding and key required';
+}
+
+function r2DeleteKeys(body: { key?: string; keys?: Array<string> }): Array<string> {
+  return body.keys ? body.keys : body.key ? [body.key] : [];
 }
 
 /**
@@ -29,22 +61,14 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   // --- D1 ---
 
   app.post('/d1/query', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      sql: string;
-      params?: Array<unknown>;
-      method?: string;
-    }>();
-
-    if (!body.binding || !body.sql) {
-      return c.json({ error: 'binding and sql required' }, 400);
+    const request = await readBindingRequest<
+      D1Database,
+      { binding: string; sql: string; params?: Array<unknown>; method?: string }
+    >(c, env, (body) => (body.binding && body.sql ? undefined : 'binding and sql required'));
+    if (request instanceof Response) {
+      return request;
     }
-
-    const db = env[body.binding] as D1Database | undefined;
-    if (!db) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: db } = request;
     const stmt = db.prepare(body.sql).bind(...(body.params ?? []));
 
     switch (body.method) {
@@ -75,20 +99,18 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   });
 
   app.post('/d1/batch', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      statements: Array<{ sql: string; params?: Array<unknown> }>;
-    }>();
-
-    if (!body.binding || !Array.isArray(body.statements)) {
-      return c.json({ error: 'binding and statements required' }, 400);
+    const request = await readBindingRequest<
+      D1Database,
+      { binding: string; statements: Array<{ sql: string; params?: Array<unknown> }> }
+    >(c, env, (body) =>
+      body.binding && Array.isArray(body.statements)
+        ? undefined
+        : 'binding and statements required',
+    );
+    if (request instanceof Response) {
+      return request;
     }
-
-    const db = env[body.binding] as D1Database | undefined;
-    if (!db) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: db } = request;
     const stmts = body.statements.map((s) => db.prepare(s.sql).bind(...(s.params ?? [])));
     const results = await db.batch(stmts);
     return c.json(
@@ -103,21 +125,14 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   // --- KV ---
 
   app.post('/kv/get', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      key: string;
-      type?: string;
-    }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<
+      KVNamespace,
+      { binding: string; key: string; type?: string }
+    >(c, env, requireKey);
+    if (request instanceof Response) {
+      return request;
     }
-
-    const kv = env[body.binding] as KVNamespace | undefined;
-    if (!kv) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: kv } = request;
     const type = body.type ?? 'text';
     if (type === 'json') {
       const val = await kv.get(body.key, 'json');
@@ -141,33 +156,25 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
         headers: { 'content-type': 'application/octet-stream' },
       });
     }
-    // Default: text
-    const val = await kv.get(body.key, 'text');
-    if (val === null) {
-      return c.json(null);
-    }
-    return c.json(val);
+    return c.json(await kv.get(body.key, 'text'));
   });
 
   app.post('/kv/put', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      key: string;
-      value: unknown;
-      base64?: boolean;
-      expiration?: number;
-      expiration_ttl?: number;
-    }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<
+      KVNamespace,
+      {
+        binding: string;
+        key: string;
+        value: unknown;
+        base64?: boolean;
+        expiration?: number;
+        expiration_ttl?: number;
+      }
+    >(c, env, requireKey);
+    if (request instanceof Response) {
+      return request;
     }
-
-    const kv = env[body.binding] as KVNamespace | undefined;
-    if (!kv) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: kv } = request;
     const opts: KVNamespacePutOptions = {};
     if (body.expiration) {
       opts.expiration = body.expiration;
@@ -188,38 +195,27 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   });
 
   app.post('/kv/delete', async (c) => {
-    const body = await c.req.json<{ binding: string; key: string }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<KVNamespace, { binding: string; key: string }>(
+      c,
+      env,
+      requireKey,
+    );
+    if (request instanceof Response) {
+      return request;
     }
-
-    const kv = env[body.binding] as KVNamespace | undefined;
-    if (!kv) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
-    await kv.delete(body.key);
+    await request.binding.delete(request.body.key);
     return c.json({ success: true });
   });
 
   app.post('/kv/list', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      prefix?: string;
-      limit?: number;
-      cursor?: string;
-    }>();
-
-    if (!body.binding) {
-      return c.json({ error: 'binding required' }, 400);
+    const request = await readBindingRequest<
+      KVNamespace,
+      { binding: string; prefix?: string; limit?: number; cursor?: string }
+    >(c, env, requireBinding);
+    if (request instanceof Response) {
+      return request;
     }
-
-    const kv = env[body.binding] as KVNamespace | undefined;
-    if (!kv) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: kv } = request;
     const opts: KVNamespaceListOptions = {};
     if (body.prefix) {
       opts.prefix = body.prefix;
@@ -242,27 +238,22 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   // --- R2 ---
 
   app.post('/r2/get', async (c) => {
-    const body = await c.req.json<{ binding: string; key: string }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<R2Bucket, { binding: string; key: string }>(
+      c,
+      env,
+      requireKey,
+    );
+    if (request instanceof Response) {
+      return request;
     }
-
-    const bucket = env[body.binding] as R2Bucket | undefined;
-    if (!bucket) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
-    const obj = await bucket.get(body.key);
+    const obj = await request.binding.get(request.body.key);
     if (!obj) {
       return c.json(null);
     }
 
     const headers = new Headers();
     headers.set('content-type', obj.httpMetadata?.contentType ?? 'application/octet-stream');
-    if (obj.size !== undefined) {
-      headers.set('content-length', String(obj.size));
-    }
+    headers.set('content-length', String(obj.size));
     if (obj.httpEtag) {
       headers.set('etag', obj.httpEtag);
     }
@@ -271,25 +262,22 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   });
 
   app.on('POST', ['/r2/put', '/r2/put-conditional'], async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      key: string;
-      base64?: string;
-      value?: string;
-      contentType?: string;
-      customMetadata?: Record<string, string>;
-      onlyIf?: unknown;
-    }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<
+      R2Bucket,
+      {
+        binding: string;
+        key: string;
+        base64?: string;
+        value?: string;
+        contentType?: string;
+        customMetadata?: Record<string, string>;
+        onlyIf?: unknown;
+      }
+    >(c, env, requireKey);
+    if (request instanceof Response) {
+      return request;
     }
-
-    const bucket = env[body.binding] as R2Bucket | undefined;
-    if (!bucket) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: bucket } = request;
     const data = body.base64
       ? decodeBase64(body.base64)
       : new TextEncoder().encode(body.value ?? '');
@@ -324,48 +312,32 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   });
 
   app.post('/r2/delete', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      key?: string;
-      keys?: Array<string>;
-    }>();
-
-    if (!body.binding) {
-      return c.json({ error: 'binding required' }, 400);
+    const request = await readBindingRequest<
+      R2Bucket,
+      { binding: string; key?: string; keys?: Array<string> }
+    >(
+      c,
+      env,
+      (body) =>
+        requireBinding(body) ??
+        (r2DeleteKeys(body).length === 0 ? 'key or keys required' : undefined),
+    );
+    if (request instanceof Response) {
+      return request;
     }
-
-    const keys: Array<string> = body.keys ? body.keys : body.key ? [body.key] : [];
-    if (keys.length === 0) {
-      return c.json({ error: 'key or keys required' }, 400);
-    }
-
-    const bucket = env[body.binding] as R2Bucket | undefined;
-    if (!bucket) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
-    await bucket.delete(keys);
+    await request.binding.delete(r2DeleteKeys(request.body));
     return c.json({ success: true });
   });
 
   app.post('/r2/list', async (c) => {
-    const body = await c.req.json<{
-      binding: string;
-      prefix?: string;
-      limit?: number;
-      cursor?: string;
-      delimiter?: string;
-    }>();
-
-    if (!body.binding) {
-      return c.json({ error: 'binding required' }, 400);
+    const request = await readBindingRequest<
+      R2Bucket,
+      { binding: string; prefix?: string; limit?: number; cursor?: string; delimiter?: string }
+    >(c, env, requireBinding);
+    if (request instanceof Response) {
+      return request;
     }
-
-    const bucket = env[body.binding] as R2Bucket | undefined;
-    if (!bucket) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
+    const { body, binding: bucket } = request;
     const opts: R2ListOptions = {};
     if (body.prefix) {
       opts.prefix = body.prefix;
@@ -385,7 +357,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
       objects: result.objects.map((o) => ({
         key: o.key,
         size: o.size,
-        lastModified: o.uploaded?.toISOString() ?? '',
+        lastModified: o.uploaded.toISOString(),
       })),
       truncated: result.truncated,
       cursor: result.truncated ? result.cursor : null,
@@ -393,27 +365,24 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   });
 
   app.post('/r2/head', async (c) => {
-    const body = await c.req.json<{ binding: string; key: string }>();
-
-    if (!body.binding || !body.key) {
-      return c.json({ error: 'binding and key required' }, 400);
+    const request = await readBindingRequest<R2Bucket, { binding: string; key: string }>(
+      c,
+      env,
+      requireKey,
+    );
+    if (request instanceof Response) {
+      return request;
     }
-
-    const bucket = env[body.binding] as R2Bucket | undefined;
-    if (!bucket) {
-      return c.json({ error: `unknown binding "${body.binding}"` }, 404);
-    }
-
-    const obj = await bucket.head(body.key);
+    const obj = await request.binding.head(request.body.key);
     if (!obj) {
       return c.json(null);
     }
 
     return c.json({
-      key: body.key,
+      key: request.body.key,
       size: obj.size,
-      etag: obj.httpEtag ?? '',
-      lastModified: obj.uploaded?.toISOString() ?? '',
+      etag: obj.httpEtag,
+      lastModified: obj.uploaded.toISOString(),
       contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
     });
   });

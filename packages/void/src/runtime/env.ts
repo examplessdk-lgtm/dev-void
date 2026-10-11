@@ -58,18 +58,7 @@ export function withRuntimeEnv<T>(env: unknown, fn: () => T): T {
   return envContext.run(resolved, () => runtimeRequestContext.run(scope, fn));
 }
 
-/**
- * Shared internal-binding predicate. A binding is framework-internal — and must
- * never be exposed to user code — when it carries an internal prefix
- * (`__VOID_`, `__PROJECT_`; always hidden) or is an exact-name internal (e.g.
- * `ISR_CACHE`; hidden ONLY while ISR is active for the isolate). `rawEnv` is the
- * unfiltered runtime env, consulted via {@link isIsrActive} to gate the
- * exact-name check so a non-ISR app's own `ISR_CACHE` binding stays visible —
- * matching the build-time `isr` gate on the generated `c.env` filter.
- *
- * Single source of truth for the runtime `env` filter here and the public
- * `void/env` proxy (`env-public.ts`).
- */
+/** Whether `name` is a framework binding hidden from user code; `rawEnv` is the unfiltered env. */
 export function isInternalBinding(name: string, rawEnv: RuntimeEnv): boolean {
   if (INTERNAL_BINDING_PREFIXES.some((p) => name.startsWith(p))) {
     return true;

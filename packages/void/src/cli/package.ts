@@ -10,7 +10,6 @@ import { buildMigrationPlanBundle } from '../migrations/plan.ts';
 import type { MigrationFile } from '../migrations/validate.ts';
 import type { WebSocketRouteDefinition } from '../router/websocket.ts';
 import type { ResolvedSandboxConfig } from '../sandbox/config.ts';
-import { toSlash } from '../shared/utils.ts';
 import type {
   AssetConfig,
   DeployAssetManifestEntry,
@@ -261,7 +260,7 @@ export async function collectAndHashAssets(
       processed++;
       await tickProgress(processed, files.length, onProgress, 'Hashing assets');
       // `collectAssetFiles` already skipped ignored paths.
-      const relativePath = '/' + toSlash(relative(dir, filePath));
+      const relativePath = '/' + relative(dir, filePath);
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       const content = readFileSync(filePath);
       const blake3 = computeAssetHash(content, filePath);
@@ -614,7 +613,7 @@ export function collectWorkerFiles(workerDir: string): Map<string, Buffer> {
     throw err;
   }
   for (const filePath of workerPaths) {
-    const relativePath = toSlash(relative(workerDir, filePath));
+    const relativePath = relative(workerDir, filePath);
     if (!isWorkerModule(relativePath)) {
       continue;
     }
@@ -806,7 +805,7 @@ function collectAssetFiles(
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
-    const relativePath = '/' + toSlash(relative(root, fullPath));
+    const relativePath = '/' + relative(root, fullPath);
     if (isIgnored(relativePath)) {
       continue;
     }

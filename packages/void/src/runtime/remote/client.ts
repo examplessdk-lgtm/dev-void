@@ -131,35 +131,4 @@ export class ProxyClient {
     }
     return res;
   }
-
-  /**
-   * Send a request to the proxy and return the raw Response (for streaming).
-   * Injects `Authorization` header and `projectId` into the JSON body.
-   * Throws on non-OK responses.
-   */
-  async stream(path: string, init: RequestInit): Promise<Response> {
-    let body = init.body;
-    if (typeof body === 'string') {
-      try {
-        const parsed = JSON.parse(body);
-        body = JSON.stringify({ ...parsed, projectId: this.projectId });
-      } catch {
-        // Not JSON, leave body as-is
-      }
-    }
-
-    const res = await globalThis.fetch(`${this.proxyUrl}${path}`, {
-      ...init,
-      headers: {
-        ...(init.headers as Record<string, string>),
-        ...this.authHeaders,
-      },
-      body,
-      redirect: 'manual',
-    });
-    if (!res.ok) {
-      throw await proxyError(res);
-    }
-    return res;
-  }
 }

@@ -7,8 +7,7 @@
  * it to locate the offending entry).
  *
  * Server env values are production secrets by definition, so validator
- * messages redact the raw input unconditionally. The old `.secret()` /
- * `.public()` masking axis was removed because it did not control storage.
+ * messages redact the raw input unconditionally.
  *
  * Users can opt out of the guard for local debugging via
  * `VOID_ENV_UNMASK=1` in the environment; that path prints a one-shot
@@ -47,7 +46,6 @@ export function redactMessage(
 }
 
 let unmaskResolved: boolean | null = null;
-let unmaskNoticeShown = false;
 
 /**
  * Resolve the effective unmask flag, consulting `process.env` exactly once
@@ -58,31 +56,23 @@ export function isUnmaskActive(): boolean {
   if (unmaskResolved !== null) {
     return unmaskResolved;
   }
-  let active = false;
   try {
-    // `process` may not exist in some worker bundles; ignore if missing.
+    // `process` may be missing in Worker bundles, and Deno throws without env permission.
     const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-    active = proc?.env?.[UNMASK_ENV_VAR] === '1';
+    unmaskResolved = proc?.env?.[UNMASK_ENV_VAR] === '1';
   } catch {
-    active = false;
+    unmaskResolved = false;
   }
-  unmaskResolved = active;
-  if (active && !unmaskNoticeShown) {
-    unmaskNoticeShown = true;
-    try {
-      // eslint-disable-next-line no-console -- explicit operator warning.
-      console.error(
-        `[void/env] ${UNMASK_ENV_VAR}=1 is set — env validation errors will include raw values. Unset it before sharing logs.`,
-      );
-    } catch {
-      // best-effort
-    }
+  if (unmaskResolved) {
+    // eslint-disable-next-line no-console -- explicit operator warning.
+    console.error(
+      `[void/env] ${UNMASK_ENV_VAR}=1 is set — env validation errors will include raw values. Unset it before sharing logs.`,
+    );
   }
-  return active;
+  return unmaskResolved;
 }
 
 /** Test hook — resets the memoised unmask state. Not part of the public API. */
 export function _resetUnmaskCacheForTests(): void {
   unmaskResolved = null;
-  unmaskNoticeShown = false;
 }

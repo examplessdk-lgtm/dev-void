@@ -30,11 +30,7 @@ export class ProxyR2Bucket {
   }
 
   async get(key: string): Promise<R2ObjectBody | null> {
-    const res = await this.client.stream('/r2/get', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ binding: this.binding, key }),
-    });
+    const res = await this.client.fetch('/r2/get', { binding: this.binding, key });
 
     // Check if the proxy returned null (JSON response for 404).
     // Clone first so we don't consume the body if the object exists.
@@ -55,7 +51,6 @@ export class ProxyR2Bucket {
     value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob,
     options?: R2PutOptions,
   ): Promise<R2Object | null> {
-    // For V1, send as base64 or text in JSON body
     let base64: string | undefined;
     let textValue: string | undefined;
 

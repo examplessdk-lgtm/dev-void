@@ -19,12 +19,9 @@ describe('ProxyClient', () => {
     vi.restoreAllMocks();
   });
 
-  describe.each(['fetch', 'stream'] as const)('%s error diagnostics', (method) => {
+  describe('error diagnostics', () => {
     function request() {
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      return method === 'fetch'
-        ? client.fetch('/d1/query', { binding: 'DB' })
-        : client.stream('/r2/get', { method: 'POST', body: JSON.stringify({ binding: 'FILES' }) });
+      return new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID).fetch('/d1/query', { binding: 'DB' });
     }
 
     it('prefers server recovery guidance over the machine error and private metadata', async () => {
@@ -193,27 +190,6 @@ describe('ProxyClient', () => {
       expect(body.projectId).toBe(PROJECT_ID);
       expect(body.binding).toBe('DB');
       expect(body.sql).toBe('SELECT 1');
-    });
-  });
-
-  describe('stream()', () => {
-    it('injects Authorization header and projectId into body', async () => {
-      const fetchMock = setFetchMock(async () => Response.json({ ok: true }));
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      await client.stream('/r2/get', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
-      });
-
-      const call = fetchMock.mock.calls[0];
-      expect(call).toBeDefined();
-      const [, init] = call as unknown as [RequestInfo | URL, RequestInit];
-      const headers = new Headers(init.headers);
-      expect(headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
-      const body = JSON.parse(String(init.body));
-      expect(body.projectId).toBe(PROJECT_ID);
     });
   });
 });

@@ -43,20 +43,9 @@ describe('parseDotenv', () => {
     expect(out).toEqual({ GOOD: '1' });
   });
 
-  it('throws on invalid keys when skipInvalidKeys=false', () => {
-    expect(() => parseDotenv('1BAD=2\n', { skipInvalidKeys: false })).toThrow(
-      /dotenv: Invalid key/,
-    );
-  });
-
-  it('expands by default', () => {
+  it('expands references to earlier keys', () => {
     const out = parseDotenv('BASE=https://example.com\nAPI=${BASE}/v1\n');
     expect(out).toEqual({ BASE: 'https://example.com', API: 'https://example.com/v1' });
-  });
-
-  it('skips expansion when expand=false', () => {
-    const out = parseDotenv('BASE=https://example.com\nAPI=${BASE}/v1\n', { expand: false });
-    expect(out.API).toBe('${BASE}/v1');
   });
 });
 
@@ -74,7 +63,7 @@ describe('parseDotenv — lines Vite and Wrangler both read', () => {
     ['exportE=7', { exportE: '7' }],
     ['export F', {}],
   ])('%j', (line, expected) => {
-    expect(parseDotenv(line, { expand: false })).toEqual(expected);
+    expect(parseDotenv(line)).toEqual(expected);
   });
 
   it('lets a later export line win over an earlier plain line', () => {
@@ -118,7 +107,7 @@ describe('parseDotenv — values read as Vite reads them', () => {
       { DATABASE_URL: 'postgres://db/app' },
     ],
   ])('%s', (_name, content, expected) => {
-    expect(parseDotenv(content, { expand: false })).toEqual(expected);
+    expect(parseDotenv(content)).toEqual(expected);
   });
 });
 
