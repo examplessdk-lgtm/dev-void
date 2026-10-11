@@ -6,11 +6,6 @@ const accessJwt =
   'header.' +
   Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url') +
   '.signature';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
-let registry: string;
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { runPlatformLogin } from '../../src/cli/auth.ts';
@@ -39,27 +34,6 @@ vi.mock('node:child_process', () => ({
 beforeEach(() => {
   mockExecFile.mockReset();
   exchangeRequests.length = 0;
-  process.env.VOID_API_URL = 'https://api.test';
-  registry = mkdtempSync(join(tmpdir(), 'void-login-connections-'));
-  process.env.VOID_PLATFORM_REGISTRY_DIR = registry;
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.test',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.staging.void.cloud',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
 
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -80,10 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(registry, { recursive: true, force: true });
-  delete process.env.VOID_PLATFORM_REGISTRY_DIR;
   vi.unstubAllGlobals();
-  delete process.env.VOID_API_URL;
   delete process.env.CF_ACCESS_TOKEN;
   delete process.env.VOID_ACCESS_ORIGIN;
 });
@@ -109,7 +80,7 @@ describe('runPlatformLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -167,7 +138,7 @@ describe('runPlatformLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -205,7 +176,7 @@ describe('runPlatformLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     // Attach the rejection assertion up front so the exchange failure doesn't
     // surface as an unhandled rejection.
     const rejection = expect(loginPromise).rejects.toThrow(/Failed to exchange login code/);
@@ -229,16 +200,16 @@ describe('runPlatformLogin', () => {
   });
 
   it('sends Cloudflare Access headers when exchanging a staging login code', async () => {
-    process.env.VOID_API_URL = 'https://api.staging.void.cloud';
+    const apiUrl = 'https://api.staging.void.cloud';
     process.env.CF_ACCESS_TOKEN = accessJwt;
-    process.env.VOID_ACCESS_ORIGIN = process.env.VOID_API_URL;
+    process.env.VOID_ACCESS_ORIGIN = apiUrl;
 
     let resolveLoginUrl!: (url: string) => void;
     const loginUrlPromise = new Promise<string>((resolve) => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runPlatformLogin(process.env.VOID_API_URL!, 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(apiUrl, 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
     expect(redirect).toBeTruthy();
