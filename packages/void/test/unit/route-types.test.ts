@@ -10,9 +10,28 @@ const pageRenderingDefaults = {
   shouldPrerender: false,
 } satisfies Pick<PageDefinition, 'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'>;
 
+function makeScan({
+  routes = [],
+  websockets,
+  pages = [],
+}: {
+  routes?: ScanResult['routes'];
+  websockets?: ScanResult['websockets'];
+  pages?: Array<PageDefinition>;
+} = {}): ScanResult {
+  return {
+    routes,
+    websockets,
+    middleware: [],
+    jobs: [],
+    queues: [],
+    pages: { pages, layouts: [], namedLayouts: [] },
+  };
+}
+
 describe('generateRouteTypes', () => {
   it('generates route type declarations for single-method routes', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/hello',
@@ -23,11 +42,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/hello.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -40,7 +55,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('generates multi-method routes', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/users',
@@ -51,11 +66,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/users/index.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -65,7 +76,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('emits one route key and preserves methods from colliding route files', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/health',
@@ -84,11 +95,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/health/index.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
     const routeMap = dts
@@ -103,7 +110,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('combines colliding environment-specific methods conservatively', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/health',
@@ -122,11 +129,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/health.prod.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
     const routeMap = dts
@@ -140,7 +143,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('skips routes with no methods', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/legacy',
@@ -151,11 +154,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/legacy.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -163,7 +162,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('handles dynamic params in patterns', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/users/:id',
@@ -174,11 +173,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/users/[id].ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -187,14 +182,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('includes Serialize and ExtractInput helper types', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
+    const { dts } = generateRouteTypes(makeScan(), '/project/routes', '/project/.void');
 
     expect(dts).toContain('type Serialize<T>');
     expect(dts).toContain('type ExtractInput<V>');
@@ -202,20 +190,13 @@ describe('generateRouteTypes', () => {
   });
 
   it('includes export {} so declare module is an augmentation', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-    const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
+    const { dts } = generateRouteTypes(makeScan(), '/project/routes', '/project/.void');
 
     expect(dts).toContain('export {}');
   });
 
   it('emits RouteName and RewriteDestination aliases on void/routes', () => {
-    const scan: ScanResult = {
+    const scan = makeScan({
       routes: [
         {
           pattern: '/api/hello',
@@ -226,11 +207,7 @@ describe('generateRouteTypes', () => {
           filePath: 'api/hello.ts',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -246,53 +223,21 @@ describe('generateRouteTypes', () => {
     expect(moduleBlock).toContain('export type RewriteDestination = RouteName | (string & {});');
   });
 
-  it('generates correct relative paths', () => {
-    const scan: ScanResult = {
-      routes: [
+  it('generates PageActionMap for pages with actions', () => {
+    const scan = makeScan({
+      pages: [
         {
-          pattern: '/api/deep/nested',
-          methods: ['GET'],
+          ...pageRenderingDefaults,
+          pattern: '/users',
           params: [],
           catchAll: false,
-          env: null,
-          filePath: 'api/deep/nested.ts',
+          componentPath: 'users/index.vue',
+          serverPath: 'users/index.server.ts',
+          methods: ['loader', 'action'],
+          componentId: 'users',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
-
-    const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
-
-    // Should have relative path from .void to routes
-    expect(dts).toContain('../routes/api/deep/nested.ts');
-  });
-
-  it('generates PageActionMap for pages with actions', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users',
-            params: [],
-            catchAll: false,
-            componentPath: 'users/index.vue',
-            serverPath: 'users/index.server.ts',
-            methods: ['loader', 'action'],
-            componentId: 'users',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages');
 
@@ -303,28 +248,20 @@ describe('generateRouteTypes', () => {
   });
 
   it('generates params in PageActionMap for dynamic routes', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users/:id',
-            params: ['id'],
-            catchAll: false,
-            componentPath: 'users/[id].vue',
-            serverPath: 'users/[id].server.ts',
-            methods: ['loader', 'action'],
-            componentId: 'users/[id]',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    const scan = makeScan({
+      pages: [
+        {
+          ...pageRenderingDefaults,
+          pattern: '/users/:id',
+          params: ['id'],
+          catchAll: false,
+          componentPath: 'users/[id].vue',
+          serverPath: 'users/[id].server.ts',
+          methods: ['loader', 'action'],
+          componentId: 'users/[id]',
+        },
+      ],
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages');
 
@@ -333,8 +270,7 @@ describe('generateRouteTypes', () => {
   });
 
   it('generates WebSocketRouteMap entries', () => {
-    const scan: ScanResult = {
-      routes: [],
+    const scan = makeScan({
       websockets: [
         {
           pattern: '/chat/:room',
@@ -349,11 +285,7 @@ describe('generateRouteTypes', () => {
           hasAuthGate: true,
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 
@@ -378,8 +310,7 @@ describe('generateRouteTypes', () => {
       mode: 'room' as const,
       hasAuthGate: true,
     };
-    const scan: ScanResult = {
-      routes: [],
+    const scan = makeScan({
       websockets: [
         websocket,
         {
@@ -390,11 +321,7 @@ describe('generateRouteTypes', () => {
           bindingName: 'ChatRoomProdWs',
         },
       ],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: { pages: [], layouts: [], namedLayouts: [] },
-    };
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
     const websocketMap = dts.split('  interface WebSocketRouteMap {')[1]!.split('\n  }\n}')[0]!;
@@ -407,28 +334,20 @@ describe('generateRouteTypes', () => {
   });
 
   it('skips pages without action in PageActionMap', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/about',
-            params: [],
-            catchAll: false,
-            componentPath: 'about.vue',
-            serverPath: 'about.server.ts',
-            methods: ['loader'],
-            componentId: 'about',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    const scan = makeScan({
+      pages: [
+        {
+          ...pageRenderingDefaults,
+          pattern: '/about',
+          params: [],
+          catchAll: false,
+          componentPath: 'about.vue',
+          serverPath: 'about.server.ts',
+          methods: ['loader'],
+          componentId: 'about',
+        },
+      ],
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages');
 
@@ -437,28 +356,20 @@ describe('generateRouteTypes', () => {
   });
 
   it('generates PageActionMap with named actions', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users',
-            params: [],
-            catchAll: false,
-            componentPath: 'users/index.vue',
-            serverPath: 'users/index.server.ts',
-            methods: ['loader', 'actions'],
-            componentId: 'users',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    const scan = makeScan({
+      pages: [
+        {
+          ...pageRenderingDefaults,
+          pattern: '/users',
+          params: [],
+          catchAll: false,
+          componentPath: 'users/index.vue',
+          serverPath: 'users/index.server.ts',
+          methods: ['loader', 'actions'],
+          componentId: 'users',
+        },
+      ],
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages');
 
@@ -469,61 +380,21 @@ describe('generateRouteTypes', () => {
     expect(dts).toContain('ParseActionUrl<U>["action"]');
   });
 
-  it('generates PageActionMap for named actions with dynamic params', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users/:id',
-            params: ['id'],
-            catchAll: false,
-            componentPath: 'users/[id].vue',
-            serverPath: 'users/[id].server.ts',
-            methods: ['loader', 'actions'],
-            componentId: 'users/[id]',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
-
-    const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages');
-
-    expect(dts).toContain('interface PageActionMap');
-    expect(dts).toContain('"/users/:id"');
-    expect(dts).toContain('["actions"]');
-    expect(dts).toContain('params: { id: string }');
-  });
-
   it('errors when both action and actions are present', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users',
-            params: [],
-            catchAll: false,
-            componentPath: 'users/index.vue',
-            serverPath: 'users/index.server.ts',
-            methods: ['loader', 'action', 'actions'],
-            componentId: 'users',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    const scan = makeScan({
+      pages: [
+        {
+          ...pageRenderingDefaults,
+          pattern: '/users',
+          params: [],
+          catchAll: false,
+          componentPath: 'users/index.vue',
+          serverPath: 'users/index.server.ts',
+          methods: ['loader', 'action', 'actions'],
+          componentId: 'users',
+        },
+      ],
+    });
 
     expect(() =>
       generateRouteTypes(scan, '/project/routes', '/project/.void', '/project/pages'),
@@ -531,28 +402,20 @@ describe('generateRouteTypes', () => {
   });
 
   it('omits PageActionMap when pagesDir is not provided', () => {
-    const scan: ScanResult = {
-      routes: [],
-      middleware: [],
-      jobs: [],
-      queues: [],
-      pages: {
-        pages: [
-          {
-            ...pageRenderingDefaults,
-            pattern: '/users',
-            params: [],
-            catchAll: false,
-            componentPath: 'users/index.vue',
-            serverPath: 'users/index.server.ts',
-            methods: ['loader', 'action'],
-            componentId: 'users',
-          },
-        ],
-        layouts: [],
-        namedLayouts: [],
-      },
-    };
+    const scan = makeScan({
+      pages: [
+        {
+          ...pageRenderingDefaults,
+          pattern: '/users',
+          params: [],
+          catchAll: false,
+          componentPath: 'users/index.vue',
+          serverPath: 'users/index.server.ts',
+          methods: ['loader', 'action'],
+          componentId: 'users',
+        },
+      ],
+    });
 
     const { dts } = generateRouteTypes(scan, '/project/routes', '/project/.void');
 

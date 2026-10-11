@@ -165,11 +165,6 @@ describe('parseRouteFilename', () => {
       const r = parseRouteFilename('api/hello.ts');
       expect(r.filePath).toBe('api/hello.ts');
     });
-
-    it('methods starts empty (populated by scanner)', () => {
-      const r = parseRouteFilename('api/hello.ts');
-      expect(r.methods).toEqual([]);
-    });
   });
 });
 

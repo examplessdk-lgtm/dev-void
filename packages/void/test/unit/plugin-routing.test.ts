@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ConfigEnv, ResolvedConfig, UserConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { analyzeApplicationSync } from '../../src/application-analysis.ts';
 import { readConfig } from '../../src/config.ts';
@@ -22,10 +23,12 @@ function createBareTempRoot(): string {
   return root;
 }
 
+type RoutingPlugin = ReturnType<typeof routingPlugin>;
+
 function createRoutingPlugin(
   root: string,
   options: Omit<Parameters<typeof routingPlugin>[1], 'getApplicationAnalysis'>,
-) {
+): RoutingPlugin {
   return routingPlugin(root, {
     ...options,
     getApplicationAnalysis: (environment) =>
@@ -43,6 +46,69 @@ function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
   throw new Error('Expected Vite hook handler.');
 }
 
+function runConfig(plugin: RoutingPlugin, env: ConfigEnv): void {
+  (getHookHandler(plugin.config) as (config: UserConfig, env: ConfigEnv) => unknown)({}, env);
+}
+
+function resolveConfig(plugin: RoutingPlugin, command: 'build' | 'serve'): void {
+  (getHookHandler(plugin.configResolved) as (config: ResolvedConfig) => void)({
+    build: { assetsDir: 'assets' },
+    command,
+    mode: command === 'build' ? 'production' : 'development',
+    plugins: [],
+  } as unknown as ResolvedConfig);
+}
+
+async function runBuildStart(plugin: RoutingPlugin): Promise<void> {
+  await (getHookHandler(plugin.buildStart) as () => Promise<void>).call({} as never);
+}
+
+function fakeDevServer(moduleIds: Array<string> = []) {
+  const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
+  const invalidated: Array<string> = [];
+  const restart = vi.fn(async () => {});
+  const modules = new Map(moduleIds.map((id) => [id, { id }]));
+  const server = {
+    watcher: {
+      on(event: string, handler: (path: string) => Promise<void> | void) {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      },
+    },
+    environments: {
+      void_worker: {
+        moduleGraph: {
+          getModuleById(id: string) {
+            return modules.get(id);
+          },
+          invalidateModule(mod: { id: string }) {
+            invalidated.push(mod.id);
+          },
+        },
+        hot: { send() {} },
+      },
+    },
+    restart,
+  };
+  async function emit(event: string, path: string): Promise<void> {
+    for (const handler of handlers.get(event) ?? []) {
+      await handler(path);
+    }
+  }
+  return { server, invalidated, restart, emit };
+}
+
+function startDevServer(plugin: RoutingPlugin, moduleIds?: Array<string>) {
+  const dev = fakeDevServer(moduleIds);
+  (getHookHandler(plugin.configureServer) as (server: unknown) => void)(dev.server);
+  return dev;
+}
+
+const PAGE_MODULE_IDS = [
+  '\0virtual:void-pages-renderer',
+  '\0virtual:void-pages-client',
+  'virtual:void-routes',
+];
+
 describe('routingPlugin', () => {
   afterEach(() => {
     while (tempDirs.length > 0) {
@@ -59,19 +125,8 @@ describe('routingPlugin', () => {
     );
 
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
-    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
-
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'build',
-      mode: 'production',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
-
-    await buildStart.call({} as never);
+    resolveConfig(plugin, 'build');
+    await runBuildStart(plugin);
 
     const entry = readFileSync(join(root, '.void', 'entry.ts'), 'utf-8');
     expect(entry).toContain('app, assets: serveWithAssets');
@@ -85,19 +140,8 @@ describe('routingPlugin', () => {
     writeFileSync(join(root, 'void.json'), JSON.stringify({ auth: { providers: ['email'] } }));
 
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => true });
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
-    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
-
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'build',
-      mode: 'production',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
-
-    await buildStart.call({} as never);
+    resolveConfig(plugin, 'build');
+    await runBuildStart(plugin);
 
     const entry = readFileSync(join(root, '.void', 'entry.ts'), 'utf-8');
     expect(entry).toContain(
@@ -119,24 +163,11 @@ describe('routingPlugin', () => {
     delete process.env.VOID_DEPLOY_PROJECT_ID;
     try {
       const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-      const config = getHookHandler(plugin.config) as (
-        config: import('vite').UserConfig,
-        env: import('vite').ConfigEnv,
-      ) => void;
-      const configResolved = getHookHandler(plugin.configResolved) as (
-        config: import('vite').ResolvedConfig,
-      ) => void;
-      const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
       const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
 
-      config({}, { command: 'build', mode: 'production' });
-      configResolved({
-        build: { assetsDir: 'assets' },
-        command: 'build',
-        mode: 'production',
-        plugins: [],
-      } as unknown as import('vite').ResolvedConfig);
-      await buildStart.call({} as never);
+      runConfig(plugin, { command: 'build', mode: 'production' });
+      resolveConfig(plugin, 'build');
+      await runBuildStart(plugin);
       const routes = await load('virtual:void-routes');
 
       expect(routes).toContain(
@@ -155,21 +186,13 @@ describe('routingPlugin', () => {
   it('resolves explicit framework client subpaths to framework auth clients', async () => {
     const root = createBareTempRoot();
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
     const resolveId = getHookHandler(plugin.resolveId) as (
       this: { environment?: { name?: string } },
       id: string,
     ) => string | undefined;
     const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
 
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'serve',
-      mode: 'development',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
+    resolveConfig(plugin, 'serve');
 
     expect(resolveId.call({ environment: { name: 'client' } }, 'void/client/react')).toBe(
       'virtual:void-client-browser:react',
@@ -192,27 +215,14 @@ describe('routingPlugin', () => {
       isAuthEnabled: () => false,
       devTriggerToken: 'secret-dev-token',
     });
-    const config = getHookHandler(plugin.config) as (
-      config: import('vite').UserConfig,
-      env: import('vite').ConfigEnv,
-    ) => void;
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
-    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
     const load = getHookHandler(plugin.load) as (
       this: { environment?: { name?: string } },
       id: string,
     ) => Promise<string | undefined>;
 
-    config({}, { command: 'serve', mode: 'development' });
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'serve',
-      mode: 'development',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
-    await buildStart.call({} as never);
+    runConfig(plugin, { command: 'serve', mode: 'development' });
+    resolveConfig(plugin, 'serve');
+    await runBuildStart(plugin);
 
     await expect(
       load.call({ environment: { name: 'client' } }, 'virtual:void-routes'),
@@ -222,104 +232,55 @@ describe('routingPlugin', () => {
     ).resolves.toContain('secret-dev-token');
   });
 
-  it('restarts dev when a structural route change changes the asset routing policy', async () => {
-    const root = createTempRoot();
-    writeFileSync(join(root, 'routes', 'api.ts'), 'export const GET = () => new Response();\n');
-
-    const onPolicyChange = vi.fn(() => true);
-    const plugin = createRoutingPlugin(root, {
-      isAuthEnabled: () => false,
-      onDevAssetRoutingPolicyChange: onPolicyChange,
-    });
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
-    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'serve',
-      mode: 'development',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
-    await buildStart.call({} as never);
-
-    const handlers: Record<string, (path: string) => Promise<void>> = {};
-    const restart = vi.fn(async () => {});
-    configureServer({
-      watcher: {
-        on: vi.fn((event: string, handler: (path: string) => Promise<void>) => {
-          handlers[event] = handler;
-        }),
-      },
-      environments: {},
-      restart,
-    });
-
-    const documentRoute = join(root, 'routes', 'dashboard.ts');
-    writeFileSync(documentRoute, 'export const GET = () => new Response("dashboard");\n');
-    await handlers.add(documentRoute);
-
-    expect(onPolicyChange).toHaveBeenCalledWith(
-      expect.objectContaining({
+  it.each([
+    {
+      change: 'a structural route change',
+      initialRoute: 'api.ts',
+      addedRoute: 'dashboard.ts',
+      policy: {
         assetConfig: expect.objectContaining({ not_found_handling: 'none' }),
         workerFirst: true,
-      }),
-    );
-    expect(restart).toHaveBeenCalledTimes(1);
-  });
-
-  it('restarts dev when adding the first API route changes the asset routing policy', async () => {
-    const root = createTempRoot();
-
-    const onPolicyChange = vi.fn(() => true);
-    const plugin = createRoutingPlugin(root, {
-      isAuthEnabled: () => false,
-      onDevAssetRoutingPolicyChange: onPolicyChange,
-    });
-    const configResolved = getHookHandler(plugin.configResolved) as (
-      config: import('vite').ResolvedConfig,
-    ) => void;
-    const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-
-    configResolved({
-      build: { assetsDir: 'assets' },
-      command: 'serve',
-      mode: 'development',
-      plugins: [],
-    } as unknown as import('vite').ResolvedConfig);
-    await buildStart.call({} as never);
-
-    const handlers: Record<string, (path: string) => Promise<void>> = {};
-    const restart = vi.fn(async () => {});
-    configureServer({
-      watcher: {
-        on: vi.fn((event: string, handler: (path: string) => Promise<void>) => {
-          handlers[event] = handler;
-        }),
       },
-      environments: {},
-      restart,
-    });
-
-    const apiRoute = join(root, 'routes', 'api.ts');
-    writeFileSync(apiRoute, 'export const GET = () => new Response("api");\n');
-    await handlers.add(apiRoute);
-
-    expect(onPolicyChange).toHaveBeenCalledWith(
-      expect.objectContaining({
+    },
+    {
+      change: 'adding the first API route',
+      initialRoute: undefined,
+      addedRoute: 'api.ts',
+      policy: {
         apiWorkerFirst: true,
         assetConfig: expect.objectContaining({
           not_found_handling: 'single-page-application',
           run_worker_first: ['/api', '/api/*', '/__void', '/__void/*'],
         }),
         workerFirst: false,
-      }),
-    );
-    expect(restart).toHaveBeenCalledTimes(1);
-  });
+      },
+    },
+  ])(
+    'restarts dev when $change changes the asset routing policy',
+    async ({ initialRoute, addedRoute, policy }) => {
+      const root = createTempRoot();
+      const routeSource = 'export const GET = () => new Response();\n';
+      if (initialRoute) {
+        writeFileSync(join(root, 'routes', initialRoute), routeSource);
+      }
+
+      const onPolicyChange = vi.fn(() => true);
+      const plugin = createRoutingPlugin(root, {
+        isAuthEnabled: () => false,
+        onDevAssetRoutingPolicyChange: onPolicyChange,
+      });
+      resolveConfig(plugin, 'serve');
+      await runBuildStart(plugin);
+      const { emit, restart } = startDevServer(plugin);
+
+      const addedPath = join(root, 'routes', addedRoute);
+      writeFileSync(addedPath, routeSource);
+      await emit('add', addedPath);
+
+      expect(onPolicyChange).toHaveBeenCalledWith(expect.objectContaining(policy));
+      expect(restart).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('invalidates page renderer modules before route table reloads for new pages', async () => {
     const root = createTempRoot();
@@ -330,51 +291,15 @@ describe('routingPlugin', () => {
     );
 
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-    const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
-    const invalidated: Array<string> = [];
-    const modules = new Map(
-      ['\0virtual:void-pages-renderer', '\0virtual:void-pages-client', 'virtual:void-routes'].map(
-        (id) => [id, { id }],
-      ),
-    );
-
-    configureServer({
-      watcher: {
-        on(event: string, handler: (path: string) => Promise<void> | void) {
-          const eventHandlers = handlers.get(event) ?? [];
-          eventHandlers.push(handler);
-          handlers.set(event, eventHandlers);
-        },
-      },
-      environments: {
-        void_worker: {
-          moduleGraph: {
-            getModuleById(id: string) {
-              return modules.get(id);
-            },
-            invalidateModule(mod: { id: string }) {
-              invalidated.push(mod.id);
-            },
-          },
-          hot: { send() {} },
-        },
-      },
-    });
+    const { emit, invalidated } = startDevServer(plugin, PAGE_MODULE_IDS);
 
     writeFileSync(
       join(root, 'pages', 'test.tsx'),
       'export default function Test() { return null; }',
     );
-    for (const handler of handlers.get('add') ?? []) {
-      await handler(join(root, 'pages', 'test.tsx'));
-    }
+    await emit('add', join(root, 'pages', 'test.tsx'));
 
-    expect(invalidated).toEqual([
-      '\0virtual:void-pages-renderer',
-      '\0virtual:void-pages-client',
-      'virtual:void-routes',
-    ]);
+    expect(invalidated).toEqual(PAGE_MODULE_IDS);
   });
 
   it('does not invalidate page renderer modules for component-only page saves', async () => {
@@ -384,42 +309,10 @@ describe('routingPlugin', () => {
     writeFileSync(pagePath, 'export default function Index() { return null; }');
 
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-    const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
-    const invalidated: Array<string> = [];
-    const modules = new Map(
-      ['\0virtual:void-pages-renderer', '\0virtual:void-pages-client', 'virtual:void-routes'].map(
-        (id) => [id, { id }],
-      ),
-    );
-
-    configureServer({
-      watcher: {
-        on(event: string, handler: (path: string) => Promise<void> | void) {
-          const eventHandlers = handlers.get(event) ?? [];
-          eventHandlers.push(handler);
-          handlers.set(event, eventHandlers);
-        },
-      },
-      environments: {
-        void_worker: {
-          moduleGraph: {
-            getModuleById(id: string) {
-              return modules.get(id);
-            },
-            invalidateModule(mod: { id: string }) {
-              invalidated.push(mod.id);
-            },
-          },
-          hot: { send() {} },
-        },
-      },
-    });
+    const { emit, invalidated } = startDevServer(plugin, PAGE_MODULE_IDS);
 
     writeFileSync(pagePath, 'export default function Index() { return <h1>Updated</h1>; }');
-    for (const handler of handlers.get('change') ?? []) {
-      await handler(pagePath);
-    }
+    await emit('change', pagePath);
 
     expect(invalidated).toEqual(['virtual:void-routes']);
   });
@@ -434,39 +327,11 @@ describe('routingPlugin', () => {
       isAuthEnabled: () => false,
       onDevAssetRoutingPolicyChange: onPolicyChange,
     });
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-    const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
-    const invalidated: Array<string> = [];
-    const modules = new Map([['virtual:void-routes', { id: 'virtual:void-routes' }]]);
-
-    configureServer({
-      watcher: {
-        on(event: string, handler: (path: string) => Promise<void> | void) {
-          const eventHandlers = handlers.get(event) ?? [];
-          eventHandlers.push(handler);
-          handlers.set(event, eventHandlers);
-        },
-      },
-      environments: {
-        void_worker: {
-          moduleGraph: {
-            getModuleById(id: string) {
-              return modules.get(id);
-            },
-            invalidateModule(mod: { id: string }) {
-              invalidated.push(mod.id);
-            },
-          },
-          hot: { send() {} },
-        },
-      },
-    });
+    const { emit, invalidated } = startDevServer(plugin, ['virtual:void-routes']);
 
     const routePath = join(root, 'src', 'routes', 'api.ts');
     writeFileSync(routePath, 'export const GET = () => new Response("ok");\n');
-    for (const handler of handlers.get('add') ?? []) {
-      await handler(routePath);
-    }
+    await emit('add', routePath);
 
     expect(onPolicyChange).toHaveBeenCalled();
     expect(invalidated).toEqual(['virtual:void-routes']);
@@ -481,49 +346,13 @@ describe('routingPlugin', () => {
     mkdirSync(join(root, 'src', 'pages'), { recursive: true });
 
     const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-    const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
-    const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
-    const invalidated: Array<string> = [];
-    const modules = new Map(
-      ['\0virtual:void-pages-renderer', '\0virtual:void-pages-client', 'virtual:void-routes'].map(
-        (id) => [id, { id }],
-      ),
-    );
-
-    configureServer({
-      watcher: {
-        on(event: string, handler: (path: string) => Promise<void> | void) {
-          const eventHandlers = handlers.get(event) ?? [];
-          eventHandlers.push(handler);
-          handlers.set(event, eventHandlers);
-        },
-      },
-      environments: {
-        void_worker: {
-          moduleGraph: {
-            getModuleById(id: string) {
-              return modules.get(id);
-            },
-            invalidateModule(mod: { id: string }) {
-              invalidated.push(mod.id);
-            },
-          },
-          hot: { send() {} },
-        },
-      },
-    });
+    const { emit, invalidated } = startDevServer(plugin, PAGE_MODULE_IDS);
 
     const pagePath = join(root, 'src', 'pages', 'test.tsx');
     writeFileSync(pagePath, 'export default function Test() { return null; }');
-    for (const handler of handlers.get('add') ?? []) {
-      await handler(pagePath);
-    }
+    await emit('add', pagePath);
 
-    expect(invalidated).toEqual([
-      '\0virtual:void-pages-renderer',
-      '\0virtual:void-pages-client',
-      'virtual:void-routes',
-    ]);
+    expect(invalidated).toEqual(PAGE_MODULE_IDS);
   });
 
   // Manual trigger auth is baked into the route table: dev accepts only the
@@ -544,22 +373,14 @@ describe('routingPlugin', () => {
       );
 
       const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
-      const config = getHookHandler(plugin.config) as (
-        config: import('vite').UserConfig,
-        env: import('vite').ConfigEnv,
-      ) => unknown;
-      const configResolved = getHookHandler(plugin.configResolved) as (
-        config: import('vite').ResolvedConfig,
-      ) => void;
       const load = getHookHandler(plugin.load) as (id: string) => Promise<string | undefined>;
 
-      config({}, { command, mode: command === 'build' ? 'production' : 'development', isPreview });
-      configResolved({
-        build: { assetsDir: 'assets' },
+      runConfig(plugin, {
         command,
-        mode: 'development',
-        plugins: [],
-      } as unknown as import('vite').ResolvedConfig);
+        mode: command === 'build' ? 'production' : 'development',
+        isPreview,
+      });
+      resolveConfig(plugin, command);
 
       const code = await load('virtual:void-routes');
       expect(code).toContain('app.post("/__void/scheduled"');
@@ -583,23 +404,9 @@ describe('routingPlugin', () => {
       const entryPath = join(root, '.void', 'entry.ts');
       expect(readFileSync(entryPath, 'utf-8')).not.toContain('__setLiveDev');
 
-      const config = getHookHandler(plugin.config) as (
-        config: import('vite').UserConfig,
-        env: import('vite').ConfigEnv,
-      ) => unknown;
-      const configResolved = getHookHandler(plugin.configResolved) as (
-        config: import('vite').ResolvedConfig,
-      ) => void;
-      const buildStart = getHookHandler(plugin.buildStart) as () => Promise<void>;
-
-      config({}, { command, mode: 'development', isPreview });
-      configResolved({
-        build: { assetsDir: 'assets' },
-        command,
-        mode: 'development',
-        plugins: [],
-      } as unknown as import('vite').ResolvedConfig);
-      await buildStart.call({} as never);
+      runConfig(plugin, { command, mode: 'development', isPreview });
+      resolveConfig(plugin, command);
+      await runBuildStart(plugin);
 
       const entry = readFileSync(entryPath, 'utf-8');
       expect(entry).toContain('__setLiveBindingName("VOID_LIVE")');

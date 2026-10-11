@@ -21,41 +21,12 @@ const pagesOptions: PagesCompileOptions = {
   clientEntryId: 'virtual:void-pages-client',
 };
 
-type TestPageDefinition = Omit<
-  PageDefinition,
-  'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'
-> &
-  Partial<Pick<PageDefinition, 'ssrMode' | 'prerenderMode' | 'renderMode' | 'shouldPrerender'>>;
-
-function withRenderingDefaults(page: TestPageDefinition): PageDefinition {
-  const renderMode =
-    page.renderMode ?? (page.island ? 'island' : page.ssr === false ? 'client' : 'server');
-  return {
-    ...page,
-    ssrMode:
-      page.ssrMode ?? (page.ssr === true ? 'server' : page.ssr === false ? 'client' : 'auto'),
-    prerenderMode:
-      page.prerenderMode ??
-      (page.prerender === true ? 'force' : page.prerender === false ? 'disabled' : 'auto'),
-    renderMode,
-    shouldPrerender: page.shouldPrerender ?? page.prerender === true,
-  };
-}
-
-function makeScan(
-  pages: Omit<PageScanResult, 'pages'> & { pages: Array<TestPageDefinition> },
-): ScanResult {
-  return {
-    routes: [],
-    middleware: [],
-    jobs: [],
-    queues: [],
-    pages: { ...pages, pages: pages.pages.map(withRenderingDefaults) },
-  };
+function makeScan(pages: PageScanResult): ScanResult {
+  return { routes: [], middleware: [], jobs: [], queues: [], pages };
 }
 
 describe('Pages metadata wiring', () => {
-  const page: TestPageDefinition = {
+  const page: PageDefinition = {
     pattern: '/',
     params: [],
     catchAll: false,
@@ -63,6 +34,10 @@ describe('Pages metadata wiring', () => {
     componentId: 'index',
     serverPath: 'index.server.ts',
     methods: ['loader', 'actions'],
+    ssrMode: 'auto',
+    prerenderMode: 'auto',
+    renderMode: 'server',
+    shouldPrerender: false,
   };
   const compile = (options = testOptions) =>
     compileRouteTable(
@@ -112,7 +87,7 @@ describe('Pages metadata wiring', () => {
   });
   it('keeps layout CSS roots in cascade order and includes island markdown metadata', () => {
     const scan = makeScan({
-      pages: [{ ...page, island: true }],
+      pages: [{ ...page, island: true, renderMode: 'island' }],
       layouts: [{ directory: '', filePath: 'layout.vue', island: true }],
       namedLayouts: [],
     });
