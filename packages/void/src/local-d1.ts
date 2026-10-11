@@ -32,8 +32,10 @@ function readConfiguredDatabaseId(root: string, bindingName: string): string | u
   let rootConfig: ReturnType<typeof readRootWranglerConfig>;
   try {
     rootConfig = readRootWranglerConfig(root);
-  } catch {
-    throw new Error(`db: cannot read malformed Wrangler configuration in ${root}.`);
+  } catch (error) {
+    throw new Error(`db: cannot read malformed Wrangler configuration in ${root}.`, {
+      cause: error,
+    });
   }
   if (!rootConfig) {
     return undefined;
@@ -61,12 +63,8 @@ function readConfiguredDatabaseId(root: string, bindingName: string): string | u
     );
   }
 
-  const matches = rawDatabases.filter(
-    (entry): entry is Record<string, unknown> =>
-      entry !== null &&
-      typeof entry === 'object' &&
-      !Array.isArray(entry) &&
-      entry.binding === bindingName,
+  const matches = (rawDatabases as Array<Record<string, unknown>>).filter(
+    (entry) => entry.binding === bindingName,
   );
   if (matches.length > 1) {
     throw new Error(

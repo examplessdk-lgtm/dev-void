@@ -12,27 +12,10 @@ import {
 
 export const DESTRUCTIVE_PRAGMA = '-- void:allow-destructive';
 
-export type MigrationExecutionPlan = {
-  name: string;
-  dialect: 'sqlite';
-  classifierVersion: number;
-  sqlHash: string;
+export type MigrationExecutionPlan = MigrationPlanHashInput & {
   planHash: string;
-  stability: 'stable' | 'legacy';
   warnings?: Array<string>;
-} & (
-  | {
-      kind: 'single-statement';
-    }
-  | {
-      kind: 'breakpoint-framed';
-      statements: Array<string>;
-    }
-  | {
-      kind: 'legacy-unsplit-multi-statement';
-      allowLegacy: boolean;
-    }
-);
+};
 
 export type MigrationPlanBundle = {
   protocolVersion: 2;
