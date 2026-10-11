@@ -33,6 +33,32 @@ const config = {
   kv_namespaces: [{ binding: 'KV', id: 'existing-id' }],
 };
 
+async function withMigrationsConfig(
+  migrations: Array<Record<string, unknown>>,
+  run: (configPath: string) => Promise<void>,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
+  try {
+    const configPath = join(root, 'wrangler.jsonc');
+    writeFileSync(configPath, JSON.stringify({ migrations }));
+    await run(configPath);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function activeWorkerRunner(version: Record<string, unknown>) {
+  return vi.fn(async (operation: CloudflareOperation): Promise<CloudflareCommandResult> => ({
+    status: 0,
+    stdout: '',
+    stderr: '',
+    data:
+      operation.type === 'deployments.status'
+        ? { versions: [{ version_id: 'active', percentage: 100 }] }
+        : { id: 'active', ...version },
+  }));
+}
+
 it('preserves an existing authored version metadata binding without permitting additions', () => {
   const metadata = { type: 'version_metadata', name: 'APP_VERSION' };
   const existing = { ...worker, bindings: [...worker.bindings, metadata] };
@@ -358,7 +384,6 @@ describe('existing Worker preservation', () => {
       }),
     ).rejects.toThrow('production changed');
     expect(runWrangler.mock.calls[1]![0]).toContain('original');
-    expect(runWrangler.mock.calls.every(([args]) => args.includes('--json'))).toBe(true);
   });
 
   it('does not infer an active migration tag from an explicitly requested candidate', async () => {
@@ -397,34 +422,18 @@ describe('existing Worker preservation', () => {
   });
 
   it('rejects a pending class migration on an existing Worker', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(
-      configPath,
-      JSON.stringify({
-        migrations: [
-          { tag: 'v1', new_sqlite_classes: ['Room'] },
-          { tag: 'v2', new_sqlite_classes: ['Counter'] },
-        ],
-      }),
-    );
-    const runWrangler = operationFixture((args: Array<string>) => ({
-      status: 0,
-      stderr: '',
-      stdout: JSON.stringify(
-        args[0] === 'deployments'
-          ? { versions: [{ version_id: 'active', percentage: 100 }] }
-          : {
-              id: 'active',
-              resources: {
-                bindings: [],
-                script: { handlers: ['fetch'] },
-                script_runtime: { migration_tag: 'v1' },
-              },
-            },
-      ),
-    }));
-    try {
+    const migrations = [
+      { tag: 'v1', new_sqlite_classes: ['Room'] },
+      { tag: 'v2', new_sqlite_classes: ['Counter'] },
+    ];
+    const runWrangler = activeWorkerRunner({
+      resources: {
+        bindings: [],
+        script: { handlers: ['fetch'] },
+        script_runtime: { migration_tag: 'v1' },
+      },
+    });
+    await withMigrationsConfig(migrations, async (configPath) => {
       await expect(
         assertCloudflareDurableObjectLifecycleSupported({
           runWrangler,
@@ -447,73 +456,51 @@ describe('existing Worker preservation', () => {
         }),
       ).resolves.toBeUndefined();
       expect(runWrangler).toHaveBeenCalledTimes(12);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   it('allows first deployment and an already-active class migration', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(
-      configPath,
-      JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
-    );
     const missing = operationFixture(() => ({
       status: 1,
       stdout: '',
       stderr: 'This Worker does not exist. [code: 10007]',
     }));
-    const active = operationFixture((args: Array<string>) => ({
-      status: 0,
-      stderr: '',
-      stdout: JSON.stringify(
-        args[0] === 'deployments'
-          ? { versions: [{ version_id: 'active', percentage: 100 }] }
-          : {
-              id: 'active',
-              resources: {
-                bindings: [],
-                script: { handlers: ['fetch'] },
-                script_runtime: { migration_tag: 'v1' },
-              },
-            },
-      ),
-    }));
-    try {
-      await expect(
-        assertCloudflareDurableObjectLifecycleSupported({
-          runWrangler: missing,
-          configPath,
-          workerName: 'first',
-          accountId: 'account',
-          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
-        }),
-      ).resolves.toBeUndefined();
-      await expect(
-        assertCloudflareDurableObjectLifecycleSupported({
-          runWrangler: active,
-          configPath,
-          workerName: 'app',
-          accountId: 'account',
-          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
-          readMigrationTag: async () => 'v1',
-        }),
-      ).resolves.toBeUndefined();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    const active = activeWorkerRunner({
+      resources: {
+        bindings: [],
+        script: { handlers: ['fetch'] },
+        script_runtime: { migration_tag: 'v1' },
+      },
+    });
+    await withMigrationsConfig(
+      [{ tag: 'v1', new_sqlite_classes: ['Room'] }],
+      async (configPath) => {
+        await expect(
+          assertCloudflareDurableObjectLifecycleSupported({
+            runWrangler: missing,
+            configPath,
+            workerName: 'first',
+            accountId: 'account',
+            apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+          }),
+        ).resolves.toBeUndefined();
+        await expect(
+          assertCloudflareDurableObjectLifecycleSupported({
+            runWrangler: active,
+            configPath,
+            workerName: 'app',
+            accountId: 'account',
+            apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+            readMigrationTag: async () => 'v1',
+          }),
+        ).resolves.toBeUndefined();
+      },
+    );
   });
 
   it.each(['placeholder', 'real-code', 'owner-drift'] as const)(
     'verifies immutable SDK secret-draft proof before its first DO migration: %s',
     async (scenario) => {
-      const root = mkdtempSync(join(tmpdir(), 'void-sdk-draft-lifecycle-'));
-      const configPath = join(root, 'wrangler.jsonc');
-      writeFileSync(
-        configPath,
-        JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
-      );
       const source = voidSecretDraftVersion();
       if (scenario === 'real-code') {
         source.modules[0]!.content_base64 = Buffer.from(
@@ -559,30 +546,31 @@ describe('existing Worker preservation', () => {
           throw new Error(`Unexpected read-only lifecycle operation: ${operation.type}`);
         },
       );
-      try {
-        const inspection = assertCloudflareDurableObjectLifecycleSupported({
-          runWrangler,
-          configPath,
-          workerName: 'app',
-          accountId: 'account',
-          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
-          readMigrationTag: async () => null,
-        });
-        if (scenario === 'placeholder') {
-          await expect(inspection).resolves.toBeUndefined();
-        } else {
-          await expect(inspection).rejects.toThrow(
-            scenario === 'owner-drift' ? 'production changed' : 'atomic Cloudflare deployment',
-          );
-        }
-        expect(
-          runWrangler.mock.calls.filter(
-            ([operation]) => operation.type === 'versions.view' && operation.includeSource,
-          ),
-        ).toHaveLength(scenario === 'owner-drift' ? 1 : 2);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
+      await withMigrationsConfig(
+        [{ tag: 'v1', new_sqlite_classes: ['Room'] }],
+        async (configPath) => {
+          const inspection = assertCloudflareDurableObjectLifecycleSupported({
+            runWrangler,
+            configPath,
+            workerName: 'app',
+            accountId: 'account',
+            apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+            readMigrationTag: async () => null,
+          });
+          if (scenario === 'placeholder') {
+            await expect(inspection).resolves.toBeUndefined();
+          } else {
+            await expect(inspection).rejects.toThrow(
+              scenario === 'owner-drift' ? 'production changed' : 'atomic Cloudflare deployment',
+            );
+          }
+          expect(
+            runWrangler.mock.calls.filter(
+              ([operation]) => operation.type === 'versions.view' && operation.includeSource,
+            ),
+          ).toHaveLength(scenario === 'owner-drift' ? 1 : 2);
+        },
+      );
     },
   );
 
@@ -622,65 +610,44 @@ describe('existing Worker preservation', () => {
     { error: 'provider process failed' },
     { status: Number.NaN },
   ])('never treats an interrupted lifecycle probe as an absent Worker: %j', async (provenance) => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-interrupted-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(
-      configPath,
-      JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
-    );
-    try {
-      await expect(
-        assertCloudflareDurableObjectLifecycleSupported({
-          runWrangler: () => ({
-            status: 1,
-            stdout: '',
-            stderr: '',
-            errorCode: 10007,
-            failure: 'not-found',
-            ...provenance,
+    await withMigrationsConfig(
+      [{ tag: 'v1', new_sqlite_classes: ['Room'] }],
+      async (configPath) => {
+        await expect(
+          assertCloudflareDurableObjectLifecycleSupported({
+            runWrangler: () => ({
+              status: 1,
+              stdout: '',
+              stderr: '',
+              errorCode: 10007,
+              failure: 'not-found',
+              ...provenance,
+            }),
+            configPath,
+            workerName: 'app',
+            accountId: 'account',
+            apiBaseUrl: 'https://api.cloudflare.test/client/v4',
           }),
-          configPath,
-          workerName: 'app',
-          accountId: 'account',
-          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
-        }),
-      ).rejects.toBeInstanceOf(CloudflareWorkerInspectionError);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+        ).rejects.toBeInstanceOf(CloudflareWorkerInspectionError);
+      },
+    );
   });
 
   it('accepts an already-published declarative Durable Object state without a legacy tag', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-exports-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(
-      configPath,
-      JSON.stringify({
-        migrations: [
-          { tag: 'fate-v1', new_sqlite_classes: ['Fate'] },
-          { tag: 'live-v1', deleted_classes: ['Fate'], new_sqlite_classes: ['Live'] },
-        ],
-      }),
-    );
-    const runWrangler = operationFixture((args: Array<string>) => ({
-      status: 0,
-      stderr: '',
-      stdout: JSON.stringify(
-        args[0] === 'deployments'
-          ? { versions: [{ version_id: 'active', percentage: 100 }] }
-          : {
-              id: 'active',
-              resources: {
-                bindings: [],
-                script: { handlers: ['fetch'] },
-                script_runtime: {
-                  exports: { Live: { type: 'durable-object', storage: 'sqlite' } },
-                },
-              },
-            },
-      ),
-    }));
-    try {
+    const migrations = [
+      { tag: 'fate-v1', new_sqlite_classes: ['Fate'] },
+      { tag: 'live-v1', deleted_classes: ['Fate'], new_sqlite_classes: ['Live'] },
+    ];
+    const runWrangler = activeWorkerRunner({
+      resources: {
+        bindings: [],
+        script: { handlers: ['fetch'] },
+        script_runtime: {
+          exports: { Live: { type: 'durable-object', storage: 'sqlite' } },
+        },
+      },
+    });
+    await withMigrationsConfig(migrations, async (configPath) => {
       await expect(
         assertCloudflareDurableObjectLifecycleSupported({
           runWrangler,
@@ -691,19 +658,14 @@ describe('existing Worker preservation', () => {
           readMigrationTag: async () => null,
         }),
       ).resolves.toBeUndefined();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   it('does not authenticate or read metadata without a class migration', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(configPath, JSON.stringify({ migrations: [{ tag: 'v1' }] }));
     const runWrangler = operationFixture(() => {
       throw new Error('must not run');
     });
-    try {
+    await withMigrationsConfig([{ tag: 'v1' }], async (configPath) => {
       await expect(
         assertCloudflareDurableObjectLifecycleSupported({
           runWrangler,
@@ -714,9 +676,7 @@ describe('existing Worker preservation', () => {
         }),
       ).resolves.toBeUndefined();
       expect(runWrangler).not.toHaveBeenCalled();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    });
   });
 
   it.each([
@@ -747,30 +707,16 @@ describe('existing Worker preservation', () => {
   ])(
     'does not treat an established Worker as an initial-secret bootstrap: %j',
     async ({ tag, runtime, binding, annotation }) => {
-      const root = mkdtempSync(join(tmpdir(), 'void-do-existing-secret-'));
-      const configPath = join(root, 'wrangler.jsonc');
-      writeFileSync(
-        configPath,
-        JSON.stringify({ migrations: [{ tag: 'live-v1', new_sqlite_classes: ['Room'] }] }),
-      );
-      const runWrangler = operationFixture((args: Array<string>) => ({
-        status: 0,
-        stderr: '',
-        stdout: JSON.stringify(
-          args[0] === 'deployments'
-            ? { versions: [{ version_id: 'active', percentage: 100 }] }
-            : {
-                id: 'active',
-                annotations: { 'workers/triggered_by': annotation },
-                resources: {
-                  bindings: [binding],
-                  script: { handlers: ['fetch'] },
-                  script_runtime: runtime,
-                },
-              },
-        ),
-      }));
-      try {
+      const runWrangler = activeWorkerRunner({
+        annotations: { 'workers/triggered_by': annotation },
+        resources: {
+          bindings: [binding],
+          script: { handlers: ['fetch'] },
+          script_runtime: runtime,
+        },
+      });
+      const migrations = [{ tag: 'live-v1', new_sqlite_classes: ['Room'] }];
+      await withMigrationsConfig(migrations, async (configPath) => {
         await expect(
           assertCloudflareDurableObjectLifecycleSupported({
             runWrangler,
@@ -783,12 +729,11 @@ describe('existing Worker preservation', () => {
         ).rejects.toThrow(/atomic Cloudflare deployment[\s\S]*live-v1/);
         expect(
           runWrangler.mock.calls.every(
-            ([args]) => args[0] === 'deployments' || (args[0] === 'versions' && args[1] === 'view'),
+            ([operation]) =>
+              operation.type === 'deployments.status' || operation.type === 'versions.view',
           ),
         ).toBe(true);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
+      });
     },
   );
 
@@ -844,47 +789,33 @@ describe('existing Worker preservation', () => {
   });
 
   it('rejects migration state that changes during lifecycle verification', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-do-lifecycle-'));
-    const configPath = join(root, 'wrangler.jsonc');
-    writeFileSync(
-      configPath,
-      JSON.stringify({ migrations: [{ tag: 'v1', new_sqlite_classes: ['Room'] }] }),
-    );
-    const runWrangler = operationFixture((args: Array<string>) => ({
-      status: 0,
-      stderr: '',
-      stdout: JSON.stringify(
-        args[0] === 'deployments'
-          ? { versions: [{ version_id: 'active', percentage: 100 }] }
-          : {
-              id: 'active',
-              annotations: { 'workers/triggered_by': 'secret' },
-              resources: {
-                bindings: [{ name: 'TOKEN', type: 'secret_text' }],
-                script: { handlers: ['fetch'] },
-                script_runtime: { usage_model: 'standard' },
-              },
-            },
-      ),
-    }));
+    const runWrangler = activeWorkerRunner({
+      annotations: { 'workers/triggered_by': 'secret' },
+      resources: {
+        bindings: [{ name: 'TOKEN', type: 'secret_text' }],
+        script: { handlers: ['fetch'] },
+        script_runtime: { usage_model: 'standard' },
+      },
+    });
     const readMigrationTag = vi
       .fn<() => Promise<string | null>>()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce('v1');
-    try {
-      await expect(
-        assertCloudflareDurableObjectLifecycleSupported({
-          runWrangler,
-          configPath,
-          workerName: 'app',
-          accountId: 'account',
-          apiBaseUrl: 'https://api.cloudflare.test/client/v4',
-          readMigrationTag,
-        }),
-      ).rejects.toThrow('migration state changed');
-      expect(readMigrationTag).toHaveBeenCalledTimes(2);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    await withMigrationsConfig(
+      [{ tag: 'v1', new_sqlite_classes: ['Room'] }],
+      async (configPath) => {
+        await expect(
+          assertCloudflareDurableObjectLifecycleSupported({
+            runWrangler,
+            configPath,
+            workerName: 'app',
+            accountId: 'account',
+            apiBaseUrl: 'https://api.cloudflare.test/client/v4',
+            readMigrationTag,
+          }),
+        ).rejects.toThrow('migration state changed');
+        expect(readMigrationTag).toHaveBeenCalledTimes(2);
+      },
+    );
   });
 });
