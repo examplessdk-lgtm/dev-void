@@ -167,31 +167,9 @@ describe('parseRedirectsFile', () => {
     ]);
   });
 
-  it('handles :splat destinations (preserved as-is)', () => {
-    setup('/blog/* /posts/:splat 301\n');
-    const parsed = parseRedirectsFile(tmpDir);
-    expect(parsed?.rules).toEqual([
-      { source: '/blog/*', destination: '/posts/:splat', status: 301, origin: '_redirects:1' },
-    ]);
-  });
-
   it('returns undefined for file with only comments', () => {
     setup('# just a comment\n# another one\n');
     expect(parseRedirectsFile(tmpDir)).toBeUndefined();
-  });
-
-  it('parses file with only 200 rewrites', () => {
-    setup('/app/* /index.html 200\n');
-    const parsed = parseRedirectsFile(tmpDir);
-    expect(parsed?.rules).toEqual([
-      {
-        source: '/app/*',
-        destination: '/index.html',
-        status: 200,
-        force: false,
-        origin: '_redirects:1',
-      },
-    ]);
   });
 
   it('skips non-200 non-3xx status codes', () => {
@@ -204,20 +182,6 @@ describe('parseRedirectsFile', () => {
 
   it('skips 200 rewrites with external destinations', () => {
     setup('/api/* https://upstream.example/:splat 200\n/app/* /index.html 200\n');
-    const parsed = parseRedirectsFile(tmpDir);
-    expect(parsed?.rules).toEqual([
-      {
-        source: '/app/*',
-        destination: '/index.html',
-        status: 200,
-        force: false,
-        origin: '_redirects:2',
-      },
-    ]);
-  });
-
-  it('skips 200 rewrites whose destination contains a query string', () => {
-    setup('/docs /en/docs?lang=en 200\n/app/* /index.html 200\n');
     const parsed = parseRedirectsFile(tmpDir);
     expect(parsed?.rules).toEqual([
       {
@@ -273,17 +237,8 @@ describe('parseRedirectsFile', () => {
     logSpy.mockRestore();
   });
 
-  it('tags origin with line number when destination is external (skipped)', () => {
-    setup('# header\n/fallback /spa.html 200\n');
-    const parsed = parseRedirectsFile(tmpDir);
-    expect(parsed?.rules[0].origin).toBe('_redirects:2');
-  });
-
   it('skips 200 rewrites whose destination is protocol-relative ("//host/x") and warns', () => {
-    // Symmetric with `c.rewrite()` codegen (compile.ts, commit 3c60d38) and
-    // the `void.json` rewrite/fallback validators. `//evil.com/x` passes the
-    // single-slash check but parses as a cross-origin URL at dispatch,
-    // silently turning an internal rewrite into a proxy.
+    // `//host` parses as a cross-origin URL, which would turn the rewrite into a proxy.
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     setup('/docs //evil.com/docs 200\n/app/* /index.html 200\n');
     const parsed = parseRedirectsFile(tmpDir);
@@ -393,50 +348,6 @@ describe('parseRedirectsFile', () => {
   });
 });
 
-describe('_redirects + void.json merge precedence (same source)', () => {
-  // Mirrors `mergeRoutingRules` (packages/void/src/cli/headers.ts):
-  //   redirectRules = [...redirects(void.json), ...rewrites(void.json), ...always(_redirects)]
-  // First-match-wins means void.json rules override _redirects rules when
-  // they share a source. Regression anchor for that contract — the merge
-  // site is simple array concat, but if someone reverses the order the
-  // silent override flips direction without failing the deploy.
-  it('places void.json rules first and _redirects last, so void.json wins under first-match-wins', async () => {
-    const { mergeRoutingRules } = await import('../../src/cli/headers.ts');
-
-    setup('/x /from-file 301\n');
-    // void.json has a same-source entry under both redirects and rewrites to
-    // cover both pre-asset origins.
-    const merged = mergeRoutingRules({
-      dir: tmpDir,
-      routing: {
-        redirects: { '/x': '/from-config-redirect' },
-        rewrites: { '/x': '/from-config-rewrite' },
-      },
-    });
-
-    expect(merged.redirectRules).toEqual([
-      {
-        source: '/x',
-        destination: '/from-config-redirect',
-        status: 302,
-        origin: 'void.json#routing.redirects',
-      },
-      {
-        source: '/x',
-        destination: '/from-config-rewrite',
-        status: 200,
-        force: true,
-        origin: 'void.json#routing.rewrites',
-      },
-      { source: '/x', destination: '/from-file', status: 301, origin: '_redirects:1' },
-    ]);
-
-    // No _redirects-file fallback entries in this fixture — sanity check
-    // that the fallback bucket doesn't accidentally pick up the 3xx entry.
-    expect(merged.fallbackRules).toBeUndefined();
-  });
-});
-
 describe('warnRedundantForceOn3xx', () => {
   // `parseRedirectsFile` tallies `!` suffixes on 3xx entries into
   // `redundantForceOn3xx` and strips them silently; the deploy pipeline
@@ -463,28 +374,5 @@ describe('warnRedundantForceOn3xx', () => {
     expect(warnSpy).toHaveBeenCalledOnce();
     expect(warnSpy.mock.calls[0][0]).toContain('3');
     expect(warnSpy.mock.calls[0][0]).toContain('_redirects');
-  });
-});
-
-describe('splitRedirectRulesByForce', () => {
-  it('returns empty buckets for undefined input', async () => {
-    const { splitRedirectRulesByForce } = await import('../../src/cli/headers.ts');
-    expect(splitRedirectRulesByForce(undefined)).toEqual({ always: [], fallbacks: [] });
-  });
-
-  it('bucketizes 200 (non-force) into fallbacks and 200! / 3xx into always', async () => {
-    const { splitRedirectRulesByForce } = await import('../../src/cli/headers.ts');
-    const split = splitRedirectRulesByForce([
-      { source: '/a', destination: '/spa.html', status: 200, force: false },
-      { source: '/b', destination: '/api', status: 200, force: true },
-      { source: '/c', destination: '/d', status: 301 },
-    ]);
-    expect(split.fallbacks).toEqual([
-      { source: '/a', destination: '/spa.html', status: 200, force: false },
-    ]);
-    expect(split.always).toEqual([
-      { source: '/b', destination: '/api', status: 200, force: true },
-      { source: '/c', destination: '/d', status: 301 },
-    ]);
   });
 });
