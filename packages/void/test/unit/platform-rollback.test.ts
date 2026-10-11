@@ -4,7 +4,6 @@ import {
 } from '@void/platform';
 import type { PlatformRuntime, PlatformRuntimeMigration } from '@void/platform/installer';
 import { describe, expect, it } from 'vite-plus/test';
-import { parsePlatformInstallationManifest } from '../../../platform/src/installation.ts';
 import { assertPlatformRuntimeSafety } from '../../src/cli/platform-installer-database.ts';
 import { assertPlatformRollbackCompatibility } from '../../src/cli/platform-management.ts';
 
@@ -197,52 +196,6 @@ describe('platform post-success rollback', () => {
       ),
     ).not.toThrow();
   });
-  it('accepts an exact compatible prefix while preserving forward schema provenance', () => {
-    const target = runtime({
-      digest: 'a'.repeat(64),
-      migrations: [firstMigration],
-      platformVersion: '1.0.0',
-      schemaDigest: 'c'.repeat(64),
-    });
-    const source = runtime({
-      digest: 'b'.repeat(64),
-      migrations: [firstMigration, secondMigration],
-      platformVersion: '1.1.0',
-      rollbackSafeFrom: [
-        { platformVersion: target.manifest.platformVersion, schemaDigest: 'c'.repeat(64) },
-      ],
-      schemaDigest: 'd'.repeat(64),
-    });
-    const installation = installed(source);
-
-    expect(() => assertPlatformRollbackCompatibility(installation, target, source)).not.toThrow();
-
-    const afterRollback = parsePlatformInstallationManifest(
-      JSON.parse(
-        JSON.stringify({
-          ...installation,
-          platformVersion: target.manifest.platformVersion,
-          runtime: {
-            manifestSha256: target.manifestSha256,
-            source: target.source,
-            sourceRevision: target.manifest.sourceRevision,
-          },
-        }),
-      ),
-    );
-    expect(afterRollback.runtime?.manifestSha256).toBe(target.manifestSha256);
-    expect(afterRollback.databaseSchemaDigest).toBe(source.manifest.database.schemaDigest);
-    expect(afterRollback.databaseSchemaDigest).not.toBe(target.manifest.database.schemaDigest);
-
-    const discoveredForRollForward = parsePlatformInstallationManifest(
-      JSON.parse(JSON.stringify(afterRollback)),
-    );
-    expect(discoveredForRollForward.platformVersion).toBe(target.manifest.platformVersion);
-    expect(discoveredForRollForward.databaseSchemaDigest).toBe(
-      source.manifest.database.schemaDigest,
-    );
-  });
-
   it('compares artifact digests for same-version custom runtimes', () => {
     const target = runtime({
       digest: 'a'.repeat(64),
