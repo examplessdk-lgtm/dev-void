@@ -1,9 +1,22 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it, vi } from 'vite-plus/test';
 import {
   applyMySqlMigrations,
   readMySqlAppliedMigrations,
   type MySqlClient,
 } from '../../src/migrations/runner-mysql.ts';
+import { createMigrationHandler } from '../../src/runtime/migration-handler-mysql.ts';
+
+const mysqlQueries = vi.hoisted(() => [] as Array<string>);
+
+vi.mock('mysql2/promise', () => ({
+  createConnection: async () => ({
+    query: async (sql: string) => {
+      mysqlQueries.push(sql);
+      return [[]];
+    },
+    end: async () => {},
+  }),
+}));
 
 describe('MySQL migration runner', () => {
   it('applies only pending migrations and records them with MySQL placeholders', async () => {
@@ -57,5 +70,38 @@ describe('MySQL migration runner', () => {
       },
     };
     await expect(readMySqlAppliedMigrations(denied)).rejects.toBe(permissionError);
+  });
+
+  it('runs each drizzle statement-breakpoint chunk as its own query', async () => {
+    const sql =
+      'CREATE TABLE `a` (`id` int);\n--> statement-breakpoint\nCREATE INDEX `a_id_idx` ON `a` (`id`);';
+    const statements = ['CREATE TABLE `a` (`id` int);', 'CREATE INDEX `a_id_idx` ON `a` (`id`);'];
+    const migrationQueries = (queries: Array<string>) =>
+      queries.filter((query) => !query.includes('_void_migrations'));
+
+    const calls: Array<string> = [];
+    const client: MySqlClient = {
+      async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
+        query: string,
+      ): Promise<T> {
+        calls.push(query);
+        return [] as unknown as T;
+      },
+    };
+    await applyMySqlMigrations(client, [{ name: '001_init.sql', sql }]);
+    expect(migrationQueries(calls)).toEqual(statements);
+
+    const handler = createMigrationHandler(
+      { HYPERDRIVE: { connectionString: 'mysql://localhost/app' }, __VOID_PROXY_TOKEN: 'token' },
+      [{ name: '001_init.sql', sql }],
+    );
+    const response = await handler(
+      new Request('http://localhost/__void/migrate', {
+        method: 'POST',
+        headers: { 'x-void-internal': 'token' },
+      }),
+    );
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(migrationQueries(mysqlQueries)).toEqual(statements);
   });
 });

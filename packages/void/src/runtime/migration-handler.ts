@@ -711,7 +711,7 @@ async function recordLegacyMigration(db: D1Database, name: string): Promise<void
     .run();
 }
 
-function splitMigrationSql(sql: string): Array<string> {
+export function splitMigrationSql(sql: string): Array<string> {
   const lines = sql.split(/\r?\n/);
   if (
     !lines.some((line) => isStatementBreakpointLine(line) || hasInlineStatementBreakpoint(line))
