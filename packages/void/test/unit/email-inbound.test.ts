@@ -2640,7 +2640,7 @@ describe('end-to-end: envelope → handler → action queue', () => {
     });
     await expect(dispatchToHandler(makeEnvelope(), handler)).rejects.toMatchObject({
       code: 'INVALID_TO',
-      message: `to: address is ${over.length} characters, over the 320-character limit.`,
+      message: `to address is ${over.length} characters, over the 320-character limit.`,
     });
   });
 

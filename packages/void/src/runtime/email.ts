@@ -777,7 +777,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     return err(
       'BINDING_MISSING',
       'email: neither SEND_EMAIL nor __VOID_PROXY is available, so nothing was sent. Deploy via Void to bind the platform proxy, ' +
-        'or set `email.from` in void.config.ts so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
+        'or set `email.from` in void.json so `void deploy --platform cloudflare` provisions the SEND_EMAIL binding. ' +
         'Under `void dev` messages are captured by the local inbox at /__void/inbox instead — reaching this error there means ' +
         'that path was bypassed (`sendInDev: true`, which does not deliver: `void dev` binds no send transport at all, so there is ' +
         'nothing to fall through to) or unavailable (the worker has no assets binding to reach the dev server through).',

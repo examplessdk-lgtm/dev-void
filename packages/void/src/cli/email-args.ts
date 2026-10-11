@@ -53,6 +53,8 @@ export interface EmailArgs {
   domainVerb?: EmailDomainVerb;
   /** The domain positional of a domain verb (absent for `domain list`). */
   domain?: string;
+  /** `--subdomain` on `domain add`, which the command refuses. */
+  subdomain?: string;
   projectSlug?: string;
   limit?: number;
   address?: string;
@@ -95,7 +97,7 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   // is valid (the same rule as `void deploy`).
   const projectValues: Array<string> = [];
   const platformValues: Array<string> = [];
-  let subdomain = false;
+  const subdomainValues: Array<string> = [];
   const positional: Array<string> = [];
 
   const rest = args.slice(1);
@@ -132,9 +134,12 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     } else if (rest[i] === '--backend' || rest[i]?.startsWith('--backend=')) {
       throw new Error("email: Unknown option '--backend'.");
     } else if (rest[i] === '--subdomain' || rest[i]?.startsWith('--subdomain=')) {
-      // Always refused below; skip its value so it is not read as the domain verb.
-      subdomain = true;
-      i = readFlagValue(rest, i, '--subdomain').next;
+      const { value, next } = readFlagValue(rest, i, '--subdomain');
+      if (value === undefined || value.trim() === '') {
+        throw new Error('email: --subdomain requires a value (a subdomain label or host).');
+      }
+      subdomainValues.push(value);
+      i = next;
     } else {
       positional.push(rest[i]);
     }
@@ -157,6 +162,10 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     }
     platform = platformValue;
   }
+  if (subdomainValues.length > 1) {
+    throw new Error('email: --subdomain can only be specified once.');
+  }
+  const subdomain = subdomainValues[0];
 
   // The `domain` group parses its own positionals (verb + domain); the one-positional
   // rule below would read the verb as the address.
@@ -168,7 +177,7 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     }
     return parseEmailDomainArgs(positional, { projectSlug, limit, platform, subdomain });
   }
-  if (subdomain) {
+  if (subdomain !== undefined) {
     throw new Error(SUBDOMAIN_ADD_ONLY);
   }
 
@@ -217,7 +226,7 @@ function parseEmailDomainArgs(
     projectSlug?: string;
     limit?: number;
     platform?: EmailArgs['platform'];
-    subdomain: boolean;
+    subdomain?: string;
   },
 ): EmailArgs {
   const verb = positional[0];
@@ -226,12 +235,8 @@ function parseEmailDomainArgs(
       'email: Usage: void email domain <add|status|list|sync|rotate-secret|remove> [<domain>] [--project <name>].',
     );
   }
-  if (flags.subdomain) {
-    throw new Error(
-      verb === 'add'
-        ? 'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.'
-        : SUBDOMAIN_ADD_ONLY,
-    );
+  if (flags.subdomain !== undefined && verb !== 'add') {
+    throw new Error(SUBDOMAIN_ADD_ONLY);
   }
   const domain = positional[1];
   if (verb === 'list') {
@@ -253,6 +258,7 @@ function parseEmailDomainArgs(
     subcommand: 'domain',
     domainVerb: verb as EmailDomainVerb,
     domain,
+    subdomain: flags.subdomain,
     projectSlug: flags.projectSlug,
     limit: flags.limit,
     platform: flags.platform,

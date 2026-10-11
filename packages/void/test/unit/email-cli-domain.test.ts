@@ -285,6 +285,17 @@ describe('emailDomainAdd', () => {
     expect(api.addEmailDomain).not.toHaveBeenCalled();
   });
 
+  it('refuses --subdomain before any credential prompt', async () => {
+    const api = client();
+    const deps = addDeps();
+    await expect(emailDomainAdd(api, 'prj_1', 'acme.com', deps, 'notifications')).rejects.toThrow(
+      'exit 1',
+    );
+    expect(printed(errorSpy)).toContain('Omit --subdomain');
+    expect(deps.openUrl).not.toHaveBeenCalled();
+    expect(api.addEmailDomain).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid domains before opening a browser', async () => {
     const api = client();
     const deps = addDeps();

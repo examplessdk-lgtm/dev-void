@@ -149,6 +149,16 @@ describe('mergeBindings email config (void dev)', () => {
     expect((result.vars as Record<string, string> | undefined)?.__VOID_EMAIL_FROM).toBeUndefined();
   });
 
+  it('strips send_email under serve even when email.from is unset', async () => {
+    const root = createProjectRoot();
+    const resolved = { send_email: [{ name: 'SEND_EMAIL' }] };
+
+    const result = await resolveCloudflareConfig(root, resolved, SERVE);
+
+    expect('send_email' in resolved).toBe(false);
+    expect('send_email' in result).toBe(false);
+  });
+
   it('leaves a SEND_EMAIL entry alone when the app does not import void/email', async () => {
     const root = createProjectRoot({}, { usesVoidEmail: false });
     const resolved = { send_email: [{ name: 'SEND_EMAIL' }] };

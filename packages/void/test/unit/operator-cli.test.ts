@@ -480,6 +480,81 @@ describe('operator argument and help coverage', () => {
       query: { project: 'app', page: '2', limit: '10' },
     });
   });
+  it('routes the email domain verbs', () => {
+    expect(
+      parseOperatorArgs([
+        'email',
+        'shared-recipient-resolve',
+        'erec/id',
+        '--ended',
+        '--outcome',
+        'not-applied',
+        '--reason',
+        'Provider audit confirms absence',
+        '--yes',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/shared-recipients/erec%2Fid/resolve',
+      body: { ended: true, outcome: 'not-applied', reason: 'Provider audit confirms absence' },
+      yes: true,
+    });
+    expect(parseOperatorArgs(['email', 'domains', '--project', 'hr-portal'])).toMatchObject({
+      method: 'GET',
+      path: '/email/domains',
+      query: { project: 'hr-portal' },
+    });
+    expect(
+      parseOperatorArgs([
+        'email',
+        'domain-add',
+        'mail.example.com',
+        '--project',
+        'hr-portal',
+        '--token-stdin',
+        '--yes',
+      ]),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/domains',
+      body: { domain: 'mail.example.com', project: 'hr-portal' },
+      tokenStdin: true,
+      yes: true,
+    });
+    expect(parseOperatorArgs(['email', 'domain-status', 'mail.example.com'])).toMatchObject({
+      method: 'GET',
+      path: '/email/domains/mail.example.com',
+    });
+    expect(parseOperatorArgs(['email', 'domain-sync', 'mail.example.com'])).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/sync',
+      body: {},
+    });
+    expect(parseOperatorArgs(['email', 'domain-rotate-secret', 'mail.example.com'])).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/rotate-secret',
+      body: {},
+    });
+    expect(parseOperatorArgs(['email', 'domain-remove', 'mail.example.com']).body).toEqual({});
+    expect(
+      parseOperatorArgs(['email', 'domain-remove', 'mail.example.com', '--token-stdin', '--yes']),
+    ).toMatchObject({
+      method: 'POST',
+      path: '/email/domains/mail.example.com/remove',
+      body: {},
+      tokenStdin: true,
+      yes: true,
+    });
+    expect(() => parseOperatorArgs(['email', 'domain-remove', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
+    expect(() => parseOperatorArgs(['email', 'domain-sync', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
+    expect(() => parseOperatorArgs(['email', 'domain-add', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
+  });
   it.each([
     ['user', 'list', '--limit', '101'],
     ['user', 'list', '--page', '1e3'],

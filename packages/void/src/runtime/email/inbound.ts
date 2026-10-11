@@ -18,6 +18,7 @@ import { getRawRuntimeEnv } from '../env-raw.ts';
 import {
   buildMime,
   indexOfControl,
+  MAX_ADDRESS_LENGTH,
   MimeError,
   normalizeEmail,
   validateAddressParts,
@@ -234,6 +235,13 @@ function queueFull(): MimeError {
   return new MimeError(
     'MIME_ERROR',
     `email: handler queued more than ${MAX_ACTIONS} actions for one message.`,
+  );
+}
+
+function addressTooLong(field: 'from' | 'to', length: number): MimeError {
+  return new MimeError(
+    field === 'from' ? 'INVALID_FROM' : 'INVALID_TO',
+    `${field} address is ${length} characters, over the ${MAX_ADDRESS_LENGTH}-character limit.`,
   );
 }
 
@@ -486,6 +494,9 @@ export function createMessageProxy(
         return;
       }
       assertQueueHasRoom();
+      if (to.length > MAX_ADDRESS_LENGTH) {
+        throw addressTooLong('to', to.length);
+      }
       validateAddressParts('to', to);
       // `Headers` lowercases names; a plain record keeps the caller's casing.
       let headersObj: Record<string, string> | undefined;
@@ -526,6 +537,12 @@ export function createMessageProxy(
       }
       // Everything cheap first, so a doomed reply never buffers its stream.
       assertQueueHasRoom();
+      if (reply.from.length > MAX_ADDRESS_LENGTH) {
+        throw addressTooLong('from', reply.from.length);
+      }
+      if (reply.to.length > MAX_ADDRESS_LENGTH) {
+        throw addressTooLong('to', reply.to.length);
+      }
       // A hand-built `{ from, to, raw }` bypasses `normalizeEmail`.
       validateAddressParts('from', reply.from);
       validateAddressParts('to', reply.to);
