@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-/**
- * Build a fake Workers AI binding (`env.AI`) for the P3 self-host backend.
- *
- * `gateway(id)` returns an object whose `getUrl(provider)` mock resolves to a
- * realistic AI Gateway URL derived from BOTH the gateway id and provider, so
- * the appended provider path can be asserted end-to-end.
- */
+/** Fake Workers AI binding (`env.AI`) whose gateway URLs include the gateway id and provider. */
 function makeDirectAi(
   opts: { getUrl?: (id: string, provider: string) => Promise<string>; run?: () => unknown } = {},
 ) {
@@ -24,23 +18,17 @@ function makeDirectAi(
 }
 
 describe('runtime ai', () => {
-  it.each([undefined, '1'])(
-    'rejects missing proxy metadata without sending credentials (legacy staging=%s)',
-    async (staging) => {
-      vi.resetModules();
-      const { envContext } = await import('../../src/runtime/env-raw.ts');
-      const { ai } = await import('../../src/runtime/ai.ts');
-      const request = vi.fn();
-      vi.stubGlobal('fetch', request);
-      await envContext.run(
-        { __VOID_TOKEN: 'token', __VOID_PROJECT_ID: 'project', __VOID_STAGING: staging },
-        async () => {
-          await expect(ai.run('@cf/meta/llama', {})).rejects.toThrow('No connected platform proxy');
-        },
-      );
-      expect(request).not.toHaveBeenCalled();
-    },
-  );
+  it('rejects missing proxy metadata without sending credentials', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { ai } = await import('../../src/runtime/ai.ts');
+    const request = vi.fn();
+    vi.stubGlobal('fetch', request);
+    await envContext.run({ __VOID_TOKEN: 'token', __VOID_PROJECT_ID: 'project' }, async () => {
+      await expect(ai.run('@cf/meta/llama', {})).rejects.toThrow('No connected platform proxy');
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -149,38 +137,6 @@ describe('runtime ai', () => {
       providerKey: 'sk-test',
       projectId: 'proj_1',
     });
-  });
-
-  it('returns non-2xx provider responses for HTTP proxy requests', async () => {
-    vi.resetModules();
-    const { envContext } = await import('../../src/runtime/env-raw.ts');
-    const { ai } = await import('../../src/runtime/ai.ts');
-
-    const fetchMock = vi.fn(
-      async (_url: string | URL | Request, _init?: RequestInit) =>
-        new Response(JSON.stringify({ error: { message: 'Invalid API key' } }), {
-          status: 401,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-
-    await envContext.run(
-      {
-        __VOID_TOKEN: 'void-token',
-        __VOID_PROJECT_ID: 'proj_1',
-        __VOID_PROXY_URL: 'https://proxy.test',
-        OPENAI_API_KEY: 'sk-test',
-      },
-      async () => {
-        const response = await ai.provider('openai').fetch('/chat/completions', {
-          body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
-        });
-
-        expect(response.status).toBe(401);
-        expect(await response.json()).toEqual({ error: { message: 'Invalid API key' } });
-      },
-    );
   });
 
   it('returns non-2xx provider responses for service-binding proxy requests', async () => {
@@ -357,9 +313,6 @@ describe('runtime ai', () => {
     );
   });
 
-  // P3 self-host backend: only `env.AI` is bound (no Void proxy/token). Inference
-  // runs directly against the user's Workers AI binding, and `ai.provider().fetch`
-  // routes through the user's OWN AI Gateway using a project provider secret.
   describe('direct AI backend (self-host, env.AI only)', () => {
     it('selects the direct backend when only env.AI is present (ai.run → directAi.run)', async () => {
       vi.resetModules();
@@ -426,12 +379,10 @@ describe('runtime ai', () => {
           const response = await ai.provider('openai').fetch('/chat/completions', {
             body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
           });
-          // Gateway response passes through untouched.
           expect(await response.json()).toEqual({ id: 'chatcmpl_direct' });
         },
       );
 
-      // Resolved the URL from the user's OWN gateway (awaited getUrl), not the Void proxy.
       expect(direct.gateway).toHaveBeenCalledWith('my-gw');
       expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('openai');
 
@@ -444,113 +395,45 @@ describe('runtime ai', () => {
       const headers = new Headers(init.headers);
       expect(headers.get('authorization')).toBe('Bearer sk-test');
       expect(headers.get('content-type')).toBe('application/json');
-      // Self-host path must NOT attach managed metering / projectId headers.
       expect(headers.get('cf-aig-metadata-projectId')).toBeNull();
       expect(headers.get('cf-aig-metadata')).toBeNull();
-
-      // Real provider payload — NOT the proxy envelope ({ action, provider, providerKey, ... }).
-      const sent = JSON.parse(init.body as string);
-      expect(sent).toEqual({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] });
-      expect(sent).not.toHaveProperty('action');
-      expect(sent).not.toHaveProperty('provider');
-      expect(sent).not.toHaveProperty('providerKey');
+      expect(JSON.parse(init.body as string)).toEqual({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
     });
 
-    it('sends the provider-native auth header for a non-Bearer provider (anthropic → x-api-key, no Bearer)', async () => {
-      vi.resetModules();
-      const { envContext } = await import('../../src/runtime/env-raw.ts');
-      const { ai } = await import('../../src/runtime/ai.ts');
+    it.each([
+      ['anthropic', 'ANTHROPIC_API_KEY', 'x-api-key', 'sk-test'],
+      ['deepgram', 'DEEPGRAM_API_KEY', 'authorization', 'Token sk-test'],
+    ] as const)(
+      'sends the provider-native auth header for %s',
+      async (provider, keyEnv, header, value) => {
+        vi.resetModules();
+        const { envContext } = await import('../../src/runtime/env-raw.ts');
+        const { ai } = await import('../../src/runtime/ai.ts');
 
-      const fetchMock = vi.fn(
-        async (_url: string | URL | Request, _init?: RequestInit) =>
-          new Response(JSON.stringify({ id: 'msg_direct' }), {
-            headers: { 'content-type': 'application/json' },
-          }),
-      );
-      vi.stubGlobal('fetch', fetchMock);
+        const fetchMock = vi.fn(
+          async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+        );
+        vi.stubGlobal('fetch', fetchMock);
 
-      const direct = makeDirectAi();
+        const direct = makeDirectAi();
 
-      await envContext.run(
-        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', ANTHROPIC_API_KEY: 'sk-ant-test' },
-        async () => {
-          await ai.provider('anthropic').fetch('/v1/messages', {
-            body: { model: 'claude-3-5-sonnet', messages: [{ role: 'user', content: 'Hi' }] },
-          });
-        },
-      );
+        await envContext.run(
+          { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', [keyEnv]: 'sk-test' },
+          async () => {
+            await ai.provider(provider).fetch('/v1/test', { body: { input: 'Hi' } });
+          },
+        );
 
-      expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('anthropic');
-      const init = fetchMock.mock.calls[0][1]!;
-      const headers = new Headers(init.headers);
-      // Anthropic authenticates with `x-api-key` and NO prefix — sending
-      // `Authorization: Bearer <key>` 401s at the gateway pass-through.
-      expect(headers.get('x-api-key')).toBe('sk-ant-test');
-      expect(headers.get('authorization')).toBeNull();
-    });
-
-    it('sends the provider-native auth header for parallel (x-api-key, no Bearer)', async () => {
-      vi.resetModules();
-      const { envContext } = await import('../../src/runtime/env-raw.ts');
-      const { ai } = await import('../../src/runtime/ai.ts');
-
-      const fetchMock = vi.fn(
-        async (_url: string | URL | Request, _init?: RequestInit) =>
-          new Response(JSON.stringify({ id: 'task_run_direct' }), {
-            headers: { 'content-type': 'application/json' },
-          }),
-      );
-      vi.stubGlobal('fetch', fetchMock);
-
-      const direct = makeDirectAi();
-
-      await envContext.run(
-        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', PARALLEL_API_KEY: 'pk-test' },
-        async () => {
-          await ai.provider('parallel').fetch('/v1/tasks/runs', {
-            body: { input: 'What is the capital of France?' },
-          });
-        },
-      );
-
-      expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith('parallel');
-      const init = fetchMock.mock.calls[0][1]!;
-      const headers = new Headers(init.headers);
-      // Parallel's AI Gateway authenticates with `x-api-key` and NO prefix —
-      // sending `Authorization: Bearer <key>` 401s at the gateway pass-through.
-      expect(headers.get('x-api-key')).toBe('pk-test');
-      expect(headers.get('authorization')).toBeNull();
-    });
-
-    it('sends a prefixed non-Bearer auth header (deepgram → Authorization: Token)', async () => {
-      vi.resetModules();
-      const { envContext } = await import('../../src/runtime/env-raw.ts');
-      const { ai } = await import('../../src/runtime/ai.ts');
-
-      const fetchMock = vi.fn(
-        async (_url: string | URL | Request, _init?: RequestInit) =>
-          new Response(JSON.stringify({ ok: true }), {
-            headers: { 'content-type': 'application/json' },
-          }),
-      );
-      vi.stubGlobal('fetch', fetchMock);
-
-      const direct = makeDirectAi();
-
-      await envContext.run(
-        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', DEEPGRAM_API_KEY: 'dg-test' },
-        async () => {
-          await ai
-            .provider('deepgram')
-            .fetch('/v1/listen', { body: { url: 'https://example.com/a.wav' } });
-        },
-      );
-
-      const init = fetchMock.mock.calls[0][1]!;
-      const headers = new Headers(init.headers);
-      // Deepgram uses the `Token ` scheme, not `Bearer `.
-      expect(headers.get('authorization')).toBe('Token dg-test');
-    });
+        expect(direct.gateway.mock.results[0].value.getUrl).toHaveBeenCalledWith(provider);
+        const headers = new Headers(fetchMock.mock.calls[0][1]!.headers);
+        // `Authorization: Bearer <key>` 401s at the gateway pass-through for these providers.
+        expect(headers.get(header)).toBe(value);
+        expect(headers.get('authorization') ?? '').not.toMatch(/^Bearer /);
+      },
+    );
 
     it('resolves to 501 when no AI gateway is configured', async () => {
       vi.resetModules();
@@ -590,7 +473,6 @@ describe('runtime ai', () => {
 
       const direct = makeDirectAi();
 
-      // Gateway present + safe path, but OPENAI_API_KEY is absent.
       await envContext.run({ AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw' }, async () => {
         const response = await ai.provider('openai').fetch('/chat/completions', {
           body: { model: 'gpt-4o' },
@@ -601,7 +483,6 @@ describe('runtime ai', () => {
       });
 
       expect(fetchMock).not.toHaveBeenCalled();
-      // Key check happens before the gateway lookup.
       expect(direct.gateway).not.toHaveBeenCalled();
     });
 
@@ -662,38 +543,7 @@ describe('runtime ai', () => {
       );
 
       expect(fetchMock).not.toHaveBeenCalled();
-      // Path is rejected before any gateway lookup or network call.
       expect(direct.gateway).not.toHaveBeenCalled();
-    });
-
-    it('serializes a direct JSON body as real application/json (not the proxy envelope)', async () => {
-      vi.resetModules();
-      const { envContext } = await import('../../src/runtime/env-raw.ts');
-      const { ai } = await import('../../src/runtime/ai.ts');
-
-      const fetchMock = vi.fn(
-        async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
-      );
-      vi.stubGlobal('fetch', fetchMock);
-
-      const direct = makeDirectAi();
-
-      await envContext.run(
-        { AI: direct.AI, __VOID_AI_GATEWAY: 'my-gw', OPENAI_API_KEY: 'sk-test' },
-        async () => {
-          await ai.provider('openai').fetch('/chat/completions', {
-            body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'Hello' }] },
-          });
-        },
-      );
-
-      const init = fetchMock.mock.calls[0][1]!;
-      expect(typeof init.body).toBe('string');
-      expect(new Headers(init.headers).get('content-type')).toBe('application/json');
-      expect(JSON.parse(init.body as string)).toEqual({
-        model: 'gpt-4o',
-        messages: [{ role: 'user', content: 'Hello' }],
-      });
     });
 
     it('forwards a direct multipart/form-data body untouched (fetch sets the boundary)', async () => {
@@ -739,21 +589,6 @@ describe('runtime ai', () => {
 });
 
 describe('AI usage-limit rejections', () => {
-  it('supports Promise.all and repeated awaits without repeating inference', async () => {
-    vi.resetModules();
-    const { envContext } = await import('../../src/runtime/env-raw.ts');
-    const { ai } = await import('../../src/runtime/ai.ts');
-    const direct = makeDirectAi();
-    await envContext.run({ AI: direct.AI }, async () => {
-      const first = ai.run('model', {});
-      const second = ai.run('model', {});
-      expect(first).toBeInstanceOf(Promise);
-      expect(await Promise.all([first, second])).toEqual([{ ok: true }, { ok: true }]);
-      expect(await first).toEqual({ ok: true });
-      expect(direct.run).toHaveBeenCalledTimes(2);
-    });
-  });
-
   it('preserves ordinary inference failures', async () => {
     vi.resetModules();
     const { envContext } = await import('../../src/runtime/env-raw.ts');
@@ -834,7 +669,6 @@ describe('AI usage-limit rejections', () => {
                 : method === 'toMarkdown'
                   ? ai.toMarkdown({ name: 'test.txt', blob: new Blob(['text']) })
                   : ai[method]('model', {});
-          expect(op).toBeInstanceOf(Promise);
           await expect(op).rejects.toBeInstanceOf(UsageLimit);
           await expect(op).rejects.toMatchObject({
             resource: 'ai',

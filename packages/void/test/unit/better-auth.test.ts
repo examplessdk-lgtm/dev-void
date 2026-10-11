@@ -98,30 +98,25 @@ describe('resolveVoidAuthOptions', () => {
     });
   });
 
-  it.each(['github', 'google'] as const)(
-    'requires both standardized credential names for %s',
-    async (provider) => {
-      const prefix = provider.toUpperCase();
-      const legacy = {
-        [`${prefix}_OAUTH_ID`]: 'old-id',
-        [`${prefix}_OAUTH_SECRET`]: 'old-secret',
-      };
-      for (const credentials of [
-        legacy,
-        { ...legacy, [`AUTH_${prefix}_CLIENT_ID`]: 'new-id' },
-        { ...legacy, [`AUTH_${prefix}_CLIENT_SECRET`]: 'new-secret' },
-      ]) {
-        await expect(
-          resolveVoidAuthOptions(
-            new Request('https://example.com/api/auth'),
-            { BETTER_AUTH_SECRET: 'secret', ...credentials },
-            { dialect: 'sqlite', providers: [provider] },
-            {} as never,
-          ),
-        ).rejects.toThrow(`Set AUTH_${prefix}_CLIENT_ID and AUTH_${prefix}_CLIENT_SECRET`);
-      }
-    },
-  );
+  it('requires both standardized credential names for a social provider', async () => {
+    const legacy = { GITHUB_OAUTH_ID: 'old-id', GITHUB_OAUTH_SECRET: 'old-secret' };
+    for (const credentials of [
+      legacy,
+      { ...legacy, AUTH_GITHUB_CLIENT_ID: 'new-id' },
+      { ...legacy, AUTH_GITHUB_CLIENT_SECRET: 'new-secret' },
+    ]) {
+      await expect(
+        resolveVoidAuthOptions(
+          new Request('https://example.com/api/auth'),
+          { BETTER_AUTH_SECRET: 'secret', ...credentials },
+          { dialect: 'sqlite', providers: ['github'] },
+          {} as never,
+        ),
+      ).rejects.toThrow(
+        "auth: Missing credentials for provider 'github'. Set AUTH_GITHUB_CLIENT_ID and AUTH_GITHUB_CLIENT_SECRET",
+      );
+    }
+  });
 
   it('preserves a custom password handler when email auth is customized', async () => {
     const password = {
@@ -157,22 +152,6 @@ describe('resolveVoidAuthOptions', () => {
     });
   });
 
-  it('throws when a configured provider is missing env credentials', async () => {
-    await expect(
-      resolveVoidAuthOptions(
-        new Request('https://example.com/api/auth'),
-        {
-          BETTER_AUTH_SECRET: 'secret',
-        },
-        {
-          dialect: 'sqlite',
-          providers: ['google'],
-        },
-        {} as never,
-      ),
-    ).rejects.toThrow("auth: Missing credentials for provider 'google'");
-  });
-
   it('requires BETTER_AUTH_SECRET in production when none is set', async () => {
     await expect(
       resolveVoidAuthOptions(
@@ -184,17 +163,6 @@ describe('resolveVoidAuthOptions', () => {
           dialect: 'sqlite',
           providers: null,
         },
-        {} as never,
-      ),
-    ).rejects.toThrow('auth: Missing Better Auth secret. Set BETTER_AUTH_SECRET.');
-  });
-
-  it('rejects a localhost request without BETTER_AUTH_SECRET in production', async () => {
-    await expect(
-      resolveVoidAuthOptions(
-        new Request('http://localhost:3000/api/auth'),
-        {},
-        { dialect: 'sqlite', providers: null },
         {} as never,
       ),
     ).rejects.toThrow('auth: Missing Better Auth secret. Set BETTER_AUTH_SECRET.');

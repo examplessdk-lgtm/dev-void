@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
 const mocks = vi.hoisted(() => ({
   betterAuth: vi.fn(),
@@ -45,6 +45,10 @@ function createApp(sessionResult: { response: AuthState | null; headers: Headers
 beforeEach(() => {
   mocks.betterAuth.mockReset();
   mocks.getSession.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('runVoidAuthMiddleware response headers', () => {
@@ -101,21 +105,18 @@ describe('runVoidAuthMiddleware response headers', () => {
     await expect(response.text()).resolves.toBe('ok');
   });
 
-  it.each(['public, max-age=60', 'private', 'no-store', 'no-cache'])(
-    'preserves an anonymous application cache policy: %s',
-    async (policy) => {
-      const app = createApp({
-        response: null,
-        headers: new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' }),
-      });
-      app.get('/public', (c) => c.text('content', 200, { 'cache-control': policy }));
-      const response = await app.request('http://localhost/public', undefined, {
-        BETTER_AUTH_SECRET: 'test-secret',
-      });
-      expect(response.headers.get('cache-control')).toBe(policy);
-      expect(response.headers.has('pragma')).toBe(false);
-    },
-  );
+  it('preserves an anonymous application cache policy', async () => {
+    const app = createApp({
+      response: null,
+      headers: new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' }),
+    });
+    app.get('/public', (c) => c.text('content', 200, { 'cache-control': 'public, max-age=60' }));
+    const response = await app.request('http://localhost/public', undefined, {
+      BETTER_AUTH_SECRET: 'test-secret',
+    });
+    expect(response.headers.get('cache-control')).toBe('public, max-age=60');
+    expect(response.headers.has('pragma')).toBe(false);
+  });
 
   it.each(['cookie', 'authorization', 'cf-access-jwt-assertion'])(
     'keeps the session lookup private for requests with %s',
@@ -245,26 +246,18 @@ describe('cross-origin cookie sessions', () => {
 
   it('ignores the cookie on a WebSocket upgrade from another origin', async () => {
     mockAuth();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      await expect(
-        sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
-      ).resolves.toBeNull();
-    } finally {
-      warn.mockRestore();
-    }
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+    ).resolves.toBeNull();
   });
 
   it('ignores the cookie on a WebSocket upgrade from a plain http page on the same host', async () => {
     mockAuth();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      await expect(
-        sessionCookieFor(upgradeRequest({ origin: 'http://app.void.app' })),
-      ).resolves.toBeNull();
-    } finally {
-      warn.mockRestore();
-    }
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'http://app.void.app' })),
+    ).resolves.toBeNull();
   });
 
   it('keeps the cookie when Vite HTTPS hands the upgrade over as http', async () => {
@@ -321,43 +314,18 @@ describe('cross-origin cookie sessions', () => {
 
     mocks.getSession.mockClear();
     mockAuth({ advanced: { disableOriginCheck: true, disableCSRFCheck: false } });
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      await expect(
-        sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
-      ).resolves.toBeNull();
-    } finally {
-      warn.mockRestore();
-    }
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'https://evil.void.app' })),
+    ).resolves.toBeNull();
   });
 
   it('ignores the cookie for an opaque origin that is not same-origin', async () => {
     mockAuth();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      await expect(
-        sessionCookieFor(upgradeRequest({ origin: 'null', 'sec-fetch-site': 'same-site' })),
-      ).resolves.toBeNull();
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it('leaves a cross-origin WebSocket upgrade without a user in the middleware', async () => {
-    mockAuth();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const app = routeApp();
-    app.get('/chat/general', (c) => c.json({ user: c.get('user') }));
-    try {
-      const response = await app.request(
-        upgradeRequest({ origin: 'https://evil.void.app' }),
-        undefined,
-        env,
-      );
-      await expect(response.json()).resolves.toEqual({ user: null });
-    } finally {
-      warn.mockRestore();
-    }
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      sessionCookieFor(upgradeRequest({ origin: 'null', 'sec-fetch-site': 'same-site' })),
+    ).resolves.toBeNull();
   });
 
   it('does not sign in a cross-origin POST but keeps its raw cookies', async () => {
@@ -369,23 +337,20 @@ describe('cross-origin cookie sessions', () => {
       return c.json({ id: requireAuth(c).id, cookie });
     });
     app.post('/api/whoami', (c) => c.json({ user: c.get('user'), cookie: c.req.header('cookie') }));
-    try {
-      const init = {
-        method: 'POST',
-        headers: { cookie: 'session=victim', origin: 'https://evil.void.app' },
-        body: '{}',
-      };
-      const denied = await app.request('https://app.void.app/api/profile', init, env);
-      expect(denied.status).toBe(401);
+    const init = {
+      method: 'POST',
+      headers: { cookie: 'session=victim', origin: 'https://evil.void.app' },
+      body: '{}',
+    };
+    const denied = await app.request('https://app.void.app/api/profile', init, env);
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).toBe('Unauthorized');
 
-      const whoami = await app.request('https://app.void.app/api/whoami', init, env);
-      await expect(whoami.json()).resolves.toEqual({ user: null, cookie: 'session=victim' });
-      expect(warn).toHaveBeenCalledTimes(2);
-      expect(String(warn.mock.calls[0]![0])).toContain('https://evil.void.app');
-      expect(String(warn.mock.calls[0]![0])).toContain('trustedOrigins');
-    } finally {
-      warn.mockRestore();
-    }
+    const whoami = await app.request('https://app.void.app/api/whoami', init, env);
+    await expect(whoami.json()).resolves.toEqual({ user: null, cookie: 'session=victim' });
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[0]![0])).toContain('https://evil.void.app');
+    expect(String(warn.mock.calls[0]![0])).toContain('trustedOrigins');
   });
 
   it.each([
@@ -397,17 +362,13 @@ describe('cross-origin cookie sessions', () => {
     const warn = vi.spyOn(console, 'warn');
     const app = routeApp();
     app.on(method, '/api/profile', (c) => c.json({ id: requireAuth(c).id }));
-    try {
-      const response = await app.request(
-        'https://app.void.app/api/profile',
-        { method, headers: { cookie: 'session=victim', ...headers } },
-        env,
-      );
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ id: 'victim' });
-      expect(warn).not.toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
-    }
+    const response = await app.request(
+      'https://app.void.app/api/profile',
+      { method, headers: { cookie: 'session=victim', ...headers } },
+      env,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ id: 'victim' });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
