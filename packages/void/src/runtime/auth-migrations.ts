@@ -195,7 +195,8 @@ function buildAddColumnSql(
   fieldName: string,
   field: VoidAuthMigrationField,
 ): string {
-  const ifNotExists = schema.dialect === 'sqlite' ? '' : ' IF NOT EXISTS';
+  // Only PostgreSQL accepts ADD COLUMN IF NOT EXISTS; callers check the column exists first.
+  const ifNotExists = schema.dialect === 'postgresql' ? ' IF NOT EXISTS' : '';
   return `ALTER TABLE ${quoteIdentifier(tableName, schema.dialect)} ADD COLUMN${ifNotExists} ${buildColumnDefinition(
     schema.dialect,
     schema,
@@ -350,8 +351,9 @@ export async function applyMySqlAuthMigrations(
     'SELECT DATABASE() AS database_name',
   );
   const databaseName = String(databaseRows[0]?.database_name ?? '');
+  // MySQL 8 labels unaliased information_schema columns in uppercase, so alias each one.
   const tableRows = await runner.all<{ table_name?: string }>(
-    "SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'",
+    "SELECT TABLE_NAME AS table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'",
     [databaseName],
   );
   const existingTables = new Set(tableRows.map((row) => String(row.table_name)));
@@ -361,12 +363,8 @@ export async function applyMySqlAuthMigrations(
       await runner.run(buildCreateTableSql(schema, table));
       existingTables.add(table.name);
     } else {
-      const columnRows = await runner.all<{
-        column_name?: string;
-        data_type?: string;
-        character_maximum_length?: number | string | null;
-      }>(
-        'SELECT column_name, data_type, character_maximum_length FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+      const columnRows = await runner.all<{ column_name?: string; data_type?: string }>(
+        'SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
         [databaseName, table.name],
       );
       const existingColumns = new Map(
@@ -386,7 +384,7 @@ export async function applyMySqlAuthMigrations(
     }
 
     const indexRows = await runner.all<{ index_name?: string }>(
-      'SELECT index_name FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?',
+      'SELECT INDEX_NAME AS index_name FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?',
       [databaseName, table.name],
     );
     const existingIndexes = new Set(indexRows.map((row) => String(row.index_name)));
