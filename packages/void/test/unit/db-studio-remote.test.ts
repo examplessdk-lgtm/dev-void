@@ -217,7 +217,7 @@ describe('void db studio --remote (D1)', () => {
   });
 });
 
-describe('void db studio and push (local PostgreSQL)', () => {
+describe('void db studio and push (local)', () => {
   let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
   beforeEach(async () => {
@@ -235,6 +235,29 @@ describe('void db studio and push (local PostgreSQL)', () => {
     for (const root of roots.splice(0, roots.length)) {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('local D1 studio exits when no local database exists', async () => {
+    const root = createProjectRoot();
+
+    const { log: clackLog } = await import('@voidzero-dev/vite-plus-prompts');
+
+    await expect(runDbCommand(root, { action: 'studio' })).rejects.toThrow('process.exit:1');
+
+    expect(clackLog.error).toHaveBeenCalledWith('No local database found. Run `void dev` first.');
+    expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it('local PG studio errors when .env has no DATABASE_URL', async () => {
+    const root = createProjectRoot({ database: 'pg' });
+
+    await expect(runDbCommand(root, { action: 'studio' })).rejects.toThrow(
+      'DATABASE_URL not found in .env',
+    );
+
+    expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 
   it('local PG studio passes the .env database URL through a private config', async () => {

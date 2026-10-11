@@ -1200,7 +1200,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     const { applyPgMigrations, readPgAppliedMigrations } =
       await import('../migrations/runner-pg.ts');
     const applied = await withPgClient(root, async (client) => {
-      const appliedNames = await readPgAppliedMigrations(client);
+      const appliedNames = await readPgAppliedMigrations(client).catch(() => []);
       try {
         validatePendingMigrations(rawMigrations, new Set(appliedNames));
       } catch (err: unknown) {
@@ -1227,7 +1227,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     const { applyMySqlMigrations, readMySqlAppliedMigrations } =
       await import('../migrations/runner-mysql.ts');
     const applied = await withMySqlClient(root, async (client) => {
-      const appliedNames = await readMySqlAppliedMigrations(client);
+      const appliedNames = await readMySqlAppliedMigrations(client).catch(() => []);
       try {
         validatePendingMigrations(rawMigrations, new Set(appliedNames));
       } catch (err: unknown) {
