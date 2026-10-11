@@ -1,5 +1,8 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { compile } from 'svelte/compiler';
+import { build, normalizePath, type Rolldown } from 'vite';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
 import { islandsPlugin } from '../../src/plugin-islands.ts';
 
@@ -180,20 +183,102 @@ describe('islandsPlugin — island style loader', () => {
     rmSync(TMP, { recursive: true, force: true });
   });
 
-  it('island-style loader is build-only', () => {
-    const plugin = islandsPlugin(PAGES_DIR).find(
-      (candidate) => candidate.name === 'void-svelte:islands-style',
+  it('bundles the scoped CSS of island pages and their layouts', async () => {
+    // Island pages and their layouts render only on the server, so they may
+    // import packages the client build cannot resolve.
+    const serverOnlyDir = join(TMP, 'node_modules', 'server-only-pkg');
+    mkdirSync(serverOnlyDir, { recursive: true });
+    writeFileSync(
+      join(serverOnlyDir, 'package.json'),
+      JSON.stringify({
+        name: 'server-only-pkg',
+        type: 'module',
+        exports: { '.': { node: './index.js', workerd: './index.js' } },
+      }),
     );
-    expect(plugin?.apply).toBe('build');
+    writeFileSync(join(serverOnlyDir, 'index.js'), 'export const label = "Nav";');
+    const layout = `<script>import { label } from 'server-only-pkg'; let { children } = $props();</script>
+<nav>{label}</nav>
+{@render children()}
+<style>nav { padding: 8px; }</style>`;
+    const page = `<script>import { label } from 'server-only-pkg';</script>
+<p>{label}</p>
+<style>p { color: red; } :global(body) { margin: 0; }</style>`;
+    writeFile('layout.svelte', layout);
+    writeFile('index.island.svelte', page);
 
+    const output = (await build({
+      root: TMP,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [svelte(), ...islandsPlugin(PAGES_DIR, { root: TMP })],
+      build: { write: false, rollupOptions: { external: ['void/pages-client'] } },
+    })) as Rolldown.RolldownOutput;
+    const css = output.output
+      .filter((item) => item.type === 'asset' && item.fileName.endsWith('.css'))
+      .map((item) => String((item as Rolldown.OutputAsset).source))
+      .join('');
+
+    const scopeOf = (source: string, file: string) =>
+      /svelte-[a-z0-9]+/.exec(
+        compile(source, { filename: normalizePath(join(PAGES_DIR, file)), generate: 'server' }).js
+          .code,
+      )![0];
+    expect(css).toContain(`nav.${scopeOf(layout, 'layout.svelte')}{padding:8px}`);
+    expect(css).toContain(`p.${scopeOf(page, 'index.island.svelte')}{color:red}`);
+    expect(css).toContain('body{margin:0}');
+  });
+
+  it('watches files the style preprocessor reads', async () => {
+    const partial = join(PAGES_DIR, '_theme.css');
+    writeFile('_theme.css', 'nav { padding: 8px; }');
     writeFile(
-      'Card.island.svelte',
-      `<p>Card</p>
-<style>p { color: red; }</style>
-<style lang="scss">.second { color: blue; }</style>`,
+      'layout.svelte',
+      `<script>let { children } = $props();</script>
+<nav>Nav</nav>
+{@render children()}
+<style>nav { margin: 0; }</style>`,
     );
-    const load = plugin!.load as HookWithHandler<(id: string) => string>;
-    const file = join(PAGES_DIR, 'Card.island.svelte');
-    expect(load.handler(`${file}?island-style&index=1&lang.css`)).toBe('.second { color: blue; }');
+    writeFile('index.island.svelte', '<p>Home</p>');
+
+    const watched: Array<string> = [];
+    const plugins = islandsPlugin(PAGES_DIR, { root: TMP });
+    const stylePlugin = plugins.find((plugin) => plugin.name === 'void-svelte:islands-style')!;
+    const load = stylePlugin.load as HookWithHandler<
+      (this: Rolldown.PluginContext, id: string) => unknown
+    >;
+    const handler = load.handler;
+    load.handler = function (id) {
+      const context = new Proxy(this, {
+        get(target, key) {
+          if (key === 'addWatchFile') {
+            return (file: string) => {
+              watched.push(normalizePath(file));
+              target.addWatchFile(file);
+            };
+          }
+          const value = Reflect.get(target, key, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      return handler.call(context, id);
+    };
+
+    await build({
+      root: TMP,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [
+        svelte({
+          preprocess: {
+            style: ({ content }) => ({ code: content, dependencies: [partial] }),
+          },
+        }),
+        ...plugins,
+      ],
+      build: { write: false, rollupOptions: { external: ['void/pages-client'] } },
+    });
+
+    expect(watched).toContain(normalizePath(partial));
   });
 });
