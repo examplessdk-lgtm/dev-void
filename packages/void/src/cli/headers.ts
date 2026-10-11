@@ -103,23 +103,14 @@ export function parseHeadersFile(dir: string): Array<HeaderRule> | undefined {
 }
 
 /**
- * Parse a `_redirects` file.
+ * Parse a `_redirects` file: `source destination [status]` per line (status
+ * defaults to 302, `#` starts a comment). Keeps 3xx redirects and 200 rewrites.
  *
- * Format: `source destination [status]` per line (status defaults to 302).
- * Lines starting with # are comments. Includes 3xx redirects and 200 rewrites.
- *
- * Force suffix (`!`) semantics:
- *   - On status 200: toggles `force: true` (Netlify-compat). The plain form
- *     fires only when the static asset would 404; the force form fires
- *     unconditionally, overriding any matching static asset.
- *   - On 3xx (301/302/307/308): silently stripped. A redirect always changes
- *     the URL, so `!` is redundant. We count these in `redundantForceOn3xx`
- *     so the deploy command can surface a single aggregated lint warning
- *     rather than one per line — Netlify users pasting their `_redirects`
- *     file shouldn't be punished for harmless cruft.
+ * A `!` suffix on 200 sets `force`, so the rewrite applies even when a static
+ * asset matches. On a 3xx it is a no-op, stripped and counted in
+ * `redundantForceOn3xx`.
  *
  * Returns `undefined` when the file doesn't exist or yields no valid rules.
- * Otherwise returns `{rules, redundantForceOn3xx}`.
  */
 export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
   const filePath = join(dir, '_redirects');
@@ -148,11 +139,7 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
 
     const [rawSource, destination, statusStr] = parts;
 
-    // Optional `https://host/path` prefix: split into `{ host, path }`. The
-    // resulting path replaces the source for the rest of the per-line
-    // validation; `host` (when set) flows onto the rule and is enforced at
-    // dispatch as a Host filter. Rules with malformed hosts are dropped with
-    // a warning so the rest of the file still deploys.
+    // An optional `https://host` prefix becomes a Host filter on the rule.
     const parsedSource = parseHostPrefixedSource(rawSource);
     if ('error' in parsedSource) {
       voidWarn(
@@ -162,11 +149,8 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
     }
     const { host, path: source } = parsedSource;
 
-    // The dispatch worker compiles each `*` into a `(?<splat>...)` capture
-    // group; two of them in one pattern yield a duplicate-group-name RegExp
-    // error at startup. Skip with a clear warning so other rules in the file
-    // still deploy, matching the "skip + warn" pattern used for invalid
-    // destinations below.
+    // Each `*` compiles to a `(?<splat>...)` group, and a RegExp cannot repeat
+    // a group name.
     if (countSplats(source) > 1) {
       voidWarn(
         `Skipping _redirects entry "${rawSource} ${destination}${statusStr ? ` ${statusStr}` : ''}" (line ${lineNumber}): source must contain at most one "*" wildcard (captured as :splat).`,
@@ -182,13 +166,8 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
         if (status === 200) {
           force = true;
         } else if (status >= 300 && status < 400) {
-          // `!` on a 3xx is a no-op — redirects always change the URL.
-          // Accept silently (stripping the suffix) and tally for the
-          // deploy-time aggregated lint so users can clean up if they want.
           redundantForceOn3xx++;
         }
-        // Non-200/non-3xx with `!` falls through to the status range check
-        // below, which skips non-200 non-3xx codes entirely.
       } else {
         status = parseInt(statusStr, 10);
       }
@@ -196,10 +175,8 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
       status = 302;
     }
 
-    // Include redirects (3xx) and rewrites (200). Status-200 entries are
-    // internal rewrites; proxy-style rules pointing at an external URL are
-    // not supported — skip them with a warning to match the "internal paths
-    // only" contract enforced for `routing.rewrites` in void.json.
+    // Status 200 is an internal rewrite. External (proxy) destinations are not
+    // supported, as with `routing.rewrites` in void.config.ts.
     if (status === 200) {
       if (!destination.startsWith('/')) {
         voidWarn(
@@ -239,11 +216,8 @@ export function parseRedirectsFile(dir: string): ParsedRedirects | undefined {
 }
 
 /**
- * Split parsed `_redirects` rules into "always-apply" and "asset-miss only"
- * buckets. Rules with `status: 200` and `force === false` are fallbacks — they
- * should only fire when the static asset resolver would 404. All other rules
- * (3xx redirects and forced `200!` rewrites) stay in the "always" bucket and
- * are merged with `routing.rewrites` / `routing.redirects` from void.json.
+ * Split `_redirects` rules into rules that always apply and fallbacks: unforced
+ * 200 rewrites, which apply only when no static asset matches.
  */
 export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefined): {
   always: Array<DevRedirectRule>;
@@ -265,33 +239,8 @@ export function splitRedirectRulesByForce(rules: Array<DevRedirectRule> | undefi
 }
 
 /**
- * Merge file-based rules (`_redirects`, `_headers`) in `dir` with routing
- * rules from `void.json`. Shared between the deploy pipeline and the dev
- * plugin so both surfaces produce identical rule tables.
- *
- * Ordering for routing rules (redirects/rewrites/fallbacks): `void.json`
- * rules first, then `_redirects` file rules. Because the router evaluates
- * routing rules with first-match-wins semantics, `void.json` entries
- * override `_redirects` entries for the same source — matching the
- * documented precedence (`docs/guide/edge/rewrites.md`). This holds even
- * though `_redirects` is conceptually "closer to the build output".
- *
- * Header rules use the inverse order — `_redirects`/`_headers` last —
- * because header rules are last-match-wins (`_headers` is Netlify-style
- * last-wins). The asymmetry is intentional and matches dispatch.
- *
- * Phase split:
- *   - `_redirects` `200!` (force) + 3xx entries → `redirectRules` (always-fire)
- *   - `_redirects` plain `200`           entries → `fallbackRules` (asset-miss)
- *   - `routing.redirects` + `routing.rewrites`    → `redirectRules`
- *   - `routing.fallbacks`                         → `fallbackRules`
- *
- * Returns `fallbackRules === undefined` when empty, meaning "no post-asset
- * phase".
- *
- * Duplicate linting is NOT called here (callers decide which warning surface
- * to use — CLI vs. Vite logger). `redundantForceOn3xx` is returned raw for
- * the same reason.
+ * Merge `_redirects` and `_headers` in `dir` with `routing` from void.config.ts.
+ * Deploy and dev share it so both build the same rule tables; callers lint them.
  */
 export function mergeRoutingRules(opts: {
   dir: string | null;
@@ -318,12 +267,10 @@ export function mergeRoutingRules(opts: {
   const cfgRewrites = convertRewritesConfig(routing?.rewrites);
   const cfgFallbacks = convertFallbacksConfig(routing?.fallbacks);
 
-  // Header rules: last-match-wins (mirrors `_headers` semantics). `void.json`
-  // entries are emitted last so they override `_headers` for the same pattern.
+  // Header rules are last-match-wins, so config rules go last to override `_headers`.
   const headerRules: Array<HeaderRule> = [...(fileHeaders ?? []), ...(cfgHeaders ?? [])];
-  // Routing rules: first-match-wins (mirrors `_redirects`/`vercel.json`
-  // semantics). `void.json` entries are emitted first so they override
-  // `_redirects` for the same source.
+  // Routing rules are first-match-wins, so config rules go first to override
+  // `_redirects`.
   const redirectRules: Array<DevRedirectRule> = [
     ...(cfgRedirects ?? []),
     ...(cfgRewrites ?? []),
@@ -341,20 +288,8 @@ export function mergeRoutingRules(opts: {
 }
 
 /**
- * Warn when a rule's `destination` contains a literal `*`. The platform's
- * `substituteParams` only replaces `:name` tokens (e.g. `:splat`, `:id`) —
- * bare `*` in destinations is a literal character, not a capture reference,
- * and will silently pass through to the rewritten/redirected URL.
- *
- * Users who write `/old/*` → `/new/*` almost always intended `:splat` to
- * reflect the captured portion of the source wildcard. Surface the mistake
- * with a single aggregated warning at the same surface as
- * `lintDuplicateSources` — per-phase, near the merge site — rather than
- * failing the deploy: a `*` in a destination is well-formed output, just
- * probably not what was meant.
- *
- * Only reported once per rule — the count of `*` in the destination is
- * irrelevant, a single occurrence is already suspicious.
+ * Warn about a literal `*` in a destination. Destinations substitute only
+ * `:name` params such as `:splat`, so a `*` passes through unchanged.
  */
 export function lintDestinationSplats(
   rules: Array<DevRedirectRule> | undefined,
@@ -378,24 +313,8 @@ export function lintDestinationSplats(
 }
 
 /**
- * Warn when the same `source` pattern appears more than once within a single
- * merged phase (pre-asset `redirectRules` or post-asset `fallbackRules`).
- *
- * Sources are scoped to the phase: a pattern appearing once in redirects and
- * once in fallbacks is *not* a collision, because those lists run in separate
- * phases and don't shadow each other. Within a single phase the dispatcher
- * uses first-match-wins semantics, so a duplicate silently hides the later
- * entry. This lint never fails the deploy; it surfaces the collision so the
- * user can decide whether to fix it.
- *
- * Only exact string duplicates are reported. Subset-shadow cases (e.g. `/*`
- * overshadowing `/docs`) are out of scope — pattern-aware analysis would be
- * both harder and noisier.
- *
- * Emits a single aggregated warning summarizing every duplicated source, each
- * annotated with the `origin` of every occurrence (e.g. `_redirects:12` vs
- * `void.json#routing.rewrites`). Aggregation avoids a wall of per-pair
- * warnings on configs with many collisions.
+ * Warn when one phase repeats an exact `source`: first match wins, so the later
+ * rule never applies. Phases run separately, so callers lint each one.
  */
 export function lintDuplicateSources(
   rules: Array<DevRedirectRule> | undefined,
