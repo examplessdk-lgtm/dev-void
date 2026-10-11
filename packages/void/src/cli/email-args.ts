@@ -42,6 +42,8 @@ const EMAIL_SUBCOMMANDS = [
   'setup',
 ] as const;
 
+const SUBDOMAIN_ADD_ONLY = 'email: --subdomain applies to `void email domain add` only.';
+
 const EMAIL_DOMAIN_VERBS = ['add', 'status', 'list', 'sync', 'rotate-secret', 'remove'] as const;
 type EmailDomainVerb = (typeof EMAIL_DOMAIN_VERBS)[number];
 
@@ -93,6 +95,7 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
   // is valid (the same rule as `void deploy`).
   const projectValues: Array<string> = [];
   const platformValues: Array<string> = [];
+  let subdomain = false;
   const positional: Array<string> = [];
 
   const rest = args.slice(1);
@@ -129,9 +132,9 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
     } else if (rest[i] === '--backend' || rest[i]?.startsWith('--backend=')) {
       throw new Error("email: Unknown option '--backend'.");
     } else if (rest[i] === '--subdomain' || rest[i]?.startsWith('--subdomain=')) {
-      throw new Error(
-        'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.',
-      );
+      // Always refused below; skip its value so it is not read as the domain verb.
+      subdomain = true;
+      i = readFlagValue(rest, i, '--subdomain').next;
     } else {
       positional.push(rest[i]);
     }
@@ -163,7 +166,10 @@ export function parseEmailArgs(args: Array<string>): EmailArgs {
         'email: --platform cloudflare applies to `void email status` and `void email setup` only (`domain` is a Void platform command).',
       );
     }
-    return parseEmailDomainArgs(positional, { projectSlug, limit, platform });
+    return parseEmailDomainArgs(positional, { projectSlug, limit, platform, subdomain });
+  }
+  if (subdomain) {
+    throw new Error(SUBDOMAIN_ADD_ONLY);
   }
 
   if (positional.length > 1) {
@@ -211,12 +217,20 @@ function parseEmailDomainArgs(
     projectSlug?: string;
     limit?: number;
     platform?: EmailArgs['platform'];
+    subdomain: boolean;
   },
 ): EmailArgs {
   const verb = positional[0];
   if (!verb || !(EMAIL_DOMAIN_VERBS as ReadonlyArray<string>).includes(verb)) {
     throw new Error(
       'email: Usage: void email domain <add|status|list|sync|rotate-secret|remove> [<domain>] [--project <name>].',
+    );
+  }
+  if (flags.subdomain) {
+    throw new Error(
+      verb === 'add'
+        ? 'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.'
+        : SUBDOMAIN_ADD_ONLY,
     );
   }
   const domain = positional[1];

@@ -50,6 +50,14 @@ describe('parseEmailArgs — domain group', () => {
         /requires a Cloudflare zone apex.*Omit --subdomain/,
       );
     }
+    for (const args of [
+      ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
+      ['setup', '--platform', 'cloudflare', '--subdomain', 'mail'],
+    ]) {
+      expect(() => parseEmailArgs(args)).toThrow(
+        'email: --subdomain applies to `void email domain add` only.',
+      );
+    }
   });
 
   it('errors on a missing or unknown domain verb', () => {

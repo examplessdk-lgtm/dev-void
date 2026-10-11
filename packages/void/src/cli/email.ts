@@ -486,7 +486,8 @@ export async function emailDomainAdd(
     return fail(`email: invalid domain '${rawDomain}'.`);
   }
 
-  // The local MX read only steers this message; the platform re-checks over public DNS.
+  // A foreign MX on the apex stops here; an unreadable one is left to the platform, which
+  // re-checks over public DNS.
   const dns = deps.dns ?? (await createNodeEmailDns());
   const checkApexMx = async (): Promise<void> => {
     const mx = await probeMx(dns, domain);

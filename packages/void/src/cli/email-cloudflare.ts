@@ -68,11 +68,11 @@ export interface EmailCloudflareInputs {
   /** The reconciled effective account id the deploy is pinned to. */
   accountId: string;
   /** Existing root-config `send_email` array (verbatim), if any. */
-  existingSendEmail?: Array<{ name?: unknown }> | null;
+  existingSendEmail?: Array<{ name?: unknown }>;
   /** Existing root-config top-level `addresses` array (verbatim), if any. */
   existingAddresses?: unknown;
   /** Existing root-config `vars` object (verbatim) — `__VOID_EMAIL_FROM` is compared to `from`. */
-  existingVars?: Record<string, unknown> | null;
+  existingVars?: Record<string, unknown>;
   /** Writer refusals (`findEmailConfigConflicts`); each blocks before the account changes. */
   configConflicts?: Array<string>;
   /** Number of source files calling `sendEmail()` — shown in the header line only. */
