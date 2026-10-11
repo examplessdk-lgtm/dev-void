@@ -1832,12 +1832,16 @@ async function runExport(
         }
         tables = [args.table];
       } else {
+        // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
         const rows = await client.query<Array<{ table_name: string }>>(
-          "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
+          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
         );
         tables = rows.map((row) => String(row.table_name));
       }
 
+      // Tables come out in name order with inline foreign keys, so a child
+      // table can precede its parent; restore with the checks off.
+      parts.push('SET FOREIGN_KEY_CHECKS = 0;');
       for (const table of tables) {
         const escapedTable = table.replaceAll('`', '``');
         if (!args.noSchema) {
@@ -1863,6 +1867,7 @@ async function runExport(
         }
         parts.push('');
       }
+      parts.push('SET FOREIGN_KEY_CHECKS = 1;', '');
     });
 
     const output = parts.join('\n');

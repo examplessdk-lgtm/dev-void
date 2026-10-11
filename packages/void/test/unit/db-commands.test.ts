@@ -451,6 +451,47 @@ describe('void db reset', () => {
   });
 });
 
+describe('void db export', () => {
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    }) as never);
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const root of rootsToClean.splice(0, rootsToClean.length)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('MySQL: exports every table with foreign key checks off', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-export-mysql-'));
+    rootsToClean.push(root);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      stdout += chunk.toString();
+      return true;
+    });
+
+    await runDbCommand(root, { action: 'export' });
+
+    expect(mysqlQueries).toContain('SHOW CREATE TABLE `users`');
+    expect(mysqlQueries).toContain('SELECT * FROM `users`');
+    expect(mysqlQueries.join('\n')).not.toContain('`undefined`');
+    const lines = stdout.trim().split('\n');
+    expect(lines[0]).toBe('SET FOREIGN_KEY_CHECKS = 0;');
+    expect(lines.at(-1)).toBe('SET FOREIGN_KEY_CHECKS = 1;');
+  });
+});
+
 describe('void db status', () => {
   let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
