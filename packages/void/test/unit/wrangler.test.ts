@@ -13,6 +13,7 @@ import {
   LATEST_KNOWN_COMPAT_DATE,
   readExistingLiveBindingConfig,
   readProvisionedBindingEntry,
+  readRootWranglerConfig,
   readWranglerCompat,
   readWranglerManagedQueueCleanupCandidates,
   readWranglerWebSocketTombstones,
@@ -547,6 +548,39 @@ describe('syncWranglerBindings', () => {
       { tag: 'void-durable-zeta-v1', new_sqlite_classes: ['ZetaDurableObject'] },
       { tag: 'void-durable-alpha-v1', new_sqlite_classes: ['AlphaDurableObject'] },
     ]);
+  });
+
+  it('keeps existing keys of a BOM-prefixed config when adding Durable Objects', () => {
+    setup(
+      'wrangler.jsonc',
+      '﻿' +
+        `{
+  // app
+  "name": "existing",
+  "main": "src/index.ts",
+  "routes": [{ "pattern": "example.com", "custom_domain": true }]
+}`,
+    );
+    expect(readRootWranglerConfig(tmpDir)?.config.name).toBe('existing');
+
+    const counter = {
+      filePath: join(tmpDir, 'durable-objects', 'counter.ts'),
+      bindingName: 'COUNTER',
+      className: 'CounterDurableObject',
+      migrationTag: 'void-durable-counter-v1',
+    };
+    expect(syncWranglerDurableObjects(tmpDir, [counter])).toBe(true);
+    const parsed = JSON.parse(readFileSync(join(tmpDir, 'wrangler.jsonc'), 'utf-8'));
+
+    expect(parsed).toMatchObject({
+      name: 'existing',
+      main: 'src/index.ts',
+      routes: [{ pattern: 'example.com', custom_domain: true }],
+      durable_objects: { bindings: [{ name: 'COUNTER', class_name: 'CounterDurableObject' }] },
+      migrations: [
+        { tag: 'void-durable-counter-v1', new_sqlite_classes: ['CounterDurableObject'] },
+      ],
+    });
   });
 
   it('adds live durable object and SQLite migration metadata', () => {
