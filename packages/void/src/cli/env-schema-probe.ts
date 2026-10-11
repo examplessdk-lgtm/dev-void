@@ -5,72 +5,37 @@ import { findEnvFile } from '../codegen/env-types.ts';
 import type { SelfHostSchemaFacts, SelfHostSchemaFailureReason } from './env-validation.ts';
 
 /**
- * The self-host `void deploy --platform cloudflare` orchestrator validates the REAL
- * build artifact (`dist/ssr/wrangler.json` `vars`) instead of predicting it. Two
- * pieces still need project code, and BOTH run here — in an ISOLATED SUBPROCESS —
- * because the orchestrator runs in a credential-bearing PARENT (CF Access service
- * token / `CLOUDFLARE_API_TOKEN` in `process.env`) and must NOT evaluate arbitrary
- * project code in-process:
- *
- *   1. `facts` — the env-INSENSITIVE server and required key names, fixed by
- *      env.ts's structure.
- *   2. `validate-emitted` — validate the REAL emitted worker `vars` (post-build
- *      ground truth) against the schema's Standard-Schema validators and return the
- *      FAILING key NAMES only. A required var shipped with an INVALID value (fails
- *      the validator) must fail the deploy closed before any remote mutation, not
- *      only at worker boot.
- *
- * Three hardening rules apply to the child:
- *   - the framed result is written to a DEDICATED file descriptor (fd 3), NOT
- *     stdout, so anything the user's code prints while evaluating can never
- *     truncate or interleave with the result;
- *   - the caller scrubs the FULL wrangler-auth credential set from the child env
- *     (neither derivation needs credentials);
- *   - the parent NEVER captures the child's stdout/stderr — they are IGNORED
- *     (fds 1 + 2), never buffered — so a leaking env.ts / validator cannot print a
- *     raw secret to the terminal or CI log, and every failure surfaces as a stable
- *     classification only.
+ * Runs the project's env.ts for the self-host deploy in a child process. The caller
+ * passes the build env with Cloudflare credentials removed. Two operations: `facts`
+ * (server and required key names) and `validate-emitted` (emitted vars that fail the
+ * schema). The child writes its result to fd 3 and its stdout/stderr are ignored, so
+ * user output cannot corrupt the result or print a secret into the deploy log.
+ * Anything unexpected fails closed.
  */
 
-/** argv[2] sentinel that switches this module from library import to child-process entry. */
+/** argv[2] marker that runs this module as the child. */
 const PROBE_MARKER = '__void-deploy-env-schema-probe__';
 
-/** The dedicated fd the child writes its framed result to (see stdio config below). */
 const RESULT_FD = 3;
 
-/** The two operations the child can perform, selected by the parent. */
 type EnvSchemaProbeOp = 'facts' | 'validate-emitted';
 
-/** Input handed to the child (JSON in argv[3]). Path only — no env values cross here. */
 export type EnvSchemaProbeInput = { root: string };
 
-/** Full child input (adds the operation discriminant to {@link EnvSchemaProbeInput}). */
 type ChildInput = { op: EnvSchemaProbeOp; root: string };
 
-/**
- * The structured result of the `facts` operation. `ok` carries the env-insensitive
- * schema facts; `schema-error` surfaces a values-free env.ts/validator failure.
- */
 export type EnvSchemaProbeResult =
   | { kind: 'ok'; facts: SelfHostSchemaFacts }
   | { kind: 'schema-error'; reason: SelfHostSchemaFailureReason };
 
-/**
- * The structured result of the `validate-emitted` operation. `invalid-keys` carries
- * the FAILING key NAMES only (never a value); `schema-error` surfaces a values-free
- * env.ts/validator failure.
- */
 export type EnvSchemaValidateResult =
   | { kind: 'invalid-keys'; invalidKeys: Array<string> }
   | { kind: 'schema-error'; reason: SelfHostSchemaFailureReason };
 
-/** The full union any child operation can emit — narrowed by the public wrappers. */
 type EnvSchemaProbeRawResult = EnvSchemaProbeResult | EnvSchemaValidateResult;
 
-/** Minimal structural shape of a `spawnSync`-style result (injectable in tests). */
 export type EnvSchemaProbeSpawnResult = {
   status: number | null;
-  /** The fd-3 buffer (the framed result) — dedicated so stdout noise can't truncate it. */
   fd3: string | null;
   error?: Error | null;
   signal?: NodeJS.Signals | null;
@@ -82,14 +47,6 @@ export type EnvSchemaProbeSpawn = (
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ) => EnvSchemaProbeSpawnResult;
 
-/**
- * Default spawner: run THIS module as a child and read ONLY the dedicated fd-3
- * result. stdin is ignored, stdout/stderr are IGNORED (fds 1 + 2) so a broken /
- * leaking env.ts can never print a raw secret to the terminal or a captured CI log,
- * and fd 3 is a pipe carrying the framed JSON result. `spawnSync`'s `output` array
- * is indexed by fd, so `output[3]` is the result channel — isolated from stdout
- * entirely (and unaffected by ignoring fds 1 + 2).
- */
 const defaultSpawn: EnvSchemaProbeSpawn = (command, args, options) => {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -106,19 +63,7 @@ const defaultSpawn: EnvSchemaProbeSpawn = (command, args, options) => {
   };
 };
 
-/**
- * Spawn THIS module as a child (`node <self> <marker> <json>`) under the scrubbed
- * `env` for one operation, and return its framed fd-3 result. The child inherits
- * ONLY `env` (the caller scrubs the full wrangler-auth credential set), so the
- * arbitrary project code never sees the parent's credentials. `import.meta.url` is
- * this module's own path — a named build entry (`dist/cli/env-schema-probe.mjs`),
- * stable in source and dist — so the child re-enters here and hits the {@link
- * PROBE_MARKER} branch. Throws (caller fails closed) on a spawn error, a signal-kill,
- * a nonzero exit, or a missing/unparseable result — exactly the cases where the
- * project code itself could not be evaluated. NEVER echoes the child's
- * stdout/stderr (never captured), so no env value the child may have printed can
- * reach the thrown error.
- */
+/** Run this module as the child for one operation and parse its fd-3 result. */
 async function spawnEnvSchemaProbe(
   op: EnvSchemaProbeOp,
   input: EnvSchemaProbeInput,
@@ -138,8 +83,6 @@ async function spawnEnvSchemaProbe(
     throw new Error(`the env-schema probe was killed by signal ${result.signal}`);
   }
   if (result.status !== 0) {
-    // The child's stdout/stderr is never captured, so there is nothing to echo —
-    // only the stable exit code (no env value can ride along).
     throw new Error(`the env-schema probe exited with code ${String(result.status)}.`);
   }
   const parsed = parseProbeResult(result.fd3 ?? '');
@@ -149,10 +92,7 @@ async function spawnEnvSchemaProbe(
   return parsed;
 }
 
-/**
- * PARENT side (`facts`): return the env-insensitive schema facts. Runs pre-build so
- * a broken env.ts fails fast, before any account operation.
- */
+/** Runs before the build so a broken env.ts fails before any account operation. */
 export async function resolveEnvSchemaFactsViaSubprocess(
   input: EnvSchemaProbeInput,
   env: NodeJS.ProcessEnv,
@@ -171,11 +111,7 @@ export async function resolveEnvSchemaFactsViaSubprocess(
   return result;
 }
 
-/**
- * PARENT side (`validate-emitted`): validate the REAL emitted worker `vars` against
- * the schema validators and return the FAILING key NAMES only. Runs post-build so
- * the values validated are exactly what the worker ships.
- */
+/** Runs after the build so it validates exactly the vars the Worker ships. */
 export async function validateEmittedVarsViaSubprocess(
   input: EnvSchemaProbeInput,
   env: NodeJS.ProcessEnv,
@@ -191,12 +127,6 @@ export async function validateEmittedVarsViaSubprocess(
   return result;
 }
 
-/**
- * Parse the child's framed result from the DEDICATED fd-3 channel. The whole buffer
- * is the JSON result (nothing else writes to fd 3), so no sentinel scan is needed:
- * config/env.ts stdout noise lives on a different fd and can never reach here. Returns undefined on a missing/unparseable/ill-shaped result
- * so the caller fails closed.
- */
 function parseProbeResult(fd3: string): EnvSchemaProbeRawResult | undefined {
   const trimmed = fd3.trim();
   if (!trimmed) {
@@ -236,7 +166,6 @@ function parseProbeResult(fd3: string): EnvSchemaProbeRawResult | undefined {
   return undefined;
 }
 
-/** Structural guard for the values-free facts the child returns. */
 function isSchemaFacts(value: unknown): value is SelfHostSchemaFacts {
   if (!value || typeof value !== 'object') {
     return false;
@@ -251,15 +180,10 @@ function isSchemaFacts(value: unknown): value is SelfHostSchemaFacts {
   );
 }
 
-/** Write the framed result to the dedicated fd 3 (synchronous → flushed before exit). */
 function emitResult(result: EnvSchemaProbeRawResult): void {
   writeSync(RESULT_FD, JSON.stringify(result));
 }
 
-/**
- * CHILD side (`facts`): import the user's env.ts and derive its structural schema
- * facts. The import stays isolated because env.ts is arbitrary project code.
- */
 async function runFactsChild(root: string): Promise<void> {
   const { deriveSelfHostSchemaFacts, SelfHostSchemaError } = await import('./env-validation.ts');
   try {
@@ -274,13 +198,7 @@ async function runFactsChild(root: string): Promise<void> {
   }
 }
 
-/**
- * CHILD side (`validate-emitted`): read the REAL emitted worker `vars` the build
- * baked into `dist/ssr/wrangler.json` (ground truth), validate them against the
- * schema's validators, and emit the FAILING key NAMES only. The parent already
- * confirmed the artifact exists, so a read failure here is a probe-infrastructure
- * fault → fail closed as a values-free schema error.
- */
+/** The parent already found the emitted config, so a read failure here fails closed. */
 async function runValidateEmittedChild(root: string): Promise<void> {
   const { computeInvalidEmittedKeys, readEmittedWorkerVars, SelfHostSchemaError } =
     await import('./env-validation.ts');
@@ -301,7 +219,6 @@ async function runValidateEmittedChild(root: string): Promise<void> {
   }
 }
 
-/** Dispatch the child to the requested operation. */
 async function runEnvSchemaProbeChild(rawInput: string): Promise<void> {
   const input = JSON.parse(rawInput) as ChildInput;
   if (input.op === 'validate-emitted') {
@@ -311,11 +228,7 @@ async function runEnvSchemaProbeChild(rawInput: string): Promise<void> {
   await runFactsChild(input.root);
 }
 
-// Child-process entry: only when invoked as `node <self> <marker> <json>`. A normal
-// library import (the CLI loading the parent-side helper) has a different argv[2], so
-// this never runs in the parent and never eagerly loads Vite / env-validation / env.ts.
-// On ANY unexpected failure the child exits nonzero with NO raw echo — the parent
-// fails closed on the exit code alone.
+// Child entry. Any unexpected failure exits nonzero; the parent fails closed on that.
 if (process.argv[2] === PROBE_MARKER) {
   runEnvSchemaProbeChild(process.argv[3] ?? 'null').then(
     () => process.exit(0),

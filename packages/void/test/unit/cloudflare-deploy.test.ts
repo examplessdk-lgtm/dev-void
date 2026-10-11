@@ -555,7 +555,6 @@ function harness(overrides: Partial<CloudflareDeployDeps> = {}): {
     // inject a throwing stub or exercise the real derive+discharge units directly.
     dischargeSelfHostEnv: (async () => {
       trace.push('gate');
-      return { hasSchema: false, remoteSecretNames: null };
     }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     // Persistent auth-secret provisioning. Dedicated tests exercise the real
     // list/put/verify lifecycle; orchestration tests record only its position.
@@ -3548,12 +3547,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
     const { deps, trace, wranglerArgs, exitCalls } = harness({
       dischargeSelfHostEnv: (async () => {
         trace.push('gate');
-        throw new SelfHostEnvValidationError('env: missing required secret STRIPE_KEY', {
-          valid: false,
-          missing: ['STRIPE_KEY'],
-          invalid: [],
-          values: new Map(),
-        });
+        throw new SelfHostEnvValidationError('env: missing required secret STRIPE_KEY');
       }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await expect(
@@ -3572,7 +3566,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
     const root = d1Project(PROVISIONED_D1);
     const { deps, exitCalls } = harness({
       dischargeSelfHostEnv: (async () => {
-        throw new SelfHostFirstDeployError('worker not deployed yet', ['STRIPE_KEY'], 1);
+        throw new SelfHostFirstDeployError('worker not deployed yet');
       }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await expect(
@@ -3663,10 +3657,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
           serverKeys: ['API_TOKEN'],
           requiredKeys: ['API_TOKEN'],
         })) as CloudflareDeployDeps['resolveSchemaFacts'],
-      dischargeSelfHostEnv: async () => ({
-        hasSchema: true,
-        remoteSecretNames: ['API_TOKEN'],
-      }),
+      dischargeSelfHostEnv: async () => {},
       activateVersion: async (options) => {
         explicitBootstrapProof = options.allowFirstDeploymentBootstrap;
         return activateCloudflareVersionPrimitive({
@@ -9142,7 +9133,6 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
       })) as CloudflareDeployDeps['validateEmittedVars'],
       dischargeSelfHostEnv: (async (ctx: SelfHostEnvContext) => {
         captured = ctx;
-        return { hasSchema: true, remoteSecretNames: null };
       }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
 
@@ -9168,16 +9158,13 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
       dischargeSelfHostEnv: (async (ctx: SelfHostEnvContext) => {
         trace.push('gate');
         captured = ctx;
-        return { hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] };
       }) as CloudflareDeployDeps['dischargeSelfHostEnv'],
     });
     await runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps);
     // STRIPE_KEY is absent from the emitted vars → the gate sees it as absentRequired (the
-    // remote secret discharges it); nothing is present-empty/invalid.
+    // remote secret discharges it); nothing is invalid.
     expect(captured).toEqual({
       hasSchema: true,
-      presentEmptyRequired: [],
-      presentEmptySources: {},
       absentRequired: ['STRIPE_KEY'],
       invalidKeys: [],
     });

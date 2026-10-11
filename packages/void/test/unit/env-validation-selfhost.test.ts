@@ -101,39 +101,16 @@ const requiredStripe: SelfHostSchemaFacts = {
 // ---------------------------------------------------------------------------
 
 describe('deriveSelfHostEnvContextFromVars — ground-truth context from the emitted worker vars', () => {
-  it('a required key PRESENT-and-EMPTY in the emitted vars is present-empty (shadows a remote secret)', () => {
-    const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: '' }, requiredStripe);
-
-    expect(ctx.hasSchema).toBe(true);
-    expect(ctx.presentEmptyRequired).toEqual(['STRIPE_KEY']);
-    expect(ctx.presentEmptySources).toEqual({ STRIPE_KEY: { kind: 'emitted' } });
-    expect(ctx.absentRequired).toEqual([]);
-    expect(ctx.invalidKeys).toEqual([]);
-  });
-
   it('a required key ABSENT from the emitted vars is absent (only a remote secret can discharge it)', () => {
     const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
 
     expect(ctx.absentRequired).toEqual(['STRIPE_KEY']);
-    expect(ctx.presentEmptyRequired).toEqual([]);
-    expect(ctx.presentEmptySources).toEqual({});
     expect(ctx.invalidKeys).toEqual([]);
   });
 
-  it('a required key PRESENT-and-NON-EMPTY is neither empty nor absent', () => {
+  it('a required key PRESENT in the emitted vars is not absent', () => {
     const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: 'sk_live' }, requiredStripe);
 
-    expect(ctx.presentEmptyRequired).toEqual([]);
-    expect(ctx.absentRequired).toEqual([]);
-  });
-
-  it('a required key PRESENT-and-NULL is present-empty too (null shadows like an empty string)', () => {
-    // A parsed wrangler.json var can be null; the validators bucket null as "missing", so
-    // without this it would be neither invalid, empty, nor absent — yet still shadow the secret.
-    const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: null }, requiredStripe);
-
-    expect(ctx.presentEmptyRequired).toEqual(['STRIPE_KEY']);
-    expect(ctx.presentEmptySources).toEqual({ STRIPE_KEY: { kind: 'emitted' } });
     expect(ctx.absentRequired).toEqual([]);
   });
 
@@ -143,13 +120,7 @@ describe('deriveSelfHostEnvContextFromVars — ground-truth context from the emi
       { hasSchema: false, serverKeys: [], requiredKeys: [] },
     );
 
-    expect(ctx).toEqual({
-      hasSchema: false,
-      presentEmptyRequired: [],
-      presentEmptySources: {},
-      absentRequired: [],
-      invalidKeys: [],
-    });
+    expect(ctx).toEqual({ hasSchema: false, absentRequired: [], invalidKeys: [] });
   });
 });
 
@@ -295,17 +266,15 @@ describe('computeInvalidEmittedKeys — schema-invalid emitted values', () => {
     const root = createTempProject();
     defineEnv({ TOKEN: string() });
     // TOKEN was baked into the worker vars as "" — shipped-but-rejected. The runtime buckets
-    // it as "missing", but because it is PRESENT in the emitted map it fails closed here too
-    // (the context's present-empty fence also covers it; the two agree, discharge fences first).
+    // it as "missing", but because it is PRESENT in the emitted map it fails closed here too.
     expect(await computeInvalidEmittedKeys(root, { TOKEN: '' })).toEqual(['TOKEN']);
   });
 
   it('flags an OPTIONAL validator key SHIPPED as "" or null (rejected but bucketed "missing")', async () => {
     const root = createTempProject();
     // A validator that rejects `""`/`null` but accepts `undefined` — exactly `z.url().optional()`.
-    // The runtime buckets a rejected empty/null as "missing" (not "invalid"), and the
-    // required-empty fence covers only `requiredKeys`, so an OPTIONAL key shipped empty would
-    // slip EVERY gate unless the present-in-emitted union catches it here.
+    // The runtime buckets a rejected empty/null as "missing" (not "invalid"), so an OPTIONAL
+    // key shipped empty would slip EVERY gate unless the present-in-emitted union catches it here.
     const optionalRejectingEmpty: StandardSchemaV1<unknown, unknown> = {
       '~standard': {
         version: 1,
@@ -441,7 +410,6 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
 
     expect(error).toBeInstanceOf(SelfHostEnvValidationError);
     const envError = error as SelfHostEnvValidationError;
-    expect(envError.report.missing).toEqual(['STRIPE_KEY']);
     expect(envError.message).toContain('STRIPE_KEY');
     expect(envError.message).toContain('void secret put');
   });
@@ -452,43 +420,16 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
     const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
 
-    const result = await dischargeSelfHostEnvContext(ctx, {
-      root,
-      configPath,
-      accountId: 'acct-1',
-      runWrangler: run,
-    });
-
-    expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+    await expect(
+      dischargeSelfHostEnvContext(ctx, {
+        root,
+        configPath,
+        accountId: 'acct-1',
+        runWrangler: run,
+      }),
+    ).resolves.toBeUndefined();
     // The provider operation is pinned to the project's config.
     expect(calls).toEqual([{ type: 'secret.list', configPath }]);
-  });
-
-  it('a required key PRESENT-and-EMPTY in the emitted vars fails CLOSED before any wrangler spawn', async () => {
-    const root = createTempProject({ withEnvTs: false });
-    // The build baked `STRIPE_KEY=""` into the emitted worker vars, which wrangler
-    // gives precedence over a same-named remote secret — so it fails closed ALWAYS.
-    const ctx = deriveSelfHostEnvContextFromVars({ STRIPE_KEY: '' }, requiredStripe);
-    const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
-
-    const error = await dischargeSelfHostEnvContext(ctx, {
-      root,
-      configPath: CONFIG_PATH,
-      runWrangler: run,
-    }).then(
-      () => null,
-      (e: unknown) => e,
-    );
-
-    expect(error).toBeInstanceOf(SelfHostEnvValidationError);
-    const envError = error as SelfHostEnvValidationError;
-    expect(envError.report.missing).toEqual(['STRIPE_KEY']);
-    expect(envError.message).toContain('Remove the empty assignment');
-    // Names the GROUND-TRUTH source (the emitted worker config), never a .env file.
-    expect(envError.message).toContain('dist/ssr/wrangler.json');
-    expect(envError.message).not.toContain('wrangler secret put');
-    // Rejected before any wrangler spawn — remote membership is irrelevant.
-    expect(calls).toEqual([]);
   });
 
   it('a folded INVALID key (an optional value the validator rejected) fails CLOSED with no wrangler spawn', async () => {
@@ -515,7 +456,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
 
     expect(error).toBeInstanceOf(SelfHostEnvValidationError);
     const envError = error as SelfHostEnvValidationError;
-    expect(envError.report.invalid.map((entry) => entry.key)).toEqual(['OPT_URL']);
+    expect(envError.message).toContain('OPT_URL');
     // No required key is absent → no wrangler spawn; the invalid value fails closed on its own.
     expect(calls).toEqual([]);
   });
@@ -528,13 +469,13 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
     );
     const { run, calls } = stubRunner(okList([]));
 
-    const result = await dischargeSelfHostEnvContext(ctx, {
-      root,
-      configPath: CONFIG_PATH,
-      runWrangler: run,
-    });
-
-    expect(result).toEqual({ hasSchema: false, remoteSecretNames: null });
+    await expect(
+      dischargeSelfHostEnvContext(ctx, {
+        root,
+        configPath: CONFIG_PATH,
+        runWrangler: run,
+      }),
+    ).resolves.toBeUndefined();
     expect(calls).toEqual([]);
   });
 
@@ -573,14 +514,14 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
       const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
 
-      const result = await dischargeSelfHostEnvContext(ctx, {
-        root,
-        configPath,
-        accountId: 'account-X',
-        runWrangler: run,
-      });
-
-      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+      await expect(
+        dischargeSelfHostEnvContext(ctx, {
+          root,
+          configPath,
+          accountId: 'account-X',
+          runWrangler: run,
+        }),
+      ).resolves.toBeUndefined();
       expect(calls.length).toBe(1);
     });
   });
@@ -613,7 +554,6 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const msg = (error as Error).message;
       expect(msg).toContain('evil-worker');
       expect(msg).toContain('app');
-      expect((error as SelfHostSecretListError).reason).toBe('name-mismatch');
       // The seam was never consulted — reconciliation failed before any spawn.
       expect(calls).toEqual([]);
     });
@@ -624,15 +564,15 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
       const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
 
-      const result = await dischargeSelfHostEnvContext(ctx, {
-        root,
-        configPath,
-        accountId: 'acct-1',
-        workerName: 'app',
-        runWrangler: run,
-      });
-
-      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+      await expect(
+        dischargeSelfHostEnvContext(ctx, {
+          root,
+          configPath,
+          accountId: 'acct-1',
+          workerName: 'app',
+          runWrangler: run,
+        }),
+      ).resolves.toBeUndefined();
       expect(calls.length).toBe(1);
     });
 
@@ -644,14 +584,14 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       const ctx = deriveSelfHostEnvContextFromVars({}, requiredStripe);
       const { run, calls } = stubRunner(okList(['STRIPE_KEY']));
 
-      const result = await dischargeSelfHostEnvContext(ctx, {
-        root,
-        configPath,
-        accountId: 'acct-1',
-        runWrangler: run,
-      });
-
-      expect(result).toEqual({ hasSchema: true, remoteSecretNames: ['STRIPE_KEY'] });
+      await expect(
+        dischargeSelfHostEnvContext(ctx, {
+          root,
+          configPath,
+          accountId: 'acct-1',
+          runWrangler: run,
+        }),
+      ).resolves.toBeUndefined();
       expect(calls.length).toBe(1);
     });
   });
@@ -693,8 +633,6 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
 
       expect(error).toBeInstanceOf(SelfHostFirstDeployError);
       const fde = error as SelfHostFirstDeployError;
-      expect(fde.workerNotFound).toBe(true);
-      expect([...fde.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
       expect(fde.message).toContain('void secret put FOO');
       expect(fde.message).toContain('void secret put API_TOKEN');
       // Still a fail-closed list error at heart (subclass).
@@ -712,7 +650,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       }).catch((error) => error);
       expect(error).toBeInstanceOf(SelfHostSecretListError);
       expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
-      expect(error.reason).toBe('nonzero-exit');
+      expect(error.message).toContain('reason: nonzero-exit');
     });
 
     it.each([{ errorCode: 10007 }, { errorCode: 10090 }, { failure: 'not-found' as const }])(
@@ -727,7 +665,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
           runWrangler: run,
         }).catch((error) => error);
         expect(error).toBeInstanceOf(SelfHostFirstDeployError);
-        expect(error.missingKeys).toEqual(['STRIPE_KEY']);
+        expect(error.message).toContain('void secret put STRIPE_KEY');
       },
     );
 
@@ -773,8 +711,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
 
       expect(error).toBeInstanceOf(SelfHostSecretListError);
       expect(error).not.toBeInstanceOf(SelfHostFirstDeployError);
-      expect((error as SelfHostSecretListError).reason).toBe('nonzero-exit');
-      expect((error as Error).message).toContain('status 1');
+      expect((error as Error).message).toContain('reason: nonzero-exit, status 1');
     });
   });
 
@@ -806,9 +743,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
         stderr: 'A request to the Cloudflare API failed.',
         status: 1,
       });
-      expect(error.reason).toBe('nonzero-exit');
-      expect(error.detail.exitCode).toBe(1);
-      expect(error.message).toContain('status 1');
+      expect(error.message).toContain('reason: nonzero-exit, status 1');
       expect(error.message).not.toContain('A request to the Cloudflare API failed.');
     });
 
@@ -821,8 +756,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
         errorCode: 10007,
         failure: 'not-found',
       });
-      expect(error.reason).toBe('signal');
-      expect(error.detail.signal).toBe('SIGKILL');
+      expect(error.message).toContain('reason: signal');
       expect(error.message).toContain('SIGKILL');
     });
 
@@ -835,7 +769,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
         errorCode: 10007,
         failure: 'not-found',
       });
-      expect(error.reason).toBe('spawn-error');
+      expect(error.message).toContain('reason: spawn-error');
       expect(error.message).not.toContain('spawn ENOENT');
     });
 
@@ -845,7 +779,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
         stderr: '',
         status: 0,
       });
-      expect(error.reason).toBe('malformed-output');
+      expect(error.message).toContain('reason: malformed-output');
     });
 
     it('a non-array JSON payload is a hard failure', async () => {
@@ -882,7 +816,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
         (e: unknown) => e,
       );
       expect(error).toBeInstanceOf(SelfHostSecretListError);
-      expect((error as SelfHostSecretListError).reason).toBe('spawn-error');
+      expect((error as Error).message).toContain('reason: spawn-error');
       expect((error as Error).message).not.toContain('boom');
     });
   });
@@ -896,18 +830,11 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
 
     /** Everything an observer could read off the thrown error. */
     function fullySerialize(error: unknown): string {
-      const e = error as SelfHostSecretListError & {
-        missingKeys?: Array<string>;
-        workerNotFound?: boolean;
-      };
+      const e = error as SelfHostSecretListError;
       return JSON.stringify({
         name: e.name,
         message: e.message,
         stack: e.stack ?? '',
-        reason: e.reason,
-        detail: e.detail,
-        missingKeys: e.missingKeys,
-        workerNotFound: e.workerNotFound,
         own: e,
         ownStr: String(e),
       });
@@ -963,7 +890,7 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
           )) as SelfHostSecretListError;
 
           expect(error).toBeInstanceOf(SelfHostSecretListError);
-          expect(error.reason).toBe(reason);
+          expect(error.message).toContain(`reason: ${reason}`);
           expect(error.message).not.toContain(SENTINEL);
           expect(fullySerialize(error)).not.toContain(SENTINEL);
         } finally {
@@ -1004,8 +931,6 @@ describe('dischargeSelfHostEnvContext — ground-truth secret gate', () => {
       )) as SelfHostFirstDeployError;
 
       expect(error).toBeInstanceOf(SelfHostFirstDeployError);
-      expect(error.workerNotFound).toBe(true);
-      expect([...error.missingKeys].sort()).toEqual(['API_TOKEN', 'FOO']);
       expect(error.message).toContain('void secret put FOO');
       expect(error.message).not.toContain(SENTINEL);
       expect(fullySerialize(error)).not.toContain(SENTINEL);
