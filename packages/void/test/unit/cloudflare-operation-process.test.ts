@@ -92,7 +92,7 @@ function runOperation(
   env: NodeJS.ProcessEnv,
   preload?: string,
 ): Promise<{ status: number; stdout: string; stderr: string }> {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(cwd);
+  const [command, ...prefix] = resolveCloudflareOperationArgv();
   const args = Array.isArray(request) ? request : encodeCloudflareOperation(request);
   return new Promise((resolve) => {
     execFile(

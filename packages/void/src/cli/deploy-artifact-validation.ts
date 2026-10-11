@@ -23,7 +23,6 @@ import {
   DEFAULT_VOID_AI_BINDING,
   verifyNoInjectedDestructiveMigration,
   normalizeContainerImagePaths,
-  collectEmittedQueueNames,
   collectEmittedQueueGroupNames,
 } from './deploy-binding-snapshot.ts';
 import { log, getErrorMessage } from './deploy-helpers.ts';
@@ -47,7 +46,6 @@ import {
   type SelfHostSchemaFacts,
 } from './env-validation.ts';
 import { readGeneratedWranglerConfigFile } from './generated-wrangler-config.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet } from './provision.ts';
 import { bindingEntriesForField } from './wrangler.ts';
 
@@ -533,7 +531,9 @@ export function verifyGeneratedDeployConfig(
   // Every emitted queue must be one Void derived from source.
   if (expected.desired) {
     const desiredQueues = new Set(expected.desired.queues);
-    for (const name of collectEmittedQueueNames(generated.queues)) {
+    const emittedProducers = collectEmittedQueueGroupNames(generated.queues, 'producers');
+    const emittedConsumers = collectEmittedQueueGroupNames(generated.queues, 'consumers');
+    for (const name of [...emittedProducers, ...emittedConsumers]) {
       if (!desiredQueues.has(name)) {
         return {
           ok: false,
@@ -542,8 +542,6 @@ export function verifyGeneratedDeployConfig(
       }
     }
     // Void emits every desired queue as both a producer and a consumer; both must remain.
-    const emittedProducers = collectEmittedQueueGroupNames(generated.queues, 'producers');
-    const emittedConsumers = collectEmittedQueueGroupNames(generated.queues, 'consumers');
     for (const name of expected.desired.queues) {
       if (!emittedProducers.has(name) || !emittedConsumers.has(name)) {
         return {
@@ -685,8 +683,8 @@ export async function validateCloudflarePostBuildEnv(options: {
     return false;
   }
 
-  // An empty required var shadows the remote secret of the same name; an absent one must exist
-  // as a remote secret. Value validation runs project code, so it stays in the isolated probe.
+  // A required key the build did not emit must exist as a remote secret. Value validation runs
+  // project code, so it stays in the isolated probe.
   const envContext = deriveSelfHostEnvContextFromVars(emittedVars, schemaFacts);
   if (schemaFacts.hasSchema) {
     let validateResult: EnvSchemaValidateResult;

@@ -4,7 +4,12 @@ import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../shared/env.ts';
 import { WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
 import { CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV } from '../shared/version-metadata.ts';
-import { requireProvisionModule } from './deploy-provision.ts';
+import {
+  assertNoTransportRedirectInProjectDotenv,
+  deleteEnvVarCaseAware,
+  provisionEnv,
+  resolvePinnedApiBaseUrl,
+} from './provision.ts';
 
 /**
  * Marks a build child as driven by a MANAGED `void deploy`.
@@ -28,7 +33,6 @@ export const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
 
 /** Remove managed-only build markers from an explicit native Cloudflare child. */
 export function scrubManagedDeployBuildMarkers(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const { deleteEnvVarCaseAware } = requireProvisionModule();
   deleteEnvVarCaseAware(env, 'VOID_DEPLOY_PROJECT_ID');
   deleteEnvVarCaseAware(env, CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV);
   for (const name of Object.keys(MANAGED_DEPLOY_BUILD_ENV)) {
@@ -71,6 +75,13 @@ const DEPLOY_WRANGLER_DOTENV_FILES = ['.env', '.env.local', '.env.', '.env..loca
  */
 const DEPLOY_VITE_DOTENV_FILES = ['.env', '.env.local', '.env.production', '.env.production.local'];
 
+/** The first non-blank ambient selector of a non-top-level worker/config, if any. */
+export function findAmbientConfigOverride(): string | undefined {
+  return ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH'].find((name) =>
+    process.env[name]?.trim(),
+  );
+}
+
 /**
  * FAIL CLOSED when the AMBIENT env selects a non-top-level worker/config for the
  * Cloudflare backend, which deploys the top-level environment of the canonical root
@@ -79,21 +90,43 @@ const DEPLOY_VITE_DOTENV_FILES = ['.env', '.env.local', '.env.production', '.env
  * rather than silently deploy a target the drift-check / provision never reasoned about.
  */
 function assertNoAmbientConfigOverride(): void {
-  const cloudflareEnv = process.env.CLOUDFLARE_ENV;
-  if (typeof cloudflareEnv === 'string' && cloudflareEnv.trim().length > 0) {
+  const override = findAmbientConfigOverride();
+  if (override === 'CLOUDFLARE_ENV') {
     throw new Error(
       'CLOUDFLARE_ENV is set. --platform cloudflare deploys the TOP-LEVEL environment of ' +
         'your root wrangler config only (a named environment can carry a different account, ' +
         'worker name, or binding set). Unset CLOUDFLARE_ENV and retry.',
     );
   }
-  const configPathOverride = process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH;
-  if (typeof configPathOverride === 'string' && configPathOverride.trim().length > 0) {
+  if (override) {
     throw new Error(
       'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. --platform cloudflare builds from the ' +
         'canonical root wrangler config only. Unset it and retry.',
     );
   }
+}
+
+/** Which of `names` the project dotenv `file` declares; win32 keys match case-insensitively. */
+function findDotenvDeclaration(
+  root: string,
+  file: string,
+  names: ReadonlyArray<string>,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const caseInsensitive = platform === 'win32';
+  const rawKeys = scanWranglerDotenvKeys(join(root, file));
+  const keys = caseInsensitive ? new Set([...rawKeys].map((key) => key.toLowerCase())) : rawKeys;
+  return names.find((name) => keys.has(caseInsensitive ? name.toLowerCase() : name));
+}
+
+/** The first dotenv file wrangler reloads that declares `WRANGLER_CI_OVERRIDE_NAME`. */
+export function findWranglerCiOverrideDotenvFile(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  return DEPLOY_WRANGLER_DOTENV_FILES.find((file) =>
+    findDotenvDeclaration(root, file, ['WRANGLER_CI_OVERRIDE_NAME'], platform),
+  );
 }
 
 /**
@@ -110,27 +143,25 @@ export function assertNoConfigOverrideInProjectDotenv(
   root: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  const caseInsensitive = platform === 'win32';
-  const declaresAny = (file: string, names: ReadonlyArray<string>): string | undefined => {
-    const rawKeys = scanWranglerDotenvKeys(join(root, file));
-    const keys = caseInsensitive ? new Set([...rawKeys].map((key) => key.toLowerCase())) : rawKeys;
-    return names.find((name) => keys.has(caseInsensitive ? name.toLowerCase() : name));
-  };
   // WRANGLER_CI_OVERRIDE_NAME reaches the DEPLOY step via wrangler's `--env=` dotenv reload.
-  for (const file of DEPLOY_WRANGLER_DOTENV_FILES) {
-    if (declaresAny(file, ['WRANGLER_CI_OVERRIDE_NAME'])) {
-      throw new Error(
-        `the project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which wrangler reloads on ` +
-          `every command and applies AFTER config load to REPLACE the deployed worker name — so ` +
-          `\`wrangler deploy\` would upload a worker whose name was never validated. Remove it from ` +
-          `"${file}" (set it in your shell/CI only if you truly need a CI name override).`,
-      );
-    }
+  const ciOverrideFile = findWranglerCiOverrideDotenvFile(root, platform);
+  if (ciOverrideFile) {
+    throw new Error(
+      `the project file "${ciOverrideFile}" sets WRANGLER_CI_OVERRIDE_NAME, which wrangler reloads on ` +
+        `every command and applies AFTER config load to REPLACE the deployed worker name — so ` +
+        `\`wrangler deploy\` would upload a worker whose name was never validated. Remove it from ` +
+        `"${ciOverrideFile}" (set it in your shell/CI only if you truly need a CI name override).`,
+    );
   }
   // CLOUDFLARE_ENV / CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH reach the BUILD via Vite's
   // production `loadEnv`, whose file set is disjoint from wrangler's `--env=` files.
   for (const file of DEPLOY_VITE_DOTENV_FILES) {
-    const offender = declaresAny(file, ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH']);
+    const offender = findDotenvDeclaration(
+      root,
+      file,
+      ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH'],
+      platform,
+    );
     if (offender) {
       throw new Error(
         `the project file "${file}" sets ${offender}, which the Cloudflare Vite plugin reads at ` +
@@ -150,11 +181,10 @@ export function assertNoConfigOverrideInProjectDotenv(
  * Returns the single resolved API base URL to pin into every child env.
  */
 export function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
-  const provision = requireProvisionModule();
   assertNoAmbientConfigOverride();
-  provision.assertNoTransportRedirectInProjectDotenv(root);
+  assertNoTransportRedirectInProjectDotenv(root);
   assertNoConfigOverrideInProjectDotenv(root);
-  return provision.resolvePinnedApiBaseUrl(
+  return resolvePinnedApiBaseUrl(
     process.env,
     readWranglerTopLevelString(rootConfig, 'compliance_region'),
   );
@@ -174,14 +204,13 @@ export function deployChildEnv(
   accountId: string | undefined,
   apiBaseUrl: string,
 ): NodeJS.ProcessEnv {
-  const provision = requireProvisionModule();
-  const env = provision.provisionEnv({ accountId, apiBaseUrl });
+  const env = provisionEnv({ accountId, apiBaseUrl });
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
-    provision.deleteEnvVarCaseAware(env, name);
+    deleteEnvVarCaseAware(env, name);
   }
   // Pin Wrangler's default log level. Delete case-aware first so a mixed-case
   // ambient value cannot shadow the pin on win32.
-  provision.deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
+  deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
   env.WRANGLER_LOG = 'log';
   // Void owns the browser OAuth lifecycle. Never allow Wrangler to fall back to
   // its plaintext credential file while a Void command is using that session.
@@ -194,15 +223,14 @@ export function deployChildEnv(
  * return it, for a Cloudflare-fork child that executes UNTRUSTED project code.
  */
 export function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const { deleteEnvVarCaseAware: deleteVar } = requireProvisionModule();
   for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
-    deleteVar(env, name);
+    deleteEnvVarCaseAware(env, name);
   }
   // These are not Wrangler credentials, but native Cloudflare builds do not
   // need either one: DATABASE_URL is consumed only by the parent-side
   // provision/migration steps, and VOID_TOKEN belongs to the managed target.
-  deleteVar(env, 'DATABASE_URL');
-  deleteVar(env, 'VOID_TOKEN');
+  deleteEnvVarCaseAware(env, 'DATABASE_URL');
+  deleteEnvVarCaseAware(env, 'VOID_TOKEN');
   return env;
 }
 
@@ -224,10 +252,10 @@ export function buildSchemaProbeEnv(accountId: string, apiBaseUrl: string): Node
   // schema conditioned on this internal marker consistent with the build,
   // this prevents an ambient case variant from shadowing the pinned value on
   // Windows.
-  requireProvisionModule().deleteEnvVarCaseAware(env, CLOUDFLARE_DEPLOY_BUILD_ENV);
+  deleteEnvVarCaseAware(env, CLOUDFLARE_DEPLOY_BUILD_ENV);
   env[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
   // Scrub any ambient spelling first (case-aware on win32) so it cannot shadow the pin.
-  requireProvisionModule().deleteEnvVarCaseAware(env, 'NODE_ENV');
+  deleteEnvVarCaseAware(env, 'NODE_ENV');
   env.NODE_ENV = 'production';
   return env;
 }

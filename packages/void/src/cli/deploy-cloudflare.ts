@@ -19,7 +19,6 @@ import {
   runCloudflareStaticDeploy,
 } from './deploy-cloudflare-static.ts';
 import { log } from './deploy-helpers.ts';
-import { loadProvisionModule } from './deploy-provision.ts';
 import { printDeploySuccess } from './deploy-summary.ts';
 import { type RunDeployOptions, type CloudflareDeployDeps } from './deploy-types.ts';
 import { renderAddressMap } from './email-cloudflare.ts';
@@ -74,7 +73,6 @@ export async function runCloudflareDeploy(
     return exit(1);
   }
 
-  const provisionModule = await loadProvisionModule();
   const staticPreset =
     resolveCloudflareStaticPreset(root, voidConfig, options) ??
     (await resolveCloudflareVoidStaticPreset(root, voidConfig));
@@ -107,7 +105,6 @@ export async function runCloudflareDeploy(
     exit,
     cliLog,
     initialCloudflareLink,
-    provisionModule,
     detectedFramework,
     source,
   });

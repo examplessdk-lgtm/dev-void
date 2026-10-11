@@ -19,7 +19,6 @@ import {
   deriveWorkerName,
   discoverRootWranglerConfig,
   isWranglerNonInteractiveOrCI,
-  loadProvisionModule,
   resolveDeployTransport,
   runWranglerAuthToken,
 } from './deploy.ts';
@@ -1014,7 +1013,6 @@ async function runEmailCloudflareCommandInConfig(
   // 2. The same pinned transport + account + worker name as `void deploy --platform
   //    cloudflare`, so every wrangler child here consults the account the deploy will.
   const rootConfig = parseRootWranglerConfig(configPath);
-  await loadProvisionModule();
   let apiBaseUrl: string;
   try {
     apiBaseUrl = resolveDeployTransport(root, rootConfig);
@@ -1035,7 +1033,6 @@ async function runEmailCloudflareCommandInConfig(
   }
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
-  // The deploy's bearer bridge: WRANGLER_WRITE_LOGS=false keeps the token out of the on-disk log.
   const getSessionBearer =
     deps.getSessionBearer ?? (() => runWranglerAuthToken(runWrangler, wranglerConfigPath));
   const inputs: EmailCloudflareInputs = {

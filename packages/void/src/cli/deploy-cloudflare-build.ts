@@ -28,7 +28,6 @@ import {
   assertRemoteMigrationsDeployable,
   checkWranglerMigrationApplySet,
 } from './deploy-migrations.ts';
-import { requireProvisionModule } from './deploy-provision.ts';
 import {
   scrubManagedDeployBuildMarkers,
   scrubWranglerAuthCredentials,
@@ -36,6 +35,7 @@ import {
 } from './deploy-transport.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
 import { resolveProjectCommand, type FrameworkPreset } from './preset.ts';
+import { deleteEnvVarCaseAware } from './provision.ts';
 
 export type CloudflareBuild = Awaited<ReturnType<typeof buildCloudflareWorker>>;
 
@@ -78,18 +78,15 @@ export async function buildCloudflareWorker(input: {
   // Tell void:env to build Worker vars from portable production dotenv files
   // only. Outside this deploy path Vite keeps its standard dotenv behavior,
   // but local files cannot be serialized into the artifact this command uploads.
-  requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, CLOUDFLARE_DEPLOY_BUILD_ENV);
+  deleteEnvVarCaseAware(buildChildEnv, CLOUDFLARE_DEPLOY_BUILD_ENV);
   buildChildEnv[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
-  requireProvisionModule().deleteEnvVarCaseAware(
-    buildChildEnv,
-    CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV,
-  );
+  deleteEnvVarCaseAware(buildChildEnv, CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV);
   if (existingWorker) {
     buildChildEnv[CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV] = '1';
   }
   // The env-schema probes run with NODE_ENV=production; `vite build` keeps an ambient value, so
   // pin it here too.
-  requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
+  deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
   buildChildEnv.NODE_ENV = 'production';
   const runBuild =
     deps.runBuild ??

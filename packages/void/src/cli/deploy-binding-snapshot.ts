@@ -572,14 +572,6 @@ export function verifyNoInjectedDestructiveMigration(
   return { ok: true };
 }
 
-/** Queue names bound as producers, then consumers. */
-export function collectEmittedQueueNames(value: unknown): Array<string> {
-  return [
-    ...collectEmittedQueueGroupNames(value, 'producers'),
-    ...collectEmittedQueueGroupNames(value, 'consumers'),
-  ];
-}
-
 /** Queue names bound in one group. A malformed `queues` value yields none. */
 export function collectEmittedQueueGroupNames(
   value: unknown,

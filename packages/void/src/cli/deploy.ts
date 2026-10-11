@@ -480,7 +480,6 @@ async function runManagedDeploy(
 export { type RunDeployOptions } from './deploy-types.ts';
 
 export { parseRootWranglerConfig } from '@void/deploy-cloudflare';
-export { loadProvisionModule } from './deploy-provision.ts';
 export { resolveDeployTransport } from './deploy-transport.ts';
 export { deriveWorkerName } from './deploy-resources.ts';
 export { checkWranglerMigrationApplySet } from './deploy-migrations.ts';

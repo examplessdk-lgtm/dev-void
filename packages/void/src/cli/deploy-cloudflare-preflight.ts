@@ -40,7 +40,6 @@ import {
   resolveWranglerMigrationPattern,
   formatCloudflareDriftMessage,
 } from './deploy-migrations.ts';
-import { loadProvisionModule } from './deploy-provision.ts';
 import {
   computeDesiredCloudflareResources,
   deriveWorkerName,
@@ -59,8 +58,13 @@ import { createNodeEmailDns, SEND_EMAIL_BINDING } from './email-cloudflare.ts';
 import type { EnvSchemaProbeResult } from './env-schema-probe.ts';
 import { selfHostSchemaFailureMessage, type SelfHostSchemaFacts } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
-import type { ProvisionDriftEntry } from './provision.ts';
+import {
+  assertValidResourceName,
+  checkCloudflareProvisionDrift,
+  isQueueConfirmedAbsent,
+  provisionCloudflareResources,
+  type ProvisionDriftEntry,
+} from './provision.ts';
 import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
 /** Validate source-level native deploy inputs before account operations or project code. */
@@ -150,7 +154,6 @@ export async function preflightCloudflareWorker(input: {
   readonly exit: (code: number) => never;
   readonly cliLog: CliLogger;
   readonly initialCloudflareLink: CloudflareLink | null;
-  readonly provisionModule: Awaited<ReturnType<typeof loadProvisionModule>>;
   readonly detectedFramework: ReturnType<typeof detectFramework>;
   readonly source: CloudflareDeploySource;
 }): Promise<{
@@ -181,7 +184,6 @@ export async function preflightCloudflareWorker(input: {
     exit,
     cliLog,
     initialCloudflareLink,
-    provisionModule,
     detectedFramework,
     source,
   } = input;
@@ -381,9 +383,9 @@ export async function preflightCloudflareWorker(input: {
       resolveBindingNames(voidConfig.inference?.bindings)?.kv !== 'ISR_CACHE' &&
       isrNamespace
     ) {
-      const missing = provisionModule
-        .checkCloudflareProvisionDrift(configPath, desired)
-        .missing.filter((entry) => entry.binding !== 'ISR_CACHE');
+      const missing = checkCloudflareProvisionDrift(configPath, desired).missing.filter(
+        (entry) => entry.binding !== 'ISR_CACHE',
+      );
       if (missing.length) {
         throw new Error(
           formatCloudflareDriftMessage(
@@ -407,7 +409,7 @@ export async function preflightCloudflareWorker(input: {
           if (!assertUploaderStillPinned()) {
             return exit(1);
           }
-          await (deps.provision ?? provisionModule.provisionCloudflareResources)(
+          await (deps.provision ?? provisionCloudflareResources)(
             root,
             configPath,
             {
@@ -470,7 +472,7 @@ export async function preflightCloudflareWorker(input: {
   // the probe below; `--provision` forces it. The provisioner is read-first and idempotent.
   const provisionAndVerify = async (): Promise<void> => {
     if (existingWorker) {
-      const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
+      const { missing } = checkCloudflareProvisionDrift(configPath, desired);
       throw new Error(
         missing.length > 0
           ? formatCloudflareDriftMessage(
@@ -485,7 +487,7 @@ export async function preflightCloudflareWorker(input: {
     if (!assertUploaderStillPinned()) {
       return exit(1);
     }
-    const provision = deps.provision ?? provisionModule.provisionCloudflareResources;
+    const provision = deps.provision ?? provisionCloudflareResources;
     let result;
     try {
       result = await provision(root, configPath, desired, {
@@ -519,7 +521,7 @@ export async function preflightCloudflareWorker(input: {
       );
       return exit(1);
     }
-    const { missing } = provisionModule.checkCloudflareProvisionDrift(configPath, desired);
+    const { missing } = checkCloudflareProvisionDrift(configPath, desired);
     if (missing.length > 0) {
       log.error(
         formatCloudflareDriftMessage(
@@ -539,10 +541,7 @@ export async function preflightCloudflareWorker(input: {
     }
   };
 
-  const { missing: initiallyMissing } = provisionModule.checkCloudflareProvisionDrift(
-    configPath,
-    desired,
-  );
+  const { missing: initiallyMissing } = checkCloudflareProvisionDrift(configPath, desired);
   // A handoff applies no migrations, so preserve the existing local migration settings.
   // Reconciling migrations_dir must not send an already-bound database to the provisioner.
   const d1NeedsConfigReconciliation = !existingWorker && d1MigrationsDirDiffers();
@@ -552,7 +551,7 @@ export async function preflightCloudflareWorker(input: {
     // Queue names come from unsanitized file paths. Report every invalid one before probing.
     const invalidQueues = desired.queues.filter((name) => {
       try {
-        provisionModule.assertValidResourceName('queue', name);
+        assertValidResourceName('queue', name);
         return false;
       } catch {
         return true;
@@ -580,7 +579,7 @@ export async function preflightCloudflareWorker(input: {
       const info = await Promise.resolve(
         runWrangler({ type: 'queues.info', name, configPath }, { capture: true }),
       );
-      if (provisionModule.isQueueConfirmedAbsent(info)) {
+      if (isQueueConfirmedAbsent(info)) {
         absentQueues.push(name);
       }
     }

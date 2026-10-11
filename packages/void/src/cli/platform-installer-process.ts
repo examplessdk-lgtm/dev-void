@@ -57,7 +57,7 @@ export async function runPlatformWranglerAtApiBase(
 ): Promise<CloudflareCommandResult> {
   const startedAt = performance.now();
   const runner = createDefaultRunWrangler(process.cwd(), {
-    launcher: resolveCloudflareOperationArgv(process.cwd()),
+    launcher: resolveCloudflareOperationArgv(),
     parallelWorkerUpload,
     timeoutMs: PLATFORM_WRANGLER_TIMEOUT_MS,
   });

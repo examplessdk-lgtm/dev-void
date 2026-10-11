@@ -50,7 +50,6 @@ import {
   getExitCode,
 } from './deploy-helpers.ts';
 import { mergeAndLintRoutingRules } from './deploy-managed-events.ts';
-import { requireProvisionModule } from './deploy-provision.ts';
 import { deriveWorkerName } from './deploy-resources.ts';
 import { formatDeploySummary, printDeployContext, printDeploySuccess } from './deploy-summary.ts';
 import {
@@ -63,6 +62,7 @@ import { type CliLogger } from './log-file.ts';
 import { note } from './output.ts';
 import { buildStaticManifest } from './package.ts';
 import { detectPreset, type StaticPreset, type FrameworkPreset } from './preset.ts';
+import { deleteEnvVarCaseAware } from './provision.ts';
 import { readWranglerManagedQueueCleanupCandidates } from './wrangler.ts';
 
 /** Default runtime date for static and framework Workers that set none. */
@@ -298,7 +298,7 @@ export async function runCloudflareStaticDeploy(
     const buildChildEnv = scrubManagedDeployBuildMarkers(
       scrubWranglerAuthCredentials(deployChildEnv(accountId, apiBaseUrl)),
     );
-    requireProvisionModule().deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
+    deleteEnvVarCaseAware(buildChildEnv, 'NODE_ENV');
     buildChildEnv.NODE_ENV = 'production';
     const runStaticBuild =
       deps.runStaticBuild ??

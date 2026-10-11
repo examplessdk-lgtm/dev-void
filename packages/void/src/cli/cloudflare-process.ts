@@ -105,7 +105,7 @@ export function createCloudflareProcessRunner(options: {
   env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv);
   timeoutMs?: number;
 }) {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(options.root);
+  const [command, ...prefix] = resolveCloudflareOperationArgv();
   return (
     operation: CloudflareOperation,
     run: { capture: boolean; input?: string; cwd?: string },

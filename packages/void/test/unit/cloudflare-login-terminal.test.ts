@@ -8,7 +8,7 @@ import {
   ensureCloudflareAuthentication,
   runCloudflareAuthCommand,
 } from '../../src/cli/cloudflare-auth.ts';
-import { createDeployWranglerRunner, loadProvisionModule } from '../../src/cli/deploy.ts';
+import { createDeployWranglerRunner } from '../../src/cli/deploy.ts';
 
 vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:child_process')>()),
@@ -40,7 +40,6 @@ describe('cf browser login', () => {
       },
     ],
   ] as const)('%s shows the live login prompt', async (_, create) => {
-    await loadProvisionModule();
     vi.spyOn(log, 'info').mockImplementation(() => {});
     let reads = 0;
     vi.mocked(spawnSync).mockImplementation((_command, args, options) => {

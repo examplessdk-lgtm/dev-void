@@ -10,7 +10,6 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { operationFixtureRequest } from '../../../deploy-cloudflare/test/operation-fixture.ts';
 import {
   createDefaultRunWrangler,
   isAlreadyGoneKillError,
@@ -53,9 +52,7 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process', () 
       timeoutMs: 400,
     });
     const start = Date.now();
-    const result = await run(operationFixtureRequest(['d1', 'list', '--json']), {
-      accountId: 'acct',
-    });
+    const result = await run({ type: 'd1.list' }, { accountId: 'acct' });
     const elapsed = Date.now() - start;
     // A loose bound: the 400ms timer can fire late on a busy machine.
     expect(elapsed).toBeLessThan(15_000);
@@ -103,9 +100,7 @@ describe('createDefaultRunWrangler — hard timeout kills the REAL process', () 
       timeoutMs: 1_500,
     });
     const start = Date.now();
-    const result = await run(operationFixtureRequest(['d1', 'list', '--json']), {
-      accountId: 'acct',
-    });
+    const result = await run({ type: 'd1.list' }, { accountId: 'acct' });
     const elapsed = Date.now() - start;
     expect(elapsed).toBeLessThan(20_000);
     expect(result.signal).toBe('SIGKILL');
@@ -290,7 +285,7 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     // the lock under a live child.
     let rejected: unknown;
     try {
-      await run(operationFixtureRequest(['d1', 'list', '--json']), { accountId: 'acct' });
+      await run({ type: 'd1.list' }, { accountId: 'acct' });
     } catch (error) {
       rejected = error;
     }
@@ -334,7 +329,7 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
     });
     let rejected: unknown;
     try {
-      await run(operationFixtureRequest(['d1', 'list', '--json']), { accountId: 'acct' });
+      await run({ type: 'd1.list' }, { accountId: 'acct' });
     } catch (error) {
       rejected = error;
     }
@@ -373,9 +368,7 @@ describe('createDefaultRunWrangler — confirmed child termination + kill classi
         throw Object.assign(new Error('ESRCH: no such process'), { code: 'ESRCH' });
       },
     });
-    const result = await run(operationFixtureRequest(['d1', 'list', '--json']), {
-      accountId: 'acct',
-    });
+    const result = await run({ type: 'd1.list' }, { accountId: 'acct' });
     expect(result.signal).toBe('SIGKILL');
     expect(result.status).not.toBe(0);
     // ESRCH is NOT a kill failure — no "could not be killed" surfaced.

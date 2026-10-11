@@ -14,7 +14,6 @@ import {
   type TableInfoRow,
   type DeployWranglerRun,
 } from './deploy-types.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { ProvisionDriftEntry } from './provision.ts';
 
 /**

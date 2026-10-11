@@ -26,14 +26,6 @@ import type {
 import { dischargeSelfHostEnvContext, type EmittedWorkerVarsResult } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
 import { type DeploymentPlatform } from './project.ts';
-// The provision module pulls in the whole-provision cross-process lock
-// (`proper-lockfile` → `signal-exit`), which patches `process.emit` /
-// `process.reallyExit` and installs exit handlers the moment it is imported. An
-// ordinary MANAGED `void deploy` never enters the Cloudflare-backend fork, so it
-// must not pay that side effect. Keep ONLY erasable `import type` at module scope
-// and load the runtime values with a DYNAMIC `import()` inside the fork
-// (`loadProvisionModule`), so importing this file (which `cli.ts` does for every
-// deploy) never evaluates the provision lifecycle.
 import type { provisionCloudflareResources } from './provision.ts';
 import type { DeployEvent, DeployTargetAdapter } from './types.ts';
 
@@ -80,7 +72,7 @@ export type DeployWranglerRunResult = CloudflareCommandResult;
 
 export type DeployWranglerRun = (
   operation: CloudflareOperation,
-  opts: { capture: boolean; input?: string; env?: Record<string, string> },
+  opts: { capture: boolean; input?: string },
 ) => DeployWranglerRunResult | Promise<DeployWranglerRunResult>;
 
 /**
@@ -111,7 +103,7 @@ export interface CloudflareDeployDeps {
    * credentialed remote migrate / deploy execute fails closed before either runs.
    */
   hashWranglerUploader?: (root: string) => string | undefined;
-  /** Provisioner seam (default: `provisionCloudflareResources`, loaded dynamically). */
+  /** Provisioner seam (default: `provisionCloudflareResources`). */
   provision?: typeof provisionCloudflareResources;
   /** Parent-side secret-gate discharge seam (default: {@link dischargeSelfHostEnvContext}). */
   dischargeSelfHostEnv?: typeof dischargeSelfHostEnvContext;
@@ -158,7 +150,7 @@ export interface CloudflareDeployDeps {
     env: NodeJS.ProcessEnv,
   ) => EnvSchemaValidateResult | Promise<EnvSchemaValidateResult>;
   /**
-   * Emitted-worker-vars read seam (default: {@link readEmittedWorkerVarsDefault}).
+   * Emitted-worker-vars read seam (default: {@link readEmittedWorkerVars}).
    * Runs POST-build: reads the REAL `vars` map the build baked into
    * `dist/ssr/wrangler.json` — the ground truth the plaintext-server-key + secret gate
    * validate.

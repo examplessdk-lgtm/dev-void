@@ -198,7 +198,7 @@ export function runCloudflareAuthCommand(
   operation: CloudflareOperation,
   signal?: AbortSignal,
 ): Promise<CloudflareAuthRunResult> {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(root);
+  const [command, ...prefix] = resolveCloudflareOperationArgv();
   const args = encodeCloudflareOperation(operation);
   if (cloudflareAuthNeedsTerminal(operation)) {
     // cf can prompt or print a device code while the browser login is active.

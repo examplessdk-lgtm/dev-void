@@ -12,12 +12,16 @@ import { type DatabaseDialect, type VoidConfig } from '../config.ts';
 import { collectRevalidate, hasRevalidate } from '../isr-config.ts';
 import { hasEmailHandlers, type EmailHandlersScan } from '../router/email.ts';
 import { DEFAULT_VOID_AI_BINDING } from './deploy-binding-snapshot.ts';
-import { loadProvisionModule } from './deploy-provision.ts';
 import {
   type CloudflareAuthSecretFailureReason,
   type DeployWranglerRunResult,
 } from './deploy-types.ts';
-import type { DesiredResourceSet, ProvisionDriftEntry } from './provision.ts';
+import {
+  isRealD1Id,
+  isRealKvId,
+  type DesiredResourceSet,
+  type ProvisionDriftEntry,
+} from './provision.ts';
 
 /** Human labels for a drifted resource kind, used in guidance messages. */
 export const CLOUDFLARE_RESOURCE_LABELS: Record<ProvisionDriftEntry['kind'], string> = {
@@ -134,7 +138,6 @@ function assertDistinctKvNamespaces(
   kvNamespaces: Array<{ binding: string; title: string }>,
   config: Record<string, unknown>,
   configPath: string,
-  isRealKvId: (value: unknown) => value is string,
 ): void {
   const bindingByTitle = new Map<string, string>();
   for (const { binding, title } of kvNamespaces) {
@@ -212,7 +215,6 @@ export async function computeDesiredCloudflareResources(
   needsEmail: boolean;
   emailHandlers: EmailHandlersScan;
 }> {
-  const { isRealD1Id, isRealKvId } = await loadProvisionModule();
   const analysis = application
     ? await completeApplicationAnalysis(application)
     : await analyzeApplication(root, { config: voidConfig, environment: 'prod' });
@@ -303,7 +305,7 @@ export async function computeDesiredCloudflareResources(
     reasons.set(binding, 'routes use `revalidate` (ISR) — needs an ISR_CACHE KV namespace');
   }
 
-  assertDistinctKvNamespaces(desired.kvNamespaces, config, configPath, isRealKvId);
+  assertDistinctKvNamespaces(desired.kvNamespaces, config, configPath);
 
   const expectedCrons = [...new Set(analysis.jobs.flatMap((job) => job.crons))];
   const emailHandlers = analysis.email;

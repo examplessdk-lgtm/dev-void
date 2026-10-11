@@ -961,7 +961,7 @@ export function createDefaultRunWrangler(
     onSpawnedChild?: (child: ChildProcess) => void;
   },
 ): RunWrangler {
-  const launcher = options?.launcher ?? resolveCloudflareOperationArgv(root);
+  const launcher = options?.launcher ?? resolveCloudflareOperationArgv();
   const timeoutMs = options?.timeoutMs ?? COMMAND_TIMEOUT_MS;
   const confirmGraceMs = options?.confirmKillGraceMs ?? CONFIRM_KILL_GRACE_MS;
   const killProcessGroup =

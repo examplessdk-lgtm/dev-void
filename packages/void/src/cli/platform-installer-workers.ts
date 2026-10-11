@@ -271,7 +271,7 @@ function platformWorkerUploaderHash(): string | null {
     return cachedPlatformUploaderHash;
   }
   try {
-    const launcher = resolveCloudflareOperationArgv(process.cwd())[1];
+    const launcher = resolveCloudflareOperationArgv()[1];
     if (!launcher) {
       return (cachedPlatformUploaderHash = null);
     }

@@ -687,7 +687,7 @@ export function createDefaultSecretListRunner(
     timeoutMs?: number;
   },
 ): RunSecretList {
-  const launcher = options?.launcher ?? resolveCloudflareOperationArgv(root);
+  const launcher = options?.launcher ?? resolveCloudflareOperationArgv();
   const timeoutMs = options?.timeoutMs ?? SECRET_LIST_TIMEOUT_MS;
   const [command, ...prefix] = launcher;
   return (args) =>

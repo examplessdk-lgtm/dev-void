@@ -6205,31 +6205,11 @@ describe('runCloudflareDeploy — config laundering by a build-adjacent probe', 
   });
 });
 
-// Importing provision.ts patches process.emit / reallyExit (proper-lockfile → signal-exit), so the
-// deploy modules every managed deploy loads may only import it as a type. Checked at the source
-// level because this test file imports provision.ts itself.
-
-describe('runCloudflareDeploy — managed path does not import the provision module', () => {
+describe('runCloudflareDeploy — env-schema probe loads lazily', () => {
   const deploySource = readdirSync(join(import.meta.dirname, '../../src/cli'))
     .filter((file) => file === 'deploy.ts' || (file.startsWith('deploy-') && file.endsWith('.ts')))
     .map((file) => readFileSync(join(import.meta.dirname, '../../src/cli', file), 'utf-8'))
     .join('\n');
-
-  it('imports ./provision.ts as TYPE-ONLY at module scope (dynamic import inside the fork)', () => {
-    // Every static `... from './provision.ts'` at module scope must be `import type`.
-    // `[^']*?` keeps each clause from spanning across a previous `from '...'`.
-    const staticImports = [
-      ...deploySource.matchAll(/^import\s+([^']*?)\s+from\s+'\.\/provision\.ts';/gm),
-    ];
-    expect(staticImports.length).toBeGreaterThan(0);
-    for (const [, clause] of staticImports) {
-      expect(clause.startsWith('type')).toBe(true);
-    }
-  });
-
-  it('loads the provision module via a dynamic import()', () => {
-    expect(deploySource).toMatch(/await import\('\.\/provision\.ts'\)/);
-  });
 
   it('loads the env-schema probe via a dynamic import() (never a static module-scope import)', () => {
     // deploy.ts must only `import type` from the probe at module scope; the runtime helper
@@ -8153,7 +8133,7 @@ describe('compareWranglerMigrationPaths (wrangler 4.131 numeric-prefix comparato
 // ---------------------------------------------------------------------------
 // Post-build ground-truth secret gate: the parent builds the values-free context
 // from the REAL emitted `vars` + the env-insensitive required names, then
-// discharges it. A required secret shipped EMPTY fails closed post-build; a
+// discharges it. A server key shipped as a plaintext var fails closed post-build; a
 // pre-build schema-probe failure fails closed before any account op.
 // ---------------------------------------------------------------------------
 
@@ -8178,26 +8158,35 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
     expect(trace).not.toContain('wrangler:deploy');
   });
 
-  it('rejects a schema-declared server key emitted as a plaintext Worker var', async () => {
-    const root = d1Project(PROVISIONED_D1);
-    const { deps, trace, exitCalls } = harness({
-      resolveSchemaFacts: (() =>
-        okSchemaFacts({
-          hasSchema: true,
-          requiredKeys: ['API_TOKEN'],
-          serverKeys: ['API_TOKEN'],
-        })) as CloudflareDeployDeps['resolveSchemaFacts'],
-      readEmittedWorkerVars: (() =>
-        emittedVars({ API_TOKEN: 'secret' })) as CloudflareDeployDeps['readEmittedWorkerVars'],
-    });
+  it.each([
+    { shipped: 'a value', value: 'secret' },
+    { shipped: 'an empty value', value: '' },
+    { shipped: 'a null value', value: null },
+  ])(
+    'rejects a schema-declared server key emitted as a plaintext Worker var with $shipped',
+    async ({ value }) => {
+      const root = d1Project(PROVISIONED_D1);
+      // The plaintext server-key gate checks presence, so empty and null values fail closed too.
+      const { deps, trace, wranglerArgs, exitCalls } = harness({
+        resolveSchemaFacts: (() =>
+          okSchemaFacts({
+            hasSchema: true,
+            requiredKeys: ['API_TOKEN'],
+            serverKeys: ['API_TOKEN'],
+          })) as CloudflareDeployDeps['resolveSchemaFacts'],
+        readEmittedWorkerVars: (() =>
+          emittedVars({ API_TOKEN: value })) as CloudflareDeployDeps['readEmittedWorkerVars'],
+      });
 
-    await expect(
-      runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toContain('build');
-    expect(trace).not.toContain('wrangler:deploy');
-  });
+      await expect(
+        runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps),
+      ).rejects.toBeInstanceOf(ExitError);
+      expect(exitCalls).toEqual([1]);
+      expect(trace).toContain('build');
+      expect(trace).not.toContain('wrangler:deploy');
+      expect(wranglerArgs.some((a) => a[0] === 'secret')).toBe(false);
+    },
+  );
 
   it('allows an emitted VITE_* client value', async () => {
     const root = d1Project(PROVISIONED_D1);
@@ -8312,54 +8301,6 @@ describe('runCloudflareDeploy — post-build ground-truth secret gate', () => {
       invalidKeys: [],
     });
     expect(trace).toContain('wrangler:deploy');
-  });
-
-  it('fails closed when a required secret is shipped EMPTY in the REAL vars (shadows the remote secret)', async () => {
-    const root = d1Project(PROVISIONED_D1);
-    // The plaintext server-key gate checks presence, so an empty value still fails closed.
-    const { deps, trace, wranglerArgs, exitCalls } = harness({
-      resolveSchemaFacts: (() =>
-        okSchemaFacts({
-          hasSchema: true,
-          requiredKeys: ['STRIPE_KEY'],
-          serverKeys: ['STRIPE_KEY'],
-        })) as CloudflareDeployDeps['resolveSchemaFacts'],
-      readEmittedWorkerVars: (() =>
-        emittedVars({ STRIPE_KEY: '' })) as CloudflareDeployDeps['readEmittedWorkerVars'],
-      dischargeSelfHostEnv: undefined,
-    });
-    await expect(
-      runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    // The gate runs POST-build (ground truth), so the build already ran; a shipped-empty
-    // required secret fails closed BEFORE any wrangler secret list and before deploy.
-    expect(trace).toContain('build');
-    expect(trace).not.toContain('wrangler:deploy');
-    expect(wranglerArgs.some((a) => a[0] === 'secret')).toBe(false);
-  });
-
-  it('fails closed when a required secret is shipped NULL in the REAL vars (shadows like empty)', async () => {
-    const root = d1Project(PROVISIONED_D1);
-    // A parsed wrangler.json var can be `null`; the presence check rejects it like an empty value.
-    const { deps, trace, wranglerArgs, exitCalls } = harness({
-      resolveSchemaFacts: (() =>
-        okSchemaFacts({
-          hasSchema: true,
-          requiredKeys: ['STRIPE_KEY'],
-          serverKeys: ['STRIPE_KEY'],
-        })) as CloudflareDeployDeps['resolveSchemaFacts'],
-      readEmittedWorkerVars: (() =>
-        emittedVars({ STRIPE_KEY: null })) as CloudflareDeployDeps['readEmittedWorkerVars'],
-      dischargeSelfHostEnv: undefined,
-    });
-    await expect(
-      runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps),
-    ).rejects.toBeInstanceOf(ExitError);
-    expect(exitCalls).toEqual([1]);
-    expect(trace).toContain('build');
-    expect(wranglerArgs.some((a) => a[0] === 'secret')).toBe(false);
-    expect(trace).not.toContain('wrangler:deploy');
   });
 
   it('fails closed when the build emits a MALFORMED vars field (array/scalar)', async () => {
@@ -8518,14 +8459,8 @@ describe('runCloudflareDeploy — wrangler credentials reach only the wrangler r
     expect(buildEnvSeen.VOID_TOKEN).toBeUndefined();
   });
 
-  it('the wrangler runner keeps Wrangler auth but not Void readiness credentials', async () => {
+  it('the wrangler runner keeps Wrangler auth but not Void readiness credentials', () => {
     stubWranglerCredentials();
-    // Run a deploy first so the fork's memoized provision module is loaded — the sync
-    // `deployChildEnv` reads it, exactly as `createDeployWranglerRunner` does.
-    const root = d1Project(PROVISIONED_D1);
-    const { deps } = harness();
-    await runCloudflareDeploy(root, { platform: 'cloudflare' }, silentCliLog, deps);
-
     const runnerEnv = deployChildEnv('acc123', 'https://api.cloudflare.com/client/v4');
     for (const name of WRANGLER_AUTH_VARS) {
       if (name === 'CF_ACCESS_TOKEN') {
@@ -9247,7 +9182,7 @@ describe('runCloudflareDeploy — native Cloudflare email step', () => {
     stderr: BETA_WARNING,
   };
 
-  type Spawn = { args: Array<string>; opts: { capture: boolean; env?: Record<string, string> } };
+  type Spawn = { args: Array<string>; opts: { capture: boolean } };
 
   /**
    * A deploy runner keyed on the wrangler argv WITHOUT the `-c <cfg> --env=` context (asserted
@@ -9541,7 +9476,6 @@ describe('runCloudflareDeploy — native Cloudflare email step', () => {
     expect(output.lines.join('\n')).not.toContain(BEARER);
     for (const spawn of spawns) {
       expect(JSON.stringify(spawn.args)).not.toContain(BEARER);
-      expect(spawn.opts.env).toBeUndefined();
     }
     expect(
       Object.values(process.env).some((v) => typeof v === 'string' && v.includes(BEARER)),

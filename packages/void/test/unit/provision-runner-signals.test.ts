@@ -9,7 +9,6 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vite-plus/test';
-import { operationFixtureRequest } from '../../../deploy-cloudflare/test/operation-fixture.ts';
 import {
   acquireProvisionLock,
   createDefaultRunWrangler,
@@ -112,9 +111,7 @@ describe('createDefaultRunWrangler — normal close confirms the whole GROUP', (
       launcher: [process.execPath, leader],
       timeoutMs: 30_000,
     });
-    const result = await run(operationFixtureRequest(['d1', 'list', '--json']), {
-      accountId: 'acct',
-    });
+    const result = await run({ type: 'd1.list' }, { accountId: 'acct' });
     // The clean exit is reported only after the grandchild was reaped.
     expect(result.status).toBe(0);
     expect(result.signal).toBeNull();
@@ -293,19 +290,19 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
       parallelWorkerUpload: true,
       timeoutMs: 30_000,
     });
-    const first = run(operationFixtureRequest(['versions', 'upload']), { accountId: 'acct' });
-    const second = run(operationFixtureRequest(['versions', 'upload']), { accountId: 'acct' });
+    const first = run({ type: 'versions.upload' }, { accountId: 'acct' });
+    const second = run({ type: 'versions.upload' }, { accountId: 'acct' });
     expect(spawned).toHaveLength(2);
+    await expect(run({ type: 'versions.upload' }, { accountId: 'acct' })).rejects.toThrow(
+      /another wrangler child is already active in this process/,
+    );
     await expect(
-      run(operationFixtureRequest(['versions', 'upload']), { accountId: 'acct' }),
-    ).rejects.toThrow(/another wrangler child is already active in this process/);
-    await expect(
-      run(operationFixtureRequest(['versions', 'deploy']), { accountId: 'acct' }),
+      run({ type: 'versions.deploy', versions: [] }, { accountId: 'acct' }),
     ).rejects.toThrow(/another wrangler child is already active in this process/);
     expect(spawned).toHaveLength(2);
     expect((await Promise.all([first, second])).map((result) => result.status)).toEqual([0, 0]);
     expect(
-      (await run(operationFixtureRequest(['versions', 'deploy']), { accountId: 'acct' })).status,
+      (await run({ type: 'versions.deploy', versions: [] }, { accountId: 'acct' })).status,
     ).toBe(0);
   }, 15_000);
 
@@ -811,7 +808,7 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
         injectErrorAfterChildStarts(child, pidFile, 'injected kill-delivery failure');
       },
     });
-    const result = await run(operationFixtureRequest(['d1', 'list']), { accountId: 'acct' });
+    const result = await run({ type: 'd1.list' }, { accountId: 'acct' });
     expect(result.status).toBe(1);
     expect(result.signal).toBe('SIGKILL');
     expect(result.stderr).toContain('injected kill-delivery failure');
@@ -843,7 +840,7 @@ describe('createDefaultRunWrangler — post-spawn child `error` events confirm/q
     });
     let thrown: unknown;
     try {
-      await run(operationFixtureRequest(['d1', 'list']), { accountId: 'acct' });
+      await run({ type: 'd1.list' }, { accountId: 'acct' });
     } catch (error) {
       thrown = error;
     }

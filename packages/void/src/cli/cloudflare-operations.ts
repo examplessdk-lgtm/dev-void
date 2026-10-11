@@ -15,8 +15,8 @@ import {
 } from '@void/deploy-cloudflare';
 import { join } from 'pathslash';
 import { materializeCloudflareConfig, persistCloudflareConfig } from '../cloudflare-config.ts';
-import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { createCloudflareProcessRunner } from './cloudflare-process.ts';
+import { findAmbientConfigOverride, findWranglerCiOverrideDotenvFile } from './deploy-transport.ts';
 import {
   assertNoTransportRedirectInProjectDotenv,
   deleteEnvVarCaseAware,
@@ -758,27 +758,22 @@ function createCloudflareOperationRunner(
 }
 
 function assertNoOperationConfigOverride(root: string): void {
-  if (process.env.CLOUDFLARE_ENV?.trim()) {
+  const override = findAmbientConfigOverride();
+  if (override === 'CLOUDFLARE_ENV') {
     throw new Error(
       'CLOUDFLARE_ENV is set. Void Cloudflare operations target the top-level config only.',
     );
   }
-  if (process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH?.trim()) {
+  if (override) {
     throw new Error(
       'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. Void Cloudflare operations use the root Wrangler config only.',
     );
   }
-  for (const file of ['.env', '.env.local', '.env.', '.env..local']) {
-    const keys = scanWranglerDotenvKeys(join(root, file));
-    const containsOverride =
-      process.platform === 'win32'
-        ? [...keys].some((key) => key.toLowerCase() === 'wrangler_ci_override_name')
-        : keys.has('WRANGLER_CI_OVERRIDE_NAME');
-    if (containsOverride) {
-      throw new Error(
-        `Project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which can replace the pinned Worker name. Remove it before running this command.`,
-      );
-    }
+  const file = findWranglerCiOverrideDotenvFile(root);
+  if (file) {
+    throw new Error(
+      `Project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which can replace the pinned Worker name. Remove it before running this command.`,
+    );
   }
 }
 

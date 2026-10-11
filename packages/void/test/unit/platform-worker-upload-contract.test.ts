@@ -111,7 +111,7 @@ it.each(['none', 'batch', 'single-file'] as const)(
             : { assets: { directory: toSlash(join(directory, 'public')) } }),
         }),
       );
-      const [command, ...prefix] = resolveCloudflareOperationArgv(process.cwd());
+      const [command, ...prefix] = resolveCloudflareOperationArgv();
       let output = '';
       const failure = await withConditionalPlatformWorkerCreate(
         'account',
