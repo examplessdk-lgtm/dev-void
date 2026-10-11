@@ -1,11 +1,11 @@
+import { isRecord } from '@void/deploy-core';
 import type { RewriteDestination } from 'void/routes';
-import type { DevRedirectRule, HeaderRule, RedirectRule } from './cli/types.ts';
-export type { RedirectRule };
 import {
   VOID_AUTH_PROVIDERS,
   isVoidAuthProvider,
   type VoidAuthProvider,
 } from './auth/providers.ts';
+import type { DevRedirectRule, HeaderRule } from './cli/types.ts';
 import { loadVoidConfig } from './config-loader.ts';
 import type { HeadConfig } from './pages/head.ts';
 import { validateSourceDir } from './project-paths.ts';
@@ -18,7 +18,7 @@ export type RedirectDestination = string | { to: string; status?: 301 | 302 | 30
 /** Supported database dialects (internal representation). */
 export type DatabaseDialect = 'sqlite' | 'postgresql' | 'mysql';
 
-/** Curated Worker fields accepted in the legacy void.json config. */
+/** Curated Worker fields accepted by the `worker` config field. */
 export type WranglerConfig = {
   compatibility_date?: string;
   compatibility_flags?: Array<string>;
@@ -144,7 +144,7 @@ export type CloudflareConfig = Record<string, unknown> & {
   assets?: CloudflareField<{
     directory?: string;
     binding?: string;
-    not_found_handling?: 'single-page-application' | '404-page' | 'none';
+    not_found_handling?: NotFoundHandling;
     run_worker_first?: boolean | Array<string>;
   }>;
   triggers?: CloudflareField<{ crons?: Array<string> }>;
@@ -187,7 +187,7 @@ const VALID_OUTPUTS = new Set(['server', 'static']);
  * Accepted `routing.notFound` values. Keep in sync with the schema.json enum
  * and `AssetConfig.not_found_handling` in `@void/deploy-core`.
  */
-export const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
+const VALID_NOT_FOUND_HANDLING: Set<string> = new Set([
   'single-page-application',
   '404-page',
   'none',
@@ -209,18 +209,19 @@ const VALID_SANDBOX_INSTANCE_TYPES = new Set<SandboxInstanceType>([
   'standard-3',
   'standard-4',
 ]);
+const SANDBOX_STRING_KEYS = [
+  'binding',
+  'className',
+  'containerName',
+  'image',
+  'imageBuildContext',
+  'platformImage',
+];
+const SANDBOX_KEYS = [...SANDBOX_STRING_KEYS, 'instanceType'];
 
 /**
- * Count anonymous `*` wildcards in a pattern, ignoring the `*` that
- * terminates a `:name*` multi-segment named capture.
- *
- * The shared `compilePattern` (`@void/edge`) emits a distinct `(?<name>.*)`
- * group for `:name*` and a `(?<splat>.*)` group for the first bare `*` —
- * those don't clash, so a pattern with both a named multi-segment capture and
- * a bare splat is legitimate and must validate. Walking raw chars would
- * over-count and cause `assertSingleSplat` to reject such patterns.
- *
- * The identifier character class matches `compilePattern`'s `[A-Za-z0-9_]+`.
+ * Count anonymous `*` wildcards, ignoring the `*` that ends a `:name*` capture:
+ * `compilePattern` (`@void/edge`) gives `:name*` its own group, so it never clashes with a splat.
  */
 export function countSplats(source: string): number {
   return source.replace(/:[A-Za-z0-9_]+\*/g, '').match(/\*/g)?.length ?? 0;
@@ -232,7 +233,7 @@ export function countSplats(source: string): number {
  * `kind` is a capitalised noun (e.g. "Redirect", "Rewrite") used in the error
  * text.
  */
-export function assertSingleSplat(source: string, kind: string): void {
+function assertSingleSplat(source: string, kind: string): void {
   const count = countSplats(source);
   if (count > 1) {
     throw new Error(
@@ -242,21 +243,10 @@ export function assertSingleSplat(source: string, kind: string): void {
 }
 
 /**
- * Reject patterns whose compilation would produce duplicate named-capture
- * groups, which makes `new RegExp()` throw `SyntaxError: Duplicate capture
- * group name` at request time. Two cases:
- *
- *   1. Two `:name` (or `:name` + trailing `*`) tokens with the same
- *      identifier — e.g. `/:id/:id`, or two named-multi-segment captures
- *      sharing a name.
- *   2. A `:splat` (named) token alongside a bare `*` — both compile to a
- *      `(?<splat>...)` group.
- *
- * The runtime skips a rule whose pattern fails to compile
- * (`runtime/routing.ts`), but failing at config-read with a precise message
- * is friendlier than a log warning.
+ * Reject patterns that compile to duplicate named groups (`/:id/:id`, or `:splat`
+ * with a bare `*`). The runtime would only skip such a rule with a log warning.
  */
-export function assertUniqueCaptureNames(source: string, kind: string): void {
+function assertUniqueCaptureNames(source: string, kind: string): void {
   const seen = new Set<string>();
   const dups = new Set<string>();
   // Same identifier class as `compilePattern`. Trailing `*` is optional —
@@ -283,15 +273,7 @@ export function assertUniqueCaptureNames(source: string, kind: string): void {
   }
 }
 
-/**
- * Predicate for the "protocol-relative" shape: a leading `//` parses as
- * `//host/path` → `https://host/path`, which silently turns an intended
- * in-worker rewrite/redirect into a cross-origin proxy.
- *
- * Shared by the config validators below and the `_redirects` parser
- * (`cli/headers.ts`). `c.rewrite()` in `runtime/routing.ts` has an equivalent
- * check for runtime input; it runs in the Worker and cannot import this module.
- */
+/** A leading `//` parses as `https://host/path`, so an internal rule would proxy cross-origin. */
 export function isProtocolRelative(dest: string): boolean {
   return dest.startsWith('//');
 }
@@ -313,41 +295,19 @@ function assertNotProtocolRelative(
   );
 }
 
-/**
- * Strict literal-hostname regex used by `parseHostPrefixedSource` to validate
- * the host portion of an `https://host/path` rule source. Mirrors
- * `LITERAL_HOSTNAME_REGEX` in `packages/deploy-core/src/validate.ts` and the
- * regex in `platform/packages/api/src/routes/domains.ts`. Rejects scheme
- * prefixes, ports, paths, whitespace, control chars, wildcards, single-label
- * hosts, IPv4 literals, and userinfo. The host is lowercased before testing so the
- * same byte-exact form reaches dispatch (which compares against the
- * lowercase `url.hostname`).
- */
+// Mirrors LITERAL_HOSTNAME_REGEX in @void/deploy-core and the platform domains route.
 const LITERAL_HOSTNAME_REGEX = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 
-export type ParsedRuleSource = {
+type ParsedRuleSource = {
   host: string | undefined;
   path: string;
 };
 
 /**
- * Split an optional `https://host/path` prefix from a rule source.
- *
- * Path-only sources (no scheme) are returned as `{ host: undefined, path }`.
- * Sources starting with `https://` have the host portion extracted and
- * lowercase-normalized; the remaining path becomes `path` (including the
- * leading `/`, which the caller may further validate).
- *
- * Rejected (returns `{ error }`):
- * - `http://...` — TLS terminates upstream of the dispatch worker; only
- *   `https://` requests ever reach the runtime, so an `http://`-scoped rule
- *   physically cannot fire.
- * - `//host/path` — protocol-relative; ambiguous and rejected by the same
- *   reasoning.
- * - `https://` with a wildcarded, ported, or otherwise non-literal host
- *   (v1 only supports literal hosts).
- * - `https://` with no path (`https://host`) — accepted and normalized to
- *   `https://host/` so the path is always non-empty.
+ * Split an optional `https://host` prefix from a rule source. The host is
+ * lowercased (dispatch compares `url.hostname`), and a bare `https://host` gets
+ * path `/`. Returns `{ error }` for `//` and `http://` sources (only HTTPS
+ * requests reach the runtime) and for non-literal hosts.
  */
 export function parseHostPrefixedSource(raw: string): ParsedRuleSource | { error: string } {
   if (raw.startsWith('//')) {
@@ -392,6 +352,35 @@ function assertNoQueryString(dest: string, source: string, kind: 'Rewrite' | 'Fa
   );
 }
 
+function validateRewriteMap(value: unknown, kind: 'Rewrite' | 'Fallback'): void {
+  if (!isRecord(value)) {
+    throw new Error(`"routing.${kind.toLowerCase()}s" in ${CONFIG_FILE} must be an object`);
+  }
+  for (const [source, dest] of Object.entries(value)) {
+    const parsed = parseHostPrefixedSource(source);
+    if ('error' in parsed) {
+      throw new Error(`${kind} source "${source}" in ${CONFIG_FILE}: ${parsed.error}`);
+    }
+    if (!parsed.path.startsWith('/')) {
+      throw new Error(
+        `${kind} source "${source}" in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path)`,
+      );
+    }
+    assertSingleSplat(parsed.path, kind);
+    assertUniqueCaptureNames(parsed.path, kind);
+    if (typeof dest !== 'string') {
+      throw new Error(`${kind} destination for "${source}" in ${CONFIG_FILE} must be a string`);
+    }
+    if (!dest.startsWith('/')) {
+      throw new Error(
+        `${kind} destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
+      );
+    }
+    assertNotProtocolRelative(dest, source, kind);
+    assertNoQueryString(dest, source, kind);
+  }
+}
+
 /** Old flat keys that have moved into namespaces. */
 const MIGRATION_ERRORS: Record<string, string> = {
   bindings: '"bindings" has moved to "inference.bindings"',
@@ -426,12 +415,10 @@ export function validateConfig(config: unknown, source: string = CONFIG_FILE): V
   }
 }
 
-function validateConfigObject(config: unknown): VoidConfig {
-  if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+function validateConfigObject(obj: unknown): VoidConfig {
+  if (!isRecord(obj)) {
     throw new Error(`config: ${CONFIG_FILE} must be a JSON object.`);
   }
-
-  const obj = config as Record<string, unknown>;
 
   // Check for old flat keys that have moved
   for (const [key, message] of Object.entries(MIGRATION_ERRORS)) {
@@ -466,11 +453,11 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Validate auth
   if (obj.auth !== undefined) {
-    if (typeof obj.auth !== 'object' || obj.auth === null || Array.isArray(obj.auth)) {
+    if (!isRecord(obj.auth)) {
       throw new Error(`config: "auth" in ${CONFIG_FILE} must be an object.`);
     }
 
-    const auth = obj.auth as Record<string, unknown>;
+    const auth = obj.auth;
     for (const key of Object.keys(auth)) {
       if (key !== 'providers') {
         throw new Error(`config: Unknown key 'auth.${key}' in ${CONFIG_FILE}. Valid: providers.`);
@@ -509,10 +496,10 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Validate head
   if (obj.head !== undefined) {
-    if (typeof obj.head !== 'object' || obj.head === null || Array.isArray(obj.head)) {
+    if (!isRecord(obj.head)) {
       throw new Error(`config: "head" in ${CONFIG_FILE} must be an object.`);
     }
-    const h = obj.head as Record<string, unknown>;
+    const h = obj.head;
     if (h.title !== undefined && typeof h.title !== 'string') {
       throw new Error(`config: "head.title" in ${CONFIG_FILE} must be a string.`);
     }
@@ -524,7 +511,7 @@ function validateConfigObject(config: unknown): VoidConfig {
         throw new Error(`config: "head.meta" in ${CONFIG_FILE} must be an array.`);
       }
       for (const entry of h.meta) {
-        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        if (!isRecord(entry)) {
           throw new Error(`config: "head.meta" entries in ${CONFIG_FILE} must be objects.`);
         }
       }
@@ -540,12 +527,12 @@ function validateConfigObject(config: unknown): VoidConfig {
       }
     }
     if (h.htmlAttrs !== undefined) {
-      if (typeof h.htmlAttrs !== 'object' || h.htmlAttrs === null || Array.isArray(h.htmlAttrs)) {
+      if (!isRecord(h.htmlAttrs)) {
         throw new Error(`config: "head.htmlAttrs" in ${CONFIG_FILE} must be an object.`);
       }
     }
     if (h.bodyAttrs !== undefined) {
-      if (typeof h.bodyAttrs !== 'object' || h.bodyAttrs === null || Array.isArray(h.bodyAttrs)) {
+      if (!isRecord(h.bodyAttrs)) {
         throw new Error(`config: "head.bodyAttrs" in ${CONFIG_FILE} must be an object.`);
       }
     }
@@ -553,10 +540,10 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Validate routing
   if (obj.routing !== undefined) {
-    if (typeof obj.routing !== 'object' || obj.routing === null || Array.isArray(obj.routing)) {
+    if (!isRecord(obj.routing)) {
       throw new Error(`config: "routing" in ${CONFIG_FILE} must be an object.`);
     }
-    const routing = obj.routing as Record<string, unknown>;
+    const routing = obj.routing;
 
     // Validate routing.notFound
     if (routing.notFound !== undefined) {
@@ -579,13 +566,8 @@ function validateConfigObject(config: unknown): VoidConfig {
             `config: "routing.revalidate" in ${CONFIG_FILE} must be a non-negative finite number.`,
           );
         }
-      } else if (
-        typeof routing.revalidate === 'object' &&
-        routing.revalidate !== null &&
-        !Array.isArray(routing.revalidate)
-      ) {
-        const r = routing.revalidate as Record<string, unknown>;
-        for (const [pattern, value] of Object.entries(r)) {
+      } else if (isRecord(routing.revalidate)) {
+        for (const [pattern, value] of Object.entries(routing.revalidate)) {
           if (pattern !== '*' && !pattern.startsWith('/')) {
             throw new Error(
               `config: "routing.revalidate" key '${pattern}' in ${CONFIG_FILE} must start with "/" or be "*".`,
@@ -625,15 +607,10 @@ function validateConfigObject(config: unknown): VoidConfig {
 
     // Validate routing.headers
     if (routing.headers !== undefined) {
-      if (
-        typeof routing.headers !== 'object' ||
-        routing.headers === null ||
-        Array.isArray(routing.headers)
-      ) {
+      if (!isRecord(routing.headers)) {
         throw new Error(`config: "routing.headers" in ${CONFIG_FILE} must be an object.`);
       }
-      const h = routing.headers as Record<string, unknown>;
-      for (const [pattern, values] of Object.entries(h)) {
+      for (const [pattern, values] of Object.entries(routing.headers)) {
         if (!pattern.startsWith('/')) {
           throw new Error(
             `config: Header pattern '${pattern}' in ${CONFIG_FILE} must start with "/".`,
@@ -650,15 +627,10 @@ function validateConfigObject(config: unknown): VoidConfig {
 
     // Validate routing.redirects
     if (routing.redirects !== undefined) {
-      if (
-        typeof routing.redirects !== 'object' ||
-        routing.redirects === null ||
-        Array.isArray(routing.redirects)
-      ) {
+      if (!isRecord(routing.redirects)) {
         throw new Error(`config: "routing.redirects" in ${CONFIG_FILE} must be an object.`);
       }
-      const r = routing.redirects as Record<string, unknown>;
-      for (const [source, dest] of Object.entries(r)) {
+      for (const [source, dest] of Object.entries(routing.redirects)) {
         const parsed = parseHostPrefixedSource(source);
         if ('error' in parsed) {
           throw new Error(
@@ -673,20 +645,15 @@ function validateConfigObject(config: unknown): VoidConfig {
         assertSingleSplat(parsed.path, 'Redirect');
         assertUniqueCaptureNames(parsed.path, 'Redirect');
         if (typeof dest === 'string') {
-          if (dest.startsWith('/')) {
-            assertNotProtocolRelative(dest, source, 'Redirect');
-          }
-        } else if (typeof dest === 'object' && dest !== null && !Array.isArray(dest)) {
-          const d = dest as Record<string, unknown>;
-          if (typeof d.to !== 'string') {
+          assertNotProtocolRelative(dest, source, 'Redirect');
+        } else if (isRecord(dest)) {
+          if (typeof dest.to !== 'string') {
             throw new Error(
               `config: Redirect for '${source}' in ${CONFIG_FILE} must have a "to" string.`,
             );
           }
-          if ((d.to as string).startsWith('/')) {
-            assertNotProtocolRelative(d.to as string, source, 'Redirect');
-          }
-          if (d.status !== undefined && !VALID_REDIRECT_STATUSES.has(d.status as number)) {
+          assertNotProtocolRelative(dest.to, source, 'Redirect');
+          if (dest.status !== undefined && !VALID_REDIRECT_STATUSES.has(dest.status as number)) {
             throw new Error(
               `config: Redirect status for '${source}' in ${CONFIG_FILE} must be 301, 302, 303, 307, or 308.`,
             );
@@ -701,11 +668,7 @@ function validateConfigObject(config: unknown): VoidConfig {
 
     // Validate routing.revalidateQueryAllowlist
     if (routing.revalidateQueryAllowlist !== undefined) {
-      if (
-        typeof routing.revalidateQueryAllowlist !== 'object' ||
-        routing.revalidateQueryAllowlist === null ||
-        Array.isArray(routing.revalidateQueryAllowlist)
-      ) {
+      if (!isRecord(routing.revalidateQueryAllowlist)) {
         throw new Error(`"routing.revalidateQueryAllowlist" in ${CONFIG_FILE} must be an object`);
       }
       for (const [pattern, params] of Object.entries(routing.revalidateQueryAllowlist)) {
@@ -725,89 +688,20 @@ function validateConfigObject(config: unknown): VoidConfig {
       }
     }
 
-    // Validate routing.rewrites
     if (routing.rewrites !== undefined) {
-      if (
-        typeof routing.rewrites !== 'object' ||
-        routing.rewrites === null ||
-        Array.isArray(routing.rewrites)
-      ) {
-        throw new Error(`"routing.rewrites" in ${CONFIG_FILE} must be an object`);
-      }
-      const rw = routing.rewrites as Record<string, unknown>;
-      for (const [source, dest] of Object.entries(rw)) {
-        const parsed = parseHostPrefixedSource(source);
-        if ('error' in parsed) {
-          throw new Error(`Rewrite source "${source}" in ${CONFIG_FILE}: ${parsed.error}`);
-        }
-        if (!parsed.path.startsWith('/')) {
-          throw new Error(
-            `Rewrite source "${source}" in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path)`,
-          );
-        }
-        assertSingleSplat(parsed.path, 'Rewrite');
-        assertUniqueCaptureNames(parsed.path, 'Rewrite');
-        if (typeof dest !== 'string') {
-          throw new Error(`Rewrite destination for "${source}" in ${CONFIG_FILE} must be a string`);
-        }
-        if (!dest.startsWith('/')) {
-          throw new Error(
-            `Rewrite destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
-          );
-        }
-        assertNotProtocolRelative(dest, source, 'Rewrite');
-        assertNoQueryString(dest, source, 'Rewrite');
-      }
+      validateRewriteMap(routing.rewrites, 'Rewrite');
     }
-
-    // Validate routing.fallbacks
     if (routing.fallbacks !== undefined) {
-      if (
-        typeof routing.fallbacks !== 'object' ||
-        routing.fallbacks === null ||
-        Array.isArray(routing.fallbacks)
-      ) {
-        throw new Error(`"routing.fallbacks" in ${CONFIG_FILE} must be an object`);
-      }
-      const fb = routing.fallbacks as Record<string, unknown>;
-      for (const [source, dest] of Object.entries(fb)) {
-        const parsed = parseHostPrefixedSource(source);
-        if ('error' in parsed) {
-          throw new Error(`Fallback source "${source}" in ${CONFIG_FILE}: ${parsed.error}`);
-        }
-        if (!parsed.path.startsWith('/')) {
-          throw new Error(
-            `Fallback source "${source}" in ${CONFIG_FILE} must start with "/" (or be "https://host/path" with a path-absolute path)`,
-          );
-        }
-        assertSingleSplat(parsed.path, 'Fallback');
-        assertUniqueCaptureNames(parsed.path, 'Fallback');
-        if (typeof dest !== 'string') {
-          throw new Error(
-            `Fallback destination for "${source}" in ${CONFIG_FILE} must be a string`,
-          );
-        }
-        if (!dest.startsWith('/')) {
-          throw new Error(
-            `Fallback destination for "${source}" in ${CONFIG_FILE} must start with "/" (only internal paths are supported)`,
-          );
-        }
-        assertNotProtocolRelative(dest, source, 'Fallback');
-        assertNoQueryString(dest, source, 'Fallback');
-      }
+      validateRewriteMap(routing.fallbacks, 'Fallback');
     }
   }
 
   // Validate inference
   if (obj.inference !== undefined) {
-    if (
-      typeof obj.inference !== 'object' ||
-      obj.inference === null ||
-      Array.isArray(obj.inference)
-    ) {
+    if (!isRecord(obj.inference)) {
       throw new Error(`config: "inference" in ${CONFIG_FILE} must be an object.`);
     }
-    const inf = obj.inference as Record<string, unknown>;
+    const inf = obj.inference;
 
     if (inf.auth !== undefined) {
       throw new Error(
@@ -817,14 +711,10 @@ function validateConfigObject(config: unknown): VoidConfig {
 
     // Validate inference.bindings
     if (inf.bindings !== undefined) {
-      if (
-        typeof inf.bindings !== 'object' ||
-        inf.bindings === null ||
-        Array.isArray(inf.bindings)
-      ) {
+      if (!isRecord(inf.bindings)) {
         throw new Error(`config: "inference.bindings" in ${CONFIG_FILE} must be an object.`);
       }
-      const b = inf.bindings as Record<string, unknown>;
+      const b = inf.bindings;
       for (const key of Object.keys(b)) {
         if (!['db', 'kv', 'storage', 'ai', 'email'].includes(key)) {
           throw new Error(
@@ -889,64 +779,40 @@ function validateConfigObject(config: unknown): VoidConfig {
   }
 
   // Validate sandbox
-  if (obj.sandbox !== undefined) {
-    if (typeof obj.sandbox === 'boolean') {
-      // ok
-    } else if (
-      typeof obj.sandbox === 'object' &&
-      obj.sandbox !== null &&
-      !Array.isArray(obj.sandbox)
-    ) {
-      const sandbox = obj.sandbox as Record<string, unknown>;
-      for (const key of Object.keys(sandbox)) {
-        if (
-          ![
-            'binding',
-            'className',
-            'containerName',
-            'image',
-            'imageBuildContext',
-            'platformImage',
-            'instanceType',
-          ].includes(key)
-        ) {
-          throw new Error(
-            `config: Unknown key 'sandbox.${key}' in ${CONFIG_FILE}. Valid: binding, className, containerName, image, imageBuildContext, platformImage, instanceType.`,
-          );
-        }
-      }
-      for (const key of [
-        'binding',
-        'className',
-        'containerName',
-        'image',
-        'imageBuildContext',
-        'platformImage',
-      ]) {
-        if (sandbox[key] !== undefined && typeof sandbox[key] !== 'string') {
-          throw new Error(`config: "sandbox.${key}" in ${CONFIG_FILE} must be a string.`);
-        }
-      }
-      if (
-        sandbox.instanceType !== undefined &&
-        (typeof sandbox.instanceType !== 'string' ||
-          !VALID_SANDBOX_INSTANCE_TYPES.has(sandbox.instanceType as SandboxInstanceType))
-      ) {
+  if (obj.sandbox !== undefined && typeof obj.sandbox !== 'boolean') {
+    if (!isRecord(obj.sandbox)) {
+      throw new Error(`config: "sandbox" in ${CONFIG_FILE} must be a boolean or an object.`);
+    }
+    const sandbox = obj.sandbox;
+    for (const key of Object.keys(sandbox)) {
+      if (!SANDBOX_KEYS.includes(key)) {
         throw new Error(
-          `config: "sandbox.instanceType" in ${CONFIG_FILE} must be one of: ${[...VALID_SANDBOX_INSTANCE_TYPES].join(', ')}.`,
+          `config: Unknown key 'sandbox.${key}' in ${CONFIG_FILE}. Valid: ${SANDBOX_KEYS.join(', ')}.`,
         );
       }
-    } else {
-      throw new Error(`config: "sandbox" in ${CONFIG_FILE} must be a boolean or an object.`);
+    }
+    for (const key of SANDBOX_STRING_KEYS) {
+      if (sandbox[key] !== undefined && typeof sandbox[key] !== 'string') {
+        throw new Error(`config: "sandbox.${key}" in ${CONFIG_FILE} must be a string.`);
+      }
+    }
+    if (
+      sandbox.instanceType !== undefined &&
+      (typeof sandbox.instanceType !== 'string' ||
+        !VALID_SANDBOX_INSTANCE_TYPES.has(sandbox.instanceType as SandboxInstanceType))
+    ) {
+      throw new Error(
+        `config: "sandbox.instanceType" in ${CONFIG_FILE} must be one of: ${[...VALID_SANDBOX_INSTANCE_TYPES].join(', ')}.`,
+      );
     }
   }
 
   // Validate worker
   if (obj.worker !== undefined) {
-    if (typeof obj.worker !== 'object' || obj.worker === null || Array.isArray(obj.worker)) {
+    if (!isRecord(obj.worker)) {
       throw new Error(`config: "worker" in ${CONFIG_FILE} must be an object.`);
     }
-    const w = obj.worker as Record<string, unknown>;
+    const w = obj.worker;
     if (w.compatibility_date !== undefined) {
       if (typeof w.compatibility_date !== 'string') {
         throw new Error(`config: "worker.compatibility_date" in ${CONFIG_FILE} must be a string.`);
@@ -968,7 +834,7 @@ function validateConfigObject(config: unknown): VoidConfig {
       }
     }
     if (w.vars !== undefined) {
-      if (typeof w.vars !== 'object' || w.vars === null || Array.isArray(w.vars)) {
+      if (!isRecord(w.vars)) {
         throw new Error(`config: "worker.vars" in ${CONFIG_FILE} must be an object.`);
       }
       for (const [key, value] of Object.entries(w.vars)) {
@@ -978,10 +844,10 @@ function validateConfigObject(config: unknown): VoidConfig {
       }
     }
     if (w.limits !== undefined) {
-      if (typeof w.limits !== 'object' || w.limits === null || Array.isArray(w.limits)) {
+      if (!isRecord(w.limits)) {
         throw new Error(`config: "worker.limits" in ${CONFIG_FILE} must be an object.`);
       }
-      const limits = w.limits as Record<string, unknown>;
+      const limits = w.limits;
       for (const key of Object.keys(limits)) {
         if (key !== 'cpu_ms') {
           throw new Error(
@@ -1006,20 +872,16 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Cloudflare's complete Worker config is passed through to its build tooling.
   if (obj.cloudflare !== undefined) {
-    if (
-      typeof obj.cloudflare !== 'object' ||
-      obj.cloudflare === null ||
-      Array.isArray(obj.cloudflare)
-    ) {
+    if (!isRecord(obj.cloudflare)) {
       throw new Error(`config: "cloudflare" in ${CONFIG_FILE} must be an object.`);
     }
   }
 
   if (obj.deploy !== undefined) {
-    if (typeof obj.deploy !== 'object' || obj.deploy === null || Array.isArray(obj.deploy)) {
+    if (!isRecord(obj.deploy)) {
       throw new Error(`config: "deploy" in ${CONFIG_FILE} must be an object.`);
     }
-    const deploy = obj.deploy as Record<string, unknown>;
+    const deploy = obj.deploy;
     for (const key of Object.keys(deploy)) {
       if (key !== 'cloudflare') {
         throw new Error(
@@ -1028,14 +890,10 @@ function validateConfigObject(config: unknown): VoidConfig {
       }
     }
     if (deploy.cloudflare !== undefined) {
-      if (
-        typeof deploy.cloudflare !== 'object' ||
-        deploy.cloudflare === null ||
-        Array.isArray(deploy.cloudflare)
-      ) {
+      if (!isRecord(deploy.cloudflare)) {
         throw new Error(`config: "deploy.cloudflare" in ${CONFIG_FILE} must be an object.`);
       }
-      const cloudflareDeploy = deploy.cloudflare as Record<string, unknown>;
+      const cloudflareDeploy = deploy.cloudflare;
       for (const key of Object.keys(cloudflareDeploy)) {
         if (key !== 'mode') {
           throw new Error(
@@ -1064,11 +922,11 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Validate ai
   if (obj.ai !== undefined) {
-    if (typeof obj.ai !== 'object' || obj.ai === null || Array.isArray(obj.ai)) {
+    if (!isRecord(obj.ai)) {
       throw new Error(`config: "ai" in ${CONFIG_FILE} must be an object.`);
     }
 
-    const aiCfg = obj.ai as Record<string, unknown>;
+    const aiCfg = obj.ai;
     for (const key of Object.keys(aiCfg)) {
       if (key !== 'gateway') {
         throw new Error(`config: Unknown key 'ai.${key}' in ${CONFIG_FILE}. Valid: gateway.`);
@@ -1085,11 +943,11 @@ function validateConfigObject(config: unknown): VoidConfig {
 
   // Validate email
   if (obj.email !== undefined) {
-    if (typeof obj.email !== 'object' || obj.email === null || Array.isArray(obj.email)) {
+    if (!isRecord(obj.email)) {
       throw new Error(`config: "email" in ${CONFIG_FILE} must be an object.`);
     }
 
-    const emailCfg = obj.email as Record<string, unknown>;
+    const emailCfg = obj.email;
     for (const key of Object.keys(emailCfg)) {
       if (key !== 'from') {
         throw new Error(`config: Unknown key 'email.${key}' in ${CONFIG_FILE}. Valid: from.`);
@@ -1117,12 +975,12 @@ function validateConfigObject(config: unknown): VoidConfig {
  * display name, and nothing that could split into two recipients or smuggle a
  * header. A sender that passes here cannot later fail `INVALID_FROM` on shape.
  */
-function parseEmailFrom(value: unknown): { email: string; name?: string } {
+function parseEmailFrom(value: unknown): void {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`config: "email.from" in ${CONFIG_FILE} must be a non-empty string.`);
   }
   try {
-    return parseAddress(value, 'email.from');
+    parseAddress(value, 'email.from');
   } catch (error) {
     const detail = error instanceof MimeError ? ` ${error.message}` : '';
     throw new Error(
@@ -1233,7 +1091,6 @@ export function convertRedirectsConfig(
   const origin = 'void.json#routing.redirects';
   const rules: Array<DevRedirectRule> = [];
   for (const [rawSource, dest] of Object.entries(redirects)) {
-    // Re-parse so callers that bypass `readConfig` get the same validation.
     const parsed = parseHostPrefixedSource(rawSource);
     if ('error' in parsed) {
       throw new Error(`convertRedirectsConfig: source "${rawSource}": ${parsed.error}`);
@@ -1262,29 +1119,7 @@ export function convertRedirectsConfig(
 export function convertRewritesConfig(
   rewrites: Record<string, RewriteDestination> | undefined,
 ): Array<DevRedirectRule> | undefined {
-  if (!rewrites) {
-    return undefined;
-  }
-
-  const origin = 'void.json#routing.rewrites';
-  const rules: Array<DevRedirectRule> = [];
-  for (const [rawSource, destination] of Object.entries(rewrites)) {
-    const parsed = parseHostPrefixedSource(rawSource);
-    if ('error' in parsed) {
-      throw new Error(`convertRewritesConfig: source "${rawSource}": ${parsed.error}`);
-    }
-    const { host, path } = parsed;
-    rules.push({
-      source: path,
-      destination,
-      status: 200,
-      force: true,
-      origin,
-      ...(host && { host }),
-    });
-  }
-
-  return rules.length > 0 ? rules : undefined;
+  return convertRewriteRules('convertRewritesConfig', rewrites, 'rewrites', true);
 }
 
 /**
@@ -1299,23 +1134,32 @@ export function convertRewritesConfig(
 export function convertFallbacksConfig(
   fallbacks: Record<string, RewriteDestination> | undefined,
 ): Array<DevRedirectRule> | undefined {
-  if (!fallbacks) {
+  return convertRewriteRules('convertFallbacksConfig', fallbacks, 'fallbacks', false);
+}
+
+function convertRewriteRules(
+  caller: string,
+  entries: Record<string, RewriteDestination> | undefined,
+  field: 'rewrites' | 'fallbacks',
+  force: boolean,
+): Array<DevRedirectRule> | undefined {
+  if (!entries) {
     return undefined;
   }
 
-  const origin = 'void.json#routing.fallbacks';
+  const origin = `void.json#routing.${field}`;
   const rules: Array<DevRedirectRule> = [];
-  for (const [rawSource, destination] of Object.entries(fallbacks)) {
+  for (const [rawSource, destination] of Object.entries(entries)) {
     const parsed = parseHostPrefixedSource(rawSource);
     if ('error' in parsed) {
-      throw new Error(`convertFallbacksConfig: source "${rawSource}": ${parsed.error}`);
+      throw new Error(`${caller}: source "${rawSource}": ${parsed.error}`);
     }
     const { host, path } = parsed;
     rules.push({
       source: path,
       destination,
       status: 200,
-      force: false,
+      force,
       origin,
       ...(host && { host }),
     });

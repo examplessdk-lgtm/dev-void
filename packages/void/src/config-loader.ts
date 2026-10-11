@@ -55,7 +55,7 @@ export function loadVoidConfig(root: string): LoadedVoidConfig | null {
 
   try {
     return { source: LEGACY_CONFIG_FILE, value: JSON.parse(readFileSync(jsonPath, 'utf-8')) };
-  } catch {
-    throw new Error(`config: Invalid JSON in ${LEGACY_CONFIG_FILE}.`);
+  } catch (error) {
+    throw new Error(`config: Invalid JSON in ${LEGACY_CONFIG_FILE}.`, { cause: error });
   }
 }

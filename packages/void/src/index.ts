@@ -36,6 +36,7 @@ import { readVoidDevCredentials, runAiSetupPrompt } from './plugin-ai-setup.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
 import { createClientStubsPlugin } from './plugin-client-stubs.ts';
 import {
+  afterServerReady,
   warnIfPackageJsonIsNotEsm,
   isViteBuildOrPreview,
   getOrCreateDevTriggerToken,
@@ -82,23 +83,7 @@ const scheduledPointerCleanups = new Set<string>();
 
 const scheduledPreviewPointerCleanups = new Set<string>();
 
-/**
- * Void plugin — the main entry point.
- *
- * Composes:
- * 1. Routing plugin (file-based routing from routes/ and middleware/)
- * 2. Migration plugin (auto-apply .sql migrations on dev startup)
- * 3. @cloudflare/vite-plugin (workerd runtime, HMR, builds)
- *
- * Binding inference runs synchronously here so results are available
- * before the Cloudflare plugin initializes.
- *
- * The Cloudflare plugin reads Void's generated config and provides it to our
- * config function. Bindings already defined there (with real IDs for
- * production deployment) are preserved — we only add inferred bindings
- * that are missing. This allows `vite build && wrangler deploy` to work
- * for deploying directly to Cloudflare without the Void platform.
- */
+/** Returns the Vite plugins that build and serve a Void app for its configured target. */
 export function voidPlugin(options?: {
   persistTo?: string;
   auxiliaryWorkers?: PluginConfig['auxiliaryWorkers'];
@@ -158,9 +143,7 @@ export function voidPlugin(options?: {
   };
   let application = analyzeApplicationSync(root, { config });
   const { paths, dialect, bindingNames, authConfigPath } = application;
-  const analyses = new Map<RouteEnvironment | undefined, ApplicationAnalysis>([
-    [undefined, application],
-  ]);
+  const analyses = new Map<RouteEnvironment, ApplicationAnalysis>();
   const getApplicationAnalysis = (environment: RouteEnvironment, refresh = false) => {
     let result = refresh ? undefined : analyses.get(environment);
     if (!result) {
@@ -175,7 +158,6 @@ export function voidPlugin(options?: {
   const detected = application.framework;
   const framework = detected?.class === 'a' ? (detected.name as Framework) : undefined;
 
-  // Infer bindings synchronously from source files
   const scanDirs = config.inference?.scanDirs ?? (detected ? FRAMEWORK_SCAN_DIRS : undefined);
   const frameworkOwnsCloudflareRuntime =
     detected !== undefined && (detected.class === 'b' || detected.class === 'c');
@@ -207,15 +189,8 @@ export function voidPlugin(options?: {
   if (detected && bindings.needsLive) {
     throw new Error('live: void/live is currently supported in Void apps only.');
   }
-  // Inbound handlers are compiled into the worker's `email()` export by
-  // `routingPlugin`, which no framework branch installs — the framework
-  // wrapper wires crons and queues only. Without this guard the build
-  // succeeds, every file in `email/` is dead code, and inbound mail bounces
-  // at the platform with a message telling the user to redeploy.
-  //
-  // Gated on the handler DIRECTORY, not on `bindings.needsEmail`. Outbound
-  // `sendEmail` is a binding rather than a compiled export, so it keeps
-  // working in every framework and must not be caught here.
+  // Inbound handlers compile into the worker's `email()` export via `routingPlugin`, which
+  // framework mode never installs. Outbound `sendEmail` is a binding and works everywhere.
   const hasInboundEmail = hasEmailHandlers(application.email);
   if (detected && hasInboundEmail) {
     throw new Error(
@@ -351,11 +326,6 @@ export function voidPlugin(options?: {
       workerConfig.compatibility_flags = wranglerCompat.compatibilityFlags;
     }
   }
-  // CPU cap from void.config.ts `worker.limits.cpu_ms` (validated in config.ts as an
-  // integer 1..300000). The CF plugin passes `limits` through into the generated
-  // `dist/ssr/wrangler.json`, so a self-host `wrangler deploy` / `void deploy
-  // --platform cloudflare` enforces it directly. Managed `void deploy` ignores
-  // the generated wrangler config and carries the cap in the deploy manifest.
   if (config.worker?.limits?.cpu_ms) {
     workerConfig.limits = { cpu_ms: config.worker.limits.cpu_ms };
   }
@@ -431,16 +401,8 @@ export function voidPlugin(options?: {
       if (command === 'serve' && directCloudflareDestination && bindings.needsAI) {
         process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
       }
-      // Re-resolve now that the environment is known — the construction-time
-      // value below always assumes `prod`.
-      //
-      // The guard is NOT an optimization. `envPlugin` is also returned by the
-      // framework and node-target branches, and both of those `return` before
-      // `ssrEntry` / `hasPages` / `hasMiddleware` are declared. Calling
-      // `resolveConfiguredAssetRoutingPolicy()` there throws a TDZ
-      // `ReferenceError`. Those branches also must not write
-      // `workerConfig.assets` at all — `mergeBindings` keys off it staying
-      // unset.
+      // Re-resolve for the real environment. Framework and node-target branches return before
+      // `ssrEntry` is declared (TDZ) and must leave `workerConfig.assets` unset.
       if (!framework && !isNodeTarget(config.target)) {
         managedCloudflareBuild = command === 'build' && Boolean(process.env.VOID_DEPLOY_PROJECT_ID);
         assetRoutingPublicDir =
@@ -512,35 +474,26 @@ export function voidPlugin(options?: {
       return watchConfig;
     },
     configureServer(server) {
-      // Defer status messages until after Vite prints "ready" so they're visible.
-      const afterReady = (fn: () => void) => {
-        if (server.httpServer) {
-          server.httpServer.once('listening', () => setTimeout(fn, 100));
-        } else {
-          fn();
-        }
-      };
-
       // Remote mode status — log which bindings are using the proxy
       if (remoteMode && (bindings.needsD1 || bindings.needsKV || bindings.needsR2)) {
         const credentials = readVoidDevCredentials(root);
         if (credentials.status === 'ok') {
           const lines = [pc.blue('Remote bindings active')];
           if (bindings.needsD1) {
-            lines.push('  DB      \x1b[2m→ remote D1\x1b[22m');
+            lines.push(`  DB      ${pc.dim('→ remote D1')}`);
           }
           if (bindings.needsKV) {
-            lines.push('  KV      \x1b[2m→ remote KV\x1b[22m');
+            lines.push(`  KV      ${pc.dim('→ remote KV')}`);
           }
           if (bindings.needsR2) {
-            lines.push('  STORAGE \x1b[2m→ remote R2\x1b[22m');
+            lines.push(`  STORAGE ${pc.dim('→ remote R2')}`);
           }
-          afterReady(() => {
+          afterServerReady(server, () => {
             console.log();
             voidLog(lines.join('\n         '));
           });
         } else if (credentials.status === 'no-token') {
-          afterReady(() => {
+          afterServerReady(server, () => {
             console.log();
             voidWarn(
               'Remote mode requires authentication. Run `void account login`, then restart.',
@@ -548,7 +501,7 @@ export function voidPlugin(options?: {
             voidWarn('Falling back to local bindings.');
           });
         } else {
-          afterReady(() => {
+          afterServerReady(server, () => {
             console.log();
             voidWarn('Remote mode requires a linked project. Run `void project link` first.');
             voidWarn('Falling back to local bindings.');
@@ -560,7 +513,7 @@ export function voidPlugin(options?: {
       if (bindings.needsAI && !directCloudflareDestination) {
         const credentials = readVoidDevCredentials(root);
         if (credentials.status === 'no-token') {
-          afterReady(() => {
+          afterServerReady(server, () => {
             console.log();
             voidWarn(
               'AI requires authentication. Run `void account login`, then restart the dev server.',
@@ -569,12 +522,12 @@ export function voidPlugin(options?: {
         } else if (credentials.status === 'no-project') {
           if (process.stdin.isTTY) {
             // Fire-and-forget interactive setup
-            afterReady(() => {
+            afterServerReady(server, () => {
               console.log();
               runAiSetupPrompt(root, credentials.token, credentials.apiUrl, server);
             });
           } else {
-            afterReady(() => {
+            afterServerReady(server, () => {
               console.log();
               voidWarn('AI requires a linked project. Run `void project link` to set one up.');
             });
@@ -666,24 +619,8 @@ export function voidPlugin(options?: {
       devTriggerToken,
       config.routing?.notFound,
     );
-    // `routing.notFound` only reaches a Class A worker through the DEPLOYED
-    // script's `assets` config, and Void writes none for these frameworks: the
-    // Class A branch returns long before `applyAssetRoutingPolicy`, and writing
-    // `not_found_handling` on its own is worse than nothing — Cloudflare's asset
-    // layer would then answer unmatched requests itself and the framework worker
-    // would never run (only `run_worker_first` sends them to the worker first,
-    // and Void does not own `assets.binding`/`directory` here to complete that
-    // policy). Managed `void deploy` supplies the policy out-of-band
-    // (`runFullDeploy` → `resolveAssetConfig` → `manifest.assetConfig`), so it
-    // IS honored there.
-    //
-    // On a self-hosted build it can still apply: the generated wrapper consumes
-    // `routing.notFound` and serves through `env.ASSETS`, and `mergeBindings`
-    // leaves an authored `assets` config untouched (its gate needs
-    // `workerConfig.assets`, which is never set here). So a user who declares a
-    // complete `assets` policy gets working behavior. Warn once per build, and
-    // only when this build is not a managed deploy (`void deploy` sets
-    // `VOID_DEPLOY_BUILD` on the build child env).
+    // Class A builds write no `assets` config, and `not_found_handling` alone would keep
+    // unmatched requests from the framework worker. Managed `void deploy` supplies the policy.
     let notFoundIgnoredWarned = false;
     const frameworkBuildWrapperPlugin: Plugin = {
       name: 'void:framework-build-wrapper',
@@ -893,9 +830,6 @@ export function voidPlugin(options?: {
         headConfig: config.head,
         prerenderPaths: config.routing?.prerender,
         target: config.target as 'node' | 'bun' | 'deno',
-        // Pass the full routing section so the plugin can merge
-        // `public/_redirects` / `public/_headers` with `void.config.ts` rules at
-        // `configResolved` time and again on HMR (parity with deploy).
         routing: config.routing,
         hasSandbox: false,
       }),
@@ -1027,10 +961,7 @@ export function voidPlugin(options?: {
       headConfig: config.head,
       prerenderPaths: config.routing?.prerender,
       remoteMode,
-      // Pass the full routing section so the plugin can merge
-      // `public/_redirects` / `public/_headers` with `void.config.ts` rules for
-      // parity with the deployment runtime. Managed production builds omit
-      // the rules because dispatch owns them; native builds keep them.
+      // Merged with `public/_redirects` and `_headers`; managed builds omit them (dispatch owns them).
       routing: config.routing,
       bindingNames,
       get hasSandbox() {
