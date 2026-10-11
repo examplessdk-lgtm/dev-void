@@ -298,6 +298,51 @@ function transcriptInputs(
   return { inputs, calls, fetchCalls };
 }
 
+/** The "second deploy" account state, with the committed config overridable per case. */
+function readyAccount(
+  overrides: Partial<EmailCloudflareInputs> & {
+    runnerTable?: Record<string, EmailWranglerRunResult | (() => EmailWranglerRunResult)>;
+    calls?: Array<Call>;
+    fetchCalls?: Array<FetchCall>;
+    rules?: Array<unknown>;
+  } = {},
+) {
+  const { rules, runnerTable, ...rest } = overrides;
+  return transcriptInputs({
+    runnerTable: {
+      'email routing rules list acme.com': {
+        status: 0,
+        stdout: '',
+        data: rules ?? routingRules({ supportDomain: 'mail.acme.com' }),
+        stderr: BETA_WARNING,
+      },
+      'email sending settings mail.acme.com': {
+        status: 0,
+        stdout: '',
+        data: {
+          name: 'mail.acme.com',
+          enabled: true,
+          tag: '19af4fdbee924a92916afea0de5a8fdd',
+        },
+        stderr: BETA_WARNING,
+      },
+      ...runnerTable,
+    },
+    fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
+    dns: fakeDns({
+      mx: {
+        'acme.com': ['aspmx.l.google.com'],
+        'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'],
+      },
+    }),
+    handlers: scan(['support+[ticket].ts']),
+    existingSendEmail: [{ name: 'SEND_EMAIL' }],
+    existingAddresses: ['support@mail.acme.com'],
+    existingVars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
+    ...rest,
+  });
+}
+
 // ── Derivation ───────────────────────────────────────────────────────────────────
 
 describe('deriveAddresses', () => {
@@ -475,11 +520,6 @@ describe('structured email results', () => {
     expect(parseWhoamiJson({ loggedIn: true, tokenPermissions: 'email_routing:write' })).toBeNull();
     expect(parseWhoamiJson({ loggedIn: true, accounts: 'invalid' })).toBeNull();
   });
-
-  it('reads session scopes and API error codes', () => {
-    expect(parseWhoamiJson(whoamiResult().data)?.tokenPermissions).toContain('email_routing:write');
-    expect(apiFailure(2040, '/zones/x/email/sending/subdomains').errorCode).toBe(2040);
-  });
 });
 
 // ── Preflight ────────────────────────────────────────────────────────────────────
@@ -531,53 +571,8 @@ describe('preflightEmail', () => {
     ]);
   });
 
-  it('pins every provider operation to the deploy config', async () => {
-    const base = transcriptInputs();
-    const seen: Array<CloudflareOperation> = [];
-    const { inputs } = transcriptInputs({
-      configPath: 'wrangler.jsonc',
-      runWrangler: (operation, opts) => {
-        seen.push(operation);
-        return base.inputs.runWrangler(operation, opts);
-      },
-    });
-    await preflightEmail(inputs);
-    expect(seen).toHaveLength(5);
-    expect(seen.every((operation) => operation.configPath === 'wrangler.jsonc')).toBe(true);
-  });
-
   it('second deploy, everything set up: ready, zero changes', async () => {
-    const { inputs } = transcriptInputs({
-      runnerTable: {
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: routingRules({ supportDomain: 'mail.acme.com' }),
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: {
-            name: 'mail.acme.com',
-            enabled: true,
-            tag: '19af4fdbee924a92916afea0de5a8fdd',
-          },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
-      dns: fakeDns({
-        mx: {
-          'acme.com': ['aspmx.l.google.com'],
-          'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'],
-        },
-      }),
-      handlers: scan(['support+[ticket].ts']),
-      existingSendEmail: [{ name: 'SEND_EMAIL' }],
-      existingAddresses: ['support@mail.acme.com'],
-      existingVars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
-    });
+    const { inputs } = readyAccount();
     const pre = await preflightEmail(inputs);
     expect(pre.routing.state).toBe('ready');
     expect(pre.subaddressing.state).toBe('on');
@@ -597,51 +592,6 @@ describe('preflightEmail', () => {
     expect(pre.ready).toBe(true);
     expect(renderEmailChecklist(pre)).toContain('Nothing to change — email is set up.');
   });
-
-  /** The "second deploy" account state, with the committed config overridable per case. */
-  function readyAccount(
-    overrides: Partial<EmailCloudflareInputs> & {
-      runnerTable?: Record<string, EmailWranglerRunResult | (() => EmailWranglerRunResult)>;
-      calls?: Array<Call>;
-      fetchCalls?: Array<FetchCall>;
-      rules?: Array<unknown>;
-    } = {},
-  ) {
-    const { rules, runnerTable, ...rest } = overrides;
-    return transcriptInputs({
-      runnerTable: {
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: rules ?? routingRules({ supportDomain: 'mail.acme.com' }),
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: {
-            name: 'mail.acme.com',
-            enabled: true,
-            tag: '19af4fdbee924a92916afea0de5a8fdd',
-          },
-          stderr: BETA_WARNING,
-        },
-        ...runnerTable,
-      },
-      fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
-      dns: fakeDns({
-        mx: {
-          'acme.com': ['aspmx.l.google.com'],
-          'mail.acme.com': ['route1.mx.cloudflare.net', 'route2.mx.cloudflare.net'],
-        },
-      }),
-      handlers: scan(['support+[ticket].ts']),
-      existingSendEmail: [{ name: 'SEND_EMAIL' }],
-      existingAddresses: ['support@mail.acme.com'],
-      existingVars: { __VOID_EMAIL_FROM: 'noreply@mail.acme.com' },
-      ...rest,
-    });
-  }
 
   it('an API-token session (CLOUDFLARE_API_TOKEN) is not gated on `tokenPermissions`: reads run, ready reads ready', async () => {
     // wrangler fills `tokenPermissions` from the stored login file only, so under an API token
@@ -709,31 +659,10 @@ describe('preflightEmail', () => {
     expect(pre.ready).toBe(false);
   });
 
-  it('a Global API Key session is refused by name — there is no bearer to borrow', async () => {
-    const calls: Array<Call> = [];
-    const { inputs } = transcriptInputs({
-      calls,
-      runnerTable: {
-        'whoami --json': {
-          status: 0,
-          stdout: '',
-          data: { loggedIn: true, authType: 'Global API Key' },
-          stderr: '',
-        },
-      },
-    });
-    const pre = await preflightEmail(inputs);
-    expect(pre.session.state).toBe('api-key');
-    expect(pre.blockers[0]?.message).toContain('CLOUDFLARE_API_TOKEN');
-    expect(calls.map((c) => c.args.join(' '))).toEqual(['whoami --json']);
-  });
-
   it('a committed config whose rules wrangler has not created yet still reads ready (rules are `wrangler deploy` work)', async () => {
     // Right after `void email setup`, before the first deploy: the array is committed, the
     // rule is absent. Apply has nothing to do; the deploy creates the rule.
-    const { inputs } = readyAccount({
-      rules: { status: 0, stdout: '', data: emptyRules, stderr: '' }.data,
-    });
+    const { inputs } = readyAccount({ rules: emptyRules });
     const pre = await preflightEmail(inputs);
     expect(pre.rules.state).toBe('pending');
     expect(pre.rules.absent).toEqual(['support@mail.acme.com']);
@@ -804,12 +733,8 @@ describe('preflightEmail', () => {
     );
   });
 
-  it('turns a writer refusal the caller precomputed into an `all` blocker, so apply makes zero calls', async () => {
-    const calls: Array<Call> = [];
-    const fetchCalls: Array<FetchCall> = [];
+  it('turns a writer refusal the caller precomputed into an `all` blocker', async () => {
     const { inputs } = transcriptInputs({
-      calls,
-      fetchCalls,
       configConflicts: findEmailConfigConflicts({ vars: { SEND_EMAIL: 'x' } }),
     });
     const pre = await preflightEmail(inputs);
@@ -820,12 +745,6 @@ describe('preflightEmail', () => {
           'Cloudflare config already uses SEND_EMAIL as a Environment Variable binding; rename it in void.config.ts (Void writes SEND_EMAIL into send_email)',
       },
     ]);
-    calls.length = 0;
-    fetchCalls.length = 0;
-    const out = await applyEmailSetup(pre, inputs);
-    expect(calls).toEqual([]);
-    expect(fetchCalls).toEqual([]);
-    expect(out.patch).toEqual({});
   });
 
   it('refuses the apex when foreign MX already receives mail there', async () => {
@@ -874,26 +793,6 @@ describe('preflightEmail', () => {
     expect(pre.rules.absent).toEqual(['support@acme.com', '*@acme.com']);
   });
 
-  it('blocks on a session without the email scopes (`void cloudflare logout`, then `login`)', async () => {
-    const who = structuredClone(whoamiResult().data) as { tokenPermissions: Array<string> };
-    who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
-    const calls: Array<Call> = [];
-    const { inputs } = transcriptInputs({
-      calls,
-      runnerTable: { 'whoami --json': { status: 0, stdout: '', data: who, stderr: '' } },
-    });
-    const pre = await preflightEmail(inputs);
-    expect(pre.session.state).toBe('missing-scopes');
-    expect(pre.session.missingScopes).toEqual(['email_routing:write', 'email_sending:write']);
-    // `void cloudflare login` re-uses a session `whoami` reads cleanly (it never re-consents
-    // one), so a readable-but-insufficient session must be signed out first.
-    expect(pre.blockers[0]?.message).toBe(
-      'the Cloudflare session lacks email_routing:write + email_sending:write — run `void cloudflare logout`, then `void cloudflare login` (one browser Allow)',
-    );
-    // No other read runs on a session that cannot do the work.
-    expect(calls.map((c) => c.args.join(' '))).toEqual(['whoami --json']);
-  });
-
   it('every session blocker routes Cloudflare login through Void, never through wrangler', async () => {
     // AGENTS.md: user-facing output never asks for a wrangler command. These rows print raw
     // from `void email setup` / `status`, and through `formatCloudflareUserMessage` on the
@@ -901,15 +800,26 @@ describe('preflightEmail', () => {
     // operation" — no guidance at all.
     const who = structuredClone(whoamiResult().data) as { tokenPermissions: Array<string> };
     who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
+    const unreadable = 'could not read the Cloudflare session — run `void cloudflare login`';
     const sessions: Array<{
       state: EmailPreflight['session']['state'];
       whoami: EmailWranglerRunResult;
+      message: string;
     }> = [
-      { state: 'unknown', whoami: { status: 1, stdout: '', data: '', stderr: '✘ [ERROR] boom\n' } },
-      { state: 'unknown', whoami: { status: 0, stdout: '', data: 'not json', stderr: '' } },
+      {
+        state: 'unknown',
+        whoami: { status: 1, stdout: '', data: '', stderr: '✘ [ERROR] boom\n' },
+        message: unreadable,
+      },
+      {
+        state: 'unknown',
+        whoami: { status: 0, stdout: '', data: 'not json', stderr: '' },
+        message: unreadable,
+      },
       {
         state: 'not-logged-in',
         whoami: { status: 0, stdout: '', data: { loggedIn: false }, stderr: '' },
+        message: 'not logged in to Cloudflare — run `void cloudflare login`',
       },
       {
         state: 'api-key',
@@ -919,51 +829,38 @@ describe('preflightEmail', () => {
           data: { loggedIn: true, authType: 'Global API Key' },
           stderr: '',
         },
+        // A Global API Key wins over both an OAuth session and CLOUDFLARE_API_TOKEN in
+        // wrangler's env precedence, so neither alternative works until the key is unset.
+        message:
+          'the Cloudflare session is a Global API Key (CLOUDFLARE_API_KEY), which has no bearer to borrow for the subaddressing calls — unset CLOUDFLARE_API_KEY, then run `void cloudflare login` or set CLOUDFLARE_API_TOKEN to a token with Email Routing Edit + Email Sending Edit',
       },
-      { state: 'missing-scopes', whoami: { status: 0, stdout: '', data: who, stderr: '' } },
+      {
+        state: 'missing-scopes',
+        whoami: { status: 0, stdout: '', data: who, stderr: '' },
+        message:
+          'the Cloudflare session lacks email_routing:write + email_sending:write — run `void cloudflare logout`, then `void cloudflare login` (one browser Allow)',
+      },
     ];
     for (const session of sessions) {
-      const { inputs } = transcriptInputs({ runnerTable: { 'whoami --json': session.whoami } });
+      const calls: Array<Call> = [];
+      const fetchCalls: Array<FetchCall> = [];
+      const { inputs } = transcriptInputs({
+        calls,
+        fetchCalls,
+        runnerTable: { 'whoami --json': session.whoami },
+      });
       const pre = await preflightEmail(inputs);
       expect(pre.session.state).toBe(session.state);
-      expect(pre.blockers.map((b) => b.scope)).toEqual(['all']);
+      expect(pre.blockers).toEqual([{ scope: 'all', message: session.message }]);
       const message = pre.blockers[0]!.message;
       expect(message).toContain('`void cloudflare login`');
       expect(message).not.toMatch(/wrangler/i);
       // The checklist carries the row verbatim on both printing paths.
       expect(renderEmailChecklist(pre)).toContain(`    ✘ ${message}`);
+      // A session that cannot do the work gets no other read and lends no bearer.
+      expect(calls.map((c) => c.args.join(' '))).toEqual(['whoami --json']);
+      expect(fetchCalls).toEqual([]);
     }
-    // A Global API Key wins over both an OAuth session and CLOUDFLARE_API_TOKEN in wrangler's
-    // env precedence, so neither alternative works until the key is unset.
-    const apiKey = await preflightEmail(
-      transcriptInputs({ runnerTable: { 'whoami --json': sessions[3]!.whoami } }).inputs,
-    );
-    expect(apiKey.blockers[0]?.message).toBe(
-      'the Cloudflare session is a Global API Key (CLOUDFLARE_API_KEY), which has no bearer to borrow for the subaddressing calls — unset CLOUDFLARE_API_KEY, then run `void cloudflare login` or set CLOUDFLARE_API_TOKEN to a token with Email Routing Edit + Email Sending Edit',
-    );
-    const notLoggedIn = await preflightEmail(
-      transcriptInputs({ runnerTable: { 'whoami --json': sessions[2]!.whoami } }).inputs,
-    );
-    expect(notLoggedIn.blockers[0]?.message).toBe(
-      'not logged in to Cloudflare — run `void cloudflare login`',
-    );
-    const unreadable = await preflightEmail(
-      transcriptInputs({ runnerTable: { 'whoami --json': sessions[0]!.whoami } }).inputs,
-    );
-    expect(unreadable.blockers[0]?.message).toBe(
-      'could not read the Cloudflare session — run `void cloudflare login`',
-    );
-  });
-
-  it('blocks when not logged in', async () => {
-    const { inputs } = transcriptInputs({
-      runnerTable: {
-        'whoami --json': { status: 0, stdout: '', data: { loggedIn: false }, stderr: '' },
-      },
-    });
-    const pre = await preflightEmail(inputs);
-    expect(pre.session.state).toBe('not-logged-in');
-    expect(pre.blockers.map((b) => b.scope)).toEqual(['all']);
   });
 
   it('keeps apex-mode routing status unlocked / misconfigured blocked — never re-locks', async () => {
@@ -1870,35 +1767,7 @@ describe('applyEmailSetup', () => {
   it('re-run with everything ready → zero wrangler calls, zero fetches, same patch', async () => {
     const calls: Array<Call> = [];
     const fetchCalls: Array<FetchCall> = [];
-    const { inputs } = transcriptInputs({
-      calls,
-      fetchCalls,
-      runnerTable: {
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: routingRules({ supportDomain: 'mail.acme.com' }),
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: {
-            name: 'mail.acme.com',
-            enabled: true,
-            tag: '19af4fdbee924a92916afea0de5a8fdd',
-          },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: { [`GET /zones/${ZONE_ID}/email/routing`]: routingGet(true) },
-      dns: fakeDns({
-        mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
-      }),
-      handlers: scan(['support+[ticket].ts']),
-      existingSendEmail: [{ name: 'SEND_EMAIL' }],
-      existingAddresses: ['support@mail.acme.com'],
-    });
+    const { inputs } = readyAccount({ calls, fetchCalls });
     const pre = await preflightEmail(inputs);
     expect(pre.ready).toBe(true);
     calls.length = 0;

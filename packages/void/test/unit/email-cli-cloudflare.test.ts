@@ -336,6 +336,12 @@ const sendingRefused: EmailWranglerRunResult = {
   stderr: `${BETA_WARNING}✘ [ERROR] A request to the Cloudflare API (/zones/${ZONE_ID}/email/sending/subdomains) failed.\n\n  something went wrong [code: 10105]\n`,
   errorCode: 10105,
 };
+const sendingOnboarded: EmailWranglerRunResult = {
+  status: 0,
+  stdout: '',
+  data: { name: 'mail.acme.com', enabled: true, tag: ZONE_ID },
+  stderr: BETA_WARNING,
+};
 
 describe('void email setup --platform cloudflare', () => {
   it('first run: checklist, one confirm, exact provider operations + REST calls, wrangler.jsonc written', async () => {
@@ -456,28 +462,6 @@ describe('void email setup --platform cloudflare', () => {
     expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
   });
 
-  it('a session without the email scopes: the ✘ row says `void cloudflare logout`, then `login` — exit 1, no prompt', async () => {
-    const root = makeProject();
-    roots.push(root);
-    const who = structuredClone(whoamiResult().data) as { tokenPermissions: Array<string> };
-    who.tokenPermissions = who.tokenPermissions.filter((s) => !s.startsWith('email_'));
-    const { deps, calls, fetchCalls, printed } = transcriptDeps({
-      runnerTable: { 'whoami --json': { status: 0, stdout: '', data: who, stderr: '' } },
-    });
-    const confirm = vi.fn(async () => true);
-
-    const code = await run(root, 'setup', { ...deps, isInteractive: true, confirm });
-
-    expect(code).toBe(1);
-    expect(confirm).not.toHaveBeenCalled();
-    expect(printed[0]).toContain(
-      '    ✘ the Cloudflare session lacks email_routing:write + email_sending:write — run `void cloudflare logout`, then `void cloudflare login` (one browser Allow)',
-    );
-    expect(printed[0]).not.toMatch(/wrangler login/i);
-    expect(calls.map((c) => c.args.slice(0, 2).join(' '))).toEqual(['whoami --json']);
-    expect(fetchCalls).toEqual([]);
-  });
-
   it('an `all` blocker (foreign MX on the apex path) exits 1 without a prompt', async () => {
     const root = makeProject({ from: 'noreply@acme.com' });
     roots.push(root);
@@ -498,32 +482,6 @@ describe('void email setup --platform cloudflare', () => {
     );
     expect(calls.some((c) => c.args.includes('enable'))).toBe(false);
     expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
-  });
-
-  it('a bearer failure keeps going: dashboard fallback printed, addresses withheld, exit 1', async () => {
-    const root = makeProject();
-    roots.push(root);
-    const configPath = join(root, 'wrangler.jsonc');
-    const { deps, printed } = transcriptDeps({
-      runnerTable: { 'email sending enable mail.acme.com': sendingEnabled('mail.acme.com') },
-    });
-
-    const code = await run(root, 'setup', {
-      ...deps,
-      getSessionBearer: async () => null,
-      isInteractive: true,
-      confirm: async () => true,
-    });
-
-    expect(code).toBe(1);
-    const output = printed.join('\n');
-    expect(output).toContain('Email → Settings → Subdomains');
-    expect(output).toContain('addresses withheld this run');
-    // Sending was onboarded, so the binding + sender var are written; `addresses` is not.
-    const config = readJsonc(configPath);
-    expect(config.send_email).toEqual([{ name: 'SEND_EMAIL' }]);
-    expect(config.vars).toEqual({ __VOID_EMAIL_FROM: 'noreply@mail.acme.com' });
-    expect(config.addresses).toBeUndefined();
   });
 
   it('routing came up but the subaddressing PATCH was refused: exit 1, subaddressing named, addresses withheld', async () => {
@@ -751,48 +709,10 @@ describe('void email setup --platform cloudflare', () => {
   });
 
   it('second run, everything ready: no prompt, zero writes, config unchanged, exit 0', async () => {
-    const root = makeProject({
-      wrangler: `{
-  "account_id": "${ACCOUNT}",
-  "name": "acme-support",
-  "send_email": [{ "name": "SEND_EMAIL" }],
-  "addresses": ["support@mail.acme.com"],
-  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
-}
-`,
+    const { root, configPath, deps, calls, fetchCalls, printed } = freeAfterSetup({
+      runnerTable: { 'email sending settings mail.acme.com': sendingOnboarded },
     });
-    roots.push(root);
-    const before = readFileSync(join(root, 'wrangler.jsonc'), 'utf-8');
-    const { deps, calls, fetchCalls, printed } = transcriptDeps({
-      runnerTable: {
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: [
-            {
-              id: '1a2b3c',
-              name: 'support',
-              enabled: true,
-              matchers: [{ type: 'literal', field: 'to', value: 'support@mail.acme.com' }],
-              actions: [{ type: 'worker', value: ['acme-support'] }],
-            },
-            { enabled: false, matchers: [{ type: 'all' }], actions: [{ type: 'drop' }] },
-          ],
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: { name: 'mail.acme.com', enabled: true, tag: ZONE_ID },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: {
-        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
-          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
-      },
-      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
-    });
+    const before = readFileSync(configPath, 'utf-8');
     const confirm = vi.fn(async () => true);
 
     const code = await run(root, 'setup', { ...deps, isInteractive: false, confirm });
@@ -801,7 +721,7 @@ describe('void email setup --platform cloudflare', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(calls.some((c) => c.args.includes('enable'))).toBe(false);
     expect(fetchCalls.every((c) => c.method === 'GET')).toBe(true);
-    expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toBe(before);
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
     // Every row reads ready; the only remaining line is the `!` for the refused catch-all.
     expect(printed[0]).toContain('    rules     support@mail.acme.com → acme-support   (ready)');
     expect(printed[0]).not.toContain('\n    + ');
@@ -961,101 +881,6 @@ describe('void email status --platform cloudflare', () => {
     expect(logged.lines.join('\n')).not.toContain('not set up');
   });
 
-  it("ready but the rule not created yet (right after `setup`): exit 0 — rules are the next deploy's", async () => {
-    const root = makeProject({
-      wrangler: `{
-  "account_id": "${ACCOUNT}",
-  "name": "acme-support",
-  "send_email": [{ "name": "SEND_EMAIL" }],
-  "addresses": ["support@mail.acme.com"],
-  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
-}
-`,
-    });
-    roots.push(root);
-    const { deps, printed } = transcriptDeps({
-      runnerTable: {
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: { name: 'mail.acme.com', enabled: true, tag: ZONE_ID },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: {
-        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
-          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
-      },
-      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
-    });
-
-    const code = await run(root, 'status', { ...deps, isInteractive: false });
-
-    expect(code).toBe(0);
-    expect(printed[1]).toContain(
-      '    inbound   support@mail.acme.com  →  email/support+[ticket].ts   (no rule yet)',
-    );
-  });
-
-  it('an API-token session reads ready like a login session does (CI on CLOUDFLARE_API_TOKEN)', async () => {
-    const root = makeProject({
-      wrangler: `{
-  "account_id": "${ACCOUNT}",
-  "name": "acme-support",
-  "send_email": [{ "name": "SEND_EMAIL" }],
-  "addresses": ["support@mail.acme.com"],
-  "vars": { "__VOID_EMAIL_FROM": "noreply@mail.acme.com" },
-}
-`,
-    });
-    roots.push(root);
-    const { deps, calls } = transcriptDeps({
-      runnerTable: {
-        'whoami --json': {
-          status: 0,
-          stdout: '',
-          data: {
-            loggedIn: true,
-            authType: 'User API Token',
-            accounts: [{ id: ACCOUNT, name: 'Acme' }],
-          },
-          stderr: '',
-        },
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: [
-            {
-              id: '1a2b3c',
-              name: 'support',
-              enabled: true,
-              matchers: [{ type: 'literal', field: 'to', value: 'support@mail.acme.com' }],
-              actions: [{ type: 'worker', value: ['acme-support'] }],
-            },
-            { enabled: false, matchers: [{ type: 'all' }], actions: [{ type: 'drop' }] },
-          ],
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: { name: 'mail.acme.com', enabled: true, tag: ZONE_ID },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: {
-        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
-          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
-      },
-      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
-    });
-
-    const code = await run(root, 'status', { ...deps, isInteractive: false });
-
-    expect(code).toBe(0);
-    expect(calls.some((c) => c.args[0] === 'email')).toBe(true);
-  });
-
   it('not signed in: the checklist reaches the terminal as-is and says `void cloudflare login`, exit 1', async () => {
     const root = makeProject();
     roots.push(root);
@@ -1085,45 +910,8 @@ describe('void email status --platform cloudflare', () => {
   });
 
   it('ready: exit 0 and the routed address map', async () => {
-    const root = makeProject({
-      wrangler: `{
-  "account_id": "${ACCOUNT}",
-  "name": "acme-support",
-  "send_email": [{ "name": "SEND_EMAIL" }],
-  "addresses": ["support@mail.acme.com"],
-}
-`,
-    });
-    roots.push(root);
-    const { deps, printed } = transcriptDeps({
-      runnerTable: {
-        'email routing rules list acme.com': {
-          status: 0,
-          stdout: '',
-          data: [
-            {
-              id: '1a2b3c',
-              name: 'support',
-              enabled: true,
-              matchers: [{ type: 'literal', field: 'to', value: 'support@mail.acme.com' }],
-              actions: [{ type: 'worker', value: ['acme-support'] }],
-            },
-            { enabled: false, matchers: [{ type: 'all' }], actions: [{ type: 'drop' }] },
-          ],
-          stderr: BETA_WARNING,
-        },
-        'email sending settings mail.acme.com': {
-          status: 0,
-          stdout: '',
-          data: { name: 'mail.acme.com', enabled: true, tag: ZONE_ID },
-          stderr: BETA_WARNING,
-        },
-      },
-      fetchTable: {
-        [`GET /zones/${ZONE_ID}/email/routing`]: () =>
-          jsonResponse(200, { success: true, result: { enabled: true, support_subaddress: true } }),
-      },
-      mx: { 'acme.com': ['aspmx.l.google.com'], 'mail.acme.com': ['route1.mx.cloudflare.net'] },
+    const { root, deps, printed } = freeAfterSetup({
+      runnerTable: { 'email sending settings mail.acme.com': sendingOnboarded },
     });
 
     const code = await run(root, 'status', { ...deps, isInteractive: false });

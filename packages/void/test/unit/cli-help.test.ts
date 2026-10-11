@@ -1,6 +1,5 @@
 import { note } from '@voidzero-dev/vite-plus-prompts';
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { parseEmailArgs } from '../../src/cli/email-args.ts';
 import { getHelpPath, hasHelpPage, printHelpPage } from '../../src/cli/help.ts';
 
 vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
@@ -125,16 +124,7 @@ describe('rendered help advertises the flags the parser honours', () => {
     return lines.join('\n').replace(/\u001b\[[0-9;]*m/g, '');
   }
 
-  // `void email logs --limit <n>` is parsed, honoured, and documented in the
-  // CLI reference, but the help page was built with the shared project-only
-  // helper, so the flag was invisible in every help surface. Nothing asserted
-  // rendered help content before, so nothing would have caught it.
-  it('shows --limit on `email logs`, which is the only email flag that does anything', () => {
-    expect(parseEmailArgs(['logs', '--limit', '7'])).toMatchObject({
-      subcommand: 'logs',
-      limit: 7,
-    });
-
+  it('shows --limit and --project on `email logs`', () => {
     const page = render(['email', 'logs']);
 
     expect(page).toContain('--limit <n>');
@@ -158,14 +148,10 @@ describe('rendered help advertises the flags the parser honours', () => {
     }
   });
 
-  // Mode B: `status` / `setup` read the local project + wrangler session, never a Void
-  // project, so their pages carry `--platform cloudflare` and no `--project`.
+  // `status` / `setup` read the local project + wrangler session, never a Void project,
+  // so their pages carry `--platform cloudflare` and no `--project`.
   it('shows --platform cloudflare, and no --project, on `email status` and `email setup`', () => {
     for (const sub of ['status', 'setup']) {
-      expect(parseEmailArgs([sub, '--platform', 'cloudflare'])).toMatchObject({
-        subcommand: sub,
-        platform: 'cloudflare',
-      });
       const page = render(['email', sub]);
       expect(page).toContain(`void email ${sub} --platform cloudflare`);
       expect(page).toContain('--platform cloudflare');
@@ -181,13 +167,6 @@ describe('rendered help advertises the flags the parser honours', () => {
   // group entry is on the email page, and every verb keeps its own page so the
   // printed `void help email domain <command>` hint actually resolves.
   it('lists `email domain` on the email page and resolves the domain help pages', () => {
-    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--project', 'acme'])).toMatchObject({
-      subcommand: 'domain',
-      domainVerb: 'add',
-      domain: 'acme.com',
-      projectSlug: 'acme',
-    });
-
     const group = render(['email']);
     expect(group).toContain('domain <add|status|list|sync|rotate-secret|remove>');
 
