@@ -6,7 +6,6 @@ import { isRecord } from '@void/deploy-core';
 import type { PlatformDiscoveryDocument } from '@void/platform';
 import { log, confirm, isCancel, cancel, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { parse, type ParseError } from 'jsonc-parser';
-import { minimatch } from 'minimatch';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'pathslash';
 import { materializeCloudflareConfig } from '../cloudflare-config.ts';
 import { createProjectTsconfig, ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
@@ -872,11 +871,107 @@ export function extractPnpmWorkspacePackages(yaml: string): Array<string> {
   return patterns;
 }
 
-// Package managers glob for `<pattern>/package.json`, so `packages/**` also
-// matches `packages` itself.
+/** Expand `{a,b}` brace groups, including several groups in one pattern. */
+function expandBraces(pattern: string): Array<string> {
+  const match = pattern.match(/^([^{}]*)\{([^{}]*)\}(.*)$/);
+  if (!match) {
+    return [pattern];
+  }
+  const [, before, group, after] = match;
+  const options = group
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (options.length === 0) {
+    return [pattern];
+  }
+  const results: Array<string> = [];
+  for (const opt of options) {
+    for (const sub of expandBraces(before + opt + after)) {
+      results.push(sub);
+    }
+  }
+  return results;
+}
+
+// Supports *, **, ./ and {a,b} braces; ?, [...] and extglobs are matched literally.
 function matchesWorkspacePattern(relPath: string, pattern: string): boolean {
-  const normalized = pattern.replace(/^\.?\/+/, '').replace(/\/+$/, '');
-  return minimatch(`${relPath}/package.json`, `${normalized}/package.json`, { dot: true });
+  const expansions = expandBraces(pattern);
+  return expansions.some((p) => matchesSingleWorkspacePattern(relPath, p));
+}
+
+function matchesSingleWorkspacePattern(relPath: string, pattern: string): boolean {
+  const normalizedPattern = pattern.replace(/^\.\/+/, '');
+  const pathSegs = relPath
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter(Boolean);
+  const patSegs = normalizedPattern
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter(Boolean);
+  const compiled = patSegs.map(compilePatternSegment);
+  return matchSegments(pathSegs, 0, compiled, 0);
+}
+
+type CompiledSegment =
+  | { kind: 'literal'; value: string }
+  | { kind: 'regex'; re: RegExp }
+  | { kind: 'globstar' };
+
+function compilePatternSegment(seg: string): CompiledSegment {
+  if (seg === '**') {
+    return { kind: 'globstar' };
+  }
+  if (!seg.includes('*')) {
+    return { kind: 'literal', value: seg };
+  }
+  // Each `*` matches any characters except `/`.
+  const re = new RegExp(
+    '^' +
+      seg
+        .split('*')
+        .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+        .join('[^/]*') +
+      '$',
+  );
+  return { kind: 'regex', re };
+}
+
+function matchSegments(
+  path: Array<string>,
+  pi: number,
+  pat: Array<CompiledSegment>,
+  qi: number,
+): boolean {
+  while (qi < pat.length) {
+    const seg = pat[qi];
+    if (seg.kind === 'globstar') {
+      // A trailing `**` matches any remaining path, including none.
+      if (qi === pat.length - 1) {
+        return true;
+      }
+      for (let k = pi; k <= path.length; k++) {
+        if (matchSegments(path, k, pat, qi + 1)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (pi >= path.length) {
+      return false;
+    }
+    if (seg.kind === 'literal') {
+      if (seg.value !== path[pi]) {
+        return false;
+      }
+    } else if (!seg.re.test(path[pi])) {
+      return false;
+    }
+    pi++;
+    qi++;
+  }
+  return pi === path.length;
 }
 
 /**

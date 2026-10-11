@@ -56,15 +56,26 @@ function writeProjectWranglerFile(configPath: string, text: string): void {
   persistMaterializedWranglerConfig(configPath);
 }
 
-/** Read the project Wrangler config, or start a new generated one from an empty object. */
+/**
+ * Read the first existing project Wrangler config. A missing or unparseable one is
+ * replaced by the generated config, starting from an empty object.
+ */
 function readOrCreateProjectWranglerConfig(root: string): {
   configPath: string;
   parsed: Record<string, unknown>;
   created: boolean;
 } {
-  const existing = readRootWranglerConfig(root);
-  if (existing) {
-    return { configPath: existing.configPath, parsed: existing.config, created: false };
+  const configPath = projectWranglerPaths(root).find((path) => existsSync(path));
+  if (configPath) {
+    let parsed: Record<string, unknown> | undefined;
+    try {
+      parsed = parseJsonc(readFileSync(configPath, 'utf-8'));
+    } catch {
+      // Can't read, replace with the generated config below.
+    }
+    if (parsed) {
+      return { configPath, parsed, created: false };
+    }
   }
   return { configPath: materializeCloudflareConfig(root), parsed: {}, created: true };
 }

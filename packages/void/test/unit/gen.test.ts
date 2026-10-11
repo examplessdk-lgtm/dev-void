@@ -127,6 +127,7 @@ function simulateDrizzleCustom(
         ...prevSnapshot,
         id: `sim-${ts}`,
         prevId: prevSnapshot.id,
+        tables: { fresh: { name: 'fresh' } },
       };
       const newSnapshotPath = nodePath.join(metaDir, `${ts}_snapshot.json`);
       nodeFs.writeFileSync(newSnapshotPath, JSON.stringify(nextSnapshot, null, 2));
@@ -732,6 +733,10 @@ describe('gen migration', () => {
       f.endsWith('_snapshot.json'),
     );
     expect(snapshotFiles).toHaveLength(2);
+    const newSnapshot = snapshotFiles.find((f) => f !== '20200101000000_snapshot.json')!;
+    expect(
+      JSON.parse(readFileSync(join(migrationsDir, 'meta', newSnapshot), 'utf-8')).tables,
+    ).toEqual({ fresh: { name: 'fresh' } });
   });
 
   it('refuses when the journal dialect disagrees with the void.json dialect', async () => {

@@ -181,7 +181,7 @@ export async function generateWrapper(
     }
     if (!existsSync(handlerPath)) {
       throw new Error(
-        `Migration handler not found: ${handlerFilename_}. Reinstall the void package.`,
+        `Migration handler not found: ${handlerFilename_}. Run "pnpm -C packages/void build" first.`,
       );
     }
     await bundleMigrationHandler(

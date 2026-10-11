@@ -1508,19 +1508,25 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // Rewrite journal tags before the tracking tables, so a tracking failure also restores it.
   if (journal) {
     try {
+      const current = readJournal(migrationsDir);
+      if (!current) {
+        throw new Error(
+          'db: db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
+        );
+      }
       const renameMap = new Map<string, string>();
       for (const { from, to } of renames) {
         renameMap.set(stripSqlExt(from), stripSqlExt(to));
       }
-      const updatedEntries = journal.entries.map((entry) => {
+      const updatedEntries = current.entries.map((entry) => {
         const next = renameMap.get(entry.tag);
         return next ? { ...entry, tag: next } : entry;
       });
       // Set before writing, so a partial write is still restored.
       journalRewritten = true;
       writeJournal(migrationsDir, {
-        version: journal.version,
-        dialect: journal.dialect,
+        version: current.version,
+        dialect: current.dialect,
         entries: updatedEntries,
       });
     } catch (err) {
