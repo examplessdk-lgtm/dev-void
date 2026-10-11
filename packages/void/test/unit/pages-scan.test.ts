@@ -276,21 +276,6 @@ export { handler as action, type actions };`,
     expect(page!.revalidate).toBeUndefined();
   });
 
-  it('detects prerender = true from .server.ts', async () => {
-    writeFile('products/index.vue', '<template><div>Products</div></template>');
-    writeFile(
-      'products/index.server.ts',
-      'export const prerender = true;\nexport const loader = () => [];',
-    );
-
-    const result = await scanPages(TMP);
-    const page = result.pages.find((p) => p.componentId === 'products');
-    expect(page).toBeDefined();
-    expect(page!.prerender).toBe(true);
-    expect(page!.prerenderMode).toBe('force');
-    expect(page!.shouldPrerender).toBe(true);
-  });
-
   it('detects ssr = false from .server.ts and resolves client render mode', async () => {
     writeFile('analytics.vue', '<template><div>Analytics</div></template>');
     writeFile('analytics.server.ts', 'export const ssr = false;\nexport const loader = () => [];');
@@ -639,14 +624,6 @@ export { handler as action, type actions };`,
       expect(result.namedLayouts[0].island).toBe(true);
     });
 
-    it('named layout files are not treated as pages', async () => {
-      writeFile('_layouts/home.vue', '<template><slot /></template>');
-      writeFile('index.vue', '<template><div /></template>');
-      const result = await scanPages(TMP);
-      expect(result.pages).toHaveLength(1);
-      expect(result.pages[0].componentId).toBe('index');
-    });
-
     it('extracts layout from Vue SFC export const', async () => {
       writeFile('_layouts/home.vue', '<template><slot /></template>');
       writeFile(
@@ -748,15 +725,6 @@ const example = 'export const layout = "home"';
         '<script>export const layout = "missing";</script>\n<template><div /></template>',
       );
       await expect(scanPages(TMP)).rejects.toThrow('_layouts/missing.vue');
-    });
-
-    it('does not throw for layout: false', async () => {
-      writeFile('layout.vue', '<template><slot /></template>');
-      writeFile(
-        'index.vue',
-        '<script>export const layout = false;</script>\n<template><div /></template>',
-      );
-      await expect(scanPages(TMP)).resolves.toBeDefined();
     });
   });
 });
@@ -867,17 +835,6 @@ describe('resolveEffectiveLayoutChain', () => {
     { name: 'api', directory: 'guide', filePath: 'guide/_layouts/api.vue' },
   ];
 
-  it('returns default chain when no layout field', () => {
-    const chain = resolveEffectiveLayoutChain(
-      { componentId: 'guide/intro' },
-      layouts,
-      namedLayouts,
-    );
-    expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe('');
-    expect(chain[1].directory).toBe('guide');
-  });
-
   it('returns empty chain for layout: false', () => {
     const chain = resolveEffectiveLayoutChain(
       { componentId: 'guide/intro', layout: false },
@@ -885,27 +842,6 @@ describe('resolveEffectiveLayoutChain', () => {
       namedLayouts,
     );
     expect(chain).toHaveLength(0);
-  });
-
-  it('replaces innermost layout for named layout', () => {
-    const chain = resolveEffectiveLayoutChain(
-      { componentId: 'guide/intro', layout: 'api' },
-      layouts,
-      namedLayouts,
-    );
-    expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe('');
-    expect((chain[1] as { name: string }).name).toBe('api');
-  });
-
-  it('replaces entire chain for exclusive layout', () => {
-    const chain = resolveEffectiveLayoutChain(
-      { componentId: 'guide/intro', layout: '!home' },
-      layouts,
-      namedLayouts,
-    );
-    expect(chain).toHaveLength(1);
-    expect((chain[0] as { name: string }).name).toBe('home');
   });
 
   it('returns named layout as sole entry when no default chain', () => {

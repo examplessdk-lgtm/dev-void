@@ -122,6 +122,55 @@ async function postCollector(
   return response;
 }
 
+function createCollector({
+  nodes,
+  transforms,
+  resolve,
+}: {
+  nodes: Map<string, { id: string; url: string }>;
+  transforms: Record<string, string>;
+  resolve: (specifier: string) => Promise<{ id: string } | undefined>;
+}) {
+  let middleware: Middleware | undefined;
+  const transformCalls: Array<string> = [];
+  const [assetPlugin, edgePlugin] = pagesDevCssAssetsPlugin('/root', 'secret');
+  const configureServer = assetPlugin.configureServer as (server: unknown) => void;
+  configureServer({
+    config: { logger: { warn() {}, warnOnce() {} }, server: {} },
+    environments: {
+      client: {
+        moduleGraph: {
+          getModuleByUrl: async (url: string) => nodes.get(url),
+        },
+        transformRequest: async (url: string) => {
+          transformCalls.push(url);
+          return { code: transforms[url] ?? '' };
+        },
+      },
+    },
+    middlewares: {
+      use(fn: Middleware) {
+        middleware = fn;
+      },
+    },
+    watcher: { on() {} },
+  });
+  const transform = edgePlugin.transform as (
+    this: unknown,
+    code: string,
+    id: string,
+  ) => Promise<void>;
+  return {
+    transformCalls,
+    transform: (code: string, id: string) =>
+      transform.call({ environment: { name: 'client' }, resolve }, code, id),
+    async collect(rootPhases: Array<Array<string>>): Promise<{ assets: unknown }> {
+      const response = await postCollector(middleware!, { rootPhases });
+      return JSON.parse(response.body);
+    },
+  };
+}
+
 describe('pages dev CSS assets', () => {
   it('resolves transformed component imports and re-exports in source order', async () => {
     const [, plugin] = pagesDevCssAssetsPlugin('/root', 'secret');
@@ -264,16 +313,6 @@ export default __vite__css;`;
     expect(response.body).toBe('Unauthorized');
   });
 
-  it('generates the worker bridge with the internal Vite origin, not request.url', () => {
-    const plugin = createConfiguredPlugin();
-    const code = loadDevAssetModule(plugin);
-
-    expect(code).toContain('const INTERNAL_ORIGIN = "http://127.0.0.1:6199"');
-    expect(code).toContain('new URL(ENDPOINT, INTERNAL_ORIGIN)');
-    expect(code).toContain('env?.ASSETS');
-    expect(code).toContain('new URL(ENDPOINT, request.url)');
-  });
-
   it('uses the internal Vite origin before the ASSETS binding in dev', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const originalFetch = globalThis.fetch;
@@ -327,6 +366,7 @@ export default __vite__css;`;
         }),
     );
     const assetsFetch = vi.fn(async (request: Request) => {
+      expect(request.url).toBe('https://app.local/__void/dev/pages-css');
       expect(request.signal.aborted).toBe(false);
       return Response.json({ assets: expectedAssets });
     });
@@ -352,14 +392,6 @@ export default __vite__css;`;
     }
   });
 
-  it('brackets IPv6 internal Vite origins', () => {
-    const plugin = createConfiguredPlugin('::1');
-    const code = loadDevAssetModule(plugin);
-
-    expect(code).toContain('const INTERNAL_ORIGIN = "http://[::1]:6199"');
-    expect(() => new URL('/__void/dev/pages-css', 'http://[::1]:6199')).not.toThrow();
-  });
-
   it('prefers concrete bound IPv6 loopback over ambiguous localhost display URLs', () => {
     const plugin = createConfiguredPlugin('::1', 'http://localhost:6199/');
     const code = loadDevAssetModule(plugin);
@@ -369,63 +401,24 @@ export default __vite__css;`;
   });
 
   it('collects CSS through ordered static edges and ignores dynamic imports', async () => {
-    let middleware: Middleware | undefined;
-    const nodes = new Map([
-      ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
-      ['/src/component.ts', { id: '/root/src/component.ts', url: '/src/component.ts' }],
-      ['/src/static.css', { id: '/root/wrong.css', url: '/src/static.css' }],
-      ['/src/dynamic.css', { id: '/root/src/dynamic.css', url: '/src/dynamic.css' }],
-    ]);
-    const transformCalls: Array<string> = [];
-    const [assetPlugin, edgePlugin] = pagesDevCssAssetsPlugin('/root', 'secret');
-    const configureServer = assetPlugin.configureServer as (server: unknown) => void;
-    configureServer({
-      config: { logger: { warn() {}, warnOnce() {} }, server: {} },
-      environments: {
-        client: {
-          moduleGraph: {
-            getModuleByUrl: async (url: string) => nodes.get(url),
-          },
-          transformRequest: async (url: string) => {
-            transformCalls.push(url);
-            if (url === '/src/static.css') {
-              return {
-                code:
-                  '// const __vite__id = "/root/comment.css"\n' +
-                  `const note = '__vite__id = "/root/string.css"';\n` +
-                  'const __vite__id = "/root/src/static.css"\nconst __vite__css = ".static{}"',
-              };
-            }
-            if (url === '/src/static.css?inline=') {
-              return { code: 'export default ".static{}"' };
-            }
-            if (url === '/src/dynamic.css') {
-              return {
-                code: 'const __vite__id = "/root/src/dynamic.css"\nconst __vite__css = ".dynamic{}"',
-              };
-            }
-            if (url === '/src/dynamic.css?inline=') {
-              return { code: 'export default ".dynamic{}"' };
-            }
-            return { code: '' };
-          },
-        },
+    const collector = createCollector({
+      nodes: new Map([
+        ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
+        ['/src/component.ts', { id: '/root/src/component.ts', url: '/src/component.ts' }],
+        ['/src/static.css', { id: '/root/wrong.css', url: '/src/static.css' }],
+        ['/src/dynamic.css', { id: '/root/src/dynamic.css', url: '/src/dynamic.css' }],
+      ]),
+      transforms: {
+        '/src/static.css':
+          '// const __vite__id = "/root/comment.css"\n' +
+          `const note = '__vite__id = "/root/string.css"';\n` +
+          'const __vite__id = "/root/src/static.css"\nconst __vite__css = ".static{}"',
+        '/src/static.css?inline=': 'export default ".static{}"',
+        '/src/dynamic.css':
+          'const __vite__id = "/root/src/dynamic.css"\nconst __vite__css = ".dynamic{}"',
+        '/src/dynamic.css?inline=': 'export default ".dynamic{}"',
       },
-      middlewares: {
-        use(fn: Middleware) {
-          middleware = fn;
-        },
-      },
-      watcher: { on() {} },
-    });
-    const transform = edgePlugin.transform as (
-      this: unknown,
-      code: string,
-      id: string,
-    ) => Promise<void>;
-    const context = {
-      environment: { name: 'client' },
-      resolve: async (specifier: string) => {
+      resolve: async (specifier) => {
         if (specifier === './component.ts') {
           return { id: '/root/src/component.ts' };
         }
@@ -436,80 +429,44 @@ export default __vite__css;`;
           return { id: '/root/src/dynamic.css' };
         }
       },
-    };
+    });
 
-    await transform.call(
-      context,
+    await collector.transform(
       'import "./component.ts"; import("./dynamic.css");',
       '/root/src/page.ts',
     );
-    await transform.call(context, 'import "./static.css";', '/root/src/component.ts');
+    await collector.transform('import "./static.css";', '/root/src/component.ts');
 
-    const response = await postCollector(middleware!, { rootPhases: [['/src/page.ts']] });
-    const body = JSON.parse(response.body);
+    const body = await collector.collect([['/src/page.ts']]);
 
     expect(body.assets).toEqual([
       { url: '/src/static.css', id: '/root/src/static.css', css: '.static{}' },
     ]);
-    expect(transformCalls).not.toContain('/src/dynamic.css');
+    expect(collector.transformCalls).not.toContain('/src/dynamic.css');
   });
 
   it('uses Svelte style transform CSS without appending inline', async () => {
-    let middleware: Middleware | undefined;
     const styleUrl = '/src/page.svelte?svelte&type=style&lang.css';
-    const nodes = new Map([
-      ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
-      [styleUrl, { id: `/root${styleUrl}`, url: styleUrl }],
-    ]);
-    const transformCalls: Array<string> = [];
-    const [assetPlugin, edgePlugin] = pagesDevCssAssetsPlugin('/root', 'secret');
-    const configureServer = assetPlugin.configureServer as (server: unknown) => void;
-    configureServer({
-      config: { logger: { warn() {}, warnOnce() {} }, server: {} },
-      environments: {
-        client: {
-          moduleGraph: {
-            getModuleByUrl: async (url: string) => nodes.get(url),
-          },
-          transformRequest: async (url: string) => {
-            transformCalls.push(url);
-            if (url === styleUrl) {
-              return {
-                code:
-                  'const __vite__id = "/root/src/page.svelte?svelte&type=style&lang.css"\n' +
-                  'const __vite__css = ".svelte-page{color:red}"',
-              };
-            }
-            if (url === `${styleUrl}&inline=`) {
-              return { code: 'export default function Component() {}' };
-            }
-            return { code: '' };
-          },
-        },
+    const collector = createCollector({
+      nodes: new Map([
+        ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
+        [styleUrl, { id: `/root${styleUrl}`, url: styleUrl }],
+      ]),
+      transforms: {
+        [styleUrl]:
+          'const __vite__id = "/root/src/page.svelte?svelte&type=style&lang.css"\n' +
+          'const __vite__css = ".svelte-page{color:red}"',
+        [`${styleUrl}&inline=`]: 'export default function Component() {}',
       },
-      middlewares: {
-        use(fn: Middleware) {
-          middleware = fn;
-        },
-      },
-      watcher: { on() {} },
+      resolve: async () => ({ id: `/root${styleUrl}` }),
     });
-    const transform = edgePlugin.transform as (
-      this: unknown,
-      code: string,
-      id: string,
-    ) => Promise<void>;
-    await transform.call(
-      {
-        environment: { name: 'client' },
-        resolve: async () => ({ id: `/root${styleUrl}` }),
-      },
+
+    await collector.transform(
       'import "./page.svelte?svelte&type=style&lang.css";',
       '/root/src/page.ts',
     );
 
-    const response = await postCollector(middleware!, { rootPhases: [['/src/page.ts']] });
-    const body = JSON.parse(response.body);
+    const body = await collector.collect([['/src/page.ts']]);
 
     expect(body.assets).toEqual([
       {
@@ -518,124 +475,52 @@ export default __vite__css;`;
         css: '.svelte-page{color:red}',
       },
     ]);
-    expect(transformCalls).not.toContain(`${styleUrl}&inline=`);
+    expect(collector.transformCalls).not.toContain(`${styleUrl}&inline=`);
   });
 
   it('unwraps virtual /@id roots before transforming them', async () => {
-    let middleware: Middleware | undefined;
-    const nodes = new Map([
-      [
-        '/@id/__x00__virtual:void-pages-client',
-        { id: '\0virtual:void-pages-client', url: '/@id/__x00__virtual:void-pages-client' },
-      ],
-      ['/src/page.css', { id: '/root/src/page.css', url: '/src/page.css' }],
-    ]);
-    const transformCalls: Array<string> = [];
-    const [assetPlugin, edgePlugin] = pagesDevCssAssetsPlugin('/root', 'secret');
-    const configureServer = assetPlugin.configureServer as (server: unknown) => void;
-    configureServer({
-      config: { logger: { warn() {}, warnOnce() {} }, server: {} },
-      environments: {
-        client: {
-          moduleGraph: {
-            getModuleByUrl: async (url: string) => nodes.get(url),
-          },
-          transformRequest: async (url: string) => {
-            transformCalls.push(url);
-            if (url === '/src/page.css?inline=') {
-              return { code: 'export default ".page{}"' };
-            }
-            return { code: '' };
-          },
-        },
-      },
-      middlewares: {
-        use(fn: Middleware) {
-          middleware = fn;
-        },
-      },
-      watcher: { on() {} },
+    const collector = createCollector({
+      nodes: new Map([
+        [
+          '/@id/__x00__virtual:void-pages-client',
+          { id: '\0virtual:void-pages-client', url: '/@id/__x00__virtual:void-pages-client' },
+        ],
+        ['/src/page.css', { id: '/root/src/page.css', url: '/src/page.css' }],
+      ]),
+      transforms: { '/src/page.css?inline=': 'export default ".page{}"' },
+      resolve: async () => ({ id: '/root/src/page.css' }),
     });
-    const transform = edgePlugin.transform as (
-      this: unknown,
-      code: string,
-      id: string,
-    ) => Promise<void>;
-    await transform.call(
-      {
-        environment: { name: 'client' },
-        resolve: async () => ({ id: '/root/src/page.css' }),
-      },
-      'import "./page.css";',
-      '\0virtual:void-pages-client',
-    );
 
-    const response = await postCollector(middleware!, {
-      rootPhases: [['/@id/__x00__virtual:void-pages-client']],
-    });
-    const body = JSON.parse(response.body);
+    await collector.transform('import "./page.css";', '\0virtual:void-pages-client');
 
-    expect(transformCalls[0]).toBe('\0virtual:void-pages-client');
+    const body = await collector.collect([['/@id/__x00__virtual:void-pages-client']]);
+
+    expect(collector.transformCalls[0]).toBe('\0virtual:void-pages-client');
     expect(body.assets).toEqual([
       { url: '/src/page.css', id: '/root/src/page.css', css: '.page{}' },
     ]);
   });
 
   it('skips optimized deps and continues collecting route CSS', async () => {
-    let middleware: Middleware | undefined;
-    const nodes = new Map([
-      ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
-      ['/src/page.css', { id: '/root/src/page.css', url: '/src/page.css' }],
-    ]);
-    const transformCalls: Array<string> = [];
-    const [assetPlugin, edgePlugin] = pagesDevCssAssetsPlugin('/root', 'secret');
-    const configureServer = assetPlugin.configureServer as (server: unknown) => void;
-    configureServer({
-      config: { logger: { warn() {}, warnOnce() {} }, server: {} },
-      environments: {
-        client: {
-          moduleGraph: {
-            getModuleByUrl: async (url: string) => nodes.get(url),
-          },
-          transformRequest: async (url: string) => {
-            transformCalls.push(url);
-            if (url === '/src/page.css?inline=') {
-              return { code: 'export default ".page{}"' };
-            }
-            return { code: '' };
-          },
-        },
+    const collector = createCollector({
+      nodes: new Map([
+        ['/src/page.ts', { id: '/root/src/page.ts', url: '/src/page.ts' }],
+        ['/src/page.css', { id: '/root/src/page.css', url: '/src/page.css' }],
+      ]),
+      transforms: { '/src/page.css?inline=': 'export default ".page{}"' },
+      resolve: async (specifier) => {
+        if (specifier === './page.css') {
+          return { id: '/root/src/page.css' };
+        }
+        return { id: '/node_modules/.vite/deps/react.js?v=123' };
       },
-      middlewares: {
-        use(fn: Middleware) {
-          middleware = fn;
-        },
-      },
-      watcher: { on() {} },
     });
-    const transform = edgePlugin.transform as (
-      this: unknown,
-      code: string,
-      id: string,
-    ) => Promise<void>;
-    await transform.call(
-      {
-        environment: { name: 'client' },
-        resolve: async (specifier: string) => {
-          if (specifier === './page.css') {
-            return { id: '/root/src/page.css' };
-          }
-          return { id: '/node_modules/.vite/deps/react.js?v=123' };
-        },
-      },
-      'import "react"; import "./page.css";',
-      '/root/src/page.ts',
-    );
 
-    const response = await postCollector(middleware!, { rootPhases: [['/src/page.ts']] });
-    const body = JSON.parse(response.body);
+    await collector.transform('import "react"; import "./page.css";', '/root/src/page.ts');
 
-    expect(transformCalls).not.toContain('/node_modules/.vite/deps/react.js?v=123');
+    const body = await collector.collect([['/src/page.ts']]);
+
+    expect(collector.transformCalls).not.toContain('/node_modules/.vite/deps/react.js?v=123');
     expect(body.assets).toEqual([
       { url: '/src/page.css', id: '/root/src/page.css', css: '.page{}' },
     ]);

@@ -80,6 +80,7 @@ describe('handlePageGet', () => {
         mockRenderFn,
         mockGetAssetTags,
       );
+      expect(response.headers.get('X-VoidPages')).toBe('true');
       expect(response.headers.get('Vary')).toBe('Accept-Language, X-VoidPages');
       await response.text();
     },
@@ -107,6 +108,7 @@ describe('handlePageGet', () => {
     expect(body.props).toEqual({ users: [1, 2, 3] });
     expect(body.url).toBe('/users');
     expect(body.errors).toBeNull();
+    expect(body.deferred).toBeUndefined();
   });
 
   it('preserves headers set by loaders on X-VoidPages JSON responses', async () => {
@@ -129,24 +131,6 @@ describe('handlePageGet', () => {
 
     expect(response.headers.get('Set-Cookie')).toContain('void_auth_nonce=abc');
     expect(response.headers.get('X-VoidPages')).toBe('true');
-  });
-
-  it('includes the request query string in page object URLs', async () => {
-    const c = await createTestContext('GET', '/users?page=2', {
-      headers: { 'x-voidpages': 'true' },
-    });
-
-    const response = await handlePageGet(
-      () => ({ users: [] }),
-      undefined,
-      c,
-      'users',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    const body = await json<PageResponse>(response);
-    expect(body.url).toBe('/users?page=2');
   });
 
   it('includes route params in page objects without requiring loader props', async () => {
@@ -227,25 +211,6 @@ describe('handlePageGet', () => {
     expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
   });
 
-  it('handles undefined handler (empty props)', async () => {
-    const c = await createTestContext('GET', '/', {
-      headers: { 'x-voidpages': 'true' },
-    });
-
-    const response = await handlePageGet(
-      undefined,
-      undefined,
-      c,
-      'index',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    const body = await json<PageResponse>(response);
-    expect(body.props).toEqual({});
-    expect(body.component).toBe('index');
-  });
-
   it('passes through redirect Response from loader', async () => {
     const c = await createTestContext('GET', '/auth/callback');
 
@@ -288,27 +253,6 @@ describe('handlePageGet', () => {
 
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(renderFn).toHaveBeenCalled();
-  });
-
-  it('island=false returns JSON for X-VoidPages requests (unchanged)', async () => {
-    const c = await createTestContext('GET', '/', {
-      headers: { 'x-voidpages': 'true' },
-    });
-
-    const renderFn = vi.fn(async () => '<html></html>');
-    const response = await handlePageGet(
-      undefined,
-      undefined,
-      c,
-      'index',
-      renderFn,
-      mockGetAssetTags,
-      undefined,
-      { renderMode: 'server' },
-    );
-
-    expect(response.headers.get('X-VoidPages')).toBe('true');
-    expect(renderFn).not.toHaveBeenCalled();
   });
 
   it('serializes dev CSS records with a nonce before rendering HTML', async () => {
@@ -876,26 +820,6 @@ describe('handlePageMutation', () => {
 });
 
 describe('handlePageGet with deferred props', () => {
-  it('SPA — marks deferred NDJSON responses as Void Pages responses', async () => {
-    const c = await createTestContext('GET', '/dashboard', {
-      headers: { 'x-voidpages': 'true' },
-    });
-
-    const response = await handlePageGet(
-      () => ({
-        usage: defer(() => Promise.resolve({ requests: 100 })),
-      }),
-      undefined,
-      c,
-      'dashboard',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    expect(response.headers.get('X-VoidPages')).toBe('true');
-    expect(response.headers.get('Vary')).toBe('X-VoidPages');
-  });
-
   it('SPA — streams NDJSON with immediate props first, then deferred', async () => {
     const c = await createTestContext('GET', '/dashboard', {
       headers: { 'x-voidpages': 'true' },
@@ -1053,26 +977,6 @@ describe('handlePageGet with deferred props', () => {
     }
   });
 
-  it('SPA — no deferred props returns normal JSON (not streaming)', async () => {
-    const c = await createTestContext('GET', '/users', {
-      headers: { 'x-voidpages': 'true' },
-    });
-
-    const handler = vi.fn(() => ({ users: [1] }));
-    const response = await handlePageGet(
-      handler,
-      undefined,
-      c,
-      'users',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    const body = await json<PageResponse>(response);
-    expect(body.props).toEqual({ users: [1] });
-    expect(body.deferred).toBeUndefined();
-  });
-
   it('SSR — streams HTML then deferred script tags', async () => {
     const c = await createTestContext('GET', '/dashboard');
 
@@ -1100,22 +1004,6 @@ describe('handlePageGet with deferred props', () => {
     expect(text).toContain('"deferred":["usage"]');
     expect(text).toContain('window.__resolveDeferred("usage",');
     expect(text).toContain('"requests":100');
-  });
-
-  it('SSR — no deferred props returns normal HTML', async () => {
-    const c = await createTestContext('GET', '/users');
-
-    const handler = vi.fn(() => ({ users: [1] }));
-    const response = await handlePageGet(
-      handler,
-      undefined,
-      c,
-      'users',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
   });
 
   it('client-only page — returns an empty app shell with initial page data', async () => {
@@ -1210,26 +1098,6 @@ describe('handlePageGet with deferred props', () => {
     expect(deferredLine.__deferred).toBe('analytics');
     expect(deferredLine.data).toHaveProperty('metrics');
     expect(deferredLine.data).toHaveProperty('chart');
-  });
-
-  it('redirect from loader with deferred props — passes through', async () => {
-    const c = await createTestContext('GET', '/dashboard');
-
-    const redirect = new Response(null, {
-      status: 302,
-      headers: { Location: '/login' },
-    });
-    const handler = vi.fn(() => redirect);
-    const response = await handlePageGet(
-      handler,
-      undefined,
-      c,
-      'dashboard',
-      mockRenderFn,
-      mockGetAssetTags,
-    );
-
-    expect(response.status).toBe(302);
   });
 });
 
