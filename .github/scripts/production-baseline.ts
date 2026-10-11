@@ -6,7 +6,6 @@ async function productionBaseline(options: {
   repository: string;
   token?: string;
   environment?: string;
-  request?: typeof fetch;
 }): Promise<string> {
   if (options.configuredSha) {
     if (options.configuredSha.length !== 40 || !/^[0-9a-f]{40}$/i.test(options.configuredSha)) {
@@ -21,11 +20,10 @@ async function productionBaseline(options: {
       'Provide a GitHub repository and read token, or set VOID_PLATFORM_PRODUCTION_REF to the deployed SHA.',
     );
   }
-  const request = options.request ?? fetch;
   const signal = AbortSignal.timeout(60_000);
   const environment = options.environment ?? 'Prod';
   const get = async (path: string): Promise<unknown> => {
-    const response = await request(`https://api.github.com/repos/${options.repository}/${path}`, {
+    const response = await fetch(`https://api.github.com/repos/${options.repository}/${path}`, {
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${options.token}`,
