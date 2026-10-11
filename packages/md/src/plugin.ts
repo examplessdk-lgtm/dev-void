@@ -376,3 +376,6 @@ function generateMdClientEntry(scripts: Map<string, string>): string {
   lines.push(`if (mdScriptId && mdScripts[mdScriptId]) mdScripts[mdScriptId]();`);
   return lines.join('\n');
 }
+
+export type { CompileOptions, CompileResult } from './compile.ts';
+export type { IslandImport, ScriptExtraction } from './extract-script.ts';
