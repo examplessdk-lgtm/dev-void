@@ -1,35 +1,13 @@
 import type { CompileResult } from './compile.ts';
-import { buildRenderChunks, toIslandId } from './emit-shared.ts';
-import type { IslandImport } from './extract-script.ts';
+import { buildRenderChunks, type ResolvedIsland } from './emit-shared.ts';
 
 function toSvelteLiteral(value: unknown): string {
   return JSON.stringify(value).replace(/<\//g, '<\\/');
 }
 
-export function emitSvelteComponent(result: CompileResult): string {
-  const frontmatter = toSvelteLiteral(result.frontmatter);
-  const headings = toSvelteLiteral(result.headings);
-  const html = toSvelteLiteral(result.html);
-
-  return `<script context="module">
-export const frontmatter = ${frontmatter};
-export const headings = ${headings};
-</script>
-
-<script>
-import { setFrontmatter } from "@void/md";
-
-const __frontmatter = ${frontmatter};
-setFrontmatter(__frontmatter);
-</script>
-
-{@html ${html}}
-`;
-}
-
-export function emitSvelteComponentWithIslands(
+export function emitSvelteComponent(
   result: CompileResult,
-  islandImports: ReadonlyArray<IslandImport>,
+  islandImports: ReadonlyArray<ResolvedIsland>,
 ): string {
   const chunks = buildRenderChunks(result.html, islandImports);
 
@@ -74,7 +52,7 @@ setFrontmatter(__frontmatter);
     source += `const ${propsName} = ${propsLiteral};
 `;
     body.push(
-      `<div data-island="${toIslandId(chunk.islandImport)}" data-props={JSON.stringify(${propsName})} data-hydrate="${chunk.islandImport.strategy}"><${alias} {...${propsName}} /></div>`,
+      `<div data-island="${chunk.islandImport.islandId}" data-props={JSON.stringify(${propsName})} data-hydrate="${chunk.islandImport.strategy}"><${alias} {...${propsName}} /></div>`,
     );
   }
 

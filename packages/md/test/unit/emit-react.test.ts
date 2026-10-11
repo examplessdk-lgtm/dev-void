@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 import type { CompileResult } from '../../src/compile.ts';
-import { emitReactComponent, emitReactComponentWithIslands } from '../../src/emit-react.ts';
+import { emitReactComponent } from '../../src/emit-react.ts';
 
 function makeResult(overrides?: Partial<CompileResult>): CompileResult {
   return {
@@ -14,26 +14,31 @@ function makeResult(overrides?: Partial<CompileResult>): CompileResult {
 
 describe('emitReactComponent', () => {
   it('emits valid React component code', () => {
-    const code = emitReactComponent(makeResult());
+    const code = emitReactComponent(makeResult(), []);
     expect(code).toContain('import React from "react"');
     expect(code).toContain('FrontmatterContext');
     expect(code).toContain('dangerouslySetInnerHTML');
   });
 
   it('exports frontmatter and headings', () => {
-    const code = emitReactComponent(makeResult());
+    const code = emitReactComponent(makeResult(), []);
     expect(code).toContain('export const frontmatter = __frontmatter');
     expect(code).toContain('export const headings = __headings');
   });
 });
 
-describe('emitReactComponentWithIslands', () => {
+describe('emitReactComponent with islands', () => {
   it('emits island imports and wrappers', () => {
     const result = makeResult({
       html: '<h1>Hello</h1>\n<Counter />\n<p>More</p>\n',
     });
-    const code = emitReactComponentWithIslands(result, [
-      { name: 'Counter', specifier: './Counter.tsx', strategy: 'visible' },
+    const code = emitReactComponent(result, [
+      {
+        name: 'Counter',
+        specifier: './Counter.tsx',
+        strategy: 'visible',
+        islandId: 'pages/Counter',
+      },
     ]);
 
     expect(code).toContain('import _raw_island_0 from "./Counter.tsx"');
@@ -47,8 +52,8 @@ describe('emitReactComponentWithIslands', () => {
     const result = makeResult({
       html: '<Counter />\n',
     });
-    const code = emitReactComponentWithIslands(result, [
-      { name: 'Counter', specifier: './Counter.tsx', strategy: 'load' },
+    const code = emitReactComponent(result, [
+      { name: 'Counter', specifier: './Counter.tsx', strategy: 'load', islandId: 'pages/Counter' },
     ]);
 
     expect(code).toContain('export const frontmatter = __frontmatter');

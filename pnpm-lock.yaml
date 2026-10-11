@@ -500,9 +500,6 @@ importers:
       void:
         specifier: workspace:*
         version: link:../void
-      vue:
-        specifier: ^3.5.43
-        version: 3.5.43(typescript@7.0.2)
 
   packages/platform:
     dependencies:

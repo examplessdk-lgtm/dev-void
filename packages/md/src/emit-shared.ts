@@ -1,5 +1,7 @@
 import type { IslandImport } from './extract-script.ts';
 
+export type ResolvedIsland = IslandImport & Readonly<{ islandId: string }>;
+
 // Match self-closing uppercase tags: <Counter />, <Counter attr="val" />
 // and paired uppercase tags: <Counter>...</Counter>
 const ISLAND_TAG_RE =
@@ -19,7 +21,7 @@ type HtmlChunk = {
 
 type IslandChunk = {
   type: 'island';
-  islandImport: IslandImport;
+  islandImport: ResolvedIsland;
   props: Record<string, string>;
 };
 
@@ -53,14 +55,14 @@ function parseAttrs(attrStr: string): Record<string, string> {
   return result;
 }
 
-export function toIslandId(imp: IslandImport): string {
-  return imp.islandId ?? imp.specifier.replace(/\.[^.]+$/, '');
-}
-
 export function buildRenderChunks(
   html: string,
-  islandImports: ReadonlyArray<IslandImport>,
+  islandImports: ReadonlyArray<ResolvedIsland>,
 ): ReadonlyArray<RenderChunk> {
+  // Pages without islands render the whole body, even when it is empty.
+  if (islandImports.length === 0) {
+    return [{ type: 'html', html }];
+  }
   const islandByName = new Map(islandImports.map((item) => [item.name, item]));
   const tags = findIslandTags(html, new Set(islandByName.keys()));
 

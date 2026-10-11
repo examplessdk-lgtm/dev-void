@@ -6,21 +6,18 @@ export type IslandImport = {
   name: string;
   specifier: string;
   strategy: string;
-  /** Root-relative island ID (set during transform when file context is available). */
-  islandId?: string;
 };
 
 export type ScriptExtraction = Readonly<{
-  script: string | null;
   body: string;
-  islandImports: Array<IslandImport>;
+  islandImports: ReadonlyArray<IslandImport>;
   clientCode: string | null;
 }>;
 
 export function extractScript(source: string): ScriptExtraction {
   const match = source.match(SCRIPT_RE);
   if (!match) {
-    return { script: null, body: source, islandImports: [], clientCode: null };
+    return { body: source, islandImports: [], clientCode: null };
   }
 
   const script = match[1].trim();
@@ -41,5 +38,5 @@ export function extractScript(source: string): ScriptExtraction {
       : script;
   const clientCode = stripped || null;
 
-  return { script, body, islandImports, clientCode };
+  return { body, islandImports, clientCode };
 }

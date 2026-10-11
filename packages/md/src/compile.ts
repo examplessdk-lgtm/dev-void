@@ -100,26 +100,14 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   // Code block wrapping (must come after shiki, before line-numbers)
   markdown.use(preWrapperPlugin);
 
-  // Container blocks: :::tip, :::warning, etc.
   markdown.use(containerPlugin);
-
-  // Image path normalization + lazy loading
   markdown.use(imagePlugin, { lazyLoading: true });
-
-  // Link handling: external attrs, .md normalization
   markdown.use(linkPlugin);
-
-  // Line numbers (opt-in per code block by default)
-  markdown.use(lineNumberPlugin, false);
-
-  // GitHub alerts: > [!NOTE], > [!TIP], etc.
+  markdown.use(lineNumberPlugin);
   markdown.use(gitHubAlertsPlugin);
 
-  // Preserve the raw fence info string (e.g. `ts {1,3-5}`) on the token before
-  // `markdown-it-attrs` consumes the `{…}` as an attribute block. Anchored
-  // after `block` so fence tokens exist, and before `curly_attributes` (which
-  // runs after `inline`), so the fence renderer can still feed the ranges to
-  // Shiki's `transformerMetaHighlight` via `meta.__raw`.
+  // Save the raw fence info (e.g. `ts {1,3-5}`) before `markdown-it-attrs` strips the
+  // `{…}`, so `transformerMetaHighlight` still gets the line ranges via `meta.__raw`.
   const stashFenceInfo: RuleCore = (state) => {
     for (const token of state.tokens) {
       if (token.type === 'fence') {
@@ -129,24 +117,18 @@ async function createCompiler(options?: CompileOptions): Promise<MarkdownExit> {
   };
   markdown.core.ruler.after('block', 'stash_fence_info', stashFenceInfo);
 
-  // Attribute syntax: {.class #id}
   markdown.use(attrs);
-
-  // Emoji shortcodes
   markdown.use(emoji);
 
-  // Footnotes: `text[^1]` refs with matching `[^1]: definition` blocks.
-  // Registered after emoji and before anchor so footnote back-reference
-  // markers are not themselves treated as heading-anchor targets.
+  // After emoji and before anchor, so footnote markers are not treated as
+  // heading-anchor targets.
   markdown.use(footnote);
 
-  // Heading anchors
   // @ts-expect-error markdown-it-anchor types reference @types/markdown-it, structurally incompatible with markdown-exit
   markdown.use(anchor, {
     permalink: anchor.permalink.ariaHidden({ placement: 'before' }),
   });
 
-  // [[toc]] directive
   markdown.use(tocPlugin);
 
   return markdown;
@@ -156,16 +138,10 @@ export async function compile(source: string, options?: CompileOptions): Promise
   const { data: frontmatter, content } = matter(source);
   const compiler = await getCompiler(options);
 
-  // Each markdown-it call gets its OWN fresh env. `renderAsync` re-parses
-  // internally, so sharing one env across `parse` and `renderAsync` makes
-  // stateful plugins double-accumulate — markdown-it-footnote would append its
-  // footnote refs/defs to the same `env.footnotes` twice, producing duplicated
-  // footnote lists and wrong fn/fnref ids. A fresh env per call keeps the two
-  // parses independent. Heading/TOC extraction is unaffected: anchor ids are
-  // derived per-parse from the (identical) content, not from shared env state.
-  const tokens = compiler.parse(content, {});
+  const env = {};
+  const tokens = compiler.parse(content, env);
   const headings = extractHeadings(tokens);
-  const html = await compiler.renderAsync(content, {});
+  const html = await compiler.renderer.renderAsync(tokens, compiler.options, env);
 
   const title =
     (frontmatter.title as string) ?? headings.find((heading) => heading.depth === 1)?.text ?? '';

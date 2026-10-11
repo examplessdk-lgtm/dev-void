@@ -1,15 +1,14 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'pathslash';
 import { glob } from 'tinyglobby';
 import { normalizePath, type Plugin, type ResolvedConfig, type ViteDevServer } from 'vite';
 import { resolvePagesDir } from 'void/pages';
-import { generateMdTypes } from './codegen/md-types.ts';
 import type { CompileOptions } from './compile.ts';
-import { emitReactComponent, emitReactComponentWithIslands } from './emit-react.ts';
-import { emitSolidComponent, emitSolidComponentWithIslands } from './emit-solid.ts';
-import { emitSvelteComponent, emitSvelteComponentWithIslands } from './emit-svelte.ts';
-import { emitVueComponent, emitVueComponentWithIslands } from './emit-vue.ts';
+import { emitReactComponent } from './emit-react.ts';
+import { emitSolidComponent } from './emit-solid.ts';
+import { emitSvelteComponent } from './emit-svelte.ts';
+import { emitVueComponent } from './emit-vue.ts';
 import { extractScript } from './extract-script.ts';
 import { extractMetadata } from './metadata.ts';
 
@@ -125,12 +124,6 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
     return pages.sort((leftPage, rightPage) => leftPage.path.localeCompare(rightPage.path));
   }
 
-  function writeMdTypes() {
-    const outDir = join(root, '.void');
-    mkdirSync(outDir, { recursive: true });
-    writeFileSync(join(outDir, 'md.d.ts'), generateMdTypes());
-  }
-
   return [
     {
       name: 'void-md',
@@ -189,7 +182,6 @@ export function voidMarkdown(options?: MarkdownOptions): Array<Plugin> {
         solidModules.clear();
         clientScripts.clear();
         mdPages = await scanMdPages();
-        writeMdTypes();
       },
 
       configureServer(server: ViteDevServer) {
@@ -326,42 +318,26 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
             const componentId = stripPageSuffix(_id.slice(pagesPrefix.length)) || 'index';
             clientScripts.set(componentId, clientCode);
           }
-          for (const imp of islandImports) {
+          const islands = islandImports.map((imp) => {
             const absPath = resolve(dirname(_id), imp.specifier);
-            imp.islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
-          }
+            const islandId = normalizePath(relative(root, absPath)).replace(/\.[^.]+$/, '');
+            return { ...imp, islandId };
+          });
 
           const { compile } = await import('./compile.ts');
           const result = await compile(body, { shiki: options?.shiki });
 
           if (adapter === 'vue') {
-            if (islandImports.length > 0) {
-              return {
-                code: emitVueComponentWithIslands(result, islandImports),
-                map: null,
-              };
-            }
-            return { code: emitVueComponent(result), map: null };
+            return { code: emitVueComponent(result, islands), map: null };
           }
 
           if (adapter === 'react') {
-            if (islandImports.length > 0) {
-              return {
-                code: emitReactComponentWithIslands(result, islandImports),
-                map: null,
-              };
-            }
-            return { code: emitReactComponent(result), map: null };
+            return { code: emitReactComponent(result, islands), map: null };
           }
 
           if (adapter === 'svelte') {
             const virtualId = createVirtualModuleId(SVELTE_VIRTUAL_PREFIX, _id, code, 'svelte');
-            svelteModules.set(
-              virtualId,
-              islandImports.length > 0
-                ? emitSvelteComponentWithIslands(result, islandImports)
-                : emitSvelteComponent(result),
-            );
+            svelteModules.set(virtualId, emitSvelteComponent(result, islands));
             return {
               code: `export { default, frontmatter, headings } from ${JSON.stringify(virtualId)};`,
               map: null,
@@ -370,12 +346,7 @@ export function useFrontmatter() { return useContext(FrontmatterContext) ?? {}; 
 
           if (adapter === 'solid') {
             const virtualId = createVirtualModuleId(SOLID_VIRTUAL_PREFIX, _id, code, 'tsx');
-            solidModules.set(
-              virtualId,
-              islandImports.length > 0
-                ? emitSolidComponentWithIslands(result, islandImports)
-                : emitSolidComponent(result),
-            );
+            solidModules.set(virtualId, emitSolidComponent(result, islands));
             return {
               code: `export { default, frontmatter, headings } from ${JSON.stringify(virtualId)};`,
               map: null,
@@ -405,6 +376,3 @@ function generateMdClientEntry(scripts: Map<string, string>): string {
   lines.push(`if (mdScriptId && mdScripts[mdScriptId]) mdScripts[mdScriptId]();`);
   return lines.join('\n');
 }
-
-export type { CompileOptions, CompileResult } from './compile.ts';
-export type { IslandImport, ScriptExtraction } from './extract-script.ts';

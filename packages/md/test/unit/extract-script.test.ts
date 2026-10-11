@@ -2,9 +2,8 @@ import { describe, expect, it } from 'vite-plus/test';
 import { extractScript } from '../../src/extract-script.ts';
 
 describe('extractScript', () => {
-  it('returns null script when no <script> block', () => {
+  it('returns the source unchanged when no <script> block', () => {
     const result = extractScript('# Hello\n\nWorld');
-    expect(result.script).toBeNull();
     expect(result.body).toBe('# Hello\n\nWorld');
     expect(result.islandImports).toEqual([]);
     expect(result.clientCode).toBeNull();
@@ -17,7 +16,6 @@ import Foo from "./Foo.vue" with { island: "load" }
 
 # Hello`;
     const result = extractScript(source);
-    expect(result.script).toBe('import Foo from "./Foo.vue" with { island: "load" }');
     expect(result.body.trim()).toBe('# Hello');
   });
 
@@ -68,7 +66,7 @@ title: Test
 
 # Hello`;
     const result = extractScript(source);
-    expect(result.script).toContain('import A');
+    expect(result.islandImports.map((island) => island.name)).toEqual(['A']);
     expect(result.body).toContain('---');
     expect(result.body).toContain('# Hello');
   });

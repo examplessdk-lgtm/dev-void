@@ -1,31 +1,9 @@
 import type { CompileResult } from './compile.ts';
-import { buildRenderChunks, toIslandId } from './emit-shared.ts';
-import type { IslandImport } from './extract-script.ts';
+import { buildRenderChunks, type ResolvedIsland } from './emit-shared.ts';
 
-export function emitSolidComponent(result: CompileResult): string {
-  return `
-import { FrontmatterContext } from "@void/md";
-
-const __frontmatter = ${JSON.stringify(result.frontmatter)};
-const __headings = ${JSON.stringify(result.headings)};
-const __html = ${JSON.stringify(result.html)};
-
-export const frontmatter = __frontmatter;
-export const headings = __headings;
-
-export default function MarkdownPage() {
-  return (
-    <FrontmatterContext.Provider value={__frontmatter}>
-      <div innerHTML={__html} />
-    </FrontmatterContext.Provider>
-  );
-}
-`;
-}
-
-export function emitSolidComponentWithIslands(
+export function emitSolidComponent(
   result: CompileResult,
-  islandImports: ReadonlyArray<IslandImport>,
+  islandImports: ReadonlyArray<ResolvedIsland>,
 ): string {
   const chunks = buildRenderChunks(result.html, islandImports);
   const importAliasByName = new Map<string, string>();
@@ -63,7 +41,7 @@ export const headings = __headings;
     const propsLiteral = Object.keys(chunk.props).length > 0 ? JSON.stringify(chunk.props) : '{}';
     code += `\nconst ${propsName} = ${propsLiteral};`;
     bodyLines.push(
-      `<div data-island=${JSON.stringify(toIslandId(chunk.islandImport))} data-props={JSON.stringify(${propsName})} data-hydrate=${JSON.stringify(chunk.islandImport.strategy)}><${importAlias} {...${propsName}} /></div>`,
+      `<div data-island=${JSON.stringify(chunk.islandImport.islandId)} data-props={JSON.stringify(${propsName})} data-hydrate=${JSON.stringify(chunk.islandImport.strategy)}><${importAlias} {...${propsName}} /></div>`,
     );
   }
 
