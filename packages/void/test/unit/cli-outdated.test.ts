@@ -12,9 +12,6 @@ const OUTDATED_BODY = JSON.stringify({
 describe('PlatformApiError + cli_outdated', () => {
   it('overrides the default message with the server-supplied upgrade text on 426', () => {
     const err = new PlatformApiError('Deploy failed', 426, OUTDATED_BODY);
-    // Default would be `Deploy failed: 426 {...json...}` — readers shouldn't
-    // see raw JSON. Server message wins so the actionable upgrade line is
-    // up front.
     expect(err.message).not.toContain('426');
     expect(err.message).not.toContain('{');
     expect(err.message).toContain('npm i -g void@latest');
@@ -54,8 +51,6 @@ describe('formatStreamDeployError + cli_outdated', () => {
   it('surfaces the server message verbatim with no HTTP wrapper', () => {
     const err = new PlatformApiError('Deploy failed', 426, OUTDATED_BODY);
     const formatted = formatStreamDeployError(err, null, null);
-    // Should NOT contain the standard "Deploy failed (HTTP 426)" wrapper
-    // because that buries the actionable line.
     expect(formatted.message).not.toContain('Deploy failed (HTTP 426)');
     expect(formatted.message).toContain('npm i -g void@latest');
   });

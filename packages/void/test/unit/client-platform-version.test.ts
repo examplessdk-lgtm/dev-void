@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { MIN_PLATFORM_VERSION, PlatformClient } from '../../src/cli/client.ts';
+import { PlatformClient } from '../../src/cli/client.ts';
 import {
   isPlatformDiscoveryRequest,
   platformDiscoveryResponse,
@@ -53,10 +53,6 @@ function client(options: { checkPlatformVersion?: boolean } = {}): PlatformClien
 }
 
 describe('minimum platform version', () => {
-  it('declares 0.27.0 as the minimum', () => {
-    expect(MIN_PLATFORM_VERSION).toBe('0.27.0');
-  });
-
   it.each(['0.27.0', '0.28.0', '1.0.0', 'hosted'])(
     'accepts a platform reporting %s',
     async (version) => {

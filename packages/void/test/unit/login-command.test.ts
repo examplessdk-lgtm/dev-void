@@ -52,7 +52,6 @@ vi.mock('../../src/cli/auth', () => ({
   removeToken: (...args: Array<unknown>) => mockRemoveToken(...args),
   runPlatformLogin: (...args: Array<unknown>) => mockRunPlatformLogin(...args),
   savePlatformToken: (...args: Array<unknown>) => mockSavePlatformToken(...args),
-  isStagingMode: () => false,
 }));
 
 vi.mock('../../src/cli/platform-cmd', () => ({
@@ -99,9 +98,9 @@ beforeEach(() => {
   mockIsExpiredTokenError.mockReturnValue(false);
 });
 
-describe('runLoginCommand', () => {
-  const root = '/project';
+const root = '/project';
 
+describe('promptForLoginToken', () => {
   it('logs into the explicit platform with its sole provider and scopes token storage', async () => {
     await promptForLoginToken(root, {
       apiUrl: 'https://company.example.com',
@@ -118,7 +117,9 @@ describe('runLoginCommand', () => {
       'https://company.example.com',
     );
   });
+});
 
+describe('runLoginCommand', () => {
   it('keeps the logout-first flow when the stored token is still valid', async () => {
     mockGetToken.mockReturnValue('existing-token');
     mockWhoami.mockResolvedValue({ login: 'cpojer', plan: 'pro' });

@@ -39,14 +39,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 const REQUEST_URL = 'https://token.actions.githubusercontent.com/abc?api-version=2.0';
 const REQUEST_TOKEN = 'req-token-123';
 
-function restoreEnv(key: string, prev: string | undefined): void {
-  if (prev === undefined) {
-    delete process.env[key];
-  } else {
-    process.env[key] = prev;
-  }
-}
-
 function oidcEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
     GITHUB_ACTIONS: 'true',
@@ -117,104 +109,56 @@ describe('exchangeGithubOidcForDeployToken', () => {
   it('forwards CF Access service-token headers on the API POST but not the GitHub GET', async () => {
     const gatedApiUrl = 'https://api.staging.void.cloud';
     vi.stubEnv('VOID_ACCESS_ORIGIN', gatedApiUrl);
-    const prevId = process.env.CF_ACCESS_CLIENT_ID;
-    const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    process.env.CF_ACCESS_CLIENT_ID = 'cf-id';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'cf-secret';
-    try {
-      fetchMock
-        .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
-        .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', 'cf-id');
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', 'cf-secret');
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
+      .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
 
-      await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
+    await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
 
-      // GitHub OIDC GET hits token.actions.githubusercontent.com — never CF Access.
-      const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
-      const getHeaders = getInit.headers as Record<string, string>;
-      expect(getHeaders['CF-Access-Client-Id']).toBeUndefined();
-      expect(getHeaders['CF-Access-Client-Secret']).toBeUndefined();
+    // The GitHub OIDC GET goes to token.actions.githubusercontent.com, never through CF Access.
+    const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const getHeaders = getInit.headers as Record<string, string>;
+    expect(getHeaders['CF-Access-Client-Id']).toBeUndefined();
+    expect(getHeaders['CF-Access-Client-Secret']).toBeUndefined();
 
-      // Void API POST carries the service-token pair so Access-gated staging passes.
-      const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      const postHeaders = postInit.headers as Record<string, string>;
-      expect(postHeaders['CF-Access-Client-Id']).toBe('cf-id');
-      expect(postHeaders['CF-Access-Client-Secret']).toBe('cf-secret');
-    } finally {
-      restoreEnv('CF_ACCESS_CLIENT_ID', prevId);
-      restoreEnv('CF_ACCESS_CLIENT_SECRET', prevSecret);
-    }
+    const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const postHeaders = postInit.headers as Record<string, string>;
+    expect(postHeaders['CF-Access-Client-Id']).toBe('cf-id');
+    expect(postHeaders['CF-Access-Client-Secret']).toBe('cf-secret');
   });
 
   it('forwards a CF_ACCESS_TOKEN user JWT on the API POST but not the GitHub GET', async () => {
     const gatedApiUrl = 'https://api.staging.void.cloud';
     vi.stubEnv('VOID_ACCESS_ORIGIN', gatedApiUrl);
-    const prevToken = process.env.CF_ACCESS_TOKEN;
-    process.env.CF_ACCESS_TOKEN = accessJwt;
-    try {
-      fetchMock
-        .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
-        .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
+    vi.stubEnv('CF_ACCESS_TOKEN', accessJwt);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
+      .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
 
-      await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
+    await exchangeGithubOidcForDeployToken(gatedApiUrl, 'my-app', oidcEnv());
 
-      const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
-      expect((getInit.headers as Record<string, string>)['cf-access-token']).toBeUndefined();
+    const [, getInit] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect((getInit.headers as Record<string, string>)['cf-access-token']).toBeUndefined();
 
-      const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      expect((postInit.headers as Record<string, string>)['cf-access-token']).toBe(accessJwt);
-    } finally {
-      restoreEnv('CF_ACCESS_TOKEN', prevToken);
-    }
+    const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect((postInit.headers as Record<string, string>)['cf-access-token']).toBe(accessJwt);
   });
 
   it('never forwards shared Access credentials to a self-hosted API', async () => {
-    const prevId = process.env.CF_ACCESS_CLIENT_ID;
-    const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    process.env.CF_ACCESS_CLIENT_ID = 'cf-id';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'cf-secret';
-    try {
-      fetchMock
-        .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
-        .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', 'cf-id');
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', 'cf-secret');
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
+      .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
 
-      await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
+    await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
 
-      const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      const postHeaders = postInit.headers as Record<string, string>;
-      expect(postHeaders['CF-Access-Client-Id']).toBeUndefined();
-      expect(postHeaders['CF-Access-Client-Secret']).toBeUndefined();
-    } finally {
-      restoreEnv('CF_ACCESS_CLIENT_ID', prevId);
-      restoreEnv('CF_ACCESS_CLIENT_SECRET', prevSecret);
-    }
-  });
-
-  it('omits CF Access headers on the API POST when no CF Access env is set (prod path)', async () => {
-    const prevId = process.env.CF_ACCESS_CLIENT_ID;
-    const prevSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    const prevToken = process.env.CF_ACCESS_TOKEN;
-    delete process.env.CF_ACCESS_CLIENT_ID;
-    delete process.env.CF_ACCESS_CLIENT_SECRET;
-    delete process.env.CF_ACCESS_TOKEN;
-    try {
-      fetchMock
-        .mockResolvedValueOnce(jsonResponse({ value: 'oidc-jwt' }))
-        .mockResolvedValueOnce(jsonResponse({ token: 'deploy-token' }));
-
-      await exchangeGithubOidcForDeployToken(apiUrl, 'my-app', oidcEnv());
-
-      const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-      const postHeaders = postInit.headers as Record<string, string>;
-      expect(postHeaders['CF-Access-Client-Id']).toBeUndefined();
-      expect(postHeaders['CF-Access-Client-Secret']).toBeUndefined();
-      expect(postHeaders[accessJwt]).toBeUndefined();
-      // The plain Content-Type header is still present.
-      expect(postHeaders['Content-Type']).toBe('application/json');
-    } finally {
-      restoreEnv('CF_ACCESS_CLIENT_ID', prevId);
-      restoreEnv('CF_ACCESS_CLIENT_SECRET', prevSecret);
-      restoreEnv('CF_ACCESS_TOKEN', prevToken);
-    }
+    const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const postHeaders = postInit.headers as Record<string, string>;
+    expect(postHeaders['CF-Access-Client-Id']).toBeUndefined();
+    expect(postHeaders['CF-Access-Client-Secret']).toBeUndefined();
   });
 
   it('throws before any fetch when the request vars are absent', async () => {

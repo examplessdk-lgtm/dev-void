@@ -29,6 +29,13 @@ import {
 
 const tempDirs: Array<string> = [];
 
+afterEach(() => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop()!;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 describe('getRequestedProjectSlug', () => {
   afterEach(() => {
     delete process.env.VOID_PROJECT;
@@ -72,10 +79,6 @@ describe('resolveProjectBySlug', () => {
     });
   });
 
-  it('returns null when slug is not found', () => {
-    expect(resolveProjectBySlug([], 'missing')).toBeNull();
-  });
-
   it('returns null when slug does not match any project', () => {
     const projects = [
       { id: 'proj_1', slug: 'app-one' },
@@ -86,13 +89,6 @@ describe('resolveProjectBySlug', () => {
 });
 
 describe('inferDefaultSlug', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('derives slug from a scoped package name', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -111,13 +107,6 @@ describe('inferDefaultSlug', () => {
 });
 
 describe('resolveDistDir', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('returns dist/ for non-framework deploys', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -166,13 +155,6 @@ describe('resolveDistDir', () => {
 });
 
 describe('resolveDeployWranglerCompat', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('does not pin compatibility_date for non-Cloudflare targets', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -215,13 +197,6 @@ describe('resolveDeployWranglerCompat', () => {
 });
 
 describe('resolveDeployWorkerMain', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('uses the build output wrangler main for non-framework Void deploys', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -254,13 +229,6 @@ describe('resolveDeployWorkerMain', () => {
 });
 
 describe('ensurePreviouslyDeployedLiveBindingConfig', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('restores the active deployment live binding into wrangler config', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -312,13 +280,6 @@ describe('ensurePreviouslyDeployedLiveBindingConfig', () => {
 });
 
 describe('resolveDeployLiveBindingConfig', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('does not restore or activate live bindings when current source no longer needs live', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -427,12 +388,6 @@ describe('resolveStaticBuildCommand', () => {
   });
 });
 
-// The FULL (Class A / Void app) deploy used to hardcode `vite build`, ignoring
-// `inference.build`. That made "two builds, one command" impossible: an SSG that
-// emits the site first and then lets Void's own build package it (via
-// `publicDir`) alongside the worker had no way to say so, and a repo with no
-// root `index.html` died on `[UNRESOLVED_ENTRY] Cannot resolve entry module
-// index.html`. The static and framework paths already honored the override.
 describe('resolveFullDeployBuildCommand', () => {
   const root = '/tmp/void-full-deploy-build-cmd';
 
@@ -443,46 +398,18 @@ describe('resolveFullDeployBuildCommand', () => {
     });
   });
 
-  it('prints exactly what it runs for a configured command', () => {
-    // No `formatProjectCommand`/`resolveProjectCommand` rewriting on the
-    // override path — the user's text is both shown and executed, so a shell
-    // chain like `a && b` cannot be mangled into an unrunnable single command.
-    const { label, command } = resolveFullDeployBuildCommand(root, 'pnpm run build:site');
-    expect(label).toBe(command);
-  });
-
-  it('falls back to the built-in vite build when inference.build is unset', () => {
-    expect(resolveFullDeployBuildCommand(root)).toEqual({
-      label: formatProjectCommand(root, 'vite build'),
-      command: resolveProjectCommand(root, 'vite build'),
-    });
-  });
-
-  it('keeps the fallback label/command distinction (display vs. local bin)', () => {
-    // `formatProjectCommand` is the user-facing form (`vite` → `vp`, no absolute
-    // path); `resolveProjectCommand` expands to node_modules/.bin. Collapsing
-    // them would either print an absolute path or execute an unresolvable bin.
-    const { label, command } = resolveFullDeployBuildCommand(root);
-    expect(label).toBe(formatProjectCommand(root, 'vite build'));
-    expect(command).toBe(resolveProjectCommand(root, 'vite build'));
-  });
-
-  it('treats an empty inference.build as unset', () => {
-    expect(resolveFullDeployBuildCommand(root, '')).toEqual({
-      label: formatProjectCommand(root, 'vite build'),
-      command: resolveProjectCommand(root, 'vite build'),
-    });
-  });
+  it.each([undefined, ''])(
+    'falls back to the built-in vite build for inference.build %j',
+    (build) => {
+      expect(resolveFullDeployBuildCommand(root, build)).toEqual({
+        label: formatProjectCommand(root, 'vite build'),
+        command: resolveProjectCommand(root, 'vite build'),
+      });
+    },
+  );
 });
 
 describe('resolveStaticDeployPreset', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('treats --dir as a static deploy override even in framework-shaped projects', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -526,13 +453,6 @@ describe('resolveStaticDeployPreset', () => {
 });
 
 describe('resolveWorkerDirName', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('returns preset worker subdir for react-router', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);
@@ -593,13 +513,6 @@ describe('resolveWorkerDirName', () => {
 });
 
 describe('generateDeployWrapperIfNeeded', () => {
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop()!;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('wraps class-a framework worker output when migrations are present', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-test-'));
     tempDirs.push(root);

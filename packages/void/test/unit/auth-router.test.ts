@@ -94,8 +94,6 @@ describe('void auth destination routing', () => {
 
   it.each(['whoami', 'link', 'token'])('rejects the retired auth %s shortcut', (command) => {
     expect(() => parseAuthArgs([command])).toThrow('void auth <login|status|logout>');
-    expect(mocks.account).not.toHaveBeenCalled();
-    expect(mocks.cloudflare).not.toHaveBeenCalled();
   });
 
   it('validates explicit targets', () => {

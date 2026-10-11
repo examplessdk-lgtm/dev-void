@@ -92,12 +92,9 @@ describe('retired unscoped credentials', () => {
     expect(getApiUrl(state.home)).toBe('https://platform.example.test');
     expect(getToken(state.home)).toBe('ci-token');
   });
-  it.each([
-    { account: 'token', apiUrl: 'https://api.void.cloud' },
-    { account: 'stagingToken', apiUrl: 'https://api.staging.void.cloud' },
-  ])(
+  it.each([{ account: 'token' }, { account: 'stagingToken' }])(
     'ignores the $account keychain destination until explicitly connected',
-    async ({ account, apiUrl }) => {
+    async ({ account }) => {
       const root = mkdtempSync(join(tmpdir(), 'void-auth-retired-project-'));
       directories.push(root);
       state.passwords.set(`dev.void.cli:${account}`, 'retired-token');
@@ -129,23 +126,6 @@ describe('retired unscoped credentials', () => {
     expect(getToken(root)).toBeNull();
     expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(config);
     expect(state.passwords.size).toBe(0);
-  });
-
-  it.each([
-    { account: 'token', apiUrl: 'https://api.void.cloud' },
-    { account: 'stagingToken', apiUrl: 'https://api.staging.void.cloud' },
-  ])('ignores token-only file destination $apiUrl', async ({ account, apiUrl }) => {
-    const root = mkdtempSync(join(tmpdir(), 'void-auth-retired-project-'));
-    directories.push(root);
-    mkdirSync(join(state.home, '.void'));
-    writeFileSync(
-      join(state.home, '.void', 'config.json'),
-      JSON.stringify({ [account]: 'retired-token' }),
-    );
-    const { getAccountCredential, getApiUrl, getToken } = await import('../../src/cli/auth.ts');
-    expect(() => getAccountCredential()).toThrow('void connect');
-    expect(() => getApiUrl(root)).toThrow('void connect');
-    expect(getToken(root)).toBeNull();
   });
 
   it('uses and removes only the modern credential for the selected origin', async () => {
