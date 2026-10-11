@@ -8,6 +8,7 @@ import {
   statSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { readConfigEntryString as readD1EntryString } from '@void/deploy-cloudflare';
 import { dirname, join, resolve } from 'pathslash';
 import { analyzeApplicationSync, type ApplicationAnalysis } from '../application-analysis.ts';
@@ -20,7 +21,6 @@ import {
 } from '../sandbox/config.ts';
 import { type BindingIdentitySnapshot } from './deploy-types.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet, ProvisionDriftEntry } from './provision.ts';
 import {
   readExistingLiveBindingConfig,
@@ -63,25 +63,15 @@ export function desiredIdentityBindings(
   return out;
 }
 
-/**
- * The snapshot/lookup key for one binding identity. `field` is one of a fixed set of wrangler
- * config sections (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`) and `binding`
- * is a wrangler binding name (an identifier — no `:`), so the joined key is collision-free.
- */
+/** Snapshot key for one binding. Binding names contain no `:`, so keys never collide. */
 export function bindingIdentityKey(field: string, binding: string): string {
   return `${field}:${binding}`;
 }
 
 /**
- * Enumerate EVERY id-bearing binding DECLARED in `config` across the four id-bearing sections
- * (`d1_databases` / `kv_namespaces` / `r2_buckets` / `hyperdrive`), as `{ field, binding, id }`.
- * `id` is `undefined` when the entry omits it or leaves it empty (never pinned, never asserted —
- * the same "absent or empty → undefined" collapse as {@link readStoredResourceName}). Reads each
- * entry on its OWN terms (never a first-match re-scan) so a duplicated / appended entry is seen as
- * itself. Section + id-field names come from {@link DEPLOY_BINDING_IDENTITY_FIELDS} — no per-kind
- * branching. Unlike {@link desiredIdentityBindings} this is NOT restricted to the desired set: it
- * captures a user's hand-declared extra binding too, which is exactly what lets the completeness
- * check tell a pre-existing binding apart from one the build injected.
+ * Every id-bearing binding declared in `config`, not only the desired ones, so the completeness
+ * check can tell a user's own binding from one the build added. A missing or empty id is
+ * `undefined`.
  */
 export function collectConfigBindingIdentities(
   config: Record<string, unknown>,
@@ -104,21 +94,9 @@ export function collectConfigBindingIdentities(
 }
 
 /**
- * Snapshot the real, id-bearing identity of EVERY binding declared in the root `config` into an
- * in-memory map — the id defense's ground truth, mirroring the pinned in-memory `accountId`.
- *
- * Taken AFTER provision (which writes each real id into the root config via
- * `wrangler <res> create --update-config`) and the `name`/`account_id` reconcile, and BEFORE
- * the build. `vite build` runs untrusted project code with its Cloudflare credentials scrubbed,
- * so a compromised build dependency can only edit FILES — it could rewrite
- * `wrangler.jsonc`'s `d1_databases[<binding>].database_id` (keeping the binding + database_name)
- * to redirect the privileged remote D1 migrate or the deploy to a DIFFERENT same-account
- * resource, OR ADD a wholly new id-bearing binding (`EXTRA_DB`/`EXTRA_KV`/…) that the CF plugin
- * would then merge verbatim into `dist/ssr/wrangler.json`. Snapshotting EVERY declared id here —
- * not only the desired ones — and asserting the post-build config + emitted artifact carry
- * exactly this set closes both gaps for D1/KV/R2/Hyperdrive alike. A binding whose id is absent
- * post-drift (which the drift check already rejects for desired bindings) is simply not pinned —
- * never asserted.
+ * Pin every declared D1/KV/R2/Hyperdrive id after provisioning and before the build. The build
+ * runs project code that can edit config files, so the post-build checks compare against this
+ * in-memory copy to catch a rewritten or added id. Bindings without an id are not pinned.
  */
 export function snapshotBindingIdentities(
   config: Record<string, unknown>,
@@ -133,27 +111,22 @@ export function snapshotBindingIdentities(
 }
 
 /**
- * Resource fields Void's OWN build legitimately emits into `dist/ssr/wrangler.json` — either
- * merged by `mergeBindings` (index.ts) or default-filled by the wrangler normalizer — so an entry
- * the artifact declares in one of THESE is NOT an injection and must not be asserted against the
- * pre-build root. Audited against `mergeBindings` (index.ts) + 13 real playground
- * `dist/ssr/wrangler.json` artifacts: the only {@link FRIENDLY_BINDING_NAMES} fields ever emitted
- * non-empty are these. The four id-bearing fields are excluded here because the id-pin
- * ({@link DEPLOY_BINDING_IDENTITY_FIELDS}) already pins them precisely.
+ * Binding fields that Void's own build emits (through `mergeWorkerBindings` in
+ * plugin-worker-bindings.ts or the config normalizer), so they are not checked against the
+ * pre-build root.
  */
 export const DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS: ReadonlySet<string> = new Set<string>([
-  // id-pinned elsewhere (DEPLOY_BINDING_IDENTITY_FIELDS)
+  // id-pinned by DEPLOY_BINDING_IDENTITY_FIELDS
   'd1_databases',
   'kv_namespaces',
   'r2_buckets',
   'hyperdrive',
-  // Void-emitted / merged by mergeBindings
+  // emitted by Void
   'ai',
   'durable_objects',
   'assets',
   'vars',
-  // bundled content / worker self-metadata — no external-resource grant, and worker code is
-  // already fully controlled by a malicious build, so pinning these adds nothing
+  // bundled content and self-metadata grant no external resource
   'data_blobs',
   'text_blobs',
   'wasm_modules',
@@ -161,49 +134,22 @@ export const DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS: ReadonlySet<string> = new Set<st
 ]);
 
 /**
- * The pass-through assert-set: every binding field wrangler knows about
- * ({@link FRIENDLY_BINDING_NAMES}, Void's authoritative transcription of wrangler's binding
- * registry) that Void does NOT itself emit. An entry the EMITTED artifact declares in one of
- * these is either a verbatim pass-through of the user's OWN root config (captured in the pre-build
- * snapshot) or a build-time INJECTION — the latter would grant the deployed worker a same-account
- * capability the source never asked for (a `services` binding to another worker, a
- * `secrets_store_secrets` handle, a `dispatch_namespaces` entry, an `unsafe` binding of an
- * arbitrary type, …), which the CF plugin passes through into the emitted config and the
- * credentialed `wrangler deploy` then binds.
- *
- * Complete-by-construction against the known registry: it auto-covers every capability field
- * (browser/images/stream/media/websearch/unsafe included) and any FUTURE field added to the
- * registry fails CLOSED — a new registry field is asserted until explicitly excluded here. Fields
- * wrangler does not yet know about are absent from the registry and still fail OPEN — the same
- * residual the id-pin has, so a future resource field can never false-positive a legitimate build.
+ * Every known binding field ({@link FRIENDLY_BINDING_NAMES}) that Void does not emit. An emitted
+ * entry in one of these must come verbatim from the root config; any other entry (a `services`
+ * binding, an `unsafe` binding, ...) was added by the build. New registry fields are checked
+ * until they are excluded above.
  */
 export const DEPLOY_PASSTHROUGH_ASSERT_FIELDS: ReadonlyArray<string> = Object.keys(
   FRIENDLY_BINDING_NAMES,
 ).filter((field) => !DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS.has(field));
 
 /**
- * Fields the CF plugin passes through VERBATIM that the per-binding ENTRY pin cannot cover, so
- * each is compared WHOLE against the raw pre-build root value instead:
- *   - `unsafe` — is in {@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS} (so it stays in the drift
- *     invariant) but its `.metadata`/`.capnp` are never entry-iterated, and wrangler applies
- *     `unsafe.metadata` LAST at upload, OVERWRITING the whole uploaded bindings array — so an
- *     entry-level pin is blind to it. Routed OUT of the entry loop into the whole-object pin.
- *   - `tail_consumers` / `streaming_tail_consumers` — are NOT "bindings" (absent from
- *     {@link FRIENDLY_BINDING_NAMES}), so the assert-set structurally can't see them, yet wrangler
- *     uploads them and they forward every log/request to the named worker (exfil).
- *   - `routes` / `route` / `workers_dev` / `preview_urls` — the worker's TRAFFIC attachment. A
- *     build that injects a `routes`/`route` entry attaches the deployed worker to a production
- *     hostname/path the account controls (traffic interception), and flipping `workers_dev` /
- *     `preview_urls` changes its public exposure. None is a "binding" either, so the assert-set
- *     can't see them, yet wrangler uploads them.
- *   - `addresses` — the worker's INBOUND MAIL attachment (0078 Mode B). wrangler ≥ 4.113
- *     reconciles the account's Email Routing rules from this array on `wrangler deploy`: a build
- *     that injects an address redirects the account's inbound mail to the deployed worker, and one
- *     that drops the root's removes the rules Void's email step set up. Not a binding either, and
- *     the CF plugin passes the key through verbatim.
- * Void's own build emits NONE of them: a clean `vite build` (root declaring none) leaves every one
- * ABSENT from the emitted artifact (verified against a real build), so an emptiness check
- * ({@link isEmptyPassthroughValue}) keeps the normalizer's default-fill from false-positiving.
+ * Fields the CF plugin passes through verbatim that the per-entry pin cannot cover, so each is
+ * compared whole against the root value. Void's own build emits none of them.
+ *   - `unsafe`: its `metadata` replaces the whole uploaded bindings list.
+ *   - `tail_consumers` / `streaming_tail_consumers`: forward every log to another Worker.
+ *   - `routes` / `route` / `workers_dev` / `preview_urls`: attach the Worker to traffic.
+ *   - `addresses`: routes the account's inbound mail to the Worker.
  */
 export const DEPLOY_WHOLE_OBJECT_PINNED_FIELDS: ReadonlyArray<string> = [
   'unsafe',
@@ -217,12 +163,8 @@ export const DEPLOY_WHOLE_OBJECT_PINNED_FIELDS: ReadonlyArray<string> = [
 ];
 
 /**
- * Fields whose RAW pre-build root value {@link snapshotPassthroughRawFields} captures for
- * {@link verifyGeneratedDeployConfig}'s whole-object + targeted checks: the
- * {@link DEPLOY_WHOLE_OBJECT_PINNED_FIELDS} plus `durable_objects` (external-DO check), `ai`
- * (binding pin), and `migrations` (destructive-DO-migration check). The last three are Void-emitted
- * (excluded from the assert-set) yet still need a pin because a build can add an EXTERNAL DO handle
- * (`script_name`), a rewritten/removed `ai` binding, or a DESTRUCTIVE Durable Object migration.
+ * Root values captured for {@link verifyGeneratedDeployConfig}: the whole-object fields plus
+ * `durable_objects`, `ai` and `migrations`, which Void emits but a build could still tamper with.
  */
 const DEPLOY_RAW_SNAPSHOT_FIELDS: ReadonlyArray<string> = [
   ...DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
@@ -231,25 +173,13 @@ const DEPLOY_RAW_SNAPSHOT_FIELDS: ReadonlyArray<string> = [
   'migrations',
 ];
 
-/** Void's default injected Workers AI binding name (`mergeBindings` in index.ts). */
+/** Default Workers AI binding name that Void emits. */
 export const DEFAULT_VOID_AI_BINDING = 'AI';
 
-/**
- * Sub-fields on a `durable_objects` binding that make it target ANOTHER worker's Durable Objects.
- * `script_name` is the one wrangler binds a cross-script DO through; `environment` narrows a
- * cross-script binding to a named environment — either marks a binding Void's own build never
- * emits (its DOs are always LOCAL `{name, class_name}`).
- */
+/** `durable_objects` sub-fields that bind another Worker's Durable Objects. Void never emits them. */
 const DURABLE_OBJECT_EXTERNAL_FIELDS = ['script_name', 'environment'];
 
-/**
- * Keys on a wrangler `migrations` entry that DELETE or MOVE existing Durable Object classes (and
- * their stored data): `deleted_classes` drops them, `renamed_classes` renames them, and the two
- * `transferred_classes*` keys move them from another script. Void's own emitted migrations only
- * ever carry the CREATION keys (`new_classes` / `new_sqlite_classes`), never one of these — so an
- * emitted entry carrying one is a build injection that `wrangler deploy` would run against
- * production Durable Object data.
- */
+/** Migration keys that delete or move Durable Object classes. Void only emits creation keys. */
 const DESTRUCTIVE_MIGRATION_KEYS = [
   'deleted_classes',
   'renamed_classes',
@@ -258,17 +188,8 @@ const DESTRUCTIVE_MIGRATION_KEYS = [
 ];
 
 /**
- * A pin of every pass-through binding's ENTRY per {@link DEPLOY_PASSTHROUGH_ASSERT_FIELDS} field —
- * field → (bindingName → the root entry object) — captured from the root config at the SAME
- * pre-build point as {@link snapshotBindingIdentities} (after provision/drift resolves ids, before
- * the untrusted build). Lets a user's LEGITIMATELY hand-declared pass-through binding (e.g. a
- * `services` entry present before the build) survive, while an entry the build ADDED — absent from
- * this pin — OR one whose TARGET the build rewrote (same name, different service/namespace/type)
- * fails closed at {@link verifyGeneratedDeployConfig}. Entries come from each field's wrangler
- * shape via {@link bindingEntriesForField} (the SAME shapes the build's uniqueness check uses), so
- * `send_email` / `ratelimits` key on `.name` and `logfwdr` on its nested `.bindings[].name`. A
- * present field whose shape the strict reader cannot parse is recorded as an EMPTY inner map, so
- * any emitted entry in it fails closed on the symmetric read.
+ * Pin each pass-through binding entry (field → name → entry) before the build, so a user's own
+ * entry survives while an added or retargeted one fails {@link verifyGeneratedDeployConfig}.
  */
 export function snapshotPassthroughIdentities(
   config: Record<string, unknown>,
@@ -292,14 +213,7 @@ export function snapshotPassthroughIdentities(
   return snapshot;
 }
 
-/**
- * Companion of {@link snapshotPassthroughIdentities} for the fields the per-binding ENTRY pin
- * cannot cover: capture the RAW pre-build root value for each {@link DEPLOY_RAW_SNAPSHOT_FIELDS}
- * entry. Taken at the SAME pre-build point
- * as the other snapshots, so a build that INJECTS or REWRITES one of these into the emitted
- * artifact is caught at {@link verifyGeneratedDeployConfig}, while a user's own hand-declared value
- * (present here, unchanged) passes.
- */
+/** Raw pre-build root value of each {@link DEPLOY_RAW_SNAPSHOT_FIELDS} field. */
 export function snapshotPassthroughRawFields(
   config: Record<string, unknown>,
 ): Map<string, unknown> {
@@ -311,20 +225,9 @@ export function snapshotPassthroughRawFields(
 }
 
 /**
- * Reconstruct the exact `containers` set Void's build emits into `dist/ssr/wrangler.json`, computed
- * PRE-BUILD from the SAME inputs `mergeBindings` (index.ts) uses so a legitimate build's emitted
- * entry deepEquals one reconstructed here:
- *   1. every root-declared container passes through VERBATIM (mergeBindings spreads
- *      `resolved.containers` unchanged), and
- *   2. PLUS — only when the source needs the sandbox (`needsSandbox`, the SAME
- *      `isSandboxEnabled(config) || inferProjectBindings(...).needsSandbox` signal index.ts gates
- *      emission on) AND no root-declared container already declares the sandbox class — the single
- *      Void sandbox container, built field-for-field from {@link resolveSandboxConfig} (the SAME
- *      pure function the build calls, so the reconstructed entry is byte-identical to the emitted
- *      one, absent optionals omitted).
- * A bare `wrangler deploy` PROVISIONS a container application from this array (billable, and it runs
- * the image's code), so pinning it lets {@link verifyGeneratedDeployConfig} reject a container the
- * build injected, dropped, or retargeted.
+ * The `containers` array Void's build emits: root containers verbatim and, when the app needs
+ * Sandbox, Void's sandbox container in place of any root container with the same class (as
+ * `mergeWorkerBindings` does). Deploy rejects an emitted array that differs.
  */
 export function reconstructExpectedContainers(
   config: VoidConfig,
@@ -440,14 +343,9 @@ export function reconstructExpectedDurableObjectState(
 }
 
 /**
- * Deterministic sha256 over the wrangler uploader BUNDLE the credentialed deploy executes — the
- * resolved `wrangler-dist/cli.js` PLUS every sibling file in its directory. `cli.js` loads sibling
- * chunks from its own `__dirname` (the proxy workers, the experimental-config module), so the
- * whole directory is the trust surface, not just the entry file. Content hash of the bytes, NOT
- * mtime. Resolves the SAME entry {@link createDeployWranglerRunner} spawns (via
- * {@link resolveCloudflareOperationArgv}, whose launcher's LAST argv element is the JS entry). Returns
- * `undefined` when the entry cannot be resolved or a file cannot be read, so the caller FAILS
- * CLOSED — it never deploys a binary it could not verify. The resolver is injectable for tests.
+ * Content hash of the directory holding the Cloudflare operation-process entry that the
+ * credentialed deploy runs (the last element of {@link resolveCloudflareOperationArgv}). Returns
+ * `undefined` when it cannot be resolved or read, so the caller fails closed.
  */
 export function hashWranglerUploader(
   root: string,
@@ -495,9 +393,8 @@ export function hashCfUploader(): string | undefined {
 }
 
 /**
- * sha256 over every file under `dir`, walked in a STABLE (name-sorted, depth-first) order with
- * each file's relative path folded into the digest, so the hash depends only on the directory's
- * contents — never on filesystem enumeration order. Returns `undefined` on any read error.
+ * sha256 over every file under `dir` in name-sorted order, with relative paths folded in.
+ * Returns `undefined` on any read error.
  */
 function hashDirectoryContents(dir: string): string | undefined {
   try {
@@ -557,11 +454,8 @@ function hashDirectoryContents(dir: string): string | undefined {
 }
 
 /**
- * Assert the wrangler uploader bundle was NOT modified between the pre-build snapshot and now.
- * A legitimate `vite build` never touches `node_modules/wrangler`, so the hash is stable across
- * the build. A build that overwrote the uploader — to run attacker code WITH the Cloudflare token
- * at the post-build remote migrate / deploy — changes it, and an unresolvable/unreadable binary
- * (either snapshot `undefined`) is a binary that cannot be verified: both FAIL CLOSED.
+ * Fail when the uploader hash changed across the build or could not be computed: a build that
+ * rewrote the uploader would otherwise run with the Cloudflare credentials.
  */
 export function assertWranglerUploaderUnchanged(
   before: string | undefined,
@@ -583,12 +477,8 @@ export function assertWranglerUploaderUnchanged(
 }
 
 /**
- * True when a resource field's emitted value carries NO capability: `undefined`/`null`, an empty
- * array, an empty object, or a `{ bindings: [] }`. A clean `vite build` (root declaring none of
- * the whole-object-pinned fields) emits `unsafe` / `tail_consumers` / `streaming_tail_consumers`
- * ABSENT (verified against a real build); this also absorbs any normalizer default-fill
- * (`[]` / `{}` / `{ bindings: [] }`) so the whole-object pin never false-positives on an empty
- * shape while still catching a value that actually grants a capability.
+ * True when a field value grants nothing: absent, `null`, `[]`, `{}` or `{ bindings: [] }`. This
+ * covers the config normalizer's default fills.
  */
 export function isEmptyPassthroughValue(value: unknown): boolean {
   if (value === undefined || value === null) {
@@ -611,12 +501,8 @@ export function isEmptyPassthroughValue(value: unknown): boolean {
 }
 
 /**
- * Reject an emitted `durable_objects` binding that targets ANOTHER worker (carrying a
- * {@link DURABLE_OBJECT_EXTERNAL_FIELDS} sub-field) unless the pre-build root declared the SAME
- * binding byte-for-byte. Void's own build only ever emits LOCAL DO bindings (`{name, class_name}`;
- * index.ts), so an external DO in the artifact is a build injection — a handle to a same-account
- * worker's Durable Objects the source never asked for. Emitted LOCAL DOs (no cross-script field)
- * always pass. A malformed emitted `durable_objects` fails closed (Void never emits one).
+ * Reject an emitted `durable_objects` binding that targets another Worker unless the root declared
+ * the same entry. Local bindings always pass; a malformed value fails.
  */
 export function verifyNoInjectedExternalDurableObject(
   emitted: unknown,
@@ -645,7 +531,7 @@ export function verifyNoInjectedExternalDurableObject(
       continue;
     }
     const rootEntry = rootByName.get(name);
-    if (rootEntry === undefined || !deepEqual(entry, rootEntry)) {
+    if (rootEntry === undefined || !isDeepStrictEqual(entry, rootEntry)) {
       return {
         ok: false,
         reason: `generated config declares a durable_objects binding ${JSON.stringify(name)} bound to another worker's script that was not present before the build — refusing to deploy an external Durable Object the build injected.`,
@@ -656,22 +542,14 @@ export function verifyNoInjectedExternalDurableObject(
 }
 
 /**
- * Reject an emitted `migrations` entry that carries a {@link DESTRUCTIVE_MIGRATION_KEYS} key unless
- * the pre-build root declared the SAME entry byte-for-byte. Void's build only ever emits migrations
- * with CREATION keys (its own DOs), so a destructive entry in the artifact is a build injection —
- * `wrangler deploy` runs the emitted migrations and would DELETE or MOVE production Durable Object
- * data. Emitted entries with only creation keys are NEVER inspected (Void's own migrations pass
- * untouched), and a user's own root-declared destructive migration (e.g. a legit rename) is pinned
- * and passes. This is the destructive-injection guard only — deriving Void's complete desired
- * migration set (full array pinning) is out of scope.
+ * Reject an emitted migration with a {@link DESTRUCTIVE_MIGRATION_KEYS} key unless the root
+ * declared the same entry. Creation-only migrations always pass.
  */
 export function verifyNoInjectedDestructiveMigration(
   emitted: unknown,
   root: unknown,
 ): { ok: boolean; reason?: string } {
   if (!Array.isArray(emitted)) {
-    // Void emits `migrations` as an array; a non-array (or absent) value carries no destructive
-    // entry to check here, and full migration-array pinning is out of scope.
     return { ok: true };
   }
   const rootEntries = Array.isArray(root) ? root : [];
@@ -683,7 +561,7 @@ export function verifyNoInjectedDestructiveMigration(
     if (!DESTRUCTIVE_MIGRATION_KEYS.some((key) => record[key] !== undefined)) {
       continue;
     }
-    if (!rootEntries.some((rootEntry) => deepEqual(record, rootEntry))) {
+    if (!rootEntries.some((rootEntry) => isDeepStrictEqual(record, rootEntry))) {
       const tag = typeof record.tag === 'string' ? ` ${JSON.stringify(record.tag)}` : '';
       return {
         ok: false,
@@ -694,72 +572,15 @@ export function verifyNoInjectedDestructiveMigration(
   return { ok: true };
 }
 
-/**
- * Minimal JSON-safe structural equality: primitives by `===`, arrays element-wise, plain objects
- * key-for-key (order-insensitive). Used to compare a pinned pre-build pass-through binding entry's
- * values against the emitted artifact's, so a build that RETARGETS a binding (rewrites a
- * service/namespace/type the user wrote in root) is caught while a normalizer-added default
- * sub-field is ignored. No cyclic/`undefined`/class support needed — wrangler config is JSON.
- */
-export function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) {
-    return true;
-  }
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
-    return false;
-  }
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
-      return false;
-    }
-    return a.every((item, i) => deepEqual(item, b[i]));
-  }
-  const aObj = a as Record<string, unknown>;
-  const bObj = b as Record<string, unknown>;
-  const aKeys = Object.keys(aObj);
-  const bKeys = Object.keys(bObj);
-  if (aKeys.length !== bKeys.length) {
-    return false;
-  }
-  return aKeys.every(
-    (key) => Object.prototype.hasOwnProperty.call(bObj, key) && deepEqual(aObj[key], bObj[key]),
-  );
-}
-
-/**
- * Every queue NAME the emitted artifact binds — `queues.producers[].queue` +
- * `queues.consumers[].queue`. Non-throwing: a wrong-shaped `queues` field or an entry with no
- * readable `queue` string contributes no name (an unnamed queue binds nothing), so only real,
- * NAMED queue bindings are asserted against the desired set.
- */
+/** Queue names bound as producers, then consumers. */
 export function collectEmittedQueueNames(value: unknown): Array<string> {
-  const names: Array<string> = [];
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return names;
-  }
-  for (const group of ['producers', 'consumers'] as const) {
-    const list = (value as Record<string, unknown>)[group];
-    if (!Array.isArray(list)) {
-      continue;
-    }
-    for (const entry of list) {
-      const name = readD1EntryString(entry, 'queue');
-      if (name !== undefined) {
-        names.push(name);
-      }
-    }
-  }
-  return names;
+  return [
+    ...collectEmittedQueueGroupNames(value, 'producers'),
+    ...collectEmittedQueueGroupNames(value, 'consumers'),
+  ];
 }
 
-/**
- * The queue NAMES the emitted artifact binds in ONE group (`producers` or `consumers`), as a Set.
- * Read defensively — a wrong-shaped `queues` field, a missing group, or an entry with no readable
- * `queue` string contributes no name — so a missing/empty group yields an EMPTY set. Used to assert
- * every DESIRED queue survives in BOTH groups: `mergeBindings` (index.ts) emits each desired queue as
- * both a producer AND a consumer, so per-group presence is required — {@link collectEmittedQueueNames}
- * merges the two groups and cannot tell that a queue lost one of its two sides.
- */
+/** Queue names bound in one group. A malformed `queues` value yields none. */
 export function collectEmittedQueueGroupNames(
   value: unknown,
   group: 'producers' | 'consumers',
@@ -781,7 +602,7 @@ export function collectEmittedQueueGroupNames(
   return names;
 }
 
-/** The CF Vite plugin's deploy-config redirect that a bare `wrangler deploy` follows. */
+/** The CF Vite plugin's deploy-config redirect file. */
 export function deployPointerPath(root: string): string {
   return join(root, '.wrangler', 'deploy', 'config.json');
 }

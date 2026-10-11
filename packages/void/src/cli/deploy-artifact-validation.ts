@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { isDeepStrictEqual as deepEqual } from 'node:util';
 import {
   parseRootWranglerConfig,
   readConfigEntryString as readD1EntryString,
@@ -17,7 +18,6 @@ import {
   collectConfigBindingIdentities,
   DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
-  deepEqual,
   isEmptyPassthroughValue,
   verifyNoInjectedExternalDurableObject,
   DEFAULT_VOID_AI_BINDING,

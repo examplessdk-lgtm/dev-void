@@ -18,7 +18,6 @@ import { listDrizzleArtifacts } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { log, getErrorMessage } from './deploy-helpers.ts';
-import { Buffer } from './node-buffer.ts';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 
@@ -101,13 +100,11 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
   const result = spawnSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
     encoding: 'utf-8',
-    // drizzle-kit loads the user's drizzle config + schema (user code); keep the
-    // CF Access service token AND every wrangler-auth credential out of it, matching the
-    // build spawns. Generating migrations needs no Cloudflare credential.
+    // drizzle-kit runs project code, so it gets no credentials.
     env: buildEnv(),
   });
-  const stderr = bufferToString(result.stderr);
-  const stdout = bufferToString(result.stdout);
+  const stderr = (result.stderr ?? '').trim();
+  const stdout = (result.stdout ?? '').trim();
   const output = [stderr, stdout].filter(Boolean).join('\n').trim();
 
   if (result.error) {
@@ -147,45 +144,12 @@ export function getDeploySchemaDriftMessage(root: string): string {
 }
 
 function formatDeploySchemaDriftCheckError(error: unknown): string {
-  const detail = extractExecErrorOutput(error);
+  const detail = getErrorMessage(error);
   return [
     'Failed to check Drizzle schema drift during deploy.',
     'Run `void db generate` locally, fix any reported issues, review the generated migration, commit it yourself, then rerun `void deploy`.',
     ...(detail ? [detail] : []),
   ].join('\n\n');
-}
-
-function extractExecErrorOutput(error: unknown): string {
-  if (!error || typeof error !== 'object') {
-    return '';
-  }
-
-  const details = [];
-  const stderr = 'stderr' in error ? bufferToString(error.stderr) : '';
-  const stdout = 'stdout' in error ? bufferToString(error.stdout) : '';
-
-  if (stderr) {
-    details.push(stderr);
-  }
-  if (stdout) {
-    details.push(stdout);
-  }
-  const message = 'message' in error ? bufferToString(error.message) : '';
-  if (details.length === 0 && message) {
-    details.push(message);
-  }
-
-  return details.join('\n').trim();
-}
-
-function bufferToString(value: unknown): string {
-  if (typeof value === 'string') {
-    return value.trim();
-  }
-  if (value instanceof Buffer) {
-    return value.toString('utf-8').trim();
-  }
-  return '';
 }
 
 function createDeployDriftProject(root: string, driftProjectRoot: string): void {

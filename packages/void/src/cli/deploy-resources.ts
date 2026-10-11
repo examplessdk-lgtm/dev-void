@@ -17,7 +17,6 @@ import {
   type CloudflareAuthSecretFailureReason,
   type DeployWranglerRunResult,
 } from './deploy-types.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
 import type { DesiredResourceSet, ProvisionDriftEntry } from './provision.ts';
 
 /** Human labels for a drifted resource kind, used in guidance messages. */
@@ -53,12 +52,8 @@ const CLOUDFLARE_WORKERS_PAID_URL = 'https://dash.cloudflare.com/?to=/:account/w
 const CLOUDFLARE_CONTAINERS_PRICING_URL = 'https://developers.cloudflare.com/containers/pricing/';
 
 /**
- * Actionable, output-independent guidance for the Sandbox entitlement probe.
- *
- * A nonzero `wrangler containers list` is intentionally not classified more narrowly: the
- * Containers API uses the same failure surface when the account has no Workers Paid entitlement
- * and when an API token lacks Containers / Cloudchamber permission. Claiming either one as fact
- * would send some users down the wrong path, so the message gives both deterministic remedies.
+ * Guidance for a failed Containers check. Cloudflare reports a missing Workers Paid plan and a
+ * token without Containers permission the same way, so the message gives both remedies.
  */
 export function formatCloudflareSandboxUnavailable(options?: { preflight?: boolean }): string {
   return [
@@ -85,12 +80,8 @@ export function formatCloudflareSandboxUnavailable(options?: { preflight?: boole
 const MAX_WORKER_NAME_LENGTH = 63;
 
 /**
- * Sanitize a raw name into a valid Cloudflare Worker name — the SAME rule
- * `@cloudflare/vite-plugin`'s `toValidWorkerName` applies (lowercase, `_`→`-`,
- * any non `[a-z0-9-]`→`-`, strip leading/trailing dashes, ≤63 chars, empty →
- * `my-worker`). Deriving it identically means the name we pin in the config and
- * the name the build emits into `dist/ssr/wrangler.json` agree, so
- * `wrangler secret list -c <root>` and `wrangler deploy` target one worker.
+ * Same rule as `@cloudflare/vite-plugin`'s `toValidWorkerName`, so the name pinned in the
+ * config matches the name the build emits.
  */
 function toValidWorkerName(raw: string): string {
   const name = raw
@@ -104,22 +95,8 @@ function toValidWorkerName(raw: string): string {
 }
 
 /**
- * Derive a `<worker>-<suffix>` resource name, RESERVING the suffix's budget before
- * the length cap applies.
- *
- * `toValidWorkerName` truncates whatever string it is handed, so
- * `toValidWorkerName(`${workerName}-kv`)` cuts from the RIGHT — the end that carries
- * the suffix. A worker name at or above the cap therefore loses the suffix entirely
- * and every derivation collapses to the bare (truncated) worker name, so `KV` and
- * `ISR_CACHE` would ask for ONE namespace title. Since KV titles are not
- * account-unique and the provisioner matches remote namespaces BY TITLE (re-listing
- * per binding), the second binding would adopt the namespace the first just created:
- * two bindings sharing one namespace and one quota slot.
- *
- * The suffix is kept intact by trimming the BASE to `63 - suffix.length - 1` first.
- * When the suffix survives the plain derivation (every worker name short enough to
- * leave room — the normal case), the result is byte-identical to what it has always
- * been, so no existing app's resource name churns.
+ * `<worker>-<suffix>` within the length cap. A long worker name is trimmed instead of the
+ * suffix, so `KV` and `ISR_CACHE` never derive the same namespace title.
  */
 function suffixedResourceName(workerName: string, suffix: string): string {
   const full = toValidWorkerName(`${workerName}-${suffix}`);
@@ -133,13 +110,8 @@ function suffixedResourceName(workerName: string, suffix: string): string {
 }
 
 /**
- * Derive the worker name the way the CF plugin's `getWorkerNameFromProject` does
- * MINUS the `WRANGLER_CI_OVERRIDE_NAME` precedence: package.json `name` → directory
- * basename → `my-worker`. The override is deliberately NOT consulted — this backend
- * scrubs it from every child env and fences it in the project dotenv (see
- * {@link deployChildEnv} / {@link assertNoConfigOverrideInProjectDotenv}), so the
- * build emits (and the deploy uploads) the non-override name; deriving from the
- * override here would pin a name the scrubbed build never produces.
+ * Worker name as the CF plugin derives it (package.json `name`, then the directory name),
+ * ignoring `WRANGLER_CI_OVERRIDE_NAME`: deploy scrubs that override from the build.
  */
 export function deriveWorkerName(root: string): string {
   let pkgName: string | undefined;
@@ -155,23 +127,8 @@ export function deriveWorkerName(root: string): string {
 }
 
 /**
- * Fail closed when two KV bindings of this deploy would end up on ONE namespace.
- *
- * KV is the only resource kind where a name collision silently WORKS: titles are not
- * account-unique, the provisioner matches remote namespaces BY TITLE, and it re-lists
- * per binding — so a second binding desiring an already-created title adopts that
- * namespace and reports success. Both checks below are cheap and purely local:
- *
- *  1. DESIRED titles must be distinct — catches any future suffix collision at the
- *     source, before a single namespace is created.
- *  2. Already-RECORDED ids must be distinct — an app provisioned before the suffix
- *     budget was reserved can carry two bindings pointing at the same namespace id.
- *     Read-first is keyed by binding and both entries hold a real id, so the
- *     provisioner would skip both forever and never surface it.
- *
- * Scoped to KV (and to the bindings THIS deploy manages): D1/R2/Hyperdrive names live
- * in separate Cloudflare namespaces and are identity-checked against their stored
- * values elsewhere.
+ * Fail when two KV bindings would share one namespace. KV titles are not account-unique and
+ * the provisioner adopts a namespace by title, so check desired titles and recorded ids.
  */
 function assertDistinctKvNamespaces(
   kvNamespaces: Array<{ binding: string; title: string }>,
@@ -222,15 +179,9 @@ function assertDistinctKvNamespaces(
 }
 
 /**
- * Compute the DESIRED id/name-bearing Cloudflare resources from SOURCE
- * (pre-build, fail-fast) — the single set shared by the provision and drift
- * paths. Consumes the same application analysis as the plugin and managed
- * packaging; provider identities and stored resource names are resolved here.
- *
- * Resource NAMES prefer the value already stored in the root wrangler config
- * (so a re-provision reuses the same database/bucket and the provisioner's
- * stored-name identity check passes); otherwise they default off the worker
- * name. Returns a per-binding REASON map used to explain drift.
+ * Desired Cloudflare resources, computed from source before the build and shared by the
+ * provision and drift paths. Names prefer the value stored in the root config, so a
+ * re-provision reuses the same resource. `reasons` explains each binding in drift messages.
  */
 export async function computeDesiredCloudflareResources(
   root: string,
@@ -240,58 +191,27 @@ export async function computeDesiredCloudflareResources(
 ): Promise<{
   desired: DesiredResourceSet;
   reasons: Map<string, string>;
-  /** Whether Void-managed auth is enabled (drives the auth-migration gate). */
   authEnabled: boolean;
-  /** Resolved database dialect (sqlite → D1, postgresql → Hyperdrive). */
+  /** sqlite uses D1; postgresql and mysql use Hyperdrive. */
   dialect: DatabaseDialect;
-  /** Absolute migrations dir on disk (sourceDir-aware) — used by the migrate gates. */
+  /** Absolute migrations directory (sourceDir-aware). */
   migrationsDir: string;
-  /** Checked-in migrations (`db/migrations/*.sql`) collected pre-build. */
   migrations: Array<{ name: string; sql: string }>;
-  /**
-   * Whether the pre-build inference found Workers AI use in the source — the SAME `needsAI`
-   * signal `shouldBindWorkersAi` (index.ts) gates the emitted AI binding on. Threaded into
-   * {@link verifyGeneratedDeployConfig} to authorize that binding.
-   */
+  /** Source uses Workers AI, which authorizes the emitted AI binding. */
   needsAI: boolean;
   /** Workers AI binding emitted by the build (default `AI`). */
   aiBindingName: string;
-  /**
-   * Whether Void's build emits the sandbox container application — the SAME signal `mergeBindings`
-   * (index.ts) gates emission on: `isSandboxEnabled(config)` (a `sandbox` field in `void.config.ts`) OR
-   * the import walk detecting a `void/sandbox` import (`inferProjectBindings(...).needsSandbox`).
-   * Threaded into {@link verifyGeneratedDeployConfig} (via {@link reconstructExpectedContainers})
-   * to pin the emitted `containers` array.
-   */
+  /** `void.config.ts` enables Sandbox or the source imports `void/sandbox`. */
   needsSandbox: boolean;
   /** Whether the source imports void/live and the build may emit its Durable Object. */
   needsLive: boolean;
   analysis: ApplicationAnalysis;
-  /**
-   * The exact cron trigger schedules Void's build emits into `dist/ssr/wrangler.json`
-   * `triggers.crons`, reconstructed PRE-BUILD from the SAME `scanJobsSync(root, paths.cronsDir)`
-   * scan index.ts derives them from (`scanJobsSync(...).flatMap((job) => job.crons)`). Threaded
-   * into {@link verifyGeneratedDeployConfig} to pin the emitted schedules against a build that
-   * injected, dropped, or retargeted a Cron Trigger.
-   */
+  /** Cron schedules the build emits into `triggers.crons`. */
   expectedCrons: Array<string>;
-  /**
-   * Whether the app uses email at all — inbound `email/` handlers ({@link hasEmailHandlers}) OR
-   * an outbound `void/email` import (the import walk's `needsEmail`, the SAME signal index.ts
-   * gates the dev inbox on). Gates the Mode B email step (3b-ii, design doc 0078); the managed
-   * platform path never reads it.
-   */
+  /** Inbound `email/` handlers or an outbound `void/email` import. */
   needsEmail: boolean;
-  /**
-   * The `email/` handler scan the email step derives `addresses` from — the SAME
-   * `scanEmailHandlersSync(paths.sourceRoot)` index.ts compiles the worker's `email()` export
-   * from, so the routed addresses can never disagree with the dispatcher.
-   */
   emailHandlers: EmailHandlersScan;
 }> {
-  // The id predicates are resolved via the memoized dynamic import so this exported
-  // helper works when called directly in unit tests (outside the fork) without a
-  // static provision edge that would eagerly load the provision lifecycle.
   const { isRealD1Id, isRealKvId } = await loadProvisionModule();
   const analysis = application
     ? await completeApplicationAnalysis(application)
@@ -301,16 +221,7 @@ export async function computeDesiredCloudflareResources(
   const config = parseRootWranglerConfig(configPath);
   const workerName = readWranglerTopLevelString(config, 'name') ?? deriveWorkerName(root);
 
-  // Checked-in migrations count toward the database gate, matching the managed
-  // manifest (`buildVoidManifest`: `needsD1 || needsAuth || hasMigrations`). Without
-  // this a migration-only SQLite app would provision no D1 and silently skip remote
-  // migrations. Collected ONCE pre-build from `db/migrations/` (sourceDir-aware) and
-  // carried through so the migrate step can skip when there are none and run the
-  // deploy gates on the exact same files.
-  // Config-relative migrations dir wrangler will resolve from the config-file dir
-  // (the root). sourceDir moves the files to `<sourceDir>/db/migrations`, so the
-  // written `migrations_dir` must include it — a hardcoded `./db/migrations` would
-  // point wrangler at the wrong (or missing) folder for a sourceDir project.
+  // `migrations_dir` is relative to the root config, and sourceDir moves the folder.
   const migrationsDirRelative = paths.sourceDir
     ? `./${paths.sourceDir}/db/migrations`
     : './db/migrations';
@@ -318,11 +229,7 @@ export async function computeDesiredCloudflareResources(
   const desired: DesiredResourceSet = { kvNamespaces: [], queues: [] };
   const reasons = new Map<string, string>();
 
-  // Database — desired on source-use OR auth OR checked-in migrations (the SAME
-  // predicate the managed manifest applies), with the dialect selecting D1 (sqlite)
-  // vs Hyperdrive (PostgreSQL/MySQL). This keeps provision/drift equivalent to the build:
-  // a migration-only SQLite app still provisions D1, and an unused pg config does
-  // not needlessly require Hyperdrive.
+  // needsDatabase covers source use, auth and checked-in migrations, like the managed manifest.
   const databaseReason = analysis.reasons.database[0]!;
   if (needsDatabase && dialect === 'sqlite') {
     const binding = bindingNames?.d1 ?? 'DB';
@@ -341,8 +248,6 @@ export async function computeDesiredCloudflareResources(
             ? storedName
             : undefined) ||
           suffixedResourceName(workerName, 'db');
-    // Carry the sourceDir-aware config-relative migrations dir so the provisioner
-    // writes the correct `migrations_dir` (it otherwise hardcodes `./db/migrations`).
     desired.d1 = { binding, name, migrationsDir: migrationsDirRelative };
     reasons.set(binding, databaseReason);
   }
@@ -376,9 +281,7 @@ export async function computeDesiredCloudflareResources(
   // Queues (resource names — account-unique; the build binds them for native apps).
   desired.queues = analysis.queues.map((q) => q.name);
 
-  // Hyperdrive (PostgreSQL/MySQL apps) — same database gate as D1, dialect-selected. The
-  // connection string is only consumed on a fresh create; a re-provision reads-first
-  // from the config id and never needs it.
+  // The connection string is used only on create; later runs read the stored id.
   if (needsDatabase && dialect !== 'sqlite') {
     const binding = 'HYPERDRIVE';
     desired.hyperdrive = {
@@ -392,10 +295,7 @@ export async function computeDesiredCloudflareResources(
     );
   }
 
-  // ISR_CACHE (a KV namespace) — self-host-only, not in the import walk. Desired
-  // when the merged revalidate config (void.config.ts `routing.revalidate` + per-page
-  // `export const revalidate`) turns ISR on — the SAME gate the build's `emitIsr`
-  // uses (`plugin-routing.ts`).
+  // ISR_CACHE is not in the import walk; this matches the build's `emitIsr` gate.
   const pageScan = analysis.scan.pages;
   if (hasRevalidate(collectRevalidate(voidConfig, pageScan))) {
     const binding = 'ISR_CACHE';
@@ -403,19 +303,9 @@ export async function computeDesiredCloudflareResources(
     reasons.set(binding, 'routes use `revalidate` (ISR) — needs an ISR_CACHE KV namespace');
   }
 
-  // Every KV binding must own its namespace — both the titles this deploy would
-  // provision and the ids an earlier provision already recorded.
   assertDistinctKvNamespaces(desired.kvNamespaces, config, configPath, isRealKvId);
 
-  // Cron trigger schedules — the EXACT expression index.ts emits into `triggers.crons`
-  // (`scanJobsSync(root, paths.cronsDir).flatMap((job) => job.crons)`), from the SAME scan and the
-  // SAME `paths` the build's emission sees, so a legitimate build's emitted schedules multiset-equal
-  // this reconstruction.
   const expectedCrons = [...new Set(analysis.jobs.flatMap((job) => job.crons))];
-
-  // Email — the handler directory is scanned from the SAME sourceRoot index.ts compiles it from
-  // (`scanEmailHandlersSync(paths.sourceRoot)`); outbound-only use shows up as the import walk's
-  // `needsEmail` (a `void/email` import anywhere in the scan dirs).
   const emailHandlers = analysis.email;
 
   return {
@@ -431,10 +321,6 @@ export async function computeDesiredCloudflareResources(
     expectedCrons,
     needsEmail: bindings.needsEmail === true || hasEmailHandlers(emailHandlers),
     emailHandlers,
-    // Mirror index.ts's emission signal EXACTLY: the sandbox container is emitted when
-    // `void.config.ts` enables it OR the source imports `void/sandbox` (the import-walk signal). Using
-    // `isSandboxEnabled` alone would miss an import-only sandbox app (e.g. kitchen-sink) and the
-    // container pin would then FALSE-POSITIVE a legitimate build.
     needsSandbox: bindings.needsSandbox,
     needsLive: bindings.needsLive === true,
   };

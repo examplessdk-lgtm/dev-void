@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { isDeepStrictEqual as deepEqual } from 'node:util';
 import {
   parseRootWranglerConfig,
   readStoredResourceName,
@@ -21,7 +22,6 @@ import { readCloudflareLink, type CloudflareLink } from './cloudflare-link.ts';
 import { resolveCloudflareWorkersDevSubdomain } from './cloudflare-readiness.ts';
 import { resolveEnvSchemaFactsDefault } from './deploy-artifact-validation.ts';
 import {
-  deepEqual,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
@@ -711,7 +711,7 @@ export async function preflightCloudflareWorker(input: {
       const info = await Promise.resolve(
         runWrangler({ type: 'queues.info', name, configPath }, { capture: true }),
       );
-      if (provisionModule.isQueueConfirmedAbsent(info, name)) {
+      if (provisionModule.isQueueConfirmedAbsent(info)) {
         absentQueues.push(name);
       }
     }
