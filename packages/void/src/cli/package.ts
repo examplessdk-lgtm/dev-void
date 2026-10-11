@@ -168,22 +168,8 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
  * and (b) project-scoped storage (`assets/${projectId}/${blake3}`) means any
  * collision attack is exploitable only against the attacker's own project.
  */
-export function computeMd5(content: Buffer): string {
+function computeMd5(content: Buffer): string {
   return createHash('md5').update(content).digest('hex');
-}
-
-/**
- * Compute both BLAKE3 (CF-compatible asset hash) and MD5 (wire-level R2
- * upload-integrity checksum) in the v2 manifest entry shape.
- */
-export function computeAssetHashes(
-  content: Buffer,
-  filePath: string,
-): { blake3: string; md5: string } {
-  return {
-    blake3: computeAssetHash(content, filePath),
-    md5: computeMd5(content),
-  };
 }
 
 /**
@@ -278,10 +264,10 @@ export async function collectAndHashAssets(
       const relativePath = '/' + toSlash(relative(dir, filePath));
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
       const content = readFileSync(filePath);
-      const { blake3, md5 } = computeAssetHashes(content, filePath);
+      const blake3 = computeAssetHash(content, filePath);
       assetManifest[relativePath] = {
         blake3,
-        md5,
+        md5: computeMd5(content),
         size: content.length,
         // Deprecated v1 alias of `blake3` for consumers still reading `entry.hash`.
         hash: blake3,
