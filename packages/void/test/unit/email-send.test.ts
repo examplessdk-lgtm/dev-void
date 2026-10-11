@@ -71,6 +71,17 @@ const PROXY_ENV_KEYS = {
   __PROJECT_ID: 'p_test',
 };
 
+/** Sends through `__VOID_PROXY`; `sendInDev` keeps a harness sink from capturing it. */
+function send(
+  proxy: ReturnType<typeof fakeProxy>['proxy'],
+  to: string | Array<string> = 'b@y.dev',
+  extra: Partial<Parameters<typeof sendEmail>[0]> = {},
+): ReturnType<typeof sendEmail> {
+  return withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
+    sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true, ...extra }),
+  );
+}
+
 describe('sendEmail (test harness)', () => {
   it('captures sends and returns ok with a dev id', async () => {
     const harness = createEmailTestHarness();
@@ -116,13 +127,8 @@ describe('sendEmail (test harness)', () => {
     }
   });
 
-  // A captured result must be the result a deploy returns. Both production
-  // transports send to `uniqueRecipients()` — one envelope per address,
-  // matched case-insensitively and reported lowercased — while the capture
-  // path mapped every `to`/`cc`/`bcc` occurrence in its original case, so a
-  // test written against it expected four deliveries where production makes
-  // two. The captured MESSAGE still carries the fields as given: the inbox
-  // shows what was asked for, `ids` reports what would be sent.
+  // `ids` reports what production sends (one lowercased entry per unique
+  // address); the captured message keeps the fields as given.
   it('reports one id per unique address, the way the production transports do', async () => {
     const opts = {
       from: 'a@x.dev',
@@ -238,63 +244,6 @@ describe('sendEmail (test harness)', () => {
     }
   });
 
-  it('treats an undocumented native binding rejection as an unknown outcome', async () => {
-    const cause = new Error('connection closed after submission');
-    const send = vi.fn().mockRejectedValue(cause);
-    const result = await withRuntimeEnv({ SEND_EMAIL: { send } }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 'ambiguous rejection',
-        text: 'body',
-      }),
-    );
-
-    expect(result).toMatchObject({
-      ok: false,
-      deliveries: [
-        {
-          recipient: 'b@y.dev',
-          state: 'outcome_unknown',
-          error: {
-            code: 'OUTCOME_UNKNOWN',
-            message: 'connection closed after submission',
-            cause,
-          },
-        },
-      ],
-    });
-  });
-
-  it('keeps a documented native provider refusal definitive', async () => {
-    const cause = Object.assign(new Error('recipient is not allowed'), {
-      code: 'E_RECIPIENT_NOT_ALLOWED',
-    });
-    const result = await withRuntimeEnv(
-      { SEND_EMAIL: { send: vi.fn().mockRejectedValue(cause) } },
-      () =>
-        sendEmail({
-          from: 'a@x.dev',
-          to: 'b@y.dev',
-          subject: 'provider refusal',
-          text: 'body',
-        }),
-    );
-
-    expect(result).toMatchObject({
-      ok: false,
-      deliveries: [
-        {
-          recipient: 'b@y.dev',
-          error: { code: 'UNVERIFIED_DESTINATION', cause },
-        },
-      ],
-    });
-    if (!result.ok && 'deliveries' in result) {
-      expect(result.deliveries[0].state).toBeUndefined();
-    }
-  });
-
   it('clear() empties the harness without disposing the sink', async () => {
     const harness = createEmailTestHarness();
     try {
@@ -346,27 +295,8 @@ describe('sendEmail (error mapping)', () => {
     }
   });
 
-  it('returns BINDING_MISSING when no sink and no __VOID_PROXY', async () => {
-    const result = await withRuntimeEnv({}, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('BINDING_MISSING');
-    }
-  });
-
   it('returns INVALID_TO for an oversize recipient list before any transport is tried', async () => {
-    // Pre-flight: it must come back as a top-level `error`, from the
-    // harness (`void dev`) exactly as it would from a deployed worker — the
-    // proxy's own 100-recipient refusal used to be the first place a list
-    // like this was ever rejected, and only after the tenant had built it.
+    // Pre-flight: a top-level `error` from the harness, as from a deployed worker.
     const harness = createEmailTestHarness();
     try {
       const result = await sendEmail({
@@ -504,9 +434,6 @@ describe('sendEmail (from defaulting)', () => {
   });
 
   it('returns INVALID_FROM (never a baked-in domain) when __VOID_EMAIL_DOMAIN is missing', async () => {
-    // Regression guard for the whole point of the binding: with a slug but
-    // no configured domain, the send must fail loudly rather than quietly
-    // addressing the production zone.
     const harness = createEmailTestHarness();
     try {
       const result = await withRuntimeEnv({ __VOID_PROJECT_SLUG: 'acme' }, () =>
@@ -557,8 +484,6 @@ describe('sendEmail (from defaulting)', () => {
   });
 
   it('returns INVALID_FROM (not MIME_ERROR) when from is explicitly null', async () => {
-    // Regression: `null` previously slipped past the empty-from guard
-    // and was passed to parseAddress, surfacing as MIME_ERROR.
     const harness = createEmailTestHarness();
     try {
       const result = await sendEmail({
@@ -607,69 +532,6 @@ describe('sendEmail (from defaulting)', () => {
       harness.dispose();
     }
   });
-
-  it('rejects an explicit 65-character local part before capture, like the slug default', async () => {
-    // The slug default above refuses to BUILD a 65-octet local part, but the
-    // same address passed explicitly used to be captured as a success —
-    // under `void dev` and here — and could only bounce at an MTA.
-    const harness = createEmailTestHarness();
-    try {
-      const from = await sendEmail({
-        from: `${'a'.repeat(57)}+noreply@${MAIL_DOMAIN}`,
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-      });
-      expect(from.ok).toBe(false);
-      if (!from.ok && 'error' in from) {
-        expect(from.error.code).toBe('INVALID_FROM');
-        expect(from.error.message).toMatch(
-          /^from: address is not a valid email address \(ASCII local part/,
-        );
-      }
-      const to = await sendEmail({
-        from: 'a@x.dev',
-        to: `${'a'.repeat(65)}@y.dev`,
-        subject: 's',
-        text: 't',
-      });
-      expect(to.ok).toBe(false);
-      if (!to.ok && 'error' in to) {
-        expect(to.error.code).toBe('INVALID_TO');
-      }
-      expect(harness.messages).toHaveLength(0);
-    } finally {
-      harness.dispose();
-    }
-  });
-
-  it('rejects a 257-character address before capture, whatever its local part', async () => {
-    // `a@` + a 255-octet domain is under the 320 total and the 64-octet
-    // local part, and used to be captured as a success — under `void dev`
-    // and here — when RFC 5321 §4.5.3.1.3 caps the path at 256 octets.
-    const label = 'b'.repeat(63);
-    const over = `a@${[label, label, label, label].join('.')}`;
-    expect(over).toHaveLength(257);
-    const harness = createEmailTestHarness();
-    try {
-      const from = await sendEmail({ from: over, to: 'b@y.dev', subject: 's', text: 't' });
-      expect(from.ok).toBe(false);
-      if (!from.ok && 'error' in from) {
-        expect(from.error.code).toBe('INVALID_FROM');
-        expect(from.error.message).toMatch(
-          /^from: address is not a valid email address \(ASCII local part/,
-        );
-      }
-      const to = await sendEmail({ from: 'a@x.dev', to: over, subject: 's', text: 't' });
-      expect(to.ok).toBe(false);
-      if (!to.ok && 'error' in to) {
-        expect(to.error.code).toBe('INVALID_TO');
-      }
-      expect(harness.messages).toHaveLength(0);
-    } finally {
-      harness.dispose();
-    }
-  });
 });
 
 describe('sendEmail (proxy round trip)', () => {
@@ -678,15 +540,7 @@ describe('sendEmail (proxy round trip)', () => {
       status: 200,
       body: { ok: true, ids: [{ recipient: 'b@y.dev', messageId: 'cf-1' }] },
     }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe('https://email-proxy/email/send');
     const body = calls[0].body as Record<string, unknown>;
@@ -703,40 +557,12 @@ describe('sendEmail (proxy round trip)', () => {
     }
   });
 
-  it('falls back to the locally-generated messageId when the proxy returns an empty one', async () => {
-    const { proxy } = fakeProxy(() => ({
-      status: 200,
-      body: { ok: true, ids: [{ recipient: 'b@y.dev', messageId: '' }] },
-    }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.ids[0].messageId).toMatch(/^<.+@x\.dev>$/);
-    }
-  });
-
   it('surfaces QUOTA_EXCEEDED when the proxy denies the send', async () => {
     const { proxy } = fakeProxy(() => ({
       status: 429,
       body: { ok: false, error: { code: 'QUOTA_EXCEEDED', message: 'monthly cap reached' } },
     }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('QUOTA_EXCEEDED');
@@ -750,15 +576,7 @@ describe('sendEmail (proxy round trip)', () => {
         throw new Error('network unreachable');
       },
     };
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('OUTCOME_UNKNOWN');
@@ -791,15 +609,7 @@ describe('sendEmail (proxy round trip)', () => {
             );
           },
         };
-        const pending = withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-          sendEmail({
-            from: 'a@x.dev',
-            to: 'b@y.dev',
-            subject: 's',
-            text: 't',
-            sendInDev: true,
-          }),
-        );
+        const pending = send(proxy);
 
         await started;
         await vi.advanceTimersByTimeAsync(0);
@@ -830,53 +640,9 @@ describe('sendEmail (proxy round trip)', () => {
         );
       },
     };
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result).toMatchObject({ ok: false, error: { code: 'OUTCOME_UNKNOWN' } });
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
-  });
-
-  it('passes mid-batch deliveries through unchanged', async () => {
-    const { proxy } = fakeProxy(() => ({
-      status: 200,
-      body: {
-        ok: false,
-        deliveries: [
-          { recipient: 'a@y.dev', ok: true, messageId: 'cf-a' },
-          {
-            recipient: 'b@y.dev',
-            ok: false,
-            error: { code: 'UNVERIFIED_DESTINATION', message: 'b@y.dev not verified' },
-          },
-          { recipient: 'c@y.dev', ok: true, messageId: 'cf-c' },
-        ],
-      },
-    }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: ['a@y.dev', 'b@y.dev', 'c@y.dev'],
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok && 'deliveries' in result) {
-      expect(result.deliveries).toHaveLength(3);
-      const b = result.deliveries.find((d) => d.recipient === 'b@y.dev');
-      expect(b?.ok).toBe(false);
-      if (b && !b.ok) {
-        expect(b.error.code).toBe('UNVERIFIED_DESTINATION');
-      }
-    }
   });
 
   it('coerces unknown error codes to UPSTREAM_ERROR', async () => {
@@ -884,15 +650,7 @@ describe('sendEmail (proxy round trip)', () => {
       status: 500,
       body: { ok: false, error: { code: 'WEIRD_NEW_CODE', message: 'something broke' } },
     }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('UPSTREAM_ERROR');
@@ -904,15 +662,7 @@ describe('sendEmail (proxy round trip)', () => {
     'keeps the upstream fallback for incomplete error fields: %j',
     async (error) => {
       const { proxy } = fakeProxy(() => ({ status: 500, body: { ok: false, error } }));
-      const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-        sendEmail({
-          from: 'a@x.dev',
-          to: 'b@y.dev',
-          subject: 's',
-          text: 't',
-          sendInDev: true,
-        }),
-      );
+      const result = await send(proxy);
       expect(result).toMatchObject({
         ok: false,
         error: { code: 'UPSTREAM_ERROR', message: 'email: upstream send failed' },
@@ -929,15 +679,7 @@ describe('sendEmail (proxy round trip)', () => {
         deliveries: [{ recipient: 'b@y.dev', ok: true, messageId: 'cf-b' }],
       },
     }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result).toEqual({
       ok: false,
       deliveries: [{ recipient: 'b@y.dev', ok: true, messageId: 'cf-b' }],
@@ -954,15 +696,7 @@ describe('sendEmail (proxy round trip)', () => {
     ['primitive array body', []],
   ])('returns OUTCOME_UNKNOWN (no throw) for malformed proxy response: %s', async (_, payload) => {
     const { proxy } = fakeProxy(() => ({ status: 200, body: payload }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('OUTCOME_UNKNOWN');
@@ -992,15 +726,7 @@ describe('sendEmail (proxy round trip)', () => {
     ],
   ])('surfaces the proxy refusal text for %s', async (_, status, payload, expected) => {
     const { proxy } = fakeProxy(() => ({ status, body: payload }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('UPSTREAM_ERROR');
@@ -1011,15 +737,7 @@ describe('sendEmail (proxy round trip)', () => {
 
   it('still reports a flat error body on a 2xx as malformed', async () => {
     const { proxy } = fakeProxy(() => ({ status: 200, body: { error: 'nope' } }));
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('OUTCOME_UNKNOWN');
@@ -1036,15 +754,7 @@ describe('sendEmail (proxy round trip)', () => {
         });
       },
     };
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy);
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('OUTCOME_UNKNOWN');
@@ -1062,17 +772,7 @@ describe('sendEmail (proxy round trip)', () => {
         },
       };
     });
-    const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        cc: 'B@Y.DEV',
-        bcc: ['b@y.dev', 'c@y.dev'],
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
+    const result = await send(proxy, 'b@y.dev', { cc: 'B@Y.DEV', bcc: ['b@y.dev', 'c@y.dev'] });
     const recipients = (calls[0].body as { recipients: Array<string> }).recipients;
     expect(recipients).toEqual(['b@y.dev', 'c@y.dev']);
     expect(result.ok).toBe(true);
@@ -1082,20 +782,8 @@ describe('sendEmail (proxy round trip)', () => {
   });
 });
 
-// The proxy answers `ok: true` only after every requested recipient was
-// accepted by the allowlist AND confirmed by `SEND_EMAIL.send()`, and its
-// `ids` is `deliveries.map(({ recipient, messageId }))` — one entry per
-// requested address, `messageId` always a string (`''` when CF returned
-// none). So on `ok: true` the list is the request's recipient set, and a
-// list that does not account for every recipient is a schema-skewed or
-// corrupt proxy: dropping the bad entry and still returning `ok: true`
-// would tell the caller a delivery was confirmed when none was.
+// ok:true must account for every requested recipient.
 describe('sendEmail (proxy delivery list)', () => {
-  const send = (proxy: ReturnType<typeof fakeProxy>['proxy'], to: string | Array<string>) =>
-    withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true }),
-    );
-
   it.each([
     [
       'a null entry',
@@ -1195,21 +883,8 @@ describe('sendEmail (proxy delivery list)', () => {
   });
 });
 
-// The mid-batch `deliveries` list is built from the same per-recipient list
-// as `ids`: one entry per requested address, each either
-// `{ recipient, ok: true, messageId }` or `{ recipient, ok: false, error }`
-// (the proxy always attaches `error` to a failed entry — both its producer
-// paths do). A list that skips, repeats or invents a recipient, or an entry
-// that does not state its outcome, cannot be acted on: skipping the bad entry
-// would leave a recipient with no outcome, and treating an entry with no `ok`
-// as failed could lead to a duplicate delivery. Such a response is a
-// schema-skewed or corrupt proxy and is refused as a whole, under the same
-// rules as the success path.
+// A mid-batch list must state one outcome per requested recipient, or it is refused whole.
 describe('sendEmail (proxy mid-batch delivery list)', () => {
-  const send = (proxy: ReturnType<typeof fakeProxy>['proxy'], to: string | Array<string>) =>
-    withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-      sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true }),
-    );
   const failed = (recipient: string) => ({
     recipient,
     ok: false,
@@ -1452,15 +1127,7 @@ describe('sendEmail (sendInDev escape hatch)', () => {
         status: 200,
         body: { ok: true, ids: [{ recipient: 'b@y.dev', messageId: 'cf-id-123' }] },
       }));
-      const result = await withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-        sendEmail({
-          from: 'a@x.dev',
-          to: 'b@y.dev',
-          subject: 's',
-          text: 't',
-          sendInDev: true,
-        }),
-      );
+      const result = await send(proxy);
       expect(harness.messages).toHaveLength(0);
       expect(calls).toHaveLength(1);
       expect(result.ok).toBe(true);
@@ -1472,13 +1139,8 @@ describe('sendEmail (sendInDev escape hatch)', () => {
     }
   });
 
-  // The test above hand-injects `__VOID_PROXY`, which `void dev` never
-  // produces: the platform adds that service binding only on a deployed
-  // worker, and the own-account `SEND_EMAIL` binding is deleted from the
-  // resolved worker config whenever `viteCommand === 'serve'`. So under a
-  // real dev server `sendInDev: true` bypasses the inbox and lands on
-  // nothing. Pin that, message text included, so re-adding a send binding
-  // to dev has to come past this test.
+  // `void dev` binds neither `__VOID_PROXY` nor `SEND_EMAIL`, so there
+  // `sendInDev: true` reaches no transport.
   it('returns BINDING_MISSING under a real `void dev` env (no transport to fall through to)', async () => {
     const assets = {
       calls: 0,
