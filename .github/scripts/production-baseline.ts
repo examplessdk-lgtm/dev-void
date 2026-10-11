@@ -4,7 +4,7 @@ async function productionBaseline(options: {
   configuredSha?: string;
   repository: string;
   token?: string;
-  environment?: string;
+  environment: string;
 }): Promise<string> {
   if (options.configuredSha) {
     if (options.configuredSha.length !== 40 || !/^[0-9a-f]{40}$/i.test(options.configuredSha)) {
@@ -20,7 +20,7 @@ async function productionBaseline(options: {
     );
   }
   const signal = AbortSignal.timeout(60_000);
-  const environment = options.environment ?? 'Prod';
+  const { environment } = options;
   const get = async (path: string): Promise<unknown> => {
     const response = await fetch(`https://api.github.com/repos/${options.repository}/${path}`, {
       headers: {
