@@ -14,7 +14,12 @@ import { ensurePlatformProxyAccess } from './cli/cf-access.ts';
 import { ensureWranglerCompat } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { renderPrerenderPaths, type PrerenderResult } from './prerender-render.ts';
+import {
+  outputFileForPath,
+  readPrerenderPathsResponse,
+  renderPrerenderPaths,
+  type PrerenderResult,
+} from './prerender-render.ts';
 export type { PrerenderResult } from './prerender-render.ts';
 import { scopedAccessCredentials } from './shared/cf-access.ts';
 import { stripInternalEnvKeys } from './shared/env.ts';
@@ -37,23 +42,6 @@ export type PrerenderWorkerModule = {
 export type PrerenderRunResult = PrerenderResult & {
   paths: Array<string>;
 };
-
-function outputFileForPath(path: string): string {
-  return path === '/' ? 'index.html' : `${path.slice(1)}.html`;
-}
-
-async function readPrerenderPathsResponse(response: Response): Promise<Array<string>> {
-  if (!response.ok) {
-    throw new Error(`prerender: Failed to collect prerender paths. HTTP ${response.status}.`);
-  }
-
-  const payload = (await response.json()) as { paths?: unknown };
-  if (!Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === 'string')) {
-    throw new Error('prerender: Failed to collect prerender paths. Response payload is invalid.');
-  }
-
-  return payload.paths;
-}
 
 function normalizeWorkerModulePath(path: string): string {
   return path.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -420,7 +408,7 @@ async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig)
     `
 import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { renderPrerenderPaths } from ${JSON.stringify(nodeRendererUrl)};
+import { readPrerenderPathsResponse, renderPrerenderPaths } from ${JSON.stringify(nodeRendererUrl)};
 
 const config = JSON.parse(process.argv[2]);
 const { mode, ssrDir, clientDir } = config;
@@ -436,18 +424,12 @@ if (!fetch) {
 // The second argument is the Hono env. Its marker is what lets the built app
 // answer path discovery; HTTP servers never pass it.
 async function collectPaths() {
-  const response = await fetch(
-    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
-    { __VOID_PRERENDER: "1" },
+  return readPrerenderPathsResponse(
+    await fetch(
+      new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
+      { __VOID_PRERENDER: "1" },
+    ),
   );
-  if (!response.ok) {
-    throw new Error("prerender: Failed to collect prerender paths. HTTP " + response.status + ".");
-  }
-  const payload = await response.json();
-  if (!payload || !Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === "string")) {
-    throw new Error("prerender: Failed to collect prerender paths. Response payload is invalid.");
-  }
-  return payload.paths;
 }
 
 async function renderPaths(paths) {

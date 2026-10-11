@@ -84,9 +84,8 @@ export function mergeWorkerBindings(
     readonly liveConfig: ReturnType<typeof resolveLiveBindingConfig> | undefined;
     readonly root: string;
     readonly remoteMode: boolean;
-    versionMetadataBinding: string | undefined;
   },
-): Partial<WorkerConfig> {
+): { patch: Partial<WorkerConfig>; versionMetadataBinding: string | undefined } {
   const {
     websocketRoutes,
     routeEnvironment,
@@ -193,20 +192,15 @@ export function mergeWorkerBindings(
     result.r2_buckets = [{ binding: r2Name, bucket_name: 'default' }];
   }
 
-  // Workers AI — direct builds use the production binding. A saved direct
-  // Cloudflare destination uses the owner's remote Workers AI binding during
-  // dev because Workers AI has no local simulator. Managed and unsaved dev
-  // projects continue through the Void HTTPS proxy below.
-  // An explicit root binding keeps its name and staging choice; direct dev
-  // only adds `remote: true`. Builds never override the user's root binding.
+  // Workers AI has no local simulator, so direct Cloudflare dev uses the remote
+  // binding; an authored root binding only gains `remote: true`. Managed and
+  // unsaved dev projects use the Void proxy below.
   const resolvedAi = (resolved as { ai?: unknown }).ai;
-  const resultAi = result.ai;
   const aiBindingName = resolveWorkersAiBindingName(resolvedAi, bindingNames?.ai);
   if (
     viteCommand === 'serve' &&
     bindings.needsAI &&
     directCloudflareDestination &&
-    !resultAi &&
     typeof resolvedAi === 'object' &&
     resolvedAi !== null &&
     'binding' in resolvedAi &&
@@ -218,7 +212,7 @@ export function mergeWorkerBindings(
       viteCommand,
       bindings.needsAI,
       resolvedAi,
-      resultAi,
+      result.ai,
       directCloudflareDestination,
     )
   ) {
@@ -241,15 +235,9 @@ export function mergeWorkerBindings(
     result.vars = vars;
   }
 
-  // Email — this patch never adds a send binding. On a Void platform,
-  // outbound mail routes through __VOID_PROXY/email/send (the proxy worker
-  // holds the platform-level send_email binding); native Cloudflare deploys
-  // use the root `SEND_EMAIL` binding handled below.
-  //
-  // Dev only: name the assets binding so `sendEmail` can loop back into the
-  // Vite dev server and reach the `/__void/inbox` buffer, which lives in the
-  // Node process rather than in this worker's isolate — and hand it the
-  // dev-trigger token the inbox middleware requires on every route.
+  // This patch never adds a send binding. In dev, the inbox buffer lives in the
+  // Vite process, so `sendEmail` loops back through the assets binding and
+  // sends the dev-trigger token the inbox requires.
   const emailDevInboxBinding =
     (workerConfig.assets as { binding?: string } | undefined)?.binding ??
     (resolved.assets as { binding?: string } | undefined)?.binding;
@@ -260,26 +248,9 @@ export function mergeWorkerBindings(
     result.vars = vars;
   }
 
-  // Serve never carries Void's own `send_email` binding, so the dev inbox
-  // stays the only sink. `void deploy --platform cloudflare` writes
-  // `send_email: [{ name: "SEND_EMAIL" }]` into the root wrangler.jsonc, and
-  // `sendEmail` falls through to `env.SEND_EMAIL` whenever the inbox is not
-  // armed (`sendInDev: true`, or no assets binding to reach the dev server
-  // through) — under miniflare that binding writes .eml files to disk, or
-  // with `remote: true` sends real mail. Only the entry under the reserved
-  // `SEND_EMAIL` name is removed: a user's own `send_email` binding under
-  // another name is theirs — nothing in Void reads it, and the root config
-  // takes precedence — so it reaches miniflare exactly as declared. Gated on
-  // `needsEmail`, the same signal that arms the inbox: without `void/email`
-  // in the app there is no `sendEmail` to guard, and a `SEND_EMAIL` entry is
-  // then either a stale leftover nothing reads or the user's own choice of
-  // name; `void deploy` warns about the former and deploys as-is, and dev
-  // must not be stricter about the root config than deploy is. Mutate
-  // `resolved`, as the assets policy above does: the return value is
-  // defu-merged over it (arrays concatenate, `undefined` is skipped), so
-  // this is the only way to remove an entry. An emptied array drops the key
-  // — the Cloudflare plugin treats `[]` and absent alike. Build passes the
-  // root entries through untouched.
+  // Serve with `void/email`: drop only the reserved SEND_EMAIL entry so the dev
+  // inbox stays the only sink; other send_email bindings are the user's. The
+  // patch is defu-merged over `resolved`, so mutating it is the only removal.
   if (viteCommand === 'serve' && bindings.needsEmail) {
     const sendEmail = (resolved as { send_email?: unknown }).send_email;
     if (Array.isArray(sendEmail)) {
@@ -294,15 +265,8 @@ export function mergeWorkerBindings(
     }
   }
 
-  // Default sender for `sendEmail()` from void.config.ts `email.from`. Serve-only,
-  // the same gate as `__VOID_TOKEN` — not because it is a credential, but
-  // because on a build the root wrangler.jsonc already owns the var:
-  // `void deploy --platform cloudflare` writes the same `__VOID_EMAIL_FROM`
-  // there once the domain's routing or sending is ready, and that entry
-  // reaches `dist/ssr/wrangler.json` through `resolved.vars`. Injecting it on
-  // build too would advertise a sender on an account nothing was set up on.
-  // The managed deploy ignores the generated wrangler config and injects its
-  // own sender.
+  // Serve only: on build the root wrangler config owns __VOID_EMAIL_FROM, which
+  // `void deploy --platform cloudflare` writes once the domain is ready.
   if (viteCommand === 'serve' && config.email?.from) {
     const vars = (result.vars as Record<string, string>) ?? {};
     vars.__VOID_EMAIL_FROM = config.email.from;
@@ -523,22 +487,22 @@ export function mergeWorkerBindings(
     }
   }
 
-  input.versionMetadataBinding = selectNativeVersionMetadataBinding(
+  const versionMetadataBinding = selectNativeVersionMetadataBinding(
     resolved as Record<string, unknown>,
     {
       nativeBuild: viteCommand === 'build' && process.env[CLOUDFLARE_DEPLOY_BUILD_ENV] === '1',
       preserveBindings: process.env[CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV] === '1',
     },
   );
-  if (input.versionMetadataBinding) {
-    const owner = findBindingNameOwner(result, 'version_metadata', input.versionMetadataBinding);
+  if (versionMetadataBinding) {
+    const owner = findBindingNameOwner(result, 'version_metadata', versionMetadataBinding);
     if (owner) {
       throw new Error(
-        `Cloudflare version metadata binding ${input.versionMetadataBinding} conflicts with ${owner}.`,
+        `Cloudflare version metadata binding ${versionMetadataBinding} conflicts with ${owner}.`,
       );
     }
     if (!resolved.version_metadata) {
-      result.version_metadata = { binding: input.versionMetadataBinding };
+      result.version_metadata = { binding: versionMetadataBinding };
     }
   }
   finalizeDurableObjectPatch(resolved as Record<string, unknown>, result, [
@@ -557,5 +521,5 @@ export function mergeWorkerBindings(
       ? [{ name: liveConfig.bindingName, class_name: liveConfig.className }]
       : []),
   ]);
-  return result as Partial<WorkerConfig>;
+  return { patch: result as Partial<WorkerConfig>, versionMetadataBinding };
 }

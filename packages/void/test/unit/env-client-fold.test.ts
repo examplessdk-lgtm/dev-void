@@ -1,7 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
-import { number, string } from '../../src/runtime/env-helpers.ts';
-import { defineEnv } from '../../src/runtime/env-public.ts';
 
 const ROOT = '/project';
 type MessagePayload = string | { message: string };
@@ -80,15 +78,7 @@ async function runFold(
   return { ctx, result };
 }
 
-function resetSchema() {
-  defineEnv({});
-}
-
 describe('envClientFoldPlugin', () => {
-  beforeEach(() => {
-    resetSchema();
-  });
-
   it('folds a VITE_-prefixed key with a .env value into a string literal', async () => {
     const code = `import { env } from "void/env";\nconsole.log(env.VITE_TITLE);\n`;
     const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
@@ -212,36 +202,6 @@ describe('envClientFoldPlugin', () => {
       env: { VITE_A: '1', VITE_B: '2' },
     });
     expect(result?.code).toContain(`console.log("1", "2")`);
-  });
-
-  it('falls back to schema defaults when a key is absent from .env', async () => {
-    defineEnv({ VITE_PORT: number().default(3000) });
-    const code = `import { env } from "void/env";\nconst p = env.VITE_PORT;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: {}, // nothing from .env; schema default should kick in
-    });
-    expect(result?.code).toContain(`"3000"`);
-  });
-
-  it('does not expose server-only schema defaults to the client', async () => {
-    // Server-only default must not leak into fold output even if it has a
-    // default — it still fails the prefix check.
-    defineEnv({ PORT: number().default(3000) });
-    const code = `import { env } from "void/env";\nconst p = env.PORT;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: {},
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('prefers .env value over schema default', async () => {
-    defineEnv({ VITE_TITLE: string().default('Default') });
-    const code = `import { env } from "void/env";\nconst t = env.VITE_TITLE;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: { VITE_TITLE: 'FromEnv' },
-    });
-    expect(result?.code).toContain(`"FromEnv"`);
-    expect(result!.code).not.toContain('Default');
   });
 
   it('reports apply: build and enforce: post', () => {

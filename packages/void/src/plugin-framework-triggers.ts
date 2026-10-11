@@ -72,9 +72,7 @@ export function frameworkTriggersPlugin(root: string, options: FrameworkTriggers
       // generated `__jobs`/`__queues` table at codegen time) are picked up
       // without a full restart.
       //
-      // chokidar emits POSIX-style paths on every platform, so normalize the
-      // root prefixes to match — otherwise this comparison silently no-ops
-      // on Windows where `join(root, 'crons')` uses backslashes.
+      // Watcher paths are native (backslashes on Windows); normalize before comparing.
       const paths = readProjectPaths(root);
       const cronsPrefix = normalizePath(paths.cronsDir);
       const queuesPrefix = normalizePath(paths.queuesDir);
@@ -87,13 +85,8 @@ export function frameworkTriggersPlugin(root: string, options: FrameworkTriggers
           return;
         }
         writeDispatch();
-        // The dispatch file lives under `.void/`, which `envPlugin.config`
-        // adds to `server.watch.ignored` (to stop miniflare's SQLite writes
-        // from triggering infinite HMR). Without explicit invalidation the
-        // worker environment would keep returning the cached dispatch
-        // module on the next dynamic import, so a renamed/added cron would
-        // never route until the dev server restarts. Walk every Vite
-        // environment and drop the cached dispatch module.
+        // In the Class A composition, `envPlugin.config` ignores `.void/` in the
+        // watcher, so Vite never invalidates the cached dispatch module itself.
         for (const env of Object.values(server.environments)) {
           const mod = env.moduleGraph.getModuleById(dispatchPath);
           if (mod) {

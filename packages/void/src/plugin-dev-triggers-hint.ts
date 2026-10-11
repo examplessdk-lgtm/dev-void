@@ -11,11 +11,7 @@ import { scanQueuesSync } from './queues/scan.ts';
  * and framework mode (SvelteKit, Nuxt, Analog, Astro, TanStack Start, React
  * Router, vinext) expose `/__void/scheduled` and `/__void/queue`.
  */
-export function devTriggersHintPlugin(
-  root: string,
-  options: { framework: boolean; devTriggerToken: string },
-): Plugin {
-  const { devTriggerToken } = options;
+export function devTriggersHintPlugin(root: string, devTriggerToken: string): Plugin {
   return {
     name: 'void:dev-triggers-hint',
     apply: 'serve',

@@ -311,12 +311,10 @@ export function voidPlugin(options?: {
       application,
       bindingNames,
       websocketRoutes,
-      sandboxConfig,
       liveConfig,
       detected,
       clientStubsPlugin,
       serverRuntimeOptimizerPlugin,
-      authEnabled,
       devTriggerToken,
       implicitDeployGuard,
     });
@@ -383,7 +381,7 @@ export function voidPlugin(options?: {
   // config. Bindings already declared there (with real IDs) take precedence;
   // placeholders are added only for inferred bindings that are missing.
   function mergeBindings(resolved: WorkerConfig): Partial<WorkerConfig> {
-    return mergeWorkerBindings(resolved, {
+    const merged = mergeWorkerBindings(resolved, {
       websocketRoutes,
       routeEnvironment,
       workerConfig,
@@ -404,13 +402,9 @@ export function voidPlugin(options?: {
       liveConfig,
       root,
       remoteMode,
-      get versionMetadataBinding() {
-        return versionMetadataBinding;
-      },
-      set versionMetadataBinding(value: string | undefined) {
-        versionMetadataBinding = value;
-      },
     });
+    versionMetadataBinding = merged.versionMetadataBinding;
+    return merged.patch;
   }
 
   function applyEnvSchema(facts: EnvSchemaFacts): void {
@@ -821,7 +815,7 @@ export function voidPlugin(options?: {
       ...(vinextWorkerEntry ? [vinextWorkerEntry] : []),
       frameworkBuildWrapperPlugin,
       frameworkTriggersPlugin(root, { devTriggerToken }),
-      devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
+      devTriggersHintPlugin(root, devTriggerToken),
       ...cloudflare({
         configPath: cloudflareConfigPath,
         ...inspectorPortOption,
@@ -1063,7 +1057,7 @@ export function voidPlugin(options?: {
       configPath: authConfigPath,
     }),
     prerenderPlugin(root, config),
-    devTriggersHintPlugin(root, { framework: false, devTriggerToken }),
+    devTriggersHintPlugin(root, devTriggerToken),
     ...cloudflare({
       configPath: cloudflareConfigPath,
       ...inspectorPortOption,
