@@ -11,6 +11,7 @@ import {
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { confirm, isCancel, outro, log, text } from '@voidzero-dev/vite-plus-prompts';
+import { createJiti } from 'jiti';
 import { basename, dirname, extname, join, relative, resolve } from 'pathslash';
 import {
   readConfig,
@@ -2197,7 +2198,13 @@ function collectSchemaModuleFiles(dir: string): Array<string> {
 }
 
 async function importLocalModule(modulePath: string): Promise<Record<string, unknown>> {
-  return import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
+  // Native import() cannot resolve the extensionless re-exports that `void gen model` writes.
+  const jiti = createJiti(import.meta.url, {
+    fsCache: false,
+    moduleCache: false,
+    interopDefault: false,
+  });
+  return jiti.import<Record<string, unknown>>(modulePath);
 }
 
 function getDrizzleSchemaOptions(
