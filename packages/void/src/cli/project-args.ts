@@ -115,26 +115,8 @@ export type ProjectArgs =
 export function parseProjectArgs(args: Array<string>): ProjectArgs {
   const [subcommand, ...rest] = args;
 
-  if (subcommand === 'status') {
-    const [name, extra] = rest;
-    if (name?.startsWith('-')) {
-      throw new Error(`project: Unknown flag '${name}'.`);
-    }
-    if (extra) {
-      throw new Error(`project: Unexpected argument '${extra}'.`);
-    }
-    return { subcommand, name: name ?? '' };
-  }
-
-  if (subcommand === 'link') {
-    const [name, extra] = rest;
-    if (name?.startsWith('-')) {
-      throw new Error(`project: Unknown flag '${name}'.`);
-    }
-    if (extra) {
-      throw new Error(`project: Unexpected argument '${extra}'.`);
-    }
-    return { subcommand, name: name ?? '' };
+  if (subcommand === 'status' || subcommand === 'link') {
+    return { subcommand, name: parseOptionalPositional(rest) };
   }
 
   if (subcommand === 'list') {
@@ -278,26 +260,8 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
     return { subcommand, status, range };
   }
 
-  if (subcommand === 'rollback') {
-    const [deployId, extra] = rest;
-    if (deployId?.startsWith('-')) {
-      throw new Error(`project: Unknown flag '${deployId}'.`);
-    }
-    if (extra) {
-      throw new Error(`project: Unexpected argument '${extra}'.`);
-    }
-    return { subcommand, deployId: deployId ?? '' };
-  }
-
-  if (subcommand === 'cancel') {
-    const [deployId, extra] = rest;
-    if (deployId?.startsWith('-')) {
-      throw new Error(`project: Unknown flag '${deployId}'.`);
-    }
-    if (extra) {
-      throw new Error(`project: Unexpected argument '${extra}'.`);
-    }
-    return { subcommand, deployId: deployId ?? '' };
+  if (subcommand === 'rollback' || subcommand === 'cancel') {
+    return { subcommand, deployId: parseOptionalPositional(rest) };
   }
 
   if (subcommand === 'delete') {
@@ -332,6 +296,17 @@ export function parseProjectArgs(args: Array<string>): ProjectArgs {
   throw new Error(
     'project: Usage: void project <status|link|list|team|token|zero-trust|logs|requests|rollback|cancel|delete|purge-cache>.',
   );
+}
+
+function parseOptionalPositional(rest: Array<string>): string {
+  const [value, extra] = rest;
+  if (value?.startsWith('-')) {
+    throw new Error(`project: Unknown flag '${value}'.`);
+  }
+  if (extra) {
+    throw new Error(`project: Unexpected argument '${extra}'.`);
+  }
+  return value ?? '';
 }
 
 function parseTeamArgs(rest: Array<string>): ProjectArgs {

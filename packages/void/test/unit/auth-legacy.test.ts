@@ -233,7 +233,7 @@ describe('retired unscoped credentials', () => {
     });
     expect(state.passwords.size).toBe(0);
     expect(
-      attachSelectedPlatform(root, { projectId: 'project', slug: 'app' }, getApiUrl(root)),
+      attachSelectedPlatform({ projectId: 'project', slug: 'app' }, getApiUrl(root)),
     ).toMatchObject({
       applicationDomain: 'apps.example.test',
       platformUrl: 'https://platform.example.test',

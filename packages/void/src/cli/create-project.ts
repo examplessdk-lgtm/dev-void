@@ -65,7 +65,7 @@ export async function promptAndCreateProject(
   }
   const config: ProjectConfig = { projectId: project.id, slug: project.slug };
   if (options.link !== false) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
   }
   if (project.owner_email_destination) {
     // The platform registers the owner's address after it has answered, so

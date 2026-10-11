@@ -1,18 +1,9 @@
 import { parseArgs } from 'node:util';
+import type { RunDeployOptions } from './deploy-types.ts';
 
-export type DeployArgs = {
-  projectSlug?: string;
-  dir?: string;
-  spa?: boolean;
-  skipBuild?: boolean;
-  debug?: boolean;
-  platform?: 'cloudflare' | 'void';
-  provision?: boolean;
-  requireEmail?: boolean;
-  atomic?: boolean;
-};
-
-export function parseDeployArgs(args: Array<string>): DeployArgs {
+export function parseDeployArgs(
+  args: Array<string>,
+): Omit<RunDeployOptions, 'reuseExistingWorker'> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({

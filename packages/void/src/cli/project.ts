@@ -173,7 +173,6 @@ export function shouldLinkDeployProject(root: string, apiUrl: string): boolean {
 
 /** Resolve the immutable platform identity that every newly linked project records. */
 export function attachSelectedPlatform(
-  root: string,
   config: Pick<ProjectConfig, 'projectId' | 'slug'>,
   platformApiUrl: string,
 ): ProjectConfig {

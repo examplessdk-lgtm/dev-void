@@ -11,17 +11,12 @@ export function validateProjectSlug(value: string | undefined): string | undefin
     return 'Project slug is required.';
   }
 
-  // Allows lowercase alphanumeric with interior dashes.
   const valid =
     slug.length === 1 ? /^[a-z0-9]$/.test(slug) : /^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(slug);
   if (!valid) {
     return 'Slug must be lowercase alphanumeric with dashes.';
   }
 
-  // The slug is an email local-part prefix (`<slug>+noreply@`, `<slug>+<tag>@`)
-  // and RFC 5321 caps a local-part at 64 octets; the API refuses anything over
-  // 56 with the same rule (`MAX_SLUG_LENGTH`). Checked here too so the prompt
-  // answers before the round trip.
   if (slug.length > MAX_SLUG_LENGTH) {
     return `Slug must be at most ${MAX_SLUG_LENGTH} characters (it forms the email sender <slug>+noreply@).`;
   }

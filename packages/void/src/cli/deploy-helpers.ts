@@ -282,7 +282,7 @@ export async function promptDeployProjectConfig(
   }
   const config = { projectId: result.project.id, slug: result.project.slug };
   if (link) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
     log.step(`Linked to ${pc.blue(config.slug)}`);
     cliLog?.info('project_linked', { projectId: config.projectId, slug: config.slug });
   } else {
@@ -421,7 +421,7 @@ export async function createProjectFromSlug(
   const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   if (shouldLinkDeployProject(root, client.apiUrl)) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
   }
   log.step(`Project created: ${pc.blue(config.slug)}`);
   reportProjectCreationWarnings(project);

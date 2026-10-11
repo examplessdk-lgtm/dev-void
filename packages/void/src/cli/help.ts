@@ -92,28 +92,9 @@ function operatorHelpTree(): HelpTree {
                     command: `--${flag} <value>`,
                     description,
                   })),
-                  ...(entry.booleans ?? []).map((flag) => ({
+                  ...Object.entries(entry.booleans ?? {}).map(([flag, description]) => ({
                     command: `--${flag}`,
-                    description:
-                      flag === 'follow'
-                        ? 'Poll new logs until interrupted or the build ends'
-                        : flag === 'ended'
-                          ? 'Attest that the original provider execution has ended'
-                          : flag === 'public-apps'
-                            ? 'Manage public app rules without identity policies'
-                            : flag === 'protect-new-projects'
-                              ? 'Protect newly created projects by default'
-                              : flag === 'check' && group === 'zero-trust'
-                                ? 'Also check the saved settings against Cloudflare Access (several API calls)'
-                                : flag === 'token-stdin' && group === 'zero-trust'
-                                  ? 'Read the Access management API token from stdin'
-                                  : flag === 'token-stdin' && group === 'email'
-                                    ? entry.action === 'domain-remove'
-                                      ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
-                                      : 'Read a scoped Cloudflare API token from stdin'
-                                    : flag === 'all'
-                                      ? 'Rotate every project'
-                                      : 'Read a full API session from stdin for explicit operator session exchange',
+                    description,
                   })),
                 ],
               },

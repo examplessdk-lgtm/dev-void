@@ -180,12 +180,8 @@ export async function generateWrapper(
       handlerPath = join(import.meta.dirname, '..', 'runtime', handlerFilename_);
     }
     if (!existsSync(handlerPath)) {
-      // Fallback for running from source (src/cli/) in tests — dist/runtime/ is two levels up.
-      handlerPath = join(import.meta.dirname, '..', '..', 'dist', 'runtime', handlerFilename_);
-    }
-    if (!existsSync(handlerPath)) {
       throw new Error(
-        `Migration handler not found: ${handlerFilename_}. Run "pnpm -C packages/void build" first.`,
+        `Migration handler not found: ${handlerFilename_}. Reinstall the void package.`,
       );
     }
     await bundleMigrationHandler(
