@@ -10,128 +10,18 @@ import { encodeCloudflareOperation } from '../../src/cli/cloudflare-process.ts';
 import { withConditionalPlatformWorkerCreate } from '../../src/cli/platform-installer-process.ts';
 import { resolveCloudflareOperationArgv } from '../../src/cli/preset.ts';
 
-it('accepts the bundled uploader query while preserving the create-only precondition', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'void-worker-upload-contract-'));
-  const uploads: Array<{ url: string; precondition: string | undefined }> = [];
-  const requests: Array<string> = [];
-  // This is a local fake API. A synthetic credential and isolated config ensure
-  // this contract test cannot deploy to any real Cloudflare account.
-  const server = createServer((request, response) => {
-    const url = request.url ?? '';
-    requests.push(`${request.method} ${url}`);
-    response.setHeader('Content-Type', 'application/json');
-    if (request.method === 'PUT') {
-      uploads.push({ url, precondition: request.headers['if-none-match'] });
-      request.resume();
-      response.writeHead(412);
-      response.end(
-        JSON.stringify({
-          success: false,
-          errors: [{ code: 1000, message: 'Simulated concurrent creation.' }],
-        }),
-      );
-    } else if (url.endsWith('/workers/subdomain')) {
-      response.end(JSON.stringify({ success: true, result: { subdomain: 'test' } }));
-    } else {
-      response.writeHead(404);
-      response.end(
-        JSON.stringify({ success: false, errors: [{ code: 10007, message: 'Worker not found.' }] }),
-      );
-    }
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-  try {
-    writeFileSync(
-      join(directory, 'worker.mjs'),
-      'export default { fetch() { return new Response("local test"); } };',
-    );
-    const config = join(directory, 'wrangler.json');
-    writeFileSync(
-      config,
-      JSON.stringify({
-        name: 'void-contract',
-        account_id: 'account',
-        main: 'worker.mjs',
-        compatibility_date: '2026-02-24',
-        workers_dev: false,
-        preview_urls: false,
-        no_bundle: true,
-      }),
-    );
-    const [command, ...prefix] = resolveCloudflareOperationArgv(process.cwd());
-    let output = '';
-    const failure = await withConditionalPlatformWorkerCreate(
-      'account',
-      'void-contract',
-      async (apiBase) => {
-        await new Promise<void>((resolve) => {
-          const child = execFile(
-            command!,
-            [
-              ...prefix,
-              ...encodeCloudflareOperation({ type: 'worker.deploy', configPath: config }),
-            ],
-            {
-              cwd: directory,
-              encoding: 'utf8',
-              timeout: 20_000,
-              maxBuffer: 1024 * 1024,
-              env: {
-                PATH: process.env.PATH,
-                SYSTEMROOT: process.env.SYSTEMROOT,
-                WINDIR: process.env.WINDIR,
-                TMP: process.env.TMP,
-                TEMP: process.env.TEMP,
-                CI: 'true',
-                CLOUDFLARE_API_TOKEN: 'synthetic-token',
-                CLOUDFLARE_API_BASE_URL: apiBase,
-                WRANGLER_SEND_METRICS: 'false',
-                WRANGLER_LOG_PATH: join(directory, 'logs'),
-              },
-            },
-            (_error, stdout, stderr) => {
-              output = stdout + stderr;
-              resolve();
-            },
-          );
-          child.stdin?.end();
-        });
-      },
-      origin,
-    ).catch((error: unknown) => error);
-    expect(String(failure), output + '\n' + requests.join('\n')).toContain(
-      'created concurrently (HTTP 412)',
-    );
-    expect(uploads).toHaveLength(1);
-    const url = new URL(uploads[0]!.url, origin);
-    expect(url.pathname).toBe('/client/v4/accounts/account/workers/scripts/void-contract');
-    expect(Object.fromEntries(url.searchParams)).toEqual({
-      excludeScript: 'true',
-      bindings_inherit: 'strict',
-    });
-    expect(uploads[0]!.precondition).toBe('*');
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-      server.closeAllConnections();
-    });
-    rmSync(directory, { recursive: true, force: true });
-  }
-}, 30_000);
-
 function unsignedJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   return `${encode({ alg: 'none' })}.${encode(payload)}.signature`;
 }
 
-it.each([false, true])(
-  'uploads static assets before the guarded create of a new Worker (single-file uploads: %s)',
-  async (singleAssetUploads) => {
-    const directory = mkdtempSync(join(tmpdir(), 'void-worker-assets-contract-'));
+it.each(['none', 'batch', 'single-file'] as const)(
+  'keeps the create-only precondition on the bundled uploader query (assets: %s)',
+  async (assets) => {
+    const directory = mkdtempSync(join(tmpdir(), 'void-worker-upload-contract-'));
     const sessionJwt = unsignedJwt({
       exp: Math.floor(Date.now() / 1000) + 3600,
-      ...(singleAssetUploads ? { wrangler_single_asset_uploads: true } : {}),
+      ...(assets === 'single-file' ? { wrangler_single_asset_uploads: true } : {}),
     });
     const completionJwt = unsignedJwt({ exp: Math.floor(Date.now() / 1000) + 3600, done: true });
     const requests: Array<{
@@ -181,6 +71,8 @@ it.each([false, true])(
               errors: [{ code: 1000, message: 'Simulated concurrent creation.' }],
             }),
           );
+        } else if (path.endsWith('/workers/subdomain')) {
+          response.end(JSON.stringify({ success: true, result: { subdomain: 'test' } }));
         } else {
           response.writeHead(404);
           response.end(
@@ -199,8 +91,10 @@ it.each([false, true])(
         join(directory, 'worker.mjs'),
         'export default { fetch() { return new Response("local test"); } };',
       );
-      mkdirSync(join(directory, 'public'));
-      writeFileSync(join(directory, 'public', 'client.js'), 'console.log("admin");');
+      if (assets !== 'none') {
+        mkdirSync(join(directory, 'public'));
+        writeFileSync(join(directory, 'public', 'client.js'), 'console.log("admin");');
+      }
       const config = join(directory, 'wrangler.json');
       writeFileSync(
         config,
@@ -212,7 +106,9 @@ it.each([false, true])(
           workers_dev: false,
           preview_urls: false,
           no_bundle: true,
-          assets: { directory: toSlash(join(directory, 'public')) },
+          ...(assets === 'none'
+            ? {}
+            : { assets: { directory: toSlash(join(directory, 'public')) } }),
         }),
       );
       const [command, ...prefix] = resolveCloudflareOperationArgv(process.cwd());
@@ -258,25 +154,38 @@ it.each([false, true])(
       ).catch((error: unknown) => error);
       const trace = output + '\n' + requests.map((entry) => entry.request).join('\n');
       expect(String(failure), trace).toContain('created concurrently (HTTP 412)');
-      const mutations = requests.filter((entry) => !entry.request.startsWith('GET '));
-      const hash = /upload\/([0-9a-f]{32})$/.exec(mutations[1]?.request ?? '')?.[1];
+      const create = {
+        request:
+          'PUT /client/v4/accounts/account/workers/scripts/void-contract?excludeScript=true&bindings_inherit=strict',
+        authorization: 'Bearer synthetic-token',
+        precondition: '*',
+      };
       expect(
-        mutations.map((entry) => entry.request),
+        requests.filter((entry) => !entry.request.startsWith('GET ')),
         trace,
-      ).toEqual([
-        'POST /client/v4/accounts/account/workers/scripts/void-contract/assets-upload-session',
-        singleAssetUploads
-          ? `POST /client/v4/accounts/account/workers/assets/upload/${hash}`
-          : 'POST /client/v4/accounts/account/workers/assets/upload?base64=true',
-        'PUT /client/v4/accounts/account/workers/scripts/void-contract?excludeScript=true&bindings_inherit=strict',
-      ]);
-      expect(mutations.map((entry) => entry.authorization)).toEqual([
-        'Bearer synthetic-token',
-        `Bearer ${sessionJwt}`,
-        'Bearer synthetic-token',
-      ]);
-      expect(mutations.map((entry) => entry.precondition)).toEqual([undefined, undefined, '*']);
-      expect(mutations[2]!.body).toContain(completionJwt);
+      ).toMatchObject(
+        assets === 'none'
+          ? [create]
+          : [
+              {
+                request:
+                  'POST /client/v4/accounts/account/workers/scripts/void-contract/assets-upload-session',
+                authorization: 'Bearer synthetic-token',
+                precondition: undefined,
+              },
+              {
+                request:
+                  assets === 'batch'
+                    ? 'POST /client/v4/accounts/account/workers/assets/upload?base64=true'
+                    : expect.stringMatching(
+                        /^POST \/client\/v4\/accounts\/account\/workers\/assets\/upload\/[0-9a-f]{32}$/,
+                      ),
+                authorization: `Bearer ${sessionJwt}`,
+                precondition: undefined,
+              },
+              { ...create, body: expect.stringContaining(completionJwt) },
+            ],
+      );
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

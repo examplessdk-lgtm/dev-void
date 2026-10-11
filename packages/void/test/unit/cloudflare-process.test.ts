@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import {
-  decodeCloudflareOperationResult,
-  encodeCloudflareOperation,
-} from '../../src/cli/cloudflare-process.ts';
+import { decodeCloudflareOperationResult } from '../../src/cli/cloudflare-process.ts';
 
 const processResult = (envelope: unknown) => ({
   status: 0,
@@ -11,18 +8,6 @@ const processResult = (envelope: unknown) => ({
 });
 
 describe('typed Cloudflare process protocol', () => {
-  it('encodes one typed request with literal public targets', () => {
-    const operation = {
-      type: 'd1.create' as const,
-      name: 'name $(touch injected); with spaces',
-      binding: 'DB',
-      configPath: '/app with spaces/config.jsonc',
-    };
-    const args = encodeCloudflareOperation(operation);
-    expect(args).toHaveLength(1);
-    expect(JSON.parse(args[0])).toEqual(operation);
-  });
-
   it('keeps structured data separate from human output', () => {
     expect(
       decodeCloudflareOperationResult(

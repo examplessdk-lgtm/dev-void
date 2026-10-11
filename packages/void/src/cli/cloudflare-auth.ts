@@ -251,7 +251,7 @@ export function runCloudflareAuthCommand(
 }
 
 /** Browser login must display cf's prompts before it completes. */
-export function cloudflareAuthNeedsTerminal(operation: CloudflareOperation): boolean {
+function cloudflareAuthNeedsTerminal(operation: CloudflareOperation): boolean {
   return operation.type === 'auth.login';
 }
 

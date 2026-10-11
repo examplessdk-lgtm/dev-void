@@ -4,7 +4,6 @@ import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import { log } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
-  cloudflareAuthNeedsTerminal,
   createBundledCloudflareAuthRunner,
   ensureCloudflareAuthentication,
   runCloudflareAuthCommand,
@@ -132,11 +131,5 @@ describe('cf browser login', () => {
     child.emit('error', new Error('spawn failed'));
     child.emit('close', 0, null);
     await expect(result).resolves.toMatchObject({ status: null, error: 'spawn failed' });
-  });
-
-  it('only streams browser login', () => {
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.login' })).toBe(true);
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.whoami' })).toBe(false);
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.token' })).toBe(false);
   });
 });

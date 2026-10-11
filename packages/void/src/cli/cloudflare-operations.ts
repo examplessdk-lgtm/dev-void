@@ -44,10 +44,6 @@ export type CloudflareOperationContext = {
   runWrangler: CloudflareOperationRunner;
 };
 
-export type CloudflareCustomDomainPublisher = (
-  context: CloudflareOperationContext,
-) => Promise<void>;
-
 export type CloudflareWorkerVersion = {
   id: string;
   createdAt: string | null;
@@ -587,7 +583,6 @@ export async function changeCloudflareDomain(
   hostname: string,
   action: 'add' | 'delete',
   runner?: CloudflareOperationRunner,
-  emptyDomainPublisher?: CloudflareCustomDomainPublisher,
 ): Promise<{ modified: boolean; domains: Array<WranglerCustomDomain> }> {
   const context = resolveCloudflareOperationContext(root, runner);
   const before = readWranglerCustomDomains(root);
@@ -600,7 +595,7 @@ export async function changeCloudflareDomain(
   const triggerConfigPath = join(triggerConfigDir, 'wrangler.json');
   const deployRoutes = async (): Promise<void> => {
     if (readWranglerCustomDomains(root).domains.length === 0) {
-      await (emptyDomainPublisher ?? publishEmptyCloudflareCustomDomainSet)(context);
+      await publishEmptyCloudflareCustomDomainSet(context);
       return;
     }
     writeDomainTriggerConfig(context, before.configPath, triggerConfigPath);
