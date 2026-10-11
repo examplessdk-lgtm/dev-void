@@ -3846,4 +3846,29 @@ describe('generateStarterMigration', () => {
       expect(existsSync(join(migrationsDir, '0001_new.sql'))).toBe(false);
     });
   });
+
+  // cmd.exe would split `C:\Program Files\nodejs\node.exe` and paths with spaces.
+  it('runs drizzle-kit and the Yarn PnP probe without a shell on Windows', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      withTempDir((root) => {
+        seedStarterSchema(root);
+        writeFileSync(join(root, '.pnp.cjs'), '// pnp stub\n');
+        mkdirSync(join(root, '.yarn'), { recursive: true });
+        writeFileSync(join(root, '.yarn', 'install-state.gz'), '');
+        mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+
+        generateStarterMigration(root, 'sqlite');
+        expect(isVoidResolvableFrom(root)).toBe(true);
+
+        const nodeSpawns = mockSpawnSync.mock.calls.filter(
+          ([command]) => command === process.execPath,
+        );
+        expect(nodeSpawns.map(([, , options]) => Boolean(options.shell))).toEqual([false, false]);
+      });
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
 });

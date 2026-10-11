@@ -730,7 +730,6 @@ export function isVoidResolvableFrom(start: string): boolean {
     const probe = spawnSync(process.execPath, probeArgs, {
       cwd: start,
       stdio: 'ignore',
-      shell: process.platform === 'win32',
       env: buildDrizzleKitSpawnEnv(start),
     });
     return !probe.error && probe.status === 0;
@@ -2105,7 +2104,6 @@ export function generateStarterMigration(
     cwd: root,
     stdio: 'pipe',
     encoding: 'utf-8',
-    shell: process.platform === 'win32',
     env: buildDrizzleKitSpawnEnv(root),
   });
 
