@@ -16,28 +16,11 @@ import { getDeploySchemaDriftMessage, hasDeploySchemaDrift } from '../../src/cli
 import { validateAuthMigrationSchema } from '../../src/cli/deploy-migrations.ts';
 import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
 import { collectMigrations } from '../../src/migrations/collect.ts';
+import { WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../../src/shared/untrusted-env.ts';
 
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 const tempDirs: Array<string> = [];
-
-/**
- * Wrangler's FULL credential env-var set (canonical names + deprecated `CF_*` aliases),
- * mirroring `WRANGLER_AUTH_CREDENTIAL_ENV_VARS` in deploy.ts.
- */
-const WRANGLER_AUTH_VARS = [
-  'CLOUDFLARE_API_TOKEN',
-  'CF_API_TOKEN',
-  'CLOUDFLARE_API_KEY',
-  'CF_API_KEY',
-  'CLOUDFLARE_EMAIL',
-  'CF_EMAIL',
-  'CLOUDFLARE_API_USER_SERVICE_KEY',
-  'WRANGLER_CF_AUTHORIZATION_TOKEN',
-  'WRANGLER_R2_SQL_AUTH_TOKEN',
-  'CLOUDFLARE_ACCESS_CLIENT_ID',
-  'CLOUDFLARE_ACCESS_CLIENT_SECRET',
-];
 
 // These cases run real Drizzle processes (up to three per test). Windows CI can take
 // over five seconds even when every operation succeeds; keep that budget local to this suite.
@@ -74,6 +57,9 @@ describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
     expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(true);
     expect(snapshotDir(migrationsDir)).toEqual(before);
     expect(existsSync(join(root, '.void', 'deploy-drift-check'))).toBe(false);
+    expect(getDeploySchemaDriftMessage(root)).toContain(
+      'Run `void db generate`, review the generated migration',
+    );
   });
 
   it('keeps generated Better Auth tables in the deploy drift check', () => {
@@ -130,7 +116,7 @@ describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
         'import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";',
         '',
         `writeFileSync(${JSON.stringify(leakFile)}, JSON.stringify({`,
-        ...WRANGLER_AUTH_VARS.map(
+        ...WRANGLER_AUTH_CREDENTIAL_ENV_VARS.map(
           (name) => `  ${name}: process.env[${JSON.stringify(name)}] ?? null,`,
         ),
         '}));',
@@ -144,20 +130,18 @@ describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
     );
 
     const saved: Record<string, string | undefined> = {};
-    for (const name of WRANGLER_AUTH_VARS) {
+    for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
       saved[name] = process.env[name];
       process.env[name] = `secret-${name}`;
     }
     try {
-      // The managed path reaches this helper too, and never loads the provision module —
-      // so this also proves the scrub does not depend on that module being present.
       hasDeploySchemaDrift(root, 'sqlite');
       const leaked = JSON.parse(readFileSync(leakFile, 'utf-8')) as Record<string, string | null>;
-      for (const name of WRANGLER_AUTH_VARS) {
+      for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
         expect(leaked[name]).toBeNull();
       }
     } finally {
-      for (const name of WRANGLER_AUTH_VARS) {
+      for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
         if (saved[name] === undefined) {
           delete process.env[name];
         } else {
@@ -181,18 +165,6 @@ describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
     const message = getDeploySchemaDriftMessage(root);
     expect(message).toBe(
       'Missing Drizzle metadata in db/migrations/.\nSee https://void.cloud/guide/database#hand-written-migrations',
-    );
-  });
-
-  it('keeps the generate advice when Drizzle metadata exists', () => {
-    const root = createTempApp();
-    writeSqliteSchema(root);
-    generateMigrations(root);
-    writeSqliteSchema(root, { includeEmail: true });
-
-    expect(hasDeploySchemaDrift(root, 'sqlite')).toBe(true);
-    expect(getDeploySchemaDriftMessage(root)).toContain(
-      'Run `void db generate`, review the generated migration',
     );
   });
 
