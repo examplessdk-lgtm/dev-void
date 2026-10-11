@@ -7,7 +7,6 @@ import {
   resolveSpecifier,
   needsIslandClientBundle,
   rewriteCssImportForVirtualModule,
-  extractCssImports,
   computePagesNeedingClientJS,
   watchPagesForRescan,
   ISLANDS_RENDERER_ID,
@@ -51,7 +50,6 @@ export function islandsPlugin(
   const islandCssFiles = new Set<string>();
   const wrapperMeta = new Map<string, WrapperMeta>();
   let wrapperId = 0;
-  let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
   /** Resolve an island import and record it in the client manifest. */
@@ -76,7 +74,6 @@ export function islandsPlugin(
 
       configResolved(config) {
         resolvedConfig = config;
-        viteRoot = config.root;
         isDev = config.command === 'serve';
       },
 
@@ -140,7 +137,7 @@ export function islandsPlugin(
 
       resolveId: {
         filter: {
-          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.(tsx|jsx)\.css$/,
+          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
@@ -149,27 +146,13 @@ export function islandsPlugin(
           if (source.startsWith(WRAPPER_PREFIX)) {
             return source;
           }
-          // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
-          // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith('.css')) {
-            const srcPath = normalizePath(source.slice(0, -4));
-            if (islandCssFiles.has(srcPath)) {
-              return srcPath + '.css';
-            }
-            if (srcPath.startsWith('/')) {
-              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
-              if (islandCssFiles.has(absPath)) {
-                return absPath + '.css';
-              }
-            }
-          }
         },
       },
 
       load: {
         filter: {
           // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
-          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.(tsx|jsx)\.css$/,
+          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(id) {
           if (id === '\0' + ISLANDS_RENDERER_ID) {
@@ -195,12 +178,6 @@ export function islandsPlugin(
             const meta = wrapperMeta.get(id);
             if (meta) {
               return generateWrapperComponent(meta);
-            }
-          }
-          if (id.endsWith('.css') && !id.startsWith('\0')) {
-            const srcPath = id.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) {
-              return extractCssImports(srcPath);
             }
           }
         },
