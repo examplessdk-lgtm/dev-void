@@ -239,7 +239,6 @@ export function createPlatformWorkerConfigs(input: {
     proxy,
     emailGateway: {
       ...common,
-      workers_dev: publicEndpoints,
       preview_urls: false,
       name: names.emailGatewayWorker,
       main: runtimeEntrypoints.emailGateway,

@@ -3,6 +3,13 @@ import {
   parsePlatformDeploymentManifest,
   type PlatformDeploymentManifest,
 } from './manifest.ts';
+import {
+  assertRecord,
+  isSandboxDrainProtocol,
+  isSourceRevision,
+  isUsageProtocolVersion,
+  requiredString,
+} from './validate.ts';
 
 export const PLATFORM_INSTALLATION_SCHEMA_VERSION = 1 as const;
 export const PLATFORM_DISABLED_KEY = '__void/platform/disabled/v1';
@@ -217,19 +224,6 @@ const STATUS_TRANSITIONS: Readonly<Record<InstallationStatus, ReadonlyArray<Inst
     uninstalled: [],
     failed: ['planned', 'provisioning', 'deploying', 'verifying', 'disabling', 'uninstalling'],
   };
-
-function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-}
-
-function requiredString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value;
-}
 
 function isInstallationStatus(value: unknown): value is InstallationStatus {
   return typeof value === 'string' && Object.hasOwn(STATUS_TRANSITIONS, value);
@@ -610,16 +604,13 @@ function parseAuthenticationResources(
 }
 
 export function parseUsageProtocolVersion(value: unknown): 0 | 1 | 2 {
-  if (value === undefined || value === 0) {
+  if (value === undefined) {
     return 0;
   }
-  if (value === 1) {
-    return 1;
+  if (!isUsageProtocolVersion(value)) {
+    throw new Error('usageProtocolVersion must be 0, 1, or 2.');
   }
-  if (value === 2) {
-    return 2;
-  }
-  throw new Error('usageProtocolVersion must be 0, 1, or 2.');
+  return value;
 }
 
 function parseSafetyProtocols(value: unknown): PlatformInstallationManifest['safetyProtocols'] {
@@ -627,12 +618,7 @@ function parseSafetyProtocols(value: unknown): PlatformInstallationManifest['saf
     return { sandboxDrain: 0 };
   }
   assertRecord(value, 'safetyProtocols');
-  if (
-    value.sandboxDrain !== 0 &&
-    value.sandboxDrain !== 1 &&
-    value.sandboxDrain !== 2 &&
-    value.sandboxDrain !== 3
-  ) {
+  if (!isSandboxDrainProtocol(value.sandboxDrain)) {
     throw new Error('safetyProtocols.sandboxDrain must be 0, 1, 2, or 3.');
   }
   return { sandboxDrain: value.sandboxDrain };
@@ -654,10 +640,7 @@ function parsePlatformRuntimeProvenance(value: unknown): PlatformRuntimeProvenan
     value.sourceRevision === null || value.sourceRevision === undefined
       ? null
       : requiredString(value.sourceRevision, 'runtime.sourceRevision');
-  if (
-    sourceRevision !== null &&
-    (sourceRevision.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(sourceRevision))
-  ) {
+  if (sourceRevision !== null && !isSourceRevision(sourceRevision)) {
     throw new Error('runtime.sourceRevision is invalid.');
   }
   return { manifestSha256, source: value.source, sourceRevision };

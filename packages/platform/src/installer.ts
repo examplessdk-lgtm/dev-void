@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, resolve } from 'pathslash';
+import {
+  isRecord,
+  isSandboxDrainProtocol,
+  isSourceRevision,
+  isUsageProtocolVersion,
+} from './validate.ts';
 
 export type PlatformRuntimeArtifact = Readonly<{
   path: string;
@@ -248,29 +254,21 @@ function parseSafetyProtocols(value: unknown): PlatformRuntimeManifest['safetyPr
   if (value === undefined) {
     return { sandboxDrain: 0 };
   }
-  const protocols = record(value, 'runtime manifest safetyProtocols');
-  if (
-    protocols.sandboxDrain !== 0 &&
-    protocols.sandboxDrain !== 1 &&
-    protocols.sandboxDrain !== 2 &&
-    protocols.sandboxDrain !== 3
-  ) {
+  const { sandboxDrain } = record(value, 'runtime manifest safetyProtocols');
+  if (!isSandboxDrainProtocol(sandboxDrain)) {
     throw new Error('runtime manifest safetyProtocols.sandboxDrain must be 0, 1, 2, or 3');
   }
-  return { sandboxDrain: protocols.sandboxDrain };
+  return { sandboxDrain };
 }
 
 function usageProtocolVersion(value: unknown): 0 | 1 | 2 {
-  if (value === undefined || value === 0) {
+  if (value === undefined) {
     return 0;
   }
-  if (value === 1) {
-    return 1;
+  if (!isUsageProtocolVersion(value)) {
+    throw new Error('runtime manifest usageProtocolVersion must be 0, 1, or 2');
   }
-  if (value === 2) {
-    return 2;
-  }
-  throw new Error('runtime manifest usageProtocolVersion must be 0, 1, or 2');
+  return value;
 }
 
 export function getPlatformRuntimeDirectory(): string {
@@ -280,14 +278,7 @@ export function getPlatformRuntimeDirectory(): string {
 export function readPlatformRuntimeManifest(
   runtimeDirectory: string = getPlatformRuntimeDirectory(),
 ): PlatformRuntimeManifest {
-  const path = join(runtimeDirectory, 'manifest.json');
-  try {
-    return parsePlatformRuntimeManifest(JSON.parse(readFileSync(path, 'utf8')));
-  } catch (error) {
-    throw new Error(
-      `Void Platform deployment artifacts are missing or invalid at ${path}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  return readRuntimeManifestFile(join(runtimeDirectory, 'manifest.json')).manifest;
 }
 
 export function resolvePlatformRuntime(
@@ -311,23 +302,30 @@ export function resolvePlatformRuntime(
       `Void Platform runtime directory is unavailable at ${requestedDirectory}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const manifestPath = join(directory, 'manifest.json');
-  let manifestContents: Buffer;
-  let manifest: PlatformRuntimeManifest;
-  try {
-    manifestContents = readFileSync(manifestPath);
-    manifest = parsePlatformRuntimeManifest(JSON.parse(manifestContents.toString('utf8')));
-  } catch (error) {
-    throw new Error(
-      `Void Platform deployment artifacts are missing or invalid at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  const { contents, manifest } = readRuntimeManifestFile(join(directory, 'manifest.json'));
   return {
     directory,
     manifest,
-    manifestSha256: createHash('sha256').update(manifestContents).digest('hex'),
+    manifestSha256: createHash('sha256').update(contents).digest('hex'),
     source,
   };
+}
+
+function readRuntimeManifestFile(path: string): {
+  contents: Buffer;
+  manifest: PlatformRuntimeManifest;
+} {
+  try {
+    const contents = readFileSync(path);
+    return {
+      contents,
+      manifest: parsePlatformRuntimeManifest(JSON.parse(contents.toString('utf8'))),
+    };
+  } catch (error) {
+    throw new Error(
+      `Void Platform deployment artifacts are missing or invalid at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function parseArtifact(value: unknown, name: string): PlatformRuntimeArtifact {
@@ -370,10 +368,10 @@ function parseMigration(value: unknown, position: number): PlatformRuntimeMigrat
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new Error(`${name} must be an object`);
   }
-  return value as Record<string, unknown>;
+  return value;
 }
 
 function array(value: unknown, name: string): ReadonlyArray<unknown> {
@@ -392,7 +390,7 @@ function nonemptyString(value: unknown, name: string): string {
 
 function sourceRevision(value: unknown): string {
   const revision = nonemptyString(value, 'runtime manifest sourceRevision');
-  if (revision.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(revision)) {
+  if (!isSourceRevision(revision)) {
     throw new Error('runtime manifest sourceRevision is invalid');
   }
   return revision;

@@ -186,27 +186,14 @@ function buildDatabaseManifest() {
   if (compatibility.schemaVersion !== 1) {
     throw new Error('Void Platform database compatibility schemaVersion must be 1.');
   }
-  if (typeof compatibility.lineage !== 'string' || compatibility.lineage.trim() === '') {
-    throw new Error('Void Platform database compatibility lineage must be a non-empty string.');
-  }
   if (!Array.isArray(compatibility.rollbackSafeFrom)) {
     throw new Error('Void Platform rollbackSafeFrom must be an array.');
   }
-  const migrations = journal.entries.map((value, position) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error(`Void Platform migration journal entry ${position} must be an object.`);
-    }
-    const { idx, tag, when } = value;
-    if (!Number.isSafeInteger(idx) || idx < 0) {
-      throw new Error(`Void Platform migration journal entry ${position} has an invalid index.`);
-    }
-    if (typeof tag !== 'string' || !/^[0-9]{4}_[a-z0-9_]+$/.test(tag)) {
+  // parsePlatformRuntimeManifest validates these values, their order, and the rollback lineage.
+  const migrations = journal.entries.map((entry, position) => {
+    const tag = entry?.tag;
+    if (typeof tag !== 'string') {
       throw new Error(`Void Platform migration journal entry ${position} has an invalid tag.`);
-    }
-    if (!Number.isSafeInteger(when) || when < 0) {
-      throw new Error(
-        `Void Platform migration journal entry ${position} has an invalid timestamp.`,
-      );
     }
     const sqlPath = join(drizzleRoot, `${tag}.sql`);
     let sql;
@@ -218,32 +205,18 @@ function buildDatabaseManifest() {
       );
     }
     return {
-      index: idx,
+      index: entry.idx,
       sha256: sha256(sql),
       tag,
-      timestampMillis: when,
+      timestampMillis: entry.when,
     };
-  });
-  // parsePlatformRuntimeManifest enforces migration order, uniqueness, and rollback lineage.
-  const rollbackSafeFrom = compatibility.rollbackSafeFrom.map((value, position) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error(`Void Platform compatibility entry ${position} must be an object.`);
-    }
-    const { platformVersion, schemaDigest } = value;
-    if (typeof platformVersion !== 'string' || platformVersion.trim() === '') {
-      throw new Error(`Void Platform compatibility entry ${position} has an invalid version.`);
-    }
-    if (typeof schemaDigest !== 'string' || !/^[0-9a-f]{64}$/.test(schemaDigest)) {
-      throw new Error(`Void Platform compatibility entry ${position} has an invalid digest.`);
-    }
-    return { platformVersion, schemaDigest };
   });
   return {
     journalSha256: sha256(journalContents),
     lineage: compatibility.lineage,
     migrations,
     protocolVersion: 1,
-    rollbackSafeFrom,
+    rollbackSafeFrom: compatibility.rollbackSafeFrom,
     schemaDigest: platformDatabaseSchemaDigest(compatibility.lineage, migrations),
   };
 }

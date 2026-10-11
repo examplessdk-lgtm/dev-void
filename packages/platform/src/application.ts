@@ -1,3 +1,5 @@
+import { createPlatformDeploymentManifest } from './manifest.ts';
+
 /** Public application addressing, independent of the platform API's origin. */
 export type PlatformApplication = Readonly<{
   baseDomain: string;
@@ -28,10 +30,15 @@ export function readPlatformApplication(
   if (!env.PLATFORM_APPLICATION) {
     return { baseDomain, zoneName: baseDomain, dedicatedZone: false };
   }
+  return parsePlatformApplication(JSON.parse(env.PLATFORM_APPLICATION));
+}
+
+/** Applies the deployment manifest's application rules to a parsed value. */
+export function parsePlatformApplication(value: unknown): PlatformApplication {
   return createPlatformDeploymentManifest({
     installationSlug: 'runtime',
     displayName: 'Runtime',
-    application: JSON.parse(env.PLATFORM_APPLICATION) as PlatformApplication,
+    application: value as PlatformApplication,
   }).application;
 }
 
@@ -138,4 +145,3 @@ export function platformProjectHostnames(
     ]),
   ];
 }
-import { createPlatformDeploymentManifest } from './manifest.ts';
