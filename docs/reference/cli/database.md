@@ -24,15 +24,21 @@ Show migration status. Displays which migrations are applied or pending locally,
 
 ## `void db reset` {#void-db-reset}
 
-Drop the development database and re-apply all migrations. D1 resets the local database; PostgreSQL and MySQL drop all tables in the `DATABASE_URL` database from `.env`. Does not affect the deployed database.
+```
+void db reset [--yes]
+```
+
+Drop the development database and re-apply all migrations. D1 resets the local database; PostgreSQL and MySQL drop all tables in the `DATABASE_URL` database from `.env`.
+
+When that `DATABASE_URL` points to a host other than `localhost`, Void names the database and asks before dropping its tables. Pass `--yes` to skip the prompt in scripts and CI; without a terminal, the command stops unless `--yes` is set. If `.env` uses the same URL as your deployment (for example after `void db connect`), reset drops the deployed tables.
 
 ## `void db seed` {#void-db-seed}
 
 ```
-void db seed [--file <path>]
+void db seed [--file <path>] [--yes]
 ```
 
-Reset the local database, re-apply all migrations, then execute a seed file.
+Reset the local database, re-apply all migrations, then execute a seed file. The reset works like `void db reset`, including the prompt and `--yes`.
 
 If `--file` is omitted, Void looks for default seed files in this order: `db/seed.ts`, `db/seed.mts`, `db/seed.js`, `db/seed.mjs`, `db/seed.sql`.
 

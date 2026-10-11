@@ -1169,11 +1169,26 @@ const HELP_TREE: HelpTree = {
       push: basicSubcommand('Push schema to local D1 without migration files.', 'void db push'),
       generate: basicSubcommand('Generate SQL migrations from schema changes.', 'void db generate'),
       status: basicSubcommand('Show migration status for local and remote DBs.', 'void db status'),
-      reset: basicSubcommand('Reset local DB and re-run migrations.', 'void db reset'),
+      reset: {
+        summary: 'Reset local DB and re-run migrations.',
+        usage: ['void db reset [options]'],
+        options: [
+          {
+            command: '--yes',
+            description: 'Skip the prompt for a non-local PostgreSQL/MySQL database',
+          },
+        ],
+      },
       seed: {
         summary: 'Reset local DB, run migrations, and seed data.',
         usage: ['void db seed [options]'],
-        options: [{ command: '--file <path>', description: 'Seed from a specific file' }],
+        options: [
+          { command: '--file <path>', description: 'Seed from a specific file' },
+          {
+            command: '--yes',
+            description: 'Skip the prompt for a non-local PostgreSQL/MySQL database',
+          },
+        ],
       },
       execute: {
         summary:

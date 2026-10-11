@@ -192,9 +192,9 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'status') {
     await runStatus(root, dialect);
   } else if (args.action === 'reset') {
-    await runReset(root, dialect);
+    await runReset(root, dialect, args.yes);
   } else if (args.action === 'seed') {
-    await runSeed(root, args.file, dialect);
+    await runSeed(root, args.file, dialect, args.yes);
   } else if (args.action === 'execute') {
     await runExecute(root, args.command, args.file, dialect, args.remote);
   } else if (args.action === 'migrate') {
@@ -525,7 +525,39 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
   outro(parts.join(', '));
 }
 
-async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<number> {
+// Hyperdrive reaches only public hosts, so a loopback or socket database is never the deployed one.
+const LOCAL_DATABASE_HOSTS = new Set(['', 'localhost', '127.0.0.1', '::1', '[::1]']);
+
+/**
+ * `.env` may hold the deployed database URL (`void db connect` writes it there), so ask before
+ * dropping every table on any other host. Without a TTY, require `--yes`.
+ */
+async function confirmDropAllTables(
+  host: string,
+  target: string,
+  yes: boolean | undefined,
+): Promise<void> {
+  if (yes || LOCAL_DATABASE_HOSTS.has(host) || host.startsWith('/')) {
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    log.error(
+      `db: Refusing to drop every table in ${target} without confirmation. Re-run with --yes.`,
+    );
+    process.exit(1);
+  }
+  const ok = await confirm({ message: `This drops every table in ${target}. Continue?` });
+  if (isCancel(ok) || !ok) {
+    log.info('Cancelled.');
+    process.exit(0);
+  }
+}
+
+async function resetDatabase(
+  root: string,
+  dialect: DatabaseDialect,
+  yes?: boolean,
+): Promise<number> {
   // Coherence check must happen before any destructive work. Report a
   // malformed `_journal.json` like `runStatus`, `runMigrate`, and the deploy
   // path do, not as a raw stack trace.
@@ -540,6 +572,12 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   }
 
   if (dialect === 'postgresql') {
+    const { Client } = await import('pg');
+    // `?host=` and PGHOST can replace the URL host, so check the host pg will connect to.
+    const { host, port, database } = new Client({
+      connectionString: getLocalDatabaseUrl(root, dialect),
+    });
+    await confirmDropAllTables(host, `database "${database}" on ${host}:${port}`, yes);
     const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
     await withPgClient(root, async (client) => {
       const tables = await client.query(
@@ -554,6 +592,9 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   }
 
   if (dialect === 'mysql') {
+    const { hostname, host, pathname } = new URL(getLocalDatabaseUrl(root, dialect));
+    const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
+    await confirmDropAllTables(hostname, target, yes);
     await withMySqlClient(root, async (client) => {
       const tables = await client.query(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
@@ -586,8 +627,8 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   return applied.length;
 }
 
-async function runReset(root: string, dialect: DatabaseDialect): Promise<void> {
-  const count = await resetDatabase(root, dialect);
+async function runReset(root: string, dialect: DatabaseDialect, yes?: boolean): Promise<void> {
+  const count = await resetDatabase(root, dialect, yes);
   if (dialect === 'sqlite') {
     log.info(dim("Restart your dev server if it's running."));
   }
@@ -598,9 +639,10 @@ async function runSeed(
   root: string,
   file: string | undefined,
   dialect: DatabaseDialect,
+  yes?: boolean,
 ): Promise<void> {
   // Reset first (drop + re-run migrations)
-  const migrationCount = await resetDatabase(root, dialect);
+  const migrationCount = await resetDatabase(root, dialect, yes);
   log.step(`Reset database. Applied ${formatCount(migrationCount, 'migration')}.`);
 
   const seed = resolveSeedTarget(root, file);
