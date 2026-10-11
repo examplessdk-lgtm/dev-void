@@ -89,7 +89,7 @@ export function decodeCloudflareOperationResult<T extends ProcessResult>(
 }
 
 /** Echo a decoded result to the terminal when the caller did not capture it. */
-export function writeUncapturedOperationOutput(result: { stdout: string; stderr: string }): void {
+function writeUncapturedOperationOutput(result: { stdout: string; stderr: string }): void {
   if (result.stdout) {
     process.stdout.write(result.stdout);
   }
