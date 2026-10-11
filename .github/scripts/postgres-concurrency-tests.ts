@@ -38,7 +38,7 @@ function usesPostgresEnvironment(node: unknown): boolean {
 }
 
 /** Select real PostgreSQL cases without repeating the whole in-memory API suite. */
-export function postgresConcurrencyTestFiles(root: string): Array<string> {
+function postgresConcurrencyTestFiles(root: string): Array<string> {
   const files = compatibilityTestFiles(root).filter((file) => {
     const parsed = parseSync(file, readFileSync(join(root, file), 'utf8'));
     if (parsed.errors.length > 0) {

@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { availableParallelism, tmpdir } from 'node:os';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite-plus';
 import { SuiteSequencer } from './test/sequencer.ts';
@@ -40,7 +39,6 @@ const e2eWorkerEnv = {
   VOID_E2E_CF_TOKEN: process.env.VOID_E2E_CF_TOKEN ?? '',
   VOID_E2E_CF_ACCOUNT_ID: process.env.VOID_E2E_CF_ACCOUNT_ID ?? '',
   VOID_E2E_RUN_ID: process.env.VOID_E2E_RUN_ID ?? '',
-  VOID_TEST_SOURCE_SNAPSHOTS: `${tmpdir().replaceAll('\\', '/')}/void-playground-sources-${randomUUID()}`,
 };
 
 // Windows CI runners are 2-3x slower for builds and server startup.
@@ -526,7 +524,6 @@ export default defineConfig({
           // schedule the longest files first and fill idle slots across package boundaries.
           name: 'parallel-integration',
           fsModuleCache: true,
-          globalSetup: ['test/playground-snapshots.ts'],
           // Bound simultaneous database engines and framework compilers locally.
           // Unit tests still fill unused integration workers in the same phase.
           sequence: { groupOrder: 2 },

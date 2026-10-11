@@ -9,7 +9,7 @@ const PROJECT_MODE_MIGRATION = {
   timestamp: 1790841384175,
 };
 
-export function isProjectModeMigrationApplied(rows) {
+function isProjectModeMigrationApplied(rows) {
   return (
     rows.length === 1 &&
     rows[0].hash === PROJECT_MODE_MIGRATION.hash &&
@@ -17,7 +17,7 @@ export function isProjectModeMigrationApplied(rows) {
   );
 }
 
-export function assertSchemaFixturePreserved(original, rows, projectModeMigrationApplied = false) {
+function assertSchemaFixturePreserved(original, rows, projectModeMigrationApplied = false) {
   for (const [table, row] of Object.entries(original)) {
     for (const [key, value] of Object.entries(row)) {
       // 0054 deliberately normalizes the obsolete Worker mode to the public
@@ -40,7 +40,7 @@ export function assertSchemaFixturePreserved(original, rows, projectModeMigratio
   }
 }
 
-export async function runSchemaFixture(command, env = process.env) {
+async function runSchemaFixture(command, env = process.env) {
   const snapshot =
     env.COMPAT_FIXTURE_PATH ??
     (env.RUNNER_TEMP ? `${env.RUNNER_TEMP}/void-schema-fixture.json` : undefined);

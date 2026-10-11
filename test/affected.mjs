@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { deletedFiles, planAffectedTests } from './affected-tests.ts';
 import { createAffectedVcsProvider } from './affected-vcs.ts';
 
-export async function runAffected(root, values) {
+async function runAffected(root, values) {
   root = realpathSync(root);
   if (values.help) {
     console.log('vp run test [--base <ref>] [--list] [--unit]');

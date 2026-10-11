@@ -48,7 +48,7 @@ export type IsolatedPlayground = {
   cleanup: () => void;
 };
 
-export function shouldCopyPlaygroundPath(sourceRoot: string, path: string): boolean {
+function shouldCopyPlaygroundPath(sourceRoot: string, path: string): boolean {
   const normalizedSourceRoot = sourceRoot.replaceAll('\\', '/');
   const normalizedPath = path.replaceAll('\\', '/');
   const relativePath = relative(normalizedSourceRoot, normalizedPath);
@@ -66,21 +66,17 @@ export function createIsolatedPlayground(
   sourceWorkspacePath: string,
 ): IsolatedPlayground {
   const sourceRoot = join(workspaceRoot, sourceWorkspacePath);
-  const snapshot = process.env.VOID_TEST_SOURCE_SNAPSHOTS
-    ? join(process.env.VOID_TEST_SOURCE_SNAPSHOTS, sourceWorkspacePath)
-    : undefined;
-  const copySource = snapshot && existsSync(snapshot) ? snapshot : sourceRoot;
   const playgroundLocal = join(workspaceRoot, 'playground-local', '.test-fixtures');
   mkdirSync(playgroundLocal, { recursive: true });
   const root = mkdtempSync(join(playgroundLocal, `test-${basename(sourceWorkspacePath)}-`));
 
-  cpSync(copySource, root, {
+  cpSync(sourceRoot, root, {
     recursive: true,
     filter(path) {
       // `cpSync` reports native backslash paths on Windows, while these workspace paths are
       // normalized to forward slashes. Normalize before using the POSIX path helpers or the
       // top-level `node_modules` directory is copied into the isolated dependency tree.
-      return shouldCopyPlaygroundPath(copySource, path);
+      return shouldCopyPlaygroundPath(sourceRoot, path);
     },
   });
 

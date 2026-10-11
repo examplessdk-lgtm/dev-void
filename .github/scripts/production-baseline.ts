@@ -1,7 +1,7 @@
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export async function productionBaseline(options: {
+async function productionBaseline(options: {
   configuredSha?: string;
   repository: string;
   token?: string;
