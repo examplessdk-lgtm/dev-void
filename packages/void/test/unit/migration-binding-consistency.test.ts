@@ -253,16 +253,6 @@ describe('buildFrameworkManifest migration-binding consistency', () => {
     expect(manifest.bindings.d1).toBeUndefined();
     expect(manifest.migrations).toEqual({ dialect: 'postgresql', pending: 1 });
   });
-
-  it('rejects live bindings because framework workers do not export the live durable object', () => {
-    expect(() =>
-      buildFrameworkManifest({
-        frameworkName: 'nuxt',
-        workerMain: 'index.js',
-        bindings: { ...noBindings, needsLive: true },
-      }),
-    ).toThrow('void/live is currently supported in Void apps only');
-  });
 });
 
 // ---------------------------------------------------------------------------

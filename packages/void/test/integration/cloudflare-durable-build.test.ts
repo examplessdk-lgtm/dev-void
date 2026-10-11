@@ -1,19 +1,19 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseRootWranglerConfig } from '@void/deploy-cloudflare';
 import spawn from 'cross-spawn';
 import { describe, expect, it } from 'vite-plus/test';
 import { createIsolatedPlayground } from '../../../../test/integration-helpers.ts';
 import { analyzeApplicationSync } from '../../src/application-analysis.ts';
+import { verifyGeneratedDeployConfig } from '../../src/cli/deploy-artifact-validation.ts';
 import {
-  computeDesiredCloudflareResources,
-  parseRootWranglerConfig,
   reconstructExpectedContainers,
   reconstructExpectedDurableObjectState,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
-  verifyGeneratedDeployConfig,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-binding-snapshot.ts';
+import { computeDesiredCloudflareResources } from '../../src/cli/deploy-resources.ts';
 import { syncWranglerBindings } from '../../src/cli/wrangler.ts';
 import { materializeCloudflareConfig } from '../../src/cloudflare-config.ts';
 import { renderVoidConfig } from '../../src/config-write.ts';

@@ -137,7 +137,6 @@ export async function runStaticDeploy(
   s.start('Packaging...');
   cliLog?.info('package_start', { mode: 'static' });
   const packageStartedAt = Date.now();
-  const neededSet = skipped > 0 ? new Set(needed) : null;
 
   const manifest = buildStaticManifest({
     appType: preset.appType,
@@ -151,19 +150,18 @@ export async function runStaticDeploy(
     mode: 'static',
     durationMs: Date.now() - packageStartedAt,
   });
-  const result = await streamDirectR2Deploy(
+  const result = await streamDirectR2Deploy({
     client,
-    config.projectId,
+    projectId: config.projectId,
     manifest,
     assetManifest,
     assetFiles,
     needed,
     gitMetadata,
-    neededSet !== null,
-    undefined,
-    s,
+    preflightUsed: skipped > 0,
+    spinner: s,
     cliLog,
-  );
+  });
 
   note(
     formatDeploySummary({ typeLabel, assets: result.assets, unchangedAssets: skipped }),

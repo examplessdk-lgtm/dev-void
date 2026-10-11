@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { analyzeApplicationSync } from '../../src/application-analysis.ts';
-import { computeDesiredCloudflareResources } from '../../src/cli/deploy.ts';
+import { computeDesiredCloudflareResources } from '../../src/cli/deploy-resources.ts';
 import { buildFrameworkManifest, buildVoidManifest } from '../../src/cli/package.ts';
 import { readConfig, type VoidConfig } from '../../src/config.ts';
 import { validateMigrations } from '../../src/migrations/validate.ts';

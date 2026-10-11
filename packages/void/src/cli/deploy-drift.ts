@@ -18,7 +18,6 @@ import { listDrizzleArtifacts } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { log, getErrorMessage } from './deploy-helpers.ts';
-import { scrubWranglerAuthCredentials } from './deploy-transport.ts';
 import { Buffer } from './node-buffer.ts';
 
 const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
@@ -105,7 +104,7 @@ function runDrizzleKitGenerate(root: string, configPath: string): string {
     // drizzle-kit loads the user's drizzle config + schema (user code); keep the
     // CF Access service token AND every wrangler-auth credential out of it, matching the
     // build spawns. Generating migrations needs no Cloudflare credential.
-    env: scrubWranglerAuthCredentials(buildEnv()),
+    env: buildEnv(),
   });
   const stderr = bufferToString(result.stderr);
   const stdout = bufferToString(result.stdout);

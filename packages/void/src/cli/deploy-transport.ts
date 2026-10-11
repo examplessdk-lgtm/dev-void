@@ -4,7 +4,7 @@ import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../shared/env.ts';
 import { WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
 import { CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV } from '../shared/version-metadata.ts';
-import { requireProvisionModule, loadedProvisionModule } from './deploy-provision.ts';
+import { requireProvisionModule } from './deploy-provision.ts';
 
 /**
  * Marks a build child as driven by a MANAGED `void deploy`.
@@ -21,9 +21,8 @@ import { requireProvisionModule, loadedProvisionModule } from './deploy-provisio
  * later `void dev` in the same shell.
  *
  * Deliberately NOT set by `runCloudflareDeploy` (`--platform cloudflare`): that flow
- * hands the built output to `wrangler deploy` against the user's own account and IS the
- * self-host path the warning is about. (It rejects framework SSR outright today, so no
- * Class A build reaches it either way.)
+ * deploys the built output to the user's own account and IS the self-host path the
+ * warning is about.
  */
 export const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
 
@@ -167,10 +166,9 @@ export function resolveDeployTransport(root: string, rootConfig: Record<string, 
  * selector incl. `CLOUDFLARE_ENV` + win32 case variants, pins ONE account + API base),
  * then scrubs the deploy-specific config-override selectors on top.
  *
- * This is the env {@link createDeployWranglerRunner} spawns `whoami` / `d1 migrations apply`
- * / `deploy` with, so it deliberately KEEPS the wrangler-auth credentials — only the
- * untrusted-code children layer {@link scrubWranglerAuthCredentials} on top. Exported so a
- * test can assert that directly.
+ * {@link createDeployWranglerRunner} runs the deploy's Cloudflare operations with this
+ * env, so it KEEPS the Cloudflare credentials; only children that run project code layer
+ * {@link scrubWranglerAuthCredentials} on top.
  */
 export function deployChildEnv(
   accountId: string | undefined,
@@ -181,12 +179,8 @@ export function deployChildEnv(
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
     provision.deleteEnvVarCaseAware(env, name);
   }
-  // Pin WRANGLER_LOG=log for the whole deploy so wrangler's `d1 migrations list` sentinels
-  // ('No migrations to apply!' / 'Migrations to be applied:'), emitted at logger level
-  // `log`, are NEVER suppressed by an ambient WRANGLER_LOG=none|error|warn|info — otherwise
-  // a declined/partial apply prints no marker and the pending-check would pass open. The
-  // canonical spelling is scrubbed case-aware FIRST so no mixed-case ambient value shadows
-  // the pin on win32; `log` is wrangler's own default level, so normal output is unchanged.
+  // Pin Wrangler's default log level. Delete case-aware first so a mixed-case
+  // ambient value cannot shadow the pin on win32.
   provision.deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
   env.WRANGLER_LOG = 'log';
   // Void owns the browser OAuth lifecycle. Never allow Wrangler to fall back to
@@ -197,24 +191,10 @@ export function deployChildEnv(
 
 /**
  * Delete every {@link WRANGLER_AUTH_CREDENTIAL_ENV_VARS} entry from `env` IN PLACE and
- * return it, for a child that executes UNTRUSTED project code and needs no Cloudflare
- * credential of its own.
- *
- * The case-aware delete lives in the provision module, which ONLY the Cloudflare fork
- * loads (a managed deploy must not pay `proper-lockfile`'s import-time side effects). One
- * caller — `runDrizzleKitGenerate`, via the shared schema-drift check — also runs on the
- * MANAGED path, where that module is legitimately absent, so read the memoized handle
- * directly instead of {@link requireProvisionModule} (which throws when the fork never ran)
- * and fall back to the exact-case delete. That fallback IS the whole rule off win32 (POSIX
- * env keys are case-sensitive); the case-insensitive win32 sweep only matters for the
- * Cloudflare fork, and by the time either call site runs there the module is always loaded.
+ * return it, for a Cloudflare-fork child that executes UNTRUSTED project code.
  */
 export function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const deleteVar =
-    loadedProvisionModule?.deleteEnvVarCaseAware ??
-    ((target: NodeJS.ProcessEnv, name: string): void => {
-      delete target[name];
-    });
+  const { deleteEnvVarCaseAware: deleteVar } = requireProvisionModule();
   for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
     deleteVar(env, name);
   }

@@ -13,6 +13,7 @@ import { stripVTControlCharacters } from 'node:util';
 import {
   CloudflareWorkerInspectionError,
   parseCloudflareVersionMessage,
+  parseRootWranglerConfig,
   type CloudflareOperation,
 } from '@void/deploy-cloudflare';
 import { log } from '@voidzero-dev/vite-plus-prompts';
@@ -24,35 +25,41 @@ import {
   operationFixtureRequest,
 } from '../../../deploy-cloudflare/test/operation-fixture.ts';
 import { readCloudflareLink } from '../../src/cli/cloudflare-link.ts';
+import { verifyGeneratedDeployConfig } from '../../src/cli/deploy-artifact-validation.ts';
 import {
-  assertMigrationsProduceAuthSchema,
-  assertNoConfigOverrideInProjectDotenv,
   assertWranglerUploaderUnchanged,
-  checkWranglerMigrationApplySet,
-  compareWranglerMigrationPaths,
-  computeDesiredCloudflareResources,
-  deployChildEnv,
   DEPLOY_PASSTHROUGH_ASSERT_FIELDS,
   DEPLOY_PASSTHROUGH_EXCLUDE_FIELDS,
   DEPLOY_WHOLE_OBJECT_PINNED_FIELDS,
-  ensureCloudflareAuthSecret,
-  formatCloudflareActivationError,
   hashWranglerUploader,
-  parseRootWranglerConfig,
-  prepareCloudflareFrameworkArtifact,
   reconstructExpectedDurableObjectState,
-  runCloudflareDeploy,
-  runWranglerAuthToken,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
+} from '../../src/cli/deploy-binding-snapshot.ts';
+import {
+  ensureCloudflareAuthSecret,
+  runWranglerAuthToken,
+} from '../../src/cli/deploy-cloudflare-auth.ts';
+import { formatCloudflareActivationError } from '../../src/cli/deploy-cloudflare-helpers.ts';
+import { prepareCloudflareFrameworkArtifact } from '../../src/cli/deploy-cloudflare-static.ts';
+import { runCloudflareDeploy } from '../../src/cli/deploy-cloudflare.ts';
+import {
+  assertMigrationsProduceAuthSchema,
+  checkWranglerMigrationApplySet,
+  compareWranglerMigrationPaths,
   validateAuthMigrationSchema,
-  verifyGeneratedDeployConfig,
-  type CloudflareDeployDeps,
-  type DeployWranglerRun,
-  type DeployWranglerRunResult,
-  type EmittedWorkerVarsResult,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-migrations.ts';
+import { computeDesiredCloudflareResources } from '../../src/cli/deploy-resources.ts';
+import {
+  assertNoConfigOverrideInProjectDotenv,
+  deployChildEnv,
+} from '../../src/cli/deploy-transport.ts';
+import type {
+  CloudflareDeployDeps,
+  DeployWranglerRun,
+  DeployWranglerRunResult,
+} from '../../src/cli/deploy-types.ts';
 import { SENDING_FREE_PLAN_HINT, type EmailDns } from '../../src/cli/email-cloudflare.ts';
 import { runEmailCloudflareCommand } from '../../src/cli/email.ts';
 import {
@@ -63,6 +70,7 @@ import {
 } from '../../src/cli/env-schema-probe.ts';
 import {
   dischargeSelfHostEnvContext,
+  type EmittedWorkerVarsResult,
   type SelfHostEnvContext,
   type SelfHostSchemaFacts,
 } from '../../src/cli/env-validation.ts';

@@ -105,8 +105,6 @@ export interface CloudflareDeployDeps {
   prepareFrameworkArtifact?: typeof prepareCloudflareFrameworkArtifact;
   /** Upload, readiness-probe, and activate the verified Worker Version. */
   activateVersion?: typeof activateCloudflareVersion;
-  /** Read-only metadata transport; writes always use the pinned uploader. */
-  metadataFetch?: typeof globalThis.fetch;
   /**
    * Wrangler-uploader content-hash seam (default: {@link hashWranglerUploader}). Snapshotted
    * BEFORE the build and re-checked AFTER, so a build that overwrote the wrangler bundle the

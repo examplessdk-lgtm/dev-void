@@ -1,5 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getContentType } from '@void/edge';
 import { hash as blake3hash } from 'blake3-jit';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
@@ -19,13 +20,8 @@ vi.mock('node:fs', async () => {
 const fsModule = await import('node:fs');
 const readFileSyncMock = fsModule.readFileSync as unknown as ReturnType<typeof vi.fn>;
 
-const {
-  collectAndHashAssets,
-  computeAssetHash,
-  computeAssetHashes,
-  computeMd5,
-  getAssetContentType,
-} = await import('../../src/cli/package.ts');
+const { collectAndHashAssets, computeAssetHash, computeAssetHashes, computeMd5 } =
+  await import('../../src/cli/package.ts');
 
 const TMP = join(import.meta.dirname, '.tmp-asset-hashing-test');
 
@@ -141,27 +137,25 @@ describe('collectAndHashAssets — v2 manifest entries', () => {
   });
 });
 
-describe('getAssetContentType', () => {
+describe('asset upload content type', () => {
   it('returns text/markdown for .md files', () => {
-    expect(getAssetContentType('/guide/github-actions-cache.md')).toBe(
-      'text/markdown; charset=utf-8',
-    );
+    expect(getContentType('/guide/github-actions-cache.md')).toBe('text/markdown; charset=utf-8');
   });
 
   it('returns text/markdown for .markdown files', () => {
-    expect(getAssetContentType('/notes.markdown')).toBe('text/markdown; charset=utf-8');
+    expect(getContentType('/notes.markdown')).toBe('text/markdown; charset=utf-8');
   });
 
   it('returns text/yaml for .yaml and .yml files', () => {
-    expect(getAssetContentType('/config.yaml')).toBe('text/yaml; charset=utf-8');
-    expect(getAssetContentType('/config.yml')).toBe('text/yaml; charset=utf-8');
+    expect(getContentType('/config.yaml')).toBe('text/yaml; charset=utf-8');
+    expect(getContentType('/config.yml')).toBe('text/yaml; charset=utf-8');
   });
 
   it('returns application/toml for .toml files', () => {
-    expect(getAssetContentType('/config.toml')).toBe('application/toml');
+    expect(getContentType('/config.toml')).toBe('application/toml');
   });
 
   it('returns application/octet-stream for unknown extensions', () => {
-    expect(getAssetContentType('/file.xyz')).toBe('application/octet-stream');
+    expect(getContentType('/file.xyz')).toBe('application/octet-stream');
   });
 });

@@ -6,7 +6,7 @@ import {
   createIsolatedPlayground,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
-import { assembleVoidManifest } from '../../src/cli/deploy.ts';
+import { assembleVoidManifest } from '../../src/cli/deploy-managed-static.ts';
 import { readConfig } from '../../src/config.ts';
 import { scanPages } from '../../src/pages/scan.ts';
 import { collectPrerenderPaths } from '../../src/prerender.ts';

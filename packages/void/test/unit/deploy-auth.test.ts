@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { intro } from '@voidzero-dev/vite-plus-prompts';
 import { toSlash } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { buildEnv, runDeploy } from '../../src/cli/deploy.ts';
+import { runDeploy } from '../../src/cli/deploy.ts';
+import { buildEnv } from '../../src/shared/untrusted-env.ts';
 
 const mockError = vi.fn();
 const mockInfo = vi.fn();

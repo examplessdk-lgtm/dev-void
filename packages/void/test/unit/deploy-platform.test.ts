@@ -2,11 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import {
-  assertManagedDurableStateSupported,
-  resolveDeploymentPlatform,
-  runDeploy,
-} from '../../src/cli/deploy.ts';
+import { assertManagedDurableStateSupported } from '../../src/cli/deploy-managed-framework.ts';
+import { resolveDeploymentPlatform, runDeploy } from '../../src/cli/deploy.ts';
 
 const roots: Array<string> = [];
 

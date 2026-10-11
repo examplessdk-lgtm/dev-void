@@ -1,5 +1,6 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
+import { parseRootWranglerConfig } from '@void/deploy-cloudflare';
 import spawn from 'cross-spawn';
 import { toSlash } from 'pathslash';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
@@ -7,15 +8,14 @@ import {
   createIsolatedPlayground,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
+import { verifyGeneratedDeployConfig } from '../../src/cli/deploy-artifact-validation.ts';
 import {
-  computeDesiredCloudflareResources,
-  parseRootWranglerConfig,
   reconstructExpectedContainers,
   snapshotBindingIdentities,
   snapshotPassthroughIdentities,
   snapshotPassthroughRawFields,
-  verifyGeneratedDeployConfig,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-binding-snapshot.ts';
+import { computeDesiredCloudflareResources } from '../../src/cli/deploy-resources.ts';
 import { materializeCloudflareConfig } from '../../src/cloudflare-config.ts';
 import { renderVoidConfig } from '../../src/config-write.ts';
 import { readConfig } from '../../src/config.ts';

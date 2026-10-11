@@ -10,7 +10,7 @@ import {
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
+import { hasDeploySchemaDrift } from '../../src/cli/deploy-drift.ts';
 import { generateStarterMigration } from '../../src/cli/init.ts';
 import { createPagesStarterTemplate, type ScaffoldStarterMode } from '../../src/cli/template.ts';
 

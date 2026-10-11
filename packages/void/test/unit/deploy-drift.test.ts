@@ -12,8 +12,8 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 import { generateVoidAuthDrizzleSchema } from '../../src/auth/drizzle.ts';
-import { getDeploySchemaDriftMessage } from '../../src/cli/deploy-drift.ts';
-import { hasDeploySchemaDrift, validateAuthMigrationSchema } from '../../src/cli/deploy.ts';
+import { getDeploySchemaDriftMessage, hasDeploySchemaDrift } from '../../src/cli/deploy-drift.ts';
+import { validateAuthMigrationSchema } from '../../src/cli/deploy-migrations.ts';
 import { writeDrizzleConfig } from '../../src/drizzle/config.ts';
 import { collectMigrations } from '../../src/migrations/collect.ts';
 

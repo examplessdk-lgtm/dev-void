@@ -52,7 +52,6 @@ export async function runFrameworkDeploy(
   log.info(`${detected.name} framework deploy`);
   cliLog?.info('deploy_mode', { mode: 'framework', framework: detected.name });
 
-  // 1. Build
   const buildCmd = voidConfig.inference?.build ?? formatProjectCommand(root, fwPreset.buildCommand);
   if (!skipBuild) {
     log.step(`Building (${buildCmd})...`);
@@ -68,7 +67,6 @@ export async function runFrameworkDeploy(
     cliLog?.info('build_skipped', { reason: 'skipBuild' });
   }
 
-  // 2. Verify output paths
   const workerDir = join(root, fwPreset.workerDir);
   const assetsDir = join(root, fwPreset.assetsDir);
   const frameworkAssetIgnorePatterns =
@@ -85,9 +83,7 @@ export async function runFrameworkDeploy(
     voidConfig.routing,
   );
 
-  // `assetConfig` below is pinned to `not_found_handling: 'none'` on this path,
-  // so `routing.notFound` is inert. Warned here (outside the packaging spinner)
-  // rather than at the pin itself.
+  // Warn before the packaging spinner starts.
   warnIgnoredNotFoundForFramework(voidConfig.routing?.notFound, detected.name);
 
   if (!existsSync(workerDir)) {
@@ -112,7 +108,7 @@ export async function runFrameworkDeploy(
 
   assertDeploySchemaDriftFree(root, dialect);
 
-  // 4. Collect migrations (before Hyperdrive check so migrations can gate provisioning)
+  // Validate migrations before the Hyperdrive check so migrations can gate provisioning.
   const validatedMigrations = validateDeployMigrations(paths.migrationsDir, analysis.migrations);
 
   // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
@@ -120,7 +116,6 @@ export async function runFrameworkDeploy(
     await ensureManagedHyperdrive(client, config.projectId, dialect);
   }
 
-  // 5. Generate wrapper if needed (crons or queues present)
   const rawJobs = analysis.jobs;
   const rawQueues = analysis.queues;
   const originalEntry = join(workerDir, fwPreset.workerMain);
@@ -135,7 +130,7 @@ export async function runFrameworkDeploy(
   let actualWorkerDir = workerDir;
   let actualWorkerMain = fwPreset.workerMain;
 
-  // Step 1: Bundle if framework has unbundled bare imports (e.g. SvelteKit)
+  // Bundle when the framework leaves bare imports unbundled (e.g. SvelteKit).
   if (fwPreset.bundle) {
     log.step('Bundling worker...');
     const bundleResult = await bundleEntry(root, originalEntry);
@@ -144,34 +139,24 @@ export async function runFrameworkDeploy(
     log.info('Worker bundled');
   }
 
-  // Step 2: Wrap if internal deploy endpoints are needed (in-place, no re-bundling)
+  // Wrap in place, without re-bundling, when internal deploy endpoints are needed.
   if (needsWrapper(wrapperFeatures)) {
     log.step('Generating wrapper...');
     await generateDeployWrapperIfNeeded(root, actualWorkerDir, actualWorkerMain, wrapperFeatures);
     log.info('Wrapper generated');
   }
 
-  // 8. Read wrangler compat settings (void.config.ts > wrangler.jsonc > build output)
-  // Use the original workerDir (not actualWorkerDir) because bundleEntry() may
-  // reassign actualWorkerDir to a temporary output — the plugin-generated
-  // wrangler.json with correct compat settings lives in the original build output.
+  // Read compat settings from the original workerDir: bundleEntry() may move
+  // actualWorkerDir to a temporary output without the generated wrangler.json.
   const wranglerCompat = resolveDeployWranglerCompat(root, voidConfig, workerDir, { dialect });
 
-  // 9. Resolve revalidate + prerender from void.config.ts
   const revalidate = collectRevalidate(voidConfig, null);
   const prerender = voidConfig.routing?.isr === false ? undefined : voidConfig.routing?.prerender;
 
-  // Build manifest-format schedules and queues from raw scans
   const { schedules, queues } = toManifestSchedulesAndQueues(rawJobs, rawQueues);
 
-  // Production env values are remote secrets. Client values are compiled
-  // from schema defaults or the build shell; no dotenv value enters the manifest.
-  const envVars: Record<string, string> = {};
-
-  // 10a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
 
-  // 11. Package & deploy
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
@@ -201,10 +186,8 @@ export async function runFrameworkDeploy(
     framework: detected.name,
   });
   const packageStartedAt = Date.now();
-  const neededSet = skipped > 0 ? new Set(needed) : null;
   const packageOptions = {
     bindingNames: analysis.bindingNames,
-    workerMain: actualWorkerMain,
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
     cpuMs: voidConfig.worker?.limits?.cpu_ms,
@@ -220,11 +203,8 @@ export async function runFrameworkDeploy(
     revalidate,
     revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
     prerender,
-    // Pinned, NOT threaded from `routing.notFound` — see
-    // `warnIgnoredNotFoundForFramework` for why the override must not apply to
-    // Class B/C. The warning above tells the user when they set it anyway.
+    // Not `routing.notFound`; see `warnIgnoredNotFoundForFramework`.
     assetConfig: { not_found_handling: 'none' },
-    vars: envVars,
     packageOptions,
     hashedAssetsPrefix: fwPreset.hashedAssetsPrefix ?? 'assets',
     headerRules,
@@ -242,19 +222,19 @@ export async function runFrameworkDeploy(
   // by the framework via `migration-handler.ts`); the deploy body only
   // needs `manifest.migrations.pending` so the platform knows to invoke
   // the worker's `/__void/migrate` endpoint after dispatch.
-  const result = await streamDirectR2Deploy(
+  const result = await streamDirectR2Deploy({
     client,
-    config.projectId,
+    projectId: config.projectId,
     manifest,
     assetManifest,
     assetFiles,
     needed,
     gitMetadata,
-    neededSet !== null,
+    preflightUsed: skipped > 0,
     workerFiles,
-    s,
+    spinner: s,
     cliLog,
-  );
+  });
 
   note(
     formatDeploySummary({

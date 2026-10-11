@@ -17,7 +17,7 @@ import {
   streamDeployEvents,
   warnIgnoredNotFoundForFramework,
   warnUnpublishedRouting,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-managed-events.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import type { DeployEvent } from '../../src/cli/types.ts';
 

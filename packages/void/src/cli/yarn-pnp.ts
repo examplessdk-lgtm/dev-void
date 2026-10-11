@@ -2,11 +2,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dirname, join } from 'pathslash';
 
-/**
- * Read PnP runtime files at a single directory without walking
- * ancestors. Returns a descriptor with the files that exist, or
- * `undefined` when neither is present.
- */
+/** Read the PnP runtime files in `dir` only, or `undefined` when neither exists. */
 function readPnpRuntimeAt(dir: string): { pnpCjs?: string; pnpLoader?: string } | undefined {
   const cjs = join(dir, '.pnp.cjs');
   const loader = join(dir, '.pnp.loader.mjs');
@@ -22,43 +18,10 @@ function readPnpRuntimeAt(dir: string): { pnpCjs?: string; pnpLoader?: string } 
 }
 
 /**
- * Returns true when `dir` contains a local package-manager lockfile
- * (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lock`,
- * `bun.lockb`). A lockfile at `dir` is definitive proof that a package
- * manager runs install from this directory: Yarn / pnpm / npm / bun
- * all write the lockfile at the install root, and workspace members
- * SHARE the root lockfile rather than carrying their own.
- *
- * Two independent call sites depend on this signal:
- *
- *   1. `findYarnPnpRuntime` / `findInstalledYarnPnpRuntime` below use
- *      it as the "leaf-managed install ownership" gate: a nested
- *      project with its own lockfile must NOT inherit an outer Yarn
- *      PnP runtime into `NODE_OPTIONS`, because the outer `.pnp.cjs`
- *      patches `Module._resolveFilename` to consult a graph that
- *      doesn't contain the leaf's dependencies — drizzle-kit then
- *      fails to resolve `drizzle-orm/...`.
- *   2. `resolveWorkspaceDeferral` in `init.ts` uses it as the
- *      "workspace-skip boundary": a subpackage with its own lockfile
- *      is not governed by the workspace install and must run install
- *      + starter migration locally.
- *
- * Both call sites must check the same set of lockfile paths — if one
- * drifts (for example, adding a new package manager's lockfile to
- * only one helper), the two paths will silently disagree on the same
- * directory. Exported as the single source of truth to lock the
- * invariant in one place.
- *
- * Note: `package.json#packageManager` (Corepack pin) is deliberately
- * NOT a signal here. A Yarn Berry workspace member can legitimately
- * declare its own `packageManager: "yarn@..."` while still resolving
- * through the workspace root's `.pnp.cjs`; treating the pin as
- * leaf-managed would stop the ancestor walk before reaching the real
- * PnP root and break `void db generate` / starter migration
- * generation in valid Yarn PnP monorepos. The lockfile check is
- * sufficient: a fresh-cloned leaf project with only a Corepack pin
- * will still trigger install, which writes the lockfile before
- * `generateStarterMigration()` fires, at which point the gate engages.
+ * Whether `dir` has its own package-manager lockfile, i.e. it is an install
+ * root: workspace members share the root lockfile. `packageManager` is not a
+ * signal, because a Yarn workspace member may pin it and still resolve through
+ * the root's `.pnp.cjs`.
  */
 export function hasLocalLockfile(dir: string): boolean {
   return (
@@ -71,20 +34,9 @@ export function hasLocalLockfile(dir: string): boolean {
 }
 
 /**
- * Walk ancestors from `start` (inclusive) looking for Yarn Berry PnP
- * runtime files. Returns the directory containing them (with both
- * possibly-existing paths) if found, or `undefined` otherwise.
- *
- * Walking ancestors is important for workspace subpackages — in a Yarn
- * PnP monorepo, `.pnp.cjs` lives at the workspace root, not in each
- * subpackage. Checking only `start` would miss the common shape.
- *
- * Local PnP files at `start` are always authoritative and take
- * precedence over the leaf-managed guard below. When `start` has no
- * local PnP files but DOES have a local lockfile, stop here — ancestor
- * PnP data belongs to a different install graph and injecting it will
- * break resolution for the local one. Only walk past `start` when
- * neither condition holds.
+ * Find Yarn Berry PnP runtime files at `start` or its nearest ancestor, since a
+ * monorepo keeps `.pnp.cjs` at the workspace root. A lockfile at `start` stops
+ * the walk: an outer PnP graph lacks the local install's dependencies.
  */
 function findYarnPnpRuntime(
   start: string,
@@ -114,44 +66,9 @@ function findYarnPnpRuntime(
 }
 
 /**
- * Stricter variant of {@link findYarnPnpRuntime}: only returns a result
- * when the PnP runtime files AND a post-install marker live in the
- * SAME ancestor directory.
- *
- * Yarn Berry repos commonly commit `.pnp.cjs` to
- * version control but NOT `.yarn/cache/*.zip` (zero-install is an
- * opt-in, not the default). A fresh `git clone` before `yarn install`
- * therefore has `.pnp.cjs` on disk while the PnP data points at ZIP
- * archives that haven't been fetched yet. Trusting `.pnp.cjs` existence
- * alone as proof that "yarn install has run" leads `init` to skip the
- * install step, and the subsequent `drizzle-kit generate` spawn crashes
- * because PnP tries to load `void/schema-d1` from a missing ZIP.
- *
- * Accept EITHER of two markers, to cover both non-zero-install
- * and zero-install shapes:
- *
- *   1. `.yarn/install-state.gz` in the same dir. Yarn Berry (3.x and
- *      4.x) writes this on every successful `yarn install` and it is
- *      gitignored by convention, so its presence strictly implies
- *      "yarn install has populated this checkout at least once". This
- *      is the only marker present in a classic (non-zero-install) repo.
- *   2. `.yarn/cache/` containing at least one `.zip` entry in the same
- *      dir. In zero-install repos (`nodeLinker: pnp`, cache committed
- *      to git), `install-state.gz` is commonly gitignored or absent,
- *      but the populated cache IS on disk — that's the whole point of
- *      zero-install. A populated cache is therefore sufficient proof
- *      that the checkout is ready to resolve dependencies.
- *
- * The same-directory requirement locks the invariant — a committed
- * `.pnp.cjs` in a subdirectory must not be covered by markers sitting
- * at an unrelated ancestor.
- *
- * NOTE: `findYarnPnpRuntime` intentionally does NOT apply this stricter
- * check. NODE_OPTIONS injection for drizzle-kit spawns should still
- * happen whenever PnP runtime files are present: if install hasn't run,
- * drizzle-kit will crash with or without the injected env, so the
- * inject is harmless; if the user is about to run install and then hits
- * a spawn, the env needs to be prepared.
+ * Like {@link findYarnPnpRuntime}, but only when Yarn has installed into that
+ * same directory. A committed `.pnp.cjs` alone does not prove an install: its
+ * ZIP archives may not be fetched yet.
  */
 export function findInstalledYarnPnpRuntime(
   start: string,
@@ -161,23 +78,13 @@ export function findInstalledYarnPnpRuntime(
 }
 
 /**
- * Return true when `dir` looks like a post-install Yarn Berry PnP
- * checkout. Two valid markers (see `findInstalledYarnPnpRuntime`):
- *
- *   - `.yarn/install-state.gz` — written by every successful
- *     `yarn install` in a classic (non-zero-install) repo.
- *   - `.yarn/cache/*.zip` — present in a zero-install checkout, where
- *     archives are committed to git and `install-state.gz` is often
- *     gitignored or absent.
+ * Yarn writes `.yarn/install-state.gz` on every install; a zero-install
+ * checkout instead commits a populated `.yarn/cache`.
  */
 function isYarnPnpInstalled(dir: string): boolean {
-  // Non-zero-install: Yarn writes this on every successful
-  // `yarn install`.
   if (existsSync(join(dir, '.yarn', 'install-state.gz'))) {
     return true;
   }
-  // Zero-install: archives are committed to git. A populated cache is
-  // the post-install proof.
   const cacheDir = join(dir, '.yarn', 'cache');
   if (!existsSync(cacheDir)) {
     return false;
@@ -191,17 +98,9 @@ function isYarnPnpInstalled(dir: string): boolean {
 }
 
 /**
- * Build a child-process env that injects Yarn Berry PnP loaders into
- * `NODE_OPTIONS` when a PnP runtime is found at or above `root`. This
- * mirrors what `yarn node` does under the hood: `--require` the PnP
- * CJS shim (patches `fs` + `Module._resolveFilename` to understand ZIP
- * virtual paths) and, when present, `--experimental-loader` the PnP
- * ESM loader.
- *
- * Any pre-existing `NODE_OPTIONS` from the parent process (for example
- * when the command is invoked as `yarn void ...` and yarn already set
- * it) is appended AFTER our injected flags so our PnP `--require` runs
- * first. Non-PnP projects inherit `process.env` unchanged.
+ * Build a child env that loads the Yarn PnP runtime found at or above `root`,
+ * like `yarn node` does. Existing `NODE_OPTIONS` go after our flags so the PnP
+ * `--require` patches resolution first.
  */
 export function buildDrizzleKitSpawnEnv(root: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -221,9 +120,6 @@ export function buildDrizzleKitSpawnEnv(root: string): NodeJS.ProcessEnv {
     flags.push(`--experimental-loader ${pathToFileURL(pnp.pnpLoader).href}`);
   }
   const injected = flags.join(' ');
-  // Preserve any pre-existing NODE_OPTIONS by prepending ours — order
-  // matters for `--require` so the PnP loader patches `fs` /
-  // `Module._resolveFilename` before anything the user registered.
   env.NODE_OPTIONS = process.env.NODE_OPTIONS
     ? `${injected} ${process.env.NODE_OPTIONS}`
     : injected;

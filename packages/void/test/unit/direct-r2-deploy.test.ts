@@ -60,7 +60,7 @@ vi.mock('../../src/cli/output.ts', async () => {
 const fsModule = await import('node:fs');
 const readFileSyncMock = fsModule.readFileSync as unknown as ReturnType<typeof vi.fn>;
 
-const { runStaticDeploy } = await import('../../src/cli/deploy.ts');
+const { runStaticDeploy } = await import('../../src/cli/deploy-managed-static.ts');
 const { openDeployLog } = await import('../../src/cli/log-file.ts');
 const { PlatformClient } = await import('../../src/cli/client.ts');
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { assembleVoidManifest } from '../../src/cli/deploy.ts';
+import { assembleVoidManifest } from '../../src/cli/deploy-managed-static.ts';
 import type { InferredBindings } from '../../src/inference/walk.ts';
 import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 

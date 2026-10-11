@@ -3,19 +3,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toSlash } from 'pathslash';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { resolveDistDir, resolveWorkerDirName } from '../../src/cli/build-output-dir.ts';
 import type { PlatformClient, ProjectResponse } from '../../src/cli/client.ts';
 import {
   ensurePreviouslyDeployedLiveBindingConfig,
   generateDeployWrapperIfNeeded,
   resolveDeployLiveBindingConfig,
   resolveDeployWorkerMain,
-  resolveDistDir,
   resolveDeployWranglerCompat,
   resolveFullDeployBuildCommand,
   resolveStaticDeployPreset,
   resolveStaticBuildCommand,
-  resolveWorkerDirName,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-helpers.ts';
 import {
   formatProjectCommand,
   resolveProjectCommand,

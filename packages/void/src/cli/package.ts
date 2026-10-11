@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { getContentType } from '@void/edge';
 import { hash as blake3hash } from 'blake3-jit';
 import ignore from 'ignore';
 import { extname, join, relative } from 'pathslash';
@@ -36,9 +35,6 @@ const textEncoder = new TextEncoder();
 
 type ProgressCallback = (message: string) => void;
 
-const FRAMEWORK_LIVE_UNSUPPORTED_MESSAGE =
-  'deploy: void/live is currently supported in Void apps only.';
-
 /**
  * Strip dev-only / internal-only fields from each rule before shipping the
  * manifest. The resulting entries contain only `{ source, destination, status }`.
@@ -65,34 +61,12 @@ function stripDevOnlyRuleFields(
 }
 
 /**
- * Layer user-defined `routing.fallbacks` with the SPA app type's implicit
- * `/index.html` fallback. Decision: user fallbacks take precedence; if none
- * matches, the SPA default kicks in.
- *
- * The platform's `not_found_handling: 'single-page-application'` is a global
- * switch — set once per deployment — so we can't have the platform evaluate
- * user fallbacks *before* applying it. Instead, when the user has configured
- * fallbacks on a SPA app, we disable the platform-level SPA setting and
- * append a synthetic catch-all fallback rule (`/*` → `/index.html`) after
- * the user's rules. The dispatch worker evaluates routing rules with
- * first-match-wins semantics, so placing the synthetic rule last means any
- * user rule that matches a more specific pattern fires first; the synthetic
- * rule only catches paths no user rule matched.
- *
- * When the user has no fallbacks configured, the platform-level SPA switch
- * is left intact (zero worker-side overhead for the common case).
- *
- * `notFound` is the explicit `routing.notFound` from void.json. It overrides
- * the value this function would otherwise infer from `appType`, mirroring
- * `resolveAssetRoutingPolicy` on the worker-with-assets path. It is resolved
- * *before* the SPA branch, not patched onto the result afterwards: an override
- * away from `single-page-application` must also skip the synthetic
- * `/* -> /index.html` rule below, otherwise the SPA shell would still be
- * served — just through a fallback rule instead of the platform switch — and
- * the override would be a no-op. This matters because `detectPreset`
- * classifies any Vite project without backend files as `spa`, so a plain Vite
- * MPA lands on `appType: 'spa'` and `routing.notFound: '404-page'` is its only
- * escape hatch.
+ * Layer user `routing.fallbacks` over the SPA default. The platform SPA switch
+ * is global, so a SPA with user fallbacks turns it off and appends a synthetic
+ * `/* -> /index.html` rule after them (first match wins). An explicit
+ * `routing.notFound` is resolved first, so overriding away from SPA also skips
+ * the synthetic rule. `detectPreset` classes a plain Vite MPA as `spa`, so this
+ * override is its only escape hatch.
  */
 export function resolveSpaFallbackChain(
   appType: 'spa' | 'static' | undefined,
@@ -123,13 +97,8 @@ export function resolveSpaFallbackChain(
     };
   }
 
-  // User fallbacks present on a SPA app — disable the platform-level SPA
-  // switch and append a synthetic catch-all rule after user rules, so that
-  // under first-match-wins any more specific user rule fires first. If the
-  // user already has an *unscoped* `/*` → `/index.html`, skip the append so
-  // we don't ship two identical rules (which would trip the duplicate-source
-  // lint). A host-scoped catch-all only covers one hostname, so other bound
-  // hosts still need the synthetic global SPA fallback.
+  // An unscoped user `/* -> /index.html` already is the catch-all; a duplicate
+  // would trip the duplicate-source lint. A host-scoped one covers one host only.
   const alreadyHasCatchAll = userRules.some(
     (r) => r.host === undefined && r.source === '/*' && r.destination === '/index.html',
   );
@@ -189,18 +158,6 @@ export function computeAssetHash(content: Buffer, filePath: string): string {
 }
 
 /**
- * Resolve the content-type to declare on a direct-to-R2 PUT for `path`.
- * The value is part of the signed Content-Type header on the presigned
- * URL — if the bytes are uploaded with a different content-type, R2
- * rejects the PUT (signature mismatch). Uses the same table dispatch serves
- * assets with, so R2-stored and serve-time content types agree. Defaults to
- * `application/octet-stream` for unknown extensions.
- */
-export function getAssetContentType(path: string): string {
-  return getContentType(path);
-}
-
-/**
  * Compute MD5 of raw content as a 32-char lowercase hex string.
  *
  * Used as the wire-level upload-integrity primitive on direct-to-R2 PUTs:
@@ -217,11 +174,7 @@ export function computeMd5(content: Buffer): string {
 
 /**
  * Compute both BLAKE3 (CF-compatible asset hash) and MD5 (wire-level R2
- * upload-integrity checksum) from a single in-memory buffer. Returned in
- * the v2 manifest entry shape for direct-to-R2 deploys.
- *
- * Single-pass: callers read the file once into `content`; this function
- * then derives both digests from that buffer. The file is never read twice.
+ * upload-integrity checksum) in the v2 manifest entry shape.
  */
 export function computeAssetHashes(
   content: Buffer,
@@ -324,7 +277,6 @@ export async function collectAndHashAssets(
       // `collectAssetFiles` already skipped ignored paths.
       const relativePath = '/' + toSlash(relative(dir, filePath));
       checkWorkerJsAsset(relativePath, assetsIgnoreFilePresent);
-      // Single disk read per file; both hashes are derived from the same buffer.
       const content = readFileSync(filePath);
       const { blake3, md5 } = computeAssetHashes(content, filePath);
       assetManifest[relativePath] = {
@@ -358,7 +310,7 @@ export type PackageOptions = {
   compatibilityDate?: string;
   /** Cloudflare compatibility_flags from framework's wrangler config. */
   compatibilityFlags?: Array<string>;
-  /** Workers CPU-time limit (ms) from void.json `worker.limits.cpu_ms`. */
+  /** Workers CPU-time limit (ms) from void.config.ts `worker.limits.cpu_ms`. */
   cpuMs?: number;
   /** Cloudflare Sandbox container metadata for platform deploys. */
   sandbox?: ResolvedSandboxConfig;
@@ -504,7 +456,6 @@ export function buildVoidManifest(opts: {
   revalidate?: number | Record<string, number>;
   pages?: Array<{ pattern: string; revalidate?: number }>;
   pathRevalidate?: Record<string, number>;
-  vars?: Record<string, string>;
   queues?: Array<QueueMeta>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
@@ -525,7 +476,6 @@ export function buildVoidManifest(opts: {
     revalidate,
     pages,
     pathRevalidate,
-    vars,
     queues,
     prerender,
     assetConfig,
@@ -610,12 +560,6 @@ export function buildVoidManifest(opts: {
     manifest.prerender = prerender;
   }
 
-  // Layer user fallbacks with the SPA default (if applicable). When the
-  // caller signals SPA mode via `not_found_handling: 'single-page-application'`
-  // and the user has `routing.fallbacks` configured, we disable the
-  // platform-level SPA switch and append a synthetic catch-all rule so user
-  // fallbacks are evaluated first and the SPA default only fires when none
-  // matched.
   let resolvedAssetConfig = assetConfig;
   let resolvedFallbackRules = fallbackRules;
   if (assetConfig?.not_found_handling === 'single-page-application') {
@@ -626,10 +570,6 @@ export function buildVoidManifest(opts: {
 
   if (resolvedAssetConfig) {
     manifest.assetConfig = resolvedAssetConfig;
-  }
-
-  if (vars && Object.keys(vars).length > 0) {
-    manifest.vars = vars;
   }
 
   if (options?.workerMain) {
@@ -757,14 +697,12 @@ export function buildFrameworkManifest(opts: {
   revalidateQueryAllowlist?: Record<string, Array<string>>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
-  vars?: Record<string, string>;
-  packageOptions?: PackageOptions;
+  packageOptions?: Omit<PackageOptions, 'workerMain'>;
   hashedAssetsPrefix?: string;
   headerRules?: Array<HeaderRule>;
   redirectRules?: Array<DevRedirectRule>;
   fallbackRules?: Array<DevRedirectRule>;
   dialect?: 'sqlite' | 'postgresql' | 'mysql';
-  webSockets?: Array<WebSocketRouteDefinition>;
 }): DeployManifest {
   const po = opts.packageOptions;
   const dialect = opts.dialect ?? 'sqlite';
@@ -777,9 +715,6 @@ export function buildFrameworkManifest(opts: {
     dialect,
     po?.bindingNames,
   );
-  if (opts.bindings.needsLive) {
-    throw new Error(FRAMEWORK_LIVE_UNSUPPORTED_MESSAGE);
-  }
 
   if (opts.migrations && opts.migrations.length > 0) {
     manifest.migrations = toMigrationsManifest(opts.migrations, dialect);
@@ -803,14 +738,11 @@ export function buildFrameworkManifest(opts: {
   if (opts.assetConfig) {
     manifest.assetConfig = opts.assetConfig;
   }
-  if (opts.vars && Object.keys(opts.vars).length > 0) {
-    manifest.vars = opts.vars;
-  }
 
   manifest.ssr = true;
   manifest.framework = opts.frameworkName;
   manifest.type = 'framework';
-  manifest.workerMain = po?.workerMain ?? opts.workerMain;
+  manifest.workerMain = opts.workerMain;
   if (po?.compatibilityDate) {
     manifest.compatibilityDate = po.compatibilityDate;
   }
@@ -835,11 +767,6 @@ export function buildFrameworkManifest(opts: {
 
   if (opts.fallbackRules && opts.fallbackRules.length > 0) {
     manifest.fallbackRules = stripDevOnlyRuleFields(opts.fallbackRules);
-  }
-
-  const websocketManifest = toWebSocketManifest(opts.webSockets);
-  if (websocketManifest) {
-    manifest.websocket = websocketManifest;
   }
 
   return manifest;

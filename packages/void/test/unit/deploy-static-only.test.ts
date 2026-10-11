@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { hasNonPageBackend } from '../../src/cli/deploy.ts';
+import { hasNonPageBackend } from '../../src/cli/deploy-helpers.ts';
 
 const NONE = {
   hasRoutes: false,
