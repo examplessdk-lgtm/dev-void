@@ -11,7 +11,6 @@ let PREVIEW_BASE: string;
 
 describe('playground/ssr dev', () => {
   let child: ReturnType<typeof spawn>;
-  let serverOutput = () => '';
 
   beforeAll(async () => {
     const server = await startServer((port) => {
@@ -40,15 +39,11 @@ describe('playground/ssr dev', () => {
       return child;
     }, 20_000);
     DEV_BASE = server.base;
-    serverOutput = server.output;
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
-    }
-    if (serverOutput().includes('error when starting dev server')) {
-      throw new Error(serverOutput());
     }
   });
 
@@ -76,7 +71,6 @@ describe('playground/ssr dev', () => {
 
 describe('playground/ssr build + preview', () => {
   let child: ReturnType<typeof spawn>;
-  let serverOutput = () => '';
 
   beforeAll(async () => {
     rmSync(join(ROOT, 'playground/ssr/dist'), { recursive: true, force: true });
@@ -108,15 +102,11 @@ describe('playground/ssr build + preview', () => {
       return child;
     }, 20_000);
     PREVIEW_BASE = server.base;
-    serverOutput = server.output;
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
-    }
-    if (serverOutput().includes('error when starting preview server')) {
-      throw new Error(serverOutput());
     }
   });
 

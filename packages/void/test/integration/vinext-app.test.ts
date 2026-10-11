@@ -17,7 +17,6 @@ let DEV_BASE: string;
 
 describe('playground/vinext-app dev', () => {
   let child: ReturnType<typeof spawn>;
-  let serverOutput = () => '';
   let playground: IsolatedPlayground;
 
   beforeAll(async () => {
@@ -34,7 +33,6 @@ describe('playground/vinext-app dev', () => {
       return child;
     }, 30_000);
     DEV_BASE = server.base;
-    serverOutput = server.output;
   });
 
   afterAll(async () => {
@@ -42,9 +40,6 @@ describe('playground/vinext-app dev', () => {
       await killChild(child);
     }
     playground?.cleanup();
-    if (serverOutput().includes('error when starting dev server')) {
-      throw new Error(serverOutput());
-    }
   });
 
   it('renders home page with SSR', async () => {

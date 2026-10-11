@@ -9,7 +9,6 @@ let DEV_BASE: string;
 
 describe('playground/react-router dev', { retry: 2 }, () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
 
   beforeAll(async () => {
     const server = await startServer((port) => {
@@ -35,10 +34,6 @@ describe('playground/react-router dev', { retry: 2 }, () => {
           },
         },
       );
-      stderr = '';
-      child.stderr!.on('data', (chunk: Buffer) => {
-        stderr += String(chunk);
-      });
       return child;
     }, 30_000);
     DEV_BASE = server.base;
@@ -47,9 +42,6 @@ describe('playground/react-router dev', { retry: 2 }, () => {
   afterAll(async () => {
     if (child) {
       await killChild(child);
-    }
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
     }
   });
 

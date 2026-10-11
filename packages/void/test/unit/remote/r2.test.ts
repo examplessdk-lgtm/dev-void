@@ -75,6 +75,7 @@ describe('ProxyR2Bucket', () => {
 
       expect(obj).not.toBeNull();
       expect(obj!.key).toBe('file.txt');
+      expect(obj!.size).toBe(body.length);
       const text = await obj!.text();
       expect(text).toBe('file contents here');
     });

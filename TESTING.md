@@ -245,8 +245,7 @@ VOID_TEST_BROWSER=webkit vp test run packages/react/test/integration packages/vu
 Use `waitForIslandsHydrated` from `test/browser-helpers.ts` before asserting island state or
 interacting with islands. Pass the expected minimum count when checking a multi-island fixture.
 Each island imports and hydrates independently, so a selector matching one hydrated island does
-not establish that its siblings are ready. The helper rejects empty or partially hydrated pages;
-`packages/void/test/integration/browser-helpers.test.ts` covers these cases.
+not establish that its siblings are ready. The helper rejects empty or partially hydrated pages.
 
 For SPA navigation, wait for a client readiness signal before setting the document marker and
 clicking. The Nuxt and SvelteKit playgrounds expose `h1[data-hydrated="true"]` after client startup.

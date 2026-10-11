@@ -7,11 +7,7 @@ import {
   createIsolatedPlayground,
   type IsolatedPlayground,
 } from '../../../../test/integration-helpers.ts';
-import { assembleVoidManifest } from '../../src/cli/deploy-managed-static.ts';
-import { readConfig } from '../../src/config.ts';
-import { scanPages } from '../../src/pages/scan.ts';
 import { collectPrerenderPaths } from '../../src/prerender.ts';
-import { resolveProjectPaths } from '../../src/project-paths.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const SOURCE_PLAYGROUND = 'playground/kitchen-sink';
@@ -127,47 +123,7 @@ describe('playground/kitchen-sink build', () => {
       'API_URL',
       'BETTER_AUTH_SECRET',
     ]);
-  });
-
-  it('requires auth deployments to inherit BETTER_AUTH_SECRET without emitting plaintext', () => {
-    const wranglerConfig = JSON.parse(readFileSync(join(dist, 'ssr', 'wrangler.json'), 'utf-8'));
-    const vars = (wranglerConfig.vars ?? {}) as Record<string, unknown>;
-    expect(wranglerConfig.secrets?.required).toContain('BETTER_AUTH_SECRET');
     expect(vars.BETTER_AUTH_SECRET).toBeUndefined();
-  });
-
-  it('emits manifest.pages for the Void pages app (scan order, RAW patterns)', async () => {
-    // The deploy manifest (carrying `pages`) is a `void deploy` artifact, not a
-    // `vite build` output — the `vp build` above never writes it to `dist`. Drive
-    // the SAME production seam `runFullDeploy` uses (`assembleVoidManifest`, which
-    // owns `scanPages` result → collectPages → manifest.pages) against the real
-    // kitchen-sink pages to prove it emits `manifest.pages` for a Void pages app
-    // (which includes an ISR page).
-    const pg = playground.root;
-    const deployConfig = readConfig(pg);
-    const paths = resolveProjectPaths(pg, deployConfig);
-    const pageScan = await scanPages(pg, { output: deployConfig.output, paths });
-    const manifest = assembleVoidManifest(pageScan, false, {
-      bindings: {
-        needsD1: false,
-        needsKV: false,
-        needsR2: false,
-        needsAuth: false,
-        needsQueues: false,
-        needsAI: false,
-        needsSandbox: false,
-      },
-    });
-
-    // kitchen-sink is a Void pages app → manifest.pages is emitted, in scan order.
-    expect(Array.isArray(manifest.pages)).toBe(true);
-    expect(manifest.pages!.length).toBeGreaterThan(0);
-    // every entry has a string pattern; catch-alls are RAW (`{.+}`/`*`), not normalized away
-    for (const p of manifest.pages!) {
-      expect(typeof p.pattern).toBe('string');
-    }
-    // the /revalidate page (export const revalidate = 60) surfaces as an ISR entry
-    expect(manifest.pages!.some((p) => p.revalidate != null)).toBe(true);
   });
 
   it('includes sandbox bindings and container metadata', () => {

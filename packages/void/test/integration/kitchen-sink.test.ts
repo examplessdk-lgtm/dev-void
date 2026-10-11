@@ -102,8 +102,6 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- SSR + SPA navigation --
-
   it('serves SSR home page and hydrates', async () => {
     const page = await newPage();
     try {
@@ -124,7 +122,6 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/`);
       await waitForHydration(page);
 
-      // Set a marker to detect full reload
       await page.evaluate(() => {
         window.__SPA_MARKER = true;
       });
@@ -137,7 +134,6 @@ describe('playground/kitchen-sink', () => {
       const marker = await page.evaluate(() => window.__SPA_MARKER);
       expect(marker).toBe(true);
 
-      // Navigate to another page
       await page.click('a[href="/kv"]');
       await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('KV'));
       expect(page.url()).toBe(`${BASE}/kv`);
@@ -168,8 +164,6 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- DB --
-
   it('DB: create and delete a note via the UI', async () => {
     const page = await newPage();
     const title = `e2e-${Date.now()}`;
@@ -178,29 +172,23 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/db`);
       await waitForHydration(page);
 
-      // Fill the form and submit
       await page.fill('input[placeholder="Note title"]', title);
       await page.fill('input[placeholder="Note body"]', 'test body');
       await page.click('button:has-text("Add Note")');
 
-      // Wait for the note to appear in the table
       await page.waitForFunction((t) => document.body.textContent?.includes(t), title);
       const text = await page.textContent('body');
       expect(text).toContain(title);
       expect(text).toContain('test body');
 
-      // Delete it — find the row with our title and click its Delete button
       const row = page.locator('tr', { hasText: title });
       await row.locator('button:has-text("Delete")').click();
 
-      // Wait for it to disappear
       await page.waitForFunction((t) => !document.body.textContent?.includes(t), title);
     } finally {
       await page.context().close();
     }
   });
-
-  // -- KV --
 
   it('KV: set and delete a key via the UI', async () => {
     const page = await newPage();
@@ -210,17 +198,14 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/kv`);
       await waitForHydration(page);
 
-      // Set a key
       await page.fill('input[placeholder="my-key"]', key);
       await page.fill('input[placeholder="my-value"]', 'hello');
       await page.click('button:has-text("Set")');
 
-      // Wait for it to appear in the keys list
       await page.waitForFunction((k) => document.body.textContent?.includes(k), key);
       let text = await page.textContent('body');
       expect(text).toContain(key);
 
-      // Delete it
       const row = page.locator('tr', { hasText: key });
       await row.locator('button:has-text("Delete")').click();
 
@@ -232,8 +217,6 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- Storage (R2) --
-
   it('Storage: upload and delete a file via the UI', async () => {
     const page = await newPage();
 
@@ -241,7 +224,6 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/storage`);
       await waitForHydration(page);
 
-      // Create a temp file via the file input
       const fileChooserPromise = page.waitForEvent('filechooser');
       await page.click('input[type="file"]');
       const fileChooser = await fileChooserPromise;
@@ -253,12 +235,10 @@ describe('playground/kitchen-sink', () => {
 
       await page.click('button:has-text("Upload")');
 
-      // Wait for it to appear
       await page.waitForFunction(() => document.body.textContent?.includes('e2e-test.txt'));
       const text = await page.textContent('body');
       expect(text).toContain('e2e-test.txt');
 
-      // Delete it
       const row = page.locator('tr', { hasText: 'e2e-test.txt' });
       await row.locator('button:has-text("Delete")').click();
 
@@ -267,8 +247,6 @@ describe('playground/kitchen-sink', () => {
       await page.context().close();
     }
   });
-
-  // -- Env --
 
   it('Env: displays bindings including DB and KV', async () => {
     const page = await newPage();
@@ -285,8 +263,6 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- Queues --
-
   it('Queues: send message and see consumer result', async () => {
     const page = await newPage();
     const key = `e2e-q-${Date.now()}`;
@@ -295,7 +271,6 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/queues`);
       await waitForHydration(page);
 
-      // Send a message
       await page.fill('input[placeholder="my-key"]', key);
       await page.fill('input[placeholder="my-value"]', 'queued');
       await page.click('button:has-text("Send to Queue")');
@@ -320,8 +295,6 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- Auth --
-
   it('Auth: register, login, protected route, logout via the UI', async () => {
     const page = await newPage();
     const email = `e2e-${Date.now()}@example.com`;
@@ -331,15 +304,12 @@ describe('playground/kitchen-sink', () => {
       await page.goto(`${BASE}/auth`);
       await waitForHydration(page);
 
-      // Should show "Not logged in"
       await page.waitForFunction(() => document.body.textContent?.includes('Not logged in'));
 
-      // Switch to Register tab
       const registerTab = page.locator('button', { hasText: 'Register' }).first();
       await registerTab.click();
       await page.waitForSelector('input[placeholder="Email"][type="email"]');
 
-      // Fill and submit the register form
       const regSection = page.locator('section', {
         has: page.locator('h2:has-text("Email Register")'),
       });
@@ -348,12 +318,10 @@ describe('playground/kitchen-sink', () => {
       await regSection.locator('input[type="text"]').fill('E2E User');
       await regSection.locator('button[type="submit"]').click();
 
-      // After register + reload, status should update (wait for "Not logged in" to disappear)
       await page.waitForFunction(() => !document.body.textContent?.includes('Not logged in'));
       const statusText = await page.textContent('body');
       expect(statusText).toContain(email);
 
-      // Test protected route
       await page.click('button:has-text("GET /api/profile")');
       await page.waitForFunction(() =>
         document.querySelector('pre')?.textContent?.includes('"user"'),
@@ -361,11 +329,9 @@ describe('playground/kitchen-sink', () => {
       const responseText = await page.textContent('pre');
       expect(responseText).toContain(email);
 
-      // Logout
       await page.click('button:has-text("Logout")');
       await page.waitForFunction(() => document.body.textContent?.includes('Not logged in'));
 
-      // Switch to Login tab and log back in
       const loginTab = page.locator('button', { hasText: 'Login' }).first();
       await loginTab.click();
 
@@ -376,7 +342,6 @@ describe('playground/kitchen-sink', () => {
       await loginSection.locator('input[type="password"]').fill(password);
       await loginSection.locator('button[type="submit"]').click();
 
-      // Should be logged in again
       await page.waitForFunction(() => !document.body.textContent?.includes('Not logged in'));
     } finally {
       await page.context().close();
@@ -436,92 +401,40 @@ describe('playground/kitchen-sink', () => {
     }
   });
 
-  // -- 404 handling --
-
-  it('returns 404 for paths with standard file extensions', async () => {
-    const res = await fetch(`${BASE}/missing.css`);
+  it.each([
+    '/missing.css',
+    '/.env',
+    '/laravel/.env',
+    '/.well-known/traffic-advice',
+    '/.git/HEAD',
+    '/.htaccess',
+    '/wp-login.php',
+    '/xmlrpc.php',
+    '/robots.txt',
+    '/favicon.ico',
+    '/api/nonexistent',
+  ])('returns 404 for %s', async (path) => {
+    const res = await fetch(`${BASE}${path}`);
     expect(res.status).toBe(404);
   });
 
-  it('returns 404 for dotfiles like /.env', async () => {
-    const res = await fetch(`${BASE}/.env`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for nested dotfiles like /laravel/.env', async () => {
-    const res = await fetch(`${BASE}/laravel/.env`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for dot-prefixed directory segments like /.well-known/traffic-advice', async () => {
-    const res = await fetch(`${BASE}/.well-known/traffic-advice`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for /.git/HEAD', async () => {
-    const res = await fetch(`${BASE}/.git/HEAD`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for /.htaccess', async () => {
-    const res = await fetch(`${BASE}/.htaccess`);
-    expect(res.status).toBe(404);
-  });
-
-  // File extension paths caught by last-segment dot check
-  it('returns 404 for /wp-login.php', async () => {
-    const res = await fetch(`${BASE}/wp-login.php`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for /xmlrpc.php', async () => {
-    const res = await fetch(`${BASE}/xmlrpc.php`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for /robots.txt', async () => {
-    const res = await fetch(`${BASE}/robots.txt`);
-    expect(res.status).toBe(404);
-  });
-
-  it('returns 404 for /favicon.ico', async () => {
-    const res = await fetch(`${BASE}/favicon.ico`);
-    expect(res.status).toBe(404);
-  });
-
-  // Bot probes — single-segment paths without dots, caught by notFound fallback
-  it('returns 404 for /wp-admin', async () => {
+  // Paths without a dot fall through to the notFound page.
+  it('returns an HTML Not Found page for /wp-admin', async () => {
     const res = await fetch(`${BASE}/wp-admin`);
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type')).toContain('text/html');
     expect(await res.text()).toContain('Not Found');
   });
 
-  it('returns 404 for /phpmyadmin', async () => {
-    const res = await fetch(`${BASE}/phpmyadmin`);
-    expect(res.status).toBe(404);
-    expect(await res.text()).toContain('Not Found');
-  });
+  it.each(['/phpmyadmin', '/foo/bar/baz', '/wp-content/plugins/exploit'])(
+    'returns the Not Found page for %s',
+    async (path) => {
+      const res = await fetch(`${BASE}${path}`);
+      expect(res.status).toBe(404);
+      expect(await res.text()).toContain('Not Found');
+    },
+  );
 
-  // Multi-segment unknown paths
-  it('returns 404 for /foo/bar/baz', async () => {
-    const res = await fetch(`${BASE}/foo/bar/baz`);
-    expect(res.status).toBe(404);
-    expect(await res.text()).toContain('Not Found');
-  });
-
-  it('returns 404 for /wp-content/plugins/exploit', async () => {
-    const res = await fetch(`${BASE}/wp-content/plugins/exploit`);
-    expect(res.status).toBe(404);
-    expect(await res.text()).toContain('Not Found');
-  });
-
-  it('returns 404 for unknown API routes', async () => {
-    const res = await fetch(`${BASE}/api/nonexistent`);
-    expect(res.status).toBe(404);
-  });
-
-  // Non-GET methods to unknown paths
   it('returns 404 for POST to unknown paths', async () => {
     const res = await fetch(`${BASE}/nonexistent`, { method: 'POST' });
     expect(res.status).toBe(404);
@@ -534,13 +447,8 @@ describe('playground/kitchen-sink', () => {
   });
 });
 
-// Preview runs the built worker in miniflare with no Cloudflare credentials.
-// Two bindings can't run in that environment, so strip them before preview.
-// Neither is exercised by this smoke test — both have dedicated coverage:
-//   - containers (SANDBOX) need a local Docker build.
-//   - ai (Workers AI) is remote-only, so its presence forces a remote-proxy
-//     session that needs a CF account/login. The build-time AI binding is
-//     covered directly by kitchen-sink-build.test.ts.
+// Preview runs without Cloudflare credentials: containers need a local Docker build and Workers AI
+// is remote-only, so turn both off. kitchen-sink-build.test.ts covers them.
 function preparePreviewWranglerConfig(pg: string): string {
   const wranglerPath = join(pg, 'dist', 'ssr', 'wrangler.json');
   const wranglerConfig = JSON.parse(readFileSync(wranglerPath, 'utf-8')) as {

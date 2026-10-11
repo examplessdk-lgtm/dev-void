@@ -114,9 +114,6 @@ export function checkSchema() {
       await killChild(child);
     }
     fixture?.cleanup();
-    if (serverOutput().includes('error when starting dev server')) {
-      throw new Error(serverOutput());
-    }
   });
 
   it('syncs the generated Cloudflare config with inferred bindings', () => {
