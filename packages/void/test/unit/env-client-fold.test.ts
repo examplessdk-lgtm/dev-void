@@ -7,7 +7,7 @@ type FoldContext = ReturnType<typeof makeContext>;
 type TransformHandler = (this: FoldContext, code: string, id: string) => unknown | Promise<unknown>;
 type ConfigResolvedHandler = (
   this: FoldContext,
-  config: { envPrefix?: string | Array<string>; env?: Record<string, string> },
+  config: { env?: Record<string, string> },
 ) => unknown | Promise<unknown>;
 type HookWithHandler<T> = { handler: T };
 
@@ -54,7 +54,6 @@ function getConfigResolvedHandler(plugin: ReturnType<typeof envClientFoldPlugin>
 }
 
 type RunOpts = {
-  envPrefix?: string | Array<string>;
   env?: Record<string, string>;
   environmentName?: string;
 };
@@ -68,10 +67,7 @@ async function runFold(
   const ctx = makeContext(opts.environmentName ?? 'client');
   const cr = getConfigResolvedHandler(plugin);
   if (cr) {
-    await cr.call(ctx, {
-      envPrefix: opts.envPrefix ?? 'VITE_',
-      env: opts.env ?? {},
-    });
+    await cr.call(ctx, { env: opts.env ?? {} });
   }
   const handler = getTransformHandler(plugin);
   const result = (await handler.call(ctx, code, id)) as TransformResult | undefined | null;
@@ -116,28 +112,6 @@ describe('envClientFoldPlugin', () => {
     ].join('\n');
     const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
       env: { VITE_TITLE: 'Hello' },
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('does not fold custom-prefix keys', async () => {
-    const code = `import { env } from "void/env";\nconsole.log(env.PUBLIC_TITLE);\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      envPrefix: 'PUBLIC_',
-      env: { PUBLIC_TITLE: 'Public' },
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('does not fold keys from custom prefix arrays', async () => {
-    const code = [
-      `import { env } from "void/env";`,
-      `const a = env.PUBLIC_A;`,
-      `const b = env.NEXT_PUBLIC_B;`,
-    ].join('\n');
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'],
-      env: { PUBLIC_A: 'aa', NEXT_PUBLIC_B: 'bb' },
     });
     expect(result).toBeFalsy();
   });

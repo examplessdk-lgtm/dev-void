@@ -12,10 +12,6 @@ type TransformHandler = (
   code: string,
   id: string,
 ) => unknown | Promise<unknown>;
-type ConfigResolvedHandler = (
-  this: ReturnType<typeof makeContext>,
-  config: { envPrefix?: string | Array<string> },
-) => unknown | Promise<unknown>;
 type HookWithHandler<T> = { handler: T };
 
 type ContextHooks = {
@@ -66,37 +62,12 @@ function getTransformHandler(plugin: ReturnType<typeof envClientGuardPlugin>): T
   throw new Error('plugin.transform missing handler');
 }
 
-function getConfigResolvedHandler(
-  plugin: ReturnType<typeof envClientGuardPlugin>,
-): ConfigResolvedHandler | null {
-  const c = plugin.configResolved;
-  if (typeof c === 'function') {
-    return c as unknown as ConfigResolvedHandler;
-  }
-  if (c && typeof c === 'object' && 'handler' in c) {
-    return (c as unknown as HookWithHandler<ConfigResolvedHandler>).handler;
-  }
-  return null;
-}
-
-type RunTransformOptions = {
-  envPrefix?: string | Array<string>;
-};
-
 async function runTransform(
   ctx: ReturnType<typeof makeContext>,
   code: string,
   id: string,
-  options: RunTransformOptions = {},
 ): Promise<{ threw: boolean; error?: Error }> {
-  const plugin = envClientGuardPlugin(ROOT);
-  if (options.envPrefix !== undefined) {
-    const cr = getConfigResolvedHandler(plugin);
-    if (cr) {
-      await cr.call(ctx, { envPrefix: options.envPrefix });
-    }
-  }
-  const handler = getTransformHandler(plugin);
+  const handler = getTransformHandler(envClientGuardPlugin(ROOT));
   try {
     await handler.call(ctx, code, id);
     return { threw: false };
@@ -116,17 +87,12 @@ function resetSchema() {
 // the no-schema test.
 async function withNoSchema(fn: () => Promise<void>): Promise<void> {
   const mod = await import('../../src/runtime/env-public.ts');
-  const originalHas = mod._hasRegisteredSchema;
-  const originalGet = mod._getRegisteredSchema;
   vi.spyOn(mod, '_hasRegisteredSchema').mockReturnValue(false);
   vi.spyOn(mod, '_getRegisteredSchema').mockReturnValue(null);
   try {
     await fn();
   } finally {
     vi.restoreAllMocks();
-    // Restore the originals (defensive — restoreAllMocks should handle it).
-    void originalHas;
-    void originalGet;
   }
 }
 
@@ -146,7 +112,7 @@ describe('envClientGuardPlugin', () => {
     expect(result.threw).toBe(true);
     expect(ctx.errors).toHaveLength(1);
     expect(ctx.errors[0]!.message).toContain('STRIPE_KEY');
-    expect(ctx.errors[0]!.message).toContain('VITE_');
+    expect(ctx.errors[0]!.message).toContain('VITE_*');
     expect(ctx.errors[0]!.loc?.line).toBe(2);
   });
 
@@ -300,44 +266,5 @@ describe('envClientGuardPlugin', () => {
     );
     expect(result.threw).toBe(true);
     expect(ctx.errors).toHaveLength(1);
-  });
-
-  it('does not let a custom Vite envPrefix redefine Void client keys', async () => {
-    defineEnv({ PUBLIC_TITLE: string() });
-    const ctx = makeContext('client');
-    const result = await runTransform(
-      ctx,
-      `import { env } from "void/env";\nconst t = env.PUBLIC_TITLE;\n`,
-      `${ROOT}/src/page.ts`,
-      { envPrefix: 'PUBLIC_' },
-    );
-    expect(result.threw).toBe(true);
-    expect(ctx.errors[0]!.message).toContain('VITE_*');
-  });
-
-  it('rejects non-VITE keys even when Vite exposes multiple custom prefixes', async () => {
-    defineEnv({ PUBLIC_A: string(), NEXT_PUBLIC_B: string() });
-    const ctx = makeContext('client');
-    const result = await runTransform(
-      ctx,
-      `import { env } from "void/env";\nconst a = env.PUBLIC_A;\nconst b = env.NEXT_PUBLIC_B;\n`,
-      `${ROOT}/src/page.ts`,
-      { envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'] },
-    );
-    expect(result.threw).toBe(true);
-    expect(ctx.errors).toHaveLength(1);
-  });
-
-  it('always points to the fixed VITE prefix', async () => {
-    defineEnv({ STRIPE_KEY: string() });
-    const ctx = makeContext('client');
-    const result = await runTransform(
-      ctx,
-      `import { env } from "void/env";\nconst k = env.STRIPE_KEY;\n`,
-      `${ROOT}/src/page.ts`,
-      { envPrefix: 'PUBLIC_' },
-    );
-    expect(result.threw).toBe(true);
-    expect(ctx.errors[0]!.message).toContain('VITE_*');
   });
 });

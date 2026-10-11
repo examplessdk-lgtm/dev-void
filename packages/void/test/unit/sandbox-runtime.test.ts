@@ -143,20 +143,6 @@ describe('Sandbox runtime', () => {
       );
     },
   );
-  it.each(['concurrency', 'runtime_budget'] as const)(
-    'restores typed %s errors after RPC',
-    async (reason) => {
-      const invoke = vi.fn().mockRejectedValue(new Error(`VOID_SANDBOX_${reason}`));
-      await envContext.run(
-        { __VOID_SANDBOX: { getSandbox: async () => ({ invoke }) } },
-        async () => {
-          const client = await getSandbox();
-          await expect(client.exec(['true'])).rejects.toBeInstanceOf(SandboxLimitError);
-          await expect(client.exec(['true'])).rejects.toMatchObject({ reason });
-        },
-      );
-    },
-  );
   it('rejects legacy namespaces, custom managed bindings and removed SDK options', async () => {
     await envContext.run({ __PROJECT_ID: 'project', SANDBOX: {} }, async () => {
       await expect(getSandbox()).rejects.toBeInstanceOf(SandboxUnavailableError);
@@ -217,6 +203,7 @@ describe('Sandbox usage-limit rejections', () => {
                 ? client.files.readFile('/data')
                 : client.fetch(8080, new Request('http://sandbox'));
           await expect(op).rejects.toBeInstanceOf(UsageLimit);
+          await expect(op).rejects.toBeInstanceOf(SandboxLimitError);
           await expect(op).rejects.toMatchObject({ reason: 'concurrency' });
           expect(invoke).toHaveBeenCalledOnce();
         },

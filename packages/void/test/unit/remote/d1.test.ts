@@ -131,12 +131,17 @@ describe('ProxyD1Database', () => {
 
   describe('batch()', () => {
     it('keeps independent bindings when reusing a prepared statement', async () => {
-      mockFetch([]);
+      mockFetch([
+        { results: [], success: true, meta: {} },
+        { results: [], success: true, meta: {} },
+      ]);
       const db = new ProxyD1Database(createClient(), 'DB');
       const prepared = db.prepare('INSERT INTO users (name) VALUES (?)');
       const alice = prepared.bind('Alice');
       const bob = alice.bind('Bob');
-      await db.batch([alice, bob] as unknown as Array<D1PreparedStatement>);
+      const results = await db.batch([alice, bob] as unknown as Array<D1PreparedStatement>);
+
+      expect(results).toHaveLength(2);
 
       const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
       expect(JSON.parse(String(call[1].body)).statements).toEqual([
@@ -144,30 +149,6 @@ describe('ProxyD1Database', () => {
         { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
       ]);
       expect(prepared._params).toEqual([]);
-    });
-
-    it('sends all statements in a batch request', async () => {
-      mockFetch([
-        { results: [], success: true, meta: {} },
-        { results: [], success: true, meta: {} },
-      ]);
-
-      const db = new ProxyD1Database(createClient(), 'DB');
-      const stmt1 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Alice');
-      const stmt2 = db.prepare('INSERT INTO users (name) VALUES (?)').bind('Bob');
-      const results = await db.batch([
-        stmt1 as unknown as D1PreparedStatement,
-        stmt2 as unknown as D1PreparedStatement,
-      ]);
-
-      expect(results).toHaveLength(2);
-
-      const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
-      const body = JSON.parse(String(call[1].body));
-      expect(body.statements).toEqual([
-        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Alice'] },
-        { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
-      ]);
     });
   });
 
@@ -185,8 +166,6 @@ describe('ProxyD1Database', () => {
 
   describe('bind()', () => {
     it('replaces params only on the returned statement', async () => {
-      mockFetch({ results: [], success: true });
-
       const db = new ProxyD1Database(createClient(), 'DB');
       const stmt = db.prepare('SELECT * FROM users WHERE id = ?');
 

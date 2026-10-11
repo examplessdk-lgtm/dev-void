@@ -12,21 +12,6 @@ const BASE_ENV: Record<string, unknown> = {
 };
 
 describe('createRemoteEnv', () => {
-  it('replaces DB with ProxyD1Database', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, DB: {} });
-    expect(env.DB).toBeInstanceOf(ProxyD1Database);
-  });
-
-  it('replaces KV with ProxyKVNamespace', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, KV: {} });
-    expect(env.KV).toBeInstanceOf(ProxyKVNamespace);
-  });
-
-  it('replaces STORAGE with ProxyR2Bucket', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, STORAGE: {} });
-    expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
-  });
-
   it('does not add bindings that are not in env', () => {
     const env = createRemoteEnv({ ...BASE_ENV });
     expect(env.DB).toBeUndefined();

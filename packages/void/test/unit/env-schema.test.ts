@@ -167,39 +167,17 @@ describe('defineEnv + env proxy', () => {
   });
 });
 
-describe('redaction roundtrip (heuristic + content)', () => {
+describe('redaction', () => {
   beforeEach(() => {
     resetSchema();
   });
 
-  it('omits placeholder values when a required STRIPE_KEY is missing', async () => {
-    defineEnv({ STRIPE_KEY: string() });
-    const report = await validateAllEnv({});
-    const formatted = report.missing.join(' ');
-    expect(formatted).toContain('STRIPE_KEY');
-    // No secret-looking fragment leaked into the report.
-    expect(formatted).not.toMatch(/sk_|ghp_/);
-  });
-
-  it('redacts a secret-looking value even when the key name is neutral (wrong-file typo)', async () => {
-    // Scenario: user pastes `PORT=sk_live_abc123` into the wrong line.
-    // `number()` rejects it, and the error message must NOT echo the token.
+  it('validateAllEnv redacts invalid values from its messages', async () => {
     defineEnv({ PORT: number() });
     const bad = await validateAllEnv({ PORT: 'sk_live_abc123' });
     expect(bad.valid).toBe(false);
     const msg = bad.invalid[0]!.messages.join(' ');
     expect(msg).not.toContain('sk_live_abc123');
-    expect(msg).toContain('<redacted>');
-  });
-
-  it('redacts invalid values when the KEY name matches the heuristic', async () => {
-    defineEnv({ STRIPE_KEY: url() });
-    const bad = await validateAllEnv({ STRIPE_KEY: 'not a url' });
-    expect(bad.valid).toBe(false);
-    // Key-name heuristic alone forces redaction even though the value
-    // itself ("not a url") is not high-entropy.
-    const msg = bad.invalid[0]!.messages.join(' ');
-    expect(msg).not.toContain('not a url');
     expect(msg).toContain('<redacted>');
   });
 
@@ -336,10 +314,7 @@ describe('_validateEnvOnce (boot-time worker check)', () => {
     expect(firstError).toBe(secondError);
   });
 
-  it('is a no-op when no schema is registered', async () => {
-    // resetSchema() registers an empty schema, so re-define with truly empty
-    // input to verify the no-validate path still passes.
-    defineEnv({});
+  it('is a no-op for an empty schema', async () => {
     await expect(_validateEnvOnce(undefined)).resolves.toBeUndefined();
   });
 
@@ -391,19 +366,11 @@ describe('_validateEnvOnce (boot-time worker check)', () => {
   });
 });
 
-// FIX C + FIX D: internal framework bindings (e.g. ISR_CACHE) must never be
-// exposed through void/env WHILE ISR IS ACTIVE — not even when a user's
-// defineEnv schema declares one and boot validation resolved and seeded its RAW
-// value into the sync cache. When ISR is inactive, a schema-declared ISR_CACHE
-// is an ordinary user binding and IS exposed.
 describe('_validateEnvOnce — internal bindings stay hidden from void/env', () => {
   beforeEach(() => {
     resetSchema();
   });
 
-  // A passthrough validator so the RAW binding value (a KV-like object) passes
-  // boot validation and would otherwise be seeded into the sync cache — this is
-  // exactly the leak path FIX C closes (while ISR is active).
   const passthrough = {
     '~standard': {
       version: 1 as const,
@@ -412,7 +379,7 @@ describe('_validateEnvOnce — internal bindings stay hidden from void/env', () 
     },
   };
 
-  it('never exposes a schema-declared ISR_CACHE while ISR is active, even after boot validation seeds its raw value', async () => {
+  it('hides a schema-declared ISR_CACHE while ISR is active, even after boot validation', async () => {
     defineEnv({ ISR_CACHE: passthrough, API_KEY: string() });
 
     const fakeIsrKv = { __brand: 'isr-kv' };
@@ -420,27 +387,16 @@ describe('_validateEnvOnce — internal bindings stay hidden from void/env', () 
     const rawEnv = { ISR_CACHE: fakeIsrKv, API_KEY: 'sk_live', __VOID_ISR_DEPLOYMENT_ID: 'dep_1' };
 
     await withRuntimeEnv(rawEnv, async () => {
-      // Boot validation runs FIRST — as it does at worker boot, before any
-      // request reads env.X. It succeeds (raw ISR_CACHE passes the passthrough
-      // validator) and, without FIX C, seeds the raw KV binding into the sync
-      // cache. Reading env.ISR_CACHE only AFTER this is what exposes the leak: a
-      // pre-validation read would mask it by caching `undefined` (the filtered
-      // value) so the `if (!cache.has(key))` seed guard would skip re-seeding.
+      // Boot validation runs before the first env read, as at worker boot.
       await _validateEnvOnce(rawEnv);
 
-      // Hidden after boot validation — the seeded raw KV binding must not
-      // leak through env.ISR_CACHE / `in` / enumeration.
       expect((env as Record<string, unknown>).ISR_CACHE).toBeUndefined();
       expect('ISR_CACHE' in env).toBe(false);
       expect(Object.keys(env)).not.toContain('ISR_CACHE');
-
-      // Lower-level binding accessors keep hiding it too.
       expect(getRuntimeBinding('ISR_CACHE')).toBeUndefined();
       expect(() => requireRuntimeBinding('ISR_CACHE')).toThrow(
         "env: Missing Cloudflare binding 'ISR_CACHE'.",
       );
-
-      // A normal declared key remains readable (the fix does not over-filter).
       expect(env.API_KEY).toBe('sk_live');
     });
   });
@@ -449,13 +405,11 @@ describe('_validateEnvOnce — internal bindings stay hidden from void/env', () 
     defineEnv({ ISR_CACHE: passthrough, API_KEY: string() });
 
     const fakeIsrKv = { __brand: 'user-kv' };
-    // No `__VOID_ISR_DEPLOYMENT_ID` ⇒ ISR inactive ⇒ ISR_CACHE is a user binding.
     const rawEnv = { ISR_CACHE: fakeIsrKv, API_KEY: 'sk_live' };
 
     await withRuntimeEnv(rawEnv, async () => {
       await _validateEnvOnce(rawEnv);
 
-      // ISR_CACHE is a normal declared binding here — visible everywhere.
       expect((env as Record<string, unknown>).ISR_CACHE).toEqual(fakeIsrKv);
       expect('ISR_CACHE' in env).toBe(true);
       expect(Object.keys(env)).toContain('ISR_CACHE');

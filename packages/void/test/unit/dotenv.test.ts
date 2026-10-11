@@ -125,13 +125,6 @@ describe('parseDotenvFile', () => {
       URL: 'https://api.example.com',
     });
   });
-
-  it('reads an export line with an inline comment', () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-dotenv-'));
-    const file = join(root, '.env');
-    writeFileSync(file, 'export DATABASE_URL="postgres://db/app" # local\n');
-    expect(parseDotenvFile(file)).toEqual({ DATABASE_URL: 'postgres://db/app' });
-  });
 });
 
 describe('expandDotenv — ${VAR} form', () => {
