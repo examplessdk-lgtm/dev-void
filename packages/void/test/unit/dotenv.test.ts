@@ -38,7 +38,7 @@ describe('parseDotenv', () => {
     expect(out).toEqual({ A: '1', B: '2', C: '3' });
   });
 
-  it('skips invalid keys by default', () => {
+  it('skips invalid keys', () => {
     const out = parseDotenv('GOOD=1\n1BAD=2\nALSO-BAD=3\n');
     expect(out).toEqual({ GOOD: '1' });
   });
