@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi, beforeEach } from 'vite-plus/test';
-import { compileNodeClient, compileWorkerClient } from '../../src/router/compile.ts';
+import { compileWorkerClient } from '../../src/router/compile.ts';
 import { FetchError as RuntimeFetchError } from '../../src/runtime/fetch-error.ts';
 import { interpolateRouteParams } from '../../src/runtime/route-url.ts';
 
@@ -330,12 +330,13 @@ function evaluateClient(
   )({ fetch }, env, requestContext, interpolateRouteParams);
 }
 
-it.each([compileWorkerClient, compileNodeClient])(
-  'expands catch-all routes in generated %s clients',
-  async (compile) => {
+it.each([false, true])(
+  'expands catch-all routes in generated clients (nodeTarget: %s)',
+  async (nodeTarget) => {
     const fetch = vi.fn<(...args: Array<unknown>) => Promise<Response>>(async () =>
       Response.json({ ok: true }),
     );
+    const compile = (authClientPath: string) => compileWorkerClient(authClientPath, nodeTarget);
     const client = evaluateClient(compile, fetch, {}, new AsyncLocalStorage());
     await client.fetch('/files/:id2/:id/:path{.+}', {
       params: { id: 'one', id2: 'two', path: 'docs/start here' },

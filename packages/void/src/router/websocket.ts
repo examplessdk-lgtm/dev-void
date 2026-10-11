@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'pathslash';
-import { glob, globSync } from 'tinyglobby';
+import { globSync } from 'tinyglobby';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import {
   isIdentifier,
@@ -163,18 +163,6 @@ function parseWebSocketFiles(
     byClass.set(route.className, previous);
   }
   return routes;
-}
-
-export async function scanWebSocketRoutes(
-  root: string,
-  paths: ProjectPaths = readProjectPaths(root),
-  environment?: RouteEnvironment,
-): Promise<Array<WebSocketRouteDefinition>> {
-  const pattern = `**/*.{${HANDLER_EXTENSIONS.join(',')}}`;
-  const files = await glob(pattern, { cwd: paths.routesDir, absolute: false }).catch(
-    () => [] as Array<string>,
-  );
-  return parseWebSocketFiles(root, files, paths, environment);
 }
 
 export function scanWebSocketRoutesSync(

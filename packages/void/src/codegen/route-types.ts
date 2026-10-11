@@ -232,30 +232,20 @@ export function generateRouteTypes(
 
       lines.push(`    ${JSON.stringify(page.pattern)}: {`);
 
-      let importPath: string | null = null;
-
-      if (page.serverPath) {
-        // Companion .server.ts — resolve directly
-        const absPath = `${pagesDir}/${page.serverPath}`;
-        importPath = relative(outDir, absPath);
-      }
-
+      // Page actions are only detected in a companion .server file.
+      const importPath = relative(outDir, `${pagesDir}/${page.serverPath!}`);
       if (hasActions) {
-        if (importPath) {
-          const actionsImport = `(typeof import(${JSON.stringify(importPath)}))["actions"]`;
-          lines.push(`      actions: { [K in keyof ${actionsImport}]: {`);
-          lines.push(
-            `        body: ExtractInput<${actionsImport}[K]["__validators"]> extends { body: infer B } ? B : Record<string, unknown>;`,
-          );
-          lines.push('      } };');
-        }
-      } else if (importPath) {
+        const actionsImport = `(typeof import(${JSON.stringify(importPath)}))["actions"]`;
+        lines.push(`      actions: { [K in keyof ${actionsImport}]: {`);
+        lines.push(
+          `        body: ExtractInput<${actionsImport}[K]["__validators"]> extends { body: infer B } ? B : Record<string, unknown>;`,
+        );
+        lines.push('      } };');
+      } else {
         const importExpr = `(typeof import(${JSON.stringify(importPath)}))["action"]`;
         lines.push(
           `      body: ExtractInput<${importExpr}["__validators"]> extends { body: infer B } ? B : Record<string, unknown>;`,
         );
-      } else {
-        lines.push('      body: Record<string, unknown>;');
       }
 
       if (page.params.length > 0) {

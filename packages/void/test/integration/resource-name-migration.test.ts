@@ -13,11 +13,12 @@ import spawn from 'cross-spawn';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'vite';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { analyzeApplication } from '../../src/application-routing.ts';
 import { buildVoidManifest, collectWorkerFiles } from '../../src/cli/package.ts';
 import { syncWranglerDurableObjects, syncWranglerWebSockets } from '../../src/cli/wrangler.ts';
+import { readConfig } from '../../src/config.ts';
 import { scanDurableObjectModules } from '../../src/durable/scan.ts';
 import { compileRouteTable, compileWorkerEntry } from '../../src/router/compile.ts';
-import { scanRoutes } from '../../src/router/scan.ts';
 
 const repository = join(import.meta.dirname, '..', '..', '..', '..');
 const runtimePath = (file: string) => join(repository, 'packages/void/src/runtime', file);
@@ -136,7 +137,7 @@ export default defineRoom({
       await runtime?.dispose();
       runtime = undefined;
       const durableObjects = scanDurableObjectModules(directory);
-      const scan = await scanRoutes(directory);
+      const { scan } = await analyzeApplication(directory, { config: readConfig(directory) });
       syncWranglerDurableObjects(directory, durableObjects);
       syncWranglerWebSockets(directory, scan.websockets ?? []);
       const cloudflare = JSON.parse(readFileSync(join(directory, '.void-wrangler.jsonc'), 'utf8'));

@@ -597,12 +597,8 @@ function evalCompiledApp(code: string): Hono {
 }
 
 const runtimeByApp = new WeakMap<Hono, RoutingRuntime>();
-function installVoidWrappers(app: Hono, originalUrls: WeakMap<Request, URL>): void {
-  const runtime = createRoutingRuntime(app, {
-    nodeTarget: true,
-    managedDispatch: true,
-    originalUrls,
-  });
+function installVoidWrappers(app: Hono): void {
+  const runtime = createRoutingRuntime(app, { nodeTarget: true, managedDispatch: true });
   runtimeByApp.set(app, runtime);
   app.use(runtime.contextMiddleware);
 }
@@ -610,7 +606,7 @@ function installVoidWrappers(app: Hono, originalUrls: WeakMap<Request, URL>): vo
 describe('c.redirect runtime wrapper', () => {
   it('preserves the original request query on internal redirects', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?x=1&y=2'));
@@ -621,7 +617,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it("destination's explicit query wins over the incoming request query", async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new?foo=1', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?foo=override&bar=2'));
@@ -634,7 +630,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it('drops the incoming query when destination has an explicit empty query', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new?', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?token=secret&bar=2'));
@@ -645,7 +641,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it('preserves fragments when an explicit empty query drops incoming params', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new?#faq', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?token=secret&bar=2'));
@@ -656,7 +652,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it('keeps destination fragments after the merged query string', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new#faq', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?utm=x'));
@@ -667,7 +663,7 @@ describe('c.redirect runtime wrapper', () => {
 
   it('keeps destination fragments after merged destination and request queries', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('/new?a=1#faq', 302));
 
     const res = await app.fetch(new Request('http://localhost/old?a=override&b=2'));
@@ -683,7 +679,7 @@ describe('c.redirect runtime wrapper', () => {
     // to a cross-origin host. Protocol-relative URLs must pass through
     // untouched, just like absolute URLs.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/old', (c) => c.redirect('//partner.example.com/landing', 302));
 
     const res = await app.fetch(
@@ -697,18 +693,16 @@ describe('c.redirect runtime wrapper', () => {
 
 function installRoutingRulesMiddleware(
   app: Hono,
-  originalUrls: WeakMap<Request, URL>,
   rules: Array<{ source: string; destination: string; status: number; force?: boolean }>,
 ): void {
-  const runtime =
-    runtimeByApp.get(app) ?? createRoutingRuntime(app, { nodeTarget: true, originalUrls });
+  const runtime = runtimeByApp.get(app) ?? createRoutingRuntime(app, { nodeTarget: true });
   app.use('*', runtime.routingMiddleware(rules));
 }
 
 describe('c.rewrite runtime wrapper', () => {
   it('re-dispatches to the rewritten path and exposes c.originalUrl / c.isRewritten', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/external', (c) => (c as any).rewrite('/internal'));
     app.get('/internal', (c) => {
@@ -742,7 +736,7 @@ describe('c.rewrite runtime wrapper', () => {
     // and `c.isRewritten()` report the pre-rewrite URL without reading the
     // header every call.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/en/docs', (c) => {
       return new Response('docs-body', {
@@ -771,17 +765,16 @@ describe('c.rewrite runtime wrapper', () => {
     // Counter tracks how many times the routing rule table *matches* a request
     // so the test fails loudly if the guard regresses.
     const app = new Hono();
-    const voidOriginalUrls = new WeakMap<Request, URL>();
     let ruleMatches = 0;
 
-    installVoidWrappers(app, voidOriginalUrls);
+    installVoidWrappers(app);
     app.use('*', async (c, next) => {
-      if (!voidOriginalUrls.has(c.req.raw)) {
+      if (!(c as any).isRewritten()) {
         ruleMatches++;
       }
       await next();
     });
-    installRoutingRulesMiddleware(app, voidOriginalUrls, [
+    installRoutingRulesMiddleware(app, [
       { source: '/a', destination: '/a', status: 200, force: true },
     ]);
 
@@ -837,9 +830,8 @@ describe('c.rewrite runtime wrapper', () => {
     // bucket is never consulted because the request was resolved before the
     // asset-miss phase would run.
     const app = new Hono();
-    const voidOriginalUrls = new WeakMap<Request, URL>();
-    installVoidWrappers(app, voidOriginalUrls);
-    installRoutingRulesMiddleware(app, voidOriginalUrls, preAsset);
+    installVoidWrappers(app);
+    installRoutingRulesMiddleware(app, preAsset);
 
     let fallbackFired = false;
     app.notFound(async (c) => {
@@ -863,7 +855,7 @@ describe('c.rewrite runtime wrapper', () => {
     // for the re-dispatched one), and `c.isRewritten()` lets users skip
     // side-effectful work on the replay.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let invocations = 0;
     const observed: Array<boolean> = [];
@@ -894,8 +886,7 @@ describe('c.rewrite runtime wrapper', () => {
     // still run twice (once per dispatch) and both URLs — the original and
     // the rewritten — must be observable from the appropriate context APIs.
     const app = new Hono();
-    const voidOriginalUrls = new WeakMap<Request, URL>();
-    installVoidWrappers(app, voidOriginalUrls);
+    installVoidWrappers(app);
 
     let invocations = 0;
     const observedReqUrls: Array<string> = [];
@@ -944,8 +935,7 @@ describe('c.rewrite runtime wrapper', () => {
     // with dispatch's pipeline) — user rewrites and static rewrites flow
     // through to fallbacks normally.
     const app = new Hono();
-    const voidOriginalUrls = new WeakMap<Request, URL>();
-    installVoidWrappers(app, voidOriginalUrls);
+    installVoidWrappers(app);
 
     app.use('*', async (c, next) => {
       if (new URL(c.req.url).pathname === '/trigger') {
@@ -973,8 +963,7 @@ describe('c.rewrite runtime wrapper', () => {
     // should fire exactly once — the re-dispatch is marked so the inner
     // notFound skips fallbacks. Mirrors dispatch's single-pass semantics.
     const app = new Hono();
-    const voidOriginalUrls = new WeakMap<Request, URL>();
-    installVoidWrappers(app, voidOriginalUrls);
+    installVoidWrappers(app);
 
     let fallbackInvocations = 0;
     const fallbackRules = [
@@ -1005,7 +994,7 @@ describe('c.rewrite runtime wrapper', () => {
     // and the query is lost. The wrapper must split on the first `?` and set
     // `pathname` + `search` separately.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/page?x=1'));
     app.get('/page', (c) => {
@@ -1029,7 +1018,7 @@ describe('c.rewrite runtime wrapper', () => {
     // forbid `?` in destinations and always preserve the incoming query) and
     // avoids dropping caller-provided state like pagination or OAuth params.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/page'));
     app.get('/page', (c) => {
@@ -1047,7 +1036,7 @@ describe('c.rewrite runtime wrapper', () => {
     // When the destination has its own `?`, it replaces the incoming query
     // wholesale (it does not merge) — documents the precedence rule.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/page?b=2'));
     app.get('/page', (c) => {
@@ -1066,7 +1055,7 @@ describe('c.rewrite runtime wrapper', () => {
     // matches no route. Fragments don't reach servers anyway, so the wrapper
     // must split on the first `#` and drop it (matches the asset-guard split).
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/foo#frag'));
     app.get('/foo', (c) => {
@@ -1092,7 +1081,7 @@ describe('c.rewrite runtime wrapper', () => {
     // search slice must stop at `#` so the fragment isn't smuggled into the
     // query string.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/foo?x=1#frag'));
     app.get('/foo', (c) => {
@@ -1118,7 +1107,7 @@ describe('c.rewrite runtime wrapper', () => {
     // first `#`, so everything after — including the `?x=1` — is the fragment
     // and is dropped. Path is `/foo`, search is empty.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/foo#frag?x=1'));
     app.get('/foo', (c) => {
@@ -1144,7 +1133,7 @@ describe('c.rewrite runtime wrapper', () => {
     // silently turn into a proxy — fail at the call site so users reach for
     // `fetch()` instead.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1169,7 +1158,7 @@ describe('c.rewrite runtime wrapper', () => {
     // fail distinct from the generic path-absolute error so users get a
     // targeted message pointing at the `//` mistake.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1192,7 +1181,7 @@ describe('c.rewrite runtime wrapper', () => {
     // Regression companion to the `//` rejection — the guard is a prefix
     // check, so a `/internal` path must keep dispatching through the router.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.get('/from', (c) => (c as any).rewrite('/internal'));
     app.get('/internal', (c) => c.text('internal-handler', 200));
@@ -1208,7 +1197,7 @@ describe('c.rewrite runtime wrapper', () => {
     // The test wrapper replays the same try/catch; this test drives the path
     // end-to-end by making `executionCtx` throw on access.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     app.use('*', async (c, next) => {
       Object.defineProperty(c, 'executionCtx', {
@@ -1236,7 +1225,7 @@ describe('c.rewrite runtime wrapper', () => {
     // by the single combined guard in compile.ts. Assert the key phrase rather
     // than the verbatim sentence so small copy tweaks don't break the test.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1257,7 +1246,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to a static asset path throws VoidAssetRewriteError', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1282,7 +1271,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to an API .json path throws (routes should be returned, not literal .json)', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1301,7 +1290,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite asset check is case-insensitive', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1319,7 +1308,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to a .html path does NOT throw (ambiguous — may be a real route)', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/from', (c) => (c as any).rewrite('/about.html'));
     app.get('/about.html', (c) => c.text('about-html', 200));
 
@@ -1330,7 +1319,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to a path without an extension does NOT throw', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
     app.get('/from', (c) => (c as any).rewrite('/users/123'));
     app.get('/users/:id', (c) => c.text(`user ${c.req.param('id')}`, 200));
 
@@ -1341,7 +1330,7 @@ describe('c.rewrite runtime wrapper', () => {
 
   it('c.rewrite to an asset path with a query string still throws', async () => {
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     let caught: unknown;
     app.get('/from', (c) => {
@@ -1371,7 +1360,7 @@ describe('c.rewrite runtime wrapper', () => {
     // blows past any reasonable depth), pinning the gap. If a max-depth
     // guard is ever added upstream, this test is the signal to revisit it.
     const app = new Hono();
-    installVoidWrappers(app, new WeakMap<Request, URL>());
+    installVoidWrappers(app);
 
     const MAX_HOPS = 50;
     let hops = 0;
@@ -1980,7 +1969,6 @@ describe('compileWorkerEntry', () => {
       remote: {
         bindingNames: { d1: 'myapp_db', kv: 'myapp_kv', r2: 'myapp_storage' },
         remotePath: '/resolved/remote.mjs',
-        envPath: '/resolved/env-legacy.mjs',
       },
       assetsDir: 'assets',
       webSocketClasses: [],

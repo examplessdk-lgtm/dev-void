@@ -4,6 +4,7 @@ import type { Context, Hono, MiddlewareHandler } from 'hono';
 import type { RedirectStatusCode } from 'hono/utils/http-status';
 import { VoidAssetRewriteError } from './handler.ts';
 import { convertReturnValue } from './response.ts';
+import { ASSET_EXTENSIONS } from './routing-assets.ts';
 export { createErrorRenderer } from './routing-errors.ts';
 
 export type RoutingRule = {
@@ -23,7 +24,6 @@ export type RoutingContext = Context & {
 };
 export type RoutingRuntime = {
   requestContext: AsyncLocalStorage<RequestContextStore>;
-  originalUrls: WeakMap<Request, URL>;
   contextMiddleware: MiddlewareHandler;
   requestMiddleware: MiddlewareHandler;
   routingMiddleware: (rules: Array<RoutingRule>) => MiddlewareHandler;
@@ -40,14 +40,13 @@ export function createRoutingRuntime(
     nodeTarget?: boolean;
     managedDispatch?: boolean;
     blockedAssetExtensions?: Array<string>;
-    originalUrls?: WeakMap<Request, URL>;
   } = {},
 ): RoutingRuntime {
-  const originalUrls = options.originalUrls ?? new WeakMap<Request, URL>();
+  const originalUrls = new WeakMap<Request, URL>();
   const fallbackHandled = new WeakSet<Request>();
   const warnedPatterns = new Set<string>();
   const requestContext = new AsyncLocalStorage<RequestContextStore>();
-  const assetExtensions = options.blockedAssetExtensions ?? DEFAULT_ASSET_EXTENSIONS;
+  const assetExtensions = options.blockedAssetExtensions ?? ASSET_EXTENSIONS;
   const assetExtensionRE = assetExtensions.length
     ? new RegExp(`\\.(${assetExtensions.join('|')})$`, 'i')
     : /(?!)/;
@@ -180,7 +179,6 @@ export function createRoutingRuntime(
   };
   return {
     requestContext,
-    originalUrls,
     contextMiddleware,
     requestMiddleware: async (c, next) => {
       await requestContext.run(
@@ -238,36 +236,6 @@ export function createRoutingRuntime(
     markNoMatch,
   };
 }
-
-export const DEFAULT_ASSET_EXTENSIONS: Array<string> = [
-  'png',
-  'jpg',
-  'jpeg',
-  'gif',
-  'webp',
-  'avif',
-  'svg',
-  'ico',
-  'css',
-  'js',
-  'mjs',
-  'cjs',
-  'woff',
-  'woff2',
-  'ttf',
-  'otf',
-  'eot',
-  'mp4',
-  'webm',
-  'mp3',
-  'wav',
-  'pdf',
-  'txt',
-  'xml',
-  'json',
-  'wasm',
-  'map',
-];
 
 export function markNoMatch(request: Request, response: Response): Response {
   const url = new URL(request.url);

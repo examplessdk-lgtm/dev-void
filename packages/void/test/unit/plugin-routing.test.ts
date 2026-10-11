@@ -2,6 +2,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { analyzeApplicationSync } from '../../src/application-analysis.ts';
+import { readConfig } from '../../src/config.ts';
 import { routingPlugin } from '../../src/plugin-routing.ts';
 
 const tempDirs: Array<string> = [];
@@ -18,6 +20,17 @@ function createBareTempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'void-routing-'));
   tempDirs.push(root);
   return root;
+}
+
+function createRoutingPlugin(
+  root: string,
+  options: Omit<Parameters<typeof routingPlugin>[1], 'getApplicationAnalysis'>,
+) {
+  return routingPlugin(root, {
+    ...options,
+    getApplicationAnalysis: (environment) =>
+      analyzeApplicationSync(root, { config: readConfig(root), environment }),
+  });
 }
 
 function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
@@ -45,7 +58,7 @@ describe('routingPlugin', () => {
       'export default defineWebSocket({});\n',
     );
 
-    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
     const configResolved = getHookHandler(plugin.configResolved) as (
       config: import('vite').ResolvedConfig,
     ) => void;
@@ -71,7 +84,7 @@ describe('routingPlugin', () => {
     const root = createTempRoot();
     writeFileSync(join(root, 'void.json'), JSON.stringify({ auth: { providers: ['email'] } }));
 
-    const plugin = routingPlugin(root, { isAuthEnabled: () => true });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => true });
     const configResolved = getHookHandler(plugin.configResolved) as (
       config: import('vite').ResolvedConfig,
     ) => void;
@@ -105,7 +118,7 @@ describe('routingPlugin', () => {
     const savedProjectId = process.env.VOID_DEPLOY_PROJECT_ID;
     delete process.env.VOID_DEPLOY_PROJECT_ID;
     try {
-      const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+      const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
       const config = getHookHandler(plugin.config) as (
         config: import('vite').UserConfig,
         env: import('vite').ConfigEnv,
@@ -141,7 +154,7 @@ describe('routingPlugin', () => {
 
   it('resolves explicit framework client subpaths to framework auth clients', async () => {
     const root = createBareTempRoot();
-    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
     const configResolved = getHookHandler(plugin.configResolved) as (
       config: import('vite').ResolvedConfig,
     ) => void;
@@ -175,7 +188,7 @@ describe('routingPlugin', () => {
   });
 
   it('refuses to load the route table in the client environment', async () => {
-    const plugin = routingPlugin(createBareTempRoot(), {
+    const plugin = createRoutingPlugin(createBareTempRoot(), {
       isAuthEnabled: () => false,
       devTriggerToken: 'secret-dev-token',
     });
@@ -214,7 +227,7 @@ describe('routingPlugin', () => {
     writeFileSync(join(root, 'routes', 'api.ts'), 'export const GET = () => new Response();\n');
 
     const onPolicyChange = vi.fn(() => true);
-    const plugin = routingPlugin(root, {
+    const plugin = createRoutingPlugin(root, {
       isAuthEnabled: () => false,
       onDevAssetRoutingPolicyChange: onPolicyChange,
     });
@@ -261,7 +274,7 @@ describe('routingPlugin', () => {
     const root = createTempRoot();
 
     const onPolicyChange = vi.fn(() => true);
-    const plugin = routingPlugin(root, {
+    const plugin = createRoutingPlugin(root, {
       isAuthEnabled: () => false,
       onDevAssetRoutingPolicyChange: onPolicyChange,
     });
@@ -316,7 +329,7 @@ describe('routingPlugin', () => {
       'export default function Index() { return null; }',
     );
 
-    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
     const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
     const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
     const invalidated: Array<string> = [];
@@ -370,7 +383,7 @@ describe('routingPlugin', () => {
     const pagePath = join(root, 'pages', 'index.tsx');
     writeFileSync(pagePath, 'export default function Index() { return null; }');
 
-    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
     const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
     const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
     const invalidated: Array<string> = [];
@@ -417,7 +430,7 @@ describe('routingPlugin', () => {
     mkdirSync(join(root, 'src', 'routes'), { recursive: true });
 
     const onPolicyChange = vi.fn(() => false);
-    const plugin = routingPlugin(root, {
+    const plugin = createRoutingPlugin(root, {
       isAuthEnabled: () => false,
       onDevAssetRoutingPolicyChange: onPolicyChange,
     });
@@ -467,7 +480,7 @@ describe('routingPlugin', () => {
     writeFileSync(join(root, 'void.json'), JSON.stringify({ sourceDir: 'src' }));
     mkdirSync(join(root, 'src', 'pages'), { recursive: true });
 
-    const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+    const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
     const configureServer = getHookHandler(plugin.configureServer) as (server: unknown) => void;
     const handlers = new Map<string, Array<(path: string) => Promise<void> | void>>();
     const invalidated: Array<string> = [];
@@ -530,7 +543,7 @@ describe('routingPlugin', () => {
         'export const cron = "0 * * * *";\nexport default async () => {};\n',
       );
 
-      const plugin = routingPlugin(root, { isAuthEnabled: () => false });
+      const plugin = createRoutingPlugin(root, { isAuthEnabled: () => false });
       const config = getHookHandler(plugin.config) as (
         config: import('vite').UserConfig,
         env: import('vite').ConfigEnv,
@@ -563,7 +576,7 @@ describe('routingPlugin', () => {
     'writes the live dev flag for $command (preview: $isPreview) as $dev',
     async ({ command, isPreview, dev }) => {
       const root = createTempRoot();
-      const plugin = routingPlugin(root, {
+      const plugin = createRoutingPlugin(root, {
         isAuthEnabled: () => false,
         live: { bindingName: 'VOID_LIVE', className: 'VoidLiveStreamDurableObject' },
       });

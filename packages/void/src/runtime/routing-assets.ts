@@ -1,6 +1,37 @@
 import type { DevCssAsset } from '../pages/types.ts';
 import type { RuntimeEnvironment } from './routing-worker.ts';
 
+// `c.rewrite()` cannot reach files the asset layer serves. `.html` is excluded: routes may use it.
+export const ASSET_EXTENSIONS: Array<string> = [
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'avif',
+  'svg',
+  'ico',
+  'css',
+  'js',
+  'mjs',
+  'cjs',
+  'woff',
+  'woff2',
+  'ttf',
+  'otf',
+  'eot',
+  'mp4',
+  'webm',
+  'mp3',
+  'wav',
+  'pdf',
+  'txt',
+  'xml',
+  'json',
+  'wasm',
+  'map',
+];
+
 export type ClientAssetTags = {
   css: string;
   preloads: string;

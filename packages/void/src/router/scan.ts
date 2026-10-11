@@ -1,23 +1,19 @@
 import { join } from 'pathslash';
-import { glob, globSync } from 'tinyglobby';
-import { scanJobs, type JobDefinition } from '../crons/scan.ts';
+import { globSync } from 'tinyglobby';
+import type { JobDefinition } from '../crons/scan.ts';
 import { scanPages } from '../pages/scan.ts';
 import type { PageScanResult } from '../pages/types.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
-import { scanQueues, type QueueDefinition } from '../queues/scan.ts';
+import type { QueueDefinition } from '../queues/scan.ts';
 import { detectHttpExports } from './detect-exports.ts';
-import { scanEmailHandlers, type EmailHandlersScan } from './email.ts';
+import type { EmailHandlersScan } from './email.ts';
 import {
   isRouteEnabledForEnvironment,
   parseRouteFilename,
   type RouteDefinition,
   type RouteEnvironment,
 } from './parse-filename.ts';
-import {
-  isWebSocketPatternFile,
-  scanWebSocketRoutes,
-  type WebSocketRouteDefinition,
-} from './websocket.ts';
+import { isWebSocketPatternFile, type WebSocketRouteDefinition } from './websocket.ts';
 
 export type ScanResult = {
   routes: Array<RouteDefinition>;
@@ -74,57 +70,24 @@ function compareRouteSpecificity(a: RouteDefinition, b: RouteDefinition): number
   return aSegments.length - bSegments.length;
 }
 
-/**
- * Scan routes/ and middleware/ directories and return a structured manifest.
- * Files starting with _ are ignored.
- */
+/** Add pages and HTTP methods to the inventories already resolved for this application phase. */
 export async function scanRoutes(
   root: string,
-  options?: {
+  options: {
     output?: 'server' | 'static';
-    paths?: ProjectPaths;
-    environment?: RouteEnvironment;
-    /** Reuse the inventories already resolved for this application phase. */
-    inventory?: Omit<ScanResult, 'pages'>;
+    paths: ProjectPaths;
+    inventory: Omit<ScanResult, 'pages'>;
   },
 ): Promise<ScanResult> {
-  const paths = options?.paths ?? readProjectPaths(root);
-  const [routeFiles, websockets, middlewareFiles, jobs, queues, pages, email] = await Promise.all([
-    options?.inventory ? [] : glob(ROUTE_PATTERN, { cwd: paths.routesDir, absolute: false }),
-    options?.inventory?.websockets ?? scanWebSocketRoutes(root, paths, options?.environment),
-    options?.inventory
-      ? []
-      : glob(ROUTE_PATTERN, { cwd: paths.middlewareDir, absolute: false }).catch(
-          () => [] as Array<string>,
-        ),
-    options?.inventory?.jobs ?? scanJobs(root, paths.cronsDir),
-    options?.inventory?.queues ?? scanQueues(root, paths.queuesDir),
-    scanPages(root, { output: options?.output, paths }),
-    // `email/` is a source convention like `crons/` and `queues/`, so it lives
-    // under `sourceRoot` — which is `root` when no `sourceDir` is configured.
-    // `scanEmailHandlers` joins its own `email` segment, so this resolves to
-    // `paths.emailDir`.
-    options?.inventory?.email ?? scanEmailHandlers(paths.sourceRoot),
-  ]);
-
-  const routesDir = paths.routesDir;
-
-  // Parse routes, filtering out files starting with _
-  const parsedRoutes =
-    options?.inventory?.routes ??
-    routeFiles
-      .filter((f) => !isWebSocketPatternFile(f))
-      .filter((f) => !f.split('/').some((s) => s.startsWith('_')))
-      .map((file) => parseRouteFilename(file))
-      .filter((route) => isRouteEnabledForEnvironment(route, options?.environment));
-  const routes = parsedRoutes
-    .map((route) => ({ ...route, methods: detectHttpExports(join(routesDir, route.filePath)) }))
+  const { paths, inventory } = options;
+  const pages = await scanPages(root, { output: options.output, paths });
+  const routes = inventory.routes
+    .map((route) => ({
+      ...route,
+      methods: detectHttpExports(join(paths.routesDir, route.filePath)),
+    }))
     .sort(compareRouteSpecificity);
-
-  // Parse middleware, sorted by numeric prefix
-  const middleware = options?.inventory?.middleware ?? parseMiddlewareDefinitions(middlewareFiles);
-
-  return { routes, websockets, middleware, jobs, queues, pages, email };
+  return { ...inventory, routes, pages };
 }
 
 export function scanMiddlewareSync(

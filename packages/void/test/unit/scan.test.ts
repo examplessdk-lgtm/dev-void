@@ -1,10 +1,18 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
-import { scanRoutePatternsSync, scanRoutes } from '../../src/router/scan.ts';
+import { analyzeApplication } from '../../src/application-routing.ts';
+import { readConfig } from '../../src/config.ts';
+import type { RouteEnvironment } from '../../src/router/parse-filename.ts';
+import { scanRoutePatternsSync } from '../../src/router/scan.ts';
 import { scanWebSocketRoutesSync } from '../../src/router/websocket.ts';
 
 const TMP = join(import.meta.dirname, '__tmp_scan_test__');
+
+async function scanRoutes(root: string, options?: { environment?: RouteEnvironment }) {
+  const config = readConfig(root);
+  return (await analyzeApplication(root, { config, environment: options?.environment })).scan;
+}
 
 function createFile(path: string, content = 'export const GET = () => {}') {
   const full = join(TMP, path);

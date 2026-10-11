@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
-import { analyzeApplicationSync, type ApplicationAnalysis } from './application-analysis.ts';
+import type { ApplicationAnalysis } from './application-analysis.ts';
 import { completeApplicationAnalysis } from './application-routing.ts';
 import {
   hasApiRoutes,
@@ -19,7 +19,7 @@ import { findEnvFileForPaths } from './codegen/env-types.ts';
 import { generateQueueTypes } from './codegen/queue-types.ts';
 import { generateRouteTypes } from './codegen/route-types.ts';
 import { writeFileIfChanged } from './codegen/write-if-changed.ts';
-import { readConfig, getDatabaseDialect, type NotFoundHandling } from './config.ts';
+import { readConfig, getDatabaseDialect } from './config.ts';
 import { collectPages, collectRevalidate, hasRevalidate } from './isr-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import {
@@ -29,7 +29,6 @@ import {
   compileWorkerClient,
   compileNodeApp,
   compileNodeServer,
-  compileNodeClient,
   type CompileOptions,
   type SsrCompileOptions,
   type PagesCompileOptions,
@@ -65,32 +64,16 @@ const LOAD_ID_FILTER =
   /^virtual:void-(routes|client-worker(?::(react|vue|svelte|solid))?|client-browser(?::(react|vue|svelte|solid))?)$/;
 
 type RoutingPluginOptions = {
-  getApplicationAnalysis?: (
-    environment: RouteEnvironment,
-    refresh?: boolean,
-  ) => ApplicationAnalysis;
+  getApplicationAnalysis: (environment: RouteEnvironment, refresh?: boolean) => ApplicationAnalysis;
   isAuthEnabled: () => boolean;
   getVersionMetadataBinding?: () => string | undefined;
   devTriggerToken?: string;
   headConfig?: import('./pages/head.ts').HeadConfig;
-  output?: 'server' | 'static';
   prerenderPaths?: Array<string>;
   remoteMode?: boolean;
   bindingNames?: { d1?: string; kv?: string; r2?: string };
   target?: 'node' | 'bun' | 'deno';
-  /**
-   * Full `routing` section from `void.config.ts`. The plugin merges
-   * `_redirects` / `_headers` under Vite's `publicDir` with the config
-   * rules on every compile, matching the deploy-time merge order (file
-   * rules first, `void.config.ts` last — last match wins).
-   *
-   * The watcher also watches those two files during `vite dev` and
-   * re-runs the merge + invalidates the route module when either changes.
-   *
-   * The merged rules are emitted into every runtime that owns its routing.
-   * Managed Cloudflare builds omit them because platform dispatch owns the
-   * same pipeline.
-   */
+  /** Merged with `_redirects` / `_headers` under Vite's `publicDir`; config rules take precedence. */
   routing?: import('./config.ts').RoutingConfig;
   hasSandbox?: boolean;
   sandboxBindingName?: string;
@@ -136,7 +119,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   const normalizedQueuesDir = normalizePath(queuesDir);
   const normalizedEmailDir = normalizePath(emailDir);
   const normalizedPagesDir = normalizePath(pagesDir);
-  const normalizedSsrDir = normalizePath(ssrDir);
   const ssrEntryAbsPaths = new Set(
     [...SSR_SERVER_ENTRY_RELATIVE_PATHS, ...SSR_CLIENT_ENTRY_RELATIVE_PATHS].map((path) =>
       normalizePath(join(ssrDir, path.split('/').pop()!)),
@@ -169,14 +151,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
   }
 
   async function rescan(refresh = false) {
-    let analysis = options.getApplicationAnalysis?.(routeEnvironment, refresh);
-    if (!analysis) {
-      const config = readConfig(root);
-      analysis = analyzeApplicationSync(root, {
-        config: { ...config, output: options.output ?? config.output },
-        environment: routeEnvironment,
-      });
-    }
+    const analysis = options.getApplicationAnalysis(routeEnvironment, refresh);
     scan = (await completeApplicationAnalysis(analysis)).scan;
     authConfigPath = analysis.authConfigPath;
     const entries = validateSsrEntries(root, paths);
@@ -212,7 +187,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     ? {
         bindingNames: options.bindingNames,
         remotePath: resolveFile('#self/remote'),
-        envPath: resolveFile('#self/_env'),
       }
     : undefined;
   // If the project has env.ts, splice boot-time validation into the worker
@@ -228,10 +202,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       helperPath: resolveFile('#self/env'),
     };
   }
+  const runtimeEmailPath = resolveFile('#self/email');
   const compileOptions: CompileOptions = {
     honoPath: resolveFile('hono'),
     runtimeEnvPath: resolveFile('#self/_env'),
-    runtimeEmailPath: resolveFile('#self/email'),
     emailDir,
     projectRoot: root,
     homeDir: homedir(),
@@ -250,21 +224,10 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     bindingNames: options.bindingNames,
   };
 
-  // Static `_redirects` / `_headers` are always merged. The compiled Hono app
-  // emits them for native Cloudflare, local dev, and non-CF targets. Managed
-  // builds strip the duplicate pipeline because dispatch owns it.
-  //
-  // `publicDir` starts at `<root>/public` (Vite's default) and is
-  // re-resolved from the resolved config in `configResolved`. For
-  // framework-configured publicDir overrides, the re-resolve picks
-  // them up before the first route module load.
+  // Vite's default until `configResolved` reads the real value; null when `publicDir: false`.
   let publicDir: string | null = join(root, 'public');
   function reloadFileRules(): void {
-    // Always run through the merge — when `publicDir === null` (user set
-    // `publicDir: false` in Vite config) file rules are skipped, but
-    // config-based `routing.redirects`/`rewrites`/`headers`/`fallbacks` still
-    // apply. Re-running also clears stale file rules picked up from the
-    // default `<root>/public` preload before `configResolved`.
+    // Config rules still apply without a public dir, and stale preload rules are cleared.
     const merged = mergeRoutingRules({ dir: publicDir, routing: options.routing });
     lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
     lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
@@ -398,47 +361,16 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     };
   }
 
-  function shouldServeSpaFallback(): boolean {
-    if (!scan) {
-      return false;
-    }
-    return resolveCurrentAssetRoutingPolicy().workerSpaFallback;
-  }
-
-  /**
-   * The `not_found_handling` the generated worker entry must agree with. Read
-   * off the SAME resolved policy that produces the wrangler asset config, so
-   * the emitted `serveWithAssets` can never disagree with the platform switch
-   * it is standing in for.
-   */
-  function currentNotFoundHandling(): NotFoundHandling {
-    return resolveCurrentAssetRoutingPolicy().assetConfig.not_found_handling ?? 'none';
-  }
-
   function resolveCurrentAssetRoutingPolicy(): AssetRoutingPolicy {
-    if (!scan) {
-      return resolveAssetRoutingPolicy({
-        isSsr: Boolean(ssr),
-        hasPages: false,
-        hasApiRoutes: compileOptions.auth !== null,
-        hasDocumentRoutes: false,
-        hasMiddleware: false,
-        hasWebSockets: false,
-        authEnabled: compileOptions.auth !== null,
-        liveEnabled: options.live !== undefined,
-        notFound: options.routing?.notFound,
-      });
-    }
+    const { pages, routes, websockets = [], middleware } = scan!;
     return resolveAssetRoutingPolicy({
       isSsr: Boolean(ssr),
-      hasPages: scan.pages.pages.length > 0,
+      hasPages: pages.pages.length > 0,
       hasApiRoutes:
-        hasApiRoutes(scan.routes) ||
-        hasApiRoutes(scan.websockets ?? []) ||
-        compileOptions.auth !== null,
-      hasDocumentRoutes: hasDocumentRoutes(scan.routes),
-      hasMiddleware: scan.middleware.length > 0,
-      hasWebSockets: hasDocumentRoutes(scan.websockets ?? []),
+        hasApiRoutes(routes) || hasApiRoutes(websockets) || compileOptions.auth !== null,
+      hasDocumentRoutes: hasDocumentRoutes(routes),
+      hasMiddleware: middleware.length > 0,
+      hasWebSockets: hasDocumentRoutes(websockets),
       authEnabled: compileOptions.auth !== null,
       liveEnabled: options.live !== undefined,
       notFound: options.routing?.notFound,
@@ -464,6 +396,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
 
   /** Write the Cloudflare worker entry from the completed scan. */
   function writeWorkerEntry(isr: WorkerEntryOptions['isr']): void {
+    const policy = resolveCurrentAssetRoutingPolicy();
     writeFileIfChanged(
       join(outDir, 'entry.ts'),
       compileWorkerEntry({
@@ -476,15 +409,15 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           ...(options.websocketTombstones ?? []),
         ],
         runtimeEnvPath: compileOptions.runtimeEnvPath,
-        runtimeEmailPath: compileOptions.runtimeEmailPath,
+        runtimeEmailPath,
         envSchemaModule: getEnvSchemaModule(),
         sandbox: sandboxEntry,
         hasEmail: hasEmailHandlers(),
-        serveSpaFallback: shouldServeSpaFallback(),
+        serveSpaFallback: policy.workerSpaFallback,
         live: options.live,
         dev: compileOptions.dev,
         isr,
-        notFound: currentNotFoundHandling(),
+        notFound: policy.assetConfig.not_found_handling ?? 'none',
         durableObjects: options.durableObjects,
       }),
     );
@@ -508,7 +441,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
         remote,
         webSocketClasses: options.websocketTombstones,
         runtimeEnvPath: compileOptions.runtimeEnvPath,
-        runtimeEmailPath: compileOptions.runtimeEmailPath,
+        runtimeEmailPath,
         envSchemaModule: getEnvSchemaModule(),
         sandbox: sandboxEntry,
         live: options.live,
@@ -533,9 +466,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           plugin.name === 'vite:react-refresh' ||
           plugin.name === 'vite:react-swc',
       );
-      // Vite sets `publicDir` to an empty string when the user passes
-      // `publicDir: false` in their config (public serving disabled).
-      // Fall through to `null` in that case so we skip file-based rules.
+      // Vite resolves `publicDir: false` to ''.
       const resolvedPublicDir =
         config.publicDir && config.publicDir.length > 0 ? config.publicDir : null;
       if (resolvedPublicDir !== publicDir) {
@@ -546,9 +477,6 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
     config(_, env) {
       previewing = env.isPreview === true;
       routeEnvironment = env.command === 'serve' && !env.isPreview ? 'dev' : 'prod';
-      // The Void environment hook has selected the route-specific binding set
-      // before this hook runs. Keep route compilation aligned with the Worker
-      // entry and Cloudflare config for dev-only live streams.
       compileOptions.hasLive = options.live !== undefined;
       compileOptions.managedDispatch =
         !options.target && env.command === 'build' && Boolean(process.env.VOID_DEPLOY_PROJECT_ID);
@@ -639,12 +567,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
       if (options.target) {
         writeNodeEntries(options.target);
       } else {
-        // ISR gate. Only a real (non-managed) production CF `vite build` bakes
-        // ISR into the worker: managed `void deploy` sets VOID_DEPLOY_PROJECT_ID
-        // (the platform owns ISR then), dev (`command === 'serve'`) never emits
-        // it, and non-CF targets took the branch above. Read the command from
-        // `resolvedConfig` (set in configResolved, available here) — not a stale
-        // captured value.
+        // Only a non-managed production build bakes ISR in; managed deploys leave it to the platform.
         const buildConfig = readConfig(root);
         const merged = collectRevalidate(buildConfig, scan!.pages);
         const configuredRevalidate = buildConfig.routing?.revalidate;
@@ -707,10 +630,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           return compileBrowserClient(getClientAuthPath(id), fetchPath, fetchStreamPath);
         }
         if (virtualClient?.[1] === 'worker') {
-          if (options.target) {
-            return compileNodeClient(getClientAuthPath(id));
-          }
-          return compileWorkerClient(getClientAuthPath(id));
+          return compileWorkerClient(getClientAuthPath(id), Boolean(options.target));
         }
         if (id !== VIRTUAL_ROUTES_ID) {
           return;
@@ -757,15 +677,7 @@ export function routingPlugin(root: string, options: RoutingPluginOptions): Plug
           isInDirectory(normalizedPath, normalizedPagesDir) ||
           isPotentialAuthConfigPath(normalizedPath) ||
           isPotentialEnvFilePath(normalizedPath);
-        if (!sourceConventionChanged && !isInDirectory(normalizedPath, normalizedSsrDir)) {
-          return;
-        }
-
-        if (
-          !sourceConventionChanged &&
-          isInDirectory(normalizedPath, normalizedSsrDir) &&
-          !ssrEntryAbsPaths.has(normalizedPath)
-        ) {
+        if (!sourceConventionChanged && !ssrEntryAbsPaths.has(normalizedPath)) {
           return;
         }
 

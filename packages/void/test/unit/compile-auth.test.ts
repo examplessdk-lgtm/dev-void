@@ -148,9 +148,6 @@ describe('compileRouteTable auth integration', () => {
 
     expect(code).toContain('runVoidAuthMigrations');
     expect(code).toContain(
-      'runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
-    );
-    expect(code).toContain(
       'runVoidAuthMigrations(new Request(request.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
     );
     expect(code).toContain('export async function __voidHandleInternalRoute(request)');
@@ -173,7 +170,7 @@ describe('compileRouteTable auth integration', () => {
     expect(code).toContain('return { ...env, DB: env["myapp_db"] };');
     expect(code).toContain('__createMigrationHandler(\n    __voidGetMigrationEnv(),');
     expect(code).toContain(
-      'runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
+      'runVoidAuthMigrations(new Request(request.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
     );
   });
 });

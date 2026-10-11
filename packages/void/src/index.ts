@@ -897,7 +897,6 @@ export function voidPlugin(options?: {
         isAuthEnabled: () => false,
         devTriggerToken,
         headConfig: config.head,
-        output: config.output,
         prerenderPaths: config.routing?.prerender,
         target: config.target as 'node' | 'bun' | 'deno',
         // Pass the full routing section so the plugin can merge
@@ -1032,7 +1031,6 @@ export function voidPlugin(options?: {
       getVersionMetadataBinding: () => versionMetadataBinding,
       devTriggerToken,
       headConfig: config.head,
-      output: config.output,
       prerenderPaths: config.routing?.prerender,
       remoteMode,
       // Pass the full routing section so the plugin can merge

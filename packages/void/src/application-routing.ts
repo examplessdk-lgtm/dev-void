@@ -10,7 +10,6 @@ export async function completeApplicationAnalysis(
   const scan = await scanRoutes(analysis.root, {
     output: analysis.config.output,
     paths: analysis.paths,
-    environment: analysis.environment,
     inventory: {
       routes: analysis.routes,
       middleware: analysis.middleware,

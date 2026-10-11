@@ -7,6 +7,7 @@ import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { resolveLayoutIds } from '../pages/layout-resolution.ts';
 import { generateQueueResolverSource } from '../queues/dispatch.ts';
 import { INTERNAL_BINDING_EXACT_NAMES, INTERNAL_BINDING_PREFIXES } from '../runtime/env-raw.ts';
+import { ASSET_EXTENSIONS } from '../runtime/routing-assets.ts';
 import { DEFAULT_SANDBOX_CLASS_NAME } from '../sandbox/config.ts';
 import type { ScanResult } from './scan.ts';
 
@@ -17,7 +18,6 @@ function pushDefaultErrorPageHelpers(lines: Array<string>, options: CompileOptio
   lines.push(
     `const __errorRenderer = __createErrorRenderer(${JSON.stringify({ dev: options.dev === true, projectRoot: options.projectRoot, homeDir: options.homeDir })});`,
   );
-  lines.push('const serveCustomErrorPage = __errorRenderer.serveCustomPage;');
   lines.push('app.onError(__errorRenderer.onError);');
 }
 
@@ -35,14 +35,7 @@ export type CompileOptions = {
   honoPath: string;
   /** Absolute path to the void/_env module */
   runtimeEnvPath: string;
-  /** Absolute path to the void/email module (inbound `createMessageProxy`) */
-  runtimeEmailPath?: string;
-  /**
-   * Absolute path to the project's top-level `email/` directory. Set when the
-   * app declares inbound email handlers; the route table then emits
-   * `__emailHandler`. Lives here rather than in `compileRouteTable`'s
-   * positional list so existing call sites keep binding correctly.
-   */
+  /** Absolute path to the project's `email/` directory; enables `__emailHandler`. */
   emailDir?: string;
   /** Absolute path to the project root */
   projectRoot: string;
@@ -230,46 +223,7 @@ export function compileRouteTable(
   }
 
   lines.push(`const app = new Hono();`);
-  // Known static-asset extensions — `c.rewrite()` into one of these re-enters
-  // the Hono router and 404s (static asset handlers run in front of the
-  // worker, not inside it). `.html` is deliberately excluded: it's ambiguous
-  // with legit route handlers at `.html` paths.
-  //
-  // The framework also lets users name route files with dotted extensions
-  // (e.g. `routes/feed.xml.ts` → pattern `/feed.xml`), so we filter the
-  // blocklist down to extensions NOT used by any registered route/page.
-  // Without this, `c.rewrite("/feed.xml")` to a real `feed.xml.ts` route
-  // would falsely throw, diverging from `routing.rewrites` which routes
-  // the same destination to the same handler without complaint.
-  const ASSET_EXTENSIONS = [
-    'png',
-    'jpg',
-    'jpeg',
-    'gif',
-    'webp',
-    'avif',
-    'svg',
-    'ico',
-    'css',
-    'js',
-    'mjs',
-    'cjs',
-    'woff',
-    'woff2',
-    'ttf',
-    'otf',
-    'eot',
-    'mp4',
-    'webm',
-    'mp3',
-    'wav',
-    'pdf',
-    'txt',
-    'xml',
-    'json',
-    'wasm',
-    'map',
-  ];
+  // Route files may use dotted names (`feed.xml.ts`), so `c.rewrite()` must still reach them.
   const routePatterns: Array<string> = [];
   for (const r of scan.routes) {
     routePatterns.push(r.pattern);
@@ -299,6 +253,13 @@ export function compileRouteTable(
   // owns routing end-to-end, including native Cloudflare production builds.
   // Managed bundles omit it because dispatch applies the same rules first.
   const emitEdgeRules = !managedDispatch;
+  const fallbackRulesJson = JSON.stringify(
+    emitEdgeRules && options.fallbackRules?.length
+      ? options.dev
+        ? options.fallbackRules
+        : stripOriginForProd(options.fallbackRules)
+      : undefined,
+  );
   if (emitEdgeRules && options.redirectRules?.length) {
     compileRoutingRulesMiddleware(lines, options.redirectRules, options.dev === true);
   }
@@ -450,7 +411,7 @@ export function compileRouteTable(
 
   if (pages && scan.pages.pages.length > 0) {
     lines.push(
-      `app.notFound(__createPagesFallback({ routing: __routingRuntime, errors: __errorRenderer, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(emitEdgeRules && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
+      `app.notFound(__createPagesFallback({ routing: __routingRuntime, errors: __errorRenderer, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${fallbackRulesJson} }));`,
     );
   }
 
@@ -461,7 +422,7 @@ export function compileRouteTable(
       `const getClientAssetTags = __createClientAssetTags(${JSON.stringify({ entryId: ssr.clientEntryRelativePath, entryUrl: '/' + ssr.clientEntryRelativePath, kind: 'ssr', dev: options.dev === true, reactRefresh: options.reactRefresh })});`,
     );
     lines.push(
-      `app.notFound(__createSsrFallback({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(emitEdgeRules && options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)}, load: () => import(${JSON.stringify(ssr.serverEntryPath)}), assets: getClientAssetTags }));`,
+      `app.notFound(__createSsrFallback({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${fallbackRulesJson}, load: () => import(${JSON.stringify(ssr.serverEntryPath)}), assets: getClientAssetTags }));`,
     );
   } else if (
     emitEdgeRules &&
@@ -469,7 +430,7 @@ export function compileRouteTable(
     !(pages && scan.pages.pages.length > 0)
   ) {
     lines.push(
-      `app.notFound(__createAssetNotFound({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${JSON.stringify(options.fallbackRules?.length ? (options.dev ? options.fallbackRules : stripOriginForProd(options.fallbackRules)) : undefined)} }));`,
+      `app.notFound(__createAssetNotFound({ routing: __routingRuntime, nodeTarget: ${JSON.stringify(options.nodeTarget === true)}, assetsDir: ${JSON.stringify(options.assetsDir)}, fallbackRules: ${fallbackRulesJson} }));`,
     );
   }
 
@@ -518,16 +479,23 @@ export function compileRouteTable(
     lines.push('');
   }
 
-  if (scan.jobs.length > 0) {
-    lines.push('const __scheduledHandler = async (c) => {');
+  if (scan.jobs.length > 0 || scan.queues.length > 0) {
+    lines.push('function __voidTriggerUnauthorized(c) {');
     lines.push('  const __token = c.req.header("x-void-internal");');
     lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
     lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__VOID_SERVE ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __expected ? __token !== __expected : __token !== __VOID_BUILD_KEY) {',
+      '  return __VOID_SERVE ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __expected ? __token !== __expected : __token !== __VOID_BUILD_KEY;',
     );
-    lines.push('    return c.json({ error: "unauthorized" }, 401);');
-    lines.push('  }');
+    lines.push('}');
+    lines.push('');
+  }
+
+  if (scan.jobs.length > 0) {
+    lines.push('const __scheduledHandler = async (c) => {');
+    lines.push(
+      '  if (__voidTriggerUnauthorized(c)) return c.json({ error: "unauthorized" }, 401);',
+    );
     lines.push('  const { cron, scheduledTime } = await c.req.json();');
     lines.push('  const controller = { cron, scheduledTime, noRetry() {} };');
     lines.push('  await scheduled(controller, c.env, c.executionCtx);');
@@ -593,16 +561,10 @@ export function compileRouteTable(
     lines.push('}');
     lines.push('');
 
-    // HTTP route — same auth policy as /__void/scheduled.
     lines.push('const __queueHandler = async (c) => {');
-    lines.push('  const __token = c.req.header("x-void-internal");');
-    lines.push('  const __expected = __getRawEnv()?.__VOID_PROXY_TOKEN;');
-    lines.push('  const __devToken = c.req.header("x-void-dev-trigger");');
     lines.push(
-      '  if (__VOID_SERVE ? __devToken !== __VOID_DEV_TRIGGER_TOKEN : __expected ? __token !== __expected : __token !== __VOID_BUILD_KEY) {',
+      '  if (__voidTriggerUnauthorized(c)) return c.json({ error: "unauthorized" }, 401);',
     );
-    lines.push('    return c.json({ error: "unauthorized" }, 401);');
-    lines.push('  }');
     lines.push('  const payload = await c.req.json();');
     lines.push('  const result = await __processQueue(payload, c.env);');
     lines.push('  return c.json(result);');
@@ -611,24 +573,7 @@ export function compileRouteTable(
     lines.push('');
   }
 
-  // Inbound email — generate __emailHandler that dispatches by recipient
-  // local-part. Patterns are tried in the order the scanner sorted them
-  // (`compareEmailRoutes` in router/email.ts: static-tag > static >
-  // dynamic-tag > dynamic, a literal tag before a captured one, then
-  // alphabetical) and the first match wins; captured groups become `info.params`
-  // and the handler is invoked with (message, env, ctx, info). Falls through
-  // to email/_default.ts when no per-address pattern matches.
-  //
-  // Slug stripping: the shared platform sender rewrites every recipient to
-  // `<slug>+<tag>@<platform mail domain>`, where `<slug>` is the
-  // project slug. User-defined handlers are written against the `<tag>` only
-  // (the slug is invisible to them — see design doc 0078-email-cf-native). When a slug is
-  // configured (`__VOID_PROJECT_SLUG`) the dispatcher strips everything up to
-  // and including the first `+` from the local-part before running it through
-  // the pattern table. Without one — a worker on the developer's own zone, or
-  // a relayed custom-domain envelope (`viaDomain`, suppressed by `handleEmail`)
-  // — the full local part is matched, so `support+T-42@zone` reaches
-  // `email/support+[ticket].ts` there too.
+  // Inbound email: the first recipient pattern in scanner order wins, then `_default`.
   const email = scan.email;
   const emailDir = options.emailDir;
   if (emailDir && email && (email.addresses.length > 0 || email.defaultHandler)) {
@@ -656,30 +601,12 @@ export function compileRouteTable(
     }
     lines.push('');
     lines.push('export async function __emailHandler(message, env, ctx, __opts) {');
-    // Route on the PLATFORM (wire) recipient, not `message.to`.
-    // `createMessageProxy` has already removed the `<slug>+` prefix from
-    // `message.to` so handler authors see the address they wrote, and it
-    // preserves the wire form as `__voidPlatformTo`. Reading `message.to`
-    // here would strip the slug a SECOND time, leaving an empty tag that no
-    // anchored pattern can match. When no slug was injected the two are
-    // identical, so the fallback is exact.
-    // Case is PRESERVED here and the patterns carry the `i` flag instead.
-    // Lowercasing the address first would lowercase the captured groups too,
-    // silently corrupting a case-sensitive tag such as a ticket id or a token
-    // (`support+T-42@` would reach the handler as `t-42`).
+    // Match the wire recipient: `createMessageProxy` already stripped the slug from `message.to`.
+    // Keep the case; patterns use the `i` flag so captured tags stay intact.
     lines.push('  const __platformTo = message ? message.__voidPlatformTo : undefined;');
     lines.push('  const __to = String((__platformTo ?? (message && message.to)) || "");');
     lines.push('  const __localFull = __to.split("@")[0] || "";');
-    // Strip the platform-injected `<slug>+` prefix exactly when a slug is
-    // CONFIGURED (`__VOID_PROJECT_SLUG`, passed in by `handleEmail`), not when
-    // `createMessageProxy` happened to remove one: the platform lane is
-    // `<slug>[+<tag>]`, so a bare `<slug>@domain` (no `+`) carries no
-    // `__voidPlatformTo` yet must still read as an EMPTY tag, not as the
-    // slug itself — otherwise `email/[user].ts` would run with `user=<slug>`.
-    // With no slug configured (a worker on the developer's own zone) the wire
-    // address IS the address the handler author wrote: match all of it. With
-    // the prefix present and no `+` after it there is no tag, and the empty
-    // string falls through to `_default`.
+    // With a slug configured, `<slug>[+<tag>]` routes on the tag; a bare `<slug>@` has an empty tag.
     lines.push('  let __local = __localFull;');
     lines.push('  if (__opts && __opts.slug) {');
     lines.push('    const __plus = __localFull.indexOf("+");');
@@ -712,12 +639,7 @@ export function compileRouteTable(
       lines.push('  }');
       lines.push('  return await __dmod.default(message, env, ctx, { params: {} });');
     } else {
-      // No-match without _default — explicitly reject so the remote MTA
-      // gets a non-delivery report. Silent acceptance would mark the
-      // message accepted on our end while never invoking any handler,
-      // which is invisible to the sender (no NDR) and to the recipient
-      // (no delivery). The reject reason is generic so user-handler
-      // authors can add `_default.ts` to customize.
+      // Reject unmatched mail so the sender gets a bounce instead of silent loss.
       lines.push('  if (typeof message.setReject === "function") {');
       lines.push(
         '    message.setReject("no handler matched recipient \\"" + __to + "\\" — add email/_default.ts to handle unmatched mail");',
@@ -798,76 +720,22 @@ export function compileRouteTable(
     }
     lines.push('  return null;');
     lines.push('}');
-    lines.push('app.post("/__void/migrate", async (c) => {');
-    lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __voidGetMigrationEnv(),');
-    lines.push('    __migrations,');
-    lines.push('    __migrationDialect,');
+    lines.push(
+      `app.post("/__void/migrate", (c) => __voidCreateMigrationRequestHandler(c.req.raw, ${auth ? 'true' : 'false'}, false)(c.req.raw));`,
+    );
+    lines.push(
+      `app.get("/__void/migrate/capabilities", (c) => __voidCreateMigrationRequestHandler(c.req.raw, ${auth ? 'true' : 'false'}, true)(c.req.raw));`,
+    );
+    lines.push(
+      'app.post("/__void/migrate/app", (c) => __voidCreateMigrationRequestHandler(c.req.raw, false, true)(c.req.raw));',
+    );
+    lines.push(
+      'app.get("/__void/migrate/app/attempt/:attemptId", (c) => __voidCreateMigrationRequestHandler(c.req.raw, false, true)(c.req.raw));',
+    );
     if (auth) {
       lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
-          auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
-        }),`,
+        'app.post("/__void/migrate/auth", (c) => __voidCreateMigrationRequestHandler(c.req.raw, true, true)(c.req.raw));',
       );
-    } else {
-      lines.push('    undefined,');
-    }
-    lines.push('  );');
-    lines.push('  return __voidMigrationHandler(c.req.raw);');
-    lines.push('});');
-    lines.push('app.get("/__void/migrate/capabilities", async (c) => {');
-    lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __voidGetMigrationEnv(),');
-    lines.push('    __migrations,');
-    lines.push('    __migrationDialect,');
-    if (auth) {
-      lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
-          auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
-        }),`,
-      );
-    } else {
-      lines.push('    undefined,');
-    }
-    lines.push('    __migrationPlanBundle,');
-    lines.push('  );');
-    lines.push('  return __voidMigrationHandler(c.req.raw);');
-    lines.push('});');
-    lines.push('app.post("/__void/migrate/app", async (c) => {');
-    lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __voidGetMigrationEnv(),');
-    lines.push('    __migrations,');
-    lines.push('    __migrationDialect,');
-    lines.push('    undefined,');
-    lines.push('    __migrationPlanBundle,');
-    lines.push('  );');
-    lines.push('  return __voidMigrationHandler(c.req.raw);');
-    lines.push('});');
-    lines.push('app.get("/__void/migrate/app/attempt/:attemptId", async (c) => {');
-    lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-    lines.push('    __voidGetMigrationEnv(),');
-    lines.push('    __migrations,');
-    lines.push('    __migrationDialect,');
-    lines.push('    undefined,');
-    lines.push('    __migrationPlanBundle,');
-    lines.push('  );');
-    lines.push('  return __voidMigrationHandler(c.req.raw);');
-    lines.push('});');
-    if (auth) {
-      lines.push('app.post("/__void/migrate/auth", async (c) => {');
-      lines.push('  const __voidMigrationHandler = __createMigrationHandler(');
-      lines.push('    __voidGetMigrationEnv(),');
-      lines.push('    __migrations,');
-      lines.push('    __migrationDialect,');
-      lines.push(
-        `    () => runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions${
-          auth.authSchemaPath ? ', __voidAuthMigrationSchema' : ''
-        }),`,
-      );
-      lines.push('    __migrationPlanBundle,');
-      lines.push('  );');
-      lines.push('  return __voidMigrationHandler(c.req.raw);');
-      lines.push('});');
     }
     lines.push('');
   } else {
@@ -1149,22 +1017,7 @@ function compilePageRoutes(
   lines.push('');
 }
 
-/**
- * Generate the asset fallthrough helper shared by native Void workers and
- * Class A framework wrappers. If the app returns 404, check ASSETS binding
- * for static files and set cache headers. Edge caching of hashed assets
- * happens at the dispatch layer (see design doc 0042).
- *
- * `notFound` is the RESOLVED `assetConfig.not_found_handling` for this build
- * (`resolveAssetRoutingPolicy`), and it decides what happens once the asset
- * binding has also answered 404. It is a separate argument from
- * `serveSpaFallback` because the two are not derived from each other: the
- * common worker-first app runs with `not_found_handling: 'none'` and STILL
- * wants the worker-side shell fallback (that is the whole reason the flag
- * exists). They are mutually exclusive in practice — `resolveAssetRoutingPolicy`
- * clears `workerSpaFallback` whenever an explicit `routing.notFound` asks for
- * anything other than the SPA shell.
- */
+/** Asset fallthrough shared by native Void workers and Class A framework wrappers. */
 export function compileAssetFallbackHelper(
   assetsDir = 'assets',
   serveSpaFallback = false,
@@ -1175,31 +1028,18 @@ const serveWithAssets = __createAssetFallback(${JSON.stringify({ assetsDir, serv
 `;
 }
 
-// Both modules are siblings under `runtime/`, so `_env` -> `email` is the only
-// transform needed. Works for bare specifiers (`void/_env` -> `void/email`) and
-// for resolved file paths (`/.../runtime/env.mjs` -> `/.../runtime/email.mjs`).
-function deriveEmailRuntimePath(runtimeEnvPath: string): string {
-  return runtimeEnvPath.replace(/_?env(\.[^/]+)?$/, (_m, ext) => 'email' + (ext ?? ''));
-}
-
 export interface WorkerEntryOptions {
   /** Native readiness proves the actual served Worker version through this binding. */
   versionMetadataBinding?: string;
   hasQueues?: boolean;
   remote?: {
     remotePath: string;
-    envPath: string;
     bindingNames?: { d1?: string; kv?: string; r2?: string };
   };
   assetsDir?: string;
   webSocketClasses?: Array<string>;
   runtimeEnvPath?: string;
-  /**
-   * Path to the `void/email` runtime, used for `createMessageProxy` in the
-   * generated email handlers. Defaults to a sibling-of-`runtimeEnvPath`
-   * derivation, which covers both bare specifiers (`void/_env` -> `void/email`)
-   * and resolved file paths.
-   */
+  /** Path to the `void/email` runtime used by the generated email handlers. */
   runtimeEmailPath?: string;
   envSchemaModule?: { importPath: string; helperPath: string };
   sandbox?:
@@ -1269,7 +1109,7 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
     assetsDir = 'assets',
     webSocketClasses = [],
     runtimeEnvPath = 'void/_env',
-    runtimeEmailPath,
+    runtimeEmailPath = 'void/email',
     envSchemaModule,
     sandbox,
     serveSpaFallback = false,
@@ -1337,9 +1177,7 @@ export function compileWorkerEntry(options: WorkerEntryOptions = {}): string {
   const remoteImport = remote
     ? `import { createRemoteEnv } from ${JSON.stringify(remote.remotePath)};\n`
     : '';
-  // Boot-time env validation: import the user's env.ts so the schema is
-  // registered, plus the validator helper. The helper short-circuits after
-  // the first call per isolate and throws EnvValidationError on bad values.
+  // Importing env.ts registers the schema that `_validateEnvOnce` checks.
   const envSchemaImport = envSchemaModule
     ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
     : '';
@@ -1367,14 +1205,11 @@ const __filterInternalBindings = (env) => __filterBindings(env, ${JSON.stringify
     internalRoute: __voidHandleInternalRoute,
     collectPrerenderPaths: __voidCollectPrerenderPaths${versionMetadataBinding ? ', versionMetadataBinding: ' + JSON.stringify(versionMetadataBinding) : ''}${envSchemaModule ? ', validateEnv: _validateEnvOnce' : ''}${remotePath ? ', remoteEnv: (env) => ' + createRemoteEnvCall : ''}${hasEmail ? ', emailReceipt: __handleEmailReceipt' : ''}${isr ? ', isr: { deploymentId: __VOID_ISR_DEPLOYMENT_ID, handle: (request, env, ctx, render) => handleIsr(request, env, ctx, { revalidate: __VOID_ISR_REVALIDATE, pages: __VOID_ISR_PAGES, pathRevalidate: __VOID_ISR_PATH_REVALIDATE, deploymentId: __VOID_ISR_DEPLOYMENT_ID, queryAllowlist: ' + JSON.stringify(isr.queryAllowlist) + ' }, render) }' : ''}
   })`;
-  const scheduledHandler = remotePath
-    ? `async function handleScheduled(controller, env, ctx) {
-${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
-${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
-  return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
-}`
-    : `async function handleScheduled(controller, env, ctx) {
-${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
+  const remoteEnvSwap = remotePath
+    ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n`
+    : '';
+  const scheduledHandler = `async function handleScheduled(controller, env, ctx) {
+${envValidateCall}${remoteEnvSwap}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   return withRuntimeEnv(env, () => scheduled(controller, userEnv, ctx));
 }`;
 
@@ -1382,34 +1217,13 @@ ${envValidateCall}${isrDeploymentStamp}  const userEnv = __filterInternalBinding
   // run the same handler. Native events replay recorded actions on the real
   // message; receipts return bounded action frames to the platform.
   const emailImport = hasEmail ? ', __emailHandler' : '';
-  const emailRuntimePath = runtimeEmailPath ?? deriveEmailRuntimePath(runtimeEnvPath);
   const emailProxyImport = hasEmail
-    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(emailRuntimePath)};\nimport { EMAIL_PROTOCOL_VERSION as __EMAIL_PROTOCOL_VERSION, encodeEmailActions as __encodeEmailActions, readEmailEnvelope as __readEmailEnvelope, verifyEmailReceiptThroughProxy as __verifyEmailReceiptThroughProxy } from "void/_email-protocol";\n`
+    ? `import { createMessageProxy as __createMessageProxy, enactEmailActions as __enactEmailActions, isForwardableEmailMessage as __isForwardableEmailMessage } from ${JSON.stringify(runtimeEmailPath)};\nimport { EMAIL_PROTOCOL_VERSION as __EMAIL_PROTOCOL_VERSION, encodeEmailActions as __encodeEmailActions, readEmailEnvelope as __readEmailEnvelope, verifyEmailReceiptThroughProxy as __verifyEmailReceiptThroughProxy } from "void/_email-protocol";\n`
     : '';
-  // `__VOID_PROJECT_SLUG` is the same binding the outbound `sendEmail` reads to
-  // default `from`. It is passed to `createMessageProxy` so the user-visible
-  // `message.to` is the bare `<tag>@<domain>` rather than the wire form, and to
-  // the generated `__emailHandler`, which routes on the wire address
-  // (`__voidPlatformTo`) and strips the `<slug>+` prefix iff a slug is set.
-  //
-  // Verified custom-domain receipts carry `viaDomain` and have no project
-  // prefix. Suppress the slug there so tags such as `support+T-42@acme.com`
-  // reach the matching handler intact.
+  // Custom-domain receipts (`viaDomain`) carry no `<slug>+` prefix, so they get no slug.
   const emailHandler = hasEmail
-    ? remotePath
-      ? `async function handleEmail(envelope, env, ctx) {
-${envValidateCall}  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};
-  const userEnv = __filterInternalBindings(env);
-  const __relayed = typeof envelope.viaDomain === "string" && envelope.viaDomain.length > 0;
-  const __slug = __relayed ? undefined : (typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined);
-  const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
-  await __withRawEnv(env, () => withRuntimeEnv(env, () => __emailHandler(message, userEnv, ctx, { slug: __slug })));
-  const __actions = getActions();
-  if (__isForwardableEmailMessage(envelope)) await __enactEmailActions(envelope, __actions);
-  return __actions;
-}`
-      : `async function handleEmail(envelope, env, ctx) {
-${envValidateCall}  const userEnv = __filterInternalBindings(env);
+    ? `async function handleEmail(envelope, env, ctx) {
+${envValidateCall}${remoteEnvSwap}  const userEnv = __filterInternalBindings(env);
   const __relayed = typeof envelope.viaDomain === "string" && envelope.viaDomain.length > 0;
   const __slug = __relayed ? undefined : (typeof env.__VOID_PROJECT_SLUG === "string" && env.__VOID_PROJECT_SLUG.length > 0 ? env.__VOID_PROJECT_SLUG : undefined);
   const { message, getActions } = __createMessageProxy(envelope, { slug: __slug });
@@ -1467,15 +1281,10 @@ ${envValidateCall}  const userEnv = __filterInternalBindings(env);
   async scheduled(controller) { return handleScheduled(controller, this.env, this.ctx); }
 ${queueMethodBody}${emailMethodBody}}`;
 
-  if (hasQueues) {
-    return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __withRawEnv, __processQueue${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
-${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
-${fetchDeclaration}
-${scheduledHandler}
-${emailHandler}
-${emailReceiptHandler}
-async function __voidQueue(batch, env, ctx) {
-${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${createRemoteEnvCall};\n` : ''}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
+  const queueImport = hasQueues ? ', __processQueue' : '';
+  const queueFunction = hasQueues
+    ? `async function __voidQueue(batch, env, ctx) {
+${envValidateCall}${remoteEnvSwap}${isrDeploymentStamp}  const userEnv = __filterInternalBindings(env);
   const messages = [...batch.messages].map(m => ({
     id: m.id, timestamp: m.timestamp.toISOString(),
     body: m.body, attempts: m.attempts,
@@ -1495,19 +1304,15 @@ ${envValidateCall}${remotePath ? `  if (env.__VOID_REMOTE === "1") env = ${creat
   if (!__qr.ok) throw new Error("queue: Handler failed.");
 }
 
-${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
-${liveExport}
-${sandboxExport}
-${durableObjectExports}
-${entryClass}`;
-  }
-  return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __withRawEnv${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
+`
+    : '';
+  return `${sandboxImport}${entryImport}${liveRuntimeImport}import app, { scheduled, __voidCollectPrerenderPaths, __voidHandleInternalRoute, __withRawEnv${queueImport}${emailImport}${webSocketClasses.length > 0 ? `, ${webSocketClasses.join(', ')}` : ''}${liveRouteImport} } from 'virtual:void-routes';
 ${durableObjectImports}\n${runtimeEnvImport}${emailProxyImport}${envSchemaImport}${remoteImport}${isrImport}${filterBindingsHelper}${assetHelper}
 ${fetchDeclaration}
 ${scheduledHandler}
 ${emailHandler}
 ${emailReceiptHandler}
-${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
+${queueFunction}${webSocketClasses.map((name) => `export { ${name} };`).join('\n')}
 ${liveExport}
 ${sandboxExport}
 ${durableObjectExports}
@@ -1517,13 +1322,6 @@ ${entryClass}`;
 /**
  * Generate the app module — exports the Hono app with static asset serving.
  * This is the entry imported by `vite preview` and can be used programmatically.
- *
- * When `envSchemaModule` is provided, splices boot-time env validation so it
- * runs on the first request (including the prerender child process spawned
- * by `prerenderPagesNode`). Mirrors `compileWorkerEntry`: a side-effect import
- * registers the schema, and `_validateEnvOnce` throws `EnvValidationError` on
- * bad values. Env source on Node/Bun is `process.env`; on Deno it's
- * `Deno.env.toObject()`.
  */
 export function compileNodeApp(
   target: 'node' | 'bun' | 'deno',
@@ -1537,10 +1335,6 @@ export function compileNodeApp(
         ? `import { serveStatic } from "hono/deno";`
         : `import { serveStatic } from "@hono/node-server/serve-static";`;
 
-  // Boot-time env validation: side-effect import so defineEnv() registers the
-  // schema, plus the validator helper. Helper short-circuits after the first
-  // call per process and throws EnvValidationError on bad values. Node/Bun
-  // read env from `process.env`; Deno from `Deno.env.toObject()`.
   const envSchemaImport = envSchemaModule
     ? `import ${JSON.stringify(envSchemaModule.importPath)};\nimport { _validateEnvOnce } from ${JSON.stringify(envSchemaModule.helperPath)};\n`
     : '';
@@ -1615,75 +1409,6 @@ export { fetchStream, StreamError } from ${JSON.stringify(fetchStreamPath)};
 export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};`;
 }
 
-/**
- * Generate the server-side fetch client module for non-CF targets.
- * Same as compileWorkerClient but without cloudflare:workers dependency.
- * Calls app.fetch() directly (no HTTP round-trip) with ALS context forwarding.
- */
-export function compileNodeClient(authClientPath: string): string {
-  return `import app, { requestContext } from "virtual:void-routes";
-import { interpolateRouteParams } from ${JSON.stringify(ROUTE_URL_PATH)};
-export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
-
-export class FetchError extends Error {
-  constructor(status, statusText, data) {
-    super(\`fetch: Request failed with status \${status}.\`);
-    this.name = "FetchError";
-    this.status = status;
-    this.statusText = statusText;
-    this.data = data;
-  }
-}
-
-export async function fetch(path, options) {
-  let url = interpolateRouteParams(path, options?.params);
-
-  if (options?.query) {
-    const qs = new URLSearchParams(options.query).toString();
-    if (qs) url += "?" + qs;
-  }
-
-  const method = options?.method ?? "GET";
-  const headers = new Headers(options?.headers);
-
-  const store = requestContext.getStore();
-  if (store?.request) {
-    const outerReq = store.request;
-    if (!headers.has("cookie")) {
-      const cookie = outerReq.headers.get("cookie");
-      if (cookie) headers.set("cookie", cookie);
-    }
-    if (!headers.has("authorization")) {
-      const auth = outerReq.headers.get("authorization");
-      if (auth) headers.set("authorization", auth);
-    }
-  }
-
-  if (options?.body != null && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-
-  const request = new Request("http://localhost" + url, {
-    method,
-    headers,
-    body: options?.body != null ? JSON.stringify(options.body) : undefined,
-  });
-
-  const response = await app.fetch(request);
-
-  if (response.status === 204) return undefined;
-
-  const contentType = response.headers.get("content-type") ?? "";
-  const data = contentType.includes("application/json") ? await response.json() : await response.text();
-
-  if (!response.ok) {
-    throw new FetchError(response.status, response.statusText, data);
-  }
-
-  return data;
-}`;
-}
-
 function stripOriginForProd(rules: Array<DevRedirectRule>): Array<DevRedirectRule> {
   return rules.map(({ origin: _origin, ...rest }) => rest);
 }
@@ -1704,11 +1429,15 @@ function compileHeaderMiddleware(lines: Array<string>, rules: Array<HeaderRule>)
   lines.push('app.use("*", __routingRuntime.headerMiddleware(__headerRules));');
 }
 
-export function compileWorkerClient(authClientPath: string): string {
+/** Generate the server-side fetch client, which calls `app.fetch()` with the current request's credentials. */
+export function compileWorkerClient(authClientPath: string, nodeTarget = false): string {
+  const envImport = nodeTarget ? '' : 'import { env } from "cloudflare:workers";\n';
+  const dispatch = nodeTarget
+    ? 'const response = await app.fetch(request);'
+    : 'const executionCtx = store?.executionCtx ?? { waitUntil() {}, passThroughOnException() {} };\n  const response = await app.fetch(request, env, executionCtx);';
   return `import app, { requestContext } from "virtual:void-routes";
 import { interpolateRouteParams } from ${JSON.stringify(ROUTE_URL_PATH)};
-import { env } from "cloudflare:workers";
-export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
+${envImport}export { auth, createAuthClient } from ${JSON.stringify(authClientPath)};
 
 export class FetchError extends Error {
   constructor(status, statusText, data) {
@@ -1731,7 +1460,6 @@ export async function fetch(path, options) {
   const method = options?.method ?? "GET";
   const headers = new Headers(options?.headers);
 
-  // Auto-forward cookie and authorization from the outer request via ALS
   const store = requestContext.getStore();
   if (store?.request) {
     const outerReq = store.request;
@@ -1749,15 +1477,13 @@ export async function fetch(path, options) {
     headers.set("content-type", "application/json");
   }
 
-  const request = new Request("http://worker.local" + url, {
+  const request = new Request("${nodeTarget ? 'http://localhost' : 'http://worker.local'}" + url, {
     method,
     headers,
     body: options?.body != null ? JSON.stringify(options.body) : undefined,
   });
 
-  // Use real executionCtx from ALS if available, otherwise provide a no-op fallback
-  const executionCtx = store?.executionCtx ?? { waitUntil() {}, passThroughOnException() {} };
-  const response = await app.fetch(request, env, executionCtx);
+  ${dispatch}
 
   if (response.status === 204) return undefined;
 
