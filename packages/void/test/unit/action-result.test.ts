@@ -174,6 +174,16 @@ describe('action clients', () => {
       data: { name: 'Alice' },
     });
   });
+
+  it('preserves validation errors as action results', async () => {
+    const client = createActionClient();
+    client.setActionRouter(routerWithVisit(vi.fn(async () => ({ errors: { name: 'Required' } }))));
+
+    expect(await client.action('/__action-test/static')).toMatchObject({
+      ok: false,
+      error: { status: 422, body: { errors: { name: 'Required' } } },
+    });
+  });
 });
 
 it('exposes the application message and retry deadline for structured quota responses', () => {

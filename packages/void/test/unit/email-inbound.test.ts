@@ -269,6 +269,16 @@ describe('parseEmail', () => {
     expect(parsed.from?.address).toBe('a@x.dev');
     expect(parsed.text?.trim()).toBe('Hi there');
   });
+
+  it('rejects messages over the size cap before reading the stream', async () => {
+    const message = {
+      from: 'a@x.dev',
+      to: 'b@y.dev',
+      rawSize: 11 * 1024 * 1024,
+      raw: new ReadableStream(),
+    } as unknown as ForwardableEmailMessage;
+    await expect(parseEmail(message)).rejects.toThrow(/exceeds maximum/);
+  });
 });
 
 const COMPILE_OPTIONS = {

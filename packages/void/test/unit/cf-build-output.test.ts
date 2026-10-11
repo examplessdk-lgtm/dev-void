@@ -295,6 +295,23 @@ it('reports a missing built entry', async () => {
   );
 });
 
+it('preserves binary font modules in a deployable Worker bundle', async () => {
+  const output = worker({ name: 'void-test', compatibility_date: '2026-09-29', main: 'index.js' });
+  mkdirSync(join(output, 'assets'));
+  writeFileSync(
+    join(output, 'index.js'),
+    "import font from './assets/font.woff2'; export default { fetch() { return new Response(String(font.byteLength)) } };\n",
+  );
+  writeFileSync(join(output, 'assets/font.woff2'), Buffer.from([1, 2, 3]));
+  await withPrepared(prepareCfBuildOutput(output, 'account-id'), async (prepared) => {
+    const built = await readBuildOutput(prepared.directory);
+    expect(built.workers.default.config.manifest).toMatchObject({
+      mainModule: 'index.js',
+      modules: { 'assets/font.woff2': { type: 'data' } },
+    });
+  });
+});
+
 it('names the file when a plugin emits an unsupported module', async () => {
   const output = worker({ name: 'void-test', compatibility_date: '2026-09-29', main: 'index.js' });
   writeFileSync(join(output, 'plugin.unknown'), 'unexpected');

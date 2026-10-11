@@ -60,15 +60,16 @@ describe('validateProdEnv — deploy-time schema enforcement', () => {
 
   it('treats remote secrets as "present" so a prod secret satisfies a required key', async () => {
     const root = createTempProject();
-    defineEnv({ STRIPE_KEY: string() });
+    defineEnv({ STRIPE_KEY: string(), PORT: number() });
 
     const { report } = await validateProdEnv(root, {
       productionOnly: true,
-      remoteSecrets: ['STRIPE_KEY'],
+      remoteSecrets: ['STRIPE_KEY', 'PORT'],
     });
 
     expect(report.valid).toBe(true);
     expect(report.missing).toEqual([]);
+    expect(report.invalid).toEqual([]);
   });
 
   it('never reads .env during production validation', async () => {
