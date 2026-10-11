@@ -14,7 +14,6 @@ import { toSlash } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   detectProjectState,
-  ensureVoidDependency,
   ensureVoidWorkerCompatibilityDate,
   ensureVoidPlatformConnection,
   extractPnpmWorkspacePackages,
@@ -3452,7 +3451,7 @@ export default config;
       );
 
       // Child app: `package.json` does NOT declare `void` yet.
-      // `ensureVoidDependency` will write the alias during `scaffoldDemo`.
+      // Init will add it before the demo is scaffolded.
       const childRoot = join(parentRoot, 'subpkg');
       mkdirSync(childRoot, { recursive: true });
       writeFileSync(
@@ -3464,8 +3463,7 @@ export default config;
             type: 'module',
             devDependencies: {
               // Keep us out of the Pages starter branch so we hit the
-              // demo prompt. No `void` declared here — scaffoldDemo
-              // (via ensureVoidDependency) must add it.
+              // demo prompt. No `void` declared here — init must add it.
               vite: '^8.0.0',
             },
           },
@@ -3482,7 +3480,7 @@ export default config;
       await runInitCommand(childRoot);
 
       // The alias WAS written to the child's own package.json —
-      // `ensureVoidDependency` declares it so post-install state
+      // init declares it so post-install state
       // matches the new dependency.
       const updatedPkg = JSON.parse(readFileSync(join(childRoot, 'package.json'), 'utf-8'));
       const voidSpec =
@@ -3654,7 +3652,7 @@ export default config;
   });
 
   it('emits a lockfile-sync note when void is hoisted and scaffoldDemo mutated package.json in a workspace subpackage', async () => {
-    // `scaffoldDemo` (via `ensureVoidDependency`) writes a new `void`
+    // Init writes a new `void`
     // entry into the subpackage's `package.json` while `void` is already
     // resolvable via an ancestor `node_modules/void`. Without a note, the
     // workspace lockfile silently disagrees with `package.json` and the
@@ -3675,7 +3673,7 @@ export default config;
       );
 
       // Subpackage: `package.json` does NOT declare `void` yet, so
-      // `ensureVoidDependency` will mutate it during `scaffoldDemo`.
+      // init will add it before the demo is scaffolded.
       const subpkgRoot = join(wsroot, 'packages', 'my-app');
       mkdirSync(subpkgRoot, { recursive: true });
       writeFileSync(
@@ -3687,8 +3685,7 @@ export default config;
             type: 'module',
             devDependencies: {
               // Keep us out of the Pages starter branch so we hit the
-              // demo prompt. No `void` declared here — scaffoldDemo
-              // (via ensureVoidDependency) must add it.
+              // demo prompt. No `void` declared here — init must add it.
               vite: '^8.0.0',
             },
           },
@@ -4288,10 +4285,9 @@ export default config;
 
   it('skips starter migration in a workspace subpackage using a leading `./` glob', async () => {
     // A real-world `pnpm-workspace.yaml` sometimes writes
-    // `- './packages/*'` instead of `- 'packages/*'`. The leading `./`
-    // must be stripped before segment splitting, or no subpackage path
-    // matches and the fresh-clone install branch aborts on the
-    // subpackage's `workspace:*` spec.
+    // `- './packages/*'` instead of `- 'packages/*'`. It must still match,
+    // or the fresh-clone install branch aborts on the subpackage's
+    // `workspace:*` spec.
     const wsroot = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(join(wsroot, 'pnpm-workspace.yaml'), "packages:\n  - './packages/*'\n");
@@ -4339,8 +4335,7 @@ export default config;
 
   it('skips starter migration in a workspace subpackage whose pattern uses a partial glob', async () => {
     // Real workspaces sometimes declare partial-segment globs like
-    // `packages/*-app`, `packages/app-*`, or `apps/*-service`. Each
-    // segment compiles to a regex so these match.
+    // `packages/*-app`, `packages/app-*`, or `apps/*-service`.
     const wsroot = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
       writeFileSync(join(wsroot, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*-app'\n");
@@ -4388,8 +4383,7 @@ export default config;
 
   it('runs install for a non-matching subpackage when the workspace uses a partial glob', async () => {
     // Negative case: a workspace that declares `packages/*-app`
-    // must NOT treat `packages/other` as a member. The partial-glob
-    // matcher is an anchored regex (`^.*-app$`), so `other` must
+    // must NOT treat `packages/other` as a member, so `other` must
     // fall through to the fresh-clone install branch.
     const wsroot = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {
@@ -5109,211 +5103,6 @@ export default config;
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe('ensureVoidDependency', () => {
-  it('creates package.json with type: "module" when none exists (greenfield)', () => {
-    withTempDir((root) => {
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.type).toBe('module');
-      expect(pkg.private).toBe(true);
-      expect(typeof pkg.devDependencies.void).toBe('string');
-    });
-  });
-
-  it('leaves existing CommonJS package.json alone (does not add type: "module")', () => {
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'legacy-app',
-            private: true,
-            dependencies: { express: '^4.18.0' },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      // Critical assertion: the absent `type` must stay absent so sibling
-      // `.js` scripts keep being interpreted as CommonJS.
-      expect(pkg.type).toBeUndefined();
-      // The helper still ensures `void` is declared as a devDependency.
-      expect(typeof pkg.devDependencies.void).toBe('string');
-      // Pre-existing fields are preserved.
-      expect(pkg.name).toBe('legacy-app');
-      expect(pkg.dependencies.express).toBe('^4.18.0');
-    });
-  });
-
-  it('leaves existing ESM package.json alone (type: "module" stays)', () => {
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'esm-app',
-            private: true,
-            type: 'module',
-            dependencies: {},
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.type).toBe('module');
-      expect(typeof pkg.devDependencies.void).toBe('string');
-      expect(pkg.name).toBe('esm-app');
-    });
-  });
-
-  it('does not clobber an existing void dependency declaration', () => {
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'pinned-void-app',
-            private: true,
-            devDependencies: {
-              void: '^0.2.3',
-            },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.devDependencies.void).toBe('^0.2.3');
-      expect(pkg.type).toBeUndefined();
-    });
-  });
-
-  it('does not add private: true to an existing package.json that omits it', () => {
-    // An existing package.json that intentionally omits `private` (e.g. a
-    // library or app meant to be published to a registry) must stay
-    // non-private after `ensureVoidDependency`. Flipping it to `private:
-    // true` silently would change publish semantics.
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'publishable-app',
-            version: '1.2.3',
-            dependencies: { react: '^18.0.0' },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      // Critical: `private` must stay absent so publish semantics are
-      // preserved.
-      expect(pkg.private).toBeUndefined();
-      // Pre-existing fields are still preserved and void was added to
-      // devDependencies.
-      expect(pkg.name).toBe('publishable-app');
-      expect(pkg.version).toBe('1.2.3');
-      expect(pkg.dependencies.react).toBe('^18.0.0');
-      expect(typeof pkg.devDependencies.void).toBe('string');
-    });
-  });
-
-  it('does not flip private: false to private: true on an existing package.json', () => {
-    // An existing package.json with `private: false` (e.g. an explicitly
-    // publishable package) must stay that way after `ensureVoidDependency`.
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'explicitly-public',
-            private: false,
-            dependencies: {},
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.private).toBe(false);
-      expect(typeof pkg.devDependencies.void).toBe('string');
-    });
-  });
-
-  it('does NOT add a duplicate `void` entry when `void` is already declared in `peerDependencies`', () => {
-    // A project with `peerDependencies.void` (e.g. a plugin author) must
-    // not get a redundant `devDependencies.void` written on top, which can
-    // confuse package managers and dependency dedup.
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'plugin-with-peer',
-            private: true,
-            peerDependencies: {
-              void: '^1.0.0',
-            },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.peerDependencies.void).toBe('^1.0.0');
-      expect(pkg.devDependencies?.void).toBeUndefined();
-    });
-  });
-
-  it('does NOT add a duplicate `void` entry when `void` is already declared in `optionalDependencies`', () => {
-    // Same fix scope as the peerDependencies case above.
-    withTempDir((root) => {
-      writeFileSync(
-        join(root, 'package.json'),
-        JSON.stringify(
-          {
-            name: 'optional-void',
-            private: true,
-            optionalDependencies: {
-              void: '^2.5.1',
-            },
-          },
-          null,
-          2,
-        ) + '\n',
-      );
-
-      ensureVoidDependency(root);
-
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-      expect(pkg.optionalDependencies.void).toBe('^2.5.1');
-      expect(pkg.devDependencies?.void).toBeUndefined();
-    });
   });
 });
 
