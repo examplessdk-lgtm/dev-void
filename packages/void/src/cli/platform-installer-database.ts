@@ -894,7 +894,7 @@ export function assertPlatformRuntimeSafety(
   }
 }
 
-export async function claimPlatformDatabaseConnection(
+async function claimPlatformDatabaseConnection(
   client: DatabaseClaimConnection,
   installationId: string,
   ownershipNonce: string,
