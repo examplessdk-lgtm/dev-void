@@ -404,11 +404,11 @@ describe('runtime ai', () => {
     });
 
     it.each([
-      ['anthropic', 'ANTHROPIC_API_KEY', 'x-api-key', 'sk-test'],
-      ['deepgram', 'DEEPGRAM_API_KEY', 'authorization', 'Token sk-test'],
+      ['anthropic', 'ANTHROPIC_API_KEY', 'x-api-key', 'sk-test', null],
+      ['deepgram', 'DEEPGRAM_API_KEY', 'authorization', 'Token sk-test', 'Token sk-test'],
     ] as const)(
       'sends the provider-native auth header for %s',
-      async (provider, keyEnv, header, value) => {
+      async (provider, keyEnv, header, value, authorization) => {
         vi.resetModules();
         const { envContext } = await import('../../src/runtime/env-raw.ts');
         const { ai } = await import('../../src/runtime/ai.ts');
@@ -431,7 +431,7 @@ describe('runtime ai', () => {
         const headers = new Headers(fetchMock.mock.calls[0][1]!.headers);
         // `Authorization: Bearer <key>` 401s at the gateway pass-through for these providers.
         expect(headers.get(header)).toBe(value);
-        expect(headers.get('authorization') ?? '').not.toMatch(/^Bearer /);
+        expect(headers.get('authorization')).toBe(authorization);
       },
     );
 
