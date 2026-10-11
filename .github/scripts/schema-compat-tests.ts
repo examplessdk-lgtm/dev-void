@@ -125,13 +125,9 @@ async function runIsolatedCompatibilityTests(options: {
   files: ReadonlyArray<string>;
   query: (statement: string) => Promise<unknown>;
   runTest: (file: string, databaseUrl: string) => Promise<number>;
-  concurrency?: number;
 }): Promise<Array<string>> {
   const template = compatibilityTemplate(options.templateUrl);
-  const concurrency = options.concurrency ?? 2;
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) {
-    throw new Error('Compatibility concurrency must be between 1 and 4.');
-  }
+  const concurrency = 2;
   if (!options.files.length || new Set(options.files).size !== options.files.length) {
     throw new Error('Compatibility tests must contain unique test files.');
   }

@@ -1,5 +1,4 @@
 import { appendFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
 
 async function productionBaseline(options: {
   configuredSha?: string;
@@ -68,15 +67,13 @@ async function productionBaseline(options: {
   );
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const sha = await productionBaseline({
-    configuredSha: process.env.PRODUCTION_REF,
-    repository: process.env.GITHUB_REPOSITORY ?? '',
-    token: process.env.GITHUB_TOKEN,
-    environment: process.env.PRODUCTION_ENVIRONMENT || 'Prod',
-  });
-  if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
-  }
-  console.log(`Previous production runtime: ${sha}`);
+const sha = await productionBaseline({
+  configuredSha: process.env.PRODUCTION_REF,
+  repository: process.env.GITHUB_REPOSITORY ?? '',
+  token: process.env.GITHUB_TOKEN,
+  environment: process.env.PRODUCTION_ENVIRONMENT || 'Prod',
+});
+if (process.env.GITHUB_OUTPUT) {
+  appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
 }
+console.log(`Previous production runtime: ${sha}`);

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 // eslint-disable-next-line no-restricted-imports -- Native filesystem paths are never embedded in source.
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { parseSync } from 'vite';
 import { isRecord } from '../../packages/deploy-core/src/is-record.ts';
 import { compatibilityTestFiles } from './schema-compat-tests.ts';
@@ -52,16 +52,14 @@ function postgresConcurrencyTestFiles(root: string): Array<string> {
   return files;
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const files = postgresConcurrencyTestFiles(process.cwd());
-  // Reuse the bounded runner's independent database clones and cleanup for every file.
-  const result = spawnSync(
-    process.execPath,
-    [fileURLToPath(new URL('./schema-compat-tests.ts', import.meta.url)), ...files],
-    { stdio: 'inherit' },
-  );
-  if (result.error) {
-    throw result.error;
-  }
-  process.exitCode = result.status ?? 1;
+const files = postgresConcurrencyTestFiles(process.cwd());
+// Reuse the bounded runner's independent database clones and cleanup for every file.
+const result = spawnSync(
+  process.execPath,
+  [fileURLToPath(new URL('./schema-compat-tests.ts', import.meta.url)), ...files],
+  { stdio: 'inherit' },
+);
+if (result.error) {
+  throw result.error;
 }
+process.exitCode = result.status ?? 1;

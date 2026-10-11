@@ -40,11 +40,11 @@ function assertSchemaFixturePreserved(original, rows, projectModeMigrationApplie
   }
 }
 
-async function runSchemaFixture(command, env = process.env) {
+async function runSchemaFixture(command) {
   const snapshot =
-    env.COMPAT_FIXTURE_PATH ??
-    (env.RUNNER_TEMP ? `${env.RUNNER_TEMP}/void-schema-fixture.json` : undefined);
-  if (!snapshot || !env.COMPAT_DATABASE_URL) {
+    process.env.COMPAT_FIXTURE_PATH ??
+    (process.env.RUNNER_TEMP ? `${process.env.RUNNER_TEMP}/void-schema-fixture.json` : undefined);
+  if (!snapshot || !process.env.COMPAT_DATABASE_URL) {
     throw new Error('A disposable compatibility database and fixture path are required.');
   }
   if (command !== 'seed' && command !== 'verify') {
@@ -55,7 +55,7 @@ async function runSchemaFixture(command, env = process.env) {
   const { Pool } = createRequire(
     pathToFileURL(`${process.cwd()}/platform/packages/api/package.json`),
   )('pg');
-  const pool = new Pool({ connectionString: env.COMPAT_DATABASE_URL });
+  const pool = new Pool({ connectionString: process.env.COMPAT_DATABASE_URL });
   try {
     if (command === 'seed') {
       await pool.query(
@@ -104,6 +104,4 @@ async function runSchemaFixture(command, env = process.env) {
   }
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  await runSchemaFixture(process.argv[2]);
-}
+await runSchemaFixture(process.argv[2]);

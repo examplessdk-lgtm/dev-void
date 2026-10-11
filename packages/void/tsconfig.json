@@ -21,5 +21,5 @@
     "isolatedDeclarations": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "test", "env.d.ts"]
+  "include": ["src", "test", "env.d.ts", "../../test/*.ts", "../../.github/scripts/*.ts"]
 }
