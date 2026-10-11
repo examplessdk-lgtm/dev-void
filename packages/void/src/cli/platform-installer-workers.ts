@@ -758,7 +758,7 @@ export async function deployPlatformWorker(
     }
     if (!uploadedVersionId) {
       throw new Error(
-        `platform: Cloudflare uploaded ${workerName} without reporting its immutable version id.`,
+        `platform: Wrangler uploaded ${workerName} without reporting its immutable version id.`,
       );
     }
     await options.onStaged(previousVersionId, uploadedVersionId, previousTriggers);

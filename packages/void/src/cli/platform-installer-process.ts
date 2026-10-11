@@ -276,12 +276,12 @@ export async function withConditionalPlatformWorkerCreate<T>(
   }
   if (proxy.state.rejectedMutation) {
     throw new Error(
-      `platform: The Cloudflare upload attempted unexpected mutation ${proxy.state.rejectedMutation} while conditionally creating new Worker ${workerName}; the mutation was blocked.`,
+      `platform: Wrangler attempted unexpected mutation ${proxy.state.rejectedMutation} while conditionally creating new Worker ${workerName}; the mutation was blocked.`,
     );
   }
   if (!proxy.state.attempted || !proxy.state.forwarded) {
     throw new Error(
-      `platform: The Cloudflare upload did not use the guarded create endpoint for new Worker ${workerName}; refusing an unverified deployment.`,
+      `platform: Wrangler did not use the guarded create endpoint for new Worker ${workerName}; refusing an unverified deployment.`,
     );
   }
   if (proxy.state.conflictStatus !== null) {

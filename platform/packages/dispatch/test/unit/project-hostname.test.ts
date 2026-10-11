@@ -47,6 +47,35 @@ describe('workers.dev routing', () => {
       workersDev: false,
     });
   });
+  it('serves the new domain and the old alias through dispatch after activation', async () => {
+    const { env, values } = fixture();
+    values.set(
+      PLATFORM_APPLICATION_KEY,
+      JSON.stringify({ ...application, baseDomain: 'example.com', zoneName: 'example.com' }),
+    );
+    values.set(project.slug, JSON.stringify({ projectId: project.id, workerName: 'user-app' }));
+    const workerFetch = vi.fn(async (request: Request) =>
+      Response.json({ origin: new URL(request.url).origin }),
+    );
+    const getWorker = vi.fn(() => ({ fetch: workerFetch }));
+    Object.assign(env, {
+      DISPATCH: { get: getWorker },
+      ANALYTICS: { writeDataPoint: () => {} },
+    });
+    const ctx = { waitUntil: () => {} } as unknown as ExecutionContext;
+    const post = (host: string) =>
+      app.fetch(
+        new Request(`https://${host}/api/state`, { method: 'POST', body: 'preserved' }),
+        env,
+        ctx,
+      );
+    const domainResponse = await post('kitchen-sink.example.com');
+    expect(domainResponse.status).toBe(200);
+    expect(await domainResponse.json()).toEqual({ origin: 'https://kitchen-sink.example.com' });
+    expect((await post(hostname)).status).toBe(200);
+    expect(getWorker).toHaveBeenCalledWith('user-app');
+    expect(workerFetch).toHaveBeenCalledTimes(2);
+  });
   it('refuses a saved configuration belonging to a different installation', async () => {
     const { env, values } = fixture();
     values.set(

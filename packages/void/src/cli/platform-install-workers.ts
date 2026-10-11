@@ -1,4 +1,5 @@
 import { createPlatformWorkerConfigs, type PlatformInstallationManifest } from '@void/platform';
+import { writePlatformTiming } from './platform-installer-process.ts';
 import {
   recordResource,
   recordProvisionIntent,
@@ -265,6 +266,11 @@ export async function uploadInstallationWorkers(input: {
     onReadyForActivation?: () => Promise<void>,
   ): Promise<void> => {
     dependencies.onProgress?.(`Deploying the ${key} service`);
+    let workerStepStarted = performance.now();
+    const markWorkerStep = (step: string) => {
+      writePlatformTiming(`worker ${key} ${step}`, workerStepStarted);
+      workerStepStarted = performance.now();
+    };
     const action = platformWorkerAction(workerActions, key);
     const workerSecrets = platformWorkerSecretPayload(
       key,
@@ -280,11 +286,13 @@ export async function uploadInstallationWorkers(input: {
       }
     });
     await dependencies.revalidateBeforeWorkerDeploy(state.manifest, action);
+    markWorkerStep('revalidate');
     const preservedRoutes = dependencies.deployWorker
       ? []
       : action.action === 'create'
         ? []
         : await inventoryUnmanagedPlatformWorkerTraffic(dependencies.client, plan, action.name);
+    markWorkerStep('traffic inventory');
     const workerConfig = mergePlatformWorkerTrafficConfig(configs[key], preservedRoutes);
     const previousWorkerConfig = mergePlatformWorkerTrafficConfig(
       previousConfigs[key],
@@ -324,6 +332,7 @@ export async function uploadInstallationWorkers(input: {
             : runPinnedPlatformWrangler,
           workerExisted: action.action !== 'create',
         });
+    markWorkerStep('deploy');
     if (rollback) {
       workerRollbacks.push(rollback);
     }
@@ -337,6 +346,7 @@ export async function uploadInstallationWorkers(input: {
         await writeManifest(recorded);
       }
     });
+    markWorkerStep('record');
   };
   if (parallelWorkerUploads) {
     const tasks: Array<Promise<void>> = [];
