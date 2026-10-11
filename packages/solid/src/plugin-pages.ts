@@ -374,6 +374,7 @@ if (appEl.getAttribute("data-void-ssr") === "false") {
   hydrate(() => createComponent(App, {}), appEl);
 }
 appEl.setAttribute("data-hydrated", "true");
+export { reactiveRouter as router };
 start();
 commitInitialRender();
 `;

@@ -263,7 +263,7 @@ function generateClientEntry(
 	
 	${generateComponentManifest(scan, pagesDir)}
 
-	await startReactPages({
+	const { router } = await startReactPages({
 	  components,
 	  layoutTree,
 	  routeMeta,
@@ -274,5 +274,6 @@ function generateClientEntry(
 	  prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
 	  prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
 	});
+	export { router };
 	`;
 }

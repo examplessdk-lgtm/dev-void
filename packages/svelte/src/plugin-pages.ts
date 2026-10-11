@@ -245,7 +245,7 @@ import { hydrate, mount, tick } from "svelte";
 import { writable } from "svelte/store";
 import App from "@void/svelte/App.svelte";
 import { setActionRouter } from "@void/svelte";
-import { createVoidRouter, idleNavigationState } from "void/pages-client";
+import { createRouterFacade, createVoidRouter, idleNavigationState } from "void/pages-client";
 import { parseCacheFor } from "void/pages-prefetch";
 
 ${generateComponentManifest(scan, pagesDir)}
@@ -255,7 +255,8 @@ const propsStore = writable({});
 const layoutsStore = writable([]);
 const sharedStore = writable({});
 const paramsStore = writable({});
-const routeUrl = window.location.pathname + window.location.search + window.location.hash;
+let routeUrl = window.location.pathname + window.location.search + window.location.hash;
+let routeParams = {};
 const routeStore = writable(routeUrl);
 const navigationStore = writable(idleNavigationState());
 
@@ -269,7 +270,8 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
       applyUpdate(pageData, comp, layouts) {
         propsStore.set(pageData.props);
         sharedStore.set(pageData.shared || {});
-        paramsStore.set(pageData.params || {});
+        routeParams = pageData.params || {};
+        paramsStore.set(routeParams);
         layoutsStore.set(layouts);
         pageStore.set(comp);
       },
@@ -284,6 +286,7 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
     prefetchHoverDelay: ${prefetch?.hoverDelay ?? 75},
     prefetchDefaultCacheFor: parseCacheFor(${JSON.stringify(prefetch?.cacheFor ?? '30s')}),
     onRouteChange(url) {
+      routeUrl = url;
       routeStore.set(url);
     },
     onNavigationChange(navigation) {
@@ -291,13 +294,16 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
     },
   });
 
+const reactiveRouter = createRouterFacade(router, () => routeUrl, () => routeParams);
+
 setActionRouter(router);
 
 pageStore.set(initialComponent);
 propsStore.set(initialPageData.props);
 layoutsStore.set(initialLayouts);
 sharedStore.set(initialPageData.shared || {});
-paramsStore.set(initialPageData.params || {});
+routeParams = initialPageData.params || {};
+paramsStore.set(routeParams);
 
 const appEl = document.getElementById("app");
 if (!appEl) throw new Error("pages: Missing #app element for Void Svelte pages hydration.");
@@ -329,6 +335,7 @@ if (appEl.getAttribute("data-void-ssr") === "false") {
   hydrate(App, appOptions);
 }
 
+export { reactiveRouter as router };
 start();
 await tick();
 commitInitialRender();

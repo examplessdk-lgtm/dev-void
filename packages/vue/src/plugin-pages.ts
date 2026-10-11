@@ -424,6 +424,7 @@ const app = createVoidApp({
 
 app.mount(appEl);
 appEl.setAttribute("data-hydrated", "true");
+export { reactiveRouter as router };
 start();
 commitInitialRender();
 `;
