@@ -149,6 +149,7 @@ describe('ProxyD1Database', () => {
         { sql: 'INSERT INTO users (name) VALUES (?)', params: ['Bob'] },
       ]);
       expect(prepared._params).toEqual([]);
+      expect(call[0]).toBe('https://proxy.void.cloud/d1/batch');
     });
   });
 
