@@ -1332,7 +1332,6 @@ describe('PUT /projects/:id/database-url', () => {
             scheme: 'postgresql',
             user: 'void_user',
           },
-          mtls: { sslmode: 'require' },
         });
         return cfSuccess({ id: 'hd-created', name: hyperdriveName });
       },
@@ -1469,7 +1468,7 @@ describe('PUT /projects/:id/database-url', () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          connectionString: 'postgres://void_user:pass@db.example.com/appdb',
+          connectionString: 'postgres://void_user:pass@db.example.com/appdb?sslmode=verify-full',
         }),
       }),
       env,

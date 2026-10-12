@@ -579,7 +579,6 @@ type HyperdriveOrigin = Readonly<{
 type HyperdriveConfigPayload = Readonly<{
   name?: string;
   origin: HyperdriveOrigin;
-  mtls?: Readonly<{ sslmode: 'require' }>;
 }>;
 
 function decodeUrlPart(value: string): string {
@@ -637,18 +636,14 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
   }
 
   const sslmode = url.searchParams.get('sslmode');
-  let mtls: HyperdriveConfigPayload['mtls'];
-  if (sslmode) {
-    if (sslmode !== 'require' && sslmode !== 'verify-ca' && sslmode !== 'verify-full') {
-      throw new InvalidHyperdriveConnectionStringError(
-        'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
-      );
-    }
-    // Hyperdrive's verify modes need a CA certificate uploaded to Cloudflare, which a URL
-    // cannot carry, so Void creates Hyperdrive in Cloudflare's default `require` mode.
-    // `sslrootcert` names a CA on the client machine and is not sent to Hyperdrive.
-    mtls = { sslmode: 'require' };
+  if (sslmode && sslmode !== 'require' && sslmode !== 'verify-ca' && sslmode !== 'verify-full') {
+    throw new InvalidHyperdriveConnectionStringError(
+      'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
+    );
   }
+  // No `mtls` is sent. A new Hyperdrive gets Cloudflare's default `require` mode, and a PUT
+  // keeps the TLS settings already on the Hyperdrive. The verify modes need a CA certificate
+  // uploaded to Cloudflare, which a URL cannot carry; `sslrootcert` names a file on the client.
 
   return {
     origin: {
@@ -659,7 +654,6 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
       scheme,
       user: decodeUrlPart(url.username),
     },
-    ...(mtls === undefined ? {} : { mtls }),
   };
 }
 
