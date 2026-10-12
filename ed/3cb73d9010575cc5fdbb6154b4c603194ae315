@@ -1,0 +1,19 @@
+platform/packages/dashboard/README.md
+  s_a387cc89f12e5a::t_0abc902e280f9b 112-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ed3cb73d9010575cc5fdbb6154b4c603194ae315",
+  "prompts": {},
+  "sessions": {
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
