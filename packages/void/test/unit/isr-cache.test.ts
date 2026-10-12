@@ -912,8 +912,12 @@ describe('handleIsr', () => {
     expect(await res!.text()).toBe('{"component":"Blog","props":{}}');
   });
 
-  it('fails open to a LIVE render (not a 500) when getWithMetadata throws', async () => {
-    const { kv } = createKvMock({ throwOnGet: true });
+  it.each([
+    ['getWithMetadata throws', true],
+    ['the KV entry is from an older cache policy', false],
+  ])('fails open to a LIVE render (not a 500) when %s', async (_, throwOnGet) => {
+    const { store, kv } = createKvMock({ throwOnGet });
+    store.set(isrKey(DPL, HOST, '/blog/post'), corruptCases[0]!.seed());
     const env = makeEnv(kv);
     const { render, spy } = createRender(
       () => new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } }),
