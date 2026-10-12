@@ -246,6 +246,32 @@ describe('platform Cloudflare authentication', () => {
     ).resolves.toEqual({ source: 'oauth', token: 'oauth-token' });
   });
 
+  it('uses cf browser login when no session exists', async () => {
+    const calls: Array<string> = [];
+    let tokenAttempts = 0;
+    const credential = await resolvePlatformCloudflareCredential({
+      interactive: true,
+      runWrangler: (args) => {
+        calls.push(args.type);
+        if (args.type === 'auth.token') {
+          tokenAttempts++;
+          return tokenAttempts === 1
+            ? { status: 1, stderr: 'not logged in', stdout: '', data: '' }
+            : {
+                status: 0,
+                stderr: '',
+                stdout: '',
+                data: { token: 'browser-token', type: 'oauth' },
+              };
+        }
+        return { status: 0, stderr: '', stdout: '', data: '' };
+      },
+    });
+
+    expect(credential).toEqual({ source: 'oauth', token: 'browser-token' });
+    expect(calls).toEqual(['auth.token', 'auth.login', 'auth.token']);
+  });
+
   it('requires an explicit environment token in non-interactive environments', async () => {
     const runWrangler = vi.fn(() => ({ status: 1, stderr: 'not logged in', stdout: '', data: '' }));
     await expect(
