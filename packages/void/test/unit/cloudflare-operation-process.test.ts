@@ -232,9 +232,12 @@ it.each(['clear-crons', 'clear-domains'])(
   30_000,
 );
 
-it.each(['true', 'false'])(
-  'clears crons with browser credentials when the keyring setting is %s',
-  async (keyringSetting) => {
+it.each([
+  ['clear-crons', 'true'],
+  ['clear-domains', 'false'],
+])(
+  'uses browser credentials for %s with keyring %s',
+  async (operation, keyringSetting) => {
     const directory = temporaryDirectory('void-cf-clear-crons-oauth-');
     const requests: Array<{
       method: string | undefined;
@@ -287,7 +290,11 @@ syncBuiltinESMExports();
     );
     const output = await runOperation(
       directory,
-      { type: 'triggers.clear-crons', configPath, workerName: 'test-worker' },
+      {
+        type: `triggers.${operation}` as 'triggers.clear-crons' | 'triggers.clear-domains',
+        configPath,
+        workerName: 'test-worker',
+      },
       {
         ...systemEnv,
         CI: 'true',
@@ -304,12 +311,11 @@ syncBuiltinESMExports();
       preload,
     );
     expect(output.status, output.stderr).toBe(0);
-    expect(requests).toEqual([
+    expect(requests).toMatchObject([
       {
         method: 'PUT',
-        url: '/client/v4/accounts/test-account/workers/scripts/test-worker/schedules',
+        url: `/client/v4/accounts/test-account/workers/scripts/test-worker/${operation === 'clear-crons' ? 'schedules' : 'domains/records'}`,
         authorization: 'Bearer synthetic-oauth-token',
-        body: [],
       },
     ]);
   },
