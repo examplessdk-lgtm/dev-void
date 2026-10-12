@@ -1,0 +1,37 @@
+docs/guide/durable-state.md
+  s_77824b01a12d99::t_09bc6a32954eb3 166-189
+docs/reference/api.md
+  s_77824b01a12d99::t_1e517b8e64f414 44
+packages/void/src/durable/scan.ts
+  s_77824b01a12d99::t_1af372308a62d8 20
+packages/void/src/plugin-inference.ts
+  s_77824b01a12d99::t_19e45c908ee5cc 38,55,147-148
+packages/void/src/runtime/durable.ts
+  s_77824b01a12d99::t_d72bd5bc27f42a 7-77
+packages/void/src/shared/resource-definition.ts
+  s_77824b01a12d99::t_d738da658e7f27 62
+packages/void/test/integration/cloudflare-durable-build.test.ts
+  s_77824b01a12d99::t_7e24a9e8dc38d2 37-44,75-80
+packages/void/test/unit/durable-object.test.ts
+  s_77824b01a12d99::t_376b91b59207ba 1-40
+packages/void/test/unit/durable-scan.test.ts
+  s_77824b01a12d99::t_74848b7de71c1c 29-40
+packages/void/test/unit/plugin-inference.test.ts
+  s_77824b01a12d99::t_1ccc7772a7230e 158-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e9fba519b217d9694a5b91612dcbb71a46436025",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
