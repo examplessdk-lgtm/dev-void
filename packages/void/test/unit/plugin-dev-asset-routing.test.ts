@@ -80,6 +80,15 @@ function createFrameworkProjectRoot(): string {
   return root;
 }
 
+function createFrameworkOwnedRuntimeProjectRoot(): string {
+  const root = createProjectRoot();
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ type: 'module', dependencies: { '@analogjs/platform': '^2.0.0' } }),
+  );
+  return root;
+}
+
 function createNodeProjectRoot(): string {
   const root = createProjectRoot();
   writeFileSync(
@@ -238,12 +247,19 @@ describe('voidPlugin dev asset routing', () => {
   });
 
   it('keeps one Void runtime module graph in core, framework, and Node servers', async () => {
+    const workerdOptimizer = {
+      optimizeDeps: { exclude: ['void'], include: ['void > email-validator'] },
+    };
     await expect(
       resolveRuntimeOptimizerConfig(createApiOnlyProjectRoot(), 'void_worker'),
-    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
+    ).resolves.toEqual(workerdOptimizer);
     vi.restoreAllMocks();
     await expect(
       resolveRuntimeOptimizerConfig(createFrameworkProjectRoot(), 'ssr'),
+    ).resolves.toEqual(workerdOptimizer);
+    vi.restoreAllMocks();
+    await expect(
+      resolveRuntimeOptimizerConfig(createFrameworkOwnedRuntimeProjectRoot(), 'ssr'),
     ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
     vi.restoreAllMocks();
     await expect(resolveRuntimeOptimizerConfig(createNodeProjectRoot(), 'ssr')).resolves.toEqual({
