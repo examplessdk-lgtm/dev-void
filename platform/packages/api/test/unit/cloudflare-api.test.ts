@@ -5,6 +5,7 @@ import {
   createD1Database,
   enableD1ReadReplication,
   createHyperdrive,
+  ensureHyperdriveCachingDisabled,
   getDispatchWorkerProxyToken,
   parseHyperdriveConnectionString,
   removeQueueConsumer,
@@ -396,6 +397,42 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgresql',
         user: 'user',
       },
+    });
+  });
+
+  it('leaves a Hyperdrive config with caching already off unchanged', async () => {
+    fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'hd_1', caching: { disabled: true } }));
+
+    await ensureHyperdriveCachingDisabled(ACCOUNT, TOKEN, 'hd_1');
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acc_test/hyperdrive/configs/hd_1',
+    );
+    expect([undefined, 'GET']).toContain((init as RequestInit).method);
+  });
+
+  it('turns caching off with a PATCH that sends no origin', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        cfSuccess({
+          id: 'hd_1',
+          caching: { disabled: false, max_age: 60, stale_while_revalidate: 15 },
+        }),
+      )
+      .mockResolvedValueOnce(cfSuccess({ id: 'hd_1' }));
+
+    await ensureHyperdriveCachingDisabled(ACCOUNT, TOKEN, 'hd_1');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acc_test/hyperdrive/configs/hd_1',
+    );
+    expect((init as RequestInit).method).toBe('PATCH');
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      caching: { disabled: true },
     });
   });
 

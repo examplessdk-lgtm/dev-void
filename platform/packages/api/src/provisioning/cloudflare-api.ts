@@ -696,6 +696,30 @@ export async function updateHyperdrive(
   );
 }
 
+/**
+ * Hyperdrive never invalidates cached reads when the app writes, so project
+ * databases run uncached. A config may predate this setting, so deploys
+ * converge it. PATCH changes caching only and needs no origin password.
+ */
+export async function ensureHyperdriveCachingDisabled(
+  accountId: string,
+  apiToken: string,
+  hyperdriveId: string,
+): Promise<void> {
+  const url = `${CF_API_BASE}/${accountId}/hyperdrive/configs/${hyperdriveId}`;
+  const config = await cfFetch<Readonly<{ caching?: Readonly<{ disabled?: boolean }> }>>(
+    url,
+    apiToken,
+  );
+  if (config.caching?.disabled === true) {
+    return;
+  }
+  await cfFetch(url, apiToken, {
+    method: 'PATCH',
+    body: JSON.stringify({ caching: { disabled: true } }),
+  });
+}
+
 export async function deleteHyperdrive(
   accountId: string,
   apiToken: string,

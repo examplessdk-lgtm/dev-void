@@ -12,6 +12,7 @@ import {
   deleteQueue,
   deleteR2Bucket,
   enableD1ReadReplication,
+  ensureHyperdriveCachingDisabled,
   getD1DatabaseByName,
   getKVNamespaceByTitle,
   getQueueByName,
@@ -149,11 +150,13 @@ export async function provisionBindings(
           );
         }
         tasks.push(
-          Promise.resolve({
-            type: 'hyperdrive' as const,
-            name: resource.bindingName,
-            id: found.cf_id,
-          }),
+          ensureHyperdriveCachingDisabled(accountId, apiToken, found.cf_id).then(
+            (): WorkerBinding => ({
+              type: 'hyperdrive',
+              name: resource.bindingName,
+              id: found.cf_id,
+            }),
+          ),
         );
         break;
       }

@@ -47,7 +47,7 @@ Choose a database during `void init`, or set `database` in `void.config.ts`:
 | Managed by | Void                         | Bring your own database             | Bring your own database   |
 | Connection | Automatic D1 binding         | Hyperdrive                          | Hyperdrive                |
 
-A Void platform disables Hyperdrive query caching when it creates or updates your database connection, so reads reflect completed writes.
+A Void platform keeps Hyperdrive query caching off for your database connection, so reads reflect completed writes. An existing connection is updated on the project's next deploy.
 
 ## Schema Definition
 
