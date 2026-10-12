@@ -1,0 +1,25 @@
+platform/packages/api/src/deploy/upload-worker.ts
+  s_904b90eb5dd75e::t_5a0b8aba150262 46,371-374
+platform/packages/api/src/deploy/user-agent.ts
+  s_904b90eb5dd75e::t_49cf96f4f93010 1-11
+platform/packages/api/test/integration/api-deploy.test.ts
+  s_904b90eb5dd75e::t_5922fdbebe95ae 5928-5955
+platform/packages/api/test/unit/deploy-user-agent.test.ts
+  s_904b90eb5dd75e::t_4612ed0507ccbc 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5e192001c0491617ce9e7b4e95dcaa6facee3352",
+  "prompts": {},
+  "sessions": {
+    "s_904b90eb5dd75e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-e615-7983-ae59-f7de338ae041",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

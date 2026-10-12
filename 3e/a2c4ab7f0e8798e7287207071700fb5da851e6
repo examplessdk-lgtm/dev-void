@@ -1,0 +1,29 @@
+platform/packages/dashboard/README.md
+  s_a387cc89f12e5a::t_fd2a8db45ff553 117-118
+platform/packages/dashboard/app.css
+  s_a387cc89f12e5a::t_6dcc98926c8cdb 1-3,13,19-24
+platform/packages/dashboard/pages/_layouts/dashboard.tsx
+  s_a387cc89f12e5a::t_35cf756c368724 1-74
+platform/packages/dashboard/pages/account.tsx
+  s_a387cc89f12e5a::t_96535505524537 4-5
+platform/packages/dashboard/pages/index.tsx
+  s_a387cc89f12e5a::t_3d43c80c81334d 6-7
+platform/packages/dashboard/pages/layout.tsx
+  s_a387cc89f12e5a::t_7953a81c8cf346 1,15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3ea2c4ab7f0e8798e7287207071700fb5da851e6",
+  "prompts": {},
+  "sessions": {
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

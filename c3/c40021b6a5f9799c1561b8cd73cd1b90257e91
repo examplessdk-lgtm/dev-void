@@ -1,0 +1,21 @@
+platform/packages/dashboard/pages/layout.tsx
+  s_a387cc89f12e5a::t_863198779cf638 7,58-66,68-70
+platform/packages/dashboard/ui/components/AppHeader.tsx
+  s_a387cc89f12e5a::t_fda1a8531be5b9 3-4,32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c3c40021b6a5f9799c1561b8cd73cd1b90257e91",
+  "prompts": {},
+  "sessions": {
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

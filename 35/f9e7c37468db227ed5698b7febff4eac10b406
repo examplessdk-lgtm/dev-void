@@ -1,0 +1,27 @@
+docs/guide/sandboxes.md
+  s_77824b01a12d99::t_fd7600187a19e9 59-60
+packages/void/src/runtime/sandbox-container.ts
+  s_77824b01a12d99::t_3c45be69e01f23 17,169-184
+packages/void/src/runtime/sandbox.ts
+  s_77824b01a12d99::t_6b37a48eeb428a 7,110-113,198-213,271
+packages/void/test/integration/sandbox-native-websocket.test.ts
+  s_77824b01a12d99::t_2280045595f162 1-90
+packages/void/test/unit/sandbox-runtime.test.ts
+  s_77824b01a12d99::t_fc639bad7f5ff1 81-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "35f9e7c37468db227ed5698b7febff4eac10b406",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

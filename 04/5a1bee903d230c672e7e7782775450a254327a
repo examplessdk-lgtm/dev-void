@@ -1,0 +1,25 @@
+platform/packages/dashboard/ui/assets/icons/bluesky.svg
+  s_a387cc89f12e5a::t_86c7ee2292c537 1
+platform/packages/dashboard/ui/assets/icons/discord.svg
+  s_a387cc89f12e5a::t_f14a283f0594c9 1
+platform/packages/dashboard/ui/assets/icons/github.svg
+  s_a387cc89f12e5a::t_f20b9b69d8ab19 1
+platform/packages/dashboard/ui/assets/icons/x.svg
+  s_a387cc89f12e5a::t_8ff80e61289c46 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "045a1bee903d230c672e7e7782775450a254327a",
+  "prompts": {},
+  "sessions": {
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

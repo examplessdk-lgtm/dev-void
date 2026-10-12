@@ -1,0 +1,47 @@
+platform/packages/dashboard/README.md
+  s_a387cc89f12e5a::t_a03863fc72c625 12,71
+platform/packages/dashboard/pages/account.tsx
+  s_a387cc89f12e5a::t_87219e181ae861 5
+platform/packages/dashboard/pages/index.tsx
+  s_a387cc89f12e5a::t_143903b6269f37 6-7,10-12
+platform/packages/dashboard/pages/layout.tsx
+  s_a387cc89f12e5a::t_366cf0a1cb6c51 36,65,70
+platform/packages/dashboard/ui/components/AppHeader.tsx
+  s_904b90eb5dd75e::t_2c8edfa8067561 27-30,33,40,43,46-51,53,58,63,66,73,75-79,91
+platform/packages/dashboard/ui/components/oss/FooterNav.tsx
+  s_904b90eb5dd75e::t_160d14d0f2bcda 37-39,42-43,46,57-58,62,69,81-82
+platform/packages/dashboard/ui/styles/base.css
+  s_a387cc89f12e5a::t_eba34f8e54888e 2,25-27,29-31,41-42,114,166,185-186,188,192-193,200,296-297
+platform/packages/dashboard/ui/styles/components.css
+  s_a387cc89f12e5a::t_407e3a5c63c2d0 1-270
+platform/packages/dashboard/ui/styles/index.css
+  s_a387cc89f12e5a::t_460a1a997cb3c6 2,8,16
+platform/packages/dashboard/ui/styles/marketing.css
+  s_a387cc89f12e5a::t_54dc50c542da47 8-17,67-78,81-106,113-130
+platform/packages/dashboard/ui/styles/tokens.css
+  s_a387cc89f12e5a::t_9df2689e1b56c9 3,6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1bf20be0bb4b212c14c7c5755de3c2776af80219",
+  "prompts": {},
+  "sessions": {
+    "s_904b90eb5dd75e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-e615-7983-ae59-f7de338ae041",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

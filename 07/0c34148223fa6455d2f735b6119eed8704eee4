@@ -1,0 +1,128 @@
+platform/packages/api/src/auth/jwt.ts
+  s_77824b01a12d99::t_72511fdeb53179 31-32
+README.md
+  s_77824b01a12d99::t_06f5c193257e76 9
+platform/packages/api/drizzle/compatibility.json
+  s_77824b01a12d99::t_2bd40a7d77bfae 68-71
+platform/packages/api/src/auth/oauth.ts
+  s_77824b01a12d99::t_bbb7973fcd5679 1-317
+platform/packages/api/test/integration/oauth.test.ts
+  s_77824b01a12d99::t_13f0834af364ed 1-628
+docs/reference/api.md
+  s_77824b01a12d99::t_117307e9bd5331 28
+platform/packages/api/src/routes/auth.ts
+  s_77824b01a12d99::t_a26647d614441f 26-30,150,175,182,189,350,534
+platform/packages/api/src/deploy/execute.ts
+  s_77824b01a12d99::t_29d62fe87e3d65 9,254-286,615
+platform/packages/api/src/admin/react/views/ConnectedAppsPage.tsx
+  s_77824b01a12d99::t_15e1af422d8b14 1-88
+packages/void/skills/void/SKILL.md
+  s_77824b01a12d99::t_62f7b92a40b9e8 54
+platform/packages/api/src/index.ts
+  s_77824b01a12d99::t_13cc591c5e1de1 15,28,117,548-549,612,829-831
+docs/guide/platform/administration/access.md
+  s_77824b01a12d99::t_0093e6f40dc210 161-164
+platform/packages/api/src/middleware/auth.ts
+  s_77824b01a12d99::t_88867760364913 4,8,79,105-108,155-216
+platform/packages/api/src/routes/oauth.ts
+  s_77824b01a12d99::t_415ac3acc144da 1-738
+packages/void/src/cli/help.ts
+  s_77824b01a12d99::t_82a85a06ce6f32 1377
+packages/void/src/cli/platform-args.ts
+  s_77824b01a12d99::t_0efacf264c7995 314-317
+packages/void/src/cli/platform-plan.ts
+  s_77824b01a12d99::t_e6253be6037673 219
+platform/packages/api/drizzle/meta/_journal.json
+  s_77824b01a12d99::t_88f33c3af441a2 368-374
+docs/.vitepress/config.ts
+  s_77824b01a12d99::t_25a72751b4633e 66,132
+platform/packages/api/src/admin/routes/connected-apps.ts
+  s_77824b01a12d99::t_a222ef351603a6 1-81
+docs/guide/platform/administration/connected-apps.md
+  s_77824b01a12d99::t_f08d58349014d0 1-55
+docs/reference/api/deploy.md
+  s_77824b01a12d99::t_def31467e4cad5 19
+  s_77824b01a12d99::t_a81382986c1d36 5-12
+platform/packages/api/src/admin/react/pages.ts
+  s_77824b01a12d99::t_e08cef207e3558 2-4,82-84
+platform/packages/api/src/r2-presign.ts
+  s_77824b01a12d99::t_990d7dae844103 37-39,124-132
+platform/meta/design-docs/0091-connected-apps.md
+  s_77824b01a12d99::t_e0188a4cb97b64 1-21
+platform/packages/api/src/schema.ts
+  s_77824b01a12d99::t_1c34c10b53ad89 22,78-135
+packages/void/README.md
+  s_77824b01a12d99::t_094cf5d294562d 46-47
+packages/platform/test/unit/worker-config.test.ts
+  s_77824b01a12d99::t_e41cbca97902bb 79
+platform/packages/api/src/middleware/platform-access.ts
+  s_77824b01a12d99::t_f2b7fccf855176 60-69,98,100
+platform/packages/api/test/unit/admin-upgrade-compatibility.test.ts
+  s_77824b01a12d99::t_8fa7ca980486e8 201,223-247
+platform/packages/api/README.md
+  s_77824b01a12d99::t_efd0785ea8e582 487-490
+docs/reference/cli/platform-installation.md
+  s_f5170a094476b8::t_6459f87bdb5259 43
+platform/packages/api/src/env.ts
+  s_a387cc89f12e5a::t_c6d38e7e74f8c9 229
+platform/packages/api/src/auth/oauth-types.ts
+  s_77824b01a12d99::t_6cf158c93bcc90 1-23
+packages/void/src/cli/platform-lifecycle.ts
+  s_77824b01a12d99::t_292bad91cfa244 228
+platform/packages/api/drizzle/meta/0059_snapshot.json
+  s_77824b01a12d99::t_1486827f870831 1-6844
+platform/packages/api/src/deployment-execution.ts
+  s_77824b01a12d99::t_b472005b1e484b 3,105,112,171-181
+platform/packages/api/src/deployment-operation-types.ts
+  s_a387cc89f12e5a::t_7f412fa174eade 7
+platform/packages/api/drizzle/0059_oauth_clients.sql
+  s_77824b01a12d99::t_22eda7fbbf9138 1-44
+platform/packages/api/src/auth/login.ts
+  s_77824b01a12d99::t_32faa301267689 41,380,402,727,736
+platform/packages/api/src/routes/projects.ts
+  s_77824b01a12d99::t_6037be1e2c0fc4 725-727,3404-3540
+platform/packages/api/src/admin/react/views/Layout.tsx
+  s_77824b01a12d99::t_4e87d624bedbae 111-116
+platform/packages/api/src/routes/deploy.ts
+  s_77824b01a12d99::t_90676fe4ce8f73 4,256-282,297-308,319-321,426-428
+platform/packages/api/src/deploy/pipeline.ts
+  s_77824b01a12d99::t_ab918b1033ade1 7,14,239-248,641-668
+platform/packages/api/src/operator/audit.ts
+  s_77824b01a12d99::t_73b69cb3f6de8f 61-73
+platform/packages/api/src/auth/redirects.ts
+  s_77824b01a12d99::t_45577614222ad2 7,16,37-39,43-44,48,53-56
+platform/packages/api/test/integration/helpers.ts
+  s_77824b01a12d99::t_09a294d3425168 366,378,565-567
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "070c34148223fa6455d2f735b6119eed8704eee4",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_a387cc89f12e5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbf-1b46-73e2-83d4-49c69ce1c181",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_f5170a094476b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "98de3432-4817-4ee1-b5e8-dabab4858e55",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
