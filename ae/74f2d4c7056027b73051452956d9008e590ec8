@@ -1,0 +1,59 @@
+docs/reference/cli/platform-installation.md
+  s_77824b01a12d99::t_eb66aaa2937327 30,146-161
+packages/platform/src/index.ts
+  s_77824b01a12d99::t_666c6151df4749 42
+packages/platform/src/manifest.ts
+  s_77824b01a12d99::t_0ef4040dddf21c 57,82,116-138,344-350,522-528
+packages/platform/src/worker-config.ts
+  s_77824b01a12d99::t_bb86dda4885ef0 172-178
+packages/platform/test/unit/auth-manifest.test.ts
+  s_77824b01a12d99::t_8a40bbf6a5a7ff 8-43
+packages/platform/test/unit/worker-config.test.ts
+  s_77824b01a12d99::t_dfe3c5ebbb1689 100-103,134-136
+packages/void/src/cli/help.ts
+  s_77824b01a12d99::t_ca16afd68c436e 552-555,1402,1421-1424
+packages/void/src/cli/platform-args.ts
+  s_77824b01a12d99::t_ec3b268623c244 3,88,102,172,178,192-198,216,334-335,345,392,484-490
+packages/void/src/cli/platform-install-preparation.ts
+  s_77824b01a12d99::t_2b87a61d4129c6 99
+packages/void/src/cli/platform-installer-types.ts
+  s_77824b01a12d99::t_e3d78c95773c41 147-149
+packages/void/src/cli/platform-lifecycle.ts
+  s_77824b01a12d99::t_7e3c25a3b9c1c4 229-230,718-720,751-753
+packages/void/src/cli/platform-management.ts
+  s_77824b01a12d99::t_bca6690e9f2cc0 228-233,357-359
+packages/void/src/cli/platform-plan.ts
+  s_77824b01a12d99::t_9f73bbb86fcd81 68,218-223
+packages/void/src/cli/platform-setup.ts
+  s_77824b01a12d99::t_e5012587b59b28 318,374-377
+packages/void/test/unit/platform-args.test.ts
+  s_77824b01a12d99::t_be3439122873c3 6-28
+platform/packages/api/src/auth/login.ts
+  s_77824b01a12d99::t_0c8f4f20ab8b12 41,380,399-403,727,734-737
+platform/packages/api/src/auth/redirects.ts
+  s_77824b01a12d99::t_f84b38c97cb33c 7,16-19,40-77
+platform/packages/api/src/env.ts
+  s_77824b01a12d99::t_4e2397b9ba0e54 115-116
+platform/packages/api/src/routes/auth.ts
+  s_77824b01a12d99::t_6d9b87990ff131 26,142-147,168-172,176-179,185-190,347-352,533-536
+platform/packages/api/test/integration/auth-dashboard-code.test.ts
+  s_77824b01a12d99::t_1ded2dd8861547 96-127
+platform/packages/api/test/unit/redirect-validation.test.ts
+  s_77824b01a12d99::t_29bea1eb8e8eb0 92-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ae74f2d4c7056027b73051452956d9008e590ec8",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
