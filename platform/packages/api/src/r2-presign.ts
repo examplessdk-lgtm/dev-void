@@ -34,6 +34,9 @@ export type PresignAssetPutOptions = Readonly<{
   contentType: string;
   /** Defaults to 600 (10 minutes). */
   ttlSeconds?: number;
+  /** Approval-bound uploads must never replace an existing content-addressed object. */
+  ifNoneMatch?: '*';
+  contentLength?: number;
   /**
    * Override the signing timestamp. Used by tests for deterministic output;
    * production callers should leave this unset to use the current time.
@@ -118,6 +121,15 @@ export async function presignAssetPut(
     'Content-Type': opts.contentType,
     'Content-Md5': checksumB64,
   };
+  if (opts.ifNoneMatch) {
+    headers['If-None-Match'] = opts.ifNoneMatch;
+  }
+  if (opts.contentLength !== undefined) {
+    if (!Number.isSafeInteger(opts.contentLength) || opts.contentLength < 0) {
+      throw new Error('contentLength must be a non-negative integer');
+    }
+    headers['Content-Length'] = String(opts.contentLength);
+  }
 
   const signer = new AwsV4Signer({
     method: 'PUT',

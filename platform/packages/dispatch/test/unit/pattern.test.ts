@@ -53,57 +53,52 @@ describe('matchPattern', () => {
 
 describe('compilePattern', () => {
   it('captures :name as single path segment', () => {
-    const { regex, paramNames } = compilePattern('/blog/:slug');
-    expect(paramNames).toEqual(['slug']);
-    expect(regex.exec('/blog/hello')?.groups).toEqual({ slug: 'hello' });
-    expect(regex.exec('/blog/hello/world')).toBeNull();
+    expect(compilePattern('/blog/:slug').paramNames).toEqual(['slug']);
+    expect(matchPatternCaptures('/blog/:slug', '/blog/hello')).toEqual({ slug: 'hello' });
+    expect(matchPatternCaptures('/blog/:slug', '/blog/hello/world')).toBeNull();
   });
 
   it('captures :name* as zero-or-more segments', () => {
-    const { regex, paramNames } = compilePattern('/docs/:path*');
-    expect(paramNames).toEqual(['path']);
-    expect(regex.exec('/docs/a/b/c')?.groups).toEqual({ path: 'a/b/c' });
-    expect(regex.exec('/docs/')?.groups).toEqual({ path: '' });
+    expect(compilePattern('/docs/:path*').paramNames).toEqual(['path']);
+    expect(matchPatternCaptures('/docs/:path*', '/docs/a/b/c')).toEqual({ path: 'a/b/c' });
+    expect(matchPatternCaptures('/docs/:path*', '/docs/')).toEqual({ path: '' });
   });
 
   it('captures legacy * as splat', () => {
-    const { regex, paramNames } = compilePattern('/assets/*');
-    expect(paramNames).toEqual(['splat']);
-    expect(regex.exec('/assets/js/app.js')?.groups).toEqual({ splat: 'js/app.js' });
+    expect(compilePattern('/assets/*').paramNames).toEqual(['splat']);
+    expect(matchPatternCaptures('/assets/*', '/assets/js/app.js')).toEqual({ splat: 'js/app.js' });
   });
 
   it('captures middle * as only what actually matched, not prefix-slice', () => {
-    const { regex } = compilePattern('/blog/*/edit');
-    expect(regex.exec('/blog/hello/edit')?.groups).toEqual({ splat: 'hello' });
-    expect(regex.exec('/blog/a/b/edit')?.groups).toEqual({ splat: 'a/b' });
-    expect(regex.exec('/blog/hello')).toBeNull();
+    expect(matchPatternCaptures('/blog/*/edit', '/blog/hello/edit')).toEqual({ splat: 'hello' });
+    expect(matchPatternCaptures('/blog/*/edit', '/blog/a/b/edit')).toEqual({ splat: 'a/b' });
+    expect(matchPatternCaptures('/blog/*/edit', '/blog/hello')).toBeNull();
   });
 
   it('matches legacy patterns with multiple anonymous wildcards', () => {
-    const { regex, paramNames } = compilePattern('/a/*/b/*');
-    expect(paramNames).toEqual(['splat']);
-    expect(regex.test('/a/x/b/y')).toBe(true);
-    expect(regex.test('/a/x/c/y')).toBe(false);
+    expect(compilePattern('/a/*/b/*').paramNames).toEqual(['splat']);
+    expect(matchPattern('/a/*/b/*', '/a/x/b/y')).toBe(true);
+    expect(matchPattern('/a/*/b/*', '/a/x/c/y')).toBe(false);
   });
 
   it('captures multiple named params in one pattern', () => {
-    const { regex, paramNames } = compilePattern('/blog/:author/:slug');
-    expect(paramNames).toEqual(['author', 'slug']);
-    expect(regex.exec('/blog/alice/hello')?.groups).toEqual({ author: 'alice', slug: 'hello' });
-    expect(regex.exec('/blog/alice/hello/world')).toBeNull();
+    expect(compilePattern('/blog/:author/:slug').paramNames).toEqual(['author', 'slug']);
+    expect(matchPatternCaptures('/blog/:author/:slug', '/blog/alice/hello')).toEqual({
+      author: 'alice',
+      slug: 'hello',
+    });
+    expect(matchPatternCaptures('/blog/:author/:slug', '/blog/alice/hello/world')).toBeNull();
   });
 
   it('escapes regex-special characters in literals', () => {
-    const { regex } = compilePattern('/foo.html');
-    expect(regex.test('/foo.html')).toBe(true);
-    expect(regex.test('/fooXhtml')).toBe(false);
+    expect(matchPattern('/foo.html', '/foo.html')).toBe(true);
+    expect(matchPattern('/foo.html', '/fooXhtml')).toBe(false);
   });
 
   it('treats bare colon (no name chars after) as literal', () => {
-    const { regex, paramNames } = compilePattern('/foo:/bar');
-    expect(paramNames).toEqual([]);
-    expect(regex.test('/foo:/bar')).toBe(true);
-    expect(regex.test('/fooX/bar')).toBe(false);
+    expect(compilePattern('/foo:/bar').paramNames).toEqual([]);
+    expect(matchPattern('/foo:/bar', '/foo:/bar')).toBe(true);
+    expect(matchPattern('/foo:/bar', '/fooX/bar')).toBe(false);
   });
 
   it('matchPattern supports legacy patterns with multiple anonymous wildcards', () => {
@@ -304,8 +299,8 @@ describe('matchSegmentPattern', () => {
   it('does NOT widen a REGEX-constrained `:name{...}` param (only exact `{.+}`)', () => {
     // Only the literal `{.+}` constraint widens to a catch-all. A regex-
     // constrained param like `:path{[0-9]+}` keeps its single-segment meaning
-    // (`[^/]+`) — the `{.+}` rule's name class `[^/{}]+` excludes braces, so it
-    // does not match `path{[0-9]+}`. Over-widening it would be a correctness bug.
+    // (`[^/]+`) — a name that contains a brace is not a catch-all name.
+    // Over-widening it would be a correctness bug.
     expect(matchSegmentPattern('/docs/:path{[0-9]+}', '/docs/a')).toBe(true);
     expect(matchSegmentPattern('/docs/:path{[0-9]+}', '/docs/a/b')).toBe(false);
   });
@@ -318,14 +313,20 @@ describe('matchSegmentPattern', () => {
   });
 
   it('leaves a mid-segment `:name{.+}` a literal (only whole-segment anchors)', () => {
-    // The `:` is mid-segment (preceded by `v1`, not `/`), so the catch-all rule's
-    // `(^|\/)` anchor does not fire and the whole token stays literal — consistent
-    // with the `/api/v1:health` literal rule above.
+    // The `:` is mid-segment (preceded by `v1`, not `/`), so it is not a
+    // whole-segment param and the whole token stays literal — consistent with
+    // the `/api/v1:health` literal rule above.
     expect(matchSegmentPattern('/api/v1:path{.+}', '/api/v1/a/b')).toBe(false);
   });
 
-  it('does not share a regex cache with matchLiteralPattern', () => {
-    // The SAME pattern string compiles to DIFFERENT regexes in the two matchers.
+  it('treats private-use characters in the pattern as literal text', () => {
+    expect(matchSegmentPattern('/a\uE000b', '/axyzb')).toBe(false);
+    expect(matchSegmentPattern('/a\uE001b', '/ax/yb')).toBe(false);
+    expect(matchSegmentPattern('/a\uE000b', '/a\uE000b')).toBe(true);
+  });
+
+  it('does not share a cache with matchLiteralPattern', () => {
+    // The SAME pattern string parses DIFFERENTLY in the two matchers.
     // A shared cache would let whichever ran first poison the other. Prime the
     // literal matcher first, then assert the segment matcher still anchors.
     expect(matchLiteralPattern('/blog/:slug', '/blog/hello')).toBe(false);
@@ -338,6 +339,78 @@ describe('matchSegmentPattern', () => {
     // `.+`. Priming the literal cache first must not poison the segment matcher.
     expect(matchLiteralPattern('/docs/:path{.+}', '/docs/a/b')).toBe(false);
     expect(matchSegmentPattern('/docs/:path{.+}', '/docs/a/b')).toBe(true);
+  });
+});
+
+describe('regex-compatible details', () => {
+  it('lets `*` and `{.+}` stop at line terminators, while `:name` takes them', () => {
+    expect(matchPatternCaptures('/*', '/a\nb')).toBeNull();
+    expect(matchPatternCaptures('/:x', '/\n')).toEqual({ x: '\n' });
+    expect(matchLiteralPattern('/*', '/a\u2028b')).toBe(false);
+    expect(matchSegmentPattern('/docs/:path{.+}', '/docs/a\nb')).toBe(false);
+    expect(matchSegmentPattern('/blog/:slug', '/blog/a\nb')).toBe(true);
+  });
+
+  it('gives each wildcard, left to right, the longest text that still matches', () => {
+    expect(matchPatternCaptures('/:a*/:b*', '/x/y/z')).toEqual({ a: 'x/y', b: 'z' });
+    expect(matchPatternCaptures('/:a:b', '/xyz')).toEqual({ a: 'xy', b: 'z' });
+    expect(matchPatternCaptures('/:a**', '/x/y')).toEqual({ a: 'x/y', splat: '' });
+    expect(matchPatternCaptures('/*/static/*', '/a/static/b/static/c')).toEqual({
+      splat: 'a/static/b',
+    });
+    expect(matchPatternCaptures('/u/:id*/files/*', '/u/files/files/x')).toEqual({
+      id: 'files',
+      splat: 'x',
+    });
+  });
+
+  it('rejects a name that starts with a digit', () => {
+    expect(() => compilePattern('/:1')).toThrow(/invalid capture group name/i);
+    expect(() => compilePattern('/:2fa')).toThrow(/invalid capture group name/i);
+    expect(matchPattern('/:1', '/x')).toBe(false);
+    expect(matchPatternCaptures('/:1', '/x')).toBeNull();
+    expect(matchPatternCaptures('/:id/:id', '/a/b')).toBeNull();
+  });
+
+  it('returns names as own keys of a null-prototype object', () => {
+    const params = matchPatternCaptures('/:__proto__/:constructor', '/a/b')!;
+    expect(Object.getPrototypeOf(params)).toBeNull();
+    expect(Object.entries(params)).toEqual([
+      ['__proto__', 'a'],
+      ['constructor', 'b'],
+    ]);
+    expect(Object.getPrototypeOf(matchPatternCaptures('/old', '/old'))).toBeNull();
+  });
+
+  it('still offers the deprecated regex view', () => {
+    const { regex } = compilePattern('/u/:id*/files/*');
+    expect(regex.source).toBe('^\\/u\\/(?<id>.*)\\/files\\/(?<splat>.*)$');
+    expect(regex.exec('/u/42/extra/files/a/b')?.groups).toEqual({ id: '42/extra', splat: 'a/b' });
+  });
+});
+
+describe('large and adversarial patterns', () => {
+  it('matches a pattern too long for a RegExp instead of throwing', () => {
+    const big = '/' + 'a'.repeat(40_000);
+    expect(matchLiteralPattern(big, big)).toBe(true);
+    expect(matchSegmentPattern(big, big)).toBe(true);
+    expect(matchPattern(big, big)).toBe(true);
+    expect(matchPatternCaptures(big + '/:x', big + '/y')).toEqual({ x: 'y' });
+    expect(matchPatternCaptures(big, '/foo')).toBeNull();
+  });
+
+  it('returns quickly for many wildcards on a long path that does not match', () => {
+    // A backtracking matcher takes seconds or more on each of these.
+    expect(matchLiteralPattern('/' + '*'.repeat(20) + 'x', '/' + 'a'.repeat(13) + '\nx')).toBe(
+      false,
+    );
+    expect(
+      matchLiteralPattern('/' + '*a'.repeat(40) + '\nb', '/' + 'a'.repeat(16_000) + 'x\nb'),
+    ).toBe(false);
+    const rest = '/' + Array.from({ length: 10 }, (_, i) => `:p${i}*`).join('/') + '/x';
+    expect(matchPatternCaptures(rest, '/a'.repeat(40) + '\n/x')).toBeNull();
+    const plus = '/' + Array.from({ length: 10 }, (_, i) => `:p${i}{.+}`).join('/') + '/x';
+    expect(matchSegmentPattern(plus, '/a'.repeat(41) + '\n/x')).toBe(false);
   });
 });
 

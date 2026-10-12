@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { hasPrerenderSources } from '../../src/cli/deploy.ts';
+import { hasPrerenderSources } from '../../src/cli/deploy-helpers.ts';
 import { compileRouteTable } from '../../src/router/compile.ts';
 import type { ScanResult } from '../../src/router/scan.ts';
 

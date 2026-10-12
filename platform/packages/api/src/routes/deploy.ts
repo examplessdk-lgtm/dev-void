@@ -1,6 +1,7 @@
 import { sql as drizzleSql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { findMissingR2Assets, persistedR2AssetSizes } from '../asset-inventory.ts';
+import { activeOAuthApproval, OAuthError } from '../auth/oauth.ts';
 import { uploadPool } from '../concurrency.ts';
 import { getProject, getUser, getDeployment, updateDeploymentStatus, type Db } from '../db.ts';
 import { handleManifestOnlyDeploy } from '../deploy/execute.ts';
@@ -252,6 +253,33 @@ app.post('/:id/deploy/upload-urls', async (context) => {
       const signingKeyCache = new Map<string, ArrayBuffer>();
       await requireActiveDeployAccess(tx, projectId, context.get('user').id);
       await requireNormalizedProject(tx, lockedProject);
+      if (context.get('oauthApproval')) {
+        const { approval } = await activeOAuthApproval(
+          tx,
+          context.get('oauthApproval')!,
+          context.get('companyIdentity'),
+          true,
+        );
+        const approved = Object.values(approval.data.artifact!.assetManifest);
+        if (
+          approval.data.projectId !== projectId ||
+          assets.some(
+            (asset) =>
+              !approved.some(
+                (entry) =>
+                  entry.blake3 === asset.blake3 &&
+                  entry.md5 === asset.md5 &&
+                  entry.size === asset.size,
+              ),
+          )
+        ) {
+          throw new OAuthError(
+            'access_denied',
+            'Upload only the assets approved for this publish.',
+            403,
+          );
+        }
+      }
       await uploadPool(assets, PRESIGN_BATCH_CONCURRENCY, async (asset) => {
         const result = await presignAssetPut(
           {
@@ -266,7 +294,18 @@ app.post('/:id/deploy/upload-urls', async (context) => {
             // pool for more than 10 minutes before its first PUT, and the CLI
             // treats R2's 403 SignatureExpired as terminal. Longer deploys need
             // the re-presign-on-expiry follow-up noted in the docstring above.
-            ttlSeconds: 1800,
+            ttlSeconds: context.get('oauthApproval')
+              ? Math.max(
+                  1,
+                  Math.min(
+                    900,
+                    context.get('deployTokenExpiresAt')! - Math.floor(Date.now() / 1000),
+                  ),
+                )
+              : 1800,
+            ...(context.get('oauthApproval')
+              ? { ifNoneMatch: '*' as const, contentLength: asset.size }
+              : {}),
           },
           signingKeyCache,
         );
@@ -277,6 +316,9 @@ app.post('/:id/deploy/upload-urls', async (context) => {
       });
     });
   } catch (err) {
+    if (err instanceof OAuthError) {
+      return context.json({ error: err.code, message: err.message }, err.status);
+    }
     if (err instanceof ProjectAccessDeniedError) {
       return context.json(projectAccessErrorBody(err), 403);
     }
@@ -380,6 +422,9 @@ export async function executeQueuedDeployment(
       context.set('deployScope', operation.project_id);
       if (operation.payload.credentialId) {
         context.set('deployCredential', operation.payload.credentialId);
+      }
+      if (operation.payload.oauthApproval) {
+        context.set('oauthApproval', operation.payload.oauthApproval);
       }
       if (operation.build_id) {
         context.set('deployBuild', operation.build_id);

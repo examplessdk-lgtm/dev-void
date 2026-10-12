@@ -1,5 +1,6 @@
 import type { PlatformApplication } from './application.ts';
 import { PLATFORM_LOGIN_KINDS, type PlatformLoginKind } from './authentication.ts';
+import { assertRecord, requiredString } from './validate.ts';
 
 export const PLATFORM_DEPLOYMENT_SCHEMA_VERSION = 1 as const;
 
@@ -110,19 +111,6 @@ const CONTROL_PLANE_DEFAULTS: PlatformControlPlane = {
   dashboardHostname: null,
   proxyHostname: null,
 };
-
-function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-}
-
-function requiredString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value;
-}
 
 export function normalizeInstallationSlug(value: string): string {
   const slug = value

@@ -6,8 +6,8 @@ import type {
 } from '@void/platform/installer';
 import { resolvePlatformRuntime } from '@void/platform/installer';
 import { join } from 'pathslash';
+import { getErrorMessage } from './output.ts';
 import { hash } from './platform-installer-resources.ts';
-import { errorMessage } from './platform-installer-workers.ts';
 
 export function loadPlatformRuntime(customRuntimeDirectory: string): PlatformRuntime {
   const runtime = resolvePlatformRuntime(customRuntimeDirectory || undefined);
@@ -33,7 +33,7 @@ export function verifyRuntimeArtifacts(
     try {
       contents = readFileSync(path);
     } catch (error) {
-      throw new Error(`platform: Runtime artifact is missing: ${errorMessage(error)}`);
+      throw new Error(`platform: Runtime artifact is missing: ${getErrorMessage(error)}`);
     }
     if (contents.byteLength !== artifact.size || hash(contents) !== artifact.sha256) {
       throw new Error(`platform: Runtime artifact failed integrity verification: ${path}.`);
@@ -52,7 +52,7 @@ export function verifyPlatformDatabaseArtifacts(
     journal = readFileSync(journalPath);
   } catch (error) {
     throw new Error(
-      `platform: Runtime database migration journal is missing: ${errorMessage(error)}`,
+      `platform: Runtime database migration journal is missing: ${getErrorMessage(error)}`,
     );
   }
   if (hash(journal) !== database.journalSha256) {
@@ -66,7 +66,7 @@ export function verifyPlatformDatabaseArtifacts(
     try {
       contents = readFileSync(path);
     } catch (error) {
-      throw new Error(`platform: Runtime database migration is missing: ${errorMessage(error)}`);
+      throw new Error(`platform: Runtime database migration is missing: ${getErrorMessage(error)}`);
     }
     if (hash(contents) !== migration.sha256) {
       throw new Error(

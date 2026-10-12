@@ -6,6 +6,7 @@ import type { DeployManifest, Resource } from '../../src/types.ts';
 vi.mock('../../src/provisioning/cloudflare-api', () => ({
   createD1Database: vi.fn().mockResolvedValue({ uuid: 'd1-uuid-123', name: 'test-DB' }),
   enableD1ReadReplication: vi.fn().mockResolvedValue(undefined),
+  ensureHyperdriveCachingDisabled: vi.fn().mockResolvedValue(undefined),
   createKVNamespace: vi.fn().mockResolvedValue({ id: 'kv-id-456', title: 'test-KV' }),
   createR2Bucket: vi.fn().mockResolvedValue({ name: 'test-STORAGE' }),
   createQueue: vi.fn().mockResolvedValue({ queue_id: 'queue-id-789', queue_name: 'test-queue' }),
@@ -39,6 +40,7 @@ import { getProjectResources, createResource } from '../../src/db.ts';
 import {
   createD1Database,
   enableD1ReadReplication,
+  ensureHyperdriveCachingDisabled,
   createKVNamespace,
   createR2Bucket,
   createQueue,
@@ -231,6 +233,57 @@ describe('provisionBindings', () => {
     expect(createResource).not.toHaveBeenCalled();
     expect(bindings[0]).toEqual({ type: 'd1', name: 'DB', id: 'existing-d1-id' });
     expect(bindings).toHaveLength(5);
+  });
+
+  describe('existing project database', () => {
+    const manifest: DeployManifest = { version: 1, bindings: { hyperdrive: ['HYPERDRIVE'] } };
+
+    beforeEach(() => {
+      vi.mocked(getProjectResources).mockResolvedValue([
+        {
+          id: 'res_hd',
+          project_id: PROJECT_ID,
+          type: 'hyperdrive',
+          cf_id: 'existing-hd-id',
+          binding_name: 'HYPERDRIVE',
+          created_at: new Date().toISOString(),
+          metadata: {},
+        },
+      ]);
+    });
+
+    it('checks Hyperdrive caching for an existing project database', async () => {
+      const bindings = await provisionBindings(
+        mockDb,
+        ACCOUNT_ID,
+        API_TOKEN,
+        PROJECT_ID,
+        manifest,
+        'void-proxy',
+        { projectSlug: PROJECT_SLUG, proxyToken: PROXY_TOKEN },
+      );
+
+      expect(ensureHyperdriveCachingDisabled).toHaveBeenCalledWith(
+        ACCOUNT_ID,
+        API_TOKEN,
+        'existing-hd-id',
+      );
+      expect(bindings[0]).toEqual({ type: 'hyperdrive', name: 'HYPERDRIVE', id: 'existing-hd-id' });
+      expect(bindings).toHaveLength(5);
+    });
+
+    it('fails the deploy when the Hyperdrive caching check fails', async () => {
+      vi.mocked(ensureHyperdriveCachingDisabled).mockRejectedValueOnce(
+        new Error('Cloudflare API error: not found'),
+      );
+
+      await expect(
+        provisionBindings(mockDb, ACCOUNT_ID, API_TOKEN, PROJECT_ID, manifest, 'void-proxy', {
+          projectSlug: PROJECT_SLUG,
+          proxyToken: PROXY_TOKEN,
+        }),
+      ).rejects.toThrow('not found');
+    });
   });
 
   it.each(['a'.repeat(32), 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'])(

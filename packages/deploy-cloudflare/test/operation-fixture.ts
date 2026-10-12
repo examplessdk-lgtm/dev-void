@@ -3,7 +3,7 @@ import { vi } from 'vite-plus/test';
 import type { CloudflareCommandResult } from '../src/execute.ts';
 import type { CloudflareOperation } from '../src/operations.ts';
 
-/** Replay the existing failure/race fixtures through the typed operation boundary. */
+/** Run an argv-style test callback behind the typed operation runner. */
 export function operationFixture<
   T extends (
     args: Array<string>,
@@ -295,7 +295,6 @@ export function operationFixtureArgs(operation: CloudflareOperation): Array<stri
   }
 }
 
-/** Convert old test input shorthand into an actual typed request. */
 export function operationFixtureRequest(args: Array<string>): CloudflareOperation {
   const value = (flag: string) => {
     const i = args.indexOf(flag);

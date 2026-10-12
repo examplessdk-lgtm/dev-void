@@ -12,6 +12,7 @@ import { adminAuthMiddleware } from './admin/middleware/auth.ts';
 import { adminCsrfMiddleware } from './admin/middleware/csrf.ts';
 import adminAuthConfig from './admin/routes/auth-config.tsx';
 import adminBuilds from './admin/routes/builds.tsx';
+import connectedApps from './admin/routes/connected-apps.ts';
 import adminDeployments from './admin/routes/deployments.tsx';
 import adminEmail from './admin/routes/email.tsx';
 import adminInvitations from './admin/routes/invitations.tsx';
@@ -24,6 +25,7 @@ import adminUsers from './admin/routes/users.tsx';
 import adminZeroTrust from './admin/routes/zero-trust.tsx';
 import { pendingAuthenticationSetup } from './auth/bootstrap.ts';
 import { readAuthSettings, readEnabledLoginConnections } from './auth/configuration.ts';
+import { purgeExpiredOAuthRequests } from './auth/oauth.ts';
 import { BuildManager, BuildManagerLarge } from './build-manager.ts';
 import { BuildScheduler } from './build-scheduler.ts';
 import { capabilityMiddleware, getPlatformCapabilities } from './capabilities.ts';
@@ -112,6 +114,7 @@ import internalRevalidate from './routes/internal-revalidate.ts';
 import internalVerifyOwner from './routes/internal-verify-owner.ts';
 import internalVerifyPrerenderBuild from './routes/internal-verify-prerender-build.ts';
 import me from './routes/me.ts';
+import oauth, { oauthMetadata } from './routes/oauth.ts';
 import platformBootstrapRoutes from './routes/platform-bootstrap.ts';
 import {
   myProjectInvitationRoutes,
@@ -542,6 +545,8 @@ const app = new Hono<ApiEnv>()
   })
   .route('/', platformBootstrapRoutes)
   .route('/auth', auth)
+  .get('/.well-known/oauth-authorization-server', oauthMetadata)
+  .route('/oauth', oauth)
   .route('/auth', oidcRoutes)
   .route('/internal/revalidate', internalRevalidate)
   .use('/internal/email/*', capabilityMiddleware('email'))
@@ -604,6 +609,7 @@ app.route('/admin/builds', adminBuilds);
 app.route('/admin/deployments', adminDeployments);
 app.route('/admin/signup-control', adminSignupControl);
 app.route('/admin/config/auth', adminAuthConfig);
+app.route('/admin/connected-apps', connectedApps);
 app.route('/admin/config/plans', adminPlans);
 app.route('/admin/invitations', adminInvitations);
 app.route('/admin', adminSystem);
@@ -820,6 +826,9 @@ async function scheduled(
   }
 
   // Purge expired OAuth nonces and auth codes left by abandoned login flows (best-effort)
+  await purgeExpiredOAuthRequests(db).catch((err) =>
+    console.error('[scheduled] failed to purge expired connected-app grants:', err),
+  );
   await purgeExpiredOAuthNonces(db).catch((err) =>
     console.error('[scheduled] failed to purge expired OAuth nonces:', err),
   );

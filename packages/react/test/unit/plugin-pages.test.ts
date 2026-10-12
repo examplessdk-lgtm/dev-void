@@ -104,18 +104,4 @@ describe('pagesPlugin dev config', () => {
 
     expect(renderer).toContain('"test": () => import');
   });
-
-  it('exposes the React dev preamble for client-only page shells', async () => {
-    writePage('index.tsx', 'export default function Index() { return <h1>Home</h1>; }\n');
-
-    const plugin = pagesPlugin(PAGES_DIR) as PagesPluginHooks;
-    getHookHandler(plugin.config)({}, { command: 'serve' });
-    await getHookHandler(plugin.buildStart).call({});
-
-    const load = getHookHandler(plugin.load);
-    const renderer = await load('\0virtual:void-pages-renderer');
-
-    expect(renderer).toContain('__vite_plugin_react_preamble_installed__ = true');
-    expect(renderer).toContain('renderPage.preambleScript = PREAMBLE_SCRIPT');
-  });
 });

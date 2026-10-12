@@ -18,6 +18,36 @@ export type ParameterizedMigrationRunner = {
   run(sql: string, params?: Array<unknown>): Promise<void>;
 };
 
+/** Wraps a `mysql2/promise` connection. */
+export function mysqlMigrationRunner(connection: {
+  query(sql: string, values?: Array<unknown>): Promise<[unknown, unknown]>;
+}): ParameterizedMigrationRunner {
+  return {
+    async all<T extends Record<string, unknown>>(sql: string, params?: Array<unknown>) {
+      const [rows] = await connection.query(sql, params);
+      return rows as Array<T>;
+    },
+    async run(sql: string, params?: Array<unknown>) {
+      await connection.query(sql, params);
+    },
+  };
+}
+
+/** Wraps a `pg` client. */
+export function pgMigrationRunner(client: {
+  query(sql: string, values?: Array<unknown>): Promise<{ rows: Array<unknown> }>;
+}): ParameterizedMigrationRunner {
+  return {
+    async all<T extends Record<string, unknown>>(sql: string, params?: Array<unknown>) {
+      const result = await client.query(sql, params);
+      return result.rows as Array<T>;
+    },
+    async run(sql: string, params?: Array<unknown>) {
+      await client.query(sql, params);
+    },
+  };
+}
+
 function quoteIdentifier(name: string, dialect: VoidAuthMigrationSchema['dialect']): string {
   return dialect === 'mysql'
     ? `\`${name.replaceAll('`', '``')}\``

@@ -35,6 +35,7 @@ export const FRAMEWORK_SCAN_DIRS = [
   'server',
   'crons',
   'queues',
+  'durable-objects',
 ] as const;
 
 /**
@@ -51,6 +52,7 @@ export const DEFAULT_SCAN_DIRS = [
   'pages',
   'crons',
   'email',
+  'durable-objects',
   'src',
 ] as const;
 
@@ -142,7 +144,8 @@ export function inferProjectBindings(
   scanDirs?: ReadonlyArray<string>,
 ): InferredBindings {
   const paths = options?.paths ?? readProjectPaths(root);
-  const dirs = scanDirs ?? (paths.sourceDir ? [paths.sourceDir] : DEFAULT_SCAN_DIRS);
+  const dirs =
+    scanDirs ?? (paths.sourceDir ? [paths.sourceDir, 'durable-objects'] : DEFAULT_SCAN_DIRS);
   const allBindings: Array<InferredBindings> = [];
   const scannedFiles = new Set<string>();
   const routesPrefix = `${toSlash(paths.routesDir).replace(/\/$/, '')}/`;

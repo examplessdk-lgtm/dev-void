@@ -1,9 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { compilePattern, mergeQueryIntoLocation, substituteParams } from '@void/edge';
+import {
+  compilePattern,
+  matchPattern,
+  matchPatternCaptures,
+  mergeQueryIntoLocation,
+  substituteParams,
+} from '@void/edge';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import type { RedirectStatusCode } from 'hono/utils/http-status';
 import { VoidAssetRewriteError } from './handler.ts';
 import { convertReturnValue } from './response.ts';
+import { ASSET_EXTENSIONS } from './routing-assets.ts';
 export { createErrorRenderer } from './routing-errors.ts';
 
 export type RoutingRule = {
@@ -23,7 +30,6 @@ export type RoutingContext = Context & {
 };
 export type RoutingRuntime = {
   requestContext: AsyncLocalStorage<RequestContextStore>;
-  originalUrls: WeakMap<Request, URL>;
   contextMiddleware: MiddlewareHandler;
   requestMiddleware: MiddlewareHandler;
   routingMiddleware: (rules: Array<RoutingRule>) => MiddlewareHandler;
@@ -40,14 +46,13 @@ export function createRoutingRuntime(
     nodeTarget?: boolean;
     managedDispatch?: boolean;
     blockedAssetExtensions?: Array<string>;
-    originalUrls?: WeakMap<Request, URL>;
   } = {},
 ): RoutingRuntime {
-  const originalUrls = options.originalUrls ?? new WeakMap<Request, URL>();
+  const originalUrls = new WeakMap<Request, URL>();
   const fallbackHandled = new WeakSet<Request>();
   const warnedPatterns = new Set<string>();
   const requestContext = new AsyncLocalStorage<RequestContextStore>();
-  const assetExtensions = options.blockedAssetExtensions ?? DEFAULT_ASSET_EXTENSIONS;
+  const assetExtensions = options.blockedAssetExtensions ?? ASSET_EXTENSIONS;
   const assetExtensionRE = assetExtensions.length
     ? new RegExp(`\\.(${assetExtensions.join('|')})$`, 'i')
     : /(?!)/;
@@ -92,17 +97,17 @@ export function createRoutingRuntime(
       if (rule.host && rule.host !== url.hostname) {
         continue;
       }
-      let match: RegExpExecArray | null;
       try {
-        match = compilePattern(rule.source).regex.exec(url.pathname);
+        compilePattern(rule.source);
       } catch (error) {
         warn(rule.source, error, 'routing');
         continue;
       }
-      if (!match) {
+      const params = matchPatternCaptures(rule.source, url.pathname);
+      if (!params) {
         continue;
       }
-      const destination = substituteParams(rule.destination, match.groups ?? {});
+      const destination = substituteParams(rule.destination, params);
       if (rule.status === 200) {
         const q = destination.indexOf('?');
         const rewriteUrl = new URL(c.req.url);
@@ -180,7 +185,6 @@ export function createRoutingRuntime(
   };
   return {
     requestContext,
-    originalUrls,
     contextMiddleware,
     requestMiddleware: async (c, next) => {
       await requestContext.run(
@@ -213,11 +217,13 @@ export function createRoutingRuntime(
       const matched: Array<[string, string]> = [];
       for (const rule of rules) {
         try {
-          if (compilePattern(rule.pattern).regex.test(pathname)) {
-            matched.push(...rule.headers);
-          }
+          compilePattern(rule.pattern);
         } catch (error) {
           warn(rule.pattern, error, 'header');
+          continue;
+        }
+        if (matchPattern(rule.pattern, pathname)) {
+          matched.push(...rule.headers);
         }
       }
       if (!matched.length) {
@@ -238,36 +244,6 @@ export function createRoutingRuntime(
     markNoMatch,
   };
 }
-
-export const DEFAULT_ASSET_EXTENSIONS: Array<string> = [
-  'png',
-  'jpg',
-  'jpeg',
-  'gif',
-  'webp',
-  'avif',
-  'svg',
-  'ico',
-  'css',
-  'js',
-  'mjs',
-  'cjs',
-  'woff',
-  'woff2',
-  'ttf',
-  'otf',
-  'eot',
-  'mp4',
-  'webm',
-  'mp3',
-  'wav',
-  'pdf',
-  'txt',
-  'xml',
-  'json',
-  'wasm',
-  'map',
-];
 
 export function markNoMatch(request: Request, response: Response): Response {
   const url = new URL(request.url);

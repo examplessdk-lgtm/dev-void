@@ -1,4 +1,7 @@
-export const PLATFORM_PLAN_ACTIONS = [
+import { parsePlatformPlanId } from '@void/platform/plans';
+import { parseConfigFlags } from './platform-config-args.ts';
+
+const PLATFORM_PLAN_ACTIONS = [
   'show',
   'add',
   'set',
@@ -9,7 +12,7 @@ export const PLATFORM_PLAN_ACTIONS = [
   'default',
   'sync',
 ] as const;
-export type PlatformPlanAction = (typeof PLATFORM_PLAN_ACTIONS)[number];
+type PlatformPlanAction = (typeof PLATFORM_PLAN_ACTIONS)[number];
 export type PlatformPlansArgs = Readonly<{
   subcommand: 'config';
   configGroup: 'plans';
@@ -26,36 +29,13 @@ export type PlatformPlansArgs = Readonly<{
 }>;
 
 export function parsePlatformPlansArgs(args: ReadonlyArray<string>): PlatformPlansArgs {
-  const positional: Array<string> = [];
-  const flags = new Set<string>();
-  const values = new Map<string, string>();
-  const valueFlags = ['connection', 'file', 'name', 'copy', 'replacement'];
-  for (let index = 1; index < args.length; index++) {
-    const arg = args[index]!;
-    if (!arg.startsWith('-')) {
-      positional.push(arg);
-      continue;
-    }
-    const name = arg.slice(2);
-    if (
-      !arg.startsWith('--') ||
-      (!['json', 'plan', 'yes'].includes(name) && !valueFlags.includes(name))
-    ) {
-      throw new Error(`platform: Unknown config plans flag ${arg}.`);
-    }
-    if (flags.has(name) || values.has(name)) {
-      throw new Error(`platform: Duplicate flag ${arg}.`);
-    }
-    if (!valueFlags.includes(name)) {
-      flags.add(name);
-      continue;
-    }
-    const value = args[++index];
-    if (!value || value.startsWith('-')) {
-      throw new Error(`platform: ${arg} requires a value.`);
-    }
-    values.set(name, value);
-  }
+  const { positional, flags, values } = parseConfigFlags(args, 'plans', [
+    'connection',
+    'file',
+    'name',
+    'copy',
+    'replacement',
+  ]);
   const [action = '', target = '', ...extra] = positional;
   if (extra.length || (action && !PLATFORM_PLAN_ACTIONS.includes(action as PlatformPlanAction))) {
     throw new Error(
@@ -102,4 +82,3 @@ export function parsePlatformPlansArgs(args: ReadonlyArray<string>): PlatformPla
     yes: flags.has('yes'),
   };
 }
-import { parsePlatformPlanId } from '@void/platform/plans';

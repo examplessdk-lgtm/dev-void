@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parseRootWranglerConfig, readWranglerTopLevelString } from '@void/deploy-cloudflare';
 import { confirm, isCancel, log, password } from '@voidzero-dev/vite-plus-prompts';
 import { join } from 'pathslash';
@@ -8,13 +9,17 @@ import { readConfig } from '../config.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { scanEmailHandlersSync } from '../router/email.ts';
 import { getToken, openBrowser } from './auth.ts';
-import { PlatformApiError, PlatformClient, type EmailDomainResponse } from './client.ts';
+import {
+  PlatformApiError,
+  PlatformClient,
+  type EmailDomainResponse,
+  type EmailOperationResponse,
+} from './client.ts';
 import {
   createDeployWranglerRunner,
   deriveWorkerName,
   discoverRootWranglerConfig,
   isWranglerNonInteractiveOrCI,
-  loadProvisionModule,
   resolveDeployTransport,
   runWranglerAuthToken,
 } from './deploy.ts';
@@ -22,8 +27,9 @@ import type { EmailArgs } from './email-args.ts';
 import {
   applyEmailSetup,
   createNodeEmailDns,
-  findEmailConfigConflicts,
+  emailConfigInputs,
   preflightEmail,
+  probeMx,
   renderAddressMap,
   renderEmailChecklist,
   type EmailCloudflareInputs,
@@ -33,11 +39,11 @@ import {
   type EmailWranglerRun,
 } from './email-cloudflare.ts';
 import { printSuccess, createSpinner, note, pc } from './output.ts';
-import { readProjectConfig } from './project.ts';
+import { resolveCommandProjectId } from './resolve-project.ts';
 import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
 export async function runEmailCommand(root: string, args: EmailArgs): Promise<void> {
-  // Mode B (design doc 0078) never touches the Void platform: no token, no project.
+  // The developer's own Cloudflare account needs no Void token or project.
   if (args.platform === 'cloudflare') {
     return runEmailCloudflareCommand(root, args);
   }
@@ -62,39 +68,21 @@ export async function runEmailCommand(root: string, args: EmailArgs): Promise<vo
 
   const client = new PlatformClient(token, { root });
 
-  const requestedSlug = args.projectSlug ?? process.env.VOID_PROJECT?.trim();
-  let projectId: string | undefined;
-
-  if (requestedSlug) {
-    const projects = await client.listProjects();
-    const project = projects.find((p) => p.slug === requestedSlug);
-    if (!project) {
-      log.error(`project: No project found with slug '${requestedSlug}'.`);
-      process.exit(1);
-    }
-    projectId = project.id;
-  } else {
-    const config = readProjectConfig(root);
-    if (!config) {
-      log.error('No linked project. Run `void project link` or pass --project <name>.');
-      process.exit(1);
-    }
-    projectId = config.projectId;
-  }
+  const projectId = await resolveCommandProjectId(client, root, args.projectSlug);
 
   switch (args.subcommand) {
     case 'usage':
-      return emailUsage(client, projectId!);
+      return emailUsage(client, projectId);
     case 'logs':
-      return emailLogs(client, projectId!, args.limit);
+      return emailLogs(client, projectId, args.limit);
     case 'destinations':
-      return emailDestinations(client, projectId!);
+      return emailDestinations(client, projectId);
     case 'allow':
-      return emailAllow(client, projectId!, args.address!);
+      return emailAllow(client, projectId, args.address!);
     case 'disallow':
-      return emailDisallow(client, projectId!, args.address!);
+      return emailDisallow(client, projectId, args.address!);
     case 'domain':
-      return runEmailDomainCommand(client, projectId!, args);
+      return runEmailDomainCommand(client, projectId, args);
   }
 }
 
@@ -203,20 +191,13 @@ export async function emailLogs(
   note(lines.join('\n'), 'Email Logs');
 }
 
-// ── Custom domains on the customer's own Cloudflare zone (0078) ──────────────
+// ── Custom domains on the customer's own Cloudflare zone ──────────────────────
 //
-// `void email domain add|status|list|sync|remove`. The api owns the
-// orchestration (contract 7); the CLI owns the MX-decision render, the
-// scoped API token (the template link +
-// clipboard watch below as the permanent fallback), and the result render.
-// The pasted API token is held in
-// memory, POSTed once, and never printed, logged, or persisted locally.
+// The API token is held in memory, sent once, and never printed, logged, or stored locally.
 
 /**
- * The dashboard template link's permission groups (contract 8). Every key
- * rides every link — there is no apex-only key, because `Zone Settings Edit`
- * gates the routing POST on both paths; `zone: read` is what the zone lookup
- * needs. URL-encoded by `URL.searchParams`.
+ * Permission groups prefilled in the dashboard token link. `zone_settings: edit` gates
+ * the routing POST; `zone: read` serves the zone lookup.
  */
 const CF_TOKEN_TEMPLATE_PERMISSION_GROUPS = [
   { key: 'zone', type: 'read' },
@@ -226,7 +207,7 @@ const CF_TOKEN_TEMPLATE_PERMISSION_GROUPS = [
   { key: 'zone_settings', type: 'edit' },
 ] as const;
 
-/** The three-click template link — the scoped token path (0078, "Creating the token in three clicks"). */
+/** Dashboard link that prefills the scoped API token form. */
 export function buildCfApiTokenTemplateUrl(domain: string): string {
   const url = new URL('https://dash.cloudflare.com/profile/api-tokens');
   url.searchParams.set('permissionGroupKeys', JSON.stringify(CF_TOKEN_TEMPLATE_PERMISSION_GROUPS));
@@ -240,24 +221,19 @@ export function buildCfApiTokenTemplateUrl(domain: string): string {
 /** 'refused' and 'unknown' are both rejected; 'refused' names a known foreign prefix in the error. */
 export type CfApiTokenShape = 'cfut' | 'legacy' | 'refused' | 'unknown';
 
-// The current format (Cloudflare's token-formats doc, 2026): the `cfut_`
-// prefix, 40 characters, then a CRC32 checksum. The doc pins the 40 but not
-// the checksum's exact rendered length, so the tail is bounded loosely —
-// `GET /user/tokens/verify` is the real gate, not this regex.
+// `cfut_`, 40 characters, then a CRC32 checksum whose rendered length is not documented,
+// so the tail is loose. `GET /user/tokens/verify` is the real gate, not this regex.
 const CFUT_TOKEN_PATTERN = /^cfut_[A-Za-z0-9_-]{44,64}$/;
 // Pre-2026 tokens: an unprefixed 40-character string. Still accepted by CF.
 const LEGACY_CF_TOKEN_PATTERN = /^[A-Za-z0-9_-]{40}$/;
-// Other dashboards' tokens are refused WITHOUT a network call (0078) —
-// pasting the wrong site's token is the common mistake, and naming it beats
-// a CF 401. `cfk_` is Cloudflare's own global key, also not a scoped token.
+// Another service's token is named without a network call instead of surfacing as a CF 401.
+// `cfk_` is Cloudflare's global key, not a scoped token.
 const REFUSED_TOKEN_PREFIXES = ['ghp_', 'github_pat_', 'sk-', 'xox', 'cfk_'] as const;
 
 /** Shape-only classification of a clipboard or pasted value. Never logs the value. */
 export function classifyCfApiTokenShape(value: string): CfApiTokenShape {
   const token = value.trim();
-  // Refused FIRST: `ghp_` + 36 chars is exactly the legacy 40-char shape, and
-  // 0078's rule is that another dashboard's token is refused without a
-  // network call — the refusal wins over the legacy-shape coincidence.
+  // Refused prefixes first: `ghp_` + 36 chars also matches the legacy 40-char shape.
   if (REFUSED_TOKEN_PREFIXES.some((prefix) => token.startsWith(prefix))) {
     return 'refused';
   }
@@ -270,8 +246,6 @@ export function classifyCfApiTokenShape(value: string): CfApiTokenShape {
   return 'unknown';
 }
 
-// Clipboard helpers — the read side mirrors the write side in account-cmd.ts
-// (pbcopy / clip / xclip); wl-paste/wl-copy cover Wayland sessions.
 function readClipboard(): string | null {
   const platform = process.platform;
   const command =
@@ -310,18 +284,15 @@ function clearClipboard(): void {
       }
     }
   } catch {
-    // Best-effort: a headless session has nothing to clear, and a failure
-    // here must not fail the add (the doc says so once, below).
+    // Best-effort: a failure here must not fail the add.
   }
 }
 
 export type CfTokenVerification = 'active' | 'inactive' | 'unknown';
 
 /**
- * The CLI-side active check from 0078's clipboard sequence. 'unknown' means
- * the check could not run (no network, a CF error) — the caller proceeds and
- * lets the platform verify authoritatively, never treating a network blip as
- * a bad token. The token itself is never logged.
+ * Local active check. 'unknown' means the check could not run (network or CF error); the
+ * caller proceeds and the platform verifies authoritatively. The token is never logged.
  */
 async function verifyCfApiToken(token: string): Promise<CfTokenVerification> {
   let res: Response;
@@ -360,57 +331,11 @@ export function isValidEmailDomainInput(domain: string): boolean {
   return /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/.test(domain);
 }
 
-/**
- * Where `--subdomain` lands: a bare label nests under the positional domain
- * (`mx` → `mx.acme.com`), a full host is taken as-is but must stay under it.
- * Throws on anything else — the user named a domain this add cannot register.
- */
-export function resolveEmailDomainTarget(
-  domain: string,
-  subdomain?: string,
-): { emailDomain: string; forced: boolean } {
-  if (subdomain === undefined) {
-    return { emailDomain: domain, forced: false };
-  }
-  const candidate = subdomain.trim().toLowerCase().replace(/\.$/, '');
-  const resolved = candidate.includes('.') ? candidate : `${candidate}.${domain}`;
-  if (!isValidEmailDomainInput(resolved)) {
-    throw new Error(`email: invalid --subdomain value '${subdomain}'.`);
-  }
-  if (resolved === domain || !resolved.endsWith(`.${domain}`)) {
-    throw new Error(`email: --subdomain must name a subdomain of ${domain} (got '${subdomain}').`);
-  }
-  return { emailDomain: resolved, forced: true };
-}
-
-/**
- * Local public-DNS MX read. [] = no records, null = could not read. The
- * local answer only steers the default and the render — the platform
- * re-checks over public DNS and its answer is authoritative, so a
- * split-horizon resolver never blocks a valid setup here.
- */
-async function lookupMxForRender(
-  dns: Pick<EmailDns, 'resolveMx'>,
-  name: string,
-): Promise<Array<string> | null> {
-  try {
-    const records = await dns.resolveMx(name);
-    return records
-      .slice()
-      .sort((a, b) => a.priority - b.priority)
-      .map((r) => r.exchange.replace(/\.$/, '').toLowerCase());
-  } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
-    return code === 'ENODATA' || code === 'ENOTFOUND' ? [] : null;
-  }
-}
-
 type EnterRace = { promise: Promise<'enter'>; stop: () => void };
 
 /**
- * The "Enter switches paths" race from 0078's flow. The default reads one
- * cooked-mode line from stdin; `stop` removes the listener so a losing race
- * cannot eat the first keystroke of a later prompt.
+ * Resolves when Enter is pressed during the clipboard watch. `stop` removes the listener so
+ * a losing race cannot eat the first keystroke of a later prompt.
  */
 function createEnterRace(waitForEnter?: () => Promise<unknown>): EnterRace {
   if (waitForEnter) {
@@ -452,9 +377,9 @@ export interface EmailDomainAddDeps {
   /** The Enter keypress that switches paths (default: one stdin line). */
   waitForEnter?: () => Promise<unknown>;
   watchIntervalMs?: number;
-  /** Default 10 minutes (0078's clipboard watch bound). */
+  /** Default 10 minutes. */
   watchTimeoutMs?: number;
-  /** Sleep between reconcile polls after a lost add answer (default: setTimeout). */
+  /** Sleep between reconcile polls after a lost answer (default: setTimeout). */
   sleep?: (ms: number) => Promise<void>;
   /** Default: wrangler's interactivity gate, same as `void email setup`. */
   isInteractive?: boolean;
@@ -475,28 +400,62 @@ async function defaultPasteToken(): Promise<string | null> {
 type EmailDomainCredential = { kind: 'api_token'; apiToken: string };
 
 /**
- * Lost-answer reconcile bounds for `domain add`: attempt-count bounded (not
- * wall clock) so the worst case is finite and tests are deterministic. The
- * API's pre-insert phase is DB-only but takes tens of ms to seconds of
- * Hyperdrive RTTs, and a lost answer does not stop the API worker — a single
- * immediate status read can 404 while the POST is still committing.
+ * Lost-answer reconcile bounds: attempt-count bounded so the worst case is finite. A lost
+ * answer does not stop the API worker, so one immediate status read can 404 while the
+ * request is still committing.
  */
-const ADD_RECONCILE_ATTEMPTS = 15;
-const ADD_RECONCILE_INTERVAL_MS = 1000;
+const RECONCILE_ATTEMPTS = 15;
+const RECONCILE_INTERVAL_MS = 1000;
+
+/**
+ * After an add or rotate request fails without a definitive refusal, poll its operation by
+ * attempt id and print it. Returns undefined when the operation never appears.
+ */
+async function reconcileEmailOperation(
+  error: unknown,
+  client: Pick<PlatformClient, 'getEmailOperation'>,
+  projectId: string,
+  attemptId: string,
+  title: string,
+  sleep: (ms: number) => Promise<void> = delay,
+): Promise<EmailOperationResponse | undefined> {
+  if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
+    throw error;
+  }
+  for (let attempt = 0; attempt < RECONCILE_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await sleep(RECONCILE_INTERVAL_MS);
+    }
+    let operation: EmailOperationResponse;
+    try {
+      operation = await client.getEmailOperation(projectId, attemptId);
+    } catch {
+      continue;
+    }
+    note(
+      [
+        `Operation:   ${operation.operationId}`,
+        `Status:      ${operation.status}`,
+        `Inbound:     ${operation.readiness.inbound.status}`,
+        `Outbound:    ${operation.readiness.outbound.status}`,
+        `Credential:  ${operation.readiness.management.status}`,
+      ].join('\n'),
+      title,
+    );
+    return operation;
+  }
+  return undefined;
+}
 
 export async function emailDomainAdd(
   client: Pick<
     PlatformClient,
-    | 'addEmailDomain'
-    | 'getEmailDomain'
-    | 'getEmailOperation'
-    | 'getEmailSettings'
-    | 'listEmailDomains'
+    'addEmailDomain' | 'getEmailOperation' | 'getEmailSettings' | 'listEmailDomains'
   >,
   projectId: string,
   rawDomain: string,
-  subdomain: string | undefined,
   deps: EmailDomainAddDeps = {},
+  subdomain?: string,
 ): Promise<void> {
   const exit = deps.exit ?? ((code: number): never => process.exit(code));
   const fail = (message: string): never => {
@@ -513,22 +472,17 @@ export async function emailDomainAdd(
       'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.',
     );
   }
-  let target: { emailDomain: string; forced: boolean };
-  try {
-    target = resolveEmailDomainTarget(domain, subdomain);
-  } catch (err) {
-    return fail(err instanceof Error ? err.message : String(err));
-  }
 
-  // Keep the requested apex. The server checks DNS and zone authority again.
+  // A foreign MX on the apex stops here; an unreadable one is left to the platform, which
+  // re-checks over public DNS.
   const dns = deps.dns ?? (await createNodeEmailDns());
-  const decideTarget = async (): Promise<void> => {
-    const mx = await lookupMxForRender(dns, domain);
-    if (mx === null) {
+  const checkApexMx = async (): Promise<void> => {
+    const mx = await probeMx(dns, domain);
+    if (mx.state === 'unknown') {
       log.info(
         `MX        could not read ${domain}'s MX from here — the platform decides over public DNS.`,
       );
-    } else if (mx.some((exchange) => !/\.mx\.cloudflare\.net$/i.test(exchange))) {
+    } else if (mx.state === 'foreign') {
       fail(
         `email: ${domain} already receives mail from another provider. Platform custom inbound email requires an unused Cloudflare zone apex; choose another apex or use the platform shared mail address.`,
       );
@@ -537,49 +491,34 @@ export async function emailDomainAdd(
     }
   };
 
-  // On an administrator-managed platform owners normally hold no Cloudflare
-  // credential, so there is no grant to open a browser for. The handoff does
-  // DNS and the two platform GETs, never a Cloudflare call or browser flow. A
-  // row the owner registered before the switch stays theirs to renew
-  // (ownership table: add on an owner row), so that owner flow continues for
-  // an existing target.
-  let renewal: string | undefined;
+  // On an administrator-managed platform new domains go to the administrator. An owner row
+  // registered before the switch stays the owner's to renew.
+  let renewal = false;
   const settings = await client.getEmailSettings(projectId);
   if (settings.domains.management === 'admin') {
     const rows = await client.listEmailDomains(projectId);
-    const candidates = [target.emailDomain];
-    const existing = candidates
-      .map((candidate) =>
-        rows.find((row) => row.domain === candidate && row.managed_by !== 'admin'),
-      )
-      .find((row) => row !== undefined);
-    if (!existing) {
-      await decideTarget();
+    renewal = rows.some((row) => row.domain === domain && row.managed_by !== 'admin');
+    if (!renewal) {
+      await checkApexMx();
       const project = settings.domains.projectSlug ?? projectId;
       log.info(
         [
           'Email domains on this platform are managed by its administrator.',
           'Ask them to run:',
           '',
-          `  void platform email domain-add ${target.emailDomain} --project ${project}`,
+          `  void platform email domain-add ${domain} --project ${project}`,
           '',
           '`void email domain list` and `void email domain status` keep working here.',
         ].join('\n'),
       );
       return exit(0);
     }
-    // The pre-switch row IS the target: Email Routing itself put MX on the
-    // apex it serves, so the MX decision below would retarget a renewal.
-    renewal = existing.domain;
-    target = { emailDomain: existing.domain, forced: true };
   }
 
-  // A renewal keeps its stored target: Email Routing itself put MX on the
-  // apex it serves, so the MX decision would retarget it.
-  if (renewal !== undefined) {
-    log.info(`Updating ${renewal} with a scoped credential; the platform will reconcile setup.`);
+  if (renewal) {
+    log.info(`Updating ${domain} with a scoped credential; the platform will reconcile setup.`);
   } else {
-    await decideTarget();
+    await checkApexMx();
   }
 
   // Token creation needs a browser or a masked paste prompt.
@@ -593,17 +532,13 @@ export async function emailDomainAdd(
   let credential: EmailDomainCredential;
   {
     log.info(
-      `Create a Cloudflare API token restricted to the account and DNS zone containing ${target.emailDomain}. In the resource selectors, replace All accounts and All zones with those exact resources. Workers Scripts Write still applies to every Worker in the selected account.`,
+      `Create a Cloudflare API token restricted to the account and DNS zone containing ${domain}. In the resource selectors, replace All accounts and All zones with those exact resources. Workers Scripts Write still applies to every Worker in the selected account.`,
     );
-    const url = buildCfApiTokenTemplateUrl(target.emailDomain);
+    const url = buildCfApiTokenTemplateUrl(domain);
     const readClip = deps.readClipboard ?? readClipboard;
     const clearClip = deps.clearClipboard ?? clearClipboard;
     const verify = deps.verifyToken ?? verifyCfApiToken;
-    const openUrl =
-      deps.openUrl ??
-      ((u: string): void => {
-        void import('node:child_process').then(({ execFile }) => openBrowser(u, execFile));
-      });
+    const openUrl = deps.openUrl ?? openBrowser;
     const snapshot = readClip();
     if (snapshot === null) {
       log.info('No clipboard tool found here — paste the token instead.');
@@ -630,9 +565,8 @@ export async function emailDomainAdd(
       const interval = deps.watchIntervalMs ?? 1000;
       const snapshotTrimmed = snapshot.trim();
       const enterDuringWatch = createEnterRace(deps.waitForEnter);
-      // Either race outcome must stop the poll branch: an orphaned loop would
-      // keep reading the clipboard on ref'd timers to the deadline (and could
-      // verify a later token-shaped value) after the flow has moved on.
+      // Either race outcome must stop the poll branch, or an orphaned loop keeps reading the
+      // clipboard (and could verify a later token) after the flow has moved on.
       let watchSettled = false;
       let watchTimer: ReturnType<typeof setTimeout> | undefined;
       outcome = await Promise.race([
@@ -649,8 +583,7 @@ export async function emailDomainAdd(
               continue;
             }
             const shape = classifyCfApiTokenShape(value);
-            // Wrong shape (another vendor's token included): nothing — still
-            // waiting, and never a network call for it (0078's branch table).
+            // Wrong shape, including another vendor's token: keep waiting, no network call.
             if (shape === 'refused' || shape === 'unknown') {
               continue;
             }
@@ -680,7 +613,6 @@ export async function emailDomainAdd(
     if (outcome.type === 'token') {
       clearClip();
       watchSpinner?.stop('Token received — the clipboard copy was cleared.');
-      // Said once, per 0078: a clipboard manager's history is outside our reach.
       log.info('A clipboard manager may keep its own history — clear it there if you run one.');
       credential = { kind: 'api_token', apiToken: outcome.token };
     } else {
@@ -689,7 +621,6 @@ export async function emailDomainAdd(
       );
       const pasted = await (deps.pasteToken ?? defaultPasteToken)();
       if (pasted === null) {
-        // Esc: cancel with nothing stored anywhere (0078's branch table).
         log.info('Cancelled — nothing was stored anywhere.');
         return;
       }
@@ -718,14 +649,14 @@ export async function emailDomainAdd(
 
   const scopeConfirmed = await (
     deps.confirmScope ??
-    (async (domain: string) => {
+    (async (name: string) => {
       const answer = await confirm({
-        message: `Is this token restricted to the Cloudflare account and DNS zone containing ${domain}?`,
+        message: `Is this token restricted to the Cloudflare account and DNS zone containing ${name}?`,
         initialValue: false,
       });
       return !isCancel(answer) && answer === true;
     })
-  )(target.emailDomain);
+  )(domain);
   if (!scopeConfirmed) {
     return fail(
       'email: restrict the token to the selected account and zone before adding the domain. Nothing was submitted to the platform.',
@@ -737,50 +668,34 @@ export async function emailDomainAdd(
   let row: EmailDomainResponse;
   try {
     row = await client.addEmailDomain(projectId, {
-      domain: target.emailDomain,
+      domain,
       apiToken: credential.apiToken,
       attemptId,
     });
   } catch (error) {
-    if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
-      throw error;
-    }
-    const sleep =
-      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    for (let attempt = 0; attempt < ADD_RECONCILE_ATTEMPTS; attempt++) {
-      if (attempt > 0) {
-        await sleep(ADD_RECONCILE_INTERVAL_MS);
-      }
-      let operation;
-      try {
-        operation = await client.getEmailOperation(projectId, attemptId);
-      } catch {
-        continue;
-      }
-      note(
-        [
-          `Operation:   ${operation.operationId}`,
-          `Status:      ${operation.status}`,
-          `Inbound:     ${operation.readiness.inbound.status}`,
-          `Outbound:    ${operation.readiness.outbound.status}`,
-          `Credential:  ${operation.readiness.management.status}`,
-        ].join('\n'),
-        'Email Setup',
-      );
-      if (operation.error) {
-        log.error(operation.error);
-      }
-      log.info(`Run \`void email domain status ${target.emailDomain}\` to inspect setup.`);
-      if (operation.status === 'completed') {
-        printSuccess(`Email domain ${target.emailDomain} configured.`);
-        return;
-      }
+    const operation = await reconcileEmailOperation(
+      error,
+      client,
+      projectId,
+      attemptId,
+      'Email Setup',
+      deps.sleep,
+    );
+    if (!operation) {
       return fail(
-        `email: setup is ${operation.status}; operation ${operation.operationId} retains its confirmed progress on the platform.`,
+        `email: setup outcome is unknown (operation ${attemptId}). Nothing was revoked. Check \`void email domain status ${domain}\` before starting another setup.`,
       );
+    }
+    if (operation.error) {
+      log.error(operation.error);
+    }
+    log.info(`Run \`void email domain status ${domain}\` to inspect setup.`);
+    if (operation.status === 'completed') {
+      printSuccess(`Email domain ${domain} configured.`);
+      return;
     }
     return fail(
-      `email: setup outcome is unknown (operation ${attemptId}). Nothing was revoked. Check \`void email domain status ${target.emailDomain}\` before starting another setup.`,
+      `email: setup is ${operation.status}; operation ${operation.operationId} retains its confirmed progress on the platform.`,
     );
   }
   log.info(
@@ -910,42 +825,26 @@ export async function emailDomainRotateSecret(
   try {
     row = await client.rotateEmailDomainSecret(projectId, domain, attemptId);
   } catch (error) {
-    if (error instanceof PlatformApiError && [400, 403, 404, 409].includes(error.status)) {
-      throw error;
-    }
-    const sleep =
-      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    for (let attempt = 0; attempt < ADD_RECONCILE_ATTEMPTS; attempt++) {
-      if (attempt > 0) {
-        await sleep(ADD_RECONCILE_INTERVAL_MS);
-      }
-      let operation;
-      try {
-        operation = await client.getEmailOperation(projectId, attemptId);
-      } catch {
-        continue;
-      }
-      note(
-        [
-          `Operation:   ${operation.operationId}`,
-          `Status:      ${operation.status}`,
-          `Inbound:     ${operation.readiness.inbound.status}`,
-          `Outbound:    ${operation.readiness.outbound.status}`,
-          `Credential:  ${operation.readiness.management.status}`,
-        ].join('\n'),
-        'Email Secret Rotation',
-      );
-      if (operation.status !== 'completed') {
-        throw new Error(
-          `email: secret rotation ${operation.status}; inspect operation ${operation.operationId}`,
-        );
-      }
-      printSuccess('Zone ingress secret rotated and verified on the deployed Worker.');
-      return;
-    }
-    throw new Error(
-      `email: secret rotation outcome is unknown (operation key ${attemptId}); inspect \`void email domain status ${domain}\` before starting another rotation.`,
+    const operation = await reconcileEmailOperation(
+      error,
+      client,
+      projectId,
+      attemptId,
+      'Email Secret Rotation',
+      deps.sleep,
     );
+    if (!operation) {
+      throw new Error(
+        `email: secret rotation outcome is unknown (operation key ${attemptId}); inspect \`void email domain status ${domain}\` before starting another rotation.`,
+      );
+    }
+    if (operation.status !== 'completed') {
+      throw new Error(
+        `email: secret rotation ${operation.status}; inspect operation ${operation.operationId}`,
+      );
+    }
+    printSuccess('Zone ingress secret rotated and verified on the deployed Worker.');
+    return;
   }
   printEmailDomainOutcome(row);
   if (row.operationStatus !== 'completed') {
@@ -983,7 +882,7 @@ async function runEmailDomainCommand(
 ): Promise<void> {
   switch (args.domainVerb) {
     case 'add':
-      return emailDomainAdd(client, projectId, args.domain!, args.subdomain);
+      return emailDomainAdd(client, projectId, args.domain!, {}, args.subdomain);
     case 'status':
       return emailDomainStatus(client, projectId, args.domain!);
     case 'list':
@@ -997,23 +896,19 @@ async function runEmailDomainCommand(
   }
 }
 
-// ── Mode B: the developer's own Cloudflare account ─────────────────────────────
+// ── --platform cloudflare: the developer's own Cloudflare account ───────────────
 
-/**
- * Seams for {@link runEmailCloudflareCommand}, so the command is unit-testable with no
- * wrangler, network, DNS, terminal, or Cloudflare account — the same pattern the deploy
- * orchestrator's `CloudflareDeployDeps` uses.
- */
+/** Test seams for {@link runEmailCloudflareCommand}. */
 export interface EmailCloudflareCommandDeps {
-  /** wrangler runner for the read-only probes and the `email … enable` writes. */
+  /** Runner for the provider reads and the `enable` writes. */
   runWrangler?: EmailWranglerRun;
-  /** The session-bearer bridge (default: `wrangler auth token --json`, logs off). */
+  /** The session-bearer bridge (default: `runWranglerAuthToken`). */
   getSessionBearer?: () => Promise<string | null>;
   fetchImpl?: EmailFetch;
   dns?: EmailDns;
-  /** Override the interactivity gate (default: wrangler's own, `!isWranglerNonInteractiveOrCI()`). */
+  /** Override the interactivity gate (default: `!isWranglerNonInteractiveOrCI()`). */
   isInteractive?: boolean;
-  /** The one Enter (default: clack `confirm`, default Yes). */
+  /** Setup confirmation (default: clack `confirm`, default Yes). */
   confirm?: (message: string) => Promise<boolean>;
   /** Block printer for the checklist / address map (default: clack `log.message`). */
   print?: (block: string) => void;
@@ -1026,10 +921,8 @@ interface EmailWranglerConfigContext {
 }
 
 /**
- * Wrangler discovers config files by walking parent directories. A standalone email command in
- * an app with no root config must still run in an explicit empty config context, otherwise an
- * unrelated ancestor config can select the wrong account. The real project path remains separate:
- * setup writes there only after it succeeds, while status leaves the project untouched.
+ * Wrangler finds config by walking parent directories, so an app with no root config runs in
+ * an empty temporary one; otherwise an unrelated ancestor config could select the wrong account.
  */
 function createEmailWranglerConfigContext(configPath: string): EmailWranglerConfigContext {
   if (existsSync(configPath)) {
@@ -1051,18 +944,15 @@ function createEmailWranglerConfigContext(configPath: string): EmailWranglerConf
 }
 
 /**
- * `void email setup --platform cloudflare` and `void email status --platform cloudflare`.
+ * `void email setup|status --platform cloudflare`.
  *
- * `setup` is the deploy's step 3b-ii on its own: preflight → checklist → the one Enter →
- * apply → write the root wrangler.jsonc. It exists for CI: a non-interactive deploy that
- * finds email not ready prints the checklist and says to run this once, commit
- * wrangler.jsonc, and redeploy. Rules and the catch-all stay wrangler's job — the next
- * `void deploy --platform cloudflare` applies the plan from the written `addresses`. It
- * is also the ONLY place a sending onboarding the committed binding remembers as refused
- * (Workers Free) is retried — on its own prompt, after a Workers Paid upgrade; the deploy
- * reads that row as settled and never retries it.
+ * `setup` runs the deploy's email step on its own: preflight, checklist, one confirmation,
+ * apply, then a write of the generated Cloudflare config and void.lock.json. A CI deploy that
+ * finds email not ready says to run it once locally, commit void.lock.json, and redeploy; the
+ * next deploy creates the routing rules from `addresses`. It is also the only place that
+ * retries a sending onboarding the committed binding records as refused (Workers Free).
  *
- * `status` is the preflight alone, printed, exit 1 when not ready.
+ * `status` prints the preflight and exits 1 when email is not ready.
  */
 export async function runEmailCloudflareCommand(
   root: string,
@@ -1123,13 +1013,12 @@ async function runEmailCloudflareCommandInConfig(
     return exit(1);
   };
 
-  // 1. Inputs from the local project: `email.from` is the ONLY domain input (decision 9).
+  // 1. Inputs from the local project: `email.from` is the only domain input.
   const { from, handlers } = project;
 
   // 2. The same pinned transport + account + worker name as `void deploy --platform
   //    cloudflare`, so every wrangler child here consults the account the deploy will.
   const rootConfig = parseRootWranglerConfig(configPath);
-  await loadProvisionModule();
   let apiBaseUrl: string;
   try {
     apiBaseUrl = resolveDeployTransport(root, rootConfig);
@@ -1150,23 +1039,14 @@ async function runEmailCloudflareCommandInConfig(
   }
   const workerName = readWranglerTopLevelString(rootConfig, 'name') ?? deriveWorkerName(root);
   const runWrangler = deps.runWrangler ?? createDeployWranglerRunner(root, accountId, apiBaseUrl);
-  // The same bearer bridge the deploy's step 3b-ii uses: `wrangler auth token --json` on the
-  // pinned runner, WRANGLER_WRITE_LOGS=false so the token never reaches wrangler's on-disk log.
   const getSessionBearer =
     deps.getSessionBearer ?? (() => runWranglerAuthToken(runWrangler, wranglerConfigPath));
-  const sendEmail = rootConfig.send_email;
   const inputs: EmailCloudflareInputs = {
     handlers,
     from,
     workerName,
     accountId,
-    existingSendEmail: Array.isArray(sendEmail) ? (sendEmail as Array<{ name?: unknown }>) : null,
-    existingAddresses: rootConfig.addresses,
-    existingVars:
-      rootConfig.vars && typeof rootConfig.vars === 'object' && !Array.isArray(rootConfig.vars)
-        ? (rootConfig.vars as Record<string, unknown>)
-        : null,
-    configConflicts: findEmailConfigConflicts(rootConfig),
+    ...emailConfigInputs(rootConfig),
     configPath: wranglerConfigPath,
     apiBaseUrl,
     runWrangler,
@@ -1204,12 +1084,8 @@ async function runEmailCloudflareCommandInConfig(
     return exit(1);
   }
 
-  // 4. The one Enter. An `all` blocker means nothing can be applied; a ready preflight
-  //    needs no prompt (apply makes zero calls and the config write is idempotent) — with
-  //    one exception: a sending row the committed binding remembers as refused (Workers
-  //    Free; `sendingRetryable`, see `preflightEmail`). Apply WOULD make that one `sending
-  //    enable` call again, so it is offered as its own prompt — the retry after a Workers
-  //    Paid upgrade, which the deploy never attempts — and is never run unasked.
+  // 4. Confirm. A ready preflight needs no prompt, except a sending onboarding the committed
+  //    binding records as refused: apply would retry it, so it gets its own prompt.
   if (pre.blockers.some((b) => b.scope === 'all')) {
     return fail('email: nothing was changed — fix the ✘ rows above and rerun.');
   }
@@ -1235,7 +1111,7 @@ async function runEmailCloudflareCommandInConfig(
     }
   }
 
-  // 5. Apply, then write the root config through the one comment-preserving writer.
+  // 5. Apply, then write the config patch.
   const out = await applyEmailSetup(pre, inputs);
   if (out.lines.length > 0) {
     print(out.lines.join('\n'));
@@ -1257,14 +1133,8 @@ async function runEmailCloudflareCommandInConfig(
       pendingLabel: '(no rule yet)',
     }),
   );
-  // The inbound rows, not routing alone: a refused subaddressing PATCH after a successful
-  // enable withholds `addresses`, so the next deploy creates no rule and `+tag` mail
-  // matches nothing — "set up" would be false, and CI's `--require-email` (which gates on
-  // the same `inboundReady`) would refuse the deploy this command exists to prepare. A
-  // sending row that stays pending (Workers Free) is NOT a failure here: inbound is
-  // complete, `addresses` is committed, the plan hint above is the warning, and the
-  // binding written alongside is what the next preflight reads as the memory of that
-  // refusal — so `void email status` and `--require-email` read this state as set up too.
+  // Inbound must be complete, as `--require-email` checks the same `inboundReady`. A sending
+  // row left pending (Workers Free) is not a failure: the written binding records it.
   if (!out.inboundReady) {
     const missing = !out.routingReady
       ? `Email Routing on ${pre.domain} is not ready`

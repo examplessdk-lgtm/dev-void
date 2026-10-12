@@ -68,7 +68,7 @@ async function protectedProjectReachedDomainLimit(db: Db, projectId: string): Pr
 }
 
 const app = new Hono<ApiEnv>()
-  .use('*', capabilityMiddleware('customDomains'))
+  .use('/:id/domains/*', capabilityMiddleware('customDomains'))
 
   // Add a custom domain to a project
   .post('/:id/domains', async (context) => {

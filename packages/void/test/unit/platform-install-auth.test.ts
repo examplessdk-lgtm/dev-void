@@ -3,7 +3,6 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { parsePlatformArgs } from '../../src/cli/platform-args.ts';
 import type { PlatformCloudflareClient } from '../../src/cli/platform-cloudflare.ts';
 import {
   collectInstallationAuthentication,
@@ -163,10 +162,6 @@ describe('installer login selection', () => {
     await writeFile(file, JSON.stringify(input));
     const selection = await selectInstallationAuthentication(file);
     expect(selection.authentication).toEqual({ providers: ['google'], configurable: true });
-    expect(parsePlatformArgs(['install', '--auth-config', file, '--plan'])).toMatchObject({
-      authConfig: file,
-      plan: true,
-    });
   });
   it('keeps recorded GitHub-only installation selection unchanged', async () => {
     expect(await selectInstallationAuthentication(undefined, { providers: ['github'] })).toEqual({

@@ -9,34 +9,26 @@ const options = { dialect: 'sqlite' as const, providers: null };
 
 function fixture() {
   const database = memoryAdapter({});
-  const runtime = createVoidAuthRuntime(
-    'sqlite',
-    async () => ({ database, dispose: async () => {} }),
-    async () => {},
-  );
+  const runtime = createVoidAuthRuntime('sqlite', async () => {});
   const app = new Hono();
-  app.use(async (c, next) => runtime.runVoidAuthMiddleware(c, next, options));
+  app.use(async (c, next) => runtime.runVoidAuthMiddleware(c, next, options, database));
   return { app, runtime, database };
 }
 
 describe('real anonymous Better Auth lookup cache policy', () => {
   it('does not copy the null-session lookup policy onto an ordinary response', async () => {
-    const { app, runtime } = fixture();
+    const { app, runtime, database } = fixture();
     const request = new Request('https://app.test/assets/client-abcdefgh.js');
-    const { auth, dispose } = await runtime.createVoidAuth(request, env, options);
-    try {
-      const lookup = await auth.api.getSession({
-        headers: request.headers,
-        asResponse: false,
-        returnHeaders: true,
-      });
-      expect(lookup.response).toBeNull();
-      expect(lookup.headers.get('cache-control')).toBe('no-store');
-      expect(lookup.headers.get('pragma')).toBe('no-cache');
-      expect(lookup.headers.has('set-cookie')).toBe(false);
-    } finally {
-      await dispose();
-    }
+    const auth = await runtime.createVoidAuth(request, env, options, database);
+    const lookup = await auth.api.getSession({
+      headers: request.headers,
+      asResponse: false,
+      returnHeaders: true,
+    });
+    expect(lookup.response).toBeNull();
+    expect(lookup.headers.get('cache-control')).toBe('no-store');
+    expect(lookup.headers.get('pragma')).toBe('no-cache');
+    expect(lookup.headers.has('set-cookie')).toBe(false);
     app.get(
       '/assets/client-abcdefgh.js',
       () =>
@@ -90,8 +82,8 @@ describe('real anonymous Better Auth lookup cache policy', () => {
   });
 
   it('retains the actual auth endpoint no-store and no-cache headers', async () => {
-    const { app, runtime } = fixture();
-    app.get('/api/auth/get-session', (c) => runtime.handleVoidAuthRequest(c, options));
+    const { app, runtime, database } = fixture();
+    app.get('/api/auth/get-session', (c) => runtime.handleVoidAuthRequest(c, options, database));
     const response = await app.request('https://app.test/api/auth/get-session', undefined, env);
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');

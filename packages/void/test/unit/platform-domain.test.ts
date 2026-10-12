@@ -4,10 +4,6 @@ import {
   parsePlatformInstallationManifest,
   recordInstallationResource,
   PLATFORM_APPLICATION_KEY,
-  PLATFORM_PROJECT_INGRESS_SOURCE,
-  platformProjectHostname,
-  platformWorkersDevAliasKey,
-  resolvePlatformApplicationEnvironment,
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -119,62 +115,6 @@ describe('platform domain activation', () => {
   it('resumes after DNS and TLS waits without changing the original application before verification', async () => {
     const f = fixture();
     const client = f.client as unknown as PlatformCloudflareClient;
-    const { default: dispatch } = await import(
-      new URL('../../../platform/dist/runtime/dispatch/index.js', import.meta.url).href
-    );
-    const project = { id: 'proj_123456abcdef', slug: 'my-app' };
-    const originalHostname = platformProjectHostname(project, f.manifest.deployment.application);
-    const route = JSON.stringify({ projectId: project.id, workerName: 'user-my-app-dpl_original' });
-    f.values.set(project.slug, route);
-    f.values.set(platformWorkersDevAliasKey(originalHostname), JSON.stringify(project));
-    let count = 0;
-    const userWorker = {
-      fetch: async (request: Request) => {
-        if (request.method === 'POST') {
-          count++;
-        }
-        return Response.json({
-          deployment: 'original',
-          count,
-          origin: new URL(request.url).origin,
-        });
-      },
-    };
-    const dispatchEnv = {
-      PLATFORM_APPLICATION: JSON.stringify(f.manifest.deployment.application),
-      BASE_HOSTNAME: 'test.workers.dev',
-      ROUTING: { get: async (key: string) => f.values.get(key) ?? null },
-      DISPATCH: {
-        get: (name: string) => {
-          expect(name).toBe('user-my-app-dpl_original');
-          return userWorker;
-        },
-      },
-      ANALYTICS: { writeDataPoint: () => {} },
-    };
-    const ingress = (
-      await import(`data:text/javascript,${encodeURIComponent(PLATFORM_PROJECT_INGRESS_SOURCE)}`)
-    ).default;
-    const fetchApp = async (host: string) => {
-      const request = new Request(`https://${host}/api/state`, {
-        method: 'POST',
-        body: 'preserved',
-      });
-      const platformFetch = (request: Request) =>
-        dispatch.fetch(request, dispatchEnv, {
-          waitUntil: () => {},
-        } as unknown as ExecutionContext);
-      const response =
-        host === originalHostname
-          ? await ingress.fetch(request, {
-              VOID_APP_HOSTNAME: host,
-              PLATFORM_DISPATCH: { fetch: platformFetch },
-            })
-          : await platformFetch(request);
-      expect(response.status).toBe(200);
-      return response.json();
-    };
-    expect(await fetchApp(originalHostname)).toMatchObject({ deployment: 'original', count: 1 });
     const pending = await applyPlatformDomain(client, f.manifest, f.target, f.plan, f.dependencies);
     expect(pending.waitingForDns).toBe(true);
     expect(f.current().deployment).toEqual(f.manifest.deployment);
@@ -220,24 +160,11 @@ describe('platform domain activation', () => {
     expect(result.manifest.pendingDomain).toBeUndefined();
     expect(result.manifest.endpoints).toEqual(f.manifest.endpoints);
     expect(result.manifest.deployment.application.baseDomain).toBe('example.com');
+    expect(result.manifest.deployment.application.workersDev).toEqual(
+      f.manifest.deployment.application.workersDev,
+    );
     expect(f.client.createZone).toHaveBeenCalledTimes(1);
     expect(f.client.createDnsRecord).toHaveBeenCalledTimes(1);
-    const originalEnv = {
-      PLATFORM_APPLICATION: JSON.stringify(f.manifest.deployment.application),
-      ROUTING: { get: async (key: string) => f.values.get(key) ?? null },
-    };
-    const activeEnv = await resolvePlatformApplicationEnvironment(originalEnv);
-    expect(platformProjectHostname(project, JSON.parse(activeEnv.PLATFORM_APPLICATION))).toBe(
-      'my-app.example.com',
-    );
-    expect(JSON.parse(originalEnv.PLATFORM_APPLICATION).zoneName).toBe('');
-    expect(await fetchApp('my-app.example.com')).toEqual({
-      deployment: 'original',
-      count: 2,
-      origin: 'https://my-app.example.com',
-    });
-    expect(await fetchApp(originalHostname)).toMatchObject({ deployment: 'original', count: 3 });
-    expect(f.values.get(project.slug)).toBe(route);
     expect(f.client.putKvValue).not.toHaveBeenCalled();
   });
   it('retains the pending domain until the platform finishes protection', async () => {

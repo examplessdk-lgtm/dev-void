@@ -99,9 +99,6 @@ export async function selectInstallationAppAccess(
       'platform: Reusing the platform Access policy requires --access-protection. Choose --app-access custom to protect apps separately.',
     );
   }
-  if (!['public', 'platform', 'custom'].includes(String(selected))) {
-    throw new Error('platform: Choose who can access deployed apps.');
-  }
   return selected;
 }
 
@@ -143,9 +140,6 @@ export async function prepareInstallationAppAccess(input: {
     // Recheck an unmanaged public choice on resume: account-wide policy may have changed.
   }
   const file = input.authentication.file?.appAccess;
-  if (file?.tokenEnv && !/^[A-Z_][A-Z0-9_]*$/.test(file.tokenEnv)) {
-    throw new Error('platform: Invalid app access token environment reference.');
-  }
   let token =
     explicitToken ||
     (input.checkpoint.appAccessTokenRejected ? undefined : input.checkpoint.appAccessToken);

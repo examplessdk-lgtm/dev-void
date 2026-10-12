@@ -6,7 +6,6 @@ import type { PageScanResult } from 'void/pages';
 import {
   resolveSpecifier,
   needsIslandClientBundle,
-  extractCssImports,
   computePagesNeedingClientJS,
   watchPagesForRescan,
   rewriteCssImportForVirtualModule,
@@ -18,6 +17,7 @@ import {
   type IslandSourceEdit,
 } from 'void/pages-islands-plugin';
 import type { IslandEntry } from 'void/pages-islands-plugin';
+import { REACT_REFRESH_PREAMBLE } from './plugin-pages.ts';
 
 const COMPONENT_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 type MdPluginWithApi = Plugin & {
@@ -36,7 +36,6 @@ export function islandsPlugin(
   const root = options?.root ?? dirname(pagesDir);
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
-  let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
   /** Resolve an island import and record it in the client manifest. */
@@ -60,7 +59,6 @@ export function islandsPlugin(
 
       configResolved(config) {
         resolvedConfig = config;
-        viteRoot = config.root;
         isDev = config.command === 'serve';
       },
 
@@ -124,31 +122,17 @@ export function islandsPlugin(
       },
 
       resolveId: {
-        filter: { id: /^virtual:void-islands-(renderer|client)$|\.(tsx|jsx)\.css$/ },
+        filter: { id: /^virtual:void-islands-(renderer|client)$/ },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
             return '\0' + source;
-          }
-          // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
-          // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith('.css')) {
-            const srcPath = normalizePath(source.slice(0, -4));
-            if (islandCssFiles.has(srcPath)) {
-              return srcPath + '.css';
-            }
-            if (srcPath.startsWith('/')) {
-              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
-              if (islandCssFiles.has(absPath)) {
-                return absPath + '.css';
-              }
-            }
           }
         },
       },
 
       load: {
         // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
-        filter: { id: /^\0virtual:void-islands-(renderer|client)$|\.(tsx|jsx)\.css$/ },
+        filter: { id: /^\0virtual:void-islands-(renderer|client)$/ },
         handler(id) {
           if (id === '\0' + ISLANDS_RENDERER_ID) {
             if (!pageScan) {
@@ -168,13 +152,6 @@ export function islandsPlugin(
               return '';
             }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
-          }
-          // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith('.css') && !id.startsWith('\0')) {
-            const srcPath = id.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) {
-              return extractCssImports(srcPath);
-            }
           }
         },
       },
@@ -264,16 +241,7 @@ function generateIslandRenderer(
   mdScriptIds: Set<string>,
   pagesNeedingClientJS: Set<string>,
 ): string {
-  const preambleScript = isDev
-    ? `
-<script type="module">
-  import RefreshRuntime from "/@react-refresh"
-  RefreshRuntime.injectIntoGlobalHook(window)
-  window.$RefreshReg$ = () => {}
-  window.$RefreshSig$ = () => (type) => type
-  window.__vite_plugin_react_preamble_installed__ = true
-</script>`
-    : '';
+  const preambleScript = isDev ? REACT_REFRESH_PREAMBLE : '';
 
   const mdScriptIdsCode = `const __mdClientScriptIds = new Set(${JSON.stringify([...mdScriptIds])});`;
   const needsJSCode = `const __pagesNeedingClientJS = new Set(${JSON.stringify([...pagesNeedingClientJS])});`;

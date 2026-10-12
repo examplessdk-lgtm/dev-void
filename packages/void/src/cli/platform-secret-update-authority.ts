@@ -1,21 +1,13 @@
 import type { PlatformInstallationManifest } from '@void/platform';
-
-const COMPLETE_WORKER_SECRET_UPDATE_NAMES = [
-  'CF_API_TOKEN',
-  'GITHUB_CLIENT_ID',
-  'GITHUB_CLIENT_SECRET',
-  'R2_ACCESS_KEY_ID',
-  'R2_SECRET_ACCESS_KEY',
-] as const;
-
-const EMAIL_WORKER_SECRET_UPDATE_NAME = 'EMAIL_SIGNING_SECRET';
+import {
+  PLATFORM_WORKER_SECRET_UPDATE_NAMES,
+  type PlatformWorkerSecretUpdates,
+} from './platform-installer-types.ts';
 
 type PendingWorkerSecretUpdateIntent = Readonly<{
   generation: number | null;
   id: string;
 }>;
-
-type WorkerSecretUpdates = Readonly<Partial<Record<string, string>>>;
 
 type WorkerSecretUpdateMarker = Readonly<{
   generation: number;
@@ -27,7 +19,7 @@ type WorkerSecretUpdateMarker = Readonly<{
  * update from carrying an opaque, possibly partial update into another cutover.
  */
 export function assertPlatformWorkerSecretUpdateAuthority(input: {
-  explicitUpdates: WorkerSecretUpdates;
+  explicitUpdates: Readonly<PlatformWorkerSecretUpdates>;
   localIntent?: PendingWorkerSecretUpdateIntent;
   manifest: PlatformInstallationManifest;
   requiresEmailSigningSecret: boolean;
@@ -95,15 +87,12 @@ function readLatestWorkerGeneration(manifest: PlatformInstallationManifest): num
 }
 
 function hasCompleteWorkerSecretReplacement(
-  updates: WorkerSecretUpdates,
+  updates: Readonly<PlatformWorkerSecretUpdates>,
   requiresEmailSigningSecret: boolean,
 ): boolean {
-  return (
-    COMPLETE_WORKER_SECRET_UPDATE_NAMES.every(
-      (name) => typeof updates[name] === 'string' && updates[name] !== '',
-    ) &&
-    (!requiresEmailSigningSecret ||
-      (typeof updates[EMAIL_WORKER_SECRET_UPDATE_NAME] === 'string' &&
-        updates[EMAIL_WORKER_SECRET_UPDATE_NAME] !== ''))
+  return PLATFORM_WORKER_SECRET_UPDATE_NAMES.every(
+    (name) =>
+      (name === 'EMAIL_SIGNING_SECRET' && !requiresEmailSigningSecret) ||
+      (typeof updates[name] === 'string' && updates[name] !== ''),
   );
 }

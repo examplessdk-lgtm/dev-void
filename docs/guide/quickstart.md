@@ -36,6 +36,8 @@ bunx void init
 
 Choose your UI framework, a starter, and a deployment target. Vite+ is the default build tool. D1 is a good first database: it runs locally without a separate database server. Choose Cloudflare to deploy to your own account, or skip deployment setup for now.
 
+You do not need to install Vite+ globally. Setup preserves your existing package-manager versions and lockfiles.
+
 With pnpm, `pnpm create void my-app` also creates the project directory and configures native build permissions for you.
 
 ## Run locally

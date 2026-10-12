@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   parsePlatformAccessProtection,
   parsePlatformLoginConfiguration,
@@ -96,6 +96,9 @@ function sameSet(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boo
 }
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+export function platformAccessNonce(ownershipNonce: string): string {
+  return createHash('sha256').update(`void-access:${ownershipNonce}`).digest('hex').slice(0, 32);
 }
 
 export class PlatformAccessClient {
@@ -339,15 +342,9 @@ export async function inspectPlatformAccess(
 export async function provisionPlatformAccess(
   client: PlatformAccessClient,
   input: PlatformAccessProvisionInput,
-  previous: PlatformAccessCheckpoint | undefined,
+  previous: PlatformAccessCheckpoint,
   save: (state: PlatformAccessCheckpoint) => void,
 ): Promise<PlatformAccessProvisionResult> {
-  if (!input.login && !input.protection) {
-    return { resources: [] };
-  }
-  if (client.accountId !== input.accountId) {
-    throw new Error('platform: Access account selection does not match its management client.');
-  }
   const inspected = await inspectPlatformAccess(client, input);
   const origins = [
     ...new Set(
@@ -362,15 +359,7 @@ export async function provisionPlatformAccess(
       }),
     ),
   ];
-  const state: PlatformAccessCheckpoint = previous
-    ? structuredClone(previous)
-    : {
-        version: 1,
-        accountId: input.accountId,
-        installationId: input.installationId,
-        nonce: randomBytes(16).toString('hex'),
-        resources: {},
-      };
+  const state = structuredClone(previous);
   if (
     state.version !== 1 ||
     state.accountId !== input.accountId ||

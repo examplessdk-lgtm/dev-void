@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'vite';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
+import { analyzeApplication } from '../../src/application-routing.ts';
+import { readConfig } from '../../src/config.ts';
 import { compileRouteTable, compileWorkerEntry } from '../../src/router/compile.ts';
-import { scanRoutes } from '../../src/router/scan.ts';
 
 const repository = join(import.meta.dirname, '..', '..', '..', '..');
 const source = (file: string) => join(repository, 'packages/void/src/runtime', file);
@@ -61,7 +62,7 @@ describe('typed routing in generated Workers', () => {
         join(pages, 'index.server.ts'),
         `export function loader() { return { title: 'real page loader' }; }\nexport const actions = { save: () => new Response('saved') };\n`,
       );
-      const scan = await scanRoutes(directory);
+      const { scan } = await analyzeApplication(directory, { config: readConfig(directory) });
       scan.pages.pages = [
         {
           pattern: '/',

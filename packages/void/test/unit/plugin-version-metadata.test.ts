@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConfigEnv, Plugin, UserConfig } from 'vite';
+import type { ConfigEnv, UserConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { createWorkerFetch } from '../../src/runtime/routing-worker.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../../src/shared/env.ts';
@@ -11,11 +11,7 @@ import {
 } from '../../src/shared/version-metadata.ts';
 
 type Config = { config: (resolved: Record<string, unknown>) => Record<string, unknown> };
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(config: Config): Array<Plugin> {
-    return [{ name: 'mock:cloudflare', api: { config } }];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 vi.mock('../../src/cli/auth.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/auth.ts')>()),
   getToken: () => null,
@@ -56,7 +52,7 @@ async function generate(resolved: Record<string, unknown>, command: 'build' | 's
   if (!cloudflare) {
     throw new Error('Cloudflare configuration callback missing');
   }
-  const patch = (cloudflare.api as { config: Config }).config.config(resolved);
+  const patch = (cloudflare.api as { pluginConfig: Config }).pluginConfig.config(resolved);
   const routingHook = plugins.find((plugin) => plugin.name === 'void:routing')?.buildStart;
   const buildStart = typeof routingHook === 'function' ? routingHook : routingHook?.handler;
   if (!buildStart) {

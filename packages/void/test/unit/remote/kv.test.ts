@@ -39,6 +39,7 @@ describe('ProxyKVNamespace', () => {
       expect(body.key).toBe('my-key');
       expect(body.type).toBe('text');
       expect(body.binding).toBe('KV');
+      expect(call[0]).toBe('https://proxy.void.cloud/kv/get');
     });
 
     it('returns parsed JSON with type=json', async () => {
@@ -114,6 +115,7 @@ describe('ProxyKVNamespace', () => {
       expect(body.key).toBe('my-key');
       expect(body.value).toBe('my-value');
       expect(body.binding).toBe('KV');
+      expect(call[0]).toBe('https://proxy.void.cloud/kv/put');
     });
 
     it('sends expiration options', async () => {
@@ -167,6 +169,7 @@ describe('ProxyKVNamespace', () => {
       const body = JSON.parse(String(call[1].body));
       expect(body.prefix).toBe('user:');
       expect(body.limit).toBe(2);
+      expect(call[0]).toBe('https://proxy.void.cloud/kv/list');
     });
 
     it('returns complete list when no cursor', async () => {

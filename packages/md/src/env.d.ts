@@ -16,9 +16,3 @@ declare module 'markdown-it-footnote' {
   const plugin: (md: unknown, ...args: ReadonlyArray<unknown>) => void;
   export default plugin;
 }
-
-declare module '*.vue' {
-  import type { DefineComponent } from 'vue';
-  const component: DefineComponent<{}, {}, unknown>;
-  export default component;
-}

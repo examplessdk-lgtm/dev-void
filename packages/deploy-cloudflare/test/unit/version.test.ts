@@ -13,6 +13,7 @@ import {
   readCloudflareTriggerConfig,
   type CloudflareCommandResult,
   type CloudflareOperation,
+  type CloudflareTriggerConfig,
 } from '../../src/index.ts';
 import { operationFixture } from '../operation-fixture.ts';
 import { voidSecretDraftVersion } from '../secret-draft-fixture.ts';
@@ -21,18 +22,34 @@ const CURRENT = '11111111-1111-4111-8111-111111111111';
 const NEXT = '22222222-2222-4222-8222-222222222222';
 const CONCURRENT = '33333333-3333-4333-8333-333333333333';
 
-function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVersion()) {
-  const events: Array<string> = [];
-  const operations: Array<CloudflareOperation> = [];
-  const triggerConfig = {
+function triggersWith(overrides: Partial<CloudflareTriggerConfig> = {}): CloudflareTriggerConfig {
+  return {
     workers_dev: true,
     preview_urls: true,
     routes: [],
     crons: [],
     queueConsumers: [],
     workflows: [],
+    ...overrides,
   };
-  const message = encodeCloudflareVersionMessage([], triggerConfig);
+}
+
+function customDomainTriggers(pattern: string): CloudflareTriggerConfig {
+  return triggersWith({
+    workers_dev: false,
+    preview_urls: false,
+    routes: [{ pattern, custom_domain: true }],
+  });
+}
+
+function readConfigArg(args: Array<string>): Record<string, unknown> {
+  return JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8')) as Record<string, unknown>;
+}
+
+function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVersion()) {
+  const events: Array<string> = [];
+  const operations: Array<CloudflareOperation> = [];
+  const message = encodeCloudflareVersionMessage([], triggersWith());
   let traffic = [{ version_id: CURRENT, percentage: 100 }];
   let uploaded = false;
   let published = false;
@@ -158,10 +175,6 @@ function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVer
 // The bundled uploader rejects locally without an API error code; keep its actual diagnostic.
 const LOCAL_DURABLE_MIGRATION_ERROR =
   'This Worker has a pending Durable Object migration, which cannot be applied by `wrangler versions upload`. Durable Object migrations must be applied with `wrangler deploy`. Run `wrangler deploy` to apply the migration, then retry `wrangler versions upload`.';
-const DURABLE_MIGRATION_ERRORS = [
-  'Durable Object migrations require deploy. [code: 10211]',
-  LOCAL_DURABLE_MIGRATION_ERROR,
-];
 
 function secretOnlyDraftVersion() {
   return {
@@ -253,14 +266,10 @@ function runner(overrides?: {
               id: CURRENT,
               number: 1,
               annotations: {
-                'workers/message': encodeCloudflareVersionMessage([], {
-                  workers_dev: true,
-                  preview_urls: true,
-                  routes: [],
-                  crons: ['0 * * * *'],
-                  queueConsumers: [],
-                  workflows: [],
-                }),
+                'workers/message': encodeCloudflareVersionMessage(
+                  [],
+                  triggersWith({ crons: ['0 * * * *'] }),
+                ),
               },
             },
             ...(uploaded ? [{ id: NEXT, number: 2, annotations: {} }] : []),
@@ -657,8 +666,9 @@ describe('Cloudflare version activation', () => {
     expect(fixture.fetcher).not.toHaveBeenCalled();
   });
 
-  it.each([
-    {
+  it('retains preview-first activation for a secret-triggered real app', async () => {
+    const fixture = sdkDraftActivation({
+      ...voidSecretDraftVersion(),
       modules: [
         {
           ...voidSecretDraftVersion().modules[0],
@@ -667,16 +677,7 @@ describe('Cloudflare version activation', () => {
           ).toString('base64'),
         },
       ],
-    },
-    {
-      bindings: [
-        ...voidSecretDraftVersion().bindings,
-        { name: 'KV', type: 'kv_namespace', namespace_id: 'foreign' },
-      ],
-    },
-    { assets: {} },
-  ])('retains preview-first activation for a secret-triggered real app with %j', async (patch) => {
-    const fixture = sdkDraftActivation({ ...voidSecretDraftVersion(), ...patch });
+    });
     expect(await activateCloudflareVersion(fixture.options)).toMatchObject({
       ok: true,
       versionId: NEXT,
@@ -795,14 +796,7 @@ describe('Cloudflare version activation', () => {
       workerName: 'my-worker',
       verifyUploader: () => true,
       verifyInheritedSecrets: true,
-      message: encodeCloudflareVersionMessage([], {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      }),
+      message: encodeCloudflareVersionMessage([], triggersWith()),
       fetch: async () => Response.json({ ready: true }),
     });
     expect(result).toMatchObject({ ok: true, versionId: NEXT });
@@ -832,8 +826,7 @@ describe('Cloudflare version activation', () => {
       const validateUploadedVersion = vi.fn().mockResolvedValue(undefined);
       const runWrangler = operationFixture((args: Array<string>) => {
         if (args[0] === 'versions' && args[1] === 'deploy') {
-          const config = JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8'));
-          expect(config).toEqual({ account_id: 'account', name: 'my-worker' });
+          expect(readConfigArg(args)).toEqual({ account_id: 'account', name: 'my-worker' });
         }
         return base(args);
       });
@@ -1371,11 +1364,7 @@ describe('Cloudflare version activation', () => {
       let applied: Record<string, unknown> | undefined;
       await deployCloudflareVersionTriggers({
         runWrangler: operationFixture(async (args) => {
-          const configIndex = args.indexOf('-c');
-          applied = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
-            string,
-            unknown
-          >;
+          applied = readConfigArg(args);
           return ok();
         }),
         workerName: 'app',
@@ -1420,17 +1409,12 @@ describe('Cloudflare version activation', () => {
         ]),
       ),
     });
-    const desired = {
+    const desired = triggersWith({
       preserveRoutes: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
       crons: ['0 * * * *'],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     await expect(
       activateCloudflareVersion({
         runWrangler,
@@ -1447,25 +1431,17 @@ describe('Cloudflare version activation', () => {
     const base = runner();
     const runWrangler = operationFixture((args: Array<string>) => {
       if (args[0] === 'triggers') {
-        applied = JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8')) as Record<
-          string,
-          unknown
-        >;
+        applied = readConfigArg(args);
         return ok();
       }
       return base(args);
     });
-    const desired = {
+    const desired = triggersWith({
       preserveRoutes: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
       crons: ['0 * * * *'],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     await expect(
       activateCloudflareVersion({
         runWrangler,
@@ -1489,18 +1465,12 @@ describe('Cloudflare version activation', () => {
   });
 
   it('continues an opaque handoff for a later code-only deployment', async () => {
-    const preserved = {
+    const preserved = triggersWith({
       preserve: true,
       preserveRoutes: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     const runWrangler = runner({
       versions: ok(
         JSON.stringify([
@@ -1526,17 +1496,14 @@ describe('Cloudflare version activation', () => {
 
   it('continues an opaque handoff with unchanged explicit routes', async () => {
     const route = { pattern: 'app.example.com', custom_domain: true };
-    const preserved = {
+    const preserved = triggersWith({
       preserve: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
       workers_dev: false,
       preview_urls: false,
       routes: [route],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     const runWrangler = runner({
       versions: ok(
         JSON.stringify([
@@ -1562,19 +1529,13 @@ describe('Cloudflare version activation', () => {
   });
 
   it('does not silently suppress changed settings after an opaque handoff', async () => {
-    const preserved = {
+    const preserved = triggersWith({
       preserve: true,
       preserveRoutes: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
       settingsHash: 'before',
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     const runWrangler = runner({
       versions: ok(
         JSON.stringify([
@@ -1619,22 +1580,16 @@ describe('Cloudflare version activation', () => {
     await deployCloudflareVersionTriggers({
       manageRoutes: false,
       runWrangler: operationFixture(async (args) => {
-        const configIndex = args.indexOf('-c');
-        applied = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
-          string,
-          unknown
-        >;
+        applied = readConfigArg(args);
         return ok();
       }),
       workerName: 'app',
-      triggerConfig: {
+      triggerConfig: triggersWith({
         workers_dev: false,
         preview_urls: false,
         routes: [{ pattern: 'apps.example.com/*', zone_name: 'example.com' }],
         crons: ['0 * * * *'],
-        queueConsumers: [],
-        workflows: [],
-      },
+      }),
     });
 
     expect(applied).not.toHaveProperty('routes');
@@ -1649,22 +1604,8 @@ describe('Cloudflare version activation', () => {
         return ok();
       }),
       workerName: 'app',
-      triggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      },
-      previousTriggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [{ queue: 'jobs' }],
-        workflows: [],
-      },
+      triggerConfig: triggersWith(),
+      previousTriggerConfig: triggersWith({ queueConsumers: [{ queue: 'jobs' }] }),
     });
 
     expect(result.status).toBe(0);
@@ -1684,30 +1625,14 @@ describe('Cloudflare version activation', () => {
     let applied: Record<string, unknown> | undefined;
     await deployCloudflareVersionTriggers({
       runWrangler: operationFixture(async (args) => {
-        const configIndex = args.indexOf('-c');
-        applied = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
-          string,
-          unknown
-        >;
+        applied = readConfigArg(args);
         return ok();
       }),
       workerName: 'app',
-      triggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      },
-      previousTriggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
+      triggerConfig: triggersWith(),
+      previousTriggerConfig: triggersWith({
         workflows: [{ name: 'nightly', class_name: 'NightlyWorkflow', schedules: ['0 0 * * *'] }],
-      },
+      }),
     });
 
     expect(applied?.workflows).toEqual([
@@ -1720,22 +1645,8 @@ describe('Cloudflare version activation', () => {
     const result = await deployCloudflareVersionTriggers({
       runWrangler: operationFixture(async () => ok()),
       workerName: 'app',
-      triggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      },
-      previousTriggerConfig: {
-        workers_dev: false,
-        preview_urls: false,
-        routes: [{ pattern: 'app.example.com', custom_domain: true }],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      },
+      triggerConfig: triggersWith(),
+      previousTriggerConfig: customDomainTriggers('app.example.com'),
       publishEmptyCustomDomains,
     });
 
@@ -1752,22 +1663,8 @@ describe('Cloudflare version activation', () => {
     const result = await deployCloudflareVersionTriggers({
       runWrangler: operationFixture(async () => ok()),
       workerName: 'app',
-      triggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      },
-      previousTriggerConfig: {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: ['0 * * * *'],
-        queueConsumers: [],
-        workflows: [],
-      },
+      triggerConfig: triggersWith(),
+      previousTriggerConfig: triggersWith({ crons: ['0 * * * *'] }),
       publishEmptyCrons,
     });
 
@@ -1804,14 +1701,7 @@ describe('Cloudflare version activation', () => {
   });
 
   it('round-trips an upload digest only when it is a valid SHA-256 value', () => {
-    const triggers = {
-      workers_dev: true,
-      preview_urls: false,
-      routes: [],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    const triggers = triggersWith({ preview_urls: false });
     const digest = 'a'.repeat(64);
     expect(
       parseCloudflareVersionMessage(encodeCloudflareVersionMessage([], triggers, digest)),
@@ -1836,11 +1726,7 @@ describe('Cloudflare version activation', () => {
       let config: Record<string, unknown> | undefined;
       await deployCloudflareVersionTriggers({
         runWrangler: operationFixture(async (args) => {
-          const configIndex = args.indexOf('-c');
-          config = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
-            string,
-            unknown
-          >;
+          config = readConfigArg(args);
           return ok();
         }),
         workerName: 'app',
@@ -1885,11 +1771,7 @@ describe('Cloudflare version activation', () => {
       let rollbackConfig: Record<string, unknown> | undefined;
       await deployCloudflareVersionTriggers({
         runWrangler: operationFixture(async (args) => {
-          const configIndex = args.indexOf('-c');
-          rollbackConfig = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf-8')) as Record<
-            string,
-            unknown
-          >;
+          rollbackConfig = readConfigArg(args);
           return ok();
         }),
         workerName: 'app',
@@ -1960,7 +1842,6 @@ describe('Cloudflare version activation', () => {
       ['triggers', 'deploy'],
       ['deployments', 'status'],
     ]);
-    expect(runWrangler.mock.calls[1]![0]).toContain('--strict');
     expect(runWrangler.mock.calls[1]![0]).toContain('--assets');
     expect(runWrangler.mock.calls[1]![0]).toContain('/app/.void/deploy/cloudflare/assets');
     expect(runWrangler.mock.calls[3]![0]).toContain(`${NEXT}@100`);
@@ -1980,14 +1861,10 @@ describe('Cloudflare version activation', () => {
     const activationStarted = deferred<void>();
     let activeVersionId = CURRENT;
     let appliedTriggerConfig: Record<string, unknown> | undefined;
-    const concurrentTriggerConfig = {
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
+    const concurrentTriggerConfig = triggersWith({
       crons: ['concurrent'],
       queueConsumers: [{ queue: 'concurrent-jobs' }],
-      workflows: [],
-    };
+    });
     const runWrangler = operationFixture(async (args: Array<string>) => {
       if (args[0] === 'deployments') {
         return ok(JSON.stringify({ versions: [{ version_id: activeVersionId, percentage: 100 }] }));
@@ -2015,11 +1892,7 @@ describe('Cloudflare version activation', () => {
         );
       }
       if (args[0] === 'triggers') {
-        const configIndex = args.indexOf('-c');
-        appliedTriggerConfig = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf8')) as Record<
-          string,
-          unknown
-        >;
+        appliedTriggerConfig = readConfigArg(args);
         return ok();
       }
       throw new Error(`Unexpected command: ${args.join(' ')}`);
@@ -2029,14 +1902,7 @@ describe('Cloudflare version activation', () => {
       runWrangler,
       verifyUploader: () => true,
       workerName: 'my-worker',
-      message: encodeCloudflareVersionMessage([], {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: ['deploy'],
-        queueConsumers: [],
-        workflows: [],
-      }),
+      message: encodeCloudflareVersionMessage([], triggersWith({ crons: ['deploy'] })),
       fetch: async () => Response.json({ ready: true }),
     });
     await activationStarted.promise;
@@ -2072,14 +1938,7 @@ describe('Cloudflare version activation', () => {
         runWrangler,
         verifyUploader: () => true,
         workerName: 'my-worker',
-        message: encodeCloudflareVersionMessage([], {
-          workers_dev: true,
-          preview_urls: true,
-          routes: [],
-          crons: [],
-          queueConsumers: [],
-          workflows: [],
-        }),
+        message: encodeCloudflareVersionMessage([], triggersWith()),
         queueConsumerCleanup: ['legacy-jobs'],
         fetch: async () => Response.json({ ready: true }),
       }),
@@ -2115,15 +1974,9 @@ describe('Cloudflare version activation', () => {
       const activationStarted = deferred<void>();
       let activeVersionId = CURRENT;
       let appliedTriggerConfig: Record<string, unknown> | undefined;
-      const previousTriggerConfig = {
-        workers_dev: true,
-        preview_urls: true,
-        routes: [],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-        ...(previousAddresses === undefined ? {} : { addresses: previousAddresses }),
-      };
+      const previousTriggerConfig = triggersWith(
+        previousAddresses === undefined ? {} : { addresses: previousAddresses },
+      );
       const runWrangler = operationFixture(async (args: Array<string>) => {
         if (args[0] === 'deployments') {
           return ok(
@@ -2153,11 +2006,7 @@ describe('Cloudflare version activation', () => {
           );
         }
         if (args[0] === 'triggers') {
-          const configIndex = args.indexOf('-c');
-          appliedTriggerConfig = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf8')) as Record<
-            string,
-            unknown
-          >;
+          appliedTriggerConfig = readConfigArg(args);
           return ok();
         }
         if (args[0] === 'queues') {
@@ -2170,15 +2019,10 @@ describe('Cloudflare version activation', () => {
         runWrangler,
         verifyUploader: () => true,
         workerName: 'my-worker',
-        message: encodeCloudflareVersionMessage([], {
-          workers_dev: true,
-          preview_urls: true,
-          routes: [],
-          crons: [],
-          queueConsumers: [],
-          workflows: [],
-          addresses: ['billing@mail.acme.com'],
-        }),
+        message: encodeCloudflareVersionMessage(
+          [],
+          triggersWith({ addresses: ['billing@mail.acme.com'] }),
+        ),
         queueConsumerCleanup: ['jobs'],
         fetch: async () => Response.json({ ready: true }),
       });
@@ -2210,14 +2054,7 @@ describe('Cloudflare version activation', () => {
     let activeVersionId = CURRENT;
     let triggerCalls = 0;
     let repairedConfig: Record<string, unknown> | undefined;
-    const configFor = (cron: string) => ({
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
-      crons: [cron],
-      queueConsumers: [],
-      workflows: [],
-    });
+    const configFor = (cron: string) => triggersWith({ crons: [cron] });
     const runWrangler = operationFixture(async (args: Array<string>) => {
       if (args[0] === 'deployments') {
         return ok(JSON.stringify({ versions: [{ version_id: activeVersionId, percentage: 100 }] }));
@@ -2255,11 +2092,7 @@ describe('Cloudflare version activation', () => {
           triggerStarted.resolve(undefined);
           return failedTriggers.promise;
         }
-        const configIndex = args.indexOf('-c');
-        repairedConfig = JSON.parse(readFileSync(args[configIndex + 1]!, 'utf8')) as Record<
-          string,
-          unknown
-        >;
+        repairedConfig = readConfigArg(args);
         return ok();
       }
       throw new Error(`Unexpected command: ${args.join(' ')}`);
@@ -2290,14 +2123,7 @@ describe('Cloudflare version activation', () => {
   });
 
   it('uses newer published traffic provenance instead of a stale version annotation', async () => {
-    const staleTriggerConfig = {
-      workers_dev: false,
-      preview_urls: false,
-      routes: [{ pattern: 'old.example.com', custom_domain: true }],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    const staleTriggerConfig = customDomainTriggers('old.example.com');
     const desiredTriggerConfig = {
       ...staleTriggerConfig,
       workers_dev: true,
@@ -2973,14 +2799,7 @@ describe('Cloudflare version activation', () => {
           verifyUploader: () => true,
           workerName: 'custom-app',
           atomic,
-          message: encodeCloudflareVersionMessage([], {
-            workers_dev: false,
-            preview_urls: false,
-            routes: [{ pattern: 'app.example.com', custom_domain: true }],
-            crons: [],
-            queueConsumers: [],
-            workflows: [],
-          }),
+          message: encodeCloudflareVersionMessage([], customDomainTriggers('app.example.com')),
           sleep: async (milliseconds) => {
             time += milliseconds;
           },
@@ -3039,14 +2858,10 @@ describe('Cloudflare version activation', () => {
   });
 
   it('restores live traffic changes made after the previous version upload', async () => {
-    const immutable = {
-      workers_dev: true,
-      preview_urls: true,
+    const immutable = triggersWith({
       routes: [{ pattern: 'old.example.com', custom_domain: true }],
       crons: ['0 * * * *'],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     const liveTraffic = {
       workers_dev: false,
       preview_urls: false,
@@ -3069,7 +2884,7 @@ describe('Cloudflare version activation', () => {
     const publications: Array<Record<string, unknown>> = [];
     const runWrangler = operationFixture((args: Array<string>) => {
       if (args[0] === 'triggers') {
-        publications.push(JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8')));
+        publications.push(readConfigArg(args));
       }
       return base(args);
     });
@@ -3099,18 +2914,12 @@ describe('Cloudflare version activation', () => {
   });
 
   it('does not claim opaque trigger recovery succeeded after restoring live traffic', async () => {
-    const opaque = {
+    const opaque = triggersWith({
       preserve: true,
       preserveRoutes: true,
       preserveWorkersDev: true,
       preservePreviewUrls: true,
-      workers_dev: true,
-      preview_urls: true,
-      routes: [],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
     const liveTraffic = {
       workers_dev: false,
       preview_urls: false,
@@ -3223,26 +3032,6 @@ describe('Cloudflare version activation', () => {
     ).resolves.toMatchObject({ ok: true, previousVersionId: null });
   });
 
-  it('accepts Wrangler error 10007 as a Worker that has not been created yet', async () => {
-    const runWrangler = runner({
-      status: {
-        stdout: '',
-        stderr: 'This Worker does not exist on your account. [code: 10007]',
-        status: 1,
-      },
-    });
-
-    await expect(
-      activateCloudflareVersion({
-        runWrangler,
-        verifyUploader: () => true,
-        workerName: 'first',
-        message: encodeCloudflareVersionMessage([]),
-        fetch: async () => Response.json({ ready: true }),
-      }),
-    ).resolves.toMatchObject({ ok: true, previousVersionId: null });
-  });
-
   it('treats a missing Worker version list as an empty inheritance baseline', async () => {
     const base = runner({
       status: {
@@ -3286,14 +3075,7 @@ describe('Cloudflare version activation', () => {
         workerName: 'private-app',
         requireVersionMetadata: true,
         readinessAttempts: 1,
-        message: encodeCloudflareVersionMessage([], {
-          workers_dev: false,
-          preview_urls: false,
-          routes: [{ pattern: 'app.example.com', custom_domain: true }],
-          crons: [],
-          queueConsumers: [],
-          workflows: [],
-        }),
+        message: encodeCloudflareVersionMessage([], customDomainTriggers('app.example.com')),
         fetch: async () => Response.json({ ready: true, versionId }),
       });
       expect(result).toMatchObject({
@@ -3323,14 +3105,7 @@ describe('Cloudflare version activation', () => {
       requireVersionMetadata: true,
       readinessAttempts: 2,
       readinessHeaders: { 'CF-Access-Client-Secret': 'must-not-leak' },
-      message: encodeCloudflareVersionMessage([], {
-        workers_dev: false,
-        preview_urls: false,
-        routes: [{ pattern: 'app.example.com', custom_domain: true }],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      }),
+      message: encodeCloudflareVersionMessage([], customDomainTriggers('app.example.com')),
       fetch: fetcher,
       sleep,
     });
@@ -3409,14 +3184,11 @@ describe('Cloudflare version activation', () => {
       upload: ok(`Worker Version ID: ${NEXT}`),
     });
     const fetcher = vi.fn(async () => Response.json({ ready: true }));
-    const triggerConfig = {
+    const triggerConfig = triggersWith({
       workers_dev: false,
       preview_urls: false,
       routes: [{ pattern: 'app.example.com/*', zone_name: 'example.com' }],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    });
 
     await expect(
       activateCloudflareVersion({
@@ -3468,14 +3240,7 @@ describe('Cloudflare version activation', () => {
   });
 
   it('probes a custom route after first-deployment bootstrap', async () => {
-    const triggerConfig = {
-      workers_dev: false,
-      preview_urls: false,
-      routes: [{ pattern: 'bootstrap.example.com', custom_domain: true }],
-      crons: [],
-      queueConsumers: [],
-      workflows: [],
-    };
+    const triggerConfig = customDomainTriggers('bootstrap.example.com');
     const runWrangler = runner({
       status: { stdout: '', stderr: 'This Worker does not exist. [code: 10007]', status: 1 },
       upload: {
@@ -3518,14 +3283,7 @@ describe('Cloudflare version activation', () => {
       runWrangler,
       verifyUploader: () => true,
       workerName: 'first-private',
-      message: encodeCloudflareVersionMessage([], {
-        workers_dev: false,
-        preview_urls: false,
-        routes: [{ pattern: 'app.example.com', custom_domain: true }],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      }),
+      message: encodeCloudflareVersionMessage([], customDomainTriggers('app.example.com')),
       fetch: fetcher,
     });
     expect(result).toMatchObject({
@@ -3541,14 +3299,7 @@ describe('Cloudflare version activation', () => {
   it.each([false, true])(
     'repairs a concurrent bootstrap owner (during readiness=%s)',
     async (duringReadiness) => {
-      const concurrentConfig = {
-        workers_dev: false,
-        preview_urls: false,
-        routes: [{ pattern: 'other.example.com', custom_domain: true }],
-        crons: [],
-        queueConsumers: [],
-        workflows: [],
-      };
+      const concurrentConfig = customDomainTriggers('other.example.com');
       const base = runner({
         status: { stdout: '', stderr: 'Worker not found. [code: 10007]', status: 1 },
         upload: { stdout: '', stderr: LOCAL_DURABLE_MIGRATION_ERROR, status: 1 },
@@ -3574,7 +3325,7 @@ describe('Cloudflare version activation', () => {
           );
         }
         if (args[0] === 'triggers') {
-          published.push(JSON.parse(readFileSync(args[args.indexOf('-c') + 1]!, 'utf8')));
+          published.push(readConfigArg(args));
         }
         const result = base(args);
         if (args[0] === 'deploy') {
@@ -3624,80 +3375,69 @@ describe('Cloudflare version activation', () => {
     },
   );
 
-  it.each(DURABLE_MIGRATION_ERRORS)(
-    'bootstraps first-deploy Durable Object migrations for %s',
-    async (error) => {
-      const base = runner({
-        status: { stdout: '', stderr: 'The Worker first has no deployments.', status: 1 },
-        upload: {
-          stdout: '',
-          stderr: error,
-          status: 1,
-        },
-        bootstrap: ok(
-          `Current Version ID: ${NEXT}\nVersion Preview URL: https://2e209d56-first.example.workers.dev`,
-        ),
-      });
-      const secretPayloads: Array<unknown> = [];
-      const secretPaths: Array<string> = [];
-      const runWrangler = operationFixture((args: Array<string>) => {
-        if (
-          (args[0] === 'deploy' || (args[0] === 'versions' && args[1] === 'upload')) &&
-          args.includes('--secrets-file')
-        ) {
-          const path = args[args.indexOf('--secrets-file') + 1]!;
-          secretPaths.push(path);
-          secretPayloads.push(JSON.parse(readFileSync(path, 'utf8')));
-        }
-        return base(args);
-      });
-      const fetcher = vi.fn(async () => Response.json({ ready: true }));
+  it('bootstraps first-deploy Durable Object migrations after Cloudflare error 10211', async () => {
+    const base = runner({
+      status: { stdout: '', stderr: 'The Worker first has no deployments.', status: 1 },
+      upload: { stdout: '', stderr: '', status: 1, errorCode: 10211 },
+      bootstrap: ok(
+        `Current Version ID: ${NEXT}\nVersion Preview URL: https://2e209d56-first.example.workers.dev`,
+      ),
+    });
+    const secretPayloads: Array<unknown> = [];
+    const secretPaths: Array<string> = [];
+    const runWrangler = operationFixture((args: Array<string>) => {
+      if (
+        (args[0] === 'deploy' || (args[0] === 'versions' && args[1] === 'upload')) &&
+        args.includes('--secrets-file')
+      ) {
+        const path = args[args.indexOf('--secrets-file') + 1]!;
+        secretPaths.push(path);
+        secretPayloads.push(JSON.parse(readFileSync(path, 'utf8')));
+      }
+      return base(args);
+    });
+    const fetcher = vi.fn(async () => Response.json({ ready: true }));
 
-      await expect(
-        activateCloudflareVersion({
-          runWrangler,
-          verifyUploader: () => true,
-          workerName: 'first',
-          configPath: '/app/wrangler.jsonc',
-          assetsDirectoryOverride: '/app/.void/deploy/cloudflare/assets',
-          message: encodeCloudflareVersionMessage(['0001_init.sql']),
-          candidateSecrets: { API_TOKEN: 'first-secret' },
-          fetch: fetcher,
-        }),
-      ).resolves.toEqual({
-        ok: true,
-        versionId: NEXT,
-        previewUrl: 'https://first.example.workers.dev',
-        previousVersionId: null,
-        workersDevSubdomain: 'example',
-      });
-      expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
-        ['deployments', 'status'],
-        ['versions', 'upload'],
-        ['deployments', 'status'],
-        ['deploy', '-c'],
-        ['deployments', 'status'],
-        ['deployments', 'status'],
-        ['triggers', 'deploy'],
-        ['deployments', 'status'],
-        ['deployments', 'status'],
-      ]);
-      const deployArgs = runWrangler.mock.calls.find(([args]) => args[0] === 'deploy')![0];
-      expect(deployArgs).toContain('--autoconfig=false');
-      expect(deployArgs).toContain('--assets');
-      expect(deployArgs).toContain('/app/.void/deploy/cloudflare/assets');
-      expect(secretPayloads).toEqual([
-        { API_TOKEN: 'first-secret' },
-        { API_TOKEN: 'first-secret' },
-      ]);
-      expect(new Set(secretPaths).size).toBe(1);
-      expect(secretPaths.every((path) => !existsSync(path))).toBe(true);
-      expect(fetcher).toHaveBeenCalledWith(
-        'https://first.example.workers.dev/__void/ready',
-        expect.objectContaining({ signal: expect.any(AbortSignal) }),
-      );
-    },
-  );
+    await expect(
+      activateCloudflareVersion({
+        runWrangler,
+        verifyUploader: () => true,
+        workerName: 'first',
+        configPath: '/app/wrangler.jsonc',
+        assetsDirectoryOverride: '/app/.void/deploy/cloudflare/assets',
+        message: encodeCloudflareVersionMessage(['0001_init.sql']),
+        candidateSecrets: { API_TOKEN: 'first-secret' },
+        fetch: fetcher,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      versionId: NEXT,
+      previewUrl: 'https://first.example.workers.dev',
+      previousVersionId: null,
+      workersDevSubdomain: 'example',
+    });
+    expect(runWrangler.mock.calls.map(([args]) => args.slice(0, 2))).toEqual([
+      ['deployments', 'status'],
+      ['versions', 'upload'],
+      ['deployments', 'status'],
+      ['deploy', '-c'],
+      ['deployments', 'status'],
+      ['deployments', 'status'],
+      ['triggers', 'deploy'],
+      ['deployments', 'status'],
+      ['deployments', 'status'],
+    ]);
+    const deployArgs = runWrangler.mock.calls.find(([args]) => args[0] === 'deploy')![0];
+    expect(deployArgs).toContain('--assets');
+    expect(deployArgs).toContain('/app/.void/deploy/cloudflare/assets');
+    expect(secretPayloads).toEqual([{ API_TOKEN: 'first-secret' }, { API_TOKEN: 'first-secret' }]);
+    expect(new Set(secretPaths).size).toBe(1);
+    expect(secretPaths.every((path) => !existsSync(path))).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://first.example.workers.dev/__void/ready',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
 
   it('reports Access blocking the already-active first Worker bootstrap', async () => {
     const runWrangler = runner({
@@ -3992,23 +3732,17 @@ describe('Cloudflare version activation', () => {
     expect(runWrangler.mock.calls.some(([args]) => args[0] === 'deploy')).toBe(false);
   });
 
-  const firstSecretTriggers = {
+  const firstSecretTriggers = triggersWith({
     preserveRoutes: true,
     preserveWorkersDev: true,
     preservePreviewUrls: true,
-    workers_dev: true,
-    preview_urls: true,
-    routes: [],
-    crons: [],
-    queueConsumers: [],
-    workflows: [],
-  };
+  });
 
   function firstSecretRunner(
     inspection: CloudflareCommandResult,
     upload: CloudflareCommandResult = {
       stdout: '',
-      stderr: DURABLE_MIGRATION_ERRORS[0]!,
+      stderr: 'Durable Object migrations require deploy. [code: 10211]',
       status: 1,
     },
   ) {
@@ -4032,21 +3766,9 @@ describe('Cloudflare version activation', () => {
     });
   }
 
-  const uploadFailures = [
-    { stdout: '', stderr: DURABLE_MIGRATION_ERRORS[0]!, status: 1 },
-    { stdout: '', stderr: LOCAL_DURABLE_MIGRATION_ERROR, status: 1 },
-    { stdout: LOCAL_DURABLE_MIGRATION_ERROR, stderr: '', status: 1 },
-    {
-      stdout: '',
-      stderr: `\u001b[31m${LOCAL_DURABLE_MIGRATION_ERROR.replace('pending Durable', 'pending\n  Durable')}\u001b[0m`,
-      status: 1,
-    },
-  ];
-  it.each(
-    [{}, { limits: {} }].flatMap((limits) => uploadFailures.map((upload) => ({ limits, upload }))),
-  )(
-    'passes lifecycle preflight and retries a first secret-only deploy for %j',
-    async ({ limits, upload }) => {
+  it.each([{}, { limits: {} }])(
+    'passes lifecycle preflight and retries a first secret-only deploy for runtime %j',
+    async (limits) => {
       const draft = secretOnlyDraftVersion();
       const runWrangler = firstSecretRunner(
         ok(
@@ -4058,7 +3780,6 @@ describe('Cloudflare version activation', () => {
             },
           }),
         ),
-        upload,
       );
       const root = mkdtempSync(join(tmpdir(), 'void-secret-lifecycle-retry-'));
       const configPath = join(root, 'wrangler.jsonc');

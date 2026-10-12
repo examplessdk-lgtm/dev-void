@@ -184,21 +184,16 @@ describe('project config', () => {
       writeProjectJson(root, { platformUrl, projectId: 'project', slug: 'demo' });
       expect(() => getApiUrl(root)).toThrow(`void connect ${platformUrl}`);
       expect(() =>
-        attachSelectedPlatform(root, { projectId: 'project', slug: 'demo' }, platformUrl),
+        attachSelectedPlatform({ projectId: 'project', slug: 'demo' }, platformUrl),
       ).toThrow('No verified metadata');
     },
   );
 
   it('attaches the operation platform instead of the active connection', () => {
-    const root = makeRoot();
     connection('https://b.example.test');
     connection('https://a.example.test');
     expect(
-      attachSelectedPlatform(
-        root,
-        { projectId: 'project-b', slug: 'app-b' },
-        'https://b.example.test',
-      ),
+      attachSelectedPlatform({ projectId: 'project-b', slug: 'app-b' }, 'https://b.example.test'),
     ).toEqual({
       applicationDomain: 'apps.example.test',
       platformUrl: 'https://b.example.test',

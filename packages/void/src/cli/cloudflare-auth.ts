@@ -1,9 +1,10 @@
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import {
+  createCloudflareProcessRunner,
   encodeCloudflareOperation,
   decodeCloudflareOperationResult,
-  writeUncapturedOperationOutput,
+  isCleanCloudflareExit,
 } from './cloudflare-process.ts';
 import { resolveCloudflareOperationArgv } from './preset.ts';
 
@@ -99,7 +100,7 @@ export async function ensureCloudflareAuthentication(
   };
   const readSession = async (): Promise<CloudflareAuthSession | null> => {
     const result = await run(whoami, true);
-    if (!isCleanExit(result)) {
+    if (!isCleanCloudflareExit(result)) {
       return null;
     }
     const session = parseCloudflareAuthSession(result.data);
@@ -123,7 +124,7 @@ export async function ensureCloudflareAuthentication(
   }
 
   const login = await run({ type: 'auth.login' }, false);
-  if (!isCleanExit(login)) {
+  if (!isCleanCloudflareExit(login)) {
     throw new CloudflareAuthenticationError(
       'Cloudflare browser sign-in did not complete. Run `void cloudflare login` to try again.',
       'login',
@@ -184,37 +185,12 @@ export function parseCloudflareAuthSession(value: unknown): CloudflareAuthSessio
 }
 
 export function createBundledCloudflareAuthRunner(root: string): CloudflareAuthRunner {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(root);
-  return (operation, capture) => {
-    const args = encodeCloudflareOperation(operation);
-    const env = cloudflareAuthEnvironment();
-    const streaming = cloudflareAuthNeedsTerminal(operation);
-    const result = spawnSync(command!, [...prefix, ...args], {
-      cwd: root,
-      encoding: 'utf8',
-      env,
-      maxBuffer: 10 * 1024 * 1024,
-      shell: false,
-      stdio: streaming ? 'inherit' : ['ignore', 'pipe', 'pipe'],
-      timeout: 10 * 60 * 1000,
-      windowsHide: true,
-    });
-    const raw = {
-      status: result.status,
-      stderr: streaming ? '' : result.stderr || '',
-      stdout: streaming ? '' : result.stdout || '',
-      signal: result.signal,
-      error: result.error?.message,
-    };
-    if (streaming) {
-      return raw;
-    }
-    const decoded = decodeCloudflareOperationResult(raw);
-    if (!capture) {
-      writeUncapturedOperationOutput(decoded);
-    }
-    return decoded;
-  };
+  const run = createCloudflareProcessRunner({
+    root,
+    env: cloudflareAuthEnvironment,
+    timeoutMs: 10 * 60 * 1000,
+  });
+  return (operation, capture) => run(operation, { capture });
 }
 
 /** Run a captured auth command without blocking terminal input or exposing credentials. */
@@ -223,7 +199,7 @@ export function runCloudflareAuthCommand(
   operation: CloudflareOperation,
   signal?: AbortSignal,
 ): Promise<CloudflareAuthRunResult> {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(root);
+  const [command, ...prefix] = resolveCloudflareOperationArgv();
   const args = encodeCloudflareOperation(operation);
   if (cloudflareAuthNeedsTerminal(operation)) {
     // cf can prompt or print a device code while the browser login is active.
@@ -276,7 +252,7 @@ export function runCloudflareAuthCommand(
 }
 
 /** Browser login must display cf's prompts before it completes. */
-export function cloudflareAuthNeedsTerminal(operation: CloudflareOperation): boolean {
+function cloudflareAuthNeedsTerminal(operation: CloudflareOperation): boolean {
   return operation.type === 'auth.login';
 }
 
@@ -305,10 +281,4 @@ export function cloudflareAuthEnvironment(
   // store: cf migrates plaintext credentials into it and removes the old file.
   env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
   return env;
-}
-
-function isCleanExit(result: CloudflareAuthRunResult): boolean {
-  return (
-    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
-  );
 }

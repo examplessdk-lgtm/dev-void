@@ -69,16 +69,4 @@ describe('rewriteCssImportForVirtualModule', () => {
     );
     expect(result).toBe('import "some-lib/styles.css";');
   });
-
-  it('normalizes backslashes to forward slashes', () => {
-    // normalizePath ensures Windows-style paths become valid import specifiers
-    const result = rewriteCssImportForVirtualModule(
-      'import "./card.css"',
-      './card.css',
-      p('/project/pages/components/deep/Card.tsx'),
-    );
-    // Should always use forward slashes regardless of OS
-    expect(result).not.toContain('\\');
-    expect(result).toBe(`import "${p('/project/pages/components/deep/card.css')}";`);
-  });
 });

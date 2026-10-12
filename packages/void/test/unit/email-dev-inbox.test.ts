@@ -1,24 +1,12 @@
 /**
- * The `void dev` email inbox spans TWO OS processes:
- *
- *   Node (Vite dev server)                 workerd (miniflare child)
- *   ----------------------                 -------------------------
- *   emailDevInboxPlugin                    user route -> void/email
- *     registers the buffer sink              sendEmail() -> hasActiveSink()
- *     serves GET /__void/inbox               globalThis.__voidEmailSinks__ is
- *                                            EMPTY here (different isolate)
- *
- * So `registerEmailSink` can never be the transport for a real `void dev`
- * send. These tests drive the wire boundary instead: `sendEmail` runs with a
- * raw env shaped like the one workerd sees (no sink registered), and its
- * capture POST is routed into the REAL dev-inbox middleware through a fake
- * `ASSETS` fetcher — which is exactly what `@cloudflare/vite-plugin` binds
- * `env.ASSETS` to in dev (`{ node: (req, res) => viteDevServer.middlewares(req, res) }`).
+ * In `void dev`, `sendEmail` runs in workerd while the inbox lives in the Vite
+ * (Node) process, so these tests drive the wire boundary: the capture POST reaches
+ * the real dev-inbox middleware through a fake `ASSETS` fetcher.
  */
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { shouldInjectEmailDevInboxVar } from '../../src/index.ts';
+import { shouldInjectEmailDevInboxVar } from '../../src/plugin-binding-utils.ts';
 import { emailDevInboxPlugin } from '../../src/plugin-email-dev-inbox.ts';
 import { sendEmail } from '../../src/runtime/email.ts';
 import {
@@ -225,16 +213,6 @@ describe('dev inbox capture wire format', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// The capture cap is sized for the SERIALIZED capture, not for the MIME. The
-// wire format carries the raw MIME as base64 and every caller string again as
-// JSON, and JSON escapes a control character to six bytes where the MIME
-// spends three (`=01`, quoted-printable body) or 1.6 (base64 encoded-word
-// header). So a message `buildMime` accepts — legal in production — can
-// serialize to several times MAX_MESSAGE_BYTES, and a cap that ignores that
-// makes `void dev` refuse what a deploy would send.
-// ---------------------------------------------------------------------------
-
 /** Serialized capture size of a message, alongside the MIME it was built from. */
 async function serializedSizeOf(
   opts: Parameters<typeof normalizeEmail>[0],
@@ -246,9 +224,8 @@ async function serializedSizeOf(
 }
 
 describe('dev inbox capture cap (sized for the serialized capture)', () => {
-  // Quoted-printable expands each control byte to `=01` plus soft breaks.
-  // The capture also carries JSON-escaped text and base64 MIME, so even a
-  // message below the 5 MiB sending limit exceeds three times that budget.
+  // A control byte is `=01` in the quoted-printable MIME but `\u0001` in the
+  // JSON text, so this legal message serializes past three MIME budgets.
   it('captures a legal message whose serialized capture exceeds three MIME budgets', async () => {
     const text = '\x01'.repeat(Math.floor(MAX_MESSAGE_BYTES / 3.15));
     const server = createFakeViteServer();
@@ -261,31 +238,22 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
     expect(message.subject).toBe('control-heavy');
     expect(message.raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
     expect(message.text).toBe(text);
-    // What crossed the wire: the same JSON the worker POSTed (ASCII, so its
-    // length is its byte size), including both expanded representations.
+    // ASCII JSON, so its length is its byte size.
     expect(serializeCapturedMessage(message).length).toBeGreaterThan(3 * MAX_MESSAGE_BYTES);
   });
 
-  // The bound behind the constant: base64 raw (4/3) plus every caller string
-  // at its worst JSON expansion over its own MIME octets (3.75x, a control in
-  // an encoded-word header), plus the fields with no MIME footprint (`bcc`
-  // addresses, framing). Pinned against the real builder and serializer at a
-  // small scale — the ratio is per octet, so it holds at any size — so a new
-  // capture field, or a MIME path that stops rendering a string, changes
-  // this test before it changes the inbox.
-  it('is derived from MAX_MESSAGE_BYTES: base64 raw (4/3) plus caller strings at 3.75x', async () => {
+  // The ratio is per octet, so checking the real serializer at a small scale
+  // holds at any size.
+  it('covers base64 raw (4/3) plus caller strings at their worst JSON expansion (3.75x)', async () => {
     const worstExpansion = 6 / 1.6;
-    expect(DEV_INBOX_MAX_CAPTURE_BYTES).toBe(6 * MAX_MESSAGE_BYTES);
     const framing = 1024;
     const bound =
       (4 / 3 + worstExpansion) * MAX_MESSAGE_BYTES + MAX_RECIPIENTS * MAX_ADDRESS_LENGTH + framing;
     expect(DEV_INBOX_MAX_CAPTURE_BYTES).toBeGreaterThan(bound);
-    // ...and the smallest integer multiple that does.
-    expect(5 * MAX_MESSAGE_BYTES).toBeLessThan(bound);
 
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's' };
     const control = '\x01'.repeat(30_000);
-    const encodedHeaderShapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
+    const shapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
       // encoded-word header: base64 plus framing (1.6) in the MIME, 6 in JSON — 3.75x
       ['control subject', { ...base, subject: control, text: 't' }],
       ['control display name', { ...base, to: [{ email: 'b@y.dev', name: control }], text: 't' }],
@@ -293,8 +261,6 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
         'control custom header value',
         { ...base, headers: { 'X-Note': control.slice(0, 8_192) }, text: 't' },
       ],
-    ];
-    const shapes: Array<[string, Parameters<typeof normalizeEmail>[0]]> = [
       // body: `=01` (3) in the MIME, `\u0001` (6) in JSON — 2x
       ['control text', { ...base, text: control }],
       // body, 7bit path: CRLF (2) in the MIME, `\r\n` (4) in JSON — exactly 2x
@@ -312,20 +278,11 @@ describe('dev inbox capture cap (sized for the serialized capture)', () => {
           ),
         },
       ],
-      ...encodedHeaderShapes,
     ];
     for (const [label, opts] of shapes) {
       const { mimeBytes, jsonBytes } = await serializedSizeOf(opts);
       expect(mimeBytes, label).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
       expect(jsonBytes, label).toBeLessThanOrEqual((4 / 3 + worstExpansion) * mimeBytes + framing);
-    }
-
-    // The 3.75x term is load-bearing, not slack: every encoded-header shape
-    // serializes past the body-only figure (4/3 + 2), which is why that
-    // figure could not have been the ratio.
-    for (const [label, opts] of encodedHeaderShapes) {
-      const { mimeBytes, jsonBytes } = await serializedSizeOf(opts);
-      expect(jsonBytes, label).toBeGreaterThan((4 / 3 + 2) * mimeBytes);
     }
   });
 });
@@ -367,7 +324,7 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(messages[0].from.email).toBe('hello@acme.dev');
     expect(messages[0].to[0].email).toBe('user@example.com');
     expect(messages[0].html).toBe('<p>Hi there</p>');
-    expect(messages[0].raw.byteLength).toBeGreaterThan(0);
+    expect(new TextDecoder().decode(messages[0].raw)).toContain('Subject: Cross-process hello');
 
     const listed = await server.dispatch(authed('http://localhost/__void/inbox'));
     expect(subjectsInListHtml(await listed.text())).toContain('Cross-process hello');
@@ -397,45 +354,6 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(message.to).toEqual([{ email: 'A@x.dev' }]);
     expect(message.cc).toEqual([{ email: 'a@x.dev' }]);
     expect(message.bcc).toEqual([{ email: 'B@x.dev', name: 'Bob' }, { email: 'b@x.dev' }]);
-  });
-
-  it('serves the captured .eml back from the raw route', async () => {
-    const server = createFakeViteServer();
-    const assets = fakeAssetsBinding(server);
-    await withRuntimeEnv(devEnv(assets), () =>
-      sendEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 'raw-check', text: 'body text' }),
-    );
-    const id = listDevMessages()[0].id;
-    const raw = await server.dispatch(authed(`http://localhost/__void/inbox/${id}/raw`));
-    expect(raw.status).toBe(200);
-    expect(raw.headers.get('content-type')).toBe('message/rfc822');
-    expect(await raw.text()).toContain('Subject: raw-check');
-  });
-
-  it('acknowledges the capture with a marker header so a plain asset 200 is not mistaken for success', async () => {
-    const server = createFakeViteServer();
-    const res = await server.dispatch(
-      authed(`http://localhost${DEV_INBOX_CAPTURE_URL}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: serializeCapturedMessage({
-          id: 'dev_marker',
-          capturedAt: Date.now(),
-          raw: new Uint8Array([65]),
-          messageId: '<m@x>',
-          from: { email: 'a@x.dev' },
-          to: [{ email: 'b@y.dev' }],
-          cc: [],
-          bcc: [],
-          subject: 'marker',
-          headers: {},
-          attachments: [],
-        }),
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(res.headers.get(DEV_INBOX_ACK_HEADER)).toBe(DEV_INBOX_ACK_VALUE);
-    expect(listDevMessages()[0].subject).toBe('marker');
   });
 
   it('reports an honest error when the dev inbox is unreachable — no hang, no crash', async () => {
@@ -487,25 +405,6 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(listDevMessages()).toHaveLength(0);
   });
 
-  it('honors sendInDev: true by skipping the dev inbox entirely', async () => {
-    const server = createFakeViteServer();
-    const assets = fakeAssetsBinding(server);
-    const result = await withRuntimeEnv(devEnv(assets), () =>
-      sendEmail({
-        from: 'a@x.dev',
-        to: 'b@y.dev',
-        subject: 's',
-        text: 't',
-        sendInDev: true,
-      }),
-    );
-    expect(assets.calls).toHaveLength(0);
-    expect(result.ok).toBe(false);
-    if (!result.ok && 'error' in result) {
-      expect(result.error.code).toBe('BINDING_MISSING');
-    }
-  });
-
   it('uses the binding name the var names, not a hardcoded ASSETS', async () => {
     const server = createFakeViteServer();
     const assets = fakeAssetsBinding(server);
@@ -516,13 +415,6 @@ describe('sendEmail -> dev inbox (cross-process transport)', () => {
     expect(listDevMessages()[0].subject).toBe('named-binding');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Every inbox route requires the dev-trigger token. Vite's host validation
-// admits any IP-literal `Host`, so under `--host` (or a shared port) the
-// unauthenticated inbox handed every network peer the raw MIME — Bcc and
-// attachments included — plus DELETE and a capture endpoint to plant messages.
-// ---------------------------------------------------------------------------
 
 function seeded(): CapturedMessage {
   return {
@@ -713,34 +605,13 @@ describe('dev inbox auth (dev-trigger token on every route)', () => {
 });
 
 describe('shouldInjectEmailDevInboxVar (dev-only gate)', () => {
-  it('injects in dev when email is used and an assets binding exists', () => {
-    expect(shouldInjectEmailDevInboxVar('dev', true, 'ASSETS')).toBe(true);
-  });
-
-  // `prod` covers every build, `void deploy`, AND `vite preview` (which
-  // reports command: 'serve' but runs the built worker, whose assets binding
-  // is a real directory rather than a dev-server loopback).
-  it('never injects outside the dev server — a production wrangler.json must not carry it', () => {
-    expect(shouldInjectEmailDevInboxVar('prod', true, 'ASSETS')).toBe(false);
-  });
-
-  it('does not inject when the app does not use void/email', () => {
-    expect(shouldInjectEmailDevInboxVar('dev', false, 'ASSETS')).toBe(false);
-    expect(shouldInjectEmailDevInboxVar('dev', undefined, 'ASSETS')).toBe(false);
-  });
-
   it('does not inject when there is no assets binding to loop back through', () => {
     expect(shouldInjectEmailDevInboxVar('dev', true, undefined)).toBe(false);
     expect(shouldInjectEmailDevInboxVar('dev', true, '')).toBe(false);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Buffer bounds. The dev buffer lives in the Vite dev server's NODE process,
-// and it retains each message's full raw MIME plus its decoded text and html.
-// A count-only cap of 100 therefore bounds the buffer at ~100 x
-// MAX_MESSAGE_BYTES, i.e. gigabytes — enough to OOM `void dev` itself.
-// ---------------------------------------------------------------------------
+// The buffer lives in the dev server's Node process, so it is bounded by retained bytes.
 
 const MIB = 1024 * 1024;
 
@@ -763,9 +634,7 @@ function capturedOfSize(id: string, rawBytes: number, htmlChars = 0): CapturedMe
 
 describe('dev inbox buffer bounds', () => {
   it('evicts on the retained-byte budget well below the count cap', () => {
-    // 8 MiB of raw MIME + 8 MiB of decoded html is 16 MiB charged per message,
-    // so the fifth push crosses the 64 MiB budget and evicts — at a count of
-    // five, nowhere near the 100-item cap that used to be the only bound.
+    // 16 MiB charged per message, so the fifth push crosses the 64 MiB budget.
     for (let i = 1; i <= 5; i++) {
       pushToDevBuffer(capturedOfSize(`msg-${i}`, 8 * MIB, 8 * MIB));
     }

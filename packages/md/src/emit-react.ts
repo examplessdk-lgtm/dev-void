@@ -1,32 +1,9 @@
 import type { CompileResult } from './compile.ts';
-import { buildRenderChunks, toIslandId } from './emit-shared.ts';
-import type { IslandImport } from './extract-script.ts';
+import { buildRenderChunks, type ResolvedIsland } from './emit-shared.ts';
 
-export function emitReactComponent(result: CompileResult): string {
-  return `
-import React from "react";
-import { FrontmatterContext } from "@void/md";
-
-const __frontmatter = ${JSON.stringify(result.frontmatter)};
-const __headings = ${JSON.stringify(result.headings)};
-const __html = ${JSON.stringify(result.html)};
-
-export const frontmatter = __frontmatter;
-export const headings = __headings;
-
-export default function MarkdownPage() {
-  return React.createElement(
-    FrontmatterContext.Provider,
-    { value: __frontmatter },
-    React.createElement("div", { dangerouslySetInnerHTML: { __html: __html } })
-  );
-}
-`;
-}
-
-export function emitReactComponentWithIslands(
+export function emitReactComponent(
   result: CompileResult,
-  islandImports: ReadonlyArray<IslandImport>,
+  islandImports: ReadonlyArray<ResolvedIsland>,
 ): string {
   const chunks = buildRenderChunks(result.html, islandImports);
 
@@ -44,7 +21,7 @@ export function emitReactComponentWithIslands(
   return React.createElement(
     "div",
     {
-      "data-island": ${JSON.stringify(toIslandId(islandImport))},
+      "data-island": ${JSON.stringify(islandImport.islandId)},
       "data-props": JSON.stringify(props),
       "data-hydrate": ${JSON.stringify(islandImport.strategy)}
     },

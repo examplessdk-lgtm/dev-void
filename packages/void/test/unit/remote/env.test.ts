@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vite-plus/test';
+import { describe, it, expect, vi } from 'vite-plus/test';
 import { ProxyD1Database } from '../../../src/runtime/remote/d1.ts';
 import { createRemoteEnv } from '../../../src/runtime/remote/index.ts';
 import { ProxyKVNamespace } from '../../../src/runtime/remote/kv.ts';
@@ -12,21 +12,6 @@ const BASE_ENV: Record<string, unknown> = {
 };
 
 describe('createRemoteEnv', () => {
-  it('replaces DB with ProxyD1Database', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, DB: {} });
-    expect(env.DB).toBeInstanceOf(ProxyD1Database);
-  });
-
-  it('replaces KV with ProxyKVNamespace', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, KV: {} });
-    expect(env.KV).toBeInstanceOf(ProxyKVNamespace);
-  });
-
-  it('replaces STORAGE with ProxyR2Bucket', () => {
-    const env = createRemoteEnv({ ...BASE_ENV, STORAGE: {} });
-    expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
-  });
-
   it('does not add bindings that are not in env', () => {
     const env = createRemoteEnv({ ...BASE_ENV });
     expect(env.DB).toBeUndefined();
@@ -40,7 +25,7 @@ describe('createRemoteEnv', () => {
     expect(env.__VOID_PROXY_URL).toBe('https://proxy.void.cloud');
   });
 
-  it('replaces all bindings when all are present', () => {
+  it('replaces all bindings when all are present', async () => {
     const env = createRemoteEnv({
       ...BASE_ENV,
       DB: {},
@@ -50,6 +35,19 @@ describe('createRemoteEnv', () => {
     expect(env.DB).toBeInstanceOf(ProxyD1Database);
     expect(env.KV).toBeInstanceOf(ProxyKVNamespace);
     expect(env.STORAGE).toBeInstanceOf(ProxyR2Bucket);
+
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => Response.json({ results: [], success: true, meta: {} }));
+    globalThis.fetch = fetchMock as typeof fetch;
+    try {
+      await (env.DB as D1Database).prepare('SELECT 1').all();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://proxy.void.cloud/d1/query');
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer test-token' });
+    expect(JSON.parse(String(init.body)).projectId).toBe('proj_1');
   });
 
   it('replaces custom binding names when configured', () => {

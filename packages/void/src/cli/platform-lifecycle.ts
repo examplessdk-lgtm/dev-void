@@ -85,7 +85,6 @@ import {
   platformSetupPages,
   platformSetupFieldHelp,
 } from './platform-setup.ts';
-import { passwordWithPlaceholder } from './prompt-password.ts';
 
 export function resolvePlatformInstallDatabaseUrl(
   checkpoint: Record<string, string> | null,
@@ -1341,11 +1340,7 @@ export async function verifyPlatformAiGatewayPlan(
       deploymentExecution: preview.actions.some((entry) => entry.key === 'deployment-queue'),
     });
   } catch (error) {
-    if (
-      error instanceof PlatformCloudflareApiError &&
-      (error.status === 401 || error.status === 403) &&
-      error.requestPath?.includes('/ai-gateway/')
-    ) {
+    if (isPlatformTokenAuthorizationError(error, '/ai-gateway/')) {
       throw new Error(
         'platform: The runtime token could not verify AI Gateway access. Include Account → AI Gateway → Edit for this account, then retry. No platform resources were created.',
         { cause: error },
@@ -1494,9 +1489,7 @@ async function promptSecret(
     validate: (input: string | undefined) => (input ? validate?.(input) : 'A value is required.'),
   };
   const value = masked
-    ? placeholder
-      ? await passwordWithPlaceholder({ ...options, placeholder })
-      : await password(options)
+    ? await password({ ...options, placeholder })
     : await text({ ...options, placeholder });
   if (isCancel(value) || typeof value === 'symbol') {
     throw new Error('platform: Cancelled.');

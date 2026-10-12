@@ -14,6 +14,7 @@ import {
   type AstVariableDeclaration,
 } from '../shared/ast.ts';
 import { staticExportInitializers, staticLiteral } from '../shared/static-exports.ts';
+import { scriptBlocks } from './island-imports.ts';
 import { resolveNamedLayout } from './layout-resolution.ts';
 import type {
   ExplicitBoolean,
@@ -63,17 +64,13 @@ function componentLayout(source: string, filename: string): string | false | und
   if (!source.includes('layout')) {
     return undefined;
   }
-  const scripts =
-    filename.endsWith('.vue') || filename.endsWith('.svelte')
-      ? [...source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1]!)
-      : [source];
-  for (const script of scripts) {
-    if (!script.includes('layout')) {
+  for (const script of scriptBlocks(source, filename)) {
+    if (!script.source.includes('layout')) {
       continue;
     }
     const initializer = staticExportInitializers(
-      filename.replace(/\.(vue|svelte)$/, '.ts'),
-      script,
+      script.filename,
+      script.source,
       new Set(['layout']),
     ).get('layout');
     const value = staticLiteral(initializer);

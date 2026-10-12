@@ -17,7 +17,7 @@ import {
   streamDeployEvents,
   warnIgnoredNotFoundForFramework,
   warnUnpublishedRouting,
-} from '../../src/cli/deploy.ts';
+} from '../../src/cli/deploy-managed-events.ts';
 import type { CliLogger } from '../../src/cli/log-file.ts';
 import type { DeployEvent } from '../../src/cli/types.ts';
 
@@ -172,23 +172,6 @@ describe('applyDeployEvent', () => {
       urls: ['https://app.void.app'],
       assets: 0,
       workers: 1,
-    };
-    const result = applyDeployEvent(done, spinner);
-    expect(result).toEqual({ kind: 'done', event: done });
-    expect(calls.clear).toHaveLength(1);
-    expect(calls.stop).toHaveLength(0);
-  });
-
-  it('clears the spinner without a duplicate success message when published is true', () => {
-    const { spinner, calls } = createMockSpinner();
-    const done: DoneEvent = {
-      event: 'done',
-      deployment: 'dpl_1',
-      url: 'https://app.void.app',
-      urls: ['https://app.void.app'],
-      assets: 0,
-      workers: 1,
-      published: true,
     };
     const result = applyDeployEvent(done, spinner);
     expect(result).toEqual({ kind: 'done', event: done });

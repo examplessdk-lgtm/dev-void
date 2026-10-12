@@ -3,7 +3,6 @@ import type { MigrationEntry, MigrationResponse, MigrationResult } from './migra
 export function createMigrationHandler(
   env: Record<string, unknown>,
   migrations: Array<MigrationEntry>,
-  _dialect: 'sqlite' | 'postgresql' | 'mysql',
   runAuthMigrations?: () => Promise<void>,
 ) {
   return async (request: Request): Promise<Response> => {

@@ -1,16 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  rmdirSync,
-  unlinkSync,
-} from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isRecord } from '@void/deploy-core';
 import type { PlatformDiscoveryDocument } from '@void/platform';
 import { log, confirm, isCancel, cancel, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { parse, type ParseError } from 'jsonc-parser';
@@ -20,10 +12,16 @@ import { createProjectTsconfig, ensureProjectTsconfig } from '../codegen/project
 import { TYPED_CONFIG_FILE } from '../config-loader.ts';
 import { canRewriteVoidProjectConfig, writeVoidProjectConfig } from '../config-write.ts';
 import { getDatabaseDialect, readConfig, type DatabaseDialect } from '../config.ts';
-import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
+import { snapshotDrizzleOutputs } from '../drizzle/generate.ts';
 import { detectFramework, type DetectedFramework } from '../plugin-inference.ts';
 import { readProjectPaths } from '../project-paths.ts';
-import { detectAgents, getPackageDir } from './agents.ts';
+import {
+  hasPackageDependency,
+  readPackageJson,
+  type PackageDependencyField,
+} from '../shared/package-json.ts';
+import { detectAgents, getOwnVersion, getPackageDir } from './agents.ts';
 import { connectCloudflare } from './cloudflare-connect.ts';
 import { maybeSetupDeployProject } from './deploy-setup.ts';
 import { maybeScaffoldEnvTs } from './env-scaffold.ts';
@@ -48,6 +46,7 @@ import {
   SCAFFOLD_FRAMEWORK_OPTIONS,
   SCAFFOLD_GITIGNORE_LINES,
   SCAFFOLD_TOOLCHAIN_OPTIONS,
+  SCAFFOLD_VITE_PLUS_DEV_DEPENDENCIES,
   type ScaffoldFramework,
   type ScaffoldStarterMode,
   type ScaffoldToolchain,
@@ -56,6 +55,7 @@ import { patchViteConfigWithVoidPlugin } from './vite-config-patch.ts';
 import { LATEST_KNOWN_COMPAT_DATE, writeProvisionedWranglerConfig } from './wrangler.ts';
 import {
   buildDrizzleKitSpawnEnv,
+  drizzleKitBin,
   findInstalledYarnPnpRuntime,
   hasLocalLockfile,
 } from './yarn-pnp.ts';
@@ -133,11 +133,9 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
 ]);
 
 const PNPM_ALLOWED_BUILDS = ['esbuild', 'sharp', 'workerd'] as const;
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
 
-// Dependencies/scripts that can be left behind by a Void Pages starter after
-// the user deletes app files and runs `void init` again. These keep that retry
-// in the greenfield starter path instead of the existing-project patch path.
+// Packages a previous Void Pages starter can leave behind, so re-running init
+// after deleting the app files still takes the starter path.
 const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
   'void',
   'hono',
@@ -161,10 +159,8 @@ const EMPTY_PROJECT_ALLOWED_PACKAGES = new Set([
   '@void/solid',
 ]);
 
-// A package with only `void` and/or an adapter can still be a preinstall shape
-// (`pnpm add -D void @void/svelte` before init). Once starter runtime/tooling
-// packages like `svelte` or `vite-plus` are present, require an adapter too so
-// we only accept manifests that look like a previous Void Pages starter.
+// Only `void` and adapters may be a preinstall (`pnpm add -D void @void/svelte`);
+// other starter packages such as `svelte` also require an adapter.
 const EMPTY_PROJECT_ALLOWED_ADAPTER_PACKAGES = new Set([
   '@void/react',
   '@void/vue',
@@ -179,9 +175,8 @@ const EMPTY_PROJECT_BASE_PACKAGES = new Set([
   '@void/solid',
 ]);
 
-// Known starter scripts are allowed for scaffold detection and are replaced
-// with the newly selected toolchain's commands during scaffoldPagesApp().
-// Custom scripts make the package an existing project instead.
+// scaffoldPagesApp() replaces these starter scripts; custom scripts make the
+// package an existing project.
 const EMPTY_PROJECT_ALLOWED_SCRIPTS: Record<string, Set<string> | undefined> = {
   test: undefined,
   dev: new Set(['vite', 'vp dev']),
@@ -225,10 +220,7 @@ type TsconfigInheritancePatch = {
 };
 
 function asRecord(value: unknown): JsonObject | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as JsonObject;
+  return isRecord(value) ? value : null;
 }
 
 function parseJsoncFile(path: string): JsonObject | null {
@@ -621,7 +613,6 @@ async function resolveInitRoot(root: string): Promise<string> {
 type ProjectState = {
   hasTypescript: boolean;
   hasTsconfig: boolean;
-  hasGithubWorkflows: boolean;
   hasRoutes: boolean;
   hasMigrations: boolean;
   hasPages: boolean;
@@ -637,8 +628,7 @@ function parsePackageManagerField(pkg: unknown): ProjectState['packageManager'] 
   if (typeof raw !== 'string') {
     return undefined;
   }
-  // Corepack spec: "name@version[+sha.<hash>]". Take the portion before the
-  // first `@` and trim whitespace; reject anything that isn't a known PM name.
+  // Corepack spec: "name@version[+sha.<hash>]".
   const name = raw.split('@', 1)[0]?.trim();
   if (name === 'npm' || name === 'pnpm' || name === 'yarn' || name === 'bun') {
     return name;
@@ -647,30 +637,11 @@ function parsePackageManagerField(pkg: unknown): ProjectState['packageManager'] 
 }
 
 /**
- * Returns `true` when a project should be treated as pnpm-managed for
- * purposes of installing build-script allowlists and picking a
- * `workspace:` rewrite strategy. We honor BOTH local signals — a committed
- * `pnpm-lock.yaml`, a local `pnpm-workspace.yaml`, or a Corepack
- * `packageManager: pnpm` pin in `package.json` — AND the same signals on
- * any ancestor workspace root.
- *
- * Ancestor walking matters for pnpm workspace subpackages: pnpm writes the
- * lockfile at the workspace root, not per-package, and many subpackages
- * omit their own `packageManager` field in favor of the workspace root's.
- * A subpackage with a `workspace:*` dep in its `package.json` but no local
- * pnpm markers is still pnpm-managed if the enclosing workspace root has
- * `pnpm-workspace.yaml`, a `pnpm-lock.yaml`, or `packageManager: pnpm@...`.
- *
- * Local non-pnpm signals MUST outrank the ancestor walk. A bun
- * or yarn subproject nested under a pnpm workspace ancestor is still
- * bun/yarn — its local `bun.lockb` / `yarn.lock` / `package-lock.json` or
- * a local Corepack pin for bun/yarn/npm proves the ancestor's pnpm shape
- * does not govern this subpackage. `detectProjectState` would pick
- * bun/yarn for such a project and try to install with that manager, so
- * the pnpm check must not inherit ancestor workspace state too eagerly.
+ * Whether pnpm manages `root`. pnpm keeps the lockfile and Corepack pin at the
+ * workspace root, so a member without local markers inherits them, but a local
+ * lockfile or pin for another manager always wins.
  */
 function isPnpmProject(root: string, pkg: JsonObject): boolean {
-  // 1. Strong local pnpm signals — immediate true.
   if (existsSync(join(root, 'pnpm-lock.yaml'))) {
     return true;
   }
@@ -682,10 +653,6 @@ function isPnpmProject(root: string, pkg: JsonObject): boolean {
     return true;
   }
 
-  // 2. Strong local non-pnpm signals — refuse to walk ancestors. A local
-  //    lockfile or Corepack pin for a different manager means this
-  //    package is governed by that manager, even if an ancestor is a
-  //    pnpm workspace root.
   if (localPm === 'bun' || localPm === 'yarn' || localPm === 'npm') {
     return false;
   }
@@ -693,30 +660,12 @@ function isPnpmProject(root: string, pkg: JsonObject): boolean {
     return false;
   }
 
-  // 3. Pristine subpackage with no local package-manager markers at
-  //    all — only now is it safe to walk ancestors looking for a pnpm
-  //    workspace root.
   return hasAncestorPnpmMarkers(root);
 }
 
 /**
- * Returns `true` when `start` is a declared member of an ancestor pnpm
- * workspace. Used to detect pnpm workspace subpackages whose enclosing
- * workspace root is pnpm-managed even when the subpackage has no local
- * pnpm signals.
- *
- * An ancestor `pnpm-workspace.yaml` / `pnpm-lock.yaml` /
- * Corepack pnpm pin alone is NOT proof that `start` is governed by
- * that repo's pnpm install. A scratch app nested under a pnpm
- * monorepo is a separate project when its path doesn't match the
- * workspace globs; treating it as a member would make
- * `ensureVoidDependency` / `scaffoldPagesApp` disagree with the local
- * install, which uses the standalone fallback path.
- *
- * Delegate workspace membership to `findWorkspaceRoot` +
- * `isWorkspaceSubpackage` — the same check used by the
- * workspace-subpackage skip path in `runInitCommand` — so the two
- * paths can't disagree.
+ * Whether `start` is a declared member of a pnpm-managed ancestor workspace.
+ * A scratch app outside the workspace globs is a separate project.
  */
 function hasAncestorPnpmMarkers(start: string): boolean {
   const workspaceRoot = findWorkspaceRoot(start);
@@ -726,9 +675,6 @@ function hasAncestorPnpmMarkers(start: string): boolean {
   if (!isWorkspaceSubpackage(workspaceRoot, start)) {
     return false;
   }
-  // We're a declared member. Confirm the containing workspace is
-  // pnpm-shaped — a yarn/npm/bun workspace root with a matching glob
-  // should not push us onto the pnpm branch.
   if (existsSync(join(workspaceRoot, 'pnpm-workspace.yaml'))) {
     return true;
   }
@@ -743,37 +689,15 @@ function hasAncestorPnpmMarkers(start: string): boolean {
         return true;
       }
     } catch {
-      // unreadable workspace-root package.json — treat as "not pnpm"
+      // An unreadable root package.json is not a pnpm pin.
     }
   }
   return false;
 }
 
 /**
- * Walk up from `start` checking each ancestor directory for a
- * `node_modules/void/package.json`. Mirrors Node's module resolution
- * algorithm for the `void` package name — returns true as soon as any
- * ancestor has `void` installed, false only when the entire chain is
- * empty. Used by the demo install gate so workspace subpackages whose
- * `void` is hoisted at the workspace root are detected as already
- * installed and we don't trigger a spurious subpackage install.
- *
- * PnP rationale: in a Yarn Berry PnP workspace, dependencies resolve
- * via `.pnp.cjs` at the workspace root and there is no `node_modules`
- * tree — not in the subpackage, not in ancestors. By the time we call
- * this, `scaffoldDemo`/`ensureVoidDependency` has added `void` to the
- * subpackage's `package.json` (or verified it was already there), and
- * under PnP the workspace-root install is what wires up resolution.
- *
- * A committed-but-unfetched `.pnp.cjs` is NOT proof that
- * `yarn install` has run. Yarn Berry repos commonly commit `.pnp.cjs`
- * but gitignore `.yarn/cache/*.zip` (zero-install is opt-in), so a
- * fresh clone has the runtime file on disk while the archives it
- * points at are missing. The stricter `findInstalledYarnPnpRuntime`
- * also requires a post-install marker next to the runtime
- * (`.yarn/install-state.gz` or a populated `.yarn/cache`). Without it,
- * we fall through and return false so the caller triggers the install
- * step before attempting to spawn drizzle-kit.
+ * Whether `void` resolves from `start`, through an ancestor `node_modules`
+ * (hoisted workspace installs) or an installed Yarn PnP runtime.
  */
 export function isVoidResolvableFrom(start: string): boolean {
   let dir = start;
@@ -787,29 +711,9 @@ export function isVoidResolvableFrom(start: string): boolean {
     }
     dir = parent;
   }
-  // PnP supersedes node_modules resolution. If any ancestor has the
-  // PnP runtime files AND the post-install marker in the same
-  // directory, void MAY resolve through PnP at runtime.
-  //
-  // An installed PnP runtime still isn't proof that `void`
-  // is currently on the dependency graph. Branch switches and edits
-  // to package.json can leave stale PnP data where void has been
-  // removed; `.pnp.cjs` still exists but the current install target
-  // has no void entry. Spawn a tiny probe under the PnP loaders to
-  // verify resolution succeeds in the same env drizzle-kit will
-  // later run under.
-  //
-  // The probe must match the shape of the installed PnP
-  // runtime. When only `.pnp.loader.mjs` is present, `--require` is
-  // NOT injected by `buildDrizzleKitSpawnEnv` — only
-  // `--experimental-loader` is — and Node's CJS `require.resolve`
-  // does not consult the ESM loader chain, so a CJS probe returns
-  // `MODULE_NOT_FOUND` even when `void` IS resolvable via the loader.
-  // Branch the probe shape on `.pnp.cjs` presence: CJS probe when the
-  // CJS shim is loaded, ESM probe (`import.meta.resolve`) when only
-  // the loader is loaded. `import.meta.resolve` goes through the
-  // PnP loader's `resolve` hook and throws synchronously when the
-  // specifier cannot be resolved, which surfaces as a non-zero exit.
+  // PnP data can be stale (void removed on another branch), so probe under the
+  // loaders drizzle-kit will use. With only `.pnp.loader.mjs`, CJS
+  // `require.resolve` skips the ESM loader, so probe with `import.meta.resolve`.
   const installed = findInstalledYarnPnpRuntime(start);
   if (installed !== undefined) {
     const probeArgs = installed.pnpCjs
@@ -827,13 +731,8 @@ export function isVoidResolvableFrom(start: string): boolean {
 }
 
 /**
- * Walks ancestors from `start` looking for workspace-root markers: a
- * `pnpm-workspace.yaml` next to a `package.json`, or a `package.json`
- * whose top-level `workspaces` field exists (array or object). Returns
- * the discovered workspace root path if `start` is a subpackage inside
- * such a workspace, or `undefined` when it is not. Stops at the
- * filesystem root. Skips `start` itself — a root with its own
- * `workspaces` field is its own root, not a subpackage.
+ * Nearest ancestor of `start` (excluding `start`) with a `pnpm-workspace.yaml`
+ * or a `package.json#workspaces` field.
  */
 function findWorkspaceRoot(start: string): string | undefined {
   let dir = dirname(start);
@@ -846,7 +745,7 @@ function findWorkspaceRoot(start: string): string | undefined {
           return dir;
         }
       } catch {
-        // unreadable parent package.json — fall through and keep walking
+        // Keep walking past an unreadable package.json.
       }
     }
     if (existsSync(join(dir, 'pnpm-workspace.yaml'))) {
@@ -861,18 +760,8 @@ function findWorkspaceRoot(start: string): string | undefined {
 }
 
 /**
- * Read the declared workspace-member glob patterns from a workspace root.
- * Supports:
- *   - `pnpm-workspace.yaml` — extracts patterns under the top-level
- *     `packages:` key via a regex matcher (no `js-yaml` dep). Only the
- *     `packages:` key is used; pnpm-specific keys like `catalog:` are
- *     ignored.
- *   - `package.json#workspaces` — either an array of patterns or a
- *     `{ packages: [...] }` object form (npm/yarn/bun convention).
- *
- * Returns an empty array if no patterns are declared or parsing fails —
- * callers should treat that as "can't verify membership" and fall back
- * to the fresh-clone install path.
+ * Member globs from `pnpm-workspace.yaml#packages` or `package.json#workspaces`
+ * (an array or `{ packages }`). Empty when none can be read.
  */
 function readWorkspacePatterns(workspaceRoot: string): Array<string> {
   const pnpmWorkspacePath = join(workspaceRoot, 'pnpm-workspace.yaml');
@@ -905,16 +794,7 @@ function readWorkspacePatterns(workspaceRoot: string): Array<string> {
   return [];
 }
 
-/**
- * Strip a trailing YAML line comment from a raw line while preserving
- * `#` characters that live inside single- or double-quoted scalars.
- * YAML treats `#` as a comment marker only when it is preceded by
- * whitespace (or is the first column) AND it is not inside a quoted
- * scalar. Flow-style inline quoting is handled by a plain state machine
- * — no escape sequence support, because real-world workspace globs
- * never contain escaped quotes. A naive `/\s+#.*$/` strip would
- * truncate quoted values like `- "path #hash/*"`.
- */
+/** Strip a trailing YAML comment, keeping `#` inside quotes (`- "path #hash/*"`). */
 function stripYamlLineComment(line: string): string {
   let inSingle = false;
   let inDouble = false;
@@ -948,23 +828,8 @@ function stripYamlLineComment(line: string): string {
 }
 
 /**
- * Minimal YAML extractor for the `packages:` key of a
- * `pnpm-workspace.yaml`. Supports both the block-style form:
- *
- *   packages:
- *     - 'packages/*'
- *     - "apps/*"
- *     - docs
- *
- * and the flow-style (inline) form:
- *
- *   packages: ['packages/*', "apps/*"]
- *   packages: [packages/*]
- *
- * Anything else (other top-level keys, comments, nested blocks) is
- * ignored. This intentionally does NOT pull in `js-yaml` — the
- * surface area we need is tiny and the real YAML we see in practice
- * uses one of these two shapes.
+ * Read the `packages:` list of a `pnpm-workspace.yaml` in block (`- 'apps/*'`)
+ * or flow (`packages: ['apps/*']`) form.
  */
 export function extractPnpmWorkspacePackages(yaml: string): Array<string> {
   const lines = yaml.split(/\r?\n/);
@@ -973,11 +838,6 @@ export function extractPnpmWorkspacePackages(yaml: string): Array<string> {
   for (const rawLine of lines) {
     const line = stripYamlLineComment(rawLine);
 
-    // Flow-style: `packages: [<items>]` on a single line. Values may
-    // be quoted (`'...'` or `"..."`) or unquoted. Whitespace around
-    // brackets and commas is tolerated. Escaped quotes inside the
-    // flow value are not supported because no real-world workspace
-    // pattern uses them.
     const inlineMatch = line.match(/^\s*packages\s*:\s*\[(.*)\]\s*$/);
     if (inlineMatch) {
       const inner = inlineMatch[1];
@@ -988,7 +848,6 @@ export function extractPnpmWorkspacePackages(yaml: string): Array<string> {
           patterns.push(unquoted);
         }
       }
-      // Inline form is self-contained — end any in-progress block.
       inPackages = false;
       continue;
     }
@@ -1013,14 +872,7 @@ export function extractPnpmWorkspacePackages(yaml: string): Array<string> {
   return patterns;
 }
 
-/**
- * Expand brace groups in a workspace glob pattern. Supports the forms
- * that appear in real workspace manifests, like `{apps,packages}/*`
- * and nested forms like `{apps,packages}/{core,web}`. Returns an array
- * of expanded patterns with no braces. No-op for patterns that don't
- * contain `{...}`. Does not support escaped braces or nested braces
- * inside a group (neither appears in real workspace manifests).
- */
+/** Expand `{a,b}` brace groups, including several groups in one pattern. */
 function expandBraces(pattern: string): Array<string> {
   const match = pattern.match(/^([^{}]*)\{([^{}]*)\}(.*)$/);
   if (!match) {
@@ -1032,7 +884,6 @@ function expandBraces(pattern: string): Array<string> {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (options.length === 0) {
-    // Empty group like `{}` — pass through unchanged.
     return [pattern];
   }
   const results: Array<string> = [];
@@ -1044,31 +895,13 @@ function expandBraces(pattern: string): Array<string> {
   return results;
 }
 
-/**
- * Match a path against a workspace glob pattern. Supports the forms
- * that appear in real workspace manifests:
- *   - Literal path: `packages/void`              → exact match.
- *   - Leading `./`: `./packages/*`               → stripped before matching.
- *   - Single-segment glob: `packages/*`          → one segment under prefix.
- *   - Partial-segment glob: `packages/*-app`     → regex within a segment.
- *   - Recursive glob: `packages/**`              → any depth under prefix.
- *   - Brace expansion: `{apps,packages}/*`       → expanded before matching.
- * Does not support character classes or extended globs — those don't
- * appear in any workspace manifest we've seen, and adding a full
- * minimatch pulls in a dep we don't need.
- */
+// Supports *, **, ./ and {a,b} braces; ?, [...] and extglobs are matched literally.
 function matchesWorkspacePattern(relPath: string, pattern: string): boolean {
-  // Brace expansion first: `{apps,packages}/*` becomes
-  // `['apps/*', 'packages/*']`, then ANY expansion matching the path
-  // counts. Real workspace manifests use this form frequently.
   const expansions = expandBraces(pattern);
   return expansions.some((p) => matchesSingleWorkspacePattern(relPath, p));
 }
 
 function matchesSingleWorkspacePattern(relPath: string, pattern: string): boolean {
-  // Normalize: strip leading `./`, then leading/trailing slashes, then
-  // split into segments. `./packages/*` is a common shape in real
-  // `pnpm-workspace.yaml` / `package.json#workspaces` files.
   const normalizedPattern = pattern.replace(/^\.\/+/, '');
   const pathSegs = relPath
     .replace(/^\/+|\/+$/g, '')
@@ -1094,11 +927,7 @@ function compilePatternSegment(seg: string): CompiledSegment {
   if (!seg.includes('*')) {
     return { kind: 'literal', value: seg };
   }
-  // Any segment with `*` characters (but not the whole-segment `**`
-  // globstar): convert to an anchored regex where each `*` matches any
-  // characters except `/`. Regex metacharacters in the literal parts
-  // are escaped first. Supports `packages/*`, `packages/*-app`,
-  // `packages/app-*`, and mixed forms like `*/foo-*`.
+  // Each `*` matches any characters except `/`.
   const re = new RegExp(
     '^' +
       seg
@@ -1119,9 +948,7 @@ function matchSegments(
   while (qi < pat.length) {
     const seg = pat[qi];
     if (seg.kind === 'globstar') {
-      // Recursive: consume zero or more path segments until the rest
-      // matches, or we run out. An empty pattern tail (`**` is the
-      // last segment) matches any remaining path including empty.
+      // A trailing `**` matches any remaining path, including none.
       if (qi === pat.length - 1) {
         return true;
       }
@@ -1139,43 +966,21 @@ function matchSegments(
       if (seg.value !== path[pi]) {
         return false;
       }
-    } else {
-      // Regex segment: match the single path segment against the
-      // compiled regex. Covers both `*` (which compiles to `[^/]*`)
-      // and partial globs like `*-app`.
-      if (!seg.re.test(path[pi])) {
-        return false;
-      }
+    } else if (!seg.re.test(path[pi])) {
+      return false;
     }
     pi++;
     qi++;
   }
-  // Pattern fully matched: path must also be fully consumed.
   return pi === path.length;
 }
 
 /**
- * Verify that `root` is actually a declared member of the workspace
- * rooted at `workspaceRoot`. An ancestor workspace root found by
- * `findWorkspaceRoot` is not enough — a standalone app nested under a
- * monorepo (e.g. `repo/scratch/my-app` inside a repo whose
- * `pnpm-workspace.yaml` only lists `packages/*`) is NOT a workspace
- * subpackage, and treating it as one leaves the demo scaffold in a
- * broken state: install is skipped, `generateStarterMigration` is
- * skipped, and the user ends up with unresolved `void` imports.
- *
- * Supports positive and negation (`!pattern`) patterns. A path is
- * considered a member if it matches at least one positive pattern and
- * no negation pattern.
- *
- * Returns `false` if no patterns are declared at all — callers treat
- * that as "not a subpackage" so the fresh-clone install path still runs.
+ * Whether `root` matches a workspace glob and no `!` glob. A nested app outside
+ * the globs is a separate project.
  */
 function isWorkspaceSubpackage(workspaceRoot: string, root: string): boolean {
   const relPath = relative(workspaceRoot, root);
-  // `root === workspaceRoot` means we're AT the workspace root, not
-  // inside it. `findWorkspaceRoot` already skips `start` itself so this
-  // shouldn't normally fire, but be defensive.
   if (relPath === '' || relPath.startsWith('..')) {
     return false;
   }
@@ -1198,15 +1003,7 @@ function isWorkspaceSubpackage(workspaceRoot: string, root: string): boolean {
   return matched;
 }
 
-/**
- * Returns true iff `root` is structurally a declared member of an
- * ancestor workspace — regardless of whether the subpackage manages its
- * own install via a local lockfile or Corepack pin. This is the signal
- * Step 8 (GitHub Actions) uses: `.github/workflows/*` files are only
- * read from the repository root, so dropping them under a subpackage
- * root is always wrong, whether or not the subpackage self-manages
- * install.
- */
+/** Workspace membership, even when the member manages its own install. */
 function isInsideWorkspaceSubpackage(root: string): boolean {
   const workspaceRoot = findWorkspaceRoot(root);
   if (workspaceRoot === undefined) {
@@ -1216,20 +1013,12 @@ function isInsideWorkspaceSubpackage(root: string): boolean {
 }
 
 /**
- * Returns the workspace root if `root` should defer its install +
- * starter migration to a parent workspace install — i.e. it is a
- * declared member of an ancestor workspace AND has no local lockfile or
- * non-pnpm Corepack pin claiming it manages its own install. Returns
- * undefined when `root` is either not a subpackage at all, or is a
- * leaf-managed project nested inside a workspace.
- *
- * This is the single source of truth used by both the starter and the
- * demo branches in `runInitCommand` so they can never disagree about
- * whether to skip install/migration.
+ * The workspace root that should install for `root`: set when `root` is a
+ * member without its own lockfile or non-pnpm Corepack pin, as in `isPnpmProject`.
  */
 function resolveWorkspaceDeferral(
   root: string,
-  pkg: JsonObject | undefined,
+  pkg: JsonObject | null,
 ): { workspaceRoot: string } | undefined {
   const workspaceRoot = findWorkspaceRoot(root);
   if (workspaceRoot === undefined) {
@@ -1241,10 +1030,6 @@ function resolveWorkspaceDeferral(
   if (hasLocalLockfile(root)) {
     return undefined;
   }
-  // A local Corepack pin for a non-pnpm manager is the same kind of
-  // self-management signal as a local lockfile — `isPnpmProject` already
-  // treats it as a refusal to walk ancestors. Mirror it here so the
-  // two helpers can never disagree.
   const localPm = parsePackageManagerField(pkg);
   if (localPm === 'bun' || localPm === 'yarn' || localPm === 'npm') {
     return undefined;
@@ -1275,23 +1060,10 @@ export function detectProjectState(root: string): ProjectState {
   } else if (existsSync(join(root, 'bun.lock')) || existsSync(join(root, 'bun.lockb'))) {
     packageManager = 'bun';
   } else if (existsSync(join(root, 'pnpm-workspace.yaml'))) {
-    // No lockfile yet, but `pnpm-workspace.yaml` at the project root is a
-    // strong local pnpm signal — it is the same marker `isPnpmProject()`
-    // treats as authoritative above. Fresh pnpm workspaces (no lockfile,
-    // no Corepack pin) still need `pnpm install`, not `npm install`: the
-    // rest of the demo / starter code paths already treat the repo as pnpm
-    // via `isPnpmProject`, and falling through to `npm install` here would
-    // either reject `workspace:` specs outright or leave a stray
-    // `package-lock.json` behind in a pnpm workspace.
+    // A fresh pnpm workspace has no lockfile yet; npm would reject its
+    // `workspace:` specs.
     packageManager = 'pnpm';
   } else {
-    // No lockfile and no pnpm-workspace.yaml — honor
-    // `package.json#packageManager` (Corepack field) for pnpm, yarn, and
-    // bun before defaulting to npm. Fresh pnpm workspaces with committed
-    // `packageManager` pins but no lockfile would get their `workspace:`
-    // specs rejected by npm, and fresh Yarn projects would get an
-    // `npm install` that creates the wrong lockfile and bypasses Yarn's
-    // linker/plugin settings.
     const field = parsePackageManagerField(pkg);
     if (field === 'pnpm' || field === 'yarn' || field === 'bun') {
       packageManager = field;
@@ -1304,7 +1076,6 @@ export function detectProjectState(root: string): ProjectState {
   return {
     hasTypescript,
     hasTsconfig: existsSync(join(root, 'tsconfig.json')),
-    hasGithubWorkflows: existsSync(join(root, '.github', 'workflows')),
     hasRoutes: existsSync(paths.routesDir),
     hasMigrations: existsSync(paths.migrationsDir) || existsSync(join(root, 'migrations')),
     hasPages: existsSync(paths.pagesDir),
@@ -1333,44 +1104,27 @@ function detectPagesFramework(root: string): ScaffoldFramework | undefined {
   });
 }
 
-function readPackageJson(root: string): JsonObject | undefined {
-  try {
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
-    return asRecord(pkg) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const DEPENDENCY_FIELDS = [
+const DEPENDENCY_FIELDS: ReadonlyArray<PackageDependencyField> = [
   'dependencies',
   'devDependencies',
   'peerDependencies',
   'optionalDependencies',
-] as const;
+];
 
-function getDeclaredDependencySpec(root: string, packageName: string): string | undefined {
-  const pkg = readPackageJson(root);
-  if (!pkg) {
-    return undefined;
-  }
-
-  for (const field of DEPENDENCY_FIELDS) {
-    const group = asRecord(pkg[field]);
-    if (typeof group?.[packageName] === 'string') {
-      return group[packageName] as string;
-    }
-  }
-
-  return undefined;
-}
-
+/** The first declared spec for `packageName`, in `DEPENDENCY_FIELDS` order. */
 function resolveScaffoldDependencySpec(
   root: string,
   packageName: string,
   fallbackVersion: string,
 ): string {
-  return getDeclaredDependencySpec(root, packageName) || fallbackVersion;
+  const pkg = readPackageJson(root);
+  for (const field of DEPENDENCY_FIELDS) {
+    const spec = asRecord(pkg?.[field])?.[packageName];
+    if (typeof spec === 'string') {
+      return spec || fallbackVersion;
+    }
+  }
+  return fallbackVersion;
 }
 
 function defaultPackageName(root: string): string {
@@ -1927,17 +1681,9 @@ function getWorkflowSetupSteps(
 }
 
 /**
- * Scaffold the GitHub Actions workflow that deploys via GitHub OIDC — no
- * long-lived secret stored in the repo. `void deploy` itself detects GitHub
- * Actions, mints an OIDC token (audience `void`), exchanges it at
- * `POST $VOID_API_URL/auth/github-oidc` for a short-lived, project-scoped deploy
- * token, and uses it — so the workflow is a single `void deploy` step (no
- * curl/jq). `permissions: id-token: write` is still required: it is what lets
- * the job (and thus the CLI) mint the OIDC token.
- *
- * `slug` is the linked project slug when known (from `.void/project.json`);
- * otherwise a `${{ vars.VOID_PROJECT }}` placeholder is emitted with a comment
- * telling the user to set the repository variable.
+ * The deploy workflow. Void deploys exchange a GitHub OIDC token (`id-token: write`)
+ * at deploy time, so no long-lived token is stored. Without a `slug`, the workflow
+ * reads a `vars.VOID_PROJECT` repository variable.
  */
 export function getWorkflowYaml(
   root: string,
@@ -2080,15 +1826,8 @@ function setupGithubActions(
 }
 
 /**
- * Bake a resolved project slug into an already-written `void-deploy.yml`.
- *
- * Step 8 (GitHub Actions) runs BEFORE Step 9 (project link), so when a user
- * links a project during the same interactive init the workflow was written
- * with the `${{ vars.VOID_PROJECT }}` placeholder. Once the link resolves a
- * slug, rewrite the placeholder `env.VOID_PROJECT` block in place so the user
- * does not also have to set a repository variable. No-op (returns `false`)
- * when the workflow is missing or the placeholder is not present (e.g. the
- * slug was already known at scaffold time, or the user declined linking).
+ * Replace the `vars.VOID_PROJECT` placeholder in `void-deploy.yml` with a slug
+ * linked after the workflow was written. Returns false when there is none.
  */
 function patchWorkflowProjectSlug(root: string, slug: string): boolean {
   const workflowPath = join(root, '.github', 'workflows', 'void-deploy.yml');
@@ -2096,8 +1835,7 @@ function patchWorkflowProjectSlug(root: string, slug: string): boolean {
     return false;
   }
   const yaml = readFileSync(workflowPath, 'utf-8');
-  // The placeholder block emitted by `getWorkflowYaml` is three lines: two
-  // 2-space-indented comment lines followed by the placeholder value line.
+  // The placeholder block that `getWorkflowYaml` emits.
   const placeholderBlock =
     '  # Set a VOID_PROJECT repository variable to your project slug\n' +
     '  # (Settings → Secrets and variables → Actions → Variables).\n' +
@@ -2215,7 +1953,7 @@ function resolvePnpmConfigRoot(root: string, pkg: JsonObject): string {
   return root;
 }
 
-function ensurePnpmAllowBuilds(root: string, pkg: JsonObject): boolean {
+function ensurePnpmAllowBuilds(root: string, pkg: JsonObject): void {
   const configRoot = resolvePnpmConfigRoot(root, pkg);
   const workspacePath = join(configRoot, 'pnpm-workspace.yaml');
   const before = existsSync(workspacePath) ? readFileSync(workspacePath, 'utf-8') : '';
@@ -2231,24 +1969,58 @@ function ensurePnpmAllowBuilds(root: string, pkg: JsonObject): boolean {
         ? 'Updated pnpm-workspace.yaml with approved builds'
         : `Updated ${relative(root, workspacePath)} with approved builds`,
     );
-    return true;
   }
-  return false;
 }
 
-function installProjectDependencies(
+export function installProjectDependencies(
   root: string,
   packageManager: ProjectState['packageManager'],
 ): void {
-  log.step(`Installing dependencies with ${packageManager}`);
+  const pkg = readPackageJson(root);
+  const useVitePlus = pkg !== null && hasPackageDependency(pkg, 'vite-plus');
+  const installer = useVitePlus ? 'vp' : packageManager;
+  log.step(`Installing dependencies with ${installer}`);
 
   // Init has just changed the manifest. Refresh the lockfile even when pnpm
   // detects a CI host; subsequent CI builds can use frozen installs normally.
-  const args = packageManager === 'pnpm' ? ['install', '--no-frozen-lockfile'] : ['install'];
-  const result = spawnSync(packageManager, args, {
+  let command: string = installer;
+  let args =
+    useVitePlus || packageManager === 'pnpm' ? ['install', '--no-frozen-lockfile'] : ['install'];
+  if (useVitePlus) {
+    let localBin: string | undefined;
+    try {
+      const require = createRequire(join(root, 'package.json'));
+      localBin = join(dirname(require.resolve('vite-plus/package.json')), 'bin/vp');
+    } catch {
+      // The starter's Vite+ dependency has not been installed yet.
+    }
+    if (localBin) {
+      command = process.execPath;
+      args = [localBin, ...args];
+    } else {
+      const probe = spawnSync('vp', ['--version'], {
+        cwd: root,
+        stdio: 'ignore',
+        shell: process.platform === 'win32',
+        timeout: 5_000,
+      });
+      if (probe.status !== 0) {
+        // npx void init must also work without a globally installed vp. Avoid
+        // asking an older pnpm to switch itself to a pinned native pnpm 12.
+        command = 'npx';
+        args = [
+          '--yes',
+          `--package=vite-plus@${SCAFFOLD_VITE_PLUS_DEV_DEPENDENCIES['vite-plus']}`,
+          'vp',
+          ...args,
+        ];
+      }
+    }
+  }
+  const result = spawnSync(command, args, {
     cwd: root,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: command !== process.execPath && process.platform === 'win32',
   });
 
   if (result.error) {
@@ -2256,12 +2028,10 @@ function installProjectDependencies(
   }
 
   if (result.status !== 0) {
-    throw new Error(
-      `${packageManager} install failed with exit code ${result.status ?? 'unknown'}`,
-    );
+    throw new Error(`${installer} install failed with exit code ${result.status ?? 'unknown'}`);
   }
 
-  log.step(`Installed dependencies with ${packageManager}`);
+  log.step(`Installed dependencies with ${installer}`);
 }
 
 export function generateStarterMigration(
@@ -2269,46 +2039,12 @@ export function generateStarterMigration(
   starterMode: Exclude<ScaffoldStarterMode, 'static'>,
 ): void {
   const dialect = starterMode;
-  const configPath = writeDrizzleConfig(
-    root,
-    dialect === 'postgresql'
-      ? 'postgresql://dummy'
-      : dialect === 'mysql'
-        ? 'mysql://dummy'
-        : ':memory:',
-    dialect,
-  );
+  const configPath = writeDrizzleConfig(root, PLACEHOLDER_DB_URL[dialect], dialect);
 
-  // Snapshot everything drizzle-kit might touch so a
-  // mid-write crash can't leave partial artifacts that wedge
-  // subsequent `void db` commands on the journal coherence check.
-  // Mirrors the rollback pattern in `gen.ts`'s
-  // `runMigration`, but extended for the "migrations dir
-  // doesn't exist yet" case that only the starter path hits.
-  const migrationsDir = readProjectPaths(root).migrationsDir;
-  const metaDir = join(migrationsDir, 'meta');
-  const journalPath = join(metaDir, '_journal.json');
-  const migrationsDirExistedBefore = existsSync(migrationsDir);
-  const metaDirExistedBefore = existsSync(metaDir);
-  const originalJournalBytes: Buffer | null = existsSync(journalPath)
-    ? readFileSync(journalPath)
-    : null;
-  const snapshotsBefore = metaDirExistedBefore
-    ? new Set(readdirSync(metaDir).filter((f) => f.endsWith('_snapshot.json')))
-    : new Set<string>();
-  const sqlFilesBefore = migrationsDirExistedBefore
-    ? new Set(readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')))
-    : new Set<string>();
+  const rollBack = snapshotDrizzleOutputs(readProjectPaths(root).migrationsDir);
 
   log.step('Generating initial Drizzle migration');
-  // Under Yarn Berry PnP, the spawned `node drizzle-kit` child cannot
-  // resolve `void/schema-d1` from the user's `db/schema.ts` without
-  // the PnP loaders patched onto `fs` / `Module._resolveFilename`.
-  // `buildDrizzleKitSpawnEnv` detects ancestor `.pnp.cjs` /
-  // `.pnp.loader.mjs` and injects the right `NODE_OPTIONS` flags so
-  // the child behaves the same as if we had run `yarn node
-  // drizzle-kit generate`. Non-PnP projects get a plain clone of
-  // `process.env`.
+  // Adds the Yarn PnP loaders drizzle-kit needs to resolve `void/schema-d1`.
   const result = spawnSync(process.execPath, [drizzleKitBin, 'generate', '--config', configPath], {
     cwd: root,
     stdio: 'pipe',
@@ -2317,78 +2053,8 @@ export function generateStarterMigration(
     env: buildDrizzleKitSpawnEnv(root),
   });
 
-  const failed = Boolean(result.error) || result.status !== 0;
-  if (failed) {
-    // Best-effort byte-restore of the journal + unlink of any fresh
-    // files drizzle-kit may have planted before it crashed. Swallow
-    // cleanup errors — the original spawn failure is the actionable
-    // signal; a cleanup bug should not shadow it.
-    if (originalJournalBytes !== null) {
-      try {
-        writeFileSync(journalPath, originalJournalBytes);
-      } catch {
-        // Swallow: surfacing the original failure is more useful.
-      }
-    } else if (!metaDirExistedBefore && existsSync(metaDir)) {
-      // meta/ didn't exist before — nuke anything drizzle-kit planted
-      // inside it and remove the dir itself.
-      try {
-        for (const f of readdirSync(metaDir)) {
-          try {
-            unlinkSync(join(metaDir, f));
-          } catch {
-            // Swallow.
-          }
-        }
-        try {
-          rmdirSync(metaDir);
-        } catch {
-          // Swallow.
-        }
-      } catch {
-        // Swallow: a failed readdir is not a useful signal here.
-      }
-    }
-    if (metaDirExistedBefore && existsSync(metaDir)) {
-      for (const f of readdirSync(metaDir)) {
-        if (f.endsWith('_snapshot.json') && !snapshotsBefore.has(f)) {
-          try {
-            unlinkSync(join(metaDir, f));
-          } catch {
-            // Swallow.
-          }
-        }
-      }
-    }
-    if (!migrationsDirExistedBefore && existsSync(migrationsDir)) {
-      // migrations/ didn't exist before — nuke any fresh sql files.
-      // Intentionally do NOT rmdir the directory itself: a subsequent
-      // retry wants it to exist, and leaving an empty dir behind is
-      // harmless.
-      try {
-        for (const f of readdirSync(migrationsDir)) {
-          if (f.endsWith('.sql')) {
-            try {
-              unlinkSync(join(migrationsDir, f));
-            } catch {
-              // Swallow.
-            }
-          }
-        }
-      } catch {
-        // Swallow.
-      }
-    } else if (migrationsDirExistedBefore && existsSync(migrationsDir)) {
-      for (const f of readdirSync(migrationsDir)) {
-        if (f.endsWith('.sql') && !sqlFilesBefore.has(f)) {
-          try {
-            unlinkSync(join(migrationsDir, f));
-          } catch {
-            // Swallow.
-          }
-        }
-      }
-    }
+  if (result.error || result.status !== 0) {
+    rollBack();
   }
 
   if (result.error) {
@@ -2488,27 +2154,10 @@ function scaffoldPagesApp(
     ensureDependency('devDependencies', name, version);
   }
 
-  // The pnpm build approval setup must run for workspace
-  // subpackages too. `detectProjectState` only checks LOCAL markers and
-  // returns `'npm'` for a subpackage without its own lockfile / pin,
-  // but `isPnpmProject(root, pkg)` walks ancestors and verifies
-  // membership. Gate the allowlist on the ancestor-aware check
-  // so the workspace gets `allowBuilds` and its
-  // better-sqlite3 / esbuild / sharp / workerd postinstalls run on the next
-  // workspace-root `pnpm install`.
-  if (isPnpmProject(root, pkg)) {
+  // `detectProjectState` reads only local markers; `isPnpmProject` also covers
+  // pnpm workspace members, which need the root `allowBuilds`.
+  if (packageManager === 'pnpm' || isPnpmProject(root, pkg)) {
     ensurePnpmAllowBuilds(root, pkg);
-  }
-  // The Corepack pin is ONLY for the standalone pnpm case. In a
-  // workspace subpackage the pin lives on the workspace root's
-  // package.json; duplicating it per-package confuses Corepack and can
-  // conflict with the root pin on future upgrades.
-  if (
-    packageManager === 'pnpm' &&
-    resolveWorkspaceDeferral(root, pkg) === undefined &&
-    (!pkg.packageManager || typeof pkg.packageManager !== 'string')
-  ) {
-    pkg.packageManager = 'pnpm@12.4.1';
   }
 
   writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2542,22 +2191,11 @@ function scaffoldPagesApp(
   return dependencyAdded;
 }
 
-type ExistingProjectPackageSetupResult = {
-  dependencyAdded: boolean;
-  packageJsonMutated: boolean;
-};
-
-function hasDeclaredDependency(pkg: JsonObject, name: string): boolean {
-  return DEPENDENCY_FIELDS.some((field) => {
-    const group = asRecord(pkg[field]);
-    return typeof group?.[name] === 'string';
-  });
-}
-
+/** Returns whether a dependency was added. */
 function ensureExistingProjectPackage(
   root: string,
   options: { plainViteSetup?: boolean } = {},
-): ExistingProjectPackageSetupResult {
+): boolean {
   const packageJsonPath = join(root, 'package.json');
   const voidSpec = resolveScaffoldDependencySpec(root, 'void', getOwnVersion());
   const plainViteSetup = options.plainViteSetup ?? true;
@@ -2605,18 +2243,20 @@ function ensureExistingProjectPackage(
 
   const devDependencies = asRecord(pkg.devDependencies) ?? {};
   pkg.devDependencies = devDependencies;
-  if (!hasDeclaredDependency(pkg, 'void')) {
+  if (!hasPackageDependency(pkg, 'void', DEPENDENCY_FIELDS)) {
     devDependencies.void = voidSpec;
     changed = true;
     dependencyAdded = true;
   }
-  if (plainViteSetup && !hasDeclaredDependency(pkg, 'vite')) {
+  if (plainViteSetup && !hasPackageDependency(pkg, 'vite', DEPENDENCY_FIELDS)) {
     devDependencies.vite = SCAFFOLD_BASE_DEV_DEPENDENCIES.vite;
     changed = true;
     dependencyAdded = true;
   }
 
-  const pnpmConfigChanged = isPnpmProject(root, pkg) ? ensurePnpmAllowBuilds(root, pkg) : false;
+  if (isPnpmProject(root, pkg)) {
+    ensurePnpmAllowBuilds(root, pkg);
+  }
 
   if (changed) {
     writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -2631,7 +2271,7 @@ function ensureExistingProjectPackage(
     );
   }
 
-  return { dependencyAdded, packageJsonMutated: changed || pnpmConfigChanged };
+  return dependencyAdded;
 }
 
 function getBasicVoidViteConfig(): string {
@@ -2720,38 +2360,23 @@ function ensureExistingProjectViteConfig(root: string, framework?: DetectedFrame
   log.step(`Added voidPlugin() to ${configPath}`);
 }
 
-function setupExistingProject(
-  root: string,
-  framework?: DetectedFramework,
-): {
-  dependencyAdded: boolean;
-  packageJsonMutated: boolean;
-} {
+/** Returns whether a dependency was added. */
+function setupExistingProject(root: string, framework?: DetectedFramework): boolean {
   log.info('Existing project detected. Configuring Void...');
-  const packageResult = ensureExistingProjectPackage(root, {
+  const dependencyAdded = ensureExistingProjectPackage(root, {
     plainViteSetup: framework?.class !== 'c',
   });
   ensureExistingProjectViteConfig(root, framework);
-  return packageResult;
+  return dependencyAdded;
 }
 
 /**
- * Scaffolds the minimal "SQL → types → handler → fetch" demo into an
- * existing project. The demo files import from `void/db` and
- * `void/schema-d1`, so `void` MUST be present in `package.json` before
- * the caller runs `installProjectDependencies` +
- * `generateStarterMigration`; otherwise `drizzle-kit generate` cannot
- * resolve the schema imports. This function ensures `void` is declared,
- * preserving whatever spec is already there or adding the current CLI
- * version used by greenfield scaffolds.
- * `scaffoldPagesApp` has the same contract via its template; we just
- * replicate the "ensure void dep" slice here for the demo path.
+ * Scaffolds the "SQL → types → handler → fetch" demo into an existing project.
+ * `setupExistingProject` has already declared `void` in `package.json`.
  */
-function scaffoldDemo(root: string): { packageJsonMutated: boolean } {
+function scaffoldDemo(root: string): void {
   const devCommand = getDevCommand(root);
   const paths = readProjectPaths(root);
-
-  const packageJsonMutated = ensureVoidDependency(root);
 
   mkdirSync(paths.dbDir, { recursive: true });
   writeFileSync(
@@ -2810,108 +2435,6 @@ console.log(posts);
       'Try changing the migration or handler — types update automatically.',
     'Type Safety Demo',
   );
-
-  return { packageJsonMutated };
-}
-
-/**
- * Ensures `void` is declared in `package.json`, creating the file if it
- * does not exist. This is a narrow, scaffoldDemo-specific helper:
- * `scaffoldPagesApp` handles greenfield projects via
- * `createPagesStarterTemplate` (which knows about adapters,
- * devDependencies, scripts, etc.); `scaffoldDemo` only needs enough in
- * `package.json` for `drizzle-kit generate` to resolve `void/schema-d1`
- * via `node_modules/void` after install.
- */
-export function ensureVoidDependency(root: string): boolean {
-  const packageJsonPath = join(root, 'package.json');
-  const voidSpec = resolveScaffoldDependencySpec(root, 'void', getOwnVersion());
-
-  let pkg: JsonObject = {};
-  let existedBefore = false;
-  if (existsSync(packageJsonPath)) {
-    existedBefore = true;
-    try {
-      pkg = asRecord(JSON.parse(readFileSync(packageJsonPath, 'utf-8'))) ?? {};
-    } catch {
-      throw new Error('Could not parse package.json while scaffolding demo');
-    }
-  }
-
-  const fallbackName = defaultPackageName(root);
-  let changed = !existedBefore;
-  if (!pkg.name || typeof pkg.name !== 'string') {
-    pkg.name = fallbackName;
-    changed = true;
-  }
-  // Only stamp `private: true` when we're creating `package.json` from
-  // scratch. Flipping an existing project that intentionally omits
-  // `private` (e.g. an app or library meant to be published to a registry)
-  // to `private: true` silently changes its publish semantics; the demo
-  // scaffold only needs `void` in `devDependencies`, not a publishability
-  // flip.
-  if (!existedBefore && pkg.private === undefined) {
-    pkg.private = true;
-    changed = true;
-  }
-  // Only stamp `type: "module"` when we're creating `package.json` from
-  // scratch. Flipping an existing CommonJS project (where `type` is absent)
-  // to ESM is a breaking change for any sibling `.js` scripts, tests, or
-  // tooling that rely on `require`-based resolution; the demo scaffold only
-  // needs `void` in `devDependencies`, not a module-system rewrite.
-  if (!existedBefore && !pkg.type) {
-    pkg.type = 'module';
-    changed = true;
-  }
-
-  if (
-    !pkg.devDependencies ||
-    typeof pkg.devDependencies !== 'object' ||
-    Array.isArray(pkg.devDependencies)
-  ) {
-    pkg.devDependencies = {};
-  }
-  if (
-    !pkg.dependencies ||
-    typeof pkg.dependencies !== 'object' ||
-    Array.isArray(pkg.dependencies)
-  ) {
-    pkg.dependencies = {};
-  }
-  const devDependencies = asRecord(pkg.devDependencies) ?? {};
-  pkg.devDependencies = devDependencies;
-
-  // Only touch `void` if it's not already declared in any dependency
-  // group (deps, devDeps, peerDeps, optionalDeps).
-  if (!hasDeclaredDependency(pkg, 'void')) {
-    devDependencies.void = voidSpec;
-    changed = true;
-  }
-
-  // Mirror `scaffoldPagesApp`'s pnpm build approval config. pnpm requires
-  // build scripts to be approved through `allowBuilds`; without this, the freshly scaffolded
-  // demo breaks on first local DB / dev commands because
-  // `better-sqlite3`/`esbuild`/`sharp`/`workerd` never run their postinstall
-  // build steps. Honor both pnpm signals via `isPnpmProject` — a committed
-  // `pnpm-lock.yaml` OR a `package.json#packageManager: pnpm` Corepack pin,
-  // which `detectProjectState` and `runInitCommand` also treat as pnpm.
-  const pnpmConfigChanged = isPnpmProject(root, pkg) ? ensurePnpmAllowBuilds(root, pkg) : false;
-
-  if (changed) {
-    writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
-    log.step(
-      existedBefore
-        ? 'Ensured void is in package.json devDependencies'
-        : 'Created package.json with void as a devDependency',
-    );
-  }
-
-  return changed || pnpmConfigChanged;
-}
-
-function getOwnVersion(): string {
-  const pkg = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8'));
-  return pkg.version;
 }
 
 const MARKER_VERSION_SOURCE =
@@ -3027,8 +2550,16 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       scaffoldedPagesFramework = await promptScaffoldFramework();
     }
     const starterMode = await promptStarterMode();
+    const existingPackageJson = readPackageJson(root);
+    const hasPackageManager =
+      hasLocalLockfile(root) ||
+      existsSync(join(root, 'pnpm-workspace.yaml')) ||
+      parsePackageManagerField(existingPackageJson) !== undefined ||
+      resolveWorkspaceDeferral(root, existingPackageJson) !== undefined;
     const scaffoldPackageManager =
-      scaffoldToolchain === 'vite-plus' ? 'pnpm' : preScaffoldState.packageManager;
+      scaffoldToolchain === 'vite-plus' && !hasPackageManager
+        ? 'pnpm'
+        : preScaffoldState.packageManager;
     const scaffoldWroteDeps = scaffoldPagesApp(
       root,
       scaffoldPackageManager,
@@ -3037,35 +2568,15 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       scaffoldToolchain,
     );
 
-    // If this empty directory sits inside a declared workspace subpackage
-    // we cannot run a leaf `installProjectDependencies` here: the fallback
-    // package manager would pollute the workspace with a stray
-    // `node_modules` / lockfile that conflicts with the workspace
-    // manager's hoisting, or reject the install outright on `workspace:`
-    // specs. Defer to the user's next workspace install via
-    // `workspaceSubpackageSkip` and surface a note. The skip also covers
-    // `generateStarterMigration` (drizzle-kit cannot resolve
-    // `void/schema-d1` from a subpackage with no resolved deps yet).
-    //
-    // The skip decision routes through `resolveWorkspaceDeferral` for
-    // consistency with the demo branch below — both branches honor the
-    // same local-lockfile / Corepack veto. `(!voidResolvable || scaffoldWroteDeps)`
-    // is defense in depth: in practice `scaffoldWroteDeps` is always
-    // true when this branch runs because `isScaffoldableEmptyProject`
-    // only whitelists `void` + adapter packages while the starter
-    // template additionally injects `hono` / framework lib / `vite` /
-    // `typescript`, so `scaffoldPagesApp`'s `ensureDependency()` is
-    // guaranteed to flip `dependencyAdded` to true. The `!voidResolvable`
-    // disjunct keeps the gate correct even if a future template lands
-    // a smaller dep set.
+    // A workspace member installs from the workspace root: a leaf install would
+    // leave a stray lockfile or reject `workspace:` specs, and drizzle-kit needs
+    // the installed deps for the starter migration.
     const deferral = resolveWorkspaceDeferral(root, readPackageJson(root));
     const voidResolvable = isVoidResolvableFrom(root);
     if (deferral && (!voidResolvable || scaffoldWroteDeps)) {
       workspaceSubpackageSkip = true;
       const relRoot = relative(deferral.workspaceRoot, root) || '.';
-      // Static starter mode does not scaffold a `db/schema.ts` (see
-      // `template.ts:156`), so the `void db generate` follow-up is
-      // meaningless there — only emit it for the db-backed starter modes.
+      // The static starter has no database schema to generate from.
       const dbFollowUp =
         starterMode === 'static'
           ? ''
@@ -3076,11 +2587,6 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         'Workspace subpackage',
       );
     } else if (scaffoldWroteDeps || !voidResolvable) {
-      // Non-subpackage case (or hoisted-void subpackage with no
-      // package.json drift): run install when we either added deps OR
-      // when `void` is not yet resolvable from disk. The latter covers
-      // the pre-declared-deps path that `isScaffoldableEmptyProject`
-      // permits.
       scaffoldAddedDependencies = true;
     }
     if (starterMode !== 'static') {
@@ -3093,10 +2599,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   const pagesFramework = scaffoldedPagesFramework ?? detectPagesFramework(root);
 
   if (!targeted && !didScaffoldStarter) {
-    const existingSetup = setupExistingProject(root, framework);
+    const dependencyAdded = setupExistingProject(root, framework);
     const voidResolvable = isVoidResolvableFrom(root);
-    const needsInstall = existingSetup.dependencyAdded || !voidResolvable;
-    if (needsInstall) {
+    if (dependencyAdded || !voidResolvable) {
       const deferral = resolveWorkspaceDeferral(root, readPackageJson(root));
       if (deferral) {
         workspaceSubpackageSkip = true;
@@ -3113,7 +2618,6 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     }
   }
 
-  // Step 1: TypeScript / tsconfig
   if (!targeted || initArgs?.tsconfig) {
     state.typescriptWanted = true;
     setupTsconfig(root, state, pagesFramework);
@@ -3131,7 +2635,6 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     ensureVoidWorkerCompatibilityDate(root);
   }
 
-  // Step 2: Cloudflare config for class B/C meta-frameworks
   if (framework) {
     setupWranglerConfig(root, framework);
   }
@@ -3139,12 +2642,11 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     migrateFrameworkAdapterPaths(root);
   }
 
-  // Step 3: Database dialect
   if (!targeted && !didScaffoldStarter) {
     applyDatabaseSetup(root, await promptDatabaseSetup(root));
   }
 
-  // Steps 4–5: Agent instructions and skills are part of every init.
+  // Agent instructions and skills are part of every init.
   await injectAgentBlock(root, newProject);
 
   const agents = detectAgents(root);
@@ -3155,12 +2657,10 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     log.info('Bundled Void docs: node_modules/void/docs/');
   }
 
-  // Step 6: Demo code (only in full interactive flow, not for meta-frameworks)
+  // Demo code only in the full flow, and not for meta-frameworks.
   if (!targeted && !framework) {
     if (didScaffoldStarter || state.hasRoutes || state.hasMigrations || state.hasPages) {
       log.info('Project already has pages, routes, or migrations, skipping demo');
-    } else if (!state.typescriptWanted) {
-      // Demo requires TypeScript for the type pipeline
     } else {
       const scaffold = await confirm({
         message: 'Scaffold demo code? (migration + API route + frontend fetch)',
@@ -3170,64 +2670,25 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         process.exit(0);
       }
       if (scaffold) {
-        const { packageJsonMutated } = scaffoldDemo(root);
-        // `generateStarterMigration` spawns drizzle-kit, which resolves
-        // `void/schema-d1` through Node's ancestor `node_modules` walk.
-        // The demo install is only necessary when that resolution would
-        // fail — i.e. `void` is not present anywhere from `root` upward.
-        // `scaffoldDemo` (via `ensureVoidDependency`) may write `void`
-        // to the local `package.json` even when `void` is already
-        // hoisted at an ancestor `node_modules/void`; that manifest
-        // update alone does NOT justify an install here. In hoisted
-        // monorepos `isVoidResolvableFrom` returns true via the ancestor
-        // walk, so we skip the install — which is important because
-        // workspace subpackages with `workspace:` specs often reject
-        // `npm install` outright. Fresh clones where `node_modules/void`
-        // is entirely missing still trigger the install via
-        // `!voidResolvable`.
-        //
-        // `resolveWorkspaceDeferral` is the single source of truth for
-        // "is this a workspace subpackage that should defer install to
-        // the root?" — it honors local lockfiles and Corepack pins so
-        // a leaf-managed nested project does NOT take the skip path.
+        scaffoldDemo(root);
+        // The existing-project step already queued any install or workspace deferral the demo needs.
         const voidResolvable = isVoidResolvableFrom(root);
         const deferral = resolveWorkspaceDeferral(root, readPackageJson(root));
-        if (deferral && (!voidResolvable || packageJsonMutated)) {
-          // Workspace subpackage: either we need an install
-          // (`!voidResolvable`) or `ensureVoidDependency` mutated
-          // `package.json` so the workspace lockfile is now stale.
-          // Either way we can't run a leaf `npm install` (would reject
-          // `workspace:` specs and pollute the workspace), and we can't
-          // safely run the starter migration before the user has
-          // reconciled their lockfile.
-          workspaceSubpackageSkip = true;
+        if (deferral && !voidResolvable) {
           const relRoot = relative(deferral.workspaceRoot, root) || '.';
-          const headline = voidResolvable
-            ? `\`void\` is already hoisted at an ancestor node_modules, but \`./${relRoot}/package.json\` was updated.\nRun your workspace install from ${deferral.workspaceRoot} to sync the lockfile,`
-            : `Run your workspace install from ${deferral.workspaceRoot} to pick up the new \`void\` dep,`;
           note(
             `Scaffolded the starter demo in ./${relRoot}.\n\n` +
-              `${headline}\n` +
+              `Run your workspace install from ${deferral.workspaceRoot} to pick up the new \`void\` dep,\n` +
               `then run \`void db generate\` from ./${relRoot} to create the initial migration.`,
             'Workspace subpackage',
           );
-        } else if (!voidResolvable || packageJsonMutated) {
-          // Non-subpackage case. We also enter this branch when
-          // `packageJsonMutated` is true even if `void` was already
-          // resolvable, because `scaffoldDemo()` added a new `void` entry
-          // to the child's `package.json` and the lockfile needs to be
-          // reconciled. Without this install, CI frozen-install (or
-          // `pnpm install --frozen-lockfile`, `npm ci`,
-          // `yarn install --immutable`) would fail the integrity check.
-          scaffoldAddedDependencies = true;
         }
         scaffoldedStarterMode = 'sqlite';
       }
     }
   }
 
-  // Step 8: Deployment platform. Targeted init commands retain their focused,
-  // non-interactive behavior and do not change the saved preference.
+  // Targeted runs keep the saved deployment preference without prompting.
   const deploymentPlatform = !targeted
     ? await promptDeploymentPlatform(root)
     : readDeploymentPlatform(root);
@@ -3240,25 +2701,12 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     voidPlatformDiscovery = await ensureVoidPlatformConnection(root);
   }
 
-  // Step 9: GitHub Actions for either configured deployment target.
-  // Skip when `root` is a workspace subpackage: `setupGithubActions` would
-  // write `.github/workflows/deploy.yml` under the subpackage root, but
-  // GitHub only reads `.github/workflows/*` from the repository root, so
-  // the workflow would be silently ignored. The user has to set this up
-  // from the workspace root themselves.
-  //
-  // This check is intentionally NOT `resolveWorkspaceDeferral`: a leaf
-  // managed subpackage (local lockfile or a non-pnpm Corepack pin) is
-  // still a workspace member structurally, and GitHub still ignores its
-  // `.github/workflows/` directory. Self-managing the install does not
-  // change where GitHub reads workflow files from. Compute the
-  // subpackage-membership signal directly so both targeted and
-  // interactive modes agree.
-  const githubStepSkipForSubpackage = workspaceSubpackage;
+  // GitHub reads workflows only from the repository root, so skip every
+  // workspace member, even one that manages its own install.
   let shouldSetupGithub = targeted ? initArgs?.github === true : deploymentPlatform !== 'none';
   if (
     shouldSetupGithub &&
-    !githubStepSkipForSubpackage &&
+    !workspaceSubpackage &&
     deploymentPlatform !== 'cloudflare' &&
     deploymentPlatform !== 'none'
   ) {
@@ -3275,9 +2723,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
       shouldSetupGithub = false;
     }
   }
-  if (shouldSetupGithub && !githubStepSkipForSubpackage) {
-    // `setupGithubActions` writes `void-deploy.yml` (skipping with a warning if
-    // it already exists). It does not touch any pre-existing `deploy.yml`.
+  if (shouldSetupGithub && !workspaceSubpackage) {
     if (targeted) {
       // --github flag: run directly without prompting
       setupGithubActions(
@@ -3303,7 +2749,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         );
       }
     }
-  } else if (githubStepSkipForSubpackage && shouldSetupGithub) {
+  } else if (workspaceSubpackage && shouldSetupGithub) {
     log.info(
       'Skipping GitHub Actions setup: workflow files must live at the repo root, not in a workspace subpackage.',
     );
@@ -3325,18 +2771,12 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
     installProjectDependencies(root, state.packageManager);
   }
   if (scaffoldedStarterMode && !workspaceSubpackageSkip) {
-    // `generateStarterMigration` injects the Yarn PnP loaders through
-    // `buildDrizzleKitSpawnEnv`, so it works under PnP like
-    // `gen.ts:runMigration`.
     generateStarterMigration(root, scaffoldedStarterMode);
   }
 
   if (!targeted && deploymentPlatform === 'void') {
     const linked = await maybeSetupDeployProject(root);
-    // Step 8 wrote `void-deploy.yml` before the project was linked, so it baked
-    // in the `${{ vars.VOID_PROJECT }}` placeholder. Now that linking resolved a
-    // slug, patch it into the workflow so the user does not also have to set a
-    // repository variable. Declining to link leaves the placeholder intact.
+    // The workflow was written before linking, with a placeholder slug.
     if (linked?.slug) {
       patchWorkflowProjectSlug(root, linked.slug);
     }
@@ -3347,11 +2787,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
   }
 
   if (workspaceSubpackageSkip) {
-    // The workspace install + `void db generate` ordering was already
-    // surfaced via `note(..., 'Workspace subpackage')` upstream; the
-    // completion nudges the user back toward that note instead of
-    // suggesting a dev command they cannot run yet. Static starter mode
-    // has no migration step, so omit the `void db generate` half there.
+    // The dev command cannot run before the workspace install.
     if (scaffoldedStarterMode) {
       printSuccess(
         'Project initialized. Run your workspace install, then `void db generate` to finish setup.',

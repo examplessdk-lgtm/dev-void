@@ -6,7 +6,7 @@ Void brings together three open-source tools for you and your coding agents:
 
 - **Void SDK:** Build your server and client together with file-based API routes, server-rendered pages, and typed APIs for databases, storage, and AI. Carry types from database queries to the UI.
 - **Void CLI:** Build your app, provision the Cloudflare resources it uses, apply migrations, and deploy with one command. Manage resources, inspect logs, and roll back through the same CLI.
-- **Void Platform:** Install a shared deployment environment in your Cloudflare account for your team or customers, with access controls, resource limits, and usage reporting.
+- **Void Platform:** Install a shared deployment environment in your Cloudflare account for your team or customers, with access controls, resource limits, usage reporting, and [connected applications](./docs/guide/platform/administration/connected-apps.md) that request user-approved deployments.
 
 The SDK's features are optional and composable. Use React, Vue, Svelte, or Solid for Void pages, or keep a [supported application framework](https://void.cloud/integrations/frameworks/overview) for routing and rendering while Void handles resource APIs, migrations, and deployment.
 
@@ -20,7 +20,7 @@ npx void init
 npm run dev
 ```
 
-Choose your UI framework and starter, then select Cloudflare to deploy to your account:
+Vite+ is the default toolchain; setup installs it for you and keeps your existing package-manager configuration. Choose your UI framework and starter, then select Cloudflare to deploy to your account:
 
 ```sh
 npx void deploy

@@ -17,7 +17,7 @@ export function inferDurableResourceName(filePath: string): string {
   return filePath.replace(/\\/g, '/').split('/').pop()!.replace(MODULE_PATTERN, '');
 }
 
-const DURABLE_HELPERS = new Set(['defineDurableState']);
+const DURABLE_HELPERS = new Set(['defineDurableState', 'defineDurableObject']);
 
 export function deriveDurableResourceIdentity(name: string): {
   bindingName: string;

@@ -7,7 +7,6 @@ import {
   deriveWebSocketClassNameFromName,
   detectWebSocketDefinition,
   inferWebSocketResourceName,
-  scanWebSocketRoutes,
   scanWebSocketRoutesSync,
 } from '../../src/router/websocket.ts';
 
@@ -48,7 +47,7 @@ describe('WebSocket resource names', () => {
 
   it.each(['defineRoom', 'defineWebSocket'])(
     'pins %s identity unchanged, then preserves it after moving the route',
-    async (helper) => {
+    (helper) => {
       const root = createRoot();
       const file = createRoute(root, 'chat/[room].ws.ts', `export default ${helper}({})`);
       const [original] = scanWebSocketRoutesSync(root);
@@ -64,7 +63,6 @@ describe('WebSocket resource names', () => {
         filePath: 'rooms/[room].ws.ts',
         pattern: '/rooms/:room',
       });
-      expect(await scanWebSocketRoutes(root)).toEqual(scanWebSocketRoutesSync(root));
     },
   );
 

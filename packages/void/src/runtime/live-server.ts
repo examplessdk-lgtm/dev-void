@@ -1,4 +1,10 @@
 import {
+  connectionInstanceName,
+  internalUrl,
+  topicDigest,
+  topicInstanceName,
+} from './live-names.ts';
+import {
   __getLiveBindingName,
   type LiveClientEvent,
   type LiveControlErrorCode,
@@ -678,23 +684,4 @@ function subscriberPrefix(streamId: string, topicKey: string): string {
 
 function subscriberKey(row: SubscriberRow): string {
   return `${subscriberPrefix(row.streamId, row.topicKey)}${row.connectionId}:${row.subscriptionId}:${row.generation}:${row.revision}`;
-}
-
-async function topicDigest(streamId: string, topic: string): Promise<string> {
-  const bytes = new TextEncoder().encode(`${streamId}\u0000${topic}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const binary = String.fromCharCode(...new Uint8Array(digest));
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-}
-
-function connectionInstanceName(streamId: string, connectionId: string): string {
-  return `live:${streamId}:connection:${connectionId}`;
-}
-
-function topicInstanceName(streamId: string, topicKey: string): string {
-  return `live:${streamId}:topic:${topicKey}`;
-}
-
-function internalUrl(path: string): string {
-  return `https://void.live${path}`;
 }

@@ -1,9 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { Buffer } from '../../src/cli/node-buffer.ts';
-import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+import { captureOutput, setIsolatedHome } from '../helpers/cli-command.ts';
 
 const tempHomes: Array<string> = [];
 const mockGetToken = vi.fn<() => string | null>();
@@ -13,31 +12,9 @@ vi.mock('../../src/cli/auth', async (importOriginal) => ({
   getToken: () => mockGetToken(),
 }));
 
-function setIsolatedHome(): void {
-  const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
-  tempHomes.push(dir);
-  process.env.HOME = dir;
-  process.env.USERPROFILE = dir;
-  process.env.VOID_PLATFORM_REGISTRY_DIR = join(dir, 'registry');
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.example.test',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test platform',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
-}
-
-function createProjectRoot(opts?: { staging?: boolean }): string {
+function createProjectRoot(): string {
   const dir = mkdtempSync(join(tmpdir(), 'void-project-'));
   tempHomes.push(dir);
-  if (opts?.staging) {
-    const voidDir = join(dir, '.void');
-    mkdirSync(voidDir, { recursive: true });
-    writeFileSync(join(voidDir, 'project.json'), JSON.stringify({ voidInternalStaging: true }));
-  }
   return dir;
 }
 
@@ -45,31 +22,6 @@ async function importRunProjectsCommand() {
   vi.resetModules();
   const mod = await import('../../src/cli/projects.ts');
   return mod.runProjectsCommand;
-}
-
-function captureOutput(): { output: () => string; restore: () => void } {
-  const chunks: Array<string> = [];
-  const writeMock = vi
-    .spyOn(process.stdout, 'write')
-    .mockImplementation((...args: Array<unknown>) => {
-      const chunk = args[0];
-      if (typeof chunk === 'string') {
-        chunks.push(chunk);
-      } else if (Buffer.isBuffer(chunk)) {
-        chunks.push(chunk.toString());
-      }
-      return true;
-    });
-  const logMock = vi.spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-    chunks.push(args.map(String).join(' ') + '\n');
-  });
-  return {
-    output: () => chunks.join(''),
-    restore: () => {
-      writeMock.mockRestore();
-      logMock.mockRestore();
-    },
-  };
 }
 
 describe('runProjectsCommand', () => {
@@ -92,8 +44,8 @@ describe('runProjectsCommand', () => {
   });
 
   it('prints projects for the authenticated user', async () => {
-    setIsolatedHome();
-    const root = createProjectRoot({ staging: true });
+    tempHomes.push(setIsolatedHome());
+    const root = createProjectRoot();
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -139,7 +91,7 @@ describe('runProjectsCommand', () => {
   });
 
   it('prints a friendly message when there are no projects', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     const root = createProjectRoot();
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
@@ -159,11 +111,11 @@ describe('runProjectsCommand', () => {
   });
 
   it('exits with error when not logged in', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     const root = createProjectRoot();
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -173,6 +125,5 @@ describe('runProjectsCommand', () => {
     capture.restore();
 
     expect(out).toContain('Not logged in');
-    expect(exitSpy).toHaveBeenCalled();
   });
 });

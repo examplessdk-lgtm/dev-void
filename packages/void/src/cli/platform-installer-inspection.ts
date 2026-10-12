@@ -15,6 +15,8 @@ import {
   type WorkerInspectionClient,
 } from './platform-installer-types.ts';
 
+export class PlatformWorkerOwnershipError extends Error {}
+
 export async function readActivePlatformWorkerVersion(
   configPath: string,
   accountId: string,
@@ -164,9 +166,6 @@ export async function inspectNewPlatformWorker(
   resourceKey: string,
   workerName: string,
 ): Promise<'missing' | 'owned'> {
-  if (!client.listWorkerNames || !client.getWorkerPlainTextBindings) {
-    throw new Error('platform: Cloudflare Worker ownership inspection is unavailable.');
-  }
   const workerNames = await client.listWorkerNames(accountId);
   if (!workerNames.includes(workerName)) {
     return 'missing';
@@ -296,7 +295,7 @@ export async function readPlatformWorkerVersionSnapshot(
     ownershipBindings.length !== 1 ||
     (ownershipBindings[0] as { text: string }).text !== expectedOwnershipMarker
   ) {
-    throw new Error(
+    throw new PlatformWorkerOwnershipError(
       `platform: Active Worker version ${versionId} for ${workerName} does not belong to this installation.`,
     );
   }

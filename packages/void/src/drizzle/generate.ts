@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'pathslash';
 import { collectMigrations } from '../migrations/collect.ts';
 import { openMigrationValidationDatabase } from '../migrations/sqlite-validation.ts';
@@ -14,6 +22,52 @@ function snapshotFiles(root: string): Map<string, Buffer> {
     }
   }
   return files;
+}
+
+function listFiles(dir: string, suffix: string): Set<string> {
+  return new Set(existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith(suffix)) : []);
+}
+
+/**
+ * Record the Drizzle outputs under `migrationsDir` and return a rollback for a
+ * failed `drizzle-kit generate`, so partial files cannot fail the journal check
+ * of later `void db` commands.
+ */
+export function snapshotDrizzleOutputs(migrationsDir: string): () => void {
+  const metaDir = join(migrationsDir, 'meta');
+  const journalPath = join(metaDir, '_journal.json');
+  const metaDirExisted = existsSync(metaDir);
+  const journal = existsSync(journalPath) ? readFileSync(journalPath) : null;
+  const snapshots = listFiles(metaDir, '_snapshot.json');
+  const sqlFiles = listFiles(migrationsDir, '.sql');
+
+  const bestEffort = (step: () => void): void => {
+    try {
+      step();
+    } catch {
+      // The drizzle-kit failure is the error worth reporting.
+    }
+  };
+  const removeNewFiles = (dir: string, suffix: string, before: Set<string>): void => {
+    for (const file of listFiles(dir, suffix)) {
+      if (!before.has(file)) {
+        bestEffort(() => unlinkSync(join(dir, file)));
+      }
+    }
+  };
+
+  return () => {
+    if (metaDirExisted) {
+      if (journal !== null) {
+        bestEffort(() => writeFileSync(journalPath, journal));
+      }
+      bestEffort(() => removeNewFiles(metaDir, '_snapshot.json', snapshots));
+    } else {
+      bestEffort(() => rmSync(metaDir, { recursive: true, force: true }));
+    }
+    // Keep a new migrations directory so a retry can reuse it.
+    bestEffort(() => removeNewFiles(migrationsDir, '.sql', sqlFiles));
+  };
 }
 
 /** Keep SQL and Drizzle's snapshot/journal together when generation fails validation. */

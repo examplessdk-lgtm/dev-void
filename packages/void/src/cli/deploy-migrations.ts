@@ -6,44 +6,27 @@ import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import { type DatabaseDialect } from '../config.ts';
 import { openMigrationValidationDatabase } from '../migrations/sqlite-validation.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
+import { isCleanCloudflareExit } from './cloudflare-process.ts';
 import { hasDeploySchemaDrift, getDeploySchemaDriftMessage } from './deploy-drift.ts';
-import { getErrorMessage, log } from './deploy-helpers.ts';
-import { CLOUDFLARE_RESOURCE_LABELS, isCleanWranglerExit } from './deploy-resources.ts';
+import { log } from './deploy-helpers.ts';
+import { CLOUDFLARE_RESOURCE_LABELS } from './deploy-resources.ts';
 import {
   type RequiredAuthTable,
   type TableInfoRow,
   type DeployWranglerRun,
 } from './deploy-types.ts';
-// Type-only: the provision module must load lazily (see `deploy-types.ts`).
+import { getErrorMessage } from './output.ts';
 import type { ProvisionDriftEntry } from './provision.ts';
 
 /**
- * Apply the checked-in migrations to an in-memory SQLite database (`node:sqlite`, a repo
- * dependency — the same driver `auth/node.ts` uses) and assert the effective schema contains
- * every REQUIRED auth table, its columns, AND the constraints that carry correctness. It reads
- * the real POST-migration schema (a token search is defeated by comments/strings/renames/plugin
- * tables) — the identical thing wrangler will apply to remote D1 (SQLite).
+ * Apply the checked-in migrations to an in-memory SQLite database and assert the resulting
+ * schema has every required auth table and column, with its primary key, NOT NULL, UNIQUE and
+ * foreign key constraints. Drizzle's `.unique()` and `.references()` are opt-in, so matching
+ * names alone would accept a weaker schema than the managed path builds.
  *
- * Names alone are not enough: Void ships no auth migration scaffolder, so users hand-write
- * `db/schema.ts` and run `void db generate`, where Drizzle's `.unique()` and `.references()`
- * are both opt-in. A migration set with every right NAME but no unique index on `user.email`
- * and no `session.userId` foreign key is a materially weaker schema than the one the managed
- * path builds (`applySqliteAuthMigrations`), so this gate rejects it.
- *
- * Asserted: column presence, the implicit `id`'s uniqueness (`primaryKey`), `required`
- * (NOT NULL), `unique: true`, and `references` (parent table + column — including that an
- * implicit `REFERENCES "parent"` resolves to the parent's actual PRIMARY KEY). Those
- * reference checks answer only WHICH column a foreign key names; whether SQLite will ACCEPT
- * that parent key is settled by `PRAGMA foreign_key_check` on the migrated (still empty)
- * database, which applies SQLite's own rule rather than a local re-derivation of it.
- * Deliberately NOT asserted — these would reject legitimate schemas:
- *   - column TYPE — SQLite is dynamically typed, and Drizzle's output varies by mode.
- *   - non-unique `index: true` — a performance property, not a correctness one.
- *   - the exact `onDelete` action — over-tight; the reference itself is the invariant.
- *
- * Throws naming the exact offending `table.column` and what is missing (identifiers only,
- * never values), or when a migration cannot even be applied. Exported for unit testing (the
- * `required` set is passed in, so this needs no Better Auth resolution).
+ * Column types, non-unique indexes and `onDelete` actions are not checked, because legitimate
+ * schemas vary there. Throws naming each offending `table.column` (identifiers only, never
+ * values), or when a migration cannot be applied.
  */
 export async function assertMigrationsProduceAuthSchema(
   migrations: Array<{ name: string; sql: string }>,
@@ -51,20 +34,10 @@ export async function assertMigrationsProduceAuthSchema(
 ): Promise<void> {
   const db = await openMigrationValidationDatabase(migrations);
   const quote = (identifier: string): string => `"${identifier.replace(/"/g, '""')}"`;
-  // SQLite resolves identifiers case-insensitively, but `sqlite_master.name` and every PRAGMA
-  // echo back the casing the migration DECLARED. So `CREATE TABLE "User" ("Email" TEXT UNIQUE)`
-  // is the same schema as the emitted `user.email` — lowercase SELECTs resolve against it and
-  // the UNIQUE constraint enforces — and must not read as missing here. Every identifier this
-  // function compares (table, column, unique index member, FK parent) is folded through this
-  // one notion of equality; only the PRAGMA arguments keep the caller's original spelling,
-  // since SQLite resolves those case-insensitively anyway.
+  // SQLite matches identifiers case-insensitively, but PRAGMAs echo the declared casing.
   const foldIdentifier = (identifier: string): string => identifier.toLowerCase();
   const sameIdentifier = (a: string, b: string): boolean => foldIdentifier(a) === foldIdentifier(b);
-  // `PRAGMA table_info`, memoized. A foreign key is validated against the PARENT table's info,
-  // and the parent is not necessarily a table this loop has reached (or will ever reach), so
-  // this must be able to answer for an arbitrary table at any point. SQLite resolves the PRAGMA
-  // argument case-insensitively, so the cache is keyed on the FOLDED name while the query keeps
-  // the caller's spelling. A table no migration created yields `[]`, not an error.
+  // Foreign keys need the parent table's info too. A table no migration created yields `[]`.
   const tableInfoCache = new Map<string, Array<TableInfoRow>>();
   const tableInfoFor = (table: string): Array<TableInfoRow> => {
     const key = foldIdentifier(table);
@@ -76,8 +49,7 @@ export async function assertMigrationsProduceAuthSchema(
     tableInfoCache.set(key, rows);
     return rows;
   };
-  // The table's single-column PRIMARY KEY, or null when it has none or a COMPOSITE one. This is
-  // the ONLY thing SQLite resolves an omitted foreign-key target column to.
+  // SQLite resolves an omitted foreign key target only to a single-column PRIMARY KEY.
   const singleColumnPrimaryKey = (table: string): string | null => {
     const primaryKey = tableInfoFor(table).filter((row) => Number(row.pk) > 0);
     return primaryKey.length === 1 && primaryKey[0] ? primaryKey[0].name : null;
@@ -105,13 +77,8 @@ export async function assertMigrationsProduceAuthSchema(
         problems.push(`table "${req.table}" is missing column(s): ${missing.join(', ')}`);
       }
 
-      // Uniqueness — collect every column SQLite actually enforces as unique, so BOTH
-      // spellings a real project produces are honored: a column-level `email TEXT UNIQUE`
-      // (SQLite materializes an implicit `sqlite_autoindex_*`) and a separate
-      // `CREATE UNIQUE INDEX ... ON user (email)` (what `applySqliteAuthMigrations` emits).
-      // Any single-column, non-partial unique index over the column counts — the index NAME
-      // is never required. A single-column PRIMARY KEY counts too, including the
-      // `INTEGER PRIMARY KEY` rowid alias, which materializes no `origin = 'pk'` index row.
+      // A column is unique through a single-column PRIMARY KEY (including the rowid alias,
+      // which has no index row) or any single-column, non-partial unique index.
       const uniqueColumns = new Set<string>();
       const primaryKey = tableInfo.filter((row) => Number(row.pk) > 0);
       if (primaryKey.length === 1 && primaryKey[0]) {
@@ -124,15 +91,14 @@ export async function assertMigrationsProduceAuthSchema(
         partial?: number;
       }>;
       for (const index of indexes) {
-        // A PARTIAL unique index only constrains the rows matching its WHERE clause, so it
-        // does not make the column globally unique.
+        // A partial unique index constrains only the rows matching its WHERE clause.
         if (Number(index.unique) !== 1 || Number(index.partial ?? 0) !== 0) {
           continue;
         }
         const indexColumns = db.prepare(`PRAGMA index_info(${quote(index.name)})`).all() as Array<{
           name: string | null;
         }>;
-        // A composite unique index constrains the TUPLE, not this column on its own.
+        // A composite unique index constrains the tuple, not this column alone.
         if (indexColumns.length !== 1) {
           continue;
         }
@@ -141,16 +107,8 @@ export async function assertMigrationsProduceAuthSchema(
           uniqueColumns.add(foldIdentifier(only));
         }
       }
-      // The implicit `id` — the parent key every auth foreign key resolves against. SQLite
-      // only accepts a parent key that is uniquely constrained, so a migration that creates
-      // `id` as an ordinary column produces a schema whose FKs are DEAD: `CREATE TABLE`
-      // succeeds, `PRAGMA foreign_key_list` still reports the constraint, and then every
-      // statement touching the child table fails at prepare time with `foreign key mismatch`
-      // under `foreign_keys=ON` (which D1 always enforces) — i.e. auth breaks in production
-      // AFTER a green deploy. PRIMARY KEY and UNIQUE are both valid parent keys, so reuse
-      // `uniqueColumns` (it already accepts the single-column PK, the `INTEGER PRIMARY KEY`
-      // rowid alias, and any single-column non-partial unique index) rather than demanding
-      // PRIMARY KEY specifically.
+      // Auth foreign keys point at `id`. SQLite (and D1, which always enforces foreign keys)
+      // rejects a non-unique parent key at runtime with "foreign key mismatch".
       const notIdentity = req.columns
         .filter(
           (required) =>
@@ -168,24 +126,9 @@ export async function assertMigrationsProduceAuthSchema(
         );
       }
 
-      // NOT NULL — `PRAGMA table_info.notnull` answers it directly, with ONE exception. The
-      // `INTEGER PRIMARY KEY` rowid alias reports `notnull = 0`, but SQLite assigns a rowid on
-      // a NULL insert, so the column can never actually hold NULL; rejecting it would false-
-      // reject a common, legitimate schema.
-      //
-      // The declared type CANNOT decide this on its own. `INTEGER PRIMARY KEY DESC` is not a
-      // rowid alias — a historical SQLite quirk — yet `PRAGMA table_info` reports it
-      // identically to the real alias (`type = INTEGER`, `pk = 1`, `notnull = 0`) while a NULL
-      // insert genuinely stores NULL. What separates them is that a true alias IS the rowid,
-      // so SQLite materializes no primary-key index for it: `PRAGMA index_list` carries an
-      // `origin = 'pk'` row for `DESC`, for `TEXT PRIMARY KEY`, for `INT`/`BIGINT PRIMARY KEY`
-      // and for a composite PK, but none for `INTEGER PRIMARY KEY` / `INTEGER PRIMARY KEY ASC`.
-      // That is the discriminator used here — the absence of the `origin = 'pk'` row, read off
-      // the `index_list` the uniqueness check above already fetched, with no SQL text parsing.
-      // Note the test is the ORIGIN, not the row count: a rowid-alias table may still carry
-      // unrelated `origin = 'u'` / `origin = 'c'` index rows from a column-level UNIQUE or a
-      // `CREATE INDEX`. The single-column-PK and exact-`INTEGER` conditions are kept alongside
-      // it, so nothing widens beyond the one shape SQLite actually aliases to the rowid.
+      // The `INTEGER PRIMARY KEY` rowid alias reports `notnull = 0` but can never hold NULL.
+      // `INTEGER PRIMARY KEY DESC` looks the same in `table_info` yet is not an alias; only a
+      // real alias has no `origin = 'pk'` row in `index_list`.
       const hasPrimaryKeyIndex = indexes.some(
         (index) => String(index.origin ?? '').toLowerCase() === 'pk',
       );
@@ -202,12 +145,8 @@ export async function assertMigrationsProduceAuthSchema(
           .map((row) => foldIdentifier(row.name)),
       );
 
-      // The identity's own NOT NULL. SQLite permits NULL in any PRIMARY KEY column that is not
-      // the rowid alias — a longstanding file-format compatibility quirk — so `id text primary
-      // key` accepts rows carrying NO identity, and more than one of them, because NULLs never
-      // collide under a unique constraint. Reported apart from the ordinary required columns
-      // below: the constraint reads as already satisfied in the migration, so the message has
-      // to name the quirk to be actionable.
+      // SQLite allows NULL in a PRIMARY KEY column other than the rowid alias, so the message
+      // names that quirk.
       const nullableIdentity = req.columns
         .filter(
           (required) =>
@@ -226,7 +165,6 @@ export async function assertMigrationsProduceAuthSchema(
         );
       }
 
-      // Every other column the emitted schema marks `required`.
       const nullableRequired = req.columns
         .filter(
           (required) =>
@@ -258,11 +196,7 @@ export async function assertMigrationsProduceAuthSchema(
         );
       }
 
-      // References — the emitted schema points these columns at a parent row, and without the
-      // foreign key the migrations permit orphaned auth rows (e.g. a session with no user).
-      // `PRAGMA foreign_key_list` returns ONE ROW PER COLUMN, not one per constraint: the rows
-      // of a single constraint share an `id` and are ordered by `seq`. Grouping by `id` is what
-      // makes the width of each constraint visible, and the width is load-bearing — see below.
+      // `PRAGMA foreign_key_list` returns one row per column; rows of one constraint share `id`.
       const foreignKeys = db
         .prepare(`PRAGMA foreign_key_list(${quote(req.table)})`)
         .all() as Array<{
@@ -291,34 +225,17 @@ export async function assertMigrationsProduceAuthSchema(
           sameIdentifier(fk.from, required.column) &&
           typeof fk.table === 'string' &&
           sameIdentifier(fk.table, reference.table);
-        // ONLY a SINGLE-COLUMN foreign key satisfies an auth reference. SQLite applies
-        // MATCH SIMPLE, under which a COMPOSITE foreign key is skipped ENTIRELY whenever ANY
-        // of its child columns is NULL — so `FOREIGN KEY (userId, tenant) REFERENCES
-        // user(id, tenant)` with a nullable `tenant` lets a session naming a nonexistent user
-        // be inserted, exactly the orphan the `references` requirement exists to prevent.
-        // Matching per ROW would accept that constraint through its `userId` member alone.
-        // `PRAGMA foreign_key_check` cannot cover for this either: it reports orphaned DATA,
-        // and the freshly-migrated database it runs against holds no rows.
+        // Only a single-column foreign key counts: under MATCH SIMPLE, SQLite skips a composite
+        // key whenever any of its child columns is NULL.
         const matching = constraints.flatMap((group) =>
           group.length === 1 && group[0] && namesReference(group[0]) ? [group[0]] : [],
         );
         const composite = constraints.some(
           (group) => group.length > 1 && group.some(namesReference),
         );
-        // WHICH COLUMN the foreign key points at — a question of NAMES, and the only
-        // question this block answers. Whether SQLite will ACCEPT that parent key at all is
-        // orthogonal and is settled below by `PRAGMA foreign_key_check`, so nothing here
-        // needs to model SQLite's parent-key rules.
-        //
-        // `to` is NULL when the migration omitted the target column (`REFERENCES "user"`).
-        // SQLite resolves an omitted target ONLY to the parent's single-column PRIMARY KEY,
-        // so the shorthand names the required column only when that column IS the parent's
-        // PRIMARY KEY. The answer lives only in the PARENT's own `table_info`, which is why
-        // this reaches outside the table being validated. This check is load-bearing beyond
-        // the pragma: a foreign key aimed at a perfectly valid parent key that is the WRONG
-        // column (`REFERENCES "user"` where the parent's PRIMARY KEY is `email`, not `id`)
-        // is structurally sound, so `foreign_key_check` passes it — only this comparison
-        // catches it. An EXPLICIT `to` matches by name directly.
+        // This checks only which column the key names; `foreign_key_check` below decides
+        // whether SQLite accepts the parent key. A null `to` (`REFERENCES "user"`) means the
+        // parent's single-column PRIMARY KEY.
         const satisfied = matching.some((fk) => {
           if (fk.to != null) {
             return sameIdentifier(String(fk.to), reference.column);
@@ -348,28 +265,9 @@ export async function assertMigrationsProduceAuthSchema(
         }
       }
 
-      // AUTHORITATIVE structural gate for this table's foreign keys — ask SQLite instead of
-      // re-deriving its parent-key rules here. Those rules are subtler than they look: a
-      // parent key must be a PRIMARY KEY, or a UNIQUE index whose columns AND COLLATING
-      // SEQUENCES match the reference, and an omitted target column resolves only to the
-      // parent's PRIMARY KEY. Hand-modelling them easily lets a schema SQLite rejects pass
-      // (an ordinary parent column; a UNIQUE-only parent under the implicit shorthand; a
-      // unique index declared `COLLATE NOCASE` over a plainly declared column).
-      // `PRAGMA foreign_key_check` applies SQLite's own rule, so a case this file has not
-      // anticipated cannot pass.
-      //
-      // It reports a STRUCTURAL mismatch by THROWING (`foreign key mismatch - "child"
-      // referencing "parent"`), not by returning rows; returned rows mean orphaned DATA,
-      // which a freshly-migrated database holding no rows cannot have, but are surfaced too
-      // so neither outcome is silently dropped. Scoped to this table (the CHILD side) so an
-      // unrelated application table with its own broken foreign key is not this gate's
-      // business. Any other error is a real fault and propagates untouched.
-      //
-      // Why this matters: `CREATE TABLE` accepts a dead foreign key, and `PRAGMA
-      // foreign_key_list` echoes it back as if valid. Only when a statement touches the
-      // child does SQLite fail at PREPARE time with `foreign key mismatch` — under
-      // `foreign_keys=ON`, which D1 always enforces. Without this gate that surfaces as auth
-      // breaking in production AFTER a green deploy.
+      // Let SQLite apply its own parent-key rules. `CREATE TABLE` accepts an invalid parent
+      // key, which then fails at runtime; `foreign_key_check` reports it by throwing
+      // "foreign key mismatch". Any other error propagates.
       try {
         const violations = db
           .prepare(`PRAGMA foreign_key_check(${quote(req.table)})`)
@@ -408,19 +306,9 @@ export async function assertMigrationsProduceAuthSchema(
 }
 
 /**
- * Read the REQUIRED Better Auth schema (tables + columns) from the schema the BUILD
- * actually generated — ground truth, not a facsimile. `writeAuthDatabaseFiles`
- * (plugin-routing.ts) emits `<root>/.void/better-auth-schema.ts` during the build,
- * containing an `export const migrationSchema = { ... } as const;` literal —
- * `JSON.stringify(resolveVoidAuthMigrationSchema(...), null, 2)` derived under the
- * build's real mode, so it already reflects configured table/column RENAMES + PLUGIN
- * tables. The literal's top-level object closes with `}` at column 0, so the
- * `\n} as const;` terminator uniquely bounds the JSON (inner braces are indented).
- * The `id` column is the implicit PRIMARY KEY, so it is prepended to each table's
- * columns — matching `resolveVoidAuthMigrationSchema`'s field set exactly. Each field
- * also carries its `required` (NOT NULL) and `unique` flags and its `references` target,
- * so the check below can assert the CONSTRAINTS the schema requires and not merely the
- * names. Throws a fail-closed error when the artifact is missing/malformed.
+ * Read the required auth tables from the `.void/better-auth-schema.ts` the build emitted, so
+ * renamed and plugin tables are included. Its `migrationSchema` JSON literal closes with
+ * `\n} as const;` because inner braces are indented. Throws when the file is missing or malformed.
  */
 function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> {
   const schemaPath = join(root, '.void', 'better-auth-schema.ts');
@@ -455,11 +343,7 @@ function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> 
   return migrationSchema.tables.map((table) => ({
     table: table.name,
     columns: [
-      // `id` is the implicit PRIMARY KEY — never carries `unique`/`references` of its own,
-      // and is absent from `fields`, so this synthesized descriptor is the ONLY thing that
-      // represents it. `primaryKey` makes the check assert it is a usable FK parent key
-      // (see {@link RequiredAuthColumn.primaryKey}); `required` makes it assert the column
-      // cannot be NULL, which PRIMARY KEY alone does not guarantee in SQLite.
+      // `id` is the implicit primary key and is absent from `fields`.
       { column: 'id', unique: false, required: true, primaryKey: true },
       ...Object.entries(table.fields).map(([column, field]) => ({
         column,
@@ -473,14 +357,7 @@ function readEmittedAuthMigrationSchema(root: string): Array<RequiredAuthTable> 
   }));
 }
 
-/**
- * Default {@link CloudflareDeployDeps.validateAuthMigrations} seam: read the auth
- * schema the BUILD generated ({@link readEmittedAuthMigrationSchema}) and assert the
- * checked-in migrations produce it (applied to in-memory SQLite). Runs POST-build,
- * against ground truth — no auth-config subprocess, no mode/envDir divergence.
- * Throws on any missing table/column (or an unapplyable migration); the caller
- * renders `.message` + fails closed.
- */
+/** Assert after the build that the checked-in migrations produce the emitted auth schema. */
 export async function validateAuthMigrationSchema(
   root: string,
   migrations: Array<{ name: string; sql: string }>,
@@ -505,15 +382,8 @@ export function formatCloudflareDriftMessage(
 }
 
 /**
- * Run the SAME migration validations the MANAGED deploy runs before applying
- * migrations to remote D1 — schema drift (drizzle-kit), journal coherence, and
- * destructive-op-without-pragma — reusing the managed building blocks
- * ({@link hasDeploySchemaDrift} / {@link getDeploySchemaDriftMessage} /
- * `assertJournalCoherence` / `validateMigrations`). Unlike the managed
- * `assertDeploySchemaDriftFree` (which calls `process.exit` itself), this THROWS on
- * any failure so the Cloudflare orchestrator routes the exit through its injectable
- * seam. This is the default of the {@link CloudflareDeployDeps.assertMigrationsDeployable}
- * seam; tests inject a stub to avoid spawning drizzle-kit.
+ * Run the managed deploy's migration checks (schema drift, journal coherence, destructive
+ * statements without a pragma). Throws instead of exiting, so the caller handles the failure.
  */
 export function assertRemoteMigrationsDeployable(
   root: string,
@@ -531,15 +401,9 @@ export function assertRemoteMigrationsDeployable(
 }
 
 /**
- * wrangler 4.131's own migration-file order comparator, reproduced EXACTLY
- * (`compareMigrationPaths` / `compareSegments` / `leadingMigrationNumber`,
- * `wrangler-dist/cli.js` `src/d1/migrations/helpers.ts`): segment-by-segment, comparing each
- * segment's LEADING NUMERIC PREFIX (`parseInt(segment.split('_')[0], 10)`) numerically first,
- * so `2_x.sql` sorts BEFORE `10_x.sql` (lexicographic would invert them). A finite number
- * sorts before a non-numeric segment; equal/both-NaN falls back to lexicographic. This is the
- * exact order `d1 migrations apply` walks (`listFilesRelative(...).sort(compareMigrationPaths)`
- * → `getMigrationNames`), so ordering the gated set the same way tells us what remote D1 will
- * receive, in what order.
+ * The cf CLI's D1 migration order: per path segment, the leading number before `_` compares
+ * numerically (`2_x.sql` before `10_x.sql`), numbers sort before non-numbers, and ties fall
+ * back to string order.
  */
 function leadingWranglerMigrationNumber(relativePath: string): number {
   const firstSegment = relativePath.split('/')[0] ?? '';
@@ -652,21 +516,10 @@ function listWranglerMigrationFiles(directory: string, pattern: string): Array<s
 }
 
 /**
- * Assert the migration files wrangler 4.131 will APPLY — in the ORDER it applies them — equal
- * the gated source set. wrangler resolves its OWN files from the D1 entry's `migrations_dir`
- * (relative to the config-file dir) with either the default `<dir>/*.sql` pattern or the
- * configured `migrations_pattern`, tracks each by its relative `.sql` name, and applies them
- * sorted by its numeric-prefix comparator ({@link compareWranglerMigrationPaths}) — the exact
- * sequence `d1 migrations apply` runs against REMOTE D1. This backend VALIDATES the set
- * `collectMigrations` reads (flat dir, `seed.sql` excluded, sorted lexicographically). Two
- * things must hold: (1) SET equality by name AND content — a stray/extra file (e.g. `seed.sql`,
- * which `collectMigrations` skips but wrangler's `*.sql` matches), a differing dir, or a
- * divergent content would otherwise be applied UNVALIDATED; and (2) ORDER parity — the numeric
- * order wrangler applies must equal Void's gated order position-for-position, so the local
- * runner + deploy gates validate the exact order remote D1 receives (an unpadded prefix like
- * `2_` vs `10_` sorts differently lexicographically-vs-numerically and diverges — reject).
- * Custom patterns are accepted only when their exact result matches that gated set. Exported for
- * unit testing.
+ * Assert the files `d1 migrations apply` would apply from the binding's `migrations_dir` and
+ * `migrations_pattern` match the validated migrations by name and content, and in the same
+ * order. Otherwise a stray file such as `seed.sql`, or an unpadded `2_` vs `10_` prefix, would
+ * reach remote D1 unvalidated or out of order.
  */
 export async function checkWranglerMigrationApplySet(
   configPath: string,
@@ -696,7 +549,6 @@ export async function checkWranglerMigrationApplySet(
   const gatedNames = gated.map((m) => m.name.replace(/\\/g, '/'));
   const gatedContent = new Map(gatedNames.map((name, i) => [name, gated[i]!.sql]));
 
-  // 1) SET equality by name + content.
   const wranglerSet = new Set(wranglerNames);
   const extra = wranglerNames.filter((k) => !gatedContent.has(k));
   const missing = gatedNames.filter((k) => !wranglerSet.has(k)).sort();
@@ -723,8 +575,6 @@ export async function checkWranglerMigrationApplySet(
     return { ok: false, reason: lines.join('\n') };
   }
 
-  // 2) ORDER parity — wrangler's numeric apply order must equal Void's gated (collectMigrations)
-  // order position-for-position, so the order remote D1 receives is the order Void validated.
   const orderDiffers =
     gatedNames.length !== wranglerNames.length ||
     gatedNames.some((name, i) => name !== wranglerNames[i]);
@@ -753,14 +603,10 @@ export async function applyAndVerifyRemoteD1Migrations(
   runWrangler: DeployWranglerRun,
   assertUploaderStillPinned: () => boolean,
 ): Promise<boolean> {
-  // 10. Apply pending migrations to remote D1 — AFTER all local + ground-truth gates pass, so a
-  // failed gate never mutates remote D1. Uses the token resolved + validated at step 8d, and the
-  // pinned root config (`-c`), which targets the account already verified by provision/drift.
+  // Runs only after every local gate passes, so a failed gate never changes remote D1.
   if (d1MigrateToken) {
     log.step('Applying D1 migrations...');
-    // The local migration gates above ran project code (drizzle-kit loaded db/schema.ts), which
-    // could have overwritten the hashed uploader bundle after the last check. Re-verify against the
-    // pre-build baseline immediately before this credentialed, remote-mutating apply.
+    // The local gates ran project code, which could have replaced the pinned uploader.
     if (!assertUploaderStillPinned()) {
       return false;
     }
@@ -770,7 +616,7 @@ export async function applyAndVerifyRemoteD1Migrations(
         { capture: false },
       ),
     );
-    if (!isCleanWranglerExit(migrate)) {
+    if (!isCleanCloudflareExit(migrate)) {
       log.error(
         `deploy: remote D1 migrations failed for "${d1MigrateToken}" (exit ${String(migrate.status)}). ` +
           'Fix the migration and rerun. Note: D1 always enforces foreign_keys=ON — a Drizzle ' +
@@ -779,8 +625,7 @@ export async function applyAndVerifyRemoteD1Migrations(
       return false;
     }
 
-    // Read the structured pending set after apply; a clean apply exit alone does not prove
-    // the schema is current. Recheck integrity before this separate credentialed read.
+    // A clean exit does not prove the schema is current, so read the pending set.
     if (!assertUploaderStillPinned()) {
       return false;
     }
@@ -790,7 +635,7 @@ export async function applyAndVerifyRemoteD1Migrations(
         { capture: true },
       ),
     );
-    if (!isCleanWranglerExit(migrateList)) {
+    if (!isCleanCloudflareExit(migrateList)) {
       log.error(
         `deploy: could not verify the remote migration state for "${d1MigrateToken}" ` +
           `(\`d1 migrations list\` exit ${String(migrateList.status)}). Refusing to deploy against ` +

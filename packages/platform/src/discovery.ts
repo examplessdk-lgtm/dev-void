@@ -1,4 +1,4 @@
-import { readPlatformApplication, type PlatformApplication } from './application.ts';
+import { parsePlatformApplication, type PlatformApplication } from './application.ts';
 import {
   parsePlatformLoginDescriptor,
   parsePlatformLoginId,
@@ -10,6 +10,7 @@ import {
   normalizePlatformDashboardUrl,
   type PlatformCapabilities,
 } from './manifest.ts';
+import { assertRecord, record } from './validate.ts';
 
 export const PLATFORM_DISCOVERY_SCHEMA_VERSION = 1 as const;
 
@@ -65,9 +66,7 @@ export function createPlatformDiscoveryDocument(
     throw new Error('platformVersion must not be empty.');
   }
   if (input.applicationRouting) {
-    const application = readPlatformApplication({
-      PLATFORM_APPLICATION: JSON.stringify(input.applicationRouting),
-    });
+    const application = parsePlatformApplication(input.applicationRouting);
     if (
       !application.workersDev ||
       application.baseDomain !== input.applicationDomain ||
@@ -132,10 +131,7 @@ export function createPlatformDiscoveryDocument(
 }
 
 export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscoveryDocument {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Platform discovery document must be an object.');
-  }
-  const document = value as Record<string, unknown>;
+  const document = record(value, 'Platform discovery document');
   if (
     document.schemaVersion !== PLATFORM_DISCOVERY_SCHEMA_VERSION &&
     document.schemaVersion !== 2 &&
@@ -152,9 +148,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   if (document.schemaVersion === 2 && document.applicationRouting === undefined) {
     throw new Error('Discovery schema version 2 requires application routing.');
   }
-  if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
-    throw new Error('capabilities must be an object.');
-  }
+  assertRecord(capabilities, 'capabilities');
   const capabilityNames: Array<keyof PlatformCapabilities> = [
     'ai',
     'customDomains',
@@ -167,7 +161,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
   ];
   const parsedCapabilities = {} as Record<keyof PlatformCapabilities, boolean>;
   for (const name of capabilityNames) {
-    const enabled = (capabilities as Record<string, unknown>)[name];
+    const enabled = capabilities[name];
     if (typeof enabled !== 'boolean') {
       throw new Error(`capabilities.${name} must be a boolean.`);
     }
@@ -206,9 +200,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
     applicationDomain: string('applicationDomain'),
     ...(document.applicationRouting !== undefined
       ? {
-          applicationRouting: readPlatformApplication({
-            PLATFORM_APPLICATION: JSON.stringify(document.applicationRouting),
-          }),
+          applicationRouting: parsePlatformApplication(document.applicationRouting),
         }
       : {}),
     authenticationProviders: providers as Array<string>,
@@ -224,10 +216,7 @@ export function parsePlatformDiscoveryDocument(value: unknown): PlatformDiscover
 }
 
 function parseAuthentication(value: unknown): PlatformAuthenticationDiscovery {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Authentication discovery must be an object.');
-  }
-  const authentication = value as Record<string, unknown>;
+  const authentication = record(value, 'Authentication discovery');
   if (
     !Array.isArray(authentication.methods) ||
     authentication.methods.length > 32 ||

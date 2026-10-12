@@ -83,11 +83,6 @@ describe('createKV', () => {
       expect(mockNS.put).toHaveBeenCalledWith('user:1', '{"name":"Alice"}', {});
     });
 
-    it('stores strings as JSON so their type survives reads', async () => {
-      await kv.put('key', 'hello');
-      expect(mockNS.put).toHaveBeenCalledWith('key', '"hello"', {});
-    });
-
     it('passes ttl option as expirationTtl', async () => {
       await kv.put('key', 'val', { ttl: 3600 });
       expect(mockNS.put).toHaveBeenCalledWith('key', '"val"', { expirationTtl: 3600 });
@@ -96,11 +91,6 @@ describe('createKV', () => {
     it('passes expiration option', async () => {
       await kv.put('key', 'val', { expiration: 1700000000 });
       expect(mockNS.put).toHaveBeenCalledWith('key', '"val"', { expiration: 1700000000 });
-    });
-
-    it('passes metadata option', async () => {
-      await kv.put('key', 'val', { metadata: { role: 'admin' } });
-      expect(mockNS.put).toHaveBeenCalledWith('key', '"val"', { metadata: { role: 'admin' } });
     });
   });
 

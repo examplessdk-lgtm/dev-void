@@ -3,13 +3,10 @@ import {
   createPlatformInstallationManifest,
 } from '@void/platform';
 import { describe, expect, it } from 'vite-plus/test';
-import {
-  recordPlatformWorkerTraffic,
-  trackedPlatformWorkerTraffic,
-} from '../../src/cli/platform-traffic.ts';
+import { recordPlatformWorkerTraffic } from '../../src/cli/platform-traffic.ts';
 
 describe('platform traffic checkpoints', () => {
-  it('records observed traffic as retained but never schedules unattended deletion', () => {
+  it('records observed traffic as retained', () => {
     const deployment = createPlatformDeploymentManifest({
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
       controlPlane: { apiHostname: 'api.example.com' },
@@ -76,7 +73,6 @@ describe('platform traffic checkpoints', () => {
       { id: 'route-one', ownership: 'external', state: 'retained' },
       { id: 'route-two', ownership: 'external', state: 'retained' },
     ]);
-    expect(trackedPlatformWorkerTraffic(manifest)).toEqual({ customDomains: [], routes: [] });
   });
 
   it('fails closed when published traffic is ambiguous or missing', () => {

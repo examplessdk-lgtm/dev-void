@@ -2,9 +2,8 @@ import { describe, expect, it } from 'vite-plus/test';
 import { parseEmailArgs } from '../../src/cli/email-args.ts';
 
 /**
- * The nested `void email domain <verb>` group (design doc 0078, "Custom
- * domains on Cloudflare"). `runSubcommandGroup` handles one level, so the
- * group parses its own positionals: verb first, domain second.
+ * The nested `void email domain <verb>` group. `runSubcommandGroup` handles one level,
+ * so the group parses its own positionals: verb first, domain second.
  */
 describe('parseEmailArgs — domain group', () => {
   it('parses domain add with a domain', () => {
@@ -12,7 +11,6 @@ describe('parseEmailArgs — domain group', () => {
       subcommand: 'domain',
       domainVerb: 'add',
       domain: 'acme.com',
-      subdomain: undefined,
       projectSlug: undefined,
       limit: undefined,
       platform: undefined,
@@ -98,6 +96,7 @@ describe('parseEmailArgs — domain group', () => {
       ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
       ['domain', 'list', '--subdomain=mx'],
       ['domain', 'remove', 'acme.com', '--subdomain', 'mx'],
+      ['setup', '--platform', 'cloudflare', '--subdomain', 'mail'],
     ]) {
       expect(() => parseEmailArgs(args)).toThrow(
         'email: --subdomain applies to `void email domain add` only.',
@@ -108,12 +107,6 @@ describe('parseEmailArgs — domain group', () => {
     );
     expect(() => parseEmailArgs(['allow', 'a@x.dev', '--subdomain', 'mx'])).toThrow(
       'email: --subdomain applies to `void email domain add` only.',
-    );
-  });
-
-  it('rejects the removed force option instead of silently ignoring it', () => {
-    expect(() => parseEmailArgs(['domain', 'remove', 'acme.com', '--force'])).toThrow(
-      /takes exactly one domain argument/,
     );
   });
 
@@ -132,8 +125,6 @@ describe('parseEmailArgs — domain group', () => {
     ).toThrow('email: --subdomain can only be specified once.');
   });
 
-  // Mode B (0078): the developer's own zone needs none of this group — same
-  // rejection the platform-only subcommands already had.
   it('rejects --platform cloudflare on the domain group, accepts --platform void', () => {
     expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--platform', 'cloudflare'])).toThrow(
       'email: --platform cloudflare applies to `void email status` and `void email setup` only (`domain` is a Void platform command).',
@@ -142,17 +133,5 @@ describe('parseEmailArgs — domain group', () => {
       domainVerb: 'list',
       platform: 'void',
     });
-  });
-
-  it('keeps the existing subcommands parsing unchanged with the group registered', () => {
-    // The shared flag rules still bind inside the group.
-    expect(() => parseEmailArgs(['domain', 'list', '--project', 'a', '--project', 'b'])).toThrow(
-      'email: --project can only be specified once.',
-    );
-    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--project='])).toThrow(
-      'email: --project requires a value (a project name).',
-    );
-    // And the top-level usage error names the group.
-    expect(() => parseEmailArgs(['nope'])).toThrow(/email: Usage: void email .*domain/);
   });
 });

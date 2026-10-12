@@ -54,10 +54,7 @@ describe('ordinary account linking CLI', () => {
       expect.any(Function),
     );
     expect(state.link).toHaveBeenCalledWith('company');
-    expect(state.open).toHaveBeenCalledWith(
-      'https://api.example.com/auth/link?id=proof',
-      expect.any(Function),
-    );
+    expect(state.open).toHaveBeenCalledWith('https://api.example.com/auth/link?id=proof');
   });
   it('refuses linking or saving a login into a different account', async () => {
     state.who

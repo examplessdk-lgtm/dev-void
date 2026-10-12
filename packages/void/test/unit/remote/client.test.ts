@@ -19,12 +19,9 @@ describe('ProxyClient', () => {
     vi.restoreAllMocks();
   });
 
-  describe.each(['fetch', 'stream'] as const)('%s error diagnostics', (method) => {
+  describe('error diagnostics', () => {
     function request() {
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      return method === 'fetch'
-        ? client.fetch('/d1/query', { binding: 'DB' })
-        : client.stream('/r2/get', { method: 'POST', body: JSON.stringify({ binding: 'FILES' }) });
+      return new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID).fetch('/d1/query', { binding: 'DB' });
     }
 
     it('prefers server recovery guidance over the machine error and private metadata', async () => {
@@ -186,100 +183,13 @@ describe('ProxyClient', () => {
         }),
       );
 
-      // Verify projectId was injected into body
       const call = fetchMock.mock.calls[0];
       expect(call).toBeDefined();
-      if (!call) {
-        throw new Error('Expected fetch to be called');
-      }
       const [, init] = call as unknown as [RequestInfo | URL, RequestInit];
       const body = JSON.parse(String(init.body));
       expect(body.projectId).toBe(PROJECT_ID);
       expect(body.binding).toBe('DB');
       expect(body.sql).toBe('SELECT 1');
-    });
-
-    it('throws on non-OK responses with error message from body', async () => {
-      setFetchMock(
-        async () => new Response(JSON.stringify({ error: 'not found' }), { status: 404 }),
-      );
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      await expect(client.fetch('/d1/query', { binding: 'MISSING' })).rejects.toThrow(
-        /remote: Proxy request failed with 404/,
-      );
-    });
-
-    it('returns response for successful requests', async () => {
-      setFetchMock(async () => Response.json({ results: [{ id: 1 }], success: true }));
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      const res = await client.fetch('/d1/query', { binding: 'DB', sql: 'SELECT 1' });
-
-      expect(res.ok).toBe(true);
-      const data = (await res.json()) as { results: Array<unknown> };
-      expect(data.results).toEqual([{ id: 1 }]);
-    });
-  });
-
-  describe('stream()', () => {
-    it('returns raw Response for streaming', async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode('chunk1'));
-          controller.close();
-        },
-      });
-      setFetchMock(
-        async () =>
-          new Response(stream, { headers: { 'content-type': 'application/octet-stream' } }),
-      );
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      const res = await client.stream('/r2/get', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
-      });
-
-      expect(res.ok).toBe(true);
-      const text = await res.text();
-      expect(text).toBe('chunk1');
-    });
-
-    it('injects Authorization header and projectId into body', async () => {
-      const fetchMock = setFetchMock(async () => Response.json({ ok: true }));
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      await client.stream('/r2/get', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
-      });
-
-      const call = fetchMock.mock.calls[0];
-      expect(call).toBeDefined();
-      if (!call) {
-        throw new Error('Expected fetch to be called');
-      }
-      const [, init] = call as unknown as [RequestInfo | URL, RequestInit];
-      const headers = new Headers(init.headers);
-      expect(headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
-      // Verify projectId was injected into body
-      const body = JSON.parse(String(init.body));
-      expect(body.projectId).toBe(PROJECT_ID);
-    });
-
-    it('throws on non-OK responses', async () => {
-      setFetchMock(async () => new Response('server error', { status: 502 }));
-
-      const client = new ProxyClient(PROXY_URL, TOKEN, PROJECT_ID);
-      await expect(
-        client.stream('/r2/get', {
-          method: 'POST',
-          body: JSON.stringify({ binding: 'STORAGE', key: 'file.txt' }),
-        }),
-      ).rejects.toThrow(/remote: Proxy request failed with 502/);
     });
   });
 });

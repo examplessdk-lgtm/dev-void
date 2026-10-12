@@ -47,6 +47,8 @@ Choose a database during `void init`, or set `database` in `void.config.ts`:
 | Managed by | Void                         | Bring your own database             | Bring your own database   |
 | Connection | Automatic D1 binding         | Hyperdrive                          | Hyperdrive                |
 
+A Void platform keeps Hyperdrive query caching off for your database connection, so reads reflect completed writes. An existing connection is updated on the project's next deploy.
+
 ## Schema Definition
 
 Define your tables in `db/schema.ts` using column helpers from `void/schema-d1`, `void/schema-pg`, or `void/schema-mysql`.

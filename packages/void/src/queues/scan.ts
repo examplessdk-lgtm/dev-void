@@ -1,9 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'pathslash';
-import { glob, globSync } from 'tinyglobby';
+import { join } from 'pathslash';
+import { listConventionFiles } from '../shared/convention-files.ts';
 import { staticExportInitializers, staticLiteral } from '../shared/static-exports.ts';
-
-const QUEUE_PATTERN = '**/*.{ts,mts,js,mjs}';
 
 export type QueueDefinition = {
   /** Relative file path from queues/ */
@@ -32,16 +30,11 @@ function deriveQueueBindingName(name: string): string {
 
 const OPTION_NAMES = ['maxBatchSize', 'maxBatchTimeout', 'maxRetries', 'retryDelay'] as const;
 
-function resolveQueuesDir(root: string, queuesDir: string): string {
-  return isAbsolute(queuesDir) ? queuesDir : join(root, queuesDir);
-}
-
-function parseQueueFiles(queuesDirPath: string, files: Array<string>): Array<QueueDefinition> {
-  const definitions = files
-    .filter((filePath) => !filePath.split('/').some((segment) => segment.startsWith('_')))
+export function scanQueuesSync(queuesDir: string): Array<QueueDefinition> {
+  const definitions = listConventionFiles(queuesDir)
     .sort()
     .map((filePath) => {
-      const absPath = join(queuesDirPath, filePath);
+      const absPath = join(queuesDir, filePath);
       const source = readFileSync(absPath, 'utf-8');
       const name = extractName(filePath);
       const options = OPTION_NAMES.some((option) => source.includes(option))
@@ -96,26 +89,4 @@ function parseQueueFiles(queuesDirPath: string, files: Array<string>): Array<Que
   }
 
   return definitions;
-}
-
-export async function scanQueues(
-  root: string,
-  queuesDir = 'queues',
-): Promise<Array<QueueDefinition>> {
-  const queuesDirPath = resolveQueuesDir(root, queuesDir);
-  const files = await glob(QUEUE_PATTERN, { cwd: queuesDirPath, absolute: false }).catch(
-    () => [] as Array<string>,
-  );
-  return parseQueueFiles(queuesDirPath, files);
-}
-
-export function scanQueuesSync(root: string, queuesDir = 'queues'): Array<QueueDefinition> {
-  const queuesDirPath = resolveQueuesDir(root, queuesDir);
-  let files: Array<string>;
-  try {
-    files = globSync(QUEUE_PATTERN, { cwd: queuesDirPath, absolute: false });
-  } catch {
-    files = [];
-  }
-  return parseQueueFiles(queuesDirPath, files);
 }

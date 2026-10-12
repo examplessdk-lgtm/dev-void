@@ -157,38 +157,6 @@ describe('parseGenArgs', () => {
     });
   });
 
-  describe('middleware', () => {
-    it('parses middleware name', () => {
-      expect(parseGenArgs(['middleware', 'auth'])).toEqual({
-        subcommand: 'middleware',
-        name: 'auth',
-      });
-    });
-
-    it('errors on missing name', () => {
-      expect(() => parseGenArgs(['middleware'])).toThrow('gen: Usage: void gen middleware <name>.');
-    });
-
-    it('errors on extra argument', () => {
-      expect(() => parseGenArgs(['middleware', 'auth', 'extra'])).toThrow(
-        "gen: Unexpected argument 'extra'.",
-      );
-    });
-
-    it('rejects an invalid name (e.g. a flag) instead of scaffolding a bogus file', () => {
-      expect(() => parseGenArgs(['middleware', '--foo'])).toThrow(
-        'gen: Middleware name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
-      );
-    });
-
-    it('allows hyphenated middleware names', () => {
-      expect(parseGenArgs(['middleware', 'rate-limit'])).toEqual({
-        subcommand: 'middleware',
-        name: 'rate-limit',
-      });
-    });
-  });
-
   describe('ssr', () => {
     it('parses ssr with no framework (auto-detect)', () => {
       expect(parseGenArgs(['ssr'])).toEqual({
@@ -197,32 +165,8 @@ describe('parseGenArgs', () => {
       });
     });
 
-    it('parses ssr with --react', () => {
-      expect(parseGenArgs(['ssr', '--react'])).toEqual({
-        subcommand: 'ssr',
-        framework: 'react',
-      });
-    });
-
-    it('parses ssr with --vue', () => {
-      expect(parseGenArgs(['ssr', '--vue'])).toEqual({
-        subcommand: 'ssr',
-        framework: 'vue',
-      });
-    });
-
-    it('parses ssr with --svelte', () => {
-      expect(parseGenArgs(['ssr', '--svelte'])).toEqual({
-        subcommand: 'ssr',
-        framework: 'svelte',
-      });
-    });
-
-    it('parses ssr with --solid', () => {
-      expect(parseGenArgs(['ssr', '--solid'])).toEqual({
-        subcommand: 'ssr',
-        framework: 'solid',
-      });
+    it.each(['react', 'vue', 'svelte', 'solid'])('parses ssr with --%s', (framework) => {
+      expect(parseGenArgs(['ssr', `--${framework}`])).toEqual({ subcommand: 'ssr', framework });
     });
 
     it('errors on multiple framework flags', () => {
@@ -236,67 +180,35 @@ describe('parseGenArgs', () => {
     });
   });
 
-  describe('cron', () => {
-    it('parses cron name', () => {
-      expect(parseGenArgs(['cron', 'hourly-sync'])).toEqual({
-        subcommand: 'cron',
-        name: 'hourly-sync',
-      });
+  describe.each([
+    ['middleware', 'Middleware'],
+    ['cron', 'Cron'],
+    ['queue', 'Queue'],
+  ])('%s', (subcommand, label) => {
+    it('parses a name', () => {
+      expect(parseGenArgs([subcommand, 'auth'])).toEqual({ subcommand, name: 'auth' });
+    });
+
+    it('allows hyphenated names', () => {
+      expect(parseGenArgs([subcommand, 'rate-limit'])).toEqual({ subcommand, name: 'rate-limit' });
     });
 
     it('errors on missing name', () => {
-      expect(() => parseGenArgs(['cron'])).toThrow('gen: Usage: void gen cron <name>.');
+      expect(() => parseGenArgs([subcommand])).toThrow(
+        `gen: Usage: void gen ${subcommand} <name>.`,
+      );
     });
 
     it('errors on extra argument', () => {
-      expect(() => parseGenArgs(['cron', 'sync', 'extra'])).toThrow(
+      expect(() => parseGenArgs([subcommand, 'auth', 'extra'])).toThrow(
         "gen: Unexpected argument 'extra'.",
       );
     });
 
-    it('errors on invalid name', () => {
-      expect(() => parseGenArgs(['cron', '1bad'])).toThrow(
-        'gen: Cron name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
+    it.each(['1bad', '--foo'])('rejects the invalid name %s', (name) => {
+      expect(() => parseGenArgs([subcommand, name])).toThrow(
+        `gen: ${label} name must be lowercase alphanumeric with underscores or hyphens and no leading digits.`,
       );
-    });
-
-    it('allows hyphens in name', () => {
-      expect(parseGenArgs(['cron', 'daily-report'])).toEqual({
-        subcommand: 'cron',
-        name: 'daily-report',
-      });
-    });
-  });
-
-  describe('queue', () => {
-    it('parses queue name', () => {
-      expect(parseGenArgs(['queue', 'emails'])).toEqual({
-        subcommand: 'queue',
-        name: 'emails',
-      });
-    });
-
-    it('errors on missing name', () => {
-      expect(() => parseGenArgs(['queue'])).toThrow('gen: Usage: void gen queue <name>.');
-    });
-
-    it('errors on extra argument', () => {
-      expect(() => parseGenArgs(['queue', 'emails', 'extra'])).toThrow(
-        "gen: Unexpected argument 'extra'.",
-      );
-    });
-
-    it('errors on invalid name', () => {
-      expect(() => parseGenArgs(['queue', '1bad'])).toThrow(
-        'gen: Queue name must be lowercase alphanumeric with underscores or hyphens and no leading digits.',
-      );
-    });
-
-    it('allows hyphens in name', () => {
-      expect(parseGenArgs(['queue', 'order-notifications'])).toEqual({
-        subcommand: 'queue',
-        name: 'order-notifications',
-      });
     });
   });
 });

@@ -1,7 +1,7 @@
+import { MAX_ISR_VARIANTS_PER_PATH } from '@void/isr/runtime';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vite-plus/test';
 import type { Env } from '../../src/env.ts';
 import {
-  MAX_ISR_VARIANTS_PER_PATH,
   SHARED_CACHE_POLICY_VERSION,
   isrCacheKey,
   isStale,
@@ -55,8 +55,7 @@ describe('isrCacheKey', () => {
     );
   });
 
-  // Host-scoping (FIX #4): the same path under two hostnames never shares a
-  // cache slot.
+  // Host-scoping: the same path under two hostnames never shares a cache slot.
   it('scopes the key to the host segment', () => {
     const a = isrCacheKey('proj_1', 'dpl_1', 'a.example.com', '/about');
     const b = isrCacheKey('proj_1', 'dpl_1', 'b.example.com', '/about');
@@ -242,7 +241,7 @@ describe('resolvePathTtl', () => {
     expect(resolvePathTtl({ '/user/*': 0, '*': 60 }, '/user/profile')).toBe(0);
   });
 
-  // Segment-aware manifest keys (FIX #3): `:slug` anchors to ONE segment,
+  // Segment-aware manifest keys: `:slug` anchors to ONE segment,
   // `*` still crosses `/`. Mirrors the matcher tests in pattern.test.ts.
   it('anchors a `:slug` manifest key to a single path segment', () => {
     expect(resolvePathTtl({ '/blog/:slug': 90 }, '/blog/hello')).toBe(90);

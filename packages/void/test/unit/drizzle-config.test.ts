@@ -27,12 +27,7 @@ describe('writeDrizzleConfig', () => {
     expect(config.schema).toBe('./db/schema.ts');
     expect(config.out).toBe('./db/migrations');
     expect(config.dbCredentials.url).toBe('/tmp/test.sqlite');
-  });
-
-  it('generates SQLite config by default', () => {
-    const configPath = writeDrizzleConfig(root, '/tmp/test.sqlite');
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.dialect).toBe('sqlite');
+    expect(config.migrations).toEqual({ prefix: 'timestamp' });
   });
 
   it('generates PostgreSQL config', () => {
@@ -50,25 +45,6 @@ describe('writeDrizzleConfig', () => {
     expect(config.dialect).toBe('mysql');
     expect(config.schema).toBe('./db/schema.ts');
     expect(config.dbCredentials.url).toBe('mysql://localhost/test');
-  });
-
-  it('generates SQLite config with explicit dialect', () => {
-    const configPath = writeDrizzleConfig(root, '/tmp/test.sqlite', 'sqlite');
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.dialect).toBe('sqlite');
-    expect(config.dbCredentials.url).toBe('/tmp/test.sqlite');
-  });
-
-  it('uses timestamp migration prefix for SQLite', () => {
-    const configPath = writeDrizzleConfig(root, '/tmp/test.sqlite');
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.migrations).toEqual({ prefix: 'timestamp' });
-  });
-
-  it('uses timestamp migration prefix for PostgreSQL', () => {
-    const configPath = writeDrizzleConfig(root, 'postgresql://localhost/test', 'postgresql');
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.migrations).toEqual({ prefix: 'timestamp' });
   });
 
   it('includes generated schemas alongside the application schema', () => {

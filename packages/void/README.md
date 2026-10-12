@@ -20,7 +20,7 @@ npx void init
 npm run dev
 ```
 
-Choose your UI framework and starter, then select Cloudflare to deploy to your account:
+Vite+ is the default toolchain; setup installs it for you and keeps your existing package-manager configuration. Choose your UI framework and starter, then select Cloudflare to deploy to your account:
 
 ```sh
 npx void deploy
@@ -42,6 +42,8 @@ Read the [Void documentation](https://void.cloud) online or use the Markdown gui
 - [Framework integrations](https://void.cloud/integrations/frameworks/overview)
 - [API](https://void.cloud/reference/api) and [CLI](https://void.cloud/reference/cli) reference
 - [Coding agents](https://void.cloud/integrations/agents)
+
+Applications that publish through a platform OAuth client can prepare a built app without credentials using [`void/deploy`](https://void.cloud/reference/api/deploy), then request [user approval](https://void.cloud/guide/platform/administration/connected-apps).
 
 ## License
 

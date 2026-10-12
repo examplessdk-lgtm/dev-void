@@ -12,7 +12,6 @@
     layouts: props.layouts,
     pageProps: props.pageProps,
     shared: props.shared,
-    errors: props.errors,
     params: props.params,
     router: props.router,
     routeUrl: props.routeUrl,
@@ -25,7 +24,6 @@
   let currentLayouts = $state(init.layouts);
   let currentPageProps = $state(init.pageProps);
   let shared = $state(init.shared);
-  let errors = $state(init.errors);
   let params = $state(init.params || {});
   let routeUrl = $state(init.routeUrl || "/");
   let navigation = $state(init.navigation || idleNavigationState());
@@ -46,9 +44,6 @@
   setContext("__void_shared", {
     get value() { return shared; },
   });
-  setContext("__void_errors", {
-    get value() { return errors; },
-  });
   setContext("__void_params", {
     get value() { return params; },
   });
@@ -66,7 +61,6 @@
       init.stores.props.subscribe((v) => { currentPageProps = v; }),
       init.stores.layouts.subscribe((v) => { currentLayouts = v; }),
       init.stores.shared.subscribe(replaceShared),
-      init.stores.errors.subscribe((v) => { errors = v; }),
       init.stores.params.subscribe((v) => { params = v; }),
       init.stores.route.subscribe((v) => { routeUrl = v; }),
       init.stores.navigation.subscribe((v) => { navigation = v; }),

@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { outro } from '@voidzero-dev/vite-plus-prompts';
-import { join } from 'pathslash';
-import { getPackageDir } from './agents.ts';
+import { getOwnVersion } from './agents.ts';
 import { asciiArts } from './ascii.ts';
 import { operatorCommands, operatorGroups } from './operator-args.ts';
 import { categoryTitle, helpLine, note, pc, sectionTitle } from './output.ts';
@@ -92,28 +90,9 @@ function operatorHelpTree(): HelpTree {
                     command: `--${flag} <value>`,
                     description,
                   })),
-                  ...(entry.booleans ?? []).map((flag) => ({
+                  ...Object.entries(entry.booleans ?? {}).map(([flag, description]) => ({
                     command: `--${flag}`,
-                    description:
-                      flag === 'follow'
-                        ? 'Poll new logs until interrupted or the build ends'
-                        : flag === 'ended'
-                          ? 'Attest that the original provider execution has ended'
-                          : flag === 'public-apps'
-                            ? 'Manage public app rules without identity policies'
-                            : flag === 'protect-new-projects'
-                              ? 'Protect newly created projects by default'
-                              : flag === 'check' && group === 'zero-trust'
-                                ? 'Also check the saved settings against Cloudflare Access (several API calls)'
-                                : flag === 'token-stdin' && group === 'zero-trust'
-                                  ? 'Read the Access management API token from stdin'
-                                  : flag === 'token-stdin' && group === 'email'
-                                    ? entry.action === 'domain-remove'
-                                      ? 'Read a replacement Cloudflare token for blocked project cleanup from stdin'
-                                      : 'Read a scoped Cloudflare API token from stdin'
-                                    : flag === 'all'
-                                      ? 'Rotate every project'
-                                      : 'Read a full API session from stdin for explicit operator session exchange',
+                    description,
                   })),
                 ],
               },
@@ -961,7 +940,7 @@ const HELP_TREE: HelpTree = {
           ),
         },
       },
-      // Mode B (design doc 0078): both read the local project + your wrangler session,
+      // Native Cloudflare email: both read the local project + your wrangler session,
       // never a Void project, so neither takes `--project`.
       status: {
         summary: 'Show the email setup state and address map. Exit 1 when not ready.',
@@ -1495,7 +1474,7 @@ export function printGlobalHelp(): void {
 }
 
 export function printVoidHeader(): void {
-  const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
+  const version = getOwnVersion();
   const art = asciiArts[Math.floor(Math.random() * asciiArts.length)];
   console.log(pc.blue(`${art}  v${version}\n`));
 }

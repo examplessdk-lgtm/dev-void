@@ -16,6 +16,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { basename, join, relative } from 'node:path/posix';
 import { setTimeout as delay } from 'node:timers/promises';
 import { stripVTControlCharacters } from 'node:util';
+import crossSpawn from 'cross-spawn';
 
 /**
  * Timeout multiplier for Windows CI runners, which are 2–3× slower
@@ -48,7 +49,7 @@ export type IsolatedPlayground = {
   cleanup: () => void;
 };
 
-export function shouldCopyPlaygroundPath(sourceRoot: string, path: string): boolean {
+function shouldCopyPlaygroundPath(sourceRoot: string, path: string): boolean {
   const normalizedSourceRoot = sourceRoot.replaceAll('\\', '/');
   const normalizedPath = path.replaceAll('\\', '/');
   const relativePath = relative(normalizedSourceRoot, normalizedPath);
@@ -66,21 +67,17 @@ export function createIsolatedPlayground(
   sourceWorkspacePath: string,
 ): IsolatedPlayground {
   const sourceRoot = join(workspaceRoot, sourceWorkspacePath);
-  const snapshot = process.env.VOID_TEST_SOURCE_SNAPSHOTS
-    ? join(process.env.VOID_TEST_SOURCE_SNAPSHOTS, sourceWorkspacePath)
-    : undefined;
-  const copySource = snapshot && existsSync(snapshot) ? snapshot : sourceRoot;
   const playgroundLocal = join(workspaceRoot, 'playground-local', '.test-fixtures');
   mkdirSync(playgroundLocal, { recursive: true });
   const root = mkdtempSync(join(playgroundLocal, `test-${basename(sourceWorkspacePath)}-`));
 
-  cpSync(copySource, root, {
+  cpSync(sourceRoot, root, {
     recursive: true,
     filter(path) {
       // `cpSync` reports native backslash paths on Windows, while these workspace paths are
       // normalized to forward slashes. Normalize before using the POSIX path helpers or the
       // top-level `node_modules` directory is copied into the isolated dependency tree.
-      return shouldCopyPlaygroundPath(copySource, path);
+      return shouldCopyPlaygroundPath(sourceRoot, path);
     },
   });
 
@@ -237,6 +234,34 @@ export async function startServer(
       console.warn(`Another process took port ${port}; starting the server on a new port.`);
     }
   }
+}
+
+/** Spawns a workspace playground's `dev` or `preview` script; pass it to {@link startServer}. */
+export function spawnPlaygroundServer(
+  workspaceRoot: string,
+  playground: string,
+  script: 'dev' | 'preview',
+  port: number,
+): ReturnType<typeof spawn> {
+  return crossSpawn(
+    'vp',
+    [
+      'run',
+      '--filter',
+      `./playground/${playground}`,
+      script,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--strictPort',
+    ],
+    {
+      cwd: workspaceRoot,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
+    },
+  );
 }
 
 export async function waitForServer(

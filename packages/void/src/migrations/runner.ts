@@ -121,31 +121,17 @@ export async function getAppliedMigrations(dbPath: string): Promise<Array<Applie
  */
 export function getMiniflareDatabasePath(persistRoot: string, databaseId: string): string {
   const uniqueKey = 'miniflare-D1DatabaseObject';
-
-  // Step 1: SHA-256 of the unique key
   const key = createHash('sha256').update(uniqueKey).digest();
-
-  // Step 2: HMAC-SHA-256 of database_id, take first 16 bytes
   const nameHmac = createHmac('sha256', key).update(databaseId).digest().subarray(0, 16);
-
-  // Step 3: HMAC-SHA-256 of nameHmac, take first 16 bytes
   const hmac = createHmac('sha256', key).update(nameHmac).digest().subarray(0, 16);
-
-  // Step 4: Concatenate to get the filename hash
   const hash = Buffer.concat([nameHmac, hmac]).toString('hex');
 
   return join(persistRoot, 'v3', 'd1', uniqueKey, `${hash}.sqlite`);
 }
 
 /**
- * One-time migration: rename legacy `_migrations` table to `_void_migrations`.
- * Copies all rows from the old table to the new one, then drops the old table.
- *
- * Wrapped in an IMMEDIATE transaction + re-checked inside, so two concurrent
- * local runners (e.g. two `vite dev` processes against the same DB file)
- * don't race each other. Without the lock, both could observe `_migrations`
- * exists, both enter the body, and the loser crashes on `SELECT … FROM
- * _migrations` after the winner already dropped it.
+ * Move the legacy `_migrations` rows into `_void_migrations`. The check runs inside an
+ * IMMEDIATE transaction so two local runners cannot both copy and drop the old table.
  */
 function upgradeTrackingTable(db: SqliteDatabase): void {
   const tx = db.transaction(() => {
@@ -229,23 +215,8 @@ function assertLocalMigrationState(
 }
 
 /**
- * Apply unapplied SQL migrations from the migrations directory.
- * Tracks applied migrations in the `_void_migrations` table.
- *
- * Each .sql file is executed as a single `db.exec()` call — better-sqlite3's
- * `exec` natively handles multi-statement SQL and lets SQLite do the parsing,
- * so semicolons inside string literals, comments, or trigger bodies don't
- * fracture the migration. A naive `split(';')` pre-processor would misparse
- * a statement like `CREATE TABLE t (msg TEXT DEFAULT 'a;b')` into garbage
- * fragments.
- *
- * Concurrent-runner safety: two local `void` processes can race against the
- * same SQLite file. Both can snapshot the applied-set before either writes,
- * and if both decide a migration is pending, the loser would crash on a
- * `table already exists` error. Each per-migration apply therefore runs
- * inside an IMMEDIATE transaction that re-checks the tracking row under the
- * SQLite write lock — the loser sees the winner's insert and skips, instead
- * of re-running the DDL.
+ * Apply pending SQL migrations and record them in `_void_migrations`.
+ * Each file runs through one `exec` so SQLite parses multi-statement SQL itself.
  */
 export async function runMigrations(migrationsDir: string, dbPath: string): Promise<Array<string>> {
   const allMigrations = collectMigrations(migrationsDir);
@@ -290,9 +261,7 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
 
     for (const migration of pending) {
       const tx = db.transaction(() => {
-        // Re-check under the write lock. A concurrent runner may have
-        // applied this migration between our pending-filter snapshot and
-        // now; if so, skip instead of re-running the DDL.
+        // Re-check under the write lock: a concurrent local runner may have applied it already.
         if (checkStmt.get(migration.name)) {
           return false;
         }

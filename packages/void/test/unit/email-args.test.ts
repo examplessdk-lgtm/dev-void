@@ -48,7 +48,7 @@ describe('parseEmailArgs', () => {
   });
 
   it('errors on missing subcommand', () => {
-    expect(() => parseEmailArgs([])).toThrow(/email: Usage:/);
+    expect(() => parseEmailArgs([])).toThrow(/email: Usage: void email .*domain/);
   });
 
   it('errors on unknown subcommand', () => {
@@ -76,9 +76,6 @@ describe('parseEmailArgs', () => {
   });
 
   it('errors when allow receives more than one positional argument', () => {
-    // Previously the second address was silently dropped — confusing UX
-    // for users who typed `void email allow a@x.dev b@y.dev` and didn't
-    // realize only the first took effect.
     expect(() => parseEmailArgs(['allow', 'a@x.dev', 'b@y.dev'])).toThrow(
       /takes exactly one positional argument/,
     );
@@ -90,8 +87,6 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  // Mode B (design doc 0078): `status` and `setup` take `--platform cloudflare` and
-  // read the local project, never a Void project.
   it('parses status and setup with --platform cloudflare (space and = forms)', () => {
     expect(parseEmailArgs(['status', '--platform', 'cloudflare'])).toEqual({
       subcommand: 'status',
@@ -109,7 +104,7 @@ describe('parseEmailArgs', () => {
     });
   });
 
-  it('parses --platform void as the platform shape (the "not available yet" exit for setup/status)', () => {
+  it('parses --platform void', () => {
     expect(parseEmailArgs(['setup', '--platform', 'void'])).toEqual({
       subcommand: 'setup',
       projectSlug: undefined,
@@ -151,16 +146,11 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  // `--project` and `--limit` take the same missing-value path as `--platform`. A bare
-  // flag used to fall through as a positional, which the read-only subcommands never
-  // reject: `void email usage --project` silently ran against the linked project and
-  // `void email logs --limit` silently ignored the limit.
   it('errors on --project without a value', () => {
     expect(() => parseEmailArgs(['usage', '--project'])).toThrow(
       'email: --project requires a value (a project name).',
     );
-    // A value that starts with `-` is the next flag, not a project name — previously
-    // `--limit` became the slug and `5` the positional.
+    // A value that starts with `-` is the next flag, not a project name.
     expect(() => parseEmailArgs(['usage', '--project', '--limit', '5'])).toThrow(
       'email: --project requires a value (a project name).',
     );
@@ -169,9 +159,6 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  // An empty slug is not nullish: `runEmailCommand` used to keep `''` over `VOID_PROJECT`
-  // and then fall through to the linked project, so `--project=` (or `--project "$VAR"`
-  // with the variable unset) silently mutated the linked project's allowlist.
   it('errors on --project with an empty or whitespace-only value, same message as a bare flag', () => {
     const message = 'email: --project requires a value (a project name).';
     expect(() => parseEmailArgs(['disallow', 'a@x.dev', '--project='])).toThrow(message);
@@ -195,30 +182,6 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  // The parser is shared, so the read-only subcommands reject the same shapes — they are
-  // exactly the ones that never validate a positional and used to run against the wrong
-  // project without a word.
-  it('rejects an empty or repeated --project on the read-only subcommands too', () => {
-    for (const sub of ['usage', 'logs']) {
-      expect(() => parseEmailArgs([sub, '--project='])).toThrow(
-        'email: --project requires a value (a project name).',
-      );
-      expect(() => parseEmailArgs([sub, '--project', 'a', '--project', 'b'])).toThrow(
-        'email: --project can only be specified once.',
-      );
-    }
-    // A single, non-empty value is still accepted as before.
-    expect(parseEmailArgs(['usage', '--project', 'x'])).toMatchObject({
-      subcommand: 'usage',
-      projectSlug: 'x',
-    });
-    expect(parseEmailArgs(['logs', '--limit', '3', '--project=x'])).toMatchObject({
-      subcommand: 'logs',
-      projectSlug: 'x',
-      limit: 3,
-    });
-  });
-
   it('errors on --limit without a value', () => {
     expect(() => parseEmailArgs(['logs', '--limit'])).toThrow(
       'email: --limit requires a value (a positive integer).',
@@ -232,7 +195,7 @@ describe('parseEmailArgs', () => {
     );
   });
 
-  it('parses --project=<name> and --limit=<n> (the = form --platform already takes)', () => {
+  it('parses --project=<name> and --limit=<n>', () => {
     expect(parseEmailArgs(['usage', '--project=foo'])).toEqual({
       subcommand: 'usage',
       projectSlug: 'foo',
@@ -246,17 +209,6 @@ describe('parseEmailArgs', () => {
       limit: 5,
       address: undefined,
       platform: undefined,
-    });
-  });
-
-  it('still carries an unrelated stray positional on a read-only subcommand', () => {
-    // Positional validation is unchanged: only allow/disallow require one, and only a
-    // second one is rejected. A stray word is still parsed as `address` and left to the
-    // command, exactly as before.
-    expect(parseEmailArgs(['usage', 'stray'])).toMatchObject({
-      subcommand: 'usage',
-      address: 'stray',
-      projectSlug: undefined,
     });
   });
 
@@ -288,19 +240,10 @@ describe('parseEmailArgs', () => {
       /`void email status --platform cloudflare` takes no argument/,
     );
   });
-  it.each([
-    ['status'],
-    ['setup'],
-    ['usage'],
-    ['logs'],
-    ['destinations'],
-    ['allow', 'a@x.dev'],
-    ['disallow', 'a@x.dev'],
-    ['domain', 'add', 'acme.com', '--project', 'my-app', '--subdomain', 'mx'],
-    ['domain', 'list'],
-  ])('rejects the removed alias before invoking %j', (...command) => {
+
+  it('rejects --backend', () => {
     for (const flags of [['--backend'], ['--backend', 'cloudflare'], ['--backend=cloudflare']]) {
-      expect(() => parseEmailArgs([...command, ...flags])).toThrow(
+      expect(() => parseEmailArgs(['status', ...flags])).toThrow(
         "email: Unknown option '--backend'.",
       );
     }

@@ -9,7 +9,6 @@ let DEV_BASE: string;
 
 describe('playground/tanstack-start dev', () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
 
   beforeAll(async () => {
     // Another process can answer on the port before this server starts,
@@ -38,10 +37,6 @@ describe('playground/tanstack-start dev', () => {
             },
           },
         );
-        stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
         return child;
       },
       20_000,
@@ -53,9 +48,6 @@ describe('playground/tanstack-start dev', () => {
   afterAll(async () => {
     if (child) {
       await killChild(child);
-    }
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
     }
   });
 

@@ -1,4 +1,7 @@
 export const adminComponents = {
+  connectedApps: async () => ({
+    default: (await import('./views/ConnectedAppsPage.tsx')).ConnectedAppsPage,
+  }),
   platformStatus: async () => ({
     default: (await import('./views/PlatformStatusPage.tsx')).PlatformStatusPage,
   }),
@@ -76,6 +79,9 @@ export const adminLayoutTree: Record<AdminPageId, Array<string>> = Object.fromEn
 
 export function matchAdminRoute(url: string): AdminPageId | null {
   const path = new URL(url, 'https://void.invalid').pathname;
+  if (path === '/admin/connected-apps') {
+    return 'connectedApps';
+  }
   if (path === '/admin/') {
     return 'dashboard';
   }

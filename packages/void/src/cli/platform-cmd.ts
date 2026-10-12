@@ -1,11 +1,7 @@
 import type { PlatformDiscoveryDocument, PlatformInstallationManifest } from '@void/platform';
 import { isCancel, log, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
-import {
-  ensureCloudflaredToken,
-  ensurePlatformAccessToken,
-  isCloudflareAccessChallenge,
-} from './cf-access.ts';
+import { ensurePlatformAccessToken, isCloudflareAccessChallenge } from './cf-access.ts';
 import { printSuccess, pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { PlatformDisabledError, readPlatformDiscoveryResponse } from './platform-discovery.ts';
@@ -33,7 +29,7 @@ export async function discoverPlatform(
   fetcher: typeof fetch = fetch,
 ): Promise<PlatformDiscoveryDocument> {
   const apiUrl = normalizePlatformInputUrl(input);
-  ensureCloudflaredToken(apiUrl);
+  ensurePlatformAccessToken(apiUrl);
   const request = () =>
     fetcher(`${apiUrl}/.well-known/void-platform`, {
       headers: { Accept: 'application/json', ...cfAccessHeaders(process.env, apiUrl) },

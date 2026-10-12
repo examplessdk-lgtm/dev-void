@@ -1,4 +1,4 @@
-import { compilePattern } from '@void/edge';
+import { compilePattern, matchPattern } from '@void/edge';
 import type { Rolldown } from 'vite';
 import type { ClientManifest } from './runtime/routing-assets.ts';
 import type { RoutingHeaderRule } from './runtime/routing.ts';
@@ -16,7 +16,11 @@ export function stampClientAssetCachePolicy(
   const fingerprinted = new Set<string>();
   const authoredCachePatterns = headerRules
     .filter((rule) => rule.headers.some(([name]) => name.toLowerCase() === 'cache-control'))
-    .map((rule) => compilePattern(rule.pattern).regex);
+    .map((rule) => rule.pattern);
+  // A malformed pattern still fails the build.
+  for (const pattern of authoredCachePatterns) {
+    compilePattern(pattern);
+  }
   for (const item of Object.values(bundle)) {
     // Chunks expose hash substitution provenance. Output assets (including CSS)
     // do not: an explicit stable fileName can match a configured [hash] template.
@@ -26,7 +30,7 @@ export function stampClientAssetCachePolicy(
       typeof item.preliminaryFileName === 'string' &&
       item.preliminaryFileName !== item.fileName
     ) {
-      if (!authoredCachePatterns.some((pattern) => pattern.test('/' + item.fileName))) {
+      if (!authoredCachePatterns.some((pattern) => matchPattern(pattern, '/' + item.fileName))) {
         fingerprinted.add(item.fileName);
       }
     }

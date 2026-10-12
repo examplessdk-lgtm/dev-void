@@ -1,11 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
-export function resolvePlatformSourceRevision({
-  environment = process.env,
-  repositoryRoot,
-  runGit = defaultRunGit,
-}) {
-  const explicit = environment.VOID_PLATFORM_SOURCE_REVISION;
+export function resolvePlatformSourceRevision({ repositoryRoot }) {
+  const explicit = process.env.VOID_PLATFORM_SOURCE_REVISION;
   if (explicit) {
     return explicit;
   }
@@ -28,7 +24,7 @@ export function resolvePlatformSourceRevision({
   return status.stdout.trim() ? `${sourceRevision}-dirty` : sourceRevision;
 }
 
-function defaultRunGit(args, cwd) {
+function runGit(args, cwd) {
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',

@@ -9,8 +9,8 @@ mode app. The administrator UI is served by the API Worker.
 - **Auth** - enabled platform login methods via the API's `/auth/login` flow. The JWT is
   stored in an httpOnly cookie (`void_token`). Middleware validates the token with
   `GET /me`.
-- **Styling** - Tailwind CSS v4 with dashboard-local styles, fonts, assets,
-  and React components in `ui/`.
+- **Styling** - Dashboard-local CSS, fonts, assets, and React components in `ui/`,
+  with Astryx's neutral theme for buttons, stacks, and the account menu.
 
 ## Pages
 
@@ -68,7 +68,7 @@ separate copy in `playground-local/my-dashboard`, keeping the app’s source,
 assets, package manifest and TypeScript configuration. Exclude local environment
 files, dependencies and generated output. Give the copied package a unique
 private name and keep its `build: vp build` script. In the copied Vite config,
-keep `tailwind()`, `voidPlugin()` and `voidReact()`, and remove the local API
+keep `voidPlugin()` and `voidReact()`, and remove the local API
 `persistTo` option.
 
 Replace the copied `cloudflare` configuration with your deployment settings:
@@ -108,14 +108,14 @@ lib/
   api.ts                    # Typed authentication API fetch helpers
 ui/
   components/               # Dashboard header and footer
-  context/                  # Logo configuration
-  styles/                   # Tailwind tokens, reset, shell and button styles
-  assets/                   # Void logos and dashboard backgrounds
+  styles/                   # Design tokens, reset, and shell styles
+  assets/                   # Void logos and bundled social icons
   fonts/                    # APK Protocol, KH Teka Mono, and Inter
 middleware/
   01.auth.ts                # void_token validation through /me
 pages/
-  layout.tsx                # Authenticated shell with logout
+  layout.tsx                # Shared navigation progress
+  _layouts/dashboard.tsx    # Authenticated shell with logout
   login.tsx                 # Enabled login method buttons
   login.server.ts           # Builds configured login URLs
   account.tsx               # Account linking form

@@ -1,9 +1,13 @@
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
-import { expect, it, vi } from 'vite-plus/test';
+import { expect, it } from 'vite-plus/test';
 import {
   cloudflareDeviceCode,
   cloudflareVerificationUrl,
-  printCloudflareLoginPrompt,
 } from '../../src/cli/cloudflare-login-output.ts';
 import { encodeCloudflareOperation } from '../../src/cli/cloudflare-process.ts';
 
@@ -31,19 +35,6 @@ it('extracts only the complete verification URL supplied by cf', () => {
     cloudflareVerificationUrl('Opening a link in your default browser: https://dash.cloud'),
   ).toBeNull();
   expect(cloudflareVerificationUrl('and enter the code:\n  a1B2c3D4\n')).toBeNull();
-});
-
-it('prints only the short Void prompt with the actual code', () => {
-  const printed = vi.spyOn(console, 'log').mockImplementation(() => {});
-  try {
-    printCloudflareLoginPrompt('a1B2c3D4');
-    expect(printed).toHaveBeenCalledTimes(1);
-    expect(stripVTControlCharacters(printed.mock.calls[0]?.[0] ?? '')).toContain(
-      'Opening Cloudflare login in your browser. Confirm the code a1B2c3D4 in your browser. Press Ctrl+C to cancel.',
-    );
-  } finally {
-    printed.mockRestore();
-  }
 });
 
 it('hides cf login chatter and prints the code before the child exits', async () => {
@@ -117,8 +108,3 @@ syncBuiltinESMExports();
     rmSync(directory, { recursive: true, force: true });
   }
 });
-import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';

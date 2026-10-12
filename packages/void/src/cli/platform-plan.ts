@@ -12,7 +12,9 @@ import {
   parsePlatformResourceOwnershipMarker,
   PLATFORM_REMOTE_INSTALLATION_MANIFEST_KEY,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
+  type InstallationResource,
   type InstallationResourceKind,
+  type PlatformAppAccess,
   type PlatformDeploymentManifest,
   type PlatformInstallationManifest,
 } from '@void/platform';
@@ -58,9 +60,9 @@ export type PlatformExternalHyperdrive = Readonly<{
   user: string;
 }>;
 
-export type PlatformInstallPlanInput = Readonly<{
-  appAccess?: import('@void/platform').PlatformAppAccess;
-  authentication?: import('@void/platform').PlatformDeploymentManifest['authentication'];
+type PlatformInstallPlanInput = Readonly<{
+  appAccess?: PlatformAppAccess;
+  authentication?: PlatformDeploymentManifest['authentication'];
   accountId: string;
   applicationDomain: string;
   controlPlaneDomain: string;
@@ -328,7 +330,6 @@ export async function createPlatformInstallPlan(
     throw error;
   });
   const [
-    workersSubdomain,
     aiGateways,
     routingKv,
     isrKv,
@@ -341,7 +342,6 @@ export async function createPlatformInstallPlan(
     hyperdrives,
     workers,
   ] = await Promise.all([
-    Promise.resolve(accountSubdomain),
     gatewayInventory,
     client.listKvNamespaces(account.id, names.routingKv),
     client.listKvNamespaces(account.id, names.isrCacheKv),
@@ -379,7 +379,12 @@ export async function createPlatformInstallPlan(
         PLATFORM_R2_OWNERSHIP_MARKER_KEY,
       );
       if (
-        !matchesResourceMarker(marker, existing, 'assets-bucket', 'r2-bucket', bucket) ||
+        resourceMarkerProblem(marker, existing, {
+          id: bucket.id,
+          key: 'assets-bucket',
+          kind: 'r2-bucket',
+          name: bucket.name,
+        }) ||
         !matchesRecordedR2Fingerprint(recordedBucket.configHash, bucket)
       ) {
         ambiguousResources.add('assets-bucket');
@@ -394,7 +399,14 @@ export async function createPlatformInstallPlan(
         bucket.name,
         PLATFORM_R2_OWNERSHIP_MARKER_KEY,
       );
-      if (matchesResourceMarker(marker, existing, 'assets-bucket', 'r2-bucket', bucket)) {
+      if (
+        !resourceMarkerProblem(marker, existing, {
+          id: bucket.id,
+          key: 'assets-bucket',
+          kind: 'r2-bucket',
+          name: bucket.name,
+        })
+      ) {
         intentProofs.add('assets-bucket');
       }
     }
@@ -408,8 +420,10 @@ export async function createPlatformInstallPlan(
       if (workers.includes(name) && hasUnrecordedProvisionIntent(existing, key, 'worker', name)) {
         const bindings = await client.getWorkerPlainTextBindings(account.id, name);
         if (
-          matchesResourceMarker(bindings.PLATFORM_OWNERSHIP_MARKER, existing, key, 'worker', {
+          !resourceMarkerProblem(bindings.PLATFORM_OWNERSHIP_MARKER, existing, {
             id: name,
+            key,
+            kind: 'worker',
             name,
           })
         ) {
@@ -487,6 +501,14 @@ export async function createPlatformInstallPlan(
     }
   }
   const actions: Array<PlatformInstallPlanAction> = [];
+  const named: NamedPlanContext = {
+    actions,
+    existing,
+    options,
+    remoteOwnership,
+    intentProofs,
+    ambiguousResources,
+  };
   if (!testing) {
     const recordedZone = existing?.resources.find((resource) => resource.key === 'zone');
     const remotelyOwnedZone = remoteOwnership?.resources.some(
@@ -536,115 +558,66 @@ export async function createPlatformInstallPlan(
         'AI Gateway access will be verified with the runtime token before provisioning (AI Gateway: Edit required).',
     });
   } else {
-    addNamedPlan(
-      actions,
-      existing,
-      'ai-gateway',
-      'ai-gateway',
-      names.aiGateway,
-      aiGateways.filter((resource) => resource.id === names.aiGateway),
-      'reuse',
-      options,
-      remoteOwnership,
-      intentProofs,
-    );
+    addNamedPlan(named, {
+      key: 'ai-gateway',
+      kind: 'ai-gateway',
+      name: names.aiGateway,
+      matches: aiGateways.filter((resource) => resource.id === names.aiGateway),
+    });
   }
-  addNamedPlan(
-    actions,
-    existing,
-    'routing-kv',
-    'kv-namespace',
-    names.routingKv,
-    routingKv,
-    'reuse',
-    options,
-    remoteOwnership,
-    intentProofs,
-  );
-  addNamedPlan(
-    actions,
-    existing,
-    'isr-cache-kv',
-    'kv-namespace',
-    names.isrCacheKv,
-    isrKv,
-    'reuse',
-    options,
-    remoteOwnership,
-  );
-  addNamedPlan(
-    actions,
-    existing,
-    'legacy-assets-kv',
-    'kv-namespace',
-    names.legacyAssetsKv,
-    legacyKv,
-    'reuse',
-    options,
-    remoteOwnership,
-  );
-  addNamedPlan(
-    actions,
-    existing,
-    'assets-bucket',
-    'r2-bucket',
-    names.assetsBucket,
-    r2Buckets.filter((resource) => resource.name === names.assetsBucket),
-    'reuse',
-    options,
-    remoteOwnership,
-    intentProofs,
-    ambiguousResources,
-  );
-  addNamedPlan(
-    actions,
-    existing,
-    'usage-queue',
-    'queue',
-    names.usageQueue,
-    usageQueues,
-    'reuse',
-    options,
-    remoteOwnership,
-  );
-  addNamedPlan(
-    actions,
-    existing,
-    'cron-queue',
-    'queue',
-    names.cronQueue,
-    cronQueues,
-    'reuse',
-    options,
-    remoteOwnership,
-  );
+  addNamedPlan(named, {
+    key: 'routing-kv',
+    kind: 'kv-namespace',
+    name: names.routingKv,
+    matches: routingKv,
+  });
+  addNamedPlan(named, {
+    key: 'isr-cache-kv',
+    kind: 'kv-namespace',
+    name: names.isrCacheKv,
+    matches: isrKv,
+  });
+  addNamedPlan(named, {
+    key: 'legacy-assets-kv',
+    kind: 'kv-namespace',
+    name: names.legacyAssetsKv,
+    matches: legacyKv,
+  });
+  addNamedPlan(named, {
+    key: 'assets-bucket',
+    kind: 'r2-bucket',
+    name: names.assetsBucket,
+    matches: r2Buckets.filter((resource) => resource.name === names.assetsBucket),
+  });
+  addNamedPlan(named, {
+    key: 'usage-queue',
+    kind: 'queue',
+    name: names.usageQueue,
+    matches: usageQueues,
+  });
+  addNamedPlan(named, {
+    key: 'cron-queue',
+    kind: 'queue',
+    name: names.cronQueue,
+    matches: cronQueues,
+  });
   if (
     options?.deploymentExecution ??
     existing?.resources.some((resource) => resource.key === 'deployment-queue')
   ) {
-    addNamedPlan(
-      actions,
-      existing,
-      'deployment-queue',
-      'queue',
-      names.deploymentQueue,
-      deploymentQueues,
-      'reuse',
-      options,
-      remoteOwnership,
-    );
+    addNamedPlan(named, {
+      key: 'deployment-queue',
+      kind: 'queue',
+      name: names.deploymentQueue,
+      matches: deploymentQueues,
+    });
   }
-  addNamedPlan(
-    actions,
-    existing,
-    'dispatch-namespace',
-    'dispatch-namespace',
-    names.dispatchNamespace,
-    dispatchNamespaces.filter((resource) => resource.name === names.dispatchNamespace),
-    'reuse',
-    options,
-    remoteOwnership,
-  );
+  addNamedPlan(named, {
+    key: 'dispatch-namespace',
+    kind: 'dispatch-namespace',
+    name: names.dispatchNamespace,
+    matches: dispatchNamespaces.filter((resource) => resource.name === names.dispatchNamespace),
+  });
   const recordedHyperdrive = existing?.resources.find((resource) => resource.key === 'hyperdrive');
   const externalHyperdriveId =
     input.externalHyperdrive?.id ||
@@ -681,17 +654,12 @@ export async function createPlatformInstallPlan(
         : 'Use the externally managed Hyperdrive without taking ownership.',
     });
   } else {
-    addNamedPlan(
-      actions,
-      existing,
-      'hyperdrive',
-      'hyperdrive',
-      names.hyperdrive,
-      hyperdrives.filter((resource) => resource.name === names.hyperdrive),
-      'reuse',
-      options,
-      remoteOwnership,
-    );
+    addNamedPlan(named, {
+      key: 'hyperdrive',
+      kind: 'hyperdrive',
+      name: names.hyperdrive,
+      matches: hyperdrives.filter((resource) => resource.name === names.hyperdrive),
+    });
   }
   for (const [key, name] of [
     ['api-worker', names.apiWorker],
@@ -702,19 +670,13 @@ export async function createPlatformInstallPlan(
     ['tail-worker', names.tailWorker],
     ['dispatch-worker', names.dispatchWorker],
   ] as const) {
-    const matches = workers.includes(name) ? [{ id: name, name }] : [];
-    addNamedPlan(
-      actions,
-      existing,
+    addNamedPlan(named, {
       key,
-      'worker',
+      kind: 'worker',
       name,
-      matches,
-      'update',
-      options,
-      remoteOwnership,
-      intentProofs,
-    );
+      matches: workers.includes(name) ? [{ id: name, name }] : [],
+      existingAction: 'update',
+    });
   }
   const resolvedResources = { ...deployment.resources };
   for (const action of actions) {
@@ -729,10 +691,8 @@ export async function createPlatformInstallPlan(
   });
   const apiUrl = resolvedDeployment.controlPlane.apiHostname
     ? `https://${deployment.controlPlane.apiHostname}`
-    : `https://${resolvedDeployment.resources.apiWorker}.${workersSubdomain}.workers.dev`;
-  const proxyUrl = resolvedDeployment.controlPlane.proxyHostname
-    ? `https://${deployment.controlPlane.proxyHostname}`
-    : `https://${resolvedDeployment.resources.proxyWorker}.${workersSubdomain}.workers.dev`;
+    : `https://${resolvedDeployment.resources.apiWorker}.${accountSubdomain}.workers.dev`;
+  const proxyUrl = `https://${resolvedDeployment.resources.proxyWorker}.${accountSubdomain}.workers.dev`;
   return {
     account,
     actions,
@@ -748,9 +708,13 @@ export async function createPlatformInstallPlan(
     ...(input.externalHyperdrive ? { externalHyperdrive: input.externalHyperdrive } : {}),
     installationId,
     proxyUrl,
-    workersSubdomain,
+    workersSubdomain: accountSubdomain,
     zone,
   };
+}
+
+export function platformWorkersDevUrl(plan: PlatformInstallPlan, workerName: string): string {
+  return `https://${workerName}.${plan.workersSubdomain}.workers.dev`;
 }
 
 export async function revalidatePlatformInstallAction(
@@ -806,8 +770,10 @@ export async function revalidatePlatformInstallAction(
     }
     const bindings = await client.getWorkerPlainTextBindings(original.account.id, action.name);
     if (
-      !matchesResourceMarker(bindings.PLATFORM_OWNERSHIP_MARKER, manifest, action.key, 'worker', {
+      resourceMarkerProblem(bindings.PLATFORM_OWNERSHIP_MARKER, manifest, {
         id: action.name,
+        key: action.key,
+        kind: 'worker',
         name: action.name,
       })
     ) {
@@ -852,8 +818,10 @@ export async function revalidatePlatformInstallAction(
   if (action.kind === 'worker' && action.action === 'update') {
     const bindings = await client.getWorkerPlainTextBindings(original.account.id, action.name);
     if (
-      !matchesResourceMarker(bindings.PLATFORM_OWNERSHIP_MARKER, manifest, action.key, 'worker', {
+      resourceMarkerProblem(bindings.PLATFORM_OWNERSHIP_MARKER, manifest, {
         id: action.name,
+        key: action.key,
+        kind: 'worker',
         name: action.name,
       })
     ) {
@@ -953,19 +921,27 @@ function resolveAccount(
   return matches[0]!;
 }
 
+type NamedPlanContext = Readonly<{
+  actions: Array<PlatformInstallPlanAction>;
+  existing: PlatformInstallationManifest | null;
+  options?: { authoritativeProvisionIntents?: boolean; repairMissing?: boolean };
+  remoteOwnership: PlatformInstallationManifest | null;
+  intentProofs: ReadonlySet<string>;
+  ambiguousResources: ReadonlySet<string>;
+}>;
+
 function addNamedPlan(
-  actions: Array<PlatformInstallPlanAction>,
-  existing: PlatformInstallationManifest | null,
-  key: string,
-  kind: InstallationResourceKind,
-  name: string,
-  matches: ReadonlyArray<CloudflareNamedResource>,
-  existingAction: 'reuse' | 'update' = 'reuse',
-  options?: { authoritativeProvisionIntents?: boolean; repairMissing?: boolean },
-  remoteOwnership?: PlatformInstallationManifest | null,
-  intentProofs: ReadonlySet<string> = new Set(),
-  ambiguousResources: ReadonlySet<string> = new Set(),
+  context: NamedPlanContext,
+  target: Readonly<{
+    key: string;
+    kind: InstallationResourceKind;
+    name: string;
+    matches: ReadonlyArray<CloudflareNamedResource>;
+    existingAction?: 'reuse' | 'update';
+  }>,
 ): void {
+  const { actions, existing, options, remoteOwnership, intentProofs, ambiguousResources } = context;
+  const { key, kind, name, matches, existingAction = 'reuse' } = target;
   if (matches.length > 1) {
     throw new Error(`platform: More than one ${kind} named ${JSON.stringify(name)} exists.`);
   }
@@ -1081,11 +1057,7 @@ function hasUnrecordedProvisionIntent(
 ): boolean {
   return (
     !manifest.resources.some((resource) => resource.key === key && resource.state === 'ready') &&
-    manifest.steps.some(
-      (step) =>
-        isProvisionIntentStep(step.key, key) &&
-        step.resultHash === platformProvisionIntentHash(manifest, key, kind, name),
-    )
+    hasProvisionIntentStep(manifest, key, kind, name)
   );
 }
 
@@ -1100,18 +1072,22 @@ function hasAmbiguousProvisionIntent(
   if (recorded?.id === remoteId && recorded.kind === kind && recorded.name === name) {
     return false;
   }
-  return manifest.steps.some(
-    (step) =>
-      isProvisionIntentStep(step.key, key) &&
-      step.resultHash ===
-        platformProvisionIntentHash(manifest, key, kind, name, recorded?.id ?? null),
-  );
+  return hasProvisionIntentStep(manifest, key, kind, name, recorded?.id ?? null);
 }
 
-function isProvisionIntentStep(stepKey: string, resourceKey: string): boolean {
-  return (
-    stepKey === `provision-intent:${resourceKey}` ||
-    stepKey.startsWith(`provision-intent:${resourceKey}:`)
+/** Whether the manifest records an intent to provision this resource. */
+export function hasProvisionIntentStep(
+  manifest: Pick<PlatformInstallationManifest, 'ownershipNonce' | 'steps'>,
+  key: string,
+  kind: InstallationResourceKind,
+  name: string,
+  previousResourceId: string | null = null,
+): boolean {
+  return manifest.steps.some(
+    (step) =>
+      (step.key === `provision-intent:${key}` || step.key.startsWith(`provision-intent:${key}:`)) &&
+      step.resultHash ===
+        platformProvisionIntentHash(manifest, key, kind, name, previousResourceId),
   );
 }
 
@@ -1128,53 +1104,71 @@ function interruptedProvisionRetryName(
   return `${name.slice(0, 63 - suffix.length).replace(/-+$/, '')}${suffix}`;
 }
 
-function matchesRecordedR2Fingerprint(
-  configHash: string,
-  resource: CloudflareNamedResource,
-): boolean {
-  if (!resource.fingerprint) {
-    return false;
-  }
-  const liveHash = createHash('sha256')
-    .update(
-      JSON.stringify({
-        fingerprint: resource.fingerprint,
-        kind: 'r2-bucket',
-        name: resource.name,
-      }),
-    )
-    .digest('hex');
-  const legacyHash = createHash('sha256')
-    .update(JSON.stringify({ kind: 'r2-bucket', name: resource.name }))
-    .digest('hex');
-  return configHash === liveHash || configHash === legacyHash;
+// Installation manifests store these config hashes, so their JSON shape must not change.
+
+/** Name-only config hash, recorded for resources without a live fingerprint. */
+export function legacyResourceConfigHash(kind: InstallationResourceKind, name: string): string {
+  return createHash('sha256').update(JSON.stringify({ kind, name })).digest('hex');
 }
 
-function matchesResourceMarker(
+export function r2BucketConfigHash(name: string, fingerprint: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ fingerprint, kind: 'r2-bucket', name }))
+    .digest('hex');
+}
+
+export function dnsRecordConfigHash(
+  name: string,
+  type: string,
+  content: string,
+  proxied: boolean,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }))
+    .digest('hex');
+}
+
+/** Whether a live R2 bucket still matches the creation fingerprint recorded for it. */
+export function matchesRecordedR2Fingerprint(
+  configHash: string,
+  bucket: CloudflareNamedResource,
+): boolean {
+  if (!bucket.fingerprint) {
+    return false;
+  }
+  return (
+    configHash === r2BucketConfigHash(bucket.name, bucket.fingerprint) ||
+    configHash === legacyResourceConfigHash('r2-bucket', bucket.name)
+  );
+}
+
+/** Why `value` is not this installation's ownership marker for the resource, or null when it is. */
+export function resourceMarkerProblem(
   value: string | null | undefined,
   manifest: PlatformInstallationManifest,
-  key: string,
-  kind: InstallationResourceKind,
-  resource: CloudflareNamedResource,
-): boolean {
+  resource: Pick<InstallationResource, 'id' | 'key' | 'kind' | 'name'>,
+): string | null {
   if (!value) {
-    return false;
+    return 'has no ownership marker';
   }
+  let actual;
   try {
-    const actual = parsePlatformResourceOwnershipMarker(JSON.parse(value) as unknown);
-    const expected = createPlatformResourceOwnershipMarker({
-      accountId: manifest.account.id,
-      installationId: manifest.id,
-      ownershipNonce: manifest.ownershipNonce,
-      resourceId: resource.id,
-      resourceKey: key,
-      resourceKind: kind,
-      resourceName: resource.name,
-    });
-    return JSON.stringify(actual) === JSON.stringify(expected);
+    actual = parsePlatformResourceOwnershipMarker(JSON.parse(value) as unknown);
   } catch {
-    return false;
+    return 'has an invalid ownership marker';
   }
+  const expected = createPlatformResourceOwnershipMarker({
+    accountId: manifest.account.id,
+    installationId: manifest.id,
+    ownershipNonce: manifest.ownershipNonce,
+    resourceId: resource.id,
+    resourceKey: resource.key,
+    resourceKind: resource.kind,
+    resourceName: resource.name,
+  });
+  return JSON.stringify(actual) === JSON.stringify(expected)
+    ? null
+    : 'belongs to another installation';
 }
 
 // Preserve recovery for previously installed, suffixed namespaces. New platforms

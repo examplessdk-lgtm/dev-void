@@ -39,6 +39,8 @@ Use the following permissions for the core platform. Cloudflare may label write 
 | Account | Hyperdrive         | Write      | Write                                   |
 | Account | Account Analytics  | Read       | Read                                    |
 | Account | AI Gateway         | Edit       | Edit when installing with browser login |
+| Account | Containers         | —          | Edit                                    |
+| Account | Cloudchamber       | —          | Edit                                    |
 | Zone    | Zone               | Read       | —                                       |
 | Zone    | DNS                | Edit       | —                                       |
 | Zone    | Workers Routes     | Edit       | —                                       |

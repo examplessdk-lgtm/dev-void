@@ -1,44 +1,42 @@
 import { describe, it, expect } from 'vite-plus/test';
 import { safeJsonStringify } from '../../src/pages/protocol.ts';
+import { serializePageData } from '../../src/pages/serialize.ts';
 
-describe('deferred data XSS prevention (real implementation)', () => {
-  it('escapes </script> in string values', () => {
-    const malicious = { name: '</script><script>alert(1)</script>' };
-    const result = safeJsonStringify(malicious);
-    expect(result).not.toContain('</script>');
-    expect(result).toContain('\\u003c/script\\u003e');
+describe.each([
+  ['serializePageData', serializePageData],
+  ['safeJsonStringify', safeJsonStringify],
+])('%s inline-script escaping', (_name, serialize) => {
+  it('escapes </script> so the inline script tag cannot be closed early', () => {
+    const payload = { html: '</script><script>alert(1)</script>' };
+    const out = serialize(payload);
+    expect(out).not.toMatch(/<\/script/i);
+    expect(out).toContain('\\u003c/script\\u003e');
+    expect(JSON.parse(out)).toEqual(payload);
   });
 
-  it('escapes < and > characters', () => {
-    const result = safeJsonStringify('<img onerror=alert(1)>');
-    expect(result).not.toContain('<');
-    expect(result).not.toContain('>');
+  it('escapes <, >, &, U+2028 and U+2029 and still round-trips', () => {
+    const payload = {
+      html: '<img onerror=alert(1)>',
+      amp: 'a & b',
+      ls: 'a\u2028b',
+      ps: 'a\u2029b',
+      count: 42,
+      nested: { ok: true },
+    };
+    const out = serialize(payload);
+    for (const char of ['<', '>', '&', '\u2028', '\u2029']) {
+      expect(out).not.toContain(char);
+    }
+    expect(out).toContain('\\u0026');
+    expect(JSON.parse(out)).toEqual(payload);
   });
+});
 
-  it('escapes & character', () => {
-    const result = safeJsonStringify('a&b');
-    expect(result).toContain('\\u0026');
-  });
-
-  it('preserves normal data', () => {
-    const data = { name: 'hello world', count: 42, nested: { ok: true } };
-    const result = safeJsonStringify(data);
-    expect(JSON.parse(result)).toEqual(data);
-  });
-
-  it('escapes unicode line/paragraph separators', () => {
-    const result = safeJsonStringify('line\u2028para\u2029');
-    expect(result).not.toContain('\u2028');
-    expect(result).not.toContain('\u2029');
-  });
-
-  it('handles undefined without throwing', () => {
-    const result = safeJsonStringify(undefined);
-    expect(result).toBe('null');
-  });
-
-  it('handles function values without throwing', () => {
-    const result = safeJsonStringify(() => {});
-    expect(result).toBe('null');
+describe('safeJsonStringify', () => {
+  it.each([
+    ['undefined', undefined],
+    ['a function', () => {}],
+  ])('returns null for %s', (_label, value) => {
+    expect(safeJsonStringify(value)).toBe('null');
   });
 });

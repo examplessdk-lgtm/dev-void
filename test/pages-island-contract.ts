@@ -1,6 +1,10 @@
+import { readFileSync, writeFileSync } from 'node:fs';
 import type { Browser, Page } from 'playwright';
 import { beforeAll, describe, expect, it } from 'vite-plus/test';
 import { waitForIslandsHydrated } from './browser-helpers.ts';
+import { waitForServer } from './integration-helpers.ts';
+
+type HmrWindow = Window & { __hmr_marker?: boolean };
 
 /** Keep independent island coverage for every adapter without copying the tests. */
 export function defineSharedIslandTests(
@@ -129,6 +133,101 @@ function registerIslandTests(
       await waitForIslandsHydrated(page, 2);
     } finally {
       await page.context().close();
+    }
+  });
+}
+
+/** Edit the playground's blog island files while its dev server runs. */
+export function defineSharedIslandHmrTests({
+  getBase,
+  getBrowser,
+  counterFile,
+  islandFile,
+  hmrKeepsState,
+  prepareHmr,
+  waitForHmr,
+}: {
+  getBase: () => string;
+  getBrowser: () => Browser;
+  counterFile: string;
+  islandFile: string;
+  hmrKeepsState: boolean;
+  /** Runs before the page loads. */
+  prepareHmr?: (page: Page) => Promise<void>;
+  /** Runs once the islands hydrate, before the edit. */
+  waitForHmr?: (page: Page) => Promise<void>;
+}): void {
+  it('island component HMR updates without full page reload', { retry: 2 }, async () => {
+    const base = getBase();
+    const original = readFileSync(counterFile, 'utf-8');
+
+    const context = await getBrowser().newContext();
+    const page = await context.newPage();
+    page.setDefaultTimeout(10_000);
+
+    try {
+      await prepareHmr?.(page);
+      await page.goto(`${base}/blog`);
+      await waitForIslandsHydrated(page, 2);
+      await waitForHmr?.(page);
+
+      await page.click("button:has-text('Increment')");
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="count"]')?.textContent === 'Count: 1',
+      );
+
+      // A full page reload drops this marker.
+      await page.evaluate(() => {
+        (window as HmrWindow).__hmr_marker = true;
+      });
+
+      writeFileSync(counterFile, original.replace('Count: ', 'Total: '));
+
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="count"]')?.textContent?.startsWith('Total:'),
+        { timeout: 15_000 },
+      );
+
+      expect(await page.evaluate(() => (window as HmrWindow).__hmr_marker === true)).toBe(true);
+      expect(await page.textContent('[data-testid="count"]')).toBe(
+        hmrKeepsState ? 'Total: 1' : 'Total: 0',
+      );
+    } finally {
+      await page.context().close();
+      writeFileSync(counterFile, original);
+      await waitForServer(`${base}/blog`, 10_000, { expectBody: 'Count:' });
+    }
+  });
+
+  it('island file edit triggers reload with updated content', { retry: 2 }, async () => {
+    const base = getBase();
+    const original = readFileSync(islandFile, 'utf-8');
+
+    try {
+      const initialRes = await fetch(`${base}/blog`);
+      expect(initialRes.status).toBe(200);
+      expect(await initialRes.text()).toContain('<h1>Blog</h1>');
+
+      writeFileSync(islandFile, original.replace('<h1>Blog</h1>', '<h1>Blog Updated</h1>'));
+
+      // Every request while the edit lands must succeed.
+      const start = Date.now();
+      let updatedHtml = '';
+      while (Date.now() - start < 10_000) {
+        await new Promise((r) => setTimeout(r, 100));
+        const res = await fetch(`${base}/blog`);
+        expect(res.status).toBe(200);
+        updatedHtml = await res.text();
+        if (updatedHtml.includes('Blog Updated')) {
+          break;
+        }
+      }
+
+      expect(updatedHtml).toContain('<h1>Blog Updated</h1>');
+      expect(updatedHtml).toContain('data-island=');
+    } finally {
+      writeFileSync(islandFile, original);
+      await waitForServer(`${base}/blog`, 10_000, { expectBody: '<h1>Blog</h1>' });
     }
   });
 }

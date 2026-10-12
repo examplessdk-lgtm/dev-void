@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
-  type PlatformAccessProtection,
 } from '@void/platform';
 import { describe, expect, it, vi } from 'vite-plus/test';
 import { verifyInstalledPlatformAccessProtection } from '../../src/cli/platform-access-preflight.ts';
@@ -27,7 +26,7 @@ const manifest = createPlatformInstallationManifest({
   ownershipNonce: '0123456789abcdef0123456789abcdef',
   platformVersion: '1.0.0',
 });
-async function fixture() {
+async function fixture(options: { loseFirstCreate?: boolean } = {}) {
   const env = platformAccessFixture();
   let state: PlatformAccessCheckpoint = {
     version: 1,
@@ -39,22 +38,25 @@ async function fixture() {
       .slice(0, 32),
     resources: {},
   };
-  const result = await provisionPlatformAccess(
-    env.client,
-    {
-      accountId: 'account',
-      installationId: manifest.id,
-      apiUrl,
-      proxyUrl,
-      identityProviderIds: ['company-idp'],
-      policyIds: ['employees'],
-      protection: {},
-    },
-    state,
-    (value) => {
-      state = structuredClone(value);
-    },
-  );
+  const provisionInput = {
+    accountId: 'account',
+    installationId: manifest.id,
+    apiUrl,
+    proxyUrl,
+    identityProviderIds: ['company-idp'],
+    policyIds: ['employees'],
+    protection: {},
+  };
+  const save = (value: PlatformAccessCheckpoint) => {
+    state = structuredClone(value);
+  };
+  if (options.loseFirstCreate) {
+    env.loseNextApplicationResponse();
+    await expect(provisionPlatformAccess(env.client, provisionInput, state, save)).rejects.toThrow(
+      'response lost',
+    );
+  }
+  const result = await provisionPlatformAccess(env.client, provisionInput, state, save);
   env.calls.length = 0;
   const input = {
     client: {
@@ -194,24 +196,12 @@ describe('installed Access protection preflight', () => {
       if (change === 'checkpoint') {
         input.checkpoint.accessProvisioningJson = '';
       }
-      await expect(verifyInstalledPlatformAccessProtection(input)).rejects.toThrow('platform:');
+      await expect(verifyInstalledPlatformAccessProtection(input)).rejects.toThrow(
+        change === 'audience' ? 'active platform protection' : 'platform:',
+      );
       expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
     },
   );
-  it('uses active database audiences instead of restoring a stale workstation configuration', async () => {
-    const { env, input } = await fixture();
-    const changed: PlatformAccessProtection = {
-      ...input.protection,
-      applications: input.protection.applications.map((entry) => ({
-        ...entry,
-        audience: 'new-live-gate',
-      })),
-    };
-    await expect(
-      verifyInstalledPlatformAccessProtection({ ...input, protection: changed }),
-    ).rejects.toThrow('active platform protection');
-    expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
-  });
   it('reads a separately managed identity account without using the deployment account for Access', async () => {
     const { env, state, input } = await fixture();
     const requested: Array<string> = [];
@@ -244,53 +234,8 @@ describe('installed Access protection preflight', () => {
     expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
   });
   it('accepts a protection application reconciled after its create response was lost', async () => {
-    const env = platformAccessFixture();
-    let state: PlatformAccessCheckpoint = {
-      version: 1,
-      accountId: 'account',
-      installationId: manifest.id,
-      nonce: createHash('sha256')
-        .update(`void-access:${manifest.ownershipNonce}`)
-        .digest('hex')
-        .slice(0, 32),
-      resources: {},
-    };
-    const provisionInput = {
-      accountId: 'account',
-      installationId: manifest.id,
-      apiUrl,
-      proxyUrl,
-      identityProviderIds: ['company-idp'],
-      policyIds: ['employees'],
-      protection: {},
-    };
-    const save = (value: PlatformAccessCheckpoint) => {
-      state = structuredClone(value);
-    };
-    env.loseNextApplicationResponse();
-    await expect(provisionPlatformAccess(env.client, provisionInput, state, save)).rejects.toThrow(
-      'response lost',
-    );
-    const result = await provisionPlatformAccess(env.client, provisionInput, state, save);
+    const { state, input } = await fixture({ loseFirstCreate: true });
     expect(state.resources.protection).toMatchObject({ pending: false });
-    await verifyInstalledPlatformAccessProtection({
-      client: {
-        ...env.transport,
-        listWorkerDomains: vi.fn(async () => []),
-        listWorkerServiceRoutes: vi.fn(async () => []),
-      },
-      manifest,
-      plan: { apiUrl, proxyUrl, actions: [] },
-      protection: result.protection!,
-      checkpoint: {
-        accessProvisioningJson: JSON.stringify(state),
-        accessSetupSpecJson: JSON.stringify({
-          mode: 'create',
-          identityProviderIds: ['company-idp'],
-          policyIds: ['employees'],
-        }),
-        accessCredentialsJson: JSON.stringify(result.credentials),
-      },
-    });
+    await verifyInstalledPlatformAccessProtection(input);
   });
 });

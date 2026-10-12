@@ -371,7 +371,7 @@ export async function createVoidRouter(config: VoidRouterConfig): Promise<{
     }
   }
 
-  const rawRouter: VoidRouter = {
+  const router: VoidRouter = {
     _hoverDelay: engine._hoverDelay,
 
     get url() {
@@ -396,7 +396,7 @@ export async function createVoidRouter(config: VoidRouterConfig): Promise<{
     },
 
     refresh(options = {}) {
-      return rawRouter.visit(window.location.pathname + window.location.search, {
+      return router.visit(window.location.pathname + window.location.search, {
         preserveState: true,
         preserveScroll: true,
         ...options,
@@ -415,11 +415,6 @@ export async function createVoidRouter(config: VoidRouterConfig): Promise<{
       engine.flushAll();
     },
   };
-  const router = createRouterFacade(
-    rawRouter,
-    () => routeUrl,
-    () => routeParams,
-  );
 
   engine.setPopStateHandler((url, options) => {
     router.visit(url, options);

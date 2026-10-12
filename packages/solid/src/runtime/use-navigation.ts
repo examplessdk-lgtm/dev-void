@@ -2,8 +2,6 @@ import { useContext } from 'solid-js';
 import { idleNavigationState, type NavigationState } from 'void/pages-client';
 import { NavigationContext } from './context.ts';
 
-export type { NavigationState } from 'void/pages-client';
-
 export function useNavigation(): NavigationState {
   const navigation = useContext(NavigationContext);
   if (!navigation) {

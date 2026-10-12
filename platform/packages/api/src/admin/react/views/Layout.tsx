@@ -109,6 +109,12 @@ export function Layout({
           </SideNavSection>
           <SideNavSection title="Applications">
             <SideNavItem
+              label="Connected apps"
+              icon={LockKeyhole}
+              href="/admin/connected-apps"
+              isSelected={path.startsWith('/admin/connected-apps')}
+            />
+            <SideNavItem
               label="Projects"
               icon={FolderKanban}
               href="/admin/projects"

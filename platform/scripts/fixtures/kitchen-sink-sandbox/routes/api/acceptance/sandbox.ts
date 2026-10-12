@@ -1,6 +1,7 @@
 import { defineHandler } from 'void';
 import { env } from 'void/env';
 import { getSandbox, SandboxLimitError, type SandboxClient } from 'void/sandbox';
+import { internetAccessProbe } from '../../../lib/internet-probe.ts';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -155,15 +156,14 @@ export const POST = defineHandler(async (c) => {
     await server.exitCode;
     checks.push('HTTP port fetch');
 
-    const blocked = await sandbox.exec(
-      [
-        'node',
-        '-e',
-        'fetch("https://www.cloudflare.com/cdn-cgi/trace", {signal: AbortSignal.timeout(3000)}).then(() => process.exit(1), () => process.exit(0));',
-      ],
-      { signal: AbortSignal.timeout(5_000) },
+    const blocked = await sandbox.exec(internetAccessProbe, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const blockedOutput = await blocked.output();
+    assert(
+      blockedOutput.exitCode === 0,
+      `Disabled Internet probe failed (exit ${blockedOutput.exitCode})`,
     );
-    assert((await blocked.output()).exitCode === 0, 'Internet access was allowed while disabled');
     checks.push('Internet disabled');
 
     const isolated = await getSandbox(`${id}-other`, {
@@ -177,15 +177,14 @@ export const POST = defineHandler(async (c) => {
       'A second Sandbox can see the first Sandbox files',
     );
     checks.push('separate ID isolation');
-    const internet = await isolated.exec(
-      [
-        'node',
-        '-e',
-        'fetch("https://www.cloudflare.com/cdn-cgi/trace", {signal: AbortSignal.timeout(10000)}).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1));',
-      ],
-      { signal: AbortSignal.timeout(15_000) },
+    const internet = await isolated.exec(internetAccessProbe, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const internetOutput = await internet.output();
+    assert(
+      internetOutput.exitCode === 1,
+      `Enabled Internet probe did not receive an HTTP response (exit ${internetOutput.exitCode})`,
     );
-    assert((await internet.output()).exitCode === 0, 'Internet access failed while enabled');
     checks.push('Internet enabled');
     await isolated.destroy();
 

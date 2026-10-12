@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
+import { hasStandalonePragma } from '@void/deploy-core';
 import { join } from 'pathslash';
 import {
   readJournal,
@@ -24,8 +25,6 @@ const DESTRUCTIVE_PATTERNS = [
   /\bDROP\s+INDEX\b/i,
   /\bDROP\s+TRIGGER\b/i,
   /\bALTER\s+TABLE\b[\s\S]*\bDROP\s+COLUMN\b/i,
-  /\bALTER\s+TABLE\b[\s\S]*\bRENAME\s+TO\b/i,
-  /\bALTER\s+TABLE\b[\s\S]*\bRENAME\s+COLUMN\b/i,
   /\bALTER\s+TABLE\b[\s\S]*\bRENAME\b[\s\S]*\bTO\b/i,
   /\bTRUNCATE\b/i,
   /\bINSERT\s+OR\s+REPLACE\b/i,
@@ -92,13 +91,6 @@ export function isDestructive(sql: string): boolean {
   });
 }
 
-function hasDestructivePragma(sql: string): boolean {
-  return sql
-    .replace(/\r\n?/g, '\n')
-    .split('\n')
-    .some((line) => line.trim() === DESTRUCTIVE_PRAGMA);
-}
-
 /**
  * Validate migration files. Returns the validated list with destructive flags.
  * Throws if any destructive migration lacks the allow-destructive pragma.
@@ -111,7 +103,7 @@ export function validateMigrations(
 
   for (const file of files) {
     const destructive = isDestructive(file.sql);
-    if (destructive && !hasDestructivePragma(file.sql)) {
+    if (destructive && !hasStandalonePragma(file.sql, DESTRUCTIVE_PRAGMA)) {
       errors.push(file.name);
     }
     results.push({ name: file.name, sql: file.sql, destructive });

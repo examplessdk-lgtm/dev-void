@@ -98,7 +98,7 @@ export async function runAiSetupPrompt(
   const { attachSelectedPlatform, writeProjectConfig } = await import('./cli/project.ts');
   const { inferDefaultSlug } = await import('./cli/resolve-project.ts');
 
-  const client = new PlatformClient(token, apiUrl);
+  const client = new PlatformClient(token, { apiUrl });
 
   let projects: Array<import('./cli/client.ts').ProjectResponse>;
   try {
@@ -169,7 +169,7 @@ export async function runAiSetupPrompt(
     slug = project.slug;
   }
 
-  writeProjectConfig(root, attachSelectedPlatform(root, { projectId, slug }, client.apiUrl));
+  writeProjectConfig(root, attachSelectedPlatform({ projectId, slug }, client.apiUrl));
   // Restart the dev server so mergeBindings picks up fresh credentials
   await server.restart();
   printSuccess(`Linked to ${slug}.`);

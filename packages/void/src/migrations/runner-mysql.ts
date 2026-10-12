@@ -24,7 +24,7 @@ export async function readMySqlAppliedMigrations(client: MySqlClient): Promise<A
   }
 }
 
-function toMySqlClient(connection: Connection): MySqlClient {
+export function toMySqlClient(connection: Connection): MySqlClient {
   return {
     async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
       sql: string,

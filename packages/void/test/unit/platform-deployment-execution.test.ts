@@ -7,10 +7,10 @@ import {
 } from '@void/platform';
 import { resolvePlatformRuntime } from '@void/platform/installer';
 import { afterEach, expect, it, vi } from 'vite-plus/test';
+import { verifyPlatformDeploymentExecutionDrain } from '../../src/cli/platform-installer-health.ts';
 import {
   installPlatform,
   createPlatformInstallationSecrets,
-  verifyPlatformDeploymentExecutionDrain,
 } from '../../src/cli/platform-installer.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { writeInstallationManifest } from '../../src/cli/platform-registry.ts';
@@ -174,6 +174,7 @@ it.each([1, 0])(
         verifyDeploymentExecutionDrain: checkDrain,
         revalidateBeforeWorkerDeploy: async () => {},
         client: {
+          apiBaseUrl: 'https://api.cloudflare.com/client/v4',
           createZone: provision,
           createAiGateway: provision,
           createDnsRecord: provision,
@@ -184,8 +185,17 @@ it.each([1, 0])(
           createQueue: provision,
           createR2Bucket: provision,
           createDispatchNamespace: provision,
+          deleteKvValue: provision,
+          getWorkerPlainTextBindings: provision,
+          listWorkerDomains: provision,
+          listWorkerNames: provision,
+          listWorkerRoutes: provision,
+          listWorkerServiceRoutes: provision,
+          publishWorkerCustomDomainsSafely: provision,
+          publishWorkerRoutesSafely: provision,
           putKvValue: async () => {},
           putR2Object: async () => {},
+          request: provision,
         },
       }),
     ).rejects.toThrow(pendingDeployments ? 'unfinished' : 'provisioning reached');

@@ -1,15 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test';
 import { bindingRuntimePlugin } from '../../src/plugin-binding-runtime.ts';
-
-function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
-  if (typeof hook === 'function') {
-    return hook;
-  }
-  if (hook && typeof hook === 'object' && 'handler' in hook) {
-    return hook.handler;
-  }
-  throw new Error('Expected Vite hook handler.');
-}
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 describe('bindingRuntimePlugin', () => {
   it('uses custom binding names in KV and R2 runtime helpers', () => {

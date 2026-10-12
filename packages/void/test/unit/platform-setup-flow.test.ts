@@ -72,7 +72,6 @@ vi.mock('../../src/cli/auth.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/auth.ts')>()),
   openBrowser: mocks.open,
 }));
-vi.mock('../../src/cli/prompt-password.ts', () => ({ passwordWithPlaceholder: mocks.password }));
 vi.mock('../../src/cli/output.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/output.ts')>()),
   createSpinner: mocks.spinner,
@@ -673,10 +672,7 @@ describe('platform credential onboarding', () => {
         headers: expect.objectContaining({ Authorization: 'Bearer management-secret' }),
       }),
     );
-    expect(mocks.open).toHaveBeenCalledWith(
-      expect.stringContaining('name=Test+Management'),
-      expect.any(Function),
-    );
+    expect(mocks.open).toHaveBeenCalledWith(expect.stringContaining('name=Test+Management'));
     const secrets = readPendingInstallationSecrets(listInstallationManifests()[0]!);
     expect(secrets?.cloudflareApiToken).toBe(
       environment.VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN,
@@ -783,10 +779,7 @@ describe('platform credential onboarding', () => {
           ([input]) => input.message === 'Paste management API token:',
         ),
       ).toHaveLength(1);
-      expect(mocks.open).toHaveBeenCalledWith(
-        expect.stringContaining('Management'),
-        expect.any(Function),
-      );
+      expect(mocks.open).toHaveBeenCalledWith(expect.stringContaining('Management'));
       expect(readPendingInstallationSecrets(manifest)?.managementApiToken).toBe(
         'replacement-secret',
       );

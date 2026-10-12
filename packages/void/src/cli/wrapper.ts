@@ -180,10 +180,6 @@ export async function generateWrapper(
       handlerPath = join(import.meta.dirname, '..', 'runtime', handlerFilename_);
     }
     if (!existsSync(handlerPath)) {
-      // Fallback for running from source (src/cli/) in tests — dist/runtime/ is two levels up.
-      handlerPath = join(import.meta.dirname, '..', '..', 'dist', 'runtime', handlerFilename_);
-    }
-    if (!existsSync(handlerPath)) {
       throw new Error(
         `Migration handler not found: ${handlerFilename_}. Run "pnpm -C packages/void build" first.`,
       );
@@ -458,9 +454,6 @@ function generateWrapperSource(
     lines.push(`import { createMigrationHandler } from "./__void_migration_handler.mjs";`);
     lines.push(`const __migrations = ${JSON.stringify(migrations)};`);
     lines.push(`const __migrationPlanBundle = ${JSON.stringify(migrationPlanBundle)};`);
-    lines.push(
-      `const __migrationDialect = ${JSON.stringify(features.migrationDialect ?? 'sqlite')};`,
-    );
   }
 
   lines.push('');
@@ -528,22 +521,20 @@ function generateWrapperSource(
     // Migration handler
     if (migrations && migrations.length > 0) {
       lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate") {');
-      lines.push(
-        '    const handler = createMigrationHandler(env, __migrations, __migrationDialect);',
-      );
+      lines.push('    const handler = createMigrationHandler(env, __migrations);');
       lines.push('    return handler(request);');
       lines.push('  }');
       lines.push(
         '  if (request.method === "GET" && url.pathname === "/__void/migrate/capabilities") {',
       );
       lines.push(
-        '    const handler = createMigrationHandler(env, __migrations, __migrationDialect, undefined, __migrationPlanBundle);',
+        '    const handler = createMigrationHandler(env, __migrations, undefined, __migrationPlanBundle);',
       );
       lines.push('    return handler(request);');
       lines.push('  }');
       lines.push('  if (request.method === "POST" && url.pathname === "/__void/migrate/app") {');
       lines.push(
-        '    const handler = createMigrationHandler(env, __migrations, __migrationDialect, undefined, __migrationPlanBundle);',
+        '    const handler = createMigrationHandler(env, __migrations, undefined, __migrationPlanBundle);',
       );
       lines.push('    return handler(request);');
       lines.push('  }');
@@ -551,7 +542,7 @@ function generateWrapperSource(
         '  if (request.method === "GET" && url.pathname.startsWith("/__void/migrate/app/attempt/")) {',
       );
       lines.push(
-        '    const handler = createMigrationHandler(env, __migrations, __migrationDialect, undefined, __migrationPlanBundle);',
+        '    const handler = createMigrationHandler(env, __migrations, undefined, __migrationPlanBundle);',
       );
       lines.push('    return handler(request);');
       lines.push('  }');

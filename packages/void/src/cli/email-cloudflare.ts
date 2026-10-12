@@ -1,54 +1,10 @@
-import type { CloudflareOperation, CloudflareCommandResult } from '@void/deploy-cloudflare';
 /**
- * Mode B email — the developer's OWN Cloudflare account (`void deploy --platform
- * cloudflare`). Design doc 0078, "Mode B — the developer's own Cloudflare account".
- *
- * Four pure-ish units, every Cloudflare touch injected so unit tests run on fakes:
- *
- *   deriveAddresses      email/ scan + domain  →  wrangler `addresses` (+ refusals)
- *   preflightEmail       read-only probes      →  one `EmailPreflight` state object
- *   renderEmailChecklist preflight             →  the block shown before the one Enter
- *   applyEmailSetup      preflight             →  only the rows not ready, in order,
- *                                                  returning the wrangler.jsonc patch
- *
- * Both callers (`void deploy --platform cloudflare` step 3b-ii and `void email
- * setup|status --platform cloudflare`) borrow the session bearer through the deploy
- * runner's `runWranglerAuthToken` and gate the prompt on `isWranglerNonInteractiveOrCI`
- * (both in `cli/deploy-cloudflare-auth.ts`), so the two never disagree.
- *
- * Rules that hold the whole thing together (0078 "The flow, by lane"):
- *
- *   - Void never refreshes, stores or forwards a token. Everything with a wrangler
- *     command goes through the injected runner (the deploy runner, pinned wrangler).
- *     The login session's bearer is borrowed via `getSessionBearer()` (backed by
- *     `wrangler auth token --json`) ONLY for the calls wrangler has no command for —
- *     subdomain routing enable, the subaddressing PATCH, and the `GET /zones?name=`
- *     zone classification — and it is dropped after each call. `fetchWithSessionBearer`
- *     is the ONLY function that ever receives the token; nothing here logs it, embeds
- *     it in a printed line, or places it in an error.
- *   - Rules and the catch-all are wrangler's job: Void derives `addresses`, writes the
- *     root config, and the existing `wrangler deploy` applies the plan. Void PRUNES an
- *     address already routed elsewhere so that plan is never destructive (decision 12).
- *   - `addresses` is written only when routing is ready for the domain, and deleted
- *     (never `[]`, which would delete every owned rule) otherwise (decision 11).
- *   - Void owns the whole top-level `addresses` array in Mode B; entries Void did not
- *     derive skip the email step for the deploy, array untouched (decision 13).
- *   - `ready` means no ACCOUNT work is left. Routing rules are `wrangler deploy`'s own
- *     (`rulesPending`), and the two CONFIG rows — `addresses` against the pruned set,
- *     `vars.__VOID_EMAIL_FROM` against `email.from` — are reconciled by a plain file write
- *     on every deploy, never behind the prompt (`addressesStale`, `sender`). A sending
- *     onboarding the committed `send_email` binding remembers as refused (Workers Free)
- *     is settled, not work: the binding is written only by a run that already attempted
- *     it. `void email setup` offers the retry (`sendingRetryable`); the deploy never does.
- *   - The session gate reads `whoami --json`: a `wrangler login` session must carry both
- *     email scopes; an API token (`CLOUDFLARE_API_TOKEN`, the CI credential) cannot list
- *     its permissions, so it is gated by the reads, which fail closed; a Global API Key is
- *     refused by name (no single bearer for the two REST-only calls).
- *
- * Email reads return structured Cloudflare data through the private command adapter.
- * Invalid data fails closed: the row reads `unknown` and the checklist directs the
- * developer to `void email setup`. Failed commands retain their API error codes.
+ * Email on the developer's own Cloudflare account, shared by `void deploy --platform cloudflare`
+ * and `void email setup|status --platform cloudflare`. Every Cloudflare call is injected:
+ * `deriveAddresses` maps handlers to `addresses`, `preflightEmail` reads state without writing,
+ * `renderEmailChecklist` shows it, and `applyEmailSetup` runs only the rows not ready.
  */
+import type { CloudflareOperation, CloudflareCommandResult } from '@void/deploy-cloudflare';
 import { isRecord } from '@void/deploy-core';
 import type { EmailHandlersScan } from '../router/email.ts';
 import { findBindingNameOwner } from './wrangler.ts';
@@ -59,20 +15,13 @@ export const SEND_EMAIL_BINDING = 'SEND_EMAIL';
 /** The root-config `vars` key carrying `void.config.ts` `email.from` into the worker. */
 export const EMAIL_FROM_VAR = '__VOID_EMAIL_FROM';
 
-/** Cloudflare's public API base — the same one `wrangler` targets by default. */
-export const CLOUDFLARE_API_BASE_URL = 'https://api.cloudflare.com/client/v4';
+const CLOUDFLARE_API_BASE_URL = 'https://api.cloudflare.com/client/v4';
 
-/** The wrangler session scopes Mode B needs (`whoami --json` `tokenPermissions`). */
-export const REQUIRED_EMAIL_SCOPES: ReadonlyArray<string> = [
-  'email_routing:write',
-  'email_sending:write',
-];
+/** OAuth scopes the session needs (`whoami` `tokenPermissions`). */
+const REQUIRED_EMAIL_SCOPES: ReadonlyArray<string> = ['email_routing:write', 'email_sending:write'];
 
-/**
- * Cloudflare Email API error codes this module classifies (0078 "error map").
- * Everything else is reported verbatim.
- */
-export const CF_EMAIL_ERROR_CODES: Readonly<Record<number, string>> = {
+/** Cloudflare Email API error codes with a known meaning; others are reported verbatim. */
+const CF_EMAIL_ERROR_CODES: Readonly<Record<number, string>> = {
   2062: 'Email Routing is not enabled on this zone',
   2040: 'already onboarded for Email Sending',
   2036: 'account is not entitled to Email Sending',
@@ -107,29 +56,24 @@ export interface EmailDns {
 export type EmailFetch = typeof fetch;
 
 /**
- * Everything `preflightEmail` / `applyEmailSetup` need. Every Cloudflare touch is a
- * seam; `getSessionBearer` resolves `null` when the session cannot be borrowed
- * (`wrangler auth token` failed) — never throws through to the deploy.
+ * Inputs for `preflightEmail` / `applyEmailSetup`. `getSessionBearer` resolves `null` when
+ * the session cannot be borrowed.
  */
 export interface EmailCloudflareInputs {
   handlers: EmailHandlersScan;
-  /** `void.config.ts` `email.from` — the ONLY domain input (decision 9). */
+  /** `void.config.ts` `email.from` — the only domain input. */
   from: string;
   /** The worker name `wrangler deploy` uploads as (rules are matched to it). */
   workerName: string;
   /** The reconciled effective account id the deploy is pinned to. */
   accountId: string;
   /** Existing root-config `send_email` array (verbatim), if any. */
-  existingSendEmail?: Array<{ name?: unknown }> | null;
+  existingSendEmail?: Array<{ name?: unknown }>;
   /** Existing root-config top-level `addresses` array (verbatim), if any. */
   existingAddresses?: unknown;
   /** Existing root-config `vars` object (verbatim) — `__VOID_EMAIL_FROM` is compared to `from`. */
-  existingVars?: Record<string, unknown> | null;
-  /**
-   * Root-config shapes the writer would refuse (`findEmailConfigConflicts`), computed by
-   * the caller from the parsed root config; each becomes an `all` blocker so the refusal
-   * lands BEFORE the Enter rather than after the account was changed.
-   */
+  existingVars?: Record<string, unknown>;
+  /** Writer refusals (`findEmailConfigConflicts`); each blocks before the account changes. */
   configConflicts?: Array<string>;
   /** Number of source files calling `sendEmail()` — shown in the header line only. */
   sendEmailFiles?: number;
@@ -143,12 +87,8 @@ export interface EmailCloudflareInputs {
 }
 
 /**
- * The root-config shapes `writeProvisionedWranglerConfig` refuses for the two names Mode
- * B writes — `SEND_EMAIL` into `send_email`, `__VOID_EMAIL_FROM` into `vars` — read from
- * the parsed root config BEFORE anything is asked, so a collision with another binding
- * type (or a malformed `send_email` / `vars`) refuses the step up front instead of after
- * the account was changed. Same guard as the writer's, which stays the last line of
- * defence (the file can change between preflight and write).
+ * Config shapes the writer would refuse for `SEND_EMAIL` and `__VOID_EMAIL_FROM`, checked
+ * before anything is asked. The writer keeps the same guard, since the file can change first.
  */
 export function findEmailConfigConflicts(config: Record<string, unknown>): Array<string> {
   // A Set: one malformed field is reported by both lookups (the owner scan reads every field).
@@ -172,6 +112,23 @@ export function findEmailConfigConflicts(config: Record<string, unknown>): Array
   return [...conflicts];
 }
 
+/** The `EmailCloudflareInputs` fields read from the parsed root config. */
+export function emailConfigInputs(
+  rootConfig: Record<string, unknown>,
+): Pick<
+  EmailCloudflareInputs,
+  'existingSendEmail' | 'existingAddresses' | 'existingVars' | 'configConflicts'
+> {
+  return {
+    existingSendEmail: Array.isArray(rootConfig.send_email)
+      ? (rootConfig.send_email as Array<{ name?: unknown }>)
+      : undefined,
+    existingAddresses: rootConfig.addresses,
+    existingVars: isRecord(rootConfig.vars) ? rootConfig.vars : undefined,
+    configConflicts: findEmailConfigConflicts(rootConfig),
+  };
+}
+
 // ── Derivation ─────────────────────────────────────────────────────────────────
 
 export type EmailDomainMode = 'apex' | 'subdomain';
@@ -190,10 +147,8 @@ export interface DerivedEmailAddresses {
  * also accepts the display-name form (`Acme <noreply@mail.acme.com>`, see `config.ts`),
  * so the address inside `<…>` is read when present.
  *
- * Validated per LABEL, not as one character class: the host is handed to wrangler as a
- * positional (`email routing settings <host>`), where a label starting with `-` is read
- * by yargs as a flag (`--config.evil` becomes an option and the domain positional goes
- * missing), and an empty label (`..acme.com`) is not a name at all.
+ * Validated per label, so an empty label or one that starts with `-` never reaches a
+ * Cloudflare command argument.
  */
 export function emailFromDomain(from: string): string | null {
   const bracketed = /<([^<>]*)>\s*$/.exec(from.trim());
@@ -282,19 +237,14 @@ export function deriveAddresses(
 
 // ── Structured command results ────────────────────────────────────────────────
 
-/**
- * `wrangler whoami --json` — the fields Mode B reads. `tokenPermissions` is filled from
- * the STORED `wrangler login` state only (4.131 `getTokenPermissions` → `getScopes`), so
- * it describes the credential in use only when `authType` is `OAuth Token`; under
- * `CLOUDFLARE_API_TOKEN` it is absent (or, with a stale login file beside the env token,
- * it describes the file, not the token).
- */
+/** The session fields read from the `auth.whoami` operation. */
 export interface WhoamiJson {
   loggedIn: boolean;
-  /** `OAuth Token` | `User API Token` | `Account API Token` | `Global API Key` (4.131 `getAuthType`). */
+  /** `OAuth Token` | `API Token` | `Global API Key`. */
   authType?: string;
   email?: string;
   accounts?: Array<{ id: string; name: string }>;
+  /** Session scopes; checked only for an OAuth session. */
   tokenPermissions?: Array<string>;
 }
 
@@ -516,7 +466,7 @@ export interface EmailPreflight {
   /**
    * True when the root `addresses` array (absent, or Void's own) is not the pruned set
    * below — a local, prompt-free rewrite, never account work, so it does not gate `ready`.
-   * A stale entry left in place reaches wrangler's plan as a `conflict` (decision 12).
+   * A stale entry left in place reaches wrangler's plan as a `conflict`.
    */
   addressesStale: boolean;
   derived: DerivedEmailAddresses;
@@ -526,22 +476,14 @@ export interface EmailPreflight {
   rulesPending: Array<string>;
   blockers: Array<EmailPreflightBlocker>;
   /**
-   * True when Email Sending onboarding is still on the table: the row is `pending` and no
-   * sending-scoped blocker stands in the way — exactly when apply would make its one
-   * `wrangler email sending enable` call (the checklist's `onboard … for Email Sending`
-   * row). With the binding committed such a row is SETTLED (`ready` stays true; see the
-   * memory rule in `preflightEmail`), so this is what `void email setup` offers as its own
-   * prompt — the retry after a Workers Paid upgrade — instead of running it unasked. ONE
-   * field, computed here, so the offer and apply's call cannot drift.
+   * True when apply would make its `sending enable` call: the row is pending and no
+   * sending blocker applies. With the binding committed the row is settled, so
+   * `void email setup` offers this retry as its own prompt.
    */
   sendingRetryable: boolean;
   /**
-   * True when nothing is left for APPLY to do on the account — no prompt, zero calls —
-   * with one remembered exception: a sending row the committed binding records as refused
-   * (`sendingRetryable`), which apply WOULD retry, so the deploy never runs apply on a
-   * ready preflight and `void email setup` asks first. Routing rules are wrangler's
-   * (`rulesPending` is informational), and the two config rows (`sender`,
-   * `addressesStale`) are reconciled by a plain file write.
+   * True when apply has no account work left, apart from a `sendingRetryable` row. Routing
+   * rules (`rulesPending`) and the config rows (`sender`, `addressesStale`) are not account work.
    */
   ready: boolean;
 }
@@ -553,8 +495,8 @@ function mxState(exchanges: Array<string>): 'empty' | 'cloudflare' | 'foreign' {
   return exchanges.every((x) => /\.mx\.cloudflare\.net\.?$/i.test(x)) ? 'cloudflare' : 'foreign';
 }
 
-async function probeMx(
-  dns: EmailDns,
+export async function probeMx(
+  dns: Pick<EmailDns, 'resolveMx'>,
   name: string,
 ): Promise<{ state: 'empty' | 'cloudflare' | 'foreign' | 'unknown'; exchanges: Array<string> }> {
   try {
@@ -601,10 +543,8 @@ function shortId(id: string): string {
 }
 
 /**
- * Read-only preflight. Order matters only for cost: public DNS first (free), then
- * `whoami` (no network beyond wrangler's own), then the three `wrangler email` reads,
- * then — if the bearer can be borrowed — the two GETs that have no wrangler command.
- * Nothing here writes.
+ * Read-only preflight: session, zone, public DNS, the provider reads and, when the bearer
+ * can be borrowed, the two REST reads that have no command. Nothing here writes.
  */
 export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<EmailPreflight> {
   const domain = emailFromDomain(inputs.from);
@@ -660,25 +600,13 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     block('all', conflict);
   }
 
-  // 1. Session: logged in, and — for a browser (OAuth) session — both email scopes
-  //    (0078: a session that predates wrangler 4.81 has neither; the pinned wrangler's
-  //    default `login` scope set carries both, one browser Allow). An API token's
-  //    permissions are not enumerable (`tokenPermissions` never describes it), so the gate
-  //    is the reads below: a refused read fails closed as an `unknown` row. A Global API
-  //    Key has no single bearer `auth token` can hand over, so the subaddressing rows could
-  //    never read; it is refused up front, by name.
-  //
-  //    Every blocker names `void cloudflare login` (AGENTS.md: Cloudflare operations are
-  //    described through Void, never as a wrangler command). That command is a no-op on a
-  //    session `whoami --json` already reads cleanly — it re-uses the existing session
-  //    rather than re-consenting — so a session that IS readable but insufficient (the
-  //    scope and Global API Key branches) says what to clear first: `void cloudflare
-  //    logout`, or the CLOUDFLARE_API_KEY pair, which wrangler prefers over both an OAuth
-  //    session and CLOUDFLARE_API_TOKEN.
+  // 1. Session. An OAuth session must carry both email scopes. An API token's permissions
+  //    cannot be listed, so the reads below gate it and fail closed. A Global API Key has no
+  //    bearer to borrow, so it is refused by name. `void cloudflare login` reuses a readable
+  //    session, so an insufficient one is told what to clear first.
   const whoami = await run({ type: 'auth.whoami' });
   const who = isHardFailure(whoami) || whoami.status !== 0 ? null : parseWhoamiJson(whoami.data);
   if (!who) {
-    // `whoami --json` failed or printed no session.
     pre.session.state = 'unknown';
     block('all', 'could not read the Cloudflare session — run `void cloudflare login`');
   } else if (!who.loggedIn) {
@@ -717,9 +645,8 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     ? ' (an API token needs Email Routing Edit + Email Sending Edit on the zone and account)'
     : '';
 
-  // 2. Zone: walk the labels the way wrangler's own `resolveDomain` does, through
-  //    `email routing settings <candidate>` — the first candidate that is a zone in the
-  //    pinned account is the apex, and its data also carries routing status + zone id.
+  // 2. Zone: the first label candidate that `email routing settings` finds in the pinned
+  //    account is the apex; its data also carries routing status and the zone id.
   let settings: RoutingSettings | null = null;
   let settingsMiss = false;
   if (pre.session.state === 'ok') {
@@ -771,12 +698,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     pre.sending.dnsConflicts.push(`(DNS lookup failed for _dmarc.${domain} / cf-bounce.${domain})`);
   }
 
-  // 4. The bearer, borrowed once for the two reads wrangler has no command for:
-  //    `GET /zones?name=<apex>` (documented zone authority — WITHOUT `account.id`, so a
-  //    zone in another account is told apart from one not on Cloudflare, and `type`
-  //    refuses partial/secondary zones) and `GET /zones/{z}/email/routing`
-  //    (`support_subaddress`, which the settings command does not return). A `null` bearer
-  //    leaves both rows `unknown`; nothing about the deploy fails on that.
+  // 4. The bearer, borrowed once for two reads with no command: `GET /zones?name=` (without
+  //    `account.id`, so a zone in another account is told apart from a missing one, and
+  //    `type` refuses partial/secondary zones) and `GET /zones/{z}/email/routing`
+  //    (`support_subaddress`). A `null` bearer leaves both rows `unknown`.
   let bearer: string | null = null;
   if (pre.session.state === 'ok') {
     bearer = await inputs.getSessionBearer().catch(() => null);
@@ -862,7 +787,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
   const mode = pre.mode;
 
   // 5. Routing status. On the apex, `ready` is the only good state. `unlocked` /
-  //    `misconfigured*` mean its locked records changed — print, never re-lock (0078).
+  //    `misconfigured*` mean its locked records changed — print, never re-lock.
   if (settings) {
     if (mode === 'apex') {
       pre.routing = {
@@ -993,7 +918,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     );
   }
 
-  // 8. The config rows: `send_email` binding and `addresses` ownership (decision 13).
+  // 8. The config rows: `send_email` binding and `addresses` ownership.
   const existingSendEmail = inputs.existingSendEmail ?? [];
   const names = existingSendEmail.map((e) => (typeof e?.name === 'string' ? e.name : ''));
   if (names.includes(SEND_EMAIL_BINDING)) {
@@ -1009,14 +934,8 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     const existing = Array.isArray(inputs.existingAddresses)
       ? inputs.existingAddresses.map((a) => (typeof a === 'string' ? a.toLowerCase() : String(a)))
       : ['(not an array)'];
-    // The candidate set is THIS scan's derivation. Void records no provenance for the
-    // entries it wrote on an earlier deploy (the array carries no marker), so an entry
-    // left behind by a deleted handler and a hand-written one are the same thing here:
-    // both are `unknown`, and the whole step is skipped with the array untouched
-    // (decision 13). With no handlers left at all the candidate set is empty and every
-    // committed entry is `unknown` — the rule stays routed to this worker. Whether such
-    // a leftover should instead be Void-managed (pruned, or `[]` when nothing is left) is
-    // decision 13's other branch; see the deploy step's note above `patch.addresses`.
+    // Void records no provenance for entries it wrote earlier, so a leftover from a deleted
+    // handler reads like a hand-written entry: the step is skipped and the array left alone.
     const candidates = new Set(pre.derived.addresses);
     const unknown = existing.filter((a) => !candidates.has(a));
     if (unknown.length > 0) {
@@ -1042,30 +961,10 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     senderVar === inputs.from ? 'ready' : senderVar === undefined ? 'absent' : 'stale';
   pre.rulesPending = pre.rules.absent.filter((a) => pre.addresses.includes(a));
 
-  // Ready = nothing left for apply to do on the ACCOUNT. A refused handler and a pruned
-  // address are `!` rows, not work; a sending-scoped blocker is something Void cannot act
-  // on, so it does not keep every later deploy prompting. Routing rules are created by
-  // `wrangler deploy` from the written `addresses`, so a rule not there yet is not apply's
-  // work either (`rulesPending`); the same goes for the config rows, which a plain file
-  // write reconciles without a prompt.
-  //
-  // A sending row still pending WITH the binding committed is settled too — the committed
-  // binding is the memory of a refused onboarding. `sending settings` answers not-found
-  // for "Workers Free" and for "Paid, never onboarded" alike, so no read tells the two
-  // apart; only the mutating `sending enable` does. And `applyEmailSetup` writes
-  // `send_email` ONLY on a run that has already made that call: the binding goes in once
-  // routing or sending came up, and `enable` runs on every apply whose sending row is not
-  // ready and not blocked. So binding present + sending pending reads "attempted and
-  // refused" (Workers Free, `10105`). Without this rule the refusal came back on every
-  // deploy — a prompt in a TTY, "cannot ask" in CI, `--require-email` refused forever,
-  // `void email status` exit 1 — against a setup that is complete for inbound (replies
-  // go through the native `message.reply()`, never the binding) and sends to verified
-  // destinations. The cost: a later Workers Paid upgrade is not picked up by the deploy;
-  // `void email setup` offers the retry (`sendingRetryable`). A binding committed by hand
-  // reads the same way — the developer chose it. Note that with the binding present every
-  // sending state is settled today (`unknown` always carries a sending-scoped blocker), so
-  // the row gates `ready` only through the binding; the three terms stay apart because
-  // each is settled for a different reason.
+  // A sending-scoped blocker is not work Void can act on. A pending sending row with the
+  // binding committed is settled too: no read tells Workers Free from "never onboarded", but
+  // apply writes `send_email` only on a run that already tried `sending enable`, so the binding
+  // records a refused onboarding. `void email setup` offers the retry (`sendingRetryable`).
   const sendingBlocked = pre.blockers.some((b) => b.scope === 'sending');
   pre.sendingRetryable = pre.sending.state === 'pending' && !sendingBlocked;
   const sendingSettled =
@@ -1085,15 +984,14 @@ type ZoneRecord = { id: string; name: string; type?: string; account?: { id?: st
 
 // ── Checklist ──────────────────────────────────────────────────────────────────
 
-/** Column padding for the checklist; an overflowing cell gets three spaces (0078 transcript). */
+/** Column padding for the checklist; an overflowing cell gets three spaces. */
 function pad(text: string, width: number): string {
   return text.length >= width ? `${text}   ` : text.padEnd(width);
 }
 
 /**
- * The block shown before the one Enter — status rows, then the `+`/`!` change list
- * under the "This changes YOUR Cloudflare account" line (0078 transcript). Blockers
- * render as `✘` rows at the end so the developer sees why nothing will be asked.
+ * The block shown before the confirmation: status rows, then the `+`/`!` change list.
+ * Blockers render as `✘` rows at the end so the developer sees why nothing will be asked.
  */
 export function renderEmailChecklist(pre: EmailPreflight): string {
   const apex = pre.apex ?? '?';
@@ -1332,9 +1230,9 @@ export async function fetchWithSessionBearer(
 // ── Apply ──────────────────────────────────────────────────────────────────────
 
 /**
- * The root-config patch Mode B writes. Shape-compatible with the `sendEmail` /
- * `addresses` / `vars` members of `ProvisionedWranglerPatch` (`cli/wrangler.ts`):
- * `addresses: null` deletes the key (never `[]`), `undefined` leaves it untouched.
+ * The config patch email setup writes; a subset of `ProvisionedWranglerPatch`.
+ * `addresses: null` deletes the key (never `[]`, which deletes every owned rule);
+ * `undefined` leaves it untouched.
  */
 export interface EmailWranglerPatch {
   sendEmail?: { name: string };
@@ -1349,34 +1247,24 @@ export interface EmailApplyResult {
   routingReady: boolean;
   subaddressingReady: boolean;
   sendingReady: boolean;
-  /** True when `addresses` was NOT written this run and the key is deleted instead. */
-  addressesWithheld: boolean;
   /**
-   * The inbound rows, together: routing ready AND subaddressing on AND `addresses`
-   * written. Routing alone is not "set up" — a refused subaddressing PATCH withholds
-   * `addresses` (no bearer call may fail, decision 11), so the next deploy creates no
-   * rule at all, and until the flag is on `support+T-42@` matches no rule for `support@`.
-   * `void email setup` exits 0 on this; `--require-email` gates on it plus the binding —
-   * the sending row needs no term there, because the binding this same run writes is what
-   * the next preflight reads as the memory of a refused onboarding (see `preflightEmail`).
-   * ONE field, computed here, so the two callers cannot drift.
+   * Routing ready, subaddressing on, and `addresses` written. `void email setup` exits 0 on
+   * this, and `--require-email` gates on it plus the binding.
    */
   inboundReady: boolean;
 }
 
 /**
- * Run ONLY the rows preflight found not ready, in 0078 order:
+ * Run only the rows preflight found not ready:
  *
- *   routing   apex → `wrangler email routing enable <apex>`
- *             subdomain → bearer POST /zones/{z}/email/routing/dns { name }   [UNVERIFIED]
- *   subaddr   bearer PATCH /zones/{z}/email/routing { support_subaddress: true } [UNVERIFIED]
- *             (both paths — wrangler has no command for it)
- *   sending   `wrangler email sending enable <domain>`; `[code: 2040]` = already
- *             onboarded → ok; any other failure → hint line, continue without sending
+ *   routing   apex → `email routing enable <apex>`
+ *             subdomain → bearer POST /zones/{z}/email/routing/dns { name }
+ *   subaddr   bearer PATCH /zones/{z}/email/routing { support_subaddress: true }
+ *   sending   `email sending enable <domain>`; code 2040 (already onboarded) is ok;
+ *             any other failure prints a hint and continues without sending
  *
- * Any bearer failure (no bearer, or a non-2xx) prints the dashboard fallback line and
- * WITHHOLDS `addresses` this run — never a deploy failure (decision 11). A preflight
- * with an `all` blocker applies nothing and returns an empty patch.
+ * A failed bearer call prints the dashboard fallback and withholds `addresses` this run;
+ * it never fails the deploy. An `all` blocker applies nothing and returns an empty patch.
  */
 export async function applyEmailSetup(
   pre: EmailPreflight,
@@ -1389,7 +1277,6 @@ export async function applyEmailSetup(
     routingReady: pre.routing.state === 'ready',
     subaddressingReady: pre.subaddressing.state === 'on',
     sendingReady: pre.sending.state === 'ready',
-    addressesWithheld: false,
     inboundReady: false,
   };
   const blocked = pre.blockers.filter((b) => b.scope === 'all');
@@ -1475,19 +1362,15 @@ export async function applyEmailSetup(
         );
       }
     } else if (apexRoutingOff) {
-      // A subdomain is added to a zone that ALREADY routes (Cloudflare's Subdomains form
-      // lives under an enabled apex). What the `name`-bearing POST does against a zone
-      // whose routing is off is unmeasured, and the one outcome that would matter — the
-      // zone itself being enabled, locking MX over the apex's live mail — is exactly what
-      // the apex refusal exists to prevent. So no call is made; `addresses` is withheld.
+      // A subdomain can only be added to a zone that already routes. Calling here could
+      // enable the zone itself and lock MX over the apex's live mail, so no call is made.
       lines.push(
         `  ✘ routing   ${pre.domain}: Email Routing is not enabled on ${apex} — a subdomain can only be added to a zone that already routes; Void never enables routing on the apex from the subdomain path`,
       );
       lines.push(`    ${subdomainDashboardFallback(apex, pre.domain)}`);
     } else {
-      // [UNVERIFIED] POST …/email/routing/dns { name } enables routing on a subdomain
-      // (OpenAPI body field `name`; wrangler's own `routing enable` calls the deprecated
-      // POST …/routing/enable which is apex-only). See 0078 "Still unverified" 1.
+      // Per the OpenAPI spec, POST …/email/routing/dns { name } enables routing on a
+      // subdomain; the `email.routing.enable` operation is apex-only.
       const response = await withBearer('POST', `/zones/${pre.zone.zoneId}/email/routing/dns`, {
         name: pre.domain,
       });
@@ -1501,8 +1384,7 @@ export async function applyEmailSetup(
     }
   }
 
-  // 2. Subaddressing — per-zone, off by default, no wrangler command (0078 measured).
-  //    [UNVERIFIED] PATCH with the OAuth session; see 0078 "Still unverified" 2.
+  // 2. Subaddressing: per zone, off by default, and reachable only through the REST API.
   if (!result.subaddressingReady && !bearerFailed && !apexRoutingOff) {
     const response = await withBearer('PATCH', `/zones/${pre.zone.zoneId}/email/routing`, {
       support_subaddress: true,
@@ -1558,29 +1440,26 @@ export async function applyEmailSetup(
     result.patch.sendEmail = { name: SEND_EMAIL_BINDING };
     result.patch.vars = { [EMAIL_FROM_VAR]: pre.from };
   }
-  result.addressesWithheld = bearerFailed || !result.routingReady;
-  if (!result.addressesWithheld && pre.addresses.length > 0) {
+  const addressesWithheld = bearerFailed || !result.routingReady;
+  if (!addressesWithheld && pre.addresses.length > 0) {
     result.patch.addresses = pre.addresses;
   } else {
     result.patch.addresses = null;
-    if (result.addressesWithheld && pre.addresses.length > 0) {
+    if (addressesWithheld && pre.addresses.length > 0) {
       lines.push(
         `  ! config    addresses withheld this run (${bearerFailed ? 'session-bearer step failed' : 'routing not ready'}); no routing rule is created for ${pre.addresses.join(', ')}`,
       );
     }
   }
-  if (result.patch.sendEmail || result.patch.addresses !== undefined) {
-    lines.push('  ✔ config    void.lock.json updated');
-  }
-  result.inboundReady =
-    result.routingReady && result.subaddressingReady && !result.addressesWithheld;
+  lines.push('  ✔ config    void.lock.json updated');
+  result.inboundReady = result.routingReady && result.subaddressingReady && !addressesWithheld;
   return result;
 }
 
 // ── Address map ────────────────────────────────────────────────────────────────
 
 /**
- * The post-deploy block (0078 transcript):
+ * The post-deploy block:
  *
  *     inbound   support@mail.acme.com  →  email/support+[ticket].ts
  *     outbound  sendEmail() from support@mail.acme.com

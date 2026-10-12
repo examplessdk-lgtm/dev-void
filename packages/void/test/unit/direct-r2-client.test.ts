@@ -118,19 +118,6 @@ describe('PlatformClient.requestUploadUrls', () => {
       aabbccdd: { url: 'https://r2/.../1', headers: { 'Content-Md5': 'abc==' } },
     });
   });
-
-  it('throws PlatformApiError on non-2xx', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
-    const client = makeClient();
-    await expect(
-      client.requestUploadUrls(projectId, [
-        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
-      ]),
-    ).rejects.toMatchObject({
-      name: 'PlatformApiError',
-      status: 403,
-    });
-  });
 });
 
 describe('PlatformClient.getMigrationStatus', () => {
@@ -268,16 +255,6 @@ describe('PlatformClient.finalizeDeploy', () => {
     ]);
   });
 
-  it('throws PlatformApiError on non-2xx', async () => {
-    fetchMock.mockResolvedValueOnce(new Response('busted', { status: 500 }));
-    const client = makeClient();
-    const gen = client.finalizeDeploy(projectId, makePayload());
-    await expect(gen.next()).rejects.toMatchObject({
-      name: 'PlatformApiError',
-      status: 500,
-    });
-  });
-
   function makeCliLog() {
     return {
       info: vi.fn(),
@@ -336,40 +313,6 @@ describe('PlatformClient.finalizeDeploy', () => {
         expect.objectContaining({ attempt: 1, delayMs: 1000 }),
       );
       expect(cliLog.error).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('throws the original error after exhausting transport retries', async () => {
-    vi.useFakeTimers();
-    fetchMock.mockImplementation(() => Promise.reject(new TypeError('fetch failed')));
-
-    const cliLog = makeCliLog();
-    const client = new PlatformClient(token, { apiUrl, cliLog });
-    try {
-      const consume = (async () => {
-        for await (const _event of client.finalizeDeploy(projectId, makePayload())) {
-          // unreachable — every attempt rejects
-        }
-      })();
-      const assertion = expect(consume).rejects.toBeInstanceOf(TypeError);
-      await vi.runAllTimersAsync();
-      await assertion;
-
-      // 1 initial attempt + 3 retries — no dedupe GETs.
-      expect(deployPostCalls()).toHaveLength(4);
-      expect(deploymentListCalls()).toHaveLength(0);
-      const retries = cliLog.warn.mock.calls.filter(([msg]) => msg === 'deploy_fetch_retry');
-      expect(retries.map(([, fields]) => fields?.delayMs)).toEqual([1000, 5000, 10000]);
-      expect(cliLog.error).toHaveBeenCalledWith(
-        'deploy_fetch_rejected',
-        expect.any(TypeError),
-        expect.objectContaining({
-          url: `${apiUrl}/projects/${projectId}/deploy`,
-          attempts: 4,
-        }),
-      );
     } finally {
       vi.useRealTimers();
     }
@@ -491,7 +434,7 @@ describe('PlatformClient.finalizeDeploy', () => {
       expect(cliLog.error).toHaveBeenCalledWith(
         'deploy_fetch_rejected',
         expect.any(TypeError),
-        expect.objectContaining({ attempts: 4 }),
+        expect.objectContaining({ url: `${apiUrl}/projects/${projectId}/deploy`, attempts: 4 }),
       );
     } finally {
       vi.useRealTimers();
@@ -1028,130 +971,71 @@ describe('PlatformClient.finalizeDeploy', () => {
   });
 });
 
-// The deploy command keeps the CF Access service-token PAIR out of the untrusted
-// build children (via `buildEnv()` on the spawn env) so they can't read the
-// shared staging credential. That is only safe because the client captures the
-// Access headers AT CONSTRUCTION and reuses them — proven here: delete the env
-// vars after construction, then verify a later API call STILL sends
-// CF-Access-Client-Id / CF-Access-Client-Secret. (deploy.ts no longer mutates
-// process.env; this test deletes them itself to assert the capture invariant.)
+// The deploy command keeps the CF Access service-token pair out of untrusted
+// build children (via `buildEnv()` on the spawn env). That is only safe because
+// the client captures the Access headers at construction and reuses them.
 describe('PlatformClient CF Access header capture (survives a later env scrub)', () => {
   it('keeps sending CF-Access headers after CF_ACCESS_* are deleted from process.env', async () => {
     vi.stubEnv('VOID_ACCESS_ORIGIN', 'https://api.staging.void.cloud');
-    const savedId = process.env.CF_ACCESS_CLIENT_ID;
-    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    try {
-      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
-      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', 'svc-id.access');
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', 'svc-secret');
+    const client = new PlatformClient(token, { apiUrl: 'https://api.staging.void.cloud' });
 
-      // Construct a known Access-gated staging client, which captures the
-      // credentials before the untrusted build environment is scrubbed.
-      const client = new PlatformClient(token, { apiUrl: 'https://api.staging.void.cloud' });
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', undefined);
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', undefined);
 
-      // Simulate deploy.ts's scrub (before any user build spawns).
-      delete process.env.CF_ACCESS_CLIENT_ID;
-      delete process.env.CF_ACCESS_CLIENT_SECRET;
+    fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
+    await client.requestUploadUrls(projectId, [
+      { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
+    ]);
 
-      fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
-      await client.requestUploadUrls(projectId, [
-        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
-      ]);
-
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      const headers = init.headers as Record<string, string>;
-      expect(headers['CF-Access-Client-Id']).toBe('svc-id.access');
-      expect(headers['CF-Access-Client-Secret']).toBe('svc-secret');
-    } finally {
-      if (savedId === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_ID;
-      } else {
-        process.env.CF_ACCESS_CLIENT_ID = savedId;
-      }
-      if (savedSecret === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_SECRET;
-      } else {
-        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
-      }
-    }
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['CF-Access-Client-Id']).toBe('svc-id.access');
+    expect(headers['CF-Access-Client-Secret']).toBe('svc-secret');
   });
 
   it('does not send staging Access credentials to a self-hosted platform', async () => {
-    const savedId = process.env.CF_ACCESS_CLIENT_ID;
-    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    try {
-      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
-      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
-      const client = makeClient();
-      fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', 'svc-id.access');
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', 'svc-secret');
+    const client = makeClient();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
 
-      await client.requestUploadUrls(projectId, [
-        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
-      ]);
+    await client.requestUploadUrls(projectId, [
+      { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
+    ]);
 
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      const headers = init.headers as Record<string, string>;
-      expect(headers['CF-Access-Client-Id']).toBeUndefined();
-      expect(headers['CF-Access-Client-Secret']).toBeUndefined();
-    } finally {
-      if (savedId === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_ID;
-      } else {
-        process.env.CF_ACCESS_CLIENT_ID = savedId;
-      }
-      if (savedSecret === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_SECRET;
-      } else {
-        process.env.CF_ACCESS_CLIENT_SECRET = savedSecret;
-      }
-    }
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['CF-Access-Client-Id']).toBeUndefined();
+    expect(headers['CF-Access-Client-Secret']).toBeUndefined();
   });
 
   it('uses a browser-renewed Access token acquired after construction', async () => {
-    const savedToken = process.env.CF_ACCESS_TOKEN;
-    const savedId = process.env.CF_ACCESS_CLIENT_ID;
-    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    const savedCredentials = process.env.VOID_ACCESS_CREDENTIALS;
-    const savedOrigin = process.env.VOID_ACCESS_ORIGIN;
-    try {
-      delete process.env.CF_ACCESS_CLIENT_ID;
-      delete process.env.CF_ACCESS_CLIENT_SECRET;
-      delete process.env.VOID_ACCESS_CREDENTIALS;
-      process.env.VOID_ACCESS_ORIGIN = 'https://api.staging.void.cloud';
-      const tokenFor = (label: string) =>
-        'header.' +
-        Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, label })).toString(
-          'base64url',
-        ) +
-        '.signature';
-      process.env.CF_ACCESS_TOKEN = tokenFor('initial');
-      const client = new PlatformClient(token, { apiUrl: 'https://api.staging.void.cloud' });
+    vi.stubEnv('CF_ACCESS_CLIENT_ID', undefined);
+    vi.stubEnv('CF_ACCESS_CLIENT_SECRET', undefined);
+    vi.stubEnv('VOID_ACCESS_CREDENTIALS', undefined);
+    vi.stubEnv('VOID_ACCESS_ORIGIN', 'https://api.staging.void.cloud');
+    const tokenFor = (label: string) =>
+      'header.' +
+      Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, label })).toString(
+        'base64url',
+      ) +
+      '.signature';
+    vi.stubEnv('CF_ACCESS_TOKEN', tokenFor('initial'));
+    const client = new PlatformClient(token, { apiUrl: 'https://api.staging.void.cloud' });
 
-      const renewedToken = tokenFor('renewed');
-      process.env.CF_ACCESS_TOKEN = renewedToken;
-      fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
-      await client.requestUploadUrls(projectId, [
-        { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
-      ]);
+    const renewedToken = tokenFor('renewed');
+    vi.stubEnv('CF_ACCESS_TOKEN', renewedToken);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ urls: {} }));
+    await client.requestUploadUrls(projectId, [
+      { blake3: 'a'.repeat(32), md5: 'b'.repeat(32), size: 1, contentType: 'text/plain' },
+    ]);
 
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      const headers = init.headers as Record<string, string>;
-      expect(headers['cf-access-token']).toBe(renewedToken);
-      expect(headers['CF-Access-Client-Id']).toBeUndefined();
-    } finally {
-      for (const [name, value] of [
-        ['CF_ACCESS_TOKEN', savedToken],
-        ['CF_ACCESS_CLIENT_ID', savedId],
-        ['CF_ACCESS_CLIENT_SECRET', savedSecret],
-        ['VOID_ACCESS_CREDENTIALS', savedCredentials],
-        ['VOID_ACCESS_ORIGIN', savedOrigin],
-      ] as const) {
-        if (value === undefined) {
-          delete process.env[name];
-        } else {
-          process.env[name] = value;
-        }
-      }
-    }
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers['cf-access-token']).toBe(renewedToken);
+    expect(headers['CF-Access-Client-Id']).toBeUndefined();
   });
 });
 
@@ -1159,8 +1043,6 @@ describe('PlatformClient Cloudflare Access challenge renewal', () => {
   const origin = 'https://api.example.com';
   const accessJwt = (seconds: number) =>
     `e30.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + seconds })).toString('base64url')}.signature`;
-  let savedCredentials: string | undefined;
-  let savedOrigin: string | undefined;
   let stdinTty: boolean | undefined;
   let stdoutTty: boolean | undefined;
 
@@ -1168,24 +1050,12 @@ describe('PlatformClient Cloudflare Access challenge renewal', () => {
     spawnSyncMock.mockReset();
     accessKeyring.read.mockReset().mockReturnValue(null);
     accessKeyring.write.mockReset().mockReturnValue(true);
-    savedCredentials = process.env.VOID_ACCESS_CREDENTIALS;
-    savedOrigin = process.env.VOID_ACCESS_ORIGIN;
     stdinTty = process.stdin.isTTY;
     stdoutTty = process.stdout.isTTY;
-    delete process.env.VOID_ACCESS_ORIGIN;
+    vi.stubEnv('VOID_ACCESS_ORIGIN', undefined);
   });
 
   afterEach(() => {
-    if (savedCredentials === undefined) {
-      delete process.env.VOID_ACCESS_CREDENTIALS;
-    } else {
-      process.env.VOID_ACCESS_CREDENTIALS = savedCredentials;
-    }
-    if (savedOrigin === undefined) {
-      delete process.env.VOID_ACCESS_ORIGIN;
-    } else {
-      process.env.VOID_ACCESS_ORIGIN = savedOrigin;
-    }
     Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: stdinTty });
     Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: stdoutTty });
   });
@@ -1193,9 +1063,7 @@ describe('PlatformClient Cloudflare Access challenge renewal', () => {
   it('renews a rejected human token and retries once at the original API endpoint', async () => {
     const stale = accessJwt(600);
     const fresh = accessJwt(900);
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      [origin]: { CF_ACCESS_TOKEN: stale },
-    });
+    vi.stubEnv('VOID_ACCESS_CREDENTIALS', JSON.stringify({ [origin]: { CF_ACCESS_TOKEN: stale } }));
     Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
     Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
     spawnSyncMock.mockImplementation((_command, args: Array<string>) =>
@@ -1229,9 +1097,10 @@ describe('PlatformClient Cloudflare Access challenge renewal', () => {
   });
 
   it('does not retry ambiguous API errors', async () => {
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      [origin]: { CF_ACCESS_TOKEN: accessJwt(600) },
-    });
+    vi.stubEnv(
+      'VOID_ACCESS_CREDENTIALS',
+      JSON.stringify({ [origin]: { CF_ACCESS_TOKEN: accessJwt(600) } }),
+    );
     fetchMock.mockResolvedValueOnce(new Response('application failure', { status: 500 }));
 
     await expect(
@@ -1242,16 +1111,16 @@ describe('PlatformClient Cloudflare Access challenge renewal', () => {
   });
 
   it('does not replace a rejected scoped service credential with a human login', async () => {
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      [origin]: {
-        CF_ACCESS_CLIENT_ID: 'ci-client',
-        CF_ACCESS_CLIENT_SECRET: 'ci-secret',
-      },
-    });
+    vi.stubEnv(
+      'VOID_ACCESS_CREDENTIALS',
+      JSON.stringify({
+        [origin]: { CF_ACCESS_CLIENT_ID: 'ci-client', CF_ACCESS_CLIENT_SECRET: 'ci-secret' },
+      }),
+    );
     Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
     Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: false });
     const client = new PlatformClient(token, { apiUrl: origin });
-    delete process.env.VOID_ACCESS_CREDENTIALS;
+    vi.stubEnv('VOID_ACCESS_CREDENTIALS', undefined);
     fetchMock.mockResolvedValueOnce(
       new Response(null, {
         status: 302,

@@ -1,18 +1,14 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Plugin, ResolvedConfig } from 'vite';
+import type { ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
 type MockCloudflarePluginConfig = {
   config: (resolved: Record<string, unknown>) => Record<string, unknown>;
 };
 
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(pluginConfig: MockCloudflarePluginConfig): Array<Plugin> {
-    return [{ name: 'mock:cloudflare', api: { pluginConfig } } as Plugin];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 
 const roots: Array<string> = [];
 

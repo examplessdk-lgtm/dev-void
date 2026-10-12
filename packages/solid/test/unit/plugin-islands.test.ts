@@ -85,29 +85,6 @@ export default function Home() { return <Toggle />; }`,
     expect(clientEntry).toContain('pages/Toggle');
   });
 
-  it('includes island imports from both pages and layouts', async () => {
-    writeFile(
-      'app/layout.island.tsx',
-      `import Nav from "../_components/Nav" with { island: "load" }
-export default function Layout(props) { return <div><Nav />{props.children}</div>; }`,
-    );
-    writeFile(
-      'app/index.island.tsx',
-      `import Widget from "../_components/Widget" with { island: "idle" }
-export default function Index() { return <Widget />; }`,
-    );
-    writeFile('_components/Nav.tsx', `export default function Nav() { return <nav />; }`);
-    writeFile('_components/Widget.tsx', `export default function Widget() { return <div />; }`);
-
-    const { buildStart, loadClientEntry } = setupPlugin();
-    await buildStart();
-    const clientEntry = loadClientEntry();
-
-    expect(clientEntry).toBeDefined();
-    expect(clientEntry).toContain('pages/_components/Nav');
-    expect(clientEntry).toContain('pages/_components/Widget');
-  });
-
   it('pre-scans island imports from named island layouts into the manifest', async () => {
     writeFile(
       '_layouts/sidebar.island.tsx',

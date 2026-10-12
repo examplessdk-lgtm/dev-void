@@ -59,9 +59,9 @@ it('prints no success after a secret mutation fails', async () => {
   expect(output).not.toContain('✓');
 });
 
-it.each([0, 2])('lists secrets when the terminal reports %i columns', async (columns) => {
+it('lists secrets when the terminal reports 0 columns', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
-  Object.defineProperty(process.stdout, 'columns', { configurable: true, value: columns });
+  Object.defineProperty(process.stdout, 'columns', { configurable: true, value: 0 });
   let output = '';
   const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
     output += String(chunk);

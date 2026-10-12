@@ -1,17 +1,15 @@
 /**
- * VoidZero React Theme - Main Stylesheet
- * Unified design system for app marketing-style sections
- *
- * Layer Architecture (priority low → high):
- * @layer base      - Shared resets and base element styles
- * @layer marketing - Marketing typography and components
- * (unlayered)      - Tailwind utilities (highest priority)
+ * Dashboard styles: foundation, shared shell, and component layouts.
  */
 
 /* Define explicit cascade layer order (left = lowest priority) */
-@layer base, marketing;
+@layer reset, base, astryx-base, astryx-theme, marketing;
 
-/* 1. Design tokens and Tailwind */
+@import '@astryxdesign/core/reset.css';
+@import '@astryxdesign/core/astryx.css';
+@import '@astryxdesign/theme-neutral/theme.css';
+
+/* 1. Design tokens */
 @import './tokens.css';
 
 /* 2. Shared foundation (@layer base) */
@@ -19,6 +17,7 @@
 
 /* 3. Marketing styles (@layer marketing) */
 @import './marketing.css';
+@import './components.css';
 
 /* ============================================
    5. Variant Brand Colors - Light/Dark Mode

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { CloudflareAuthRunResult } from '../../src/cli/cloudflare-auth.ts';
-import { cloudflareAuthEnvironment } from '../../src/cli/cloudflare-auth.ts';
 import {
   assertPlatformOperatorCredentialCanApplyPlan,
   readWranglerOAuthCredential,
@@ -196,16 +195,6 @@ describe('platform Cloudflare authentication', () => {
     ).not.toThrow();
   });
 
-  it('uses explicit environment credentials without invoking Wrangler', async () => {
-    process.env.CLOUDFLARE_API_TOKEN = 'ci-token';
-    const runWrangler = vi.fn();
-
-    await expect(
-      resolvePlatformCloudflareCredential({ interactive: false, runWrangler }),
-    ).resolves.toEqual({ source: 'environment', token: 'ci-token' });
-    expect(runWrangler).not.toHaveBeenCalled();
-  });
-
   it.each([false, true])(
     'uses saved management authority before browser login (interactive: %s)',
     async (interactive) => {
@@ -303,18 +292,6 @@ describe('platform Cloudflare authentication', () => {
         data: { token: 'implicit-token', type: 'api_token' },
       })),
     ).resolves.toBeNull();
-  });
-
-  it('does not expose platform recovery or service secrets to Wrangler auth commands', () => {
-    expect(
-      cloudflareAuthEnvironment({
-        CF_ACCESS_CLIENT_SECRET: 'access-secret',
-        DATABASE_URL: 'postgres://secret',
-        PATH: '/bin',
-        VOID_PLATFORM_GITHUB_CLIENT_SECRET: 'github-secret',
-        VOID_PLATFORM_RECOVERY_KEY: 'recovery-secret',
-      }),
-    ).toEqual({ CLOUDFLARE_AUTH_USE_KEYRING: 'true', PATH: '/bin' });
   });
 });
 

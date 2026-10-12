@@ -2,15 +2,9 @@
 // `/__void/inbox` routes for browsing captured messages. Activated when
 // binding inference detected `void/email` usage.
 //
-// Two ways a message lands in the buffer:
-//   * `POST /__void/inbox/_capture` — the real `void dev` path. `sendEmail`
-//     runs in workerd (a separate OS process), so it cannot reach this
-//     process's sink registry; it POSTs the captured message here through its
-//     dev assets binding, which @cloudflare/vite-plugin wires directly into
-//     this middleware stack.
-//   * the in-process sink — only fires for a `sendEmail` that happens to run
-//     inside this Node process (e.g. a prerender pass). Kept so that path is
-//     still captured; it is not the dev-server transport.
+// `sendEmail` runs in workerd, a separate OS process, so it POSTs each
+// captured message to `/__void/inbox/_capture` through its dev assets
+// binding, which @cloudflare/vite-plugin wires into this middleware stack.
 //
 // Every route requires the project's dev-trigger token — the same one
 // `/__void/scheduled` and `/__void/queue` check. Vite's own host validation
@@ -21,6 +15,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { Plugin } from 'vite';
 import { voidLog } from './log.ts';
+import { afterServerReady } from './plugin-dev-config.ts';
 import {
   clearDevBuffer,
   DEV_INBOX_ACK_HEADER,
@@ -34,7 +29,6 @@ import {
   listDevMessages,
   parseCapturedMessage,
   pushToDevBuffer,
-  registerEmailSink,
   type CapturedMessage,
 } from './runtime/email/dev-inbox.ts';
 
@@ -60,7 +54,6 @@ export interface EmailDevInboxPluginOptions {
 
 export function emailDevInboxPlugin(options: EmailDevInboxPluginOptions): Plugin {
   const { devTriggerToken } = options;
-  let unregister: (() => void) | undefined;
 
   /** `href` for an inbox path that keeps the browser session authorized. */
   const inboxHref = (path: string): string =>
@@ -69,18 +62,6 @@ export function emailDevInboxPlugin(options: EmailDevInboxPluginOptions): Plugin
   return {
     name: 'void:email-dev-inbox',
     apply: 'serve',
-    buildStart() {
-      if (unregister) {
-        return;
-      }
-      unregister = registerEmailSink((m) => pushToDevBuffer(m));
-    },
-    buildEnd() {
-      if (unregister) {
-        unregister();
-        unregister = undefined;
-      }
-    },
     configureServer(server) {
       // The browser cannot add a header, so the inbox URL is printed with the
       // token in its query, the same way the cron/queue hint prints its curl.
@@ -92,9 +73,7 @@ export function emailDevInboxPlugin(options: EmailDevInboxPluginOptions): Plugin
         }
         voidLog(`Email inbox: http://localhost:${port}${inboxHref('')}`);
       };
-      if (server.httpServer) {
-        server.httpServer.once('listening', () => setTimeout(printInboxUrl, 100));
-      }
+      afterServerReady(server, printInboxUrl);
 
       server.middlewares.use(DEV_INBOX_PREFIX, (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost');

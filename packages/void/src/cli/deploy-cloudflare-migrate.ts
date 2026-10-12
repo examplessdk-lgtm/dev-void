@@ -1,82 +1,59 @@
-import type { DatabaseDialect } from '../config.ts';
-import { collectMigrations } from '../migrations/collect.ts';
 import { runMySqlMigrations } from '../migrations/runner-mysql.ts';
 import { runPgMigrations } from '../migrations/runner-pg.ts';
 import {
   verifyGeneratedDeployConfig,
   verifyCloudflareDeployArtifact,
 } from './deploy-artifact-validation.ts';
-import {
-  snapshotBindingIdentities,
-  snapshotPassthroughIdentities,
-  snapshotPassthroughRawFields,
-  reconstructExpectedContainers,
-  reconstructExpectedDurableObjectState,
-} from './deploy-binding-snapshot.ts';
 import { ensureCloudflareAuthSecret } from './deploy-cloudflare-auth.ts';
-import { log, getErrorMessage } from './deploy-helpers.ts';
+import type { CloudflareBuild } from './deploy-cloudflare-build.ts';
+import type { CloudflareDeploySource, CloudflarePreflight } from './deploy-cloudflare-preflight.ts';
+import { log } from './deploy-helpers.ts';
 import { applyAndVerifyRemoteD1Migrations } from './deploy-migrations.ts';
 import { CloudflareAuthSecretError } from './deploy-resources.ts';
 import { type CloudflareDeployDeps } from './deploy-types.ts';
-import { type SelfHostSchemaFacts } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
+import { getErrorMessage } from './output.ts';
 
+export type CloudflareMigration = Awaited<ReturnType<typeof migrateCloudflareWorker>>;
+
+/** Provision the auth secret and apply database migrations, then verify the artifact. */
 export async function migrateCloudflareWorker(input: {
-  readonly authEnabled: boolean;
-  readonly deps: CloudflareDeployDeps;
   readonly root: string;
-  readonly accountId: string;
-  readonly workerName: string;
-  readonly desired: import('./provision.ts').DesiredResourceSet;
-  readonly bindingIdentitySnapshot: ReturnType<typeof snapshotBindingIdentities>;
-  readonly passthroughIdentitySnapshot: ReturnType<typeof snapshotPassthroughIdentities>;
-  readonly passthroughRawFields: ReturnType<typeof snapshotPassthroughRawFields>;
-  readonly needsAI: boolean;
-  readonly aiBindingName: string;
-  readonly expectedContainers: ReturnType<typeof reconstructExpectedContainers>;
-  readonly expectedDurableObjectState: ReturnType<typeof reconstructExpectedDurableObjectState>;
-  readonly expectedCrons: Array<string>;
+  readonly deps: CloudflareDeployDeps;
   readonly exit: (code: number) => never;
-  readonly configPath: string;
-  readonly runWrangler: NonNullable<CloudflareDeployDeps['runWrangler']>;
-  readonly assertUploaderStillPinned: () => boolean;
   readonly cliLog: CliLogger;
-  readonly dialect: DatabaseDialect;
-  readonly migrations: ReturnType<typeof collectMigrations>;
-  readonly migrationsDir: string;
-  readonly d1MigrateToken: string | undefined;
-  readonly schemaFacts: SelfHostSchemaFacts;
+  readonly source: CloudflareDeploySource;
+  readonly preflight: CloudflarePreflight;
+  readonly build: CloudflareBuild;
 }): Promise<{
   workerWasMissingBeforeSecretProvisioning: boolean;
   initialAuthSecret: string | undefined;
   appliedMigrations: number;
 }> {
+  const { root, deps, exit, cliLog } = input;
   const {
+    configPath,
     authEnabled,
-    deps,
-    root,
+    desired,
+    needsAI,
+    aiBindingName,
+    expectedCrons,
+    dialect,
+    migrationsDir,
+  } = input.source;
+  const {
     accountId,
     workerName,
-    desired,
     bindingIdentitySnapshot,
     passthroughIdentitySnapshot,
     passthroughRawFields,
-    needsAI,
-    aiBindingName,
     expectedContainers,
     expectedDurableObjectState,
-    expectedCrons,
-    exit,
-    configPath,
     runWrangler,
     assertUploaderStillPinned,
-    cliLog,
-    dialect,
-    migrations,
-    migrationsDir,
-    d1MigrateToken,
     schemaFacts,
-  } = input;
+  } = input.preflight;
+  const { migrations, d1MigrateToken } = input.build;
 
   let workerWasMissingBeforeSecretProvisioning = false;
   let initialAuthSecret: string | undefined;
@@ -96,15 +73,10 @@ export async function migrateCloudflareWorker(input: {
     expectedCrons,
   };
 
-  // 8e. Persistent Better Auth secret — after every local/build-derived gate,
-  // but before the first remote migration or worker upload. Existing secrets
-  // are adopted unchanged; a missing value is generated once, sent over stdin,
-  // and verified by name before deployment can continue.
+  // Persistent Better Auth secret: adopted when present, otherwise generated once and verified,
+  // before the first remote migration or upload.
   if (authEnabled) {
-    // Prove the artifact will inherit the secret BEFORE creating it. Wrangler
-    // replaces Worker versions on deploy; without `secrets.required`, a secret
-    // successfully written to the draft/current Worker can be dropped by the
-    // immediately following upload.
+    // Without `secrets.required`, the next upload could drop a newly written secret.
     const inheritance = (deps.verifyDeployConfig ?? verifyGeneratedDeployConfig)(
       root,
       verifyOptions,
@@ -146,10 +118,8 @@ export async function migrateCloudflareWorker(input: {
 
   let appliedMigrations = 0;
 
-  // 9. Apply pending PostgreSQL or MySQL migrations before the Worker upload. The
-  // production URL is intentionally provided by the deploy environment rather than recovered
-  // from Hyperdrive (Cloudflare never returns the database password). The runners record
-  // applied names in `_void_migrations`, so retries are idempotent.
+  // Cloudflare never returns the Hyperdrive password, so the deploy environment provides the
+  // production URL. The runners record applied names, so retries are idempotent.
   if (dialect !== 'sqlite' && migrations.length > 0) {
     const mysql = dialect === 'mysql';
     const label = mysql ? 'MySQL' : 'PostgreSQL';

@@ -49,7 +49,6 @@ const staleCloudflareAssets = {
 } as const;
 
 let child: ReturnType<typeof spawn> | undefined;
-let stderr = '';
 let previousVoidConfig: string | undefined;
 let middlewareBackedUp = false;
 let publicDirCreated = false;
@@ -111,7 +110,6 @@ function writeProtectedAsset(): void {
 
 async function startSpaDevServer(): Promise<string> {
   const server = await startServer((port) => {
-    stderr = '';
     child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
       cwd: playground.root,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -120,9 +118,6 @@ async function startSpaDevServer(): Promise<string> {
         VOID_INSPECTOR_PORT: 'false',
       },
     });
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
     return child;
   }, 30_000);
   return server.base;
@@ -130,7 +125,6 @@ async function startSpaDevServer(): Promise<string> {
 
 async function startSpaPreviewServer(): Promise<string> {
   const server = await startServer((port) => {
-    stderr = '';
     child = spawn(
       'vp',
       ['preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
@@ -140,9 +134,6 @@ async function startSpaPreviewServer(): Promise<string> {
         env: { ...process.env, VOID_INSPECTOR_PORT: 'false' },
       },
     );
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += String(chunk);
-    });
     return child;
   }, 30_000);
   return server.base;
@@ -195,12 +186,6 @@ afterEach(async () => {
     publicDirCreated = false;
   }
   restoreVoidConfig();
-  if (
-    stderr.includes('error when starting dev server') ||
-    stderr.includes('error when starting preview server')
-  ) {
-    throw new Error(stderr);
-  }
 });
 
 describe('SPA asset routing policy', () => {

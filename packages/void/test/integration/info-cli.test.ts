@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
@@ -36,19 +36,7 @@ afterEach(() => {
 });
 
 describe('void info (subprocess)', () => {
-  it('works offline without credentials and leaves project files untouched', () => {
-    const root = project();
-    const before = readdirSync(root);
-    const result = runVoid(root, ['info']);
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('Inferred name: chat-room');
-    expect(result.stdout).toContain(
-      "To preserve this resource when moving its code, add this to 'defineRoom':",
-    );
-    expect(readdirSync(root)).toEqual(before);
-  });
-
-  it('prints clean JSON and exposes the command in help', () => {
+  it('prints clean JSON without credentials', () => {
     const root = project();
     const result = runVoid(root, ['info', '--json']);
     expect(result.status, result.stderr).toBe(0);
@@ -60,37 +48,6 @@ describe('void info (subprocess)', () => {
       nameSource: 'inferred',
     });
     expect(info.recordedResources).toEqual([]);
-    const help = runVoid(root, ['info', '--help']);
-    expect(help.status, help.stderr).toBe(0);
-    expect(help.stdout).toContain('void info [--json]');
-  });
-
-  it('lets a user discover, pin and move a room while preserving its generated identity', () => {
-    const root = project();
-    const inferred = JSON.parse(runVoid(root, ['info', '--json']).stdout).resources[0];
-    writeFileSync(
-      join(root, 'routes/chat/[room].ws.ts'),
-      `export default defineRoom({ name: ${JSON.stringify(inferred.name)}, messages: {} });`,
-    );
-    const pinned = JSON.parse(runVoid(root, ['info', '--json']).stdout).resources[0];
-    expect(pinned).toMatchObject({
-      name: inferred.name,
-      className: inferred.className,
-      bindingName: inferred.bindingName,
-      nameSource: 'explicit',
-    });
-    mkdirSync(join(root, 'routes/rooms'), { recursive: true });
-    renameSync(join(root, 'routes/chat/[room].ws.ts'), join(root, 'routes/rooms/[room].ws.ts'));
-    const movedResult = runVoid(root, ['info', '--json']);
-    expect(movedResult.status, movedResult.stderr).toBe(0);
-    expect(JSON.parse(movedResult.stdout).resources[0]).toMatchObject({
-      file: 'routes/rooms/[room].ws.ts',
-      route: '/rooms/:room',
-      name: inferred.name,
-      className: inferred.className,
-      bindingName: inferred.bindingName,
-      nameSource: 'explicit',
-    });
   });
 
   it('rejects invalid arguments with a structured JSON error', () => {

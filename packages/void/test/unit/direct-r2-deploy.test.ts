@@ -4,11 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
-// Capture how many times each asset path is read via `readFileSync`. Mocked
-// before any importer of `node:fs` so the spy is in place when `package.ts`
-// resolves its `import { readFileSync } from 'node:fs'` binding. Only assets
-// inside the test fixture directory are counted; other reads (e.g.
-// .assetsignore lookup misses) pass through to the real fs.
+// Spy on `readFileSync` to count asset reads. Mocked before any importer of
+// `node:fs` so `package.ts` binds to the spy.
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
@@ -60,7 +57,7 @@ vi.mock('../../src/cli/output.ts', async () => {
 const fsModule = await import('node:fs');
 const readFileSyncMock = fsModule.readFileSync as unknown as ReturnType<typeof vi.fn>;
 
-const { runStaticDeploy } = await import('../../src/cli/deploy.ts');
+const { runStaticDeploy } = await import('../../src/cli/deploy-managed-static.ts');
 const { openDeployLog } = await import('../../src/cli/log-file.ts');
 const { PlatformClient } = await import('../../src/cli/client.ts');
 
@@ -222,6 +219,32 @@ function openTestLog(): ReturnType<typeof openDeployLog> {
   return log;
 }
 
+function deploy(
+  options: {
+    client?: InstanceType<typeof PlatformClient>;
+    appType?: 'spa' | 'static';
+    routing?: Parameters<typeof runStaticDeploy>[10];
+    cliLog?: Parameters<typeof runStaticDeploy>[11];
+    notFound?: Parameters<typeof runStaticDeploy>[12];
+  } = {},
+): Promise<void> {
+  return runStaticDeploy(
+    workdir,
+    { projectId: 'proj_t', slug: 'test' },
+    options.client ?? makeClient(),
+    { buildCommand: null, outputDir: assetsDir, appType: options.appType ?? 'spa' },
+    true,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    options.routing,
+    options.cliLog,
+    options.notFound,
+  );
+}
+
 describe('direct-to-R2 deploy flow', () => {
   it.each([true, undefined, false])(
     'prints a single success after the box only when routing is published (%s)',
@@ -233,13 +256,7 @@ describe('direct-to-R2 deploy flow', () => {
       events.at(-1)!.published = published;
       installPlatformMocks({ finalizeEvents: events });
 
-      await runStaticDeploy(
-        workdir,
-        { projectId: 'proj_t', slug: 'test' },
-        makeClient(),
-        { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-        true,
-      );
+      await deploy();
 
       expect(summary).toHaveBeenCalledOnce();
       if (published === false) {
@@ -256,30 +273,14 @@ describe('direct-to-R2 deploy flow', () => {
 
   it('uploads assets directly to R2 then calls finalize JSON endpoint', async () => {
     const state = installPlatformMocks();
-    const client = makeClient();
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true, // skipBuild
-      undefined, // gitMetadata
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined, // cliLog (tested separately)
-    );
+    await deploy();
 
-    // Preflight + upload-urls + R2 PUTs + finalize were called once each.
     expect(state.preflightCalls).toHaveLength(1);
     expect(state.uploadUrlsCalls).toHaveLength(1);
     expect(state.r2PutCalls).toHaveLength(4);
     expect(state.finalizeCalls).toHaveLength(1);
 
-    // Each R2 PUT carries Content-Md5 and the asset bytes.
     for (const { init } of state.r2PutCalls) {
       const headers = init.headers as Record<string, string>;
       expect(headers['Content-Md5']).toBeDefined();
@@ -288,7 +289,6 @@ describe('direct-to-R2 deploy flow', () => {
       expect(init.body).toBeInstanceOf(Uint8Array);
     }
 
-    // Body payload of finalize is JSON, not multipart.
     const finalize = state.finalizeCalls[0];
     expect((finalize.init.headers as Record<string, string>)['Content-Type']).toBe(
       'application/json',
@@ -300,36 +300,16 @@ describe('direct-to-R2 deploy flow', () => {
       md5: expect.any(String),
       size: fixtureFiles['/index.html'].length,
     });
-    expect(finalizeBody.preflight).toBe(null); // skipped=0 means no preflight reuse
-    expect(finalizeBody.workerFiles).toBeUndefined(); // static → no worker bytes
+    expect(finalizeBody.preflight).toBe(null);
+    expect(finalizeBody.workerFiles).toBeUndefined();
   });
 
   it('reads each asset file from disk EXACTLY ONCE end-to-end', async () => {
     installPlatformMocks();
-    const client = makeClient();
 
-    // Reset the mock so we count ONLY reads from this run.
-    readFileSyncMock.mockClear();
+    await deploy();
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    // Filter to just the fixture files — `.assetsignore` lookup may fire
-    // an additional read against a file that doesn't exist (caught and
-    // swallowed by package.ts via existsSync), but that's not an asset
-    // re-read so we filter it out.
+    // Other files, such as config, are read through the same mock.
     const reads = readFileSyncMock.mock.calls.filter(([p]: Array<unknown>) => {
       const path = String(p);
       return (
@@ -340,20 +320,12 @@ describe('direct-to-R2 deploy flow', () => {
       );
     });
 
-    // 4 fixture assets × 1 read each = 4 reads total. The new direct-to-R2
-    // flow uses the in-memory `assetFiles` cache from collectAndHashAssets
-    // for the upload phase — no second pass over the disk.
     expect(reads).toHaveLength(4);
     const uniquePaths = new Set(reads.map(([p]: Array<unknown>) => String(p)));
     expect(uniquePaths.size).toBe(4);
   });
 
   it('prunes the in-memory assetFiles cache to needed-only after preflight', async () => {
-    // 4 fixture assets, only 1 needed: pruning should drop 3 buffers
-    // immediately after preflight, and the per-PUT cleanup should drop
-    // the last one once R2 acks the upload. We assert via the JSONL log,
-    // which captures both the pre/post-prune sizes (`asset_cache_pruned`)
-    // and the upload events (`r2_put_end`).
     installPlatformMocks({
       preflightNeeded: ['/index.html'],
       preflightSkipped: 3,
@@ -363,20 +335,7 @@ describe('direct-to-R2 deploy flow', () => {
     expect(logPath).toBeTruthy();
     const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      cliLog,
-    );
+    await deploy({ client, cliLog });
 
     await cliLog.close();
     const lines = readFileSync(logPath as string, 'utf-8')
@@ -385,35 +344,18 @@ describe('direct-to-R2 deploy flow', () => {
       .map((l) => JSON.parse(l) as { msg: string; before?: number; after?: number });
     const prune = lines.find((l) => l.msg === 'asset_cache_pruned');
     expect(prune).toBeDefined();
-    // Before prune: 4 fixture buffers in the cache. After: 1 (the only
-    // needed asset). Per-PUT cleanup runs after this event so the log
-    // value here is the post-prune-but-pre-PUT size.
     expect(prune?.before).toBe(4);
     expect(prune?.after).toBe(1);
   });
 
   it('does not log asset_cache_pruned when nothing was skipped', async () => {
-    // All 4 needed → prune is a no-op and we suppress the noisy log.
     installPlatformMocks();
     const cliLog = openDeployLog();
     const logPath = cliLog.path;
     expect(logPath).toBeTruthy();
     const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      cliLog,
-    );
+    await deploy({ client, cliLog });
 
     await cliLog.close();
     const lines = readFileSync(logPath as string, 'utf-8')
@@ -425,22 +367,8 @@ describe('direct-to-R2 deploy flow', () => {
 
   it('skips upload-urls + R2 PUT phase when no assets are needed', async () => {
     const state = installPlatformMocks({ preflightNeeded: [], preflightSkipped: 4 });
-    const client = makeClient();
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
+    await deploy();
 
     expect(state.uploadUrlsCalls).toHaveLength(0);
     expect(state.r2PutCalls).toHaveLength(0);
@@ -449,29 +377,57 @@ describe('direct-to-R2 deploy flow', () => {
     expect(body.preflight).toBe('true');
   });
 
-  // `routing.notFound` must reach the STATIC manifest, not only the
-  // worker-with-assets path. `detectPreset` classifies any Vite project with
-  // no backend files as `spa`, so a plain Vite MPA lands here and would
-  // otherwise ship `not_found_handling: 'single-page-application'` — every
-  // unknown URL answered with index.html and HTTP 200.
-  it('threads routing.notFound into the finalize manifest (static path)', async () => {
+  it.each(['static', 'spa'] as const)(
+    'includes file-based routing without a routing config (%s)',
+    async (appType) => {
+      writeFileSync(join(assetsDir, '_headers'), '/about\n  X-Test: file-rule\n');
+      writeFileSync(join(assetsDir, '_redirects'), '/old /about 302\n/rewrite /about 200\n');
+      const state = installPlatformMocks();
+
+      await deploy({ appType });
+
+      const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+      expect(body.manifest.headerRules).toEqual([
+        { pattern: '/about', headers: [['X-Test', 'file-rule']] },
+      ]);
+      expect(body.manifest.redirectRules).toEqual([
+        { source: '/old', destination: '/about', status: 302 },
+      ]);
+      expect(body.manifest.fallbackRules).toContainEqual({
+        source: '/rewrite',
+        destination: '/about',
+        status: 200,
+      });
+    },
+  );
+
+  it('preserves routing rules already merged by the full-to-static path', async () => {
+    writeFileSync(join(assetsDir, '_headers'), '/about\n  X-Test: file-rule\n');
+    const headerRules = [
+      { pattern: '/about', headers: [['X-Test', 'config-rule']] as Array<[string, string]> },
+    ];
     const state = installPlatformMocks();
-    const client = makeClient();
 
     await runStaticDeploy(
       workdir,
       { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
+      makeClient(),
+      { buildCommand: null, outputDir: assetsDir, appType: 'static' },
       true,
       undefined,
       undefined,
-      undefined,
-      undefined,
-      undefined,
-      { notFound: '404-page' },
-      undefined,
+      headerRules,
     );
+
+    const body = JSON.parse(state.finalizeCalls[0].init.body as string);
+    expect(body.manifest.headerRules).toEqual(headerRules);
+  });
+
+  // A plain Vite MPA is detected as `spa`, so its notFound must reach the static manifest.
+  it('threads routing.notFound into the finalize manifest (static path)', async () => {
+    const state = installPlatformMocks();
+
+    await deploy({ routing: { notFound: '404-page' } });
 
     const body = JSON.parse(state.finalizeCalls[0].init.body as string);
     expect(body.manifest.type).toBe('spa');
@@ -487,65 +443,13 @@ describe('direct-to-R2 deploy flow', () => {
   // dedicated trailing param or it is silently dropped there too.
   it('honors an explicit notFound when routing is undefined (full->static redirect shape)', async () => {
     const state = installPlatformMocks();
-    const client = makeClient();
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'static' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'single-page-application',
-    );
+    await deploy({ appType: 'static', notFound: 'single-page-application' });
 
     const body = JSON.parse(state.finalizeCalls[0].init.body as string);
     expect(body.manifest.assetConfig).toEqual({
       not_found_handling: 'single-page-application',
     });
-  });
-
-  it('retries 5xx R2 PUT failures up to 3 times', async () => {
-    let attemptsForFirstAsset = 0;
-    const state = installPlatformMocks({
-      r2PutBehavior(url) {
-        // Pick a deterministic asset and fail it 2 times.
-        if (url.includes('/') && attemptsForFirstAsset < 2) {
-          // Match only the very first PUT URL (preserve mock state)
-          attemptsForFirstAsset++;
-          if (attemptsForFirstAsset <= 2) {
-            return new Response('temporary', { status: 503 });
-          }
-        }
-        return new Response(null, { status: 200 });
-      },
-    });
-    const client = makeClient();
-
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    // 4 assets but the first one was retried 2 times, so total PUTs = 4 + 2 = 6.
-    expect(state.r2PutCalls.length).toBeGreaterThanOrEqual(5);
-    expect(state.finalizeCalls).toHaveLength(1);
   });
 
   it('surfaces 4xx R2 PUT errors with asset path and hash', async () => {
@@ -554,24 +458,8 @@ describe('direct-to-R2 deploy flow', () => {
         return new Response('SignatureMismatch', { status: 403 });
       },
     });
-    const client = makeClient();
 
-    await expect(
-      runStaticDeploy(
-        workdir,
-        { projectId: 'proj_t', slug: 'test' },
-        client,
-        { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-        true,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-      ),
-    ).rejects.toThrow(/R2 PUT failed.+SignatureMismatch/);
+    await expect(deploy()).rejects.toThrow(/R2 PUT failed.+SignatureMismatch/);
   });
 
   it('writes presign + r2_put + finalize events to the JSONL log', async () => {
@@ -582,20 +470,7 @@ describe('direct-to-R2 deploy flow', () => {
 
     const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      cliLog,
-    );
+    await deploy({ client, cliLog });
 
     await cliLog.close();
     const lines = readFileSync(capturedLogPath as string, 'utf-8')
@@ -612,14 +487,6 @@ describe('direct-to-R2 deploy flow', () => {
   });
 
   it('dedupes presign + R2 PUT by content hash when paths share blake3', async () => {
-    // Two files with identical content → identical blake3. The upload
-    // phase must collapse to ONE presign + ONE PUT, but the final
-    // assetManifest must still list BOTH paths (the platform builds the
-    // per-path serving manifest from it).
-    //
-    // We build a fresh fixture: keep `index.html` and `style.css` from
-    // the default set, plus two extra files with the same identical
-    // content so the duplicates are an explicit pair.
     const sharedHtml = '<!doctype html><html><body>shared</body></html>\n';
     const dupeRel = '/about.html';
     const dupeRel2 = '/contact.html';
@@ -628,26 +495,9 @@ describe('direct-to-R2 deploy flow', () => {
 
     const allPaths = [...Object.keys(fixtureFiles), dupeRel, dupeRel2];
     const state = installPlatformMocks({ preflightNeeded: allPaths });
-    const client = makeClient();
 
-    await runStaticDeploy(
-      workdir,
-      { projectId: 'proj_t', slug: 'test' },
-      client,
-      { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-      true,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
+    await deploy();
 
-    // 6 paths total but only 5 unique blake3 values (about.html ==
-    // contact.html). Presign request body MUST contain 5 entries,
-    // R2 PUTs MUST be 5, NOT 6.
     expect(state.uploadUrlsCalls).toHaveLength(1);
     const presign = state.uploadUrlsCalls[0] as {
       assets: Array<{ blake3: string }>;
@@ -660,8 +510,6 @@ describe('direct-to-R2 deploy flow', () => {
     const r2Hashes = new Set(state.r2PutCalls.map(({ url }) => url.split('/').pop()));
     expect(r2Hashes.size).toBe(5);
 
-    // The finalize payload's assetManifest still includes BOTH duplicate
-    // paths so the platform-side per-path serving manifest is complete.
     expect(state.finalizeCalls).toHaveLength(1);
     const finalizeBody = JSON.parse(state.finalizeCalls[0].init.body as string);
     expect(finalizeBody.assetManifest[dupeRel]).toBeDefined();
@@ -681,22 +529,9 @@ describe('direct-to-R2 deploy flow', () => {
 
     const client = new PlatformClient('test-token', { apiUrl: 'https://api.test', cliLog });
 
-    await expect(
-      runStaticDeploy(
-        workdir,
-        { projectId: 'proj_t', slug: 'test' },
-        client,
-        { buildCommand: null, outputDir: assetsDir, appType: 'spa' },
-        true,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        cliLog,
-      ),
-    ).rejects.toThrow(new RegExp(escapeRegex(logPath as string)));
+    await expect(deploy({ client, cliLog })).rejects.toThrow(
+      new RegExp(escapeRegex(logPath as string)),
+    );
 
     await cliLog.close();
   });

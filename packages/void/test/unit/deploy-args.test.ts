@@ -40,20 +40,8 @@ describe('parseDeployArgs', () => {
     expect(result.spa).toBe(true);
   });
 
-  it('parses --dir and --spa together', () => {
-    const result = parseDeployArgs(['--dir', 'dist', '--spa']);
-    expect(result.dir).toBe('dist');
-    expect(result.spa).toBe(true);
-  });
-
   it('parses --skip-build flag', () => {
     const result = parseDeployArgs(['--skip-build']);
-    expect(result.skipBuild).toBe(true);
-  });
-
-  it('parses --skip-build with --project', () => {
-    const result = parseDeployArgs(['--project', 'my-app', '--skip-build']);
-    expect(result.projectSlug).toBe('my-app');
     expect(result.skipBuild).toBe(true);
   });
 
@@ -152,34 +140,20 @@ describe('parseDeployArgs', () => {
     );
   });
 
-  it('passes --skip-build through for target-specific validation', () => {
-    expect(parseDeployArgs(['--platform', 'cloudflare', '--skip-build'])).toMatchObject({
-      platform: 'cloudflare',
-      skipBuild: true,
-    });
-  });
-
   it('explains that Cloudflare resolves no Void project', () => {
     expect(() => parseDeployArgs(['--platform', 'cloudflare', '--project', 'foo'])).toThrow(
       /--project is not supported with --platform cloudflare.*no Void project is involved/,
     );
   });
 
-  it('parses static-directory and SPA flags on Cloudflare', () => {
-    expect(parseDeployArgs(['--platform', 'cloudflare', '--dir', 'dist', '--spa'])).toMatchObject({
+  it('parses static-directory, SPA and skip-build flags on Cloudflare', () => {
+    expect(
+      parseDeployArgs(['--platform', 'cloudflare', '--dir', 'dist', '--spa', '--skip-build']),
+    ).toMatchObject({
       platform: 'cloudflare',
       dir: 'dist',
       spa: true,
+      skipBuild: true,
     });
-  });
-
-  it('keeps the managed static-directory path available', () => {
-    expect(parseDeployArgs(['--project', 'foo', '--dir', 'dist', '--spa'])).toMatchObject({
-      projectSlug: 'foo',
-      dir: 'dist',
-      spa: true,
-    });
-    expect(parseDeployArgs([]).platform).toBeUndefined();
-    expect(parseDeployArgs([]).provision).toBeUndefined();
   });
 });

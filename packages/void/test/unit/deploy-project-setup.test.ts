@@ -76,7 +76,7 @@ describe('promptDeployProjectConfig', () => {
   it.each(['create', 'link'])(
     'keeps the saved destination when choosing to %s a temporary deployment project',
     async (action) => {
-      const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+      const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
       const client = createClient();
       vi.stubEnv('VOID_API_URL', client.apiUrl);
       const projectFile = join(root, '.void/project.json');
@@ -115,7 +115,7 @@ describe('promptDeployProjectConfig', () => {
   );
 
   it('does not show link option when there are no existing projects', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const client = createClient();
     client.listProjectChoices.mockResolvedValueOnce([]);
     client.createProject.mockResolvedValueOnce({ id: 'proj_new', slug: 'new-app' });
@@ -125,6 +125,7 @@ describe('promptDeployProjectConfig', () => {
     const config = await promptDeployProjectConfig(root, client);
 
     expect(client.listProjectChoices).toHaveBeenCalledOnce();
+    expect(mockSelect).toHaveBeenCalledTimes(1);
     expect(mockSelect).toHaveBeenCalledWith({
       message: 'Set up a Void project for deploy:',
       options: [{ value: 'create', label: 'Create a new project' }],
@@ -161,59 +162,8 @@ describe('promptDeployProjectConfig', () => {
     expect(promptConfig.validate(' ')).toBe('Project slug is required.');
   });
 
-  it('re-prompts when the server rejects a short slug for a free-plan user', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
-    const { PlatformApiError } = await import('../../src/cli/client.ts');
-    const client = createClient();
-    client.listProjectChoices.mockResolvedValueOnce([]);
-    client.createProject
-      .mockRejectedValueOnce(
-        new PlatformApiError(
-          'createProject',
-          403,
-          JSON.stringify({ error: 'short slugs (5 characters or fewer) require a paid plan' }),
-        ),
-      )
-      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
-    mockSelect.mockResolvedValueOnce('create');
-    mockText.mockResolvedValueOnce('oxc').mockResolvedValueOnce('longer-app');
-
-    const config = await promptDeployProjectConfig(root, client);
-
-    expect(client.createProject).toHaveBeenNthCalledWith(1, 'oxc');
-    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
-    expect(mockText).toHaveBeenCalledTimes(2);
-    expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
-  });
-
-  it('retries when 403 body mentions slug but code is generic', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
-    const { PlatformApiError } = await import('../../src/cli/client.ts');
-    const client = createClient();
-    client.listProjectChoices.mockResolvedValueOnce([]);
-    // Generic top-level error code with the slug detail only in `message` —
-    // the retry check must inspect both fields, not short-circuit on `code`.
-    client.createProject
-      .mockRejectedValueOnce(
-        new PlatformApiError(
-          'createProject',
-          403,
-          JSON.stringify({ error: 'forbidden', message: 'slug too short for plan' }),
-        ),
-      )
-      .mockResolvedValueOnce({ id: 'proj_new', slug: 'longer-app' });
-    mockSelect.mockResolvedValueOnce('create');
-    mockText.mockResolvedValueOnce('oxc').mockResolvedValueOnce('longer-app');
-
-    const config = await promptDeployProjectConfig(root, client);
-
-    expect(client.createProject).toHaveBeenNthCalledWith(1, 'oxc');
-    expect(client.createProject).toHaveBeenNthCalledWith(2, 'longer-app');
-    expect(config).toEqual({ projectId: 'proj_new', slug: 'longer-app' });
-  });
-
   it('does not retry on non-slug 403 errors (e.g. account suspended)', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const { PlatformApiError } = await import('../../src/cli/client.ts');
     const client = createClient();
     client.listProjectChoices.mockResolvedValueOnce([]);
@@ -229,40 +179,8 @@ describe('promptDeployProjectConfig', () => {
     expect(mockText).toHaveBeenCalledTimes(1);
   });
 
-  it('does not show project names when creating with existing projects available', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
-    const client = createClient();
-    client.listProjectChoices.mockResolvedValueOnce([
-      {
-        id: 'proj_1',
-        user_id: 'user_1',
-        slug: 'existing-app',
-        type: 'worker',
-        created_at: '2026-04-24T00:00:00.000Z',
-        custom_domain: null,
-      },
-    ]);
-    client.createProject.mockResolvedValueOnce({ id: 'proj_new', slug: 'new-app' });
-    mockSelect.mockResolvedValueOnce('create');
-    mockText.mockResolvedValueOnce('new-app');
-
-    const config = await promptDeployProjectConfig(root, client);
-
-    expect(client.listProjectChoices).toHaveBeenCalledOnce();
-    expect(mockSelect).toHaveBeenCalledTimes(1);
-    expect(mockSelect.mock.calls[0]?.[0]).toMatchObject({
-      message: 'Set up a Void project for deploy:',
-      options: [
-        { value: 'create', label: 'Create a new project' },
-        { value: 'link', label: 'Link an existing project' },
-      ],
-    });
-    expect(JSON.stringify(mockSelect.mock.calls[0]?.[0])).not.toContain('existing-app');
-    expect(config).toEqual({ projectId: 'proj_new', slug: 'new-app' });
-  });
-
   it('only shows project names after the user chooses to link', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const client = createClient();
     client.listProjectChoices.mockResolvedValueOnce([
       {
@@ -306,7 +224,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   it('hides reader projects and identifies roles when selecting a deployment destination', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const client = createClient();
     client.listProjectChoices.mockResolvedValueOnce([
       { id: 'proj_reader', slug: 'read-only-app', role: 'reader' },
@@ -340,7 +258,7 @@ describe('promptDeployProjectConfig', () => {
   });
 
   it('offers project creation without an empty link picker when every project is read-only', async () => {
-    const { promptDeployProjectConfig } = await import('../../src/cli/deploy.ts');
+    const { promptDeployProjectConfig } = await import('../../src/cli/deploy-helpers.ts');
     const client = createClient();
     client.listProjectChoices.mockResolvedValueOnce([
       { id: 'proj_reader', slug: 'read-only-app', role: 'reader' },

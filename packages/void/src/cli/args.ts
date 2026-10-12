@@ -1,18 +1,9 @@
 import { parseArgs } from 'node:util';
+import type { RunDeployOptions } from './deploy-types.ts';
 
-export type DeployArgs = {
-  projectSlug?: string;
-  dir?: string;
-  spa?: boolean;
-  skipBuild?: boolean;
-  debug?: boolean;
-  platform?: 'cloudflare' | 'void';
-  provision?: boolean;
-  requireEmail?: boolean;
-  atomic?: boolean;
-};
-
-export function parseDeployArgs(args: Array<string>): DeployArgs {
+export function parseDeployArgs(
+  args: Array<string>,
+): Omit<RunDeployOptions, 'reuseExistingWorker'> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -93,7 +84,7 @@ export function parseDeployArgs(args: Array<string>): DeployArgs {
     throw new Error('deploy: --provision requires --platform cloudflare.');
   }
 
-  // Mode B email (design doc 0078): fail the deploy — before any upload — instead of
+  // Native Cloudflare email: fail the deploy — before any upload — instead of
   // continuing without email when the domain is not set up and nobody can press Enter
   // (CI / non-TTY). Only the Cloudflare backend runs the email step.
   const requireEmail = parsed.values['require-email'] === true ? true : undefined;

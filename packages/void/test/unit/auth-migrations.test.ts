@@ -76,15 +76,6 @@ describe('auth migration runner', () => {
           if (sql.includes('current_schema')) {
             return [{ schema: 'public' }] as unknown as Array<T>;
           }
-          if (sql.includes('information_schema.tables')) {
-            return [] as Array<T>;
-          }
-          if (sql.includes('information_schema.columns')) {
-            return [] as Array<T>;
-          }
-          if (sql.includes('pg_indexes')) {
-            return [] as Array<T>;
-          }
           return [] as Array<T>;
         },
         async run(sql: string) {
@@ -114,9 +105,6 @@ describe('auth migration runner', () => {
           }
           if (sql === "PRAGMA table_info('user')") {
             return [{ name: 'id' }] as unknown as Array<T>;
-          }
-          if (sql === "PRAGMA index_list('user')") {
-            return [] as Array<T>;
           }
           return [] as Array<T>;
         },

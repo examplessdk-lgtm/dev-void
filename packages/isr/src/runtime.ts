@@ -49,41 +49,14 @@ export { matchSegmentPattern as matchLiteralPattern };
 export { canonicalIsrPathname, denormalizeIsrPath, normalizeIsrPath } from './index.ts';
 
 /**
- * Single-tenant ISR (incremental static regeneration) cache ladder for the
- * direct Cloudflare Worker (Void apps and framework deploy wrappers).
- *
- * On managed Void, ISR lives in the dispatch worker that sits IN FRONT of the
- * user worker. Self-host has no dispatch worker, so this module ports that
- * caching ladder INTO the user worker, collapsed from multi-tenant to a single
- * deployment:
- *
- *   - No `projectId`, no cross-tenant metering.
- *   - No `#rw=` rewrite variant, no query-string variant fanout, no variant cap.
- *   - The deployment id is baked at build time as a compile-time literal and
- *     surfaced on `env.__VOID_ISR_DEPLOYMENT_ID`. The KV helpers read
- *     it from `env` (matching the `revalidate()` purge path in `runtime/isr.ts`),
- *     while `handleIsr` uses the `deploymentId` option for the edge-cache keys —
- *     the two are the same value.
- *
- * Fail-open contract: every `env.ISR_CACHE` (KV) and `caches.default` operation
- * is wrapped so a misconfigured or erroring cache degrades to a live render,
- * never a 500. Read/hit-path failures bail (caller renders live); write-path
- * failures are swallowed.
- *
- * Worker-only: no `lib.dom` types — globals come from `@cloudflare/workers-types`.
- *
- * Ported from the hosted dispatch runtime and the shared `@void/isr` contract.
+ * Single-tenant ISR cache for a direct Cloudflare Worker (Void apps and
+ * framework deploy wrappers). Every `ISR_CACHE` (KV) and `caches.default`
+ * operation fails open: read errors render live, write errors are ignored.
+ * KV helpers read the deployment id from `env.__VOID_ISR_DEPLOYMENT_ID`;
+ * edge-cache keys use the `deploymentId` option. Both hold the same value.
  */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal env surface this module needs. Both fields are optional so a worker
- * with no ISR binding (or a caller that only knows the deployment id) still
- * typechecks and fails open at runtime.
- */
+/** Env fields ISR reads. Both are optional: without them ISR fails open. */
 export interface IsrCacheEnv {
   ISR_CACHE?: KVNamespace;
   __VOID_ISR_DEPLOYMENT_ID?: string;
@@ -100,13 +73,11 @@ export type HandleIsrOptions = Readonly<{
   queryAllowlist?: QueryAllowlist;
 }>;
 
+// Caps rewrite-variant entries per path, so random values of an allowlisted
+// query param cannot grow KV without bound. Existing variants still update.
 export const MAX_ISR_VARIANTS_PER_PATH = 200;
 // Match managed ISR: tolerate removal responses for 24 hours after expiry.
 const ISR_STALE_EVICT_GRACE_MS = 86_400_000;
-
-// ---------------------------------------------------------------------------
-// Collapsed single-tenant cache keys
-// ---------------------------------------------------------------------------
 
 const DIRECT_ISR_PROJECT_ID = '__void_direct__';
 
@@ -116,11 +87,8 @@ export function isrPrefix(deploymentId: string): string {
 }
 
 /**
- * KV cache key for an ISR-cached page. Deployment- AND host-scoped: cached HTML
- * cannot outlive the hashed assets of the deployment that produced it (a fresh
- * `wrangler deploy` mints a new deployment id → cold cache), and one host's
- * cached content never bleeds into another host served by the same worker
- * (custom domain + workers.dev, apex + www, etc.).
+ * KV key for an ISR-cached page, scoped by deployment (a new deploy starts with
+ * a cold cache) and by host (custom domain, workers.dev, apex, and www stay apart).
  */
 export function isrKey(
   deploymentId: string,
@@ -136,10 +104,9 @@ export function isrVariantPrefix(deploymentId: string, host: string, pathname: s
 }
 
 /**
- * Host-registry key. Every host that has written cached content registers itself
- * under `void-isr-hosts/<id>/<host>` (value `''`) so a purge with no request host
- * (cron / queue `revalidate({ paths })`) can enumerate the hosts to purge.
- * Scoped by deployment id so registrations from an old deploy do not leak.
+ * Host-registry key. Every host that writes cached content registers here, so a
+ * purge without a request host (cron or queue `revalidate({ paths })`) can find
+ * the hosts to purge.
  */
 export function hostRegistryKey(deploymentId: string, host: string): string {
   return `void-isr-hosts/${deploymentId}/${host}`;
@@ -172,16 +139,7 @@ export function jsonEdgeKey(
   return isrEdgeCacheUrl(host, pathname, id, 'json', variantUrl);
 }
 
-// ---------------------------------------------------------------------------
-// KV cache (single-tenant; fail-open on every ISR_CACHE op)
-// ---------------------------------------------------------------------------
-
-/**
- * Read an ISR cache entry from KV. Returns null on cache miss, malformed
- * metadata, or ANY KV error (fail-open → caller renders live). The KV key is
- * deployment-scoped via `env.__VOID_ISR_DEPLOYMENT_ID` (see module header) and
- * host-scoped via `host` so one host never reads another host's cached bytes.
- */
+/** Read an ISR entry from KV. Returns null on a miss, a malformed entry, or any KV error. */
 export async function readIsrCache(
   env: IsrCacheEnv,
   host: string,
@@ -200,17 +158,14 @@ export async function readIsrCache(
     value = result.value;
     metadata = result.metadata;
   } catch {
-    // Fail open — a broken ISR_CACHE must degrade to a live render, never 500.
     return null;
   }
   return decodeIsrCacheEntry(value, metadata);
 }
 
 /**
- * Write an ISR cache entry to KV. The `response.clone()` is taken SYNCHRONOUSLY
- * before any `await` so a caller that consumes `response.body` for the client
- * response (after kicking us off via `ctx.waitUntil`) cannot race the body
- * away. Any KV error is swallowed (fail-open on the write path).
+ * Write an ISR entry to KV. The response is cloned before any `await`, so the
+ * caller can stream the original body to the client. KV errors are ignored.
  */
 export async function writeIsrCache(
   env: IsrCacheEnv,
@@ -246,11 +201,8 @@ export async function writeIsrCache(
       } satisfies IsrCacheMetadata,
     });
   } catch {
-    // Fail open — swallow write errors so a broken ISR_CACHE never 500s.
+    // Fail open.
   }
-  // Register this host so a host-less purge (cron / queue) can find it. Guarded
-  // by an in-isolate Set so it costs one KV write per (isolate, id, host), not
-  // one per page write. Fail-open — a registry write error never 500s a render.
   await registerIsrHost(kv, id, host);
 }
 
@@ -271,11 +223,7 @@ async function isVariantWriteAllowed(
   );
 }
 
-/**
- * In-isolate guard: `${id}/${host}` values whose host-registry key this isolate
- * has already written (or attempted). Bounds host registration to ~one KV write
- * per (isolate, deployment, host) instead of one per page write.
- */
+/** `${id}/${host}` pairs this isolate has registered: one registry write per pair, not per page. */
 const registeredHosts = new Set<string>();
 
 async function registerIsrHost(kv: KVNamespace, deploymentId: string, host: string): Promise<void> {
@@ -283,26 +231,19 @@ async function registerIsrHost(kv: KVNamespace, deploymentId: string, host: stri
   if (registeredHosts.has(guardKey)) {
     return;
   }
-  // Mark BEFORE the await so concurrent page writes in this isolate don't all
-  // fire the registry put. On failure, CLEAR the guard so a later write in this
-  // same (possibly long-lived) isolate retries — otherwise one transient error
-  // would permanently drop this host from `listIsrHosts()`, and a cron/queue
-  // `revalidate()` (which has no request host) could never purge it.
+  // Mark before the await so concurrent writes skip the put; clear on failure so
+  // a later write retries instead of leaving the host out of `listIsrHosts()`.
   registeredHosts.add(guardKey);
   try {
     await kv.put(hostRegistryKey(deploymentId, host), '');
   } catch {
-    // Fail open — a registry write failure must never 500 a page render — but
-    // allow a retry on a subsequent write instead of skipping this host forever.
     registeredHosts.delete(guardKey);
   }
 }
 
 /**
- * List every host that has registered cached content for a deployment. Used by
- * the on-demand `revalidate({ paths })` purge when there is no request host
- * (cron / queue). Fail-open: a registry read error yields the hosts collected so
- * far (or none) rather than throwing — degraded purge coverage, never a 500.
+ * List every host registered for a deployment. A registry read error returns
+ * the hosts collected so far instead of throwing.
  */
 export async function listIsrHosts(kv: KVNamespace, deploymentId: string): Promise<Array<string>> {
   const prefix = `void-isr-hosts/${deploymentId}/`;
@@ -317,15 +258,12 @@ export async function listIsrHosts(kv: KVNamespace, deploymentId: string): Promi
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
   } catch {
-    // Fail open — a broken registry degrades purge coverage, never throws.
+    // Fail open.
   }
   return hosts;
 }
 
-/**
- * Delete an ISR cache entry from KV. Used when a worker permanently opts out
- * via `x-revalidate: 0`. Any KV error is swallowed (fail-open).
- */
+/** Delete an ISR entry from KV (for example after `x-revalidate: 0`). KV errors are ignored. */
 export async function deleteIsrCache(
   env: IsrCacheEnv,
   host: string,
@@ -342,10 +280,6 @@ export async function deleteIsrCache(
     // Fail open.
   }
 }
-
-// ---------------------------------------------------------------------------
-// Response builders
-// ---------------------------------------------------------------------------
 
 const CLIENT_REVALIDATE_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 
@@ -396,11 +330,8 @@ function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS')
   const response = new Response(pageData, {
     headers: {
       'content-type': 'application/json',
-      // Mirror the live JSON responder `pageJsonResponse` (pages/protocol.ts):
-      // it stamps `X-VoidPages: true` + `Vary: X-VoidPages`. The Pages client
-      // gates JSON parsing on `X-VoidPages` (navigation-engine.ts) — a cached
-      // JSON variant served on a later navigation without it is treated as
-      // non-JSON and hard-reloads the whole page. Keep name/value/casing exact.
+      // Match the live Pages JSON response: the client parses JSON only when
+      // `X-VoidPages` is present, and otherwise reloads the whole page.
       'X-VoidPages': 'true',
       Vary: 'X-VoidPages',
       'Cache-Control': `public, s-maxage=${ttl}, max-age=0, must-revalidate`,
@@ -412,10 +343,9 @@ function jsonCacheResponse(pageData: string, ttl: number, state: 'HIT' | 'MISS')
 }
 
 /**
- * Populate the JSON edge cache from a response's embedded page data (the
- * `x-void-page-data` header or the `__VOID_PAGE_DATA__` inline script). No-ops
- * when there is no extractable page data. Any cache error is swallowed
- * (fail-open) so this is always safe to fire inside `ctx.waitUntil`.
+ * Fill the JSON edge cache from a response's page data (the `x-void-page-data`
+ * header or the `__VOID_PAGE_DATA__` script). Does nothing without page data;
+ * cache errors are ignored.
  */
 export async function populateJsonEdgeCache(
   cache: Cache | undefined,
@@ -437,30 +367,14 @@ export async function populateJsonEdgeCache(
     }
     await cache.put(cacheKey, jsonCacheResponse(pageData, ttl, state));
   } catch {
-    // Fail open — a broken edge cache must never 500.
+    // Fail open.
   }
 }
 
-// ---------------------------------------------------------------------------
-// Fail-open edge-cache wrappers
-// ---------------------------------------------------------------------------
-
-/**
- * The per-colo edge cache (`caches.default`), or `undefined` when the Cache API
- * is absent/degraded. Accessed through a cast because this package has both
- * `@types/node` and `@cloudflare/workers-types` in scope, and Node's ambient
- * `CacheStorage` (which lacks `.default`) otherwise shadows the Workers one on
- * the `caches` global.
- *
- * Non-throwing by contract: dereferencing `caches.default` can throw if the
- * Cache API is missing (e.g. a non-worker runtime) or degraded. We swallow that
- * here and return `undefined` so `handleIsr` never rejects before its fail-open
- * guards run — the serving invariant is a degraded cache must render live, never
- * 500. Every call site guards `undefined` (via `if (!cache)` or `cache?.`).
- */
+/** `caches.default`, or `undefined` when reading it throws (for example, with no Cache API). */
 function edgeCache(): Cache | undefined {
   try {
-    return (caches as unknown as { default: Cache }).default;
+    return caches.default;
   } catch {
     return undefined;
   }
@@ -505,31 +419,18 @@ async function deleteSharedIsrVariants(
   await safeCacheDelete(cache, keys.jsonKey);
 }
 
-// ---------------------------------------------------------------------------
-// Background revalidation (single-tenant: re-renders through `render`)
-// ---------------------------------------------------------------------------
-
-/**
- * Build a new Request with the `X-VoidPages` header removed. Headers on an
- * existing Request are immutable, so we must clone into a fresh Request. ISR
- * only runs for GET, so there is no body to preserve.
- */
+/** Copy a request without its `X-VoidPages` header. */
 export function cloneWithoutVoidPages(request: Request): Request {
   const headers = new Headers(request.headers);
   headers.delete('X-VoidPages');
-  // Construct from the Request OBJECT (not a string URL): workerd copies the
-  // `cf` blob from the input Request, so `request.cf` is preserved on the clone.
-  // Do not "simplify" this into `new Request(request.url, { headers })` — the
-  // string-URL form drops `cf`.
+  // Construct from the Request, not its URL string, so workerd keeps `request.cf`.
   return new Request(request, { headers });
 }
 
 /**
- * Revalidate an ISR page in the background. Re-renders as HTML (X-VoidPages
- * stripped), writes fresh HTML to KV + HTML edge cache, and populates the JSON
- * edge cache from embedded page data. Errors are caught and logged — serve
- * stale, don't retry. An explicit cache opt-out (including `ttl === 0`)
- * deletes the KV entry and both edge variants.
+ * Re-render a stale page in the background and refresh KV and the edge cache.
+ * Errors are logged and the stale entry keeps serving. An explicit cache
+ * opt-out (including `ttl === 0`) deletes the KV entry and both edge variants.
  */
 async function revalidateInBackground(
   env: IsrCacheEnv,
@@ -544,8 +445,7 @@ async function revalidateInBackground(
   staleSinceMs: number,
 ): Promise<void> {
   try {
-    const cleanRequest = cloneWithoutVoidPages(request);
-    const response = await render(cleanRequest);
+    const response = await render(request);
     const ttl = resolveRevalidateTtl(response, defaultTtl);
     const cache = edgeCache();
     if (response.status === 200 && isEventStreamResponse(response)) {
@@ -564,7 +464,9 @@ async function revalidateInBackground(
           headers: sharedHtmlCacheHeaders(response, ttl, 'HIT'),
         }),
       );
-      await populateJsonEdgeCache(cache, keys.jsonKey, response, ttl, 'HIT');
+      if (!htmlOnly) {
+        await populateJsonEdgeCache(cache, keys.jsonKey, response, ttl, 'HIT');
+      }
     } else if (
       isUncacheableRender(response, ttl, htmlOnly) ||
       ((response.status === 404 || response.status === 410) &&
@@ -578,10 +480,6 @@ async function revalidateInBackground(
     console.error('ISR revalidation failed:', err);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Orchestrator
-// ---------------------------------------------------------------------------
 
 /** Cache only framework document HTML; leave client data requests and other response types live. */
 export async function handleFrameworkIsr(
@@ -598,24 +496,16 @@ export async function handleFrameworkIsr(
 }
 
 /**
- * Run the ISR caching ladder for a request.
+ * Run the ISR cache ladder for a request. Returns the response to send, or
+ * `null` when the caller should render live: the request is not eligible
+ * (not GET, `/api`, Range, `shouldBypassIsr`, or no TTL), a cache read failed,
+ * or a miss carries query params outside the allowlist.
  *
- * Returns a cached/rendered `Response` when ISR applies, or `null` when the
- * caller should render live itself (request not ISR-eligible, a read/hit
- * cache op failed open, or a cache miss for a URL carrying query params
- * outside the allowlist).
- *
- * Ladder:
- *   - Bail (`null`) if not GET, an API path, a Range request, `shouldBypassIsr`,
- *     or the path has no ISR TTL. Range requests bail BEFORE any cache read/write so they
- *     render live (correct 206) and never touch the shared full-response entry.
- *   - JSON (X-VoidPages) path: edge match → hit serves `clientRevalidateResponse`;
- *     miss renders live JSON and returns it — the JSON path never writes the edge
- *     cache. The JSON edge variant is warmed only as a side-effect of the HTML
- *     render path (cold colo re-renders JSON).
- *   - HTML path: L1 edge match → L2 KV. Hit serves `isrCacheResponse`
- *     (stale hits also queue a background revalidation). Miss renders live and,
- *     when cacheable, writes KV + JSON edge + HTML edge in the background.
+ * Pages-protocol (`X-VoidPages`) requests read only the JSON edge cache, and a
+ * miss renders live without caching; HTML renders fill the JSON variant. HTML
+ * requests read the edge cache, then KV. A stale hit is served while it
+ * revalidates in the background, and a cacheable miss fills KV and the edge
+ * cache in the background.
  */
 export async function handleIsr(
   request: Request,
@@ -640,12 +530,7 @@ async function handleIsrInternal(
   if (request.method !== 'GET') {
     return null;
   }
-  // Range requests must render LIVE so the origin produces a correct partial
-  // response (`206 Partial Content`) for the requested byte range. They must
-  // never read or write the shared ISR entry: reading would serve a full-body
-  // entry for a partial request, and writing would poison the shared (host,path)
-  // key with a truncated 206 that a later full request would then be served.
-  // Return null here (→ caller renders live) BEFORE any cache read or write.
+  // A partial 206 must never read or replace the shared full-response entry.
   if (request.headers.has('range')) {
     return null;
   }
@@ -663,10 +548,8 @@ async function handleIsrInternal(
     return null;
   }
 
-  // Keep the KV helpers (which derive the deployment id from env — matching the
-  // `revalidate()` purge path) aligned with the edge keys built here. The worker
-  // entry usually sets this already; the `??=` covers callers that only pass
-  // the option.
+  // KV helpers and `revalidate()` read the id from env; fill it for callers
+  // that pass only the option.
   env.__VOID_ISR_DEPLOYMENT_ID ??= deploymentId;
 
   const host = url.hostname;
@@ -683,8 +566,6 @@ async function handleIsrInternal(
   if (request.headers.has('X-VoidPages')) {
     let jsonCached: Response | undefined;
     try {
-      // `cache?.` — an absent/degraded Cache API (edgeCache() → undefined) is a
-      // miss, not a throw, so we fall through to a live JSON render.
       jsonCached = await cache?.match(jsonKey);
     } catch {
       return null; // fail open → caller renders live
@@ -695,10 +576,6 @@ async function handleIsrInternal(
     if (jsonCached) {
       await safeCacheDelete(cache, jsonKey);
     }
-    // Miss — render live JSON and return it. The JSON path never writes the edge
-    // cache: a pages-protocol JSON response carries no embedded page data, so the
-    // JSON edge variant is warmed only as a side-effect of the HTML render path
-    // (cold colo re-renders JSON). Matches the platform dispatch behavior.
     const response = await render(request);
     const ttl = resolveRevalidateTtl(response, isrTtl);
     if (isUncacheableRender(response, ttl, false)) {
@@ -714,9 +591,6 @@ async function handleIsrInternal(
   // L1: edge cache (per-colo, sub-ms).
   let edgeCached: Response | undefined;
   try {
-    // `cache?.` — an absent/degraded Cache API (edgeCache() → undefined) is an
-    // L1 miss, not a throw, so we fall through to the L2 KV read below (KV still
-    // serves cached content even with no per-colo edge cache).
     edgeCached = await cache?.match(htmlKey);
   } catch {
     return null; // fail open → caller renders live
@@ -731,10 +605,6 @@ async function handleIsrInternal(
   // L2: KV (global, authoritative). `readIsrCache` fails open to null.
   const cached = await readIsrCache(env, host, pathname, variantUrl);
   if (cached) {
-    // Belt-and-suspenders: `readIsrCache` already validates the entry so the
-    // Response constructors below can't throw, but the never-500 fail-open
-    // contract must hold even if a future change slips a throwable past that
-    // choke point. On any throw, fall open (null → caller renders live).
     try {
       const stale = isStale(cached);
       if (stale) {
@@ -787,7 +657,9 @@ async function handleIsrInternal(
     // Every clone below is taken synchronously (before `response.body` is read
     // for the client) so no consumer races the body away.
     ctx.waitUntil(writeIsrCache(env, host, pathname, response, ttl, variantUrl));
-    ctx.waitUntil(populateJsonEdgeCache(cache, jsonKey, response, ttl, 'HIT'));
+    if (!htmlOnly) {
+      ctx.waitUntil(populateJsonEdgeCache(cache, jsonKey, response, ttl, 'HIT'));
+    }
 
     const cacheResponse = new Response(response.clone().body, {
       status: response.status,

@@ -3,9 +3,10 @@ import {
   createPlatformDeploymentManifest,
   platformDashboardUrl,
   transitionInstallation,
-  type PlatformInstallationManifest,
+  type PlatformDeploymentManifest,
   parsePlatformAuthenticationSetup,
 } from '@void/platform';
+import type { PlatformRuntimeManifest } from '@void/platform/installer';
 import { ensurePlatformAccessHealthChecks } from './platform-access-health.ts';
 import { verifyInstalledPlatformAccessProtection } from './platform-access-preflight.ts';
 import {
@@ -22,100 +23,100 @@ import {
   createPlatformHealthProbeToken,
 } from './platform-installer-secrets.ts';
 import {
+  type PlatformDatabaseLifecycleLock,
   type PlatformInstallerDependencies,
-  type PlatformInstallationSecrets,
-  type PlatformWorkerSecretUpdateIntent,
+  type PlatformInstallRunState,
   mergePlatformLiveAuthenticationDeployment,
 } from './platform-installer-types.ts';
-import { type PlatformInstallPlan } from './platform-plan.ts';
 import {
   readPendingInstallationSecrets,
   writeInstallationManifest,
   writePendingInstallationSecrets,
 } from './platform-registry.ts';
 
+function withAuthentication(
+  deployment: PlatformDeploymentManifest,
+  authentication: PlatformDeploymentManifest['authentication'],
+): PlatformDeploymentManifest {
+  return createPlatformDeploymentManifest({
+    ...deployment,
+    authentication,
+    capabilities: {
+      ...deployment.capabilities,
+      githubOAuth: authentication.providers.includes('github'),
+      googleOAuth: authentication.providers.includes('google'),
+    },
+  });
+}
+
 export async function prepareInstallationAuthentication(input: {
-  readonly releaseDatabaseLock: import('./platform-installer-types.ts').PlatformDatabaseLifecycleLock;
-  authenticationEnforcementActive: boolean;
-  readonly runtime: import('@void/platform/installer').PlatformRuntimeManifest;
-  plan: PlatformInstallPlan;
+  readonly state: PlatformInstallRunState;
+  readonly releaseDatabaseLock: PlatformDatabaseLifecycleLock;
+  readonly runtime: PlatformRuntimeManifest;
   readonly authenticationProtocolTransition: boolean;
-  manifest: PlatformInstallationManifest;
-  secrets: PlatformInstallationSecrets;
   readonly now: () => string;
   readonly dependencies: PlatformInstallerDependencies;
-  readonly workerSecretUpdateIntent: PlatformWorkerSecretUpdateIntent | null;
 }): Promise<void> {
   const {
+    state,
     releaseDatabaseLock,
     runtime,
     authenticationProtocolTransition,
     now,
     dependencies,
-    workerSecretUpdateIntent,
   } = input;
+  const { workerSecretUpdateIntent } = state;
 
   const liveAuthentication = await releaseDatabaseLock.readAuthenticationState?.();
   if (liveAuthentication) {
-    input.authenticationEnforcementActive = liveAuthentication.sessionsRequired;
+    state.authenticationEnforcementActive = liveAuthentication.sessionsRequired;
     if (liveAuthentication.sessionsRequired && runtime.authenticationProtocolVersion !== 1) {
       throw new Error(
         'platform: This runtime cannot enforce the active authentication configuration. Use an authentication-compatible runtime.',
       );
     }
     const deployment = mergePlatformLiveAuthenticationDeployment(
-      input.plan.deployment,
+      state.plan.deployment,
       liveAuthentication,
     );
-    input.plan = { ...input.plan, deployment };
+    state.plan = { ...state.plan, deployment };
     if (!authenticationProtocolTransition) {
-      input.manifest = { ...input.manifest, deployment };
+      state.manifest = { ...state.manifest, deployment };
     }
   }
   if (
     !liveAuthentication &&
-    input.manifest.deployment.authentication.configurable &&
-    !input.plan.deployment.authentication.configurable
+    state.manifest.deployment.authentication.configurable &&
+    !state.plan.deployment.authentication.configurable
   ) {
-    const authentication = input.manifest.deployment.authentication;
-    const providers = authentication.providers;
-    input.plan = {
-      ...input.plan,
-      deployment: createPlatformDeploymentManifest({
-        ...input.plan.deployment,
-        authentication,
-        capabilities: {
-          ...input.plan.deployment.capabilities,
-          githubOAuth: providers.includes('github'),
-          googleOAuth: providers.includes('google'),
-        },
+    state.plan = {
+      ...state.plan,
+      deployment: withAuthentication(
+        state.plan.deployment,
+        state.manifest.deployment.authentication,
+      ),
+    };
+  }
+  if (authenticationProtocolTransition && !state.plan.deployment.authentication.configurable) {
+    state.plan = {
+      ...state.plan,
+      deployment: withAuthentication(state.plan.deployment, {
+        providers: state.plan.deployment.authentication.providers,
+        configurable: true,
       }),
     };
   }
-  if (authenticationProtocolTransition && !input.plan.deployment.authentication.configurable) {
-    const providers = input.plan.deployment.authentication.providers;
-    const deployment = createPlatformDeploymentManifest({
-      ...input.plan.deployment,
-      authentication: { providers, configurable: true },
-      capabilities: {
-        ...input.plan.deployment.capabilities,
-        githubOAuth: providers.includes('github'),
-        googleOAuth: providers.includes('google'),
-      },
-    });
-    input.plan = { ...input.plan, deployment };
-  }
   const activateAccessCredentials = () => {
-    if (!input.secrets.accessCredentialsJson) {
+    if (!state.secrets.accessCredentialsJson) {
       return;
     }
-    const credentials: unknown = JSON.parse(input.secrets.accessCredentialsJson);
+    const credentials: unknown = JSON.parse(state.secrets.accessCredentialsJson);
     if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) {
       throw new Error('platform: Invalid saved Access credentials.');
     }
     // Lifecycle HTTP calls use API/proxy origins. Retain optional dashboard credentials
     // in recovery storage without activating them, including after protection removal.
-    const origins = [input.plan.apiUrl, input.plan.proxyUrl];
+    const origins = [state.plan.apiUrl, state.plan.proxyUrl];
     activatePlatformAccessCredentials(
       JSON.stringify(
         Object.fromEntries(
@@ -126,30 +127,29 @@ export async function prepareInstallationAuthentication(input: {
     );
   };
   activateAccessCredentials();
-  input.manifest = checkpointAuthenticationResources(input.manifest, input.secrets, now());
-  writeInstallationManifest(input.manifest);
-  await releaseDatabaseLock.checkpoint?.(input.manifest);
+  state.manifest = checkpointAuthenticationResources(state.manifest, state.secrets, now());
+  writeInstallationManifest(state.manifest);
+  await releaseDatabaseLock.checkpoint?.(state.manifest);
   dependencies.onProgress?.('Checking and creating Cloudflare resources');
   if (
     !authenticationProtocolTransition &&
-    JSON.stringify(input.manifest.deployment) !== JSON.stringify(input.plan.deployment)
+    JSON.stringify(state.manifest.deployment) !== JSON.stringify(state.plan.deployment)
   ) {
-    input.manifest = {
-      ...input.manifest,
-      deployment: input.plan.deployment,
+    state.manifest = {
+      ...state.manifest,
+      deployment: state.plan.deployment,
       updatedAt: now(),
     };
-    writeInstallationManifest(input.manifest);
-    await releaseDatabaseLock.checkpoint?.(input.manifest);
+    writeInstallationManifest(state.manifest);
+    await releaseDatabaseLock.checkpoint?.(state.manifest);
   }
-  await releaseDatabaseLock.checkpoint?.(input.manifest);
-  if (input.manifest.status !== 'provisioning') {
-    input.manifest = transitionInstallation(input.manifest, 'provisioning', now());
-    writeInstallationManifest(input.manifest);
+  if (state.manifest.status !== 'provisioning') {
+    state.manifest = transitionInstallation(state.manifest, 'provisioning', now());
+    writeInstallationManifest(state.manifest);
   }
   if (
     runtime.deploymentExecution !== 1 &&
-    (input.manifest.deploymentExecution === 1 ||
+    (state.manifest.deploymentExecution === 1 ||
       dependencies.databaseRollbackSource?.manifest.deploymentExecution === 1)
   ) {
     // Admission takes a shared row lock on this authoritative checkpoint in the
@@ -158,101 +158,101 @@ export async function prepareInstallationAuthentication(input: {
     if (!releaseDatabaseLock.checkpoint) {
       throw new Error('platform: The database lifecycle lock cannot fence deployment admission.');
     }
-    await releaseDatabaseLock.checkpoint(input.manifest);
+    await releaseDatabaseLock.checkpoint(state.manifest);
     dependencies.onProgress?.('Verifying durable deployment operations have drained');
     await (dependencies.verifyDeploymentExecutionDrain ?? verifyPlatformDeploymentExecutionDrain)(
-      input.plan.apiUrl,
-      createPlatformHealthProbeToken(input.manifest.ownershipNonce),
-      input.manifest.id,
+      state.plan.apiUrl,
+      createPlatformHealthProbeToken(state.manifest.ownershipNonce),
+      state.manifest.id,
     );
   }
 
   if (dependencies.prepareAuthentication) {
     dependencies.onProgress?.('Preparing platform authentication');
     try {
-      input.secrets = {
-        ...input.secrets,
-        ...(await dependencies.prepareAuthentication(input.manifest, input.secrets)),
+      state.secrets = {
+        ...state.secrets,
+        ...(await dependencies.prepareAuthentication(state.manifest, state.secrets)),
       };
     } catch (error) {
       // Preserve provider secrets/ambiguous-create intents written while the preparation
       // hook was running; the outer failure checkpoint must not erase that recovery data.
-      const latest = readPendingInstallationSecrets(input.manifest) ?? {};
-      input.secrets = {
-        ...input.secrets,
+      const latest = readPendingInstallationSecrets(state.manifest) ?? {};
+      state.secrets = {
+        ...state.secrets,
         authenticationPreparation: Object.fromEntries(
           Object.entries(latest).filter(([name]) => isPlatformAuthenticationPreparationKey(name)),
         ),
         authenticationSetupJson:
-          latest.authenticationSetupJson || input.secrets.authenticationSetupJson,
-        authSetupToken: latest.authSetupToken || input.secrets.authSetupToken,
-        authBootstrapCode: latest.authBootstrapCode || input.secrets.authBootstrapCode,
+          latest.authenticationSetupJson || state.secrets.authenticationSetupJson,
+        authSetupToken: latest.authSetupToken || state.secrets.authSetupToken,
+        authBootstrapCode: latest.authBootstrapCode || state.secrets.authBootstrapCode,
         accessProvisioningJson:
-          latest.accessProvisioningJson || input.secrets.accessProvisioningJson,
-        accessCredentialsJson: latest.accessCredentialsJson || input.secrets.accessCredentialsJson,
+          latest.accessProvisioningJson || state.secrets.accessProvisioningJson,
+        accessCredentialsJson: latest.accessCredentialsJson || state.secrets.accessCredentialsJson,
       };
-      input.manifest = checkpointAuthenticationResources(input.manifest, input.secrets, now());
-      writeInstallationManifest(input.manifest);
-      await releaseDatabaseLock.checkpoint?.(input.manifest);
+      state.manifest = checkpointAuthenticationResources(state.manifest, state.secrets, now());
+      writeInstallationManifest(state.manifest);
+      await releaseDatabaseLock.checkpoint?.(state.manifest);
       throw error;
     }
-    const latest = readPendingInstallationSecrets(input.manifest) ?? {};
-    input.secrets = {
-      ...input.secrets,
+    const latest = readPendingInstallationSecrets(state.manifest) ?? {};
+    state.secrets = {
+      ...state.secrets,
       authenticationPreparation: Object.fromEntries(
         Object.entries(latest).filter(([name]) => isPlatformAuthenticationPreparationKey(name)),
       ),
     };
-    input.manifest = checkpointAuthenticationResources(input.manifest, input.secrets, now());
-    writeInstallationManifest(input.manifest);
-    await releaseDatabaseLock.checkpoint?.(input.manifest);
+    state.manifest = checkpointAuthenticationResources(state.manifest, state.secrets, now());
+    writeInstallationManifest(state.manifest);
+    await releaseDatabaseLock.checkpoint?.(state.manifest);
     activateAccessCredentials();
-    assertRequiredPlatformSecrets(input.plan, input.manifest, input.secrets);
+    assertRequiredPlatformSecrets(state.plan, state.manifest, state.secrets);
     if (
-      input.secrets.authenticationSetupJson &&
+      state.secrets.authenticationSetupJson &&
       createHash('sha256')
-        .update(input.secrets.authBootstrapCode ?? '')
+        .update(state.secrets.authBootstrapCode ?? '')
         .digest('hex') !==
-        parsePlatformAuthenticationSetup(JSON.parse(input.secrets.authenticationSetupJson))
+        parsePlatformAuthenticationSetup(JSON.parse(state.secrets.authenticationSetupJson))
           .bootstrapCredentialHash
     ) {
       throw new Error(
         'platform: Prepared authentication does not match its administrator setup code.',
       );
     }
-    writePendingInstallationSecrets(input.manifest, {
-      ...secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+    writePendingInstallationSecrets(state.manifest, {
+      ...secretCheckpoint(state.secrets, workerSecretUpdateIntent),
       databaseClaimState: 'claimed',
     });
   }
 
   const appAccessSetupRequired =
-    !!input.plan.deployment.appAccess &&
-    !input.manifest.steps.some((step) => step.key === 'app-access-initialized:v1');
+    !!state.plan.deployment.appAccess &&
+    !state.manifest.steps.some((step) => step.key === 'app-access-initialized:v1');
   if (appAccessSetupRequired) {
     if (dependencies.prepareAppAccess) {
       try {
         const appAccessSetupJson = await dependencies.prepareAppAccess(
-          input.manifest,
-          input.secrets,
+          state.manifest,
+          state.secrets,
         );
-        const latest = readPendingInstallationSecrets(input.manifest) ?? {};
-        input.secrets = {
-          ...input.secrets,
+        const latest = readPendingInstallationSecrets(state.manifest) ?? {};
+        state.secrets = {
+          ...state.secrets,
           appAccessSetupJson,
           authenticationPreparation: Object.fromEntries(
             Object.entries(latest).filter(([key]) => isPlatformAuthenticationPreparationKey(key)),
           ),
         };
-        writePendingInstallationSecrets(input.manifest, {
-          ...secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+        writePendingInstallationSecrets(state.manifest, {
+          ...secretCheckpoint(state.secrets, workerSecretUpdateIntent),
           databaseClaimState: 'claimed',
         });
       } catch (error) {
-        const latest = readPendingInstallationSecrets(input.manifest) ?? {};
-        input.secrets = {
-          ...input.secrets,
-          appAccessSetupJson: latest.appAccessSetupJson || input.secrets.appAccessSetupJson,
+        const latest = readPendingInstallationSecrets(state.manifest) ?? {};
+        state.secrets = {
+          ...state.secrets,
+          appAccessSetupJson: latest.appAccessSetupJson || state.secrets.appAccessSetupJson,
           authenticationPreparation: Object.fromEntries(
             Object.entries(latest).filter(([key]) => isPlatformAuthenticationPreparationKey(key)),
           ),
@@ -260,14 +260,14 @@ export async function prepareInstallationAuthentication(input: {
         throw error;
       }
     }
-    if (!input.secrets.appAccessSetupJson) {
+    if (!state.secrets.appAccessSetupJson) {
       throw new Error(
         'platform: Restore the encrypted app access setup checkpoint before resuming.',
       );
     }
-    if (!input.secrets.appAccessSetupToken) {
+    if (!state.secrets.appAccessSetupToken) {
       if (
-        input.manifest.resources.some(
+        state.manifest.resources.some(
           (resource) => resource.key === 'api-worker' && resource.state === 'ready',
         )
       ) {
@@ -275,18 +275,18 @@ export async function prepareInstallationAuthentication(input: {
           'platform: Restore the encrypted app access setup authority before resuming.',
         );
       }
-      input.secrets = { ...input.secrets, appAccessSetupToken: randomBytes(32).toString('hex') };
-      writePendingInstallationSecrets(input.manifest, {
-        ...secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+      state.secrets = { ...state.secrets, appAccessSetupToken: randomBytes(32).toString('hex') };
+      writePendingInstallationSecrets(state.manifest, {
+        ...secretCheckpoint(state.secrets, workerSecretUpdateIntent),
         databaseClaimState: 'claimed',
       });
     }
   }
-  if (input.plan.deployment.authentication.accessProtection) {
+  if (state.plan.deployment.authentication.accessProtection) {
     const protection = liveAuthentication
       ? liveAuthentication.protection
-      : input.secrets.authenticationSetupJson
-        ? parsePlatformAuthenticationSetup(JSON.parse(input.secrets.authenticationSetupJson))
+      : state.secrets.authenticationSetupJson
+        ? parsePlatformAuthenticationSetup(JSON.parse(state.secrets.authenticationSetupJson))
             .protection
         : null;
     if (!protection) {
@@ -297,54 +297,54 @@ export async function prepareInstallationAuthentication(input: {
     dependencies.onProgress?.('Verifying current Access policies and protected origins');
     await (dependencies.verifyAccessProtection ?? verifyInstalledPlatformAccessProtection)({
       client: dependencies.client,
-      manifest: input.manifest,
-      plan: input.plan,
-      dashboardUrl: platformDashboardUrl(input.plan.deployment),
+      manifest: state.manifest,
+      plan: state.plan,
+      dashboardUrl: platformDashboardUrl(state.plan.deployment),
       protection,
-      checkpoint: secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+      checkpoint: secretCheckpoint(state.secrets, workerSecretUpdateIntent),
     });
   }
   if (
-    input.plan.deployment.authentication.accessProtection ||
+    state.plan.deployment.authentication.accessProtection ||
     (appAccessSetupRequired &&
-      input.secrets.appAccessSetupJson &&
-      JSON.parse(input.secrets.appAccessSetupJson).managed === true)
+      state.secrets.appAccessSetupJson &&
+      JSON.parse(state.secrets.appAccessSetupJson).managed === true)
   ) {
     dependencies.onProgress?.('Preparing Access for authenticated platform health checks');
     try {
       await (dependencies.prepareHealthAccess ?? ensurePlatformAccessHealthChecks)({
         client: dependencies.client,
-        manifest: input.manifest,
-        plan: input.plan,
-        checkpoint: secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+        manifest: state.manifest,
+        plan: state.plan,
+        checkpoint: secretCheckpoint(state.secrets, workerSecretUpdateIntent),
         save: (accessHealthProvisioningJson) => {
-          input.secrets = { ...input.secrets, accessHealthProvisioningJson };
-          input.manifest = checkpointAuthenticationResources(input.manifest!, input.secrets, now());
-          writePendingInstallationSecrets(input.manifest, {
-            ...secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+          state.secrets = { ...state.secrets, accessHealthProvisioningJson };
+          state.manifest = checkpointAuthenticationResources(state.manifest, state.secrets, now());
+          writePendingInstallationSecrets(state.manifest, {
+            ...secretCheckpoint(state.secrets, workerSecretUpdateIntent),
             databaseClaimState: 'claimed',
           });
-          writeInstallationManifest(input.manifest);
+          writeInstallationManifest(state.manifest);
         },
       });
     } catch (error) {
       if (
         appAccessSetupRequired &&
-        input.secrets.appAccessSetupJson &&
-        JSON.parse(input.secrets.appAccessSetupJson).managed &&
+        state.secrets.appAccessSetupJson &&
+        JSON.parse(state.secrets.appAccessSetupJson).managed &&
         error instanceof PlatformCloudflareApiError &&
         [401, 403].includes(error.status)
       ) {
-        input.secrets = {
-          ...input.secrets,
+        state.secrets = {
+          ...state.secrets,
           authenticationPreparation: {
-            ...input.secrets.authenticationPreparation,
+            ...state.secrets.authenticationPreparation,
             appAccessTokenRejected: 'true',
           },
         };
         writePendingInstallationSecrets(
-          input.manifest,
-          secretCheckpoint(input.secrets, workerSecretUpdateIntent),
+          state.manifest,
+          secretCheckpoint(state.secrets, workerSecretUpdateIntent),
         );
         throw new PlatformAppAccessCredentialError(
           'platform: App access token rejected while preparing health checks. Resume installation to provide a replacement.',
@@ -352,7 +352,7 @@ export async function prepareInstallationAuthentication(input: {
       }
       throw error;
     } finally {
-      await releaseDatabaseLock.checkpoint?.(input.manifest);
+      await releaseDatabaseLock.checkpoint?.(state.manifest);
     }
   }
 }

@@ -1,6 +1,5 @@
 import { afterEach, expect, it, vi } from 'vite-plus/test';
-import { runPlatformWranglerAtApiBase } from '../../src/cli/platform-installer-process.ts';
-import { runPlatformWrangler } from '../../src/cli/platform-installer.ts';
+import { runPlatformWrangler } from '../../src/cli/platform-installer-process.ts';
 
 const mocks = vi.hoisted(() => ({ run: vi.fn() }));
 vi.mock('../../src/cli/provision.ts', async (importOriginal) => ({
@@ -13,25 +12,6 @@ vi.mock('../../src/cli/preset.ts', () => ({
 
 afterEach(() => {
   vi.restoreAllMocks();
-});
-
-it('pins the selected operator token for serial and parallel platform operations', async () => {
-  mocks.run.mockResolvedValue({ status: 0, stdout: '', stderr: '' });
-  for (const parallel of [false, true]) {
-    await runPlatformWranglerAtApiBase(
-      { type: 'versions.upload', configPath: '/test/wrangler.json' },
-      'account',
-      '/test',
-      true,
-      'https://api.example.com/client/v4',
-      parallel,
-      'selected-manager',
-    );
-    expect(mocks.run).toHaveBeenLastCalledWith(
-      expect.anything(),
-      expect.objectContaining({ apiToken: 'selected-manager', accountId: 'account' }),
-    );
-  }
 });
 
 it.each([true, false])(

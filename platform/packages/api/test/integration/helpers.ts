@@ -363,6 +363,7 @@ class MemoryR2Bucket {
     size: number;
     etag: string;
     uploaded: Date;
+    body: ReadableStream<Uint8Array>;
     arrayBuffer: () => Promise<ArrayBuffer>;
   } | null> {
     const entry = this.store.get(key);
@@ -374,6 +375,7 @@ class MemoryR2Bucket {
       size: entry.body.byteLength,
       etag: entry.etag,
       uploaded: entry.uploaded,
+      body: new Response(entry.body).body!,
       arrayBuffer: async () => entry.body.slice(0),
     };
   }
@@ -560,6 +562,9 @@ export async function teardownEnv(): Promise<void> {
 
 export async function clearTables(db: Db): Promise<void> {
   const tables = [
+    schema.oauthRequests,
+    schema.oauthGrants,
+    schema.oauthClients,
     schema.projectCleanupJobs,
     schema.emailDestinationCleanups,
     schema.emailOperationSteps,

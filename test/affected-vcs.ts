@@ -9,7 +9,7 @@ type AffectedVcsProvider = {
 };
 const execFileAsync = promisify(execFile);
 
-export async function changedFiles(root: string, base?: string): Promise<Array<string>> {
+async function changedFiles(root: string, base?: string): Promise<Array<string>> {
   const git = async (args: Array<string>): Promise<string> => {
     const { stdout } = await execFileAsync('git', args, {
       cwd: root,

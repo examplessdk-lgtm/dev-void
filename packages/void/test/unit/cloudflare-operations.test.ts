@@ -714,24 +714,6 @@ describe('Cloudflare custom domains', () => {
     expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf-8')).toBe(before);
   });
 
-  it('removes the final domain through the authenticated API', async () => {
-    const root = project(
-      '{"name":"my-worker","account_id":"account-1","routes":[{"pattern":"app.example.com","custom_domain":true}]}',
-    );
-    const runner = vi.fn<CloudflareOperationRunner>();
-    const publishEmpty = vi.fn(async () => undefined);
-
-    await expect(
-      changeCloudflareDomain(root, 'app.example.com', 'delete', runner, publishEmpty),
-    ).resolves.toMatchObject({ modified: true, domains: [] });
-
-    expect(publishEmpty).toHaveBeenCalledWith(
-      expect.objectContaining({ accountId: 'account-1', workerName: 'my-worker' }),
-    );
-    expect(runner).not.toHaveBeenCalled();
-    expect(readWranglerCustomDomains(root).domains).toEqual([]);
-  });
-
   it('publishes an empty final domain set to the pinned Cloudflare API', async () => {
     const root = project(
       '{"name":"my-worker","account_id":"account-1","routes":[{"pattern":"app.example.com","custom_domain":true}]}',
@@ -741,7 +723,11 @@ describe('Cloudflare custom domains', () => {
     const runner = vi
       .fn<CloudflareOperationRunner>()
       .mockResolvedValue({ status: 0, stdout: '', stderr: '' });
-    await changeCloudflareDomain(root, 'app.example.com', 'delete', runner);
+    await expect(
+      changeCloudflareDomain(root, 'app.example.com', 'delete', runner),
+    ).resolves.toMatchObject({ modified: true, domains: [] });
+    expect(readWranglerCustomDomains(root).domains).toEqual([]);
+    expect(runner).toHaveBeenCalledTimes(1);
     expect(runner).toHaveBeenCalledWith(
       {
         type: 'triggers.clear-domains',

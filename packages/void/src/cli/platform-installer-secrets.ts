@@ -9,6 +9,7 @@ import {
 } from './platform-access-setup.ts';
 import {
   type PlatformInstallationSecrets,
+  type PlatformWorkerKey,
   type PlatformWorkerSecretUpdateIntent,
   type PlatformWorkerSecretUpdateName,
   PLATFORM_WORKER_SECRET_UPDATE_NAMES,
@@ -77,10 +78,7 @@ export function createPlatformInstallationSecrets(input: {
     const setup = parsePlatformAuthenticationSetup(JSON.parse(authenticationSetupJson));
     if (
       !existingInstallation &&
-      (authSetupToken.length < 32 ||
-        !/^[a-f0-9]{64}$/.test(authBootstrapCode) ||
-        createHash('sha256').update(authBootstrapCode).digest('hex') !==
-          setup.bootstrapCredentialHash)
+      createHash('sha256').update(authBootstrapCode).digest('hex') !== setup.bootstrapCredentialHash
     ) {
       throw new Error(
         'platform: Valid installation setup authority and a matching administrator setup code are required.',
@@ -140,6 +138,22 @@ export function createPlatformInstallationSecrets(input: {
     !!emailSigningSecret &&
     ((emailEnabled && (!existingEmailEnabled || !checkpoint.emailSigningSecret)) ||
       !!input.emailSigningSecret);
+  const githubOptional = existingInstallation || modernAuthentication;
+  const resolve = (
+    key:
+      | 'bootstrapGitHubId'
+      | 'bootstrapGitHubLogin'
+      | 'cloudflareApiToken'
+      | 'githubClientId'
+      | 'githubClientSecret'
+      | 'r2AccessKeyId'
+      | 'r2SecretAccessKey',
+    requiredName: string,
+    optional: boolean,
+  ): string => {
+    const value = configured(input[key], key);
+    return optional ? value : required(value, requiredName);
+  };
   const explicitWorkerSecretUpdates = withoutEmptySecrets({
     CF_API_TOKEN: input.cloudflareApiToken,
     ...(emailSigningSecretUpdateAuthorized ? { EMAIL_SIGNING_SECRET: emailSigningSecret } : {}),
@@ -174,59 +188,40 @@ export function createPlatformInstallationSecrets(input: {
     pendingWorkerSecretUpdateIntent: input.updateExistingWorkers
       ? pendingWorkerSecretUpdateIntent
       : undefined,
-    bootstrapGitHubId:
-      existingInstallation || modernAuthentication
-        ? configured(input.bootstrapGitHubId, 'bootstrapGitHubId')
-        : required(
-            configured(input.bootstrapGitHubId, 'bootstrapGitHubId'),
-            'resolved administrator GitHub account id',
-          ),
-    bootstrapGitHubLogin:
-      existingInstallation || modernAuthentication
-        ? configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin')
-        : required(
-            configured(input.bootstrapGitHubLogin, 'bootstrapGitHubLogin'),
-            'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
-          ),
-    cloudflareApiToken: existingInstallation
-      ? configured(input.cloudflareApiToken, 'cloudflareApiToken')
-      : required(
-          configured(input.cloudflareApiToken, 'cloudflareApiToken'),
-          'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN',
-        ),
+    bootstrapGitHubId: resolve(
+      'bootstrapGitHubId',
+      'resolved administrator GitHub account id',
+      githubOptional,
+    ),
+    bootstrapGitHubLogin: resolve(
+      'bootstrapGitHubLogin',
+      'VOID_PLATFORM_ADMIN_GITHUB_LOGIN',
+      githubOptional,
+    ),
+    cloudflareApiToken: resolve(
+      'cloudflareApiToken',
+      'VOID_PLATFORM_RUNTIME_CLOUDFLARE_API_TOKEN',
+      existingInstallation,
+    ),
     databaseUrl: required(input.databaseUrl || checkpoint.databaseUrl || '', 'DATABASE_URL'),
     emailEnabled,
     emailSigningSecret,
-    githubClientId:
-      existingInstallation || modernAuthentication
-        ? configured(input.githubClientId, 'githubClientId')
-        : required(
-            configured(input.githubClientId, 'githubClientId'),
-            'VOID_PLATFORM_GITHUB_CLIENT_ID',
-          ),
-    githubClientSecret:
-      existingInstallation || modernAuthentication
-        ? configured(input.githubClientSecret, 'githubClientSecret')
-        : required(
-            configured(input.githubClientSecret, 'githubClientSecret'),
-            'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
-          ),
+    githubClientId: resolve('githubClientId', 'VOID_PLATFORM_GITHUB_CLIENT_ID', githubOptional),
+    githubClientSecret: resolve(
+      'githubClientSecret',
+      'VOID_PLATFORM_GITHUB_CLIENT_SECRET',
+      githubOptional,
+    ),
     jwtSecret: resolvedJwtSecret,
     projectSecretActiveKeyVersion: projectSecretKeyring.activeVersion,
     projectSecretKey: projectSecretKeyring.v1Key,
     projectSecretKeysJson: projectSecretKeyring.keysJson,
-    r2AccessKeyId: existingInstallation
-      ? configured(input.r2AccessKeyId, 'r2AccessKeyId')
-      : required(
-          configured(input.r2AccessKeyId, 'r2AccessKeyId'),
-          'VOID_PLATFORM_R2_ACCESS_KEY_ID',
-        ),
-    r2SecretAccessKey: existingInstallation
-      ? configured(input.r2SecretAccessKey, 'r2SecretAccessKey')
-      : required(
-          configured(input.r2SecretAccessKey, 'r2SecretAccessKey'),
-          'VOID_PLATFORM_R2_SECRET_ACCESS_KEY',
-        ),
+    r2AccessKeyId: resolve('r2AccessKeyId', 'VOID_PLATFORM_R2_ACCESS_KEY_ID', existingInstallation),
+    r2SecretAccessKey: resolve(
+      'r2SecretAccessKey',
+      'VOID_PLATFORM_R2_SECRET_ACCESS_KEY',
+      existingInstallation,
+    ),
   };
 }
 
@@ -513,7 +508,7 @@ export function apiWorkerSecrets(
 
 /** Existing Workers inherit live secrets, including complete encryption keyrings. */
 export function platformWorkerSecretPayload(
-  worker: 'api' | 'proxy' | 'emailGateway' | 'tail' | 'dispatch',
+  worker: PlatformWorkerKey,
   secrets: PlatformInstallationSecrets,
   accountId: string,
   zoneId: string,
@@ -534,16 +529,9 @@ export function platformWorkerSecretPayload(
     }
     return proxyWorkerSecrets(secrets, accountId);
   }
-  const allowed =
+  const allowed: ReadonlyArray<string> =
     worker === 'api'
-      ? [
-          'CF_API_TOKEN',
-          'EMAIL_SIGNING_SECRET',
-          'GITHUB_CLIENT_ID',
-          'GITHUB_CLIENT_SECRET',
-          'R2_ACCESS_KEY_ID',
-          'R2_SECRET_ACCESS_KEY',
-        ]
+      ? PLATFORM_WORKER_SECRET_UPDATE_NAMES
       : worker === 'proxy'
         ? ['CF_API_TOKEN', 'EMAIL_SIGNING_SECRET']
         : ['EMAIL_SIGNING_SECRET'];

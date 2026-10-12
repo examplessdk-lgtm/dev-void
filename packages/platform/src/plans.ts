@@ -1,3 +1,5 @@
+import { isPrintableText, record } from './validate.ts';
+
 /** Installation-defined plan IDs are stable even when a display name changes. */
 export type PlanId = string;
 export type BuiltinPlanId = 'free' | 'solo' | 'pro' | 'sponsored' | 'custom';
@@ -193,28 +195,14 @@ export function parsePlatformPlanId(value: unknown): PlanId {
 }
 
 export function parsePlanName(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !value.trim() ||
-    value.length > 80 ||
-    Array.from(value).some(
-      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
-    )
-  ) {
+  if (!isPrintableText(value, 80)) {
     throw new Error('Plan names must contain 1 to 80 printable characters.');
   }
   return value.trim();
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(label + ' must be an object.');
-  }
-  return value as Record<string, unknown>;
-}
-
 export function parsePlanLimitsPatch(value: unknown): PlanLimitsPatch {
-  const input = object(value, 'Plan limits');
+  const input = record(value, 'Plan limits');
   for (const [key, limit] of Object.entries(input)) {
     if (!(PLAN_EDITABLE_LIMIT_KEYS as ReadonlyArray<string>).includes(key)) {
       throw new Error('Unknown or unenforced plan limit: ' + key + '.');
@@ -261,7 +249,7 @@ export function parseBuildInstanceType(value: unknown): BuildInstanceType {
 
 /** Strict saved-state validation: invalid configuration must not silently lift quotas. */
 export function parsePlatformPlanCatalog(value: unknown): PlatformPlanCatalog {
-  const input = object(value, 'Plan catalog');
+  const input = record(value, 'Plan catalog');
   if (!Number.isSafeInteger(input.revision) || (input.revision as number) < 0) {
     throw new Error('Invalid plan catalog revision.');
   }
@@ -270,7 +258,7 @@ export function parsePlatformPlanCatalog(value: unknown): PlatformPlanCatalog {
   }
   const ids = new Set<string>();
   const plans = input.plans.map((value) => {
-    const plan = object(value, 'Plan');
+    const plan = record(value, 'Plan');
     const id = parsePlatformPlanId(plan.id);
     if (ids.has(id)) {
       throw new Error('Duplicate plan ID: ' + id + '.');
@@ -282,7 +270,7 @@ export function parsePlatformPlanCatalog(value: unknown): PlatformPlanCatalog {
     if (typeof plan.allowShortSlugs !== 'boolean') {
       throw new Error('allowShortSlugs must be a boolean.');
     }
-    const limits = object(plan.limits, 'Plan limits');
+    const limits = record(plan.limits, 'Plan limits');
     const keys = Object.keys(PLAN_LIMITS.free);
     if (
       Object.keys(limits).length !== keys.length ||
@@ -306,7 +294,7 @@ export function parsePlatformPlanCatalog(value: unknown): PlatformPlanCatalog {
   }
   let reconciliation: PlatformPlanReconciliation | null = null;
   if (input.reconciliation !== null) {
-    const operation = object(input.reconciliation, 'Plan reconciliation');
+    const operation = record(input.reconciliation, 'Plan reconciliation');
     if (
       operation.revision !== input.revision ||
       typeof operation.complete !== 'boolean' ||
@@ -322,7 +310,7 @@ export function parsePlatformPlanCatalog(value: unknown): PlatformPlanCatalog {
     }
     let error: PlatformPlanReconciliation['error'];
     if (operation.error !== undefined) {
-      const failure = object(operation.error, 'Plan reconciliation failure');
+      const failure = record(operation.error, 'Plan reconciliation failure');
       if (
         typeof failure.accountId !== 'string' ||
         typeof failure.message !== 'string' ||

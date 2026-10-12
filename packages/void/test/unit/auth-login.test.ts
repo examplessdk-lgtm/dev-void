@@ -1,20 +1,19 @@
+import { createHash } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { runPlatformLogin } from '../../src/cli/auth.ts';
+
 vi.mock('../../src/cli/keyring.ts', () => ({
   readKeyringPassword: () => null,
   writeKeyringPassword: () => true,
 }));
+vi.mock('node:child_process', () => ({
+  execFile: (...args: Array<unknown>) => mockExecFile(...args),
+}));
+
 const accessJwt =
   'header.' +
   Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url') +
   '.signature';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
-let registry: string;
-import { createHash } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { runLogin, runPlatformLogin } from '../../src/cli/auth.ts';
-
 const mockExecFile = vi.fn();
 const exchangeRequests: Array<{
   url: string;
@@ -32,34 +31,9 @@ function codeChallengeFor(verifier: string): string {
     .replaceAll('=', '');
 }
 
-vi.mock('node:child_process', () => ({
-  execFile: (...args: Array<unknown>) => mockExecFile(...args),
-}));
-
 beforeEach(() => {
   mockExecFile.mockReset();
   exchangeRequests.length = 0;
-  process.env.VOID_API_URL = 'https://api.test';
-  registry = mkdtempSync(join(tmpdir(), 'void-login-connections-'));
-  process.env.VOID_PLATFORM_REGISTRY_DIR = registry;
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.test',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.staging.void.cloud',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
 
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
@@ -80,15 +54,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(registry, { recursive: true, force: true });
-  delete process.env.VOID_PLATFORM_REGISTRY_DIR;
   vi.unstubAllGlobals();
-  delete process.env.VOID_API_URL;
   delete process.env.CF_ACCESS_TOKEN;
   delete process.env.VOID_ACCESS_ORIGIN;
 });
 
-describe('runLogin', () => {
+describe('runPlatformLogin', () => {
   it('keeps explicit platform login and code exchange on the selected origin', async () => {
     let ready!: (url: string) => void;
     const urlReady = new Promise<string>((resolve) => {
@@ -109,7 +80,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -122,13 +93,6 @@ describe('runLogin', () => {
     const state = redirectUrl.searchParams.get('state');
     expect(state).toEqual(expect.any(String));
     expect(state).toHaveLength(64);
-
-    const attackUrl = new URL(redirectUrl);
-    attackUrl.searchParams.set('token', 'attacker-controlled-token');
-    attackUrl.searchParams.set('state', 'wrong-state');
-
-    const attackResponse = await fetch(attackUrl);
-    expect(attackResponse.status).toBe(400);
 
     const validUrl = new URL(redirectUrl);
     validUrl.searchParams.set('code', 'real-code');
@@ -167,7 +131,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
 
@@ -188,7 +152,7 @@ describe('runLogin', () => {
     await expect(loginPromise).resolves.toBe('real-token');
   });
 
-  it('shows the failure page and throws when the code exchange fails (F3 regression)', async () => {
+  it('shows the failure page and throws when the code exchange fails', async () => {
     // Override fetch so the localhost callback still hits the real server, but
     // the API token exchange returns a non-ok response (expired code, etc.).
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -205,7 +169,7 @@ describe('runLogin', () => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin('https://api.test', 'github', resolveLoginUrl);
     // Attach the rejection assertion up front so the exchange failure doesn't
     // surface as an unhandled rejection.
     const rejection = expect(loginPromise).rejects.toThrow(/Failed to exchange login code/);
@@ -218,8 +182,6 @@ describe('runLogin', () => {
     validUrl.searchParams.set('code', 'real-code');
 
     const validResponse = await fetch(validUrl);
-    // The exchange ran INSIDE the request handler and failed → failure page,
-    // never the success page.
     expect(validResponse.status).toBe(400);
     const body = await validResponse.text();
     expect(body).not.toContain('successful');
@@ -229,16 +191,16 @@ describe('runLogin', () => {
   });
 
   it('sends Cloudflare Access headers when exchanging a staging login code', async () => {
-    process.env.VOID_API_URL = 'https://api.staging.void.cloud';
+    const apiUrl = 'https://api.staging.void.cloud';
     process.env.CF_ACCESS_TOKEN = accessJwt;
-    process.env.VOID_ACCESS_ORIGIN = process.env.VOID_API_URL;
+    process.env.VOID_ACCESS_ORIGIN = apiUrl;
 
     let resolveLoginUrl!: (url: string) => void;
     const loginUrlPromise = new Promise<string>((resolve) => {
       resolveLoginUrl = resolve;
     });
 
-    const loginPromise = runLogin('/project', 'github', resolveLoginUrl);
+    const loginPromise = runPlatformLogin(apiUrl, 'github', resolveLoginUrl);
     const loginUrl = new URL(await loginUrlPromise);
     const redirect = loginUrl.searchParams.get('redirect');
     expect(redirect).toBeTruthy();

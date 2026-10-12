@@ -56,6 +56,8 @@ File operations live under `sandbox.files`: `readFile`, `writeFile`, `stat`, `ls
 
 To reach a server inside the container, await `sandbox.fetch(port, new Request(url))`. `sandbox.running()` checks whether the container is running; `sandbox.destroy()` stops it.
 
+On native Cloudflare deployments, `sandbox.fetch()` also supports WebSocket upgrade requests. Return its response from your Worker handler to connect the client to the container. WebSocket upgrades are currently unavailable on managed Void deployments.
+
 `getSandbox()` options include `inactivityTimeoutMs` (default ten minutes, maximum six hours), `enableInternet` (default `false`), and string `labels`. Internet access and labels take effect on the next container start. `binding` selects a custom native binding; managed platforms use the configured binding.
 
 For code that runs on both deployment targets, use `getSandbox()`. Direct access through `c.env.SANDBOX` is available only on local and native Cloudflare deployments.

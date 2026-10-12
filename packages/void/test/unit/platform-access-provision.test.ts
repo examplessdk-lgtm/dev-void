@@ -15,6 +15,13 @@ const base: PlatformAccessProvisionInput = {
   identityProviderIds: ['company-idp'],
   policyIds: ['employees'],
 };
+const fresh = (): PlatformAccessCheckpoint => ({
+  version: 1,
+  accountId: base.accountId,
+  installationId: base.installationId,
+  nonce: '0123456789abcdef0123456789abcdef',
+  resources: {},
+});
 
 describe('Cloudflare Access provisioning', () => {
   it.each(['', '  ', undefined, null])(
@@ -40,7 +47,7 @@ describe('Cloudflare Access provisioning', () => {
       provisionPlatformAccess(
         env.client,
         { ...base, login: { id: 'access', label: 'Company Access' } },
-        undefined,
+        fresh(),
         () => {},
       ),
     ).rejects.toThrow('Cloudflare Access did not return identity provider');
@@ -71,7 +78,7 @@ describe('Cloudflare Access provisioning', () => {
         protection: { applicationId: 'external-gate' },
         serviceToken: { id: 'ci-token', clientId: 'external-ci', clientSecret: 'external-secret' },
       },
-      undefined,
+      fresh(),
       () => {},
     );
     expect(output.resources).toEqual(
@@ -82,18 +89,9 @@ describe('Cloudflare Access provisioning', () => {
     );
     expect(env.calls.every((call) => call.method === 'GET')).toBe(true);
   });
-  it('performs no Access probes or writes when neither capability is selected', async () => {
-    const env = fixture();
-    expect(
-      await provisionPlatformAccess(env.client, base, undefined, () => {
-        throw new Error('No checkpoint expected');
-      }),
-    ).toEqual({ resources: [] });
-    expect(env.calls).toHaveLength(0);
-  });
   it('creates OIDC login without a perimeter application or service token', async () => {
     const env = fixture();
-    let state: PlatformAccessCheckpoint | undefined;
+    let state = fresh();
     const input = { ...base, login: { id: 'access', label: 'Company Access' } };
     const result = await provisionPlatformAccess(env.client, input, state, (value) => {
       state = structuredClone(value);
@@ -118,7 +116,7 @@ describe('Cloudflare Access provisioning', () => {
     const result = await provisionPlatformAccess(
       env.client,
       { ...base, protection: {} },
-      undefined,
+      fresh(),
       (state) => {
         saved = structuredClone(state);
       },
@@ -154,7 +152,7 @@ describe('Cloudflare Access provisioning', () => {
       const env = fixture();
       Object.assign(env.policy, replacement);
       await expect(
-        provisionPlatformAccess(env.client, { ...base, protection: {} }, undefined, () => {}),
+        provisionPlatformAccess(env.client, { ...base, protection: {} }, fresh(), () => {}),
       ).rejects.toThrow();
       expect(env.calls.some((call) => call.method === 'POST')).toBe(false);
     }
@@ -172,7 +170,7 @@ describe('Cloudflare Access provisioning', () => {
       provisionPlatformAccess(
         env.client,
         { ...base, login: { id: 'access', label: 'Access' }, protection: {} },
-        undefined,
+        fresh(),
         () => {},
       ),
     ).rejects.toThrow('overlaps');
@@ -181,7 +179,7 @@ describe('Cloudflare Access provisioning', () => {
 
   it('reconciles an ambiguous create without duplicating the app or inventing its secret', async () => {
     const env = fixture();
-    let state: PlatformAccessCheckpoint | undefined;
+    let state = fresh();
     const save = (value: PlatformAccessCheckpoint) => {
       state = structuredClone(value);
     };
@@ -232,7 +230,7 @@ describe('Cloudflare Access provisioning', () => {
           clientSecret: 'external-secret',
         },
       },
-      undefined,
+      fresh(),
       () => {},
     );
     expect(result.resources).toMatchObject([{ id: 'external', adopted: true }]);

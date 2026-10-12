@@ -12,20 +12,15 @@ import {
 // VOID_E2E_CF_TOKEN and VOID_E2E_CF_ACCOUNT_ID are set, and skips each test otherwise. See
 // README.md in this directory for prerequisites, CI wiring, and resource naming/cleanup.
 
-// Read the credentials + the enable gate at EXECUTION time, never at module top-level. Vitest imports
-// (collects) this file BEFORE the CI runner injects the job's step env into the worker's process.env,
-// so a top-level `process.env.VOID_E2E_CF_TOKEN` read sees an empty string and `describe.skipIf` would
-// skip the suite even when the credentials are present — while an identical read inside a hook/test
-// (which run AFTER injection) sees the real value. So these are functions, called from the hooks/tests.
+// Read env inside hooks and tests, never at module load: Vitest collects this file before the
+// runner injects the job env, so a top-level read sees empty credentials.
 function cfToken(): string {
   return process.env.VOID_E2E_CF_TOKEN ?? '';
 }
 function cfAccountId(): string {
   return process.env.VOID_E2E_CF_ACCOUNT_ID ?? '';
 }
-// Windows is intentionally excluded from the LIVE deploy: invoking the cf CLI against a real
-// account on win32 is unverified. The real-build integration test
-// (test/integration/cloudflare-deploy-build.test.ts) exercises the build path on Windows.
+// Live cf calls are unverified on Windows; cloudflare-deploy-build.test.ts covers the build there.
 function e2eEnabled(): boolean {
   return cfToken().length > 0 && cfAccountId().length > 0 && process.platform !== 'win32';
 }
@@ -37,55 +32,28 @@ const PACKAGE_ROOT = join(ROOT, 'packages', 'void');
 const CLI_ENTRY = join(PACKAGE_ROOT, 'dist', 'cli', 'cli.mjs');
 const CF_BIN = join(PACKAGE_ROOT, 'node_modules', 'cf', 'bin', 'cf');
 const OPERATION_ENTRY = join(PACKAGE_ROOT, 'dist', 'cli', 'cloudflare-operation-process.mjs');
-// Bound each deploy subprocess BELOW the enclosing vitest timeout. `spawn.sync` blocks the test
-// worker's event loop, so a hung CLI/cf call would keep vitest's own timer from firing AND keep
-// `afterAll` from running — leaking the worker/D1/KV. On timeout, spawnSync returns a null status,
-// which fails the status assertion loudly and lets teardown reclaim the resources.
+// `spawn.sync` blocks the event loop, so Vitest cannot time out a hung call and teardown would
+// never run. Bound every spawn below its hook timeout.
 const DEPLOY_TIMEOUT_MS = 480_000;
-// The same event-loop-block reasoning applies to every `cf` call (ownership lists and teardown):
-// an unbounded `spawn.sync` on a stalled Cloudflare call would freeze vitest's hook timer and strand
-// already-created resources. Quick ops, so a much shorter bound.
 const CF_TIMEOUT_MS = 120_000;
-// Per-request abort deadline for the polling fetches, so a single stalled request aborts and the
-// retry loop moves on instead of consuming the whole per-test budget on one hung socket.
 const REQUEST_TIMEOUT_MS = 20_000;
-// `CF_TIMEOUT_MS` bounds ONE stalled call, but each hook fires SEVERAL cf calls back to
-// back with no `await` between them (setup: 2 lists; teardown: up to 5 list/delete), so
-// `spawn.sync` blocks the event loop across the whole run and vitest's hook timer can never fire to
-// interrupt it — the per-call bound alone lets the AGGREGATE (5–6 × 120s) blow past the hook budget,
-// and an external cancel mid-teardown strands D1/KV. These budgets cap the SUM of cf wall-clock
-// per hook: each hook stamps `cfDeadline` at its start and `cf()` shrinks each call's
-// timeout to the time left, skipping (as a failed call) once spent. Sized under the hook timeouts —
-// setup: 90s + DEPLOY_TIMEOUT_MS (a separate spawn) = 570s < 600s beforeAll; teardown: 200s + the
-// ~64s async worker probe = 264s < 300s afterAll.
+// Total cf time per hook, since several blocking calls run back to back. Setup: 90s +
+// DEPLOY_TIMEOUT_MS < 600s; teardown: 200s + the ~64s worker probe < 300s.
 const SETUP_CF_BUDGET_MS = 90_000;
 const TEARDOWN_CF_BUDGET_MS = 200_000;
 
-// Deploy target: the SPA playground (real, buildable Void app exercising D1 + KV + a cron). The
-// deploy CLI runs its own build → provision → migrate → deploy pipeline against this dir.
+// The SPA playground uses D1, KV and a cron.
 const APP = join(ROOT, 'playground', 'spa');
 const APP_WRANGLER = join(APP, 'wrangler.jsonc');
 
-// A UNIQUE per-run worker name: two runs that overlap (two pushes in flight, a rerun of the same
-// commit) must never deploy the same-named worker or create the same D1/KV, or they would clobber
-// each other and teardown would race one against the other. The suffix is `VOID_E2E_RUN_ID` (CI
-// sets it to run-id + attempt) or, locally, a timestamp + random. The shared
-// `void-e2e-cf-deploy-` prefix keeps every resource greppable for manual cleanup of an orphan from a
-// hard-killed run. Derived names mirror the provisioner (`suffixedResourceName`): `<name>-db` (D1),
-// `<name>-kv` (KV).
+// A unique name per run keeps overlapping runs apart; the shared prefix keeps orphans greppable.
+// D1/KV names mirror the provisioner's `suffixedResourceName`.
 function uniqueRunSuffix(): string {
-  // `||`, not `??`: `VOID_E2E_RUN_ID` arrives as an EMPTY STRING (not undefined) when unset, because
-  // `vite.config.ts` forwards `VOID_E2E_RUN_ID: process.env.VOID_E2E_RUN_ID ?? ''` into the worker
-  // via `test.env`. `??` would treat that `''` as present and collapse every local run onto the
-  // `-local` suffix (below), so overlapping local runs would clobber one shared worker/D1/KV. `||`
-  // lets the empty value fall through to a unique timestamp + random. CI sets a non-empty run id, so
-  // its value is unaffected.
+  // `||`, not `??`: vite.config.ts forwards an unset VOID_E2E_RUN_ID as ''.
   const raw =
     process.env.VOID_E2E_RUN_ID ||
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  // Cloudflare worker/D1/KV names are lowercase `[a-z0-9-]` and must not start/end with `-`.
-  // Sanitize, then cap the suffix so the worker name — and its `-db`/`-kv` tails — stay well under
-  // the 63-char limit.
+  // Cloudflare names are lowercase [a-z0-9-], cannot start or end with '-', and max out at 63 chars.
   const cleaned = raw
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -93,9 +61,6 @@ function uniqueRunSuffix(): string {
     .replace(/^-+|-+$/g, '');
   return cleaned || 'local';
 }
-// Computed in `beforeAll` (execution time), not here, so `VOID_E2E_RUN_ID` is read after the runner
-// injects it — the same collection-vs-execution timing as the credentials above. A module-load read
-// would always miss the CI run id and fall back to the timestamp.
 let WORKER_NAME = '';
 let D1_NAME = '';
 let KV_TITLE = '';
@@ -111,9 +76,7 @@ let wranglerSnapshotTaken = false;
 let wranglerOriginal: string | undefined;
 let deployOutput = '';
 let deployStatus: number | null = null;
-// Set true ONLY once the pre-deploy ownership gate proves none of the fixed-name resources already
-// existed in the account. Teardown deletes ONLY when this is true, so a collision (gate throws) can
-// never delete a pre-existing resource the test does not own.
+// Teardown deletes only after the ownership gate proved the names were free before the deploy.
 let ownershipVerified = false;
 
 /** The credentialed env every real Cloudflare call (deploy + teardown) shares. */
@@ -123,12 +86,8 @@ function cloudEnv(): NodeJS.ProcessEnv {
     CLOUDFLARE_API_TOKEN: cfToken(),
     CLOUDFLARE_ACCOUNT_ID: cfAccountId(),
   };
-  // This suite only supports the PUBLIC Cloudflare API + a `*.workers.dev` URL: `workerExistence()`
-  // fetches `api.cloudflare.com` directly and the 200 assertion hits `*.workers.dev`. Scrub every
-  // Cloudflare transport-redirect override inherited from the operator's shell so the spawned cf
-  // calls AND the direct fetch resolve the SAME api base. Otherwise a worker deployed to a
-  // staging/FedRAMP/custom base would 404 on the public api, and teardown's existence check would
-  // treat it as absent and skip the delete — leaking the worker on the alternate base.
+  // The direct fetches use the public api.cloudflare.com, so cf must too. Otherwise teardown could
+  // miss a worker deployed to another API base and leak it.
   delete env.CLOUDFLARE_API_BASE_URL;
   delete env.CF_API_BASE_URL;
   delete env.WRANGLER_API_ENVIRONMENT;
@@ -136,9 +95,7 @@ function cloudEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-// Absolute wall-clock deadline (epoch ms) for the CURRENT hook's aggregate cf work; each hook
-// stamps it at its start (see SETUP_/TEARDOWN_CF_BUDGET_MS). Infinity outside a hook so a stray
-// call is still bounded by CF_TIMEOUT_MS alone.
+// Deadline for the current hook's total cf time (see SETUP_/TEARDOWN_CF_BUDGET_MS).
 let cfDeadline = Number.POSITIVE_INFINITY;
 
 /** Best-effort pinned cf invocation for setup and teardown. */
@@ -147,10 +104,7 @@ function cf(args: Array<string> | CloudflareOperation): {
   stdout: string;
   output: string;
 } {
-  // Shrink this call's timeout to the time left in the hook's aggregate budget, so a run of stalled
-  // calls can't collectively overrun the hook (spawn.sync blocks the loop, so vitest can't interrupt).
-  // Once the budget is spent, skip the call as a failed one rather than launching a doomed spawn — the
-  // ownership gate fails closed and teardown records the leak loudly instead of silently hanging.
+  // Once the hook budget is spent, fail the call instead of spawning; every caller fails closed.
   const remaining = cfDeadline - Date.now();
   if (remaining <= 0) {
     return {
@@ -167,9 +121,6 @@ function cf(args: Array<string> | CloudflareOperation): {
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
       env: { ...cloudEnv(), CF_DELEGATION: '1' },
-      // Bound each call so a stalled CF request can't block the event loop and freeze teardown
-      // (see CF_TIMEOUT_MS). On timeout, status is null → `?? 1` makes it a non-zero (failed) call,
-      // which every caller already handles: the ownership gate fails closed, teardown records a failure.
       timeout: Math.min(CF_TIMEOUT_MS, remaining),
     },
   );
@@ -187,9 +138,7 @@ function cf(args: Array<string> | CloudflareOperation): {
       ? JSON.stringify(decoded.data)
       : (decoded.stdout ?? '');
   const stderr = decoded.stderr ?? '';
-  // `output` (stdout+stderr) is for human-facing error text only. JSON parsing must read `stdout`
-  // ALONE: cf can print notices/warnings to stderr on a status-0 list, and any non-JSON
-  // trailing the payload would make JSON.parse throw — breaking the ownership gate / teardown.
+  // Parse JSON from `stdout` only: cf can print notices to stderr on success.
   return {
     status: decoded.status ?? 1,
     stdout,
@@ -198,14 +147,8 @@ function cf(args: Array<string> | CloudflareOperation): {
 }
 
 /**
- * Definitively resolve whether the fixed-name worker already exists, for the ownership gate. The CF
- * API returns an unambiguous 200 (exists) / 404 (absent) for a script, unlike a CLI exit code
- * (a genuinely-absent worker ALSO exits nonzero). A DEFINITIVE 200/404 is returned immediately; any
- * other outcome — a non-200/404 status or a network error — is retried a few times so a single
- * transient CF API blip (a 5xx, a 429, a dropped connection) does not needlessly fail the gate. Only
- * when EVERY attempt is non-definitive does it return `'unknown'`, which the gate treats as a
- * collision and fails closed on — so an ownership lookup that merely errored can never be mistaken
- * for "the name is free", while a lone hiccup no longer blocks an otherwise-clean run.
+ * Ask the CF API whether the worker exists: `cf` exits nonzero for a missing worker too, so its
+ * exit code cannot tell. Returns 'unknown' after three tries without a 200 or 404.
  */
 async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -214,8 +157,6 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
         `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}`,
         {
           headers: { Authorization: `Bearer ${cfToken()}` },
-          // Abort a stalled connection so the retry loop (and teardown that depends on it) stays
-          // bounded — an accepted-but-never-answered request would otherwise hang the whole check.
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         },
       );
@@ -226,7 +167,7 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
         return 'absent';
       }
     } catch {
-      // Network error — transient; fall through to retry.
+      // Retry network errors.
     }
     if (attempt < 2) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -237,10 +178,7 @@ async function workerExistence(): Promise<'exists' | 'absent' | 'unknown'> {
 
 /** Extract the deployed workers.dev URL the CLI prints on a successful deploy. */
 function extractWorkerUrl(output: string): string | undefined {
-  // `[a-z0-9.-]+` spans the MULTI-label host (`<worker>.<account-subdomain>.workers.dev`); the
-  // optional `(?:\/[^\s]*)?` consumes only a real URL path, so a trailing sentence period (were the
-  // URL ever printed in prose) is not captured. A bare `[a-z0-9-]+` before `.workers.dev` would NOT
-  // match the two-label host and would return undefined — do not "simplify" it to that.
+  // The host has two labels before workers.dev: `<worker>.<account-subdomain>`.
   return output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev(?:\/[^\s]*)?/)?.[0];
 }
 
@@ -265,14 +203,8 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Poll the live worker until it serves a 200. A BRAND-NEW `*.workers.dev` hostname (every run uses a
- * unique worker name) needs the route to propagate globally before the first request succeeds, and
- * that window is materially longer from a CI runner's network path than from a dev machine — a run
- * observed a solid 30s of 404s before the route went live. So poll generously (~2 min). Retries on ANY
- * non-200 — not just 5xx — so a propagation-window 404 is not mistaken for the final answer. On
- * exhaustion returns the LAST response so the caller's status assertion reports the real final status;
- * throws only when every attempt was a network error (no response at all). `init` is forwarded to
- * `fetch` for non-GET requests (e.g. a KV `PUT`) and defaults to a GET.
+ * Poll until a 200, retrying any other status: a new workers.dev host can 404 while its route
+ * propagates. Returns the last response, or throws when no attempt got a response.
  */
 async function fetchWithRetry(
   url: string,
@@ -284,18 +216,13 @@ async function fetchWithRetry(
   let lastResponse: Response | undefined;
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
-    // Overall deadline: callers pass the test's `ctx.signal`, which vitest aborts at the test timeout.
-    // Without it, a worker that accepts connections but never answers could keep this loop running
-    // (e.g. 40 × ~22s ≈ 15 min) long after vitest already failed the test, leaking requests and timers
-    // into later tests and teardown. Stop as soon as the enclosing test is done.
+    // Stop once the test times out, so retries do not leak into later tests.
     if (signal?.aborted) {
       break;
     }
     try {
       const res = await fetch(url, {
         ...init,
-        // Per-request deadline (fail a single stalled socket fast) AND the overall test signal, so
-        // neither one request nor the whole loop can outlive its budget.
         signal:
           init.signal ??
           (signal
@@ -321,11 +248,7 @@ async function fetchWithRetry(
   throw lastError ?? new Error(`worker at ${url} never answered`);
 }
 
-/**
- * Whether the deployed worker has its `*.workers.dev` route enabled, for diagnosing a persistent 404.
- * A propagation-window 404 has the route enabled (just not live yet); a route that is DISABLED 404s
- * forever. Best-effort — returns a short human string, never throws.
- */
+/** Report whether the worker's workers.dev route is enabled, to diagnose a persistent 404. */
 async function workersDevEnabled(): Promise<string> {
   try {
     const res = await fetch(
@@ -348,8 +271,6 @@ async function cfWorkerApi(path: string, signal?: AbortSignal): Promise<Response
     `https://api.cloudflare.com/client/v4/accounts/${cfAccountId()}/workers/scripts/${WORKER_NAME}${path}`,
     {
       headers: { Authorization: `Bearer ${cfToken()}` },
-      // Bound the request so one stalled schedules read aborts and the caller's retry loop continues;
-      // when the caller passes the test signal, also abort the moment Vitest times the test out.
       signal: signal
         ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
         : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -359,32 +280,16 @@ async function cfWorkerApi(path: string, signal?: AbortSignal): Promise<Response
 
 describe('void deploy --platform cloudflare (live account)', () => {
   beforeAll(async () => {
-    // Gate at execution time (see the credential note): when the token/account are absent the suite is
-    // a no-op — the tests below skip too. Compute the unique resource names now, from the injected env.
     if (!e2eEnabled()) {
       return;
     }
-    // Cap the SUM of this hook's cf wall-clock (the ownership-gate lists)
-    // so it plus the separate deploy spawn stays under the 600s beforeAll budget. The deploy is NOT a
-    // cf() call, so it keeps its own DEPLOY_TIMEOUT_MS.
     cfDeadline = Date.now() + SETUP_CF_BUDGET_MS;
     computeResourceNames();
 
-    // Ownership gate — refuse to run if any of this run's resources ALREADY exist in the target account.
-    // Automatic provisioning ADOPTS an exact-name D1/KV (it would migrate pre-existing data), and teardown
-    // deletes by these exact names, so a collision with a real resource risks destroying data this
-    // test does not own. Only after proving the names are exclusively ours do we set
-    // `ownershipVerified` — the sole condition under which teardown deletes anything.
-    //
-    // Every check fails CLOSED: a lookup that neither confirms "free" nor confirms "taken" (a
-    // transient API error, a missing read scope, a non-JSON body) is recorded as a collision, so an
-    // ambiguous result can never be mistaken for a free name and let teardown delete a resource this
-    // test did not create.
+    // Ownership gate: provisioning adopts an existing D1/KV with the same name and teardown deletes
+    // by name, so refuse to run on any collision. An ambiguous lookup counts as a collision.
     const collisions: Array<string> = [];
 
-    // Worker — a genuinely-absent worker ALSO makes `cf` exit nonzero, so an exit code cannot
-    // tell "free" from "errored". Resolve it against the CF API instead, which returns an unambiguous
-    // 200/404; anything else is `'unknown'` → treated as a collision (fail closed).
     const worker = await workerExistence();
     if (worker === 'exists') {
       collisions.push(`worker ${WORKER_NAME}`);
@@ -392,9 +297,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
       collisions.push(`worker ${WORKER_NAME} (could not confirm it is free — lookup errored)`);
     }
 
-    // D1 — `d1 info <name>` exits nonzero BOTH when the database is absent and when the call errors,
-    // so it cannot fail closed. List every database instead: a successful JSON list that omits the
-    // name proves it is free; a list failure or non-JSON body is ambiguous → collision.
+    // `d1 info` cannot tell a missing database from an error, so list them all.
     const d1List = cf({ type: 'd1.list' });
     if (d1List.status !== 0) {
       collisions.push(`d1 database ${D1_NAME} (could not list databases to rule out a collision)`);
@@ -436,17 +339,14 @@ describe('void deploy --platform cloudflare (live account)', () => {
           'Remove them (or change WORKER_NAME) and rerun.',
       );
     }
-    // Exclusive ownership proven: any resource with these names after this point was created by THIS
-    // run, so teardown may safely delete them.
     ownershipVerified = true;
 
-    // Snapshot BEFORE any filesystem work so an early failure never deletes a developer-local file.
+    // Snapshot before writing so an early failure never deletes a local file.
     wranglerOriginal = existsSync(APP_WRANGLER) ? readFileSync(APP_WRANGLER, 'utf-8') : undefined;
     wranglerSnapshotTaken = true;
 
-    // Start from an intentionally incomplete config. The deploy itself must create D1 + KV and
-    // persist their real ids/migrations_dir before continuing. `account_id` pins whoami,
-    // provisioning, migration, and deploy to the intended account.
+    // No D1/KV ids, so the deploy must provision them. `account_id` pins every step to the test
+    // account. The deploy migrates this file into void.config.ts.
     const overlay = {
       name: WORKER_NAME,
       compatibility_date: COMPAT_DATE,
@@ -454,8 +354,6 @@ describe('void deploy --platform cloudflare (live account)', () => {
     };
     writeFileSync(APP_WRANGLER, `${JSON.stringify(overlay, null, 2)}\n`);
 
-    // No extra flag: this exercises automatic provision → build → tamper guard → remote migrations
-    // → `cf deploy` against the live account.
     const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--platform', 'cloudflare'], {
       cwd: APP,
       encoding: 'utf8',
@@ -468,13 +366,8 @@ describe('void deploy --platform cloudflare (live account)', () => {
   }, 600_000);
 
   afterAll(async () => {
-    // Tear DOWN the worker + the D1/KV created in `beforeAll`, even if the deploy or an assertion
-    // failed. Each delete is best-effort and independent so one failure never blocks the others.
-    // A delete is only required to succeed for a resource that STILL EXISTS: a resource confirmed
-    // ABSENT (e.g. the deploy failed before the worker was created) is already gone — no leak, no
-    // failure. A nonzero delete of a resource that IS present — or a lookup that cannot confirm the
-    // resource is gone — is COLLECTED and re-thrown after cleanup + config restore, so a genuine
-    // leak (or an ambiguous teardown) fails LOUD instead of reporting green.
+    // Independent best-effort deletes, even after a failed deploy. A failed delete or a lookup that
+    // cannot confirm a resource is gone is collected and thrown after the config restore.
     const failures: Array<string> = [];
     const attemptDelete = (label: string, args: Array<string>): void => {
       const res = cf(args);
@@ -482,21 +375,13 @@ describe('void deploy --platform cloudflare (live account)', () => {
         failures.push(`${label} (exit ${res.status})\n${res.output.trim()}`);
       }
     };
-    // Delete ONLY when the ownership gate proved these names were free before the deploy, so a
-    // collision that aborted beforeAll never deletes a pre-existing resource the test does not own.
     if (e2eEnabled() && ownershipVerified) {
-      // Cap the SUM of teardown's cf wall-clock (the worker probe is async + separately bounded)
-      // so the whole cleanup stays under the 300s afterAll budget even if every list/delete stalls.
       cfDeadline = Date.now() + TEARDOWN_CF_BUDGET_MS;
-      // Worker — exists only if the deploy succeeded. Skip when the CF API confirms it is ABSENT
-      // (avoids a spurious "does not exist" failure on a deploy that never got that far); fail closed
-      // when existence cannot be confirmed ('unknown') by attempting the delete anyway.
+      // Skip only a worker the API confirms absent; 'unknown' still tries the delete.
       const worker = await workerExistence();
       if (worker !== 'absent') {
         attemptDelete(`worker ${WORKER_NAME}`, ['workers', 'delete', WORKER_NAME, '--force']);
       }
-      // D1 — created in beforeAll; delete when the account still lists it by EXACT name. A list
-      // failure cannot confirm the database is gone, so it is recorded (fail closed).
       const d1List = cf({ type: 'd1.list' });
       if (d1List.status !== 0) {
         failures.push(`d1 list (exit ${d1List.status})\n${d1List.output.trim()}`);
@@ -515,9 +400,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
           );
         }
       }
-      // KV delete needs the namespace id — resolve it from the account's namespace list by EXACT
-      // title. Matching by exact title (not `endsWith`) avoids selecting an unrelated namespace that
-      // merely shares the suffix. A namespace absent from the list is already gone (skip).
+      // KV delete needs the namespace id; match the exact title.
       const list = cf({ type: 'kv.namespace.list' });
       if (list.status !== 0) {
         failures.push(`kv namespace list (exit ${list.status})\n${list.output.trim()}`);
@@ -537,8 +420,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
         }
       }
     }
-    // Restore the app's original root config (or remove the overlay if it had none) BEFORE surfacing
-    // any teardown failure, so the working tree is always left clean.
+    // Restore the root config before surfacing teardown failures.
     if (wranglerSnapshotTaken) {
       if (wranglerOriginal === undefined) {
         rmSync(APP_WRANGLER, { force: true });
@@ -554,12 +436,9 @@ describe('void deploy --platform cloudflare (live account)', () => {
   it('deploys the worker to the live account', (ctx) => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
     expect(deployStatus, deployOutput).toBe(0);
-    // A successful `void deploy` prints the worker's workers.dev URL.
     const url = extractWorkerUrl(deployOutput);
     expect(url, deployOutput).toBeDefined();
-    // The host's FIRST label must be THIS run's worker name. If a concurrent local run had clobbered
-    // the shared `wrangler.jsonc` overlay, the deploy would have targeted a different worker — this
-    // catches that cross-run contamination rather than silently validating someone else's worker.
+    // A concurrent local run sharing the playground could have deployed another worker.
     const workerLabel = new URL(url!).hostname.split('.')[0];
     expect(workerLabel, `deployed host for ${url}`).toBe(WORKER_NAME);
   });
@@ -570,8 +449,6 @@ describe('void deploy --platform cloudflare (live account)', () => {
     expect(base, deployOutput).toBeDefined();
     const url = `${base!.replace(/\/$/, '')}/api/hello`;
     const res = await fetchWithRetry(url, {}, 40, 3000, ctx.signal);
-    // On a persistent non-200, report the URL + whether the workers.dev route is even enabled, to
-    // tell a slow-propagation 404 (route enabled) from a route that never went live (disabled).
     const diagnostic =
       res.status === 200 ? '' : ` — GET ${url} → ${res.status}; ${await workersDevEnabled()}`;
     expect(res.status, `worker ${WORKER_NAME}${diagnostic}`).toBe(200);
@@ -582,11 +459,8 @@ describe('void deploy --platform cloudflare (live account)', () => {
     const base = extractWorkerUrl(deployOutput);
     expect(base, deployOutput).toBeDefined();
     const root = base!.replace(/\/$/, '');
-    // A 500 here means the remote D1 migration never applied (no `users` table) or the DB binding did
-    // not resolve — the exact deploy failure the static /api/hello check cannot catch. A unique email
-    // keeps the read-back assertion precise regardless of any pre-existing rows. This (and the KV/
-    // idempotency cases) run AFTER `serves a live 200` has already blocked until the hostname routes
-    // globally, so their shorter retry budgets only need to cover worker cold-start, not propagation.
+    // A 500 means the remote D1 migration or binding failed. The live-200 test already waited for
+    // the route, so shorter retries only cover cold start.
     const email = `e2e-${uniqueRunSuffix()}@example.com`;
     const created = await fetchWithRetry(
       `${root}/api/users`,
@@ -618,8 +492,6 @@ describe('void deploy --platform cloudflare (live account)', () => {
     const base = extractWorkerUrl(deployOutput);
     expect(base, deployOutput).toBeDefined();
     const root = base!.replace(/\/$/, '');
-    // Proves the `KV` binding resolves to the real namespace end to end: write via the deployed worker,
-    // then read it back. (The deploy in beforeAll created the namespace and pinned its id.)
     const key = `probe-${uniqueRunSuffix()}`;
     const value = `kv-${Date.now().toString(36)}`;
     const put = await fetchWithRetry(
@@ -630,9 +502,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
       ctx.signal,
     );
     expect(put.status, `PUT /api/kv/${key}`).toBe(200);
-    // KV is eventually consistent and a first-read MISS can be negatively cached at the edge for up to
-    // ~60s, so poll past that window (40 × 2s = 80s). A healthy binding whose first GET raced the
-    // write's central visibility then converges rather than false-failing CI.
+    // KV can cache a first-read miss for ~60s, so poll past that window.
     const got = await fetchWithRetry(`${root}/api/kv/${key}`, {}, 40, 2000, ctx.signal);
     const gotBody = await got.text();
     expect(got.status, gotBody).toBe(200);
@@ -641,16 +511,10 @@ describe('void deploy --platform cloudflare (live account)', () => {
 
   it('registers the cron trigger on the deployed worker', async (ctx) => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
-    // The deploy emits `triggers.crons` and Cloudflare registers them on the worker. We
-    // assert the schedule is REGISTERED via the CF API — fast + deterministic — instead of waiting for
-    // the hourly job to actually fire. Retry so a single transient CF-API blip (a 429/5xx or a network
-    // throw) or a brief registration-visibility lag on the shared CI runner does not red an
-    // otherwise-healthy deploy; a genuinely-unregistered cron still fails loud after the retries.
+    // Check the registered schedule through the CF API instead of waiting for the hourly run.
     let crons: Array<string | undefined> = [];
     let diag = 'no response';
     for (let attempt = 0; attempt < 8; attempt++) {
-      // Stop as soon as Vitest times the test out: like `fetchWithRetry`, thread `ctx.signal` into the
-      // request AND the inter-attempt delay so 8 × 20s of polling can't outlive the 60s test budget.
       if (ctx.signal.aborted) {
         break;
       }
@@ -678,10 +542,7 @@ describe('void deploy --platform cloudflare (live account)', () => {
 
   it('re-deploys idempotently to the same worker', async (ctx) => {
     ctx.skip(!e2eEnabled(), NO_CREDS_NOTE);
-    // A SECOND `void deploy` against the already-created worker/D1/KV must succeed cleanly: the
-    // existing D1/KV are reused, the remote migration is already applied (a no-op), and the worker
-    // is updated in place. The overlay wrangler.jsonc is still on disk
-    // (afterAll restores it only after every test), so this reuses it. Runs LAST for that reason.
+    // Runs last: redeploys with the config the first deploy wrote, reusing the worker, D1 and KV.
     const res = spawn.sync('node', [CLI_ENTRY, 'deploy', '--platform', 'cloudflare'], {
       cwd: APP,
       encoding: 'utf8',
@@ -691,15 +552,12 @@ describe('void deploy --platform cloudflare (live account)', () => {
     });
     const output = `${res.stdout ?? ''}${res.stderr ?? ''}${res.error ? `\n${res.error}` : ''}`;
     expect(res.status, output).toBe(0);
-    // Prove THIS deploy re-targeted the same worker: read the URL from ITS OWN output (no fallback to
-    // the first deploy, which would mask a second deploy that uploaded nothing) and require the host's
-    // worker label to equal WORKER_NAME.
+    // Read the URL from this deploy's own output, not the first deploy's.
     const base = extractWorkerUrl(output);
     expect(base, output).toBeDefined();
     expect(new URL(base!).hostname.split('.')[0], output).toBe(WORKER_NAME);
     const root = base!.replace(/\/$/, '');
-    // The re-deployed worker still serves AND its bindings survived the update: /api/hello (static) is
-    // 200, and /api/users (a D1-backed route) is 200 — a dropped or broken DB binding would 500.
+    // /api/users reads D1, so a dropped binding would return 500.
     const served = await fetchWithRetry(`${root}/api/hello`, {}, 15, 2000, ctx.signal);
     expect(served.status).toBe(200);
     const dbRoute = await fetchWithRetry(`${root}/api/users`, {}, 15, 2000, ctx.signal);

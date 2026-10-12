@@ -69,40 +69,35 @@ describe('action result handling', () => {
     }
   });
 
-  it('returns call-site action errors instead of throwing them', async () => {
-    const error = new VoidActionError({
-      body: 'Missing',
-      status: 404,
-      statusText: 'Not Found',
-      url: '/users/1',
-    });
+  it.each([
+    [
+      'a VoidActionError',
+      new VoidActionError({
+        body: 'Missing',
+        status: 404,
+        statusText: 'Not Found',
+        url: '/users/1',
+      }),
+    ],
+    [
+      'a structurally equivalent error',
+      {
+        body: 'Conflict',
+        message: 'Action failed with 409 Conflict',
+        name: 'VoidActionError',
+        status: 409,
+        statusText: 'Conflict',
+        url: '/users',
+      } as VoidActionError,
+    ],
+  ])('returns call-site action errors instead of throwing them (%s)', async (_label, error) => {
     const router = routerWithVisit(
       vi.fn(async () => {
         throw error;
       }),
     );
 
-    const result = await submitAction(router, '/users/1', { method: 'DELETE' });
-
-    expect(result).toEqual({ ok: false, error });
-  });
-
-  it('returns structurally equivalent call-site action errors', async () => {
-    const error = {
-      body: 'Conflict',
-      message: 'Action failed with 409 Conflict',
-      name: 'VoidActionError',
-      status: 409,
-      statusText: 'Conflict',
-      url: '/users',
-    } as VoidActionError;
-    const router = routerWithVisit(
-      vi.fn(async () => {
-        throw error;
-      }),
-    );
-
-    const result = await submitAction(router, '/users', { method: 'POST' });
+    const result = await submitAction(router, error.url, { method: 'POST' });
 
     expect(result).toEqual({ ok: false, error });
   });
@@ -116,22 +111,6 @@ describe('action result handling', () => {
       statusText: 'Internal Server Error',
       url: '/users',
     } as VoidActionError;
-    const router = routerWithVisit(
-      vi.fn(async () => {
-        throw error;
-      }),
-    );
-
-    await expect(submitAction(router, '/users', { method: 'POST' })).rejects.toBe(error);
-  });
-
-  it('throws boundary action errors', async () => {
-    const error = new VoidActionError({
-      body: 'Boom',
-      status: 500,
-      statusText: 'Internal Server Error',
-      url: '/users',
-    });
     const router = routerWithVisit(
       vi.fn(async () => {
         throw error;

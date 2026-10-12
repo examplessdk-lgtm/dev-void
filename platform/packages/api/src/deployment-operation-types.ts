@@ -4,6 +4,7 @@ export type DeploymentInput = {
   body: Record<string, unknown>;
   modules: Array<{ name: string; key: string; digest: string; type: string }>;
   credentialId?: string;
+  oauthApproval?: string;
 };
 export type DeploymentProgress = { seq: number; event: DeployEvent };
 export type DeploymentOperation = {

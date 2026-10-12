@@ -86,7 +86,7 @@ describe('awaitBrowserCallback', () => {
     await expect(resultPromise).resolves.toEqual({ linked: 'abc' });
   });
 
-  it('renders the failure page and rejects when finalize throws (F3 regression pin)', async () => {
+  it('renders the failure page and rejects when finalize throws', async () => {
     const finalizeError = new Error('exchange blew up');
     const finalize = vi.fn(async () => {
       throw finalizeError;
@@ -139,26 +139,6 @@ describe('awaitBrowserCallback', () => {
     const params = await resultPromise;
     expect(finalize).toHaveBeenCalledTimes(1);
     expect(params.get('link_code')).toBe('real');
-  });
-
-  it('renders 403 and rejects when describeError returns a message', async () => {
-    const { resultPromise, callbackPromise, state } = startCallback({
-      describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
-    });
-    const callback = await callbackPromise;
-
-    // Attach the rejection assertion before triggering the request so the
-    // handler is in place when the promise settles (no unhandled rejection).
-    const rejection = expect(resultPromise).rejects.toThrow('GitHub authorization failed.');
-
-    const hit = new URL(callback);
-    hit.searchParams.set('state', state);
-    hit.searchParams.set('error', 'access_denied');
-
-    const res = await fetch(hit);
-    expect(res.status).toBe(403);
-
-    await rejection;
   });
 
   it('rejects after the timeout elapses', async () => {

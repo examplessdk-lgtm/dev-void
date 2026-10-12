@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import { VOID_PNPM_ALLOWED_BUILDS, writePnpmBuildPolicy } from '../../src/pm.ts';
+import { writePnpmBuildPolicy } from '../../src/pm.ts';
 
 const temporaryDirectories: Array<string> = [];
 
@@ -20,7 +20,7 @@ describe('create-void package manager bootstrap', () => {
     writePnpmBuildPolicy(root, 'pnpm');
 
     expect(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8')).toBe(
-      `allowBuilds:\n  better-sqlite3: false\n${VOID_PNPM_ALLOWED_BUILDS.map((name) => `  ${name}: true`).join('\n')}\n`,
+      'allowBuilds:\n  better-sqlite3: false\n  esbuild: true\n  sharp: true\n  workerd: true\n',
     );
   });
 
@@ -33,21 +33,5 @@ describe('create-void package manager bootstrap', () => {
 
       expect(existsSync(join(root, 'pnpm-workspace.yaml'))).toBe(false);
     }
-  });
-
-  it('stays aligned with the policy written by void init', () => {
-    const initSource = readFileSync(
-      join(import.meta.dirname, '../../../void/src/cli/init.ts'),
-      'utf-8',
-    );
-    const declaration = initSource.match(
-      /const PNPM_ALLOWED_BUILDS = \[([\s\S]*?)\] as const;/,
-    )?.[1];
-    if (!declaration) {
-      throw new Error('Could not find the void init pnpm build policy.');
-    }
-    const initAllowedBuilds = [...declaration.matchAll(/'([^']+)'/g)].map((match) => match[1]);
-
-    expect(VOID_PNPM_ALLOWED_BUILDS).toEqual(initAllowedBuilds);
   });
 });

@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
 import { log } from '@voidzero-dev/vite-plus-prompts';
-import { join } from 'pathslash';
 import { accountSubcommands, parseAccountArgs } from './account-args.ts';
-import { getPackageDir } from './agents.ts';
+import { getOwnVersion } from './agents.ts';
 import { parseDeployArgs } from './args.ts';
 import { authSubcommands, parseAuthArgs } from './auth-args.ts';
 import { buildSubcommands, parseBuildArgs } from './build-args.ts';
@@ -196,17 +194,7 @@ if (helpPath) {
   }
 
   import('./deploy.ts').then(({ runDeploy }) => {
-    runDeploy(root, {
-      projectSlug: deployArgs.projectSlug,
-      dir: deployArgs.dir,
-      spa: deployArgs.spa,
-      skipBuild: deployArgs.skipBuild,
-      debug: deployArgs.debug,
-      platform: deployArgs.platform,
-      provision: deployArgs.provision,
-      requireEmail: deployArgs.requireEmail,
-      atomic: deployArgs.atomic,
-    }).catch((err) => {
+    runDeploy(root, deployArgs).catch((err) => {
       log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
@@ -238,16 +226,15 @@ if (helpPath) {
   });
 } else if (command === 'prepare') {
   const root = process.cwd();
-  let prepareArgs;
   try {
-    prepareArgs = parsePrepareArgs(args.slice(1));
+    parsePrepareArgs(args.slice(1));
   } catch (err) {
     log.error(formatCloudflareUserMessage(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
 
   import('./prepare.ts').then(({ runPrepareCommand }) => {
-    runPrepareCommand(root, prepareArgs).catch((err) => {
+    runPrepareCommand(root).catch((err) => {
       log.error(formatCloudflareUserMessage(err.message ?? String(err)));
       process.exit(1);
     });
@@ -279,9 +266,8 @@ if (helpPath) {
     });
   });
 } else if (command === '-v' || command === '--version') {
-  const version = JSON.parse(readFileSync(join(getPackageDir(), 'package.json'), 'utf-8')).version;
-  console.log(version);
-} else if (command && command !== 'help' && command !== '--help' && command !== '-h') {
+  console.log(getOwnVersion());
+} else if (command) {
   log.error(`cli: Unknown command '${command}'. Run \`void --help\` for usage.`);
   process.exit(1);
 } else if (!command && process.stdin.isTTY) {
@@ -413,7 +399,7 @@ if (helpPath) {
       }
       case 'prepare': {
         const { runPrepareCommand } = await import('./prepare.ts');
-        await runPrepareCommand(root, parsePrepareArgs([]));
+        await runPrepareCommand(root);
         return;
       }
       case 'help':

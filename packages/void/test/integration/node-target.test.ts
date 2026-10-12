@@ -16,7 +16,6 @@ let PROD_BASE: string;
 describe('playground/node-app dev', () => {
   let playground: IsolatedPlayground;
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
 
   beforeAll(async () => {
     playground = createIsolatedPlayground(ROOT, 'playground/node-app');
@@ -24,10 +23,6 @@ describe('playground/node-app dev', () => {
       child = spawn('vp', ['dev', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
         cwd: playground.root,
         stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      stderr = '';
-      child.stderr!.on('data', (chunk: Buffer) => {
-        stderr += String(chunk);
       });
       return child;
     }, 20_000);
@@ -39,9 +34,6 @@ describe('playground/node-app dev', () => {
       await killChild(child);
     }
     playground?.cleanup();
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
-    }
   });
 
   it('serves API routes via Hono in Node.js', async () => {

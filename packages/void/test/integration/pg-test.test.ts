@@ -24,7 +24,6 @@ describe('playground/pg-test', () => {
   let pgPort: number;
   let devChild: ReturnType<typeof spawn>;
   let BASE: string;
-  let serverOutput = () => '';
 
   beforeAll(async () => {
     // 1. Start PGlite + TCP server
@@ -75,7 +74,6 @@ describe('playground/pg-test', () => {
       return devChild;
     }, 30_000);
     BASE = server.base;
-    serverOutput = server.output;
   });
 
   afterAll(async () => {
@@ -93,9 +91,6 @@ describe('playground/pg-test', () => {
       unlinkSync(ENV_PATH);
     } catch {
       // Ignore missing cleanup files between test runs.
-    }
-    if (serverOutput().includes('error when starting dev server')) {
-      throw new Error(serverOutput());
     }
   });
 

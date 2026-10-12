@@ -142,18 +142,12 @@ describe('PrefetchCache', () => {
 
   it('expired entries are not returned by get', () => {
     const cache = new PrefetchCache();
-    // Use a past timestamp by directly manipulating staleAt/expiresAt via a zero-duration entry
-    // then advance conceptually. We instead set a very short TTL and use a manipulated entry.
-    // Since we can't mock Date.now() without vi.useFakeTimers here, we use a workaround:
-    // set the entry then manually expire it by setting expiresAt in the past.
     cache.set('http://example.com/api/data', 'GET', Promise.resolve({}), {
       stale: 10000,
       expires: 10000,
     });
     const entry = cache.get('http://example.com/api/data')!;
-    // Manually set expiresAt to the past
     (entry as { expiresAt: number }).expiresAt = Date.now() - 1;
-    // Non-singleUse entry past expiresAt should be removed on next get
     expect(cache.get('http://example.com/api/data')).toBeNull();
   });
 

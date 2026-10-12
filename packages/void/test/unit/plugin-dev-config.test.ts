@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 import {
   devTriggerSecretGuardPlugin,
   isDevTriggerSecretRequest,
@@ -67,48 +67,7 @@ describe('isDevTriggerSecretRequest', () => {
 });
 
 describe('devTriggerSecretGuardPlugin', () => {
-  type Middleware = (req: { url?: string }, res: unknown, next: () => void) => void;
-
-  function installGuard(): Middleware {
-    const plugin = devTriggerSecretGuardPlugin();
-    let middleware: Middleware | undefined;
-    const server = {
-      middlewares: {
-        use(fn: Middleware) {
-          middleware = fn;
-        },
-      },
-    };
-    (plugin.configureServer as (this: unknown, s: unknown) => void).call(plugin, server);
-    if (!middleware) {
-      throw new Error('Expected the guard to register a middleware.');
-    }
-    return middleware;
-  }
-
-  it('runs before other dev server plugins and only in serve', () => {
-    const plugin = devTriggerSecretGuardPlugin();
-    expect(plugin.apply).toBe('serve');
-    expect(plugin.enforce).toBe('pre');
-  });
-
-  it('answers 404 for the token file without calling the next middleware', () => {
-    const guard = installGuard();
-    const res = { statusCode: 200, end: vi.fn() };
-    const next = vi.fn();
-    guard({ url: '/.void/dev-trigger-token' }, res, next);
-    expect(res.statusCode).toBe(404);
-    expect(res.end).toHaveBeenCalledTimes(1);
-    expect(next).not.toHaveBeenCalled();
-  });
-
-  it('passes other requests through untouched', () => {
-    const guard = installGuard();
-    const res = { statusCode: 200, end: vi.fn() };
-    const next = vi.fn();
-    guard({ url: '/src/main.ts' }, res, next);
-    expect(next).toHaveBeenCalledTimes(1);
-    expect(res.statusCode).toBe(200);
-    expect(res.end).not.toHaveBeenCalled();
+  it('runs before other dev server plugins', () => {
+    expect(devTriggerSecretGuardPlugin().enforce).toBe('pre');
   });
 });

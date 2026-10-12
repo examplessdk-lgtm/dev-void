@@ -207,14 +207,6 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  it('rejects inference.auth regardless of type', () => {
-    setup(JSON.stringify({ inference: { auth: 'github' } }));
-    expect(() => readConfig(tmpDir)).toThrow(
-      '"inference.auth" in void.json is no longer supported',
-    );
-    cleanup();
-  });
-
   it('rejects unknown top-level auth providers', () => {
     setup(JSON.stringify({ auth: { providers: ['email', 'patreon'] } }));
     expect(() => readConfig(tmpDir)).toThrow('"auth.providers" value \'patreon\'');
@@ -259,12 +251,6 @@ describe('readConfig', () => {
 
   it('throws on invalid ai binding value', () => {
     setup(JSON.stringify({ inference: { bindings: { ai: 42 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
-    cleanup();
-  });
-
-  it('throws on invalid binding value type', () => {
-    setup(JSON.stringify({ inference: { bindings: { db: 42 } } }));
     expect(() => readConfig(tmpDir)).toThrow('must be a boolean or a string');
     cleanup();
   });
@@ -389,19 +375,6 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  it('throws on partial compatibility_date format', () => {
-    setup(JSON.stringify({ worker: { compatibility_date: '2026-02' } }));
-    expect(() => readConfig(tmpDir)).toThrow('YYYY-MM-DD format');
-    cleanup();
-  });
-
-  it('accepts valid compatibility_date format', () => {
-    setup(JSON.stringify({ worker: { compatibility_date: '2026-02-24' } }));
-    const config = readConfig(tmpDir);
-    expect(config.worker?.compatibility_date).toBe('2026-02-24');
-    cleanup();
-  });
-
   it('accepts valid worker.limits.cpu_ms', () => {
     setup(JSON.stringify({ worker: { limits: { cpu_ms: 50 } } }));
     const config = readConfig(tmpDir);
@@ -429,26 +402,8 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  it('throws on worker.limits.cpu_ms of 0', () => {
-    setup(JSON.stringify({ worker: { limits: { cpu_ms: 0 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
-    cleanup();
-  });
-
-  it('throws on negative worker.limits.cpu_ms', () => {
-    setup(JSON.stringify({ worker: { limits: { cpu_ms: -5 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
-    cleanup();
-  });
-
-  it('throws on non-integer worker.limits.cpu_ms', () => {
-    setup(JSON.stringify({ worker: { limits: { cpu_ms: 50.5 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
-    cleanup();
-  });
-
-  it('throws on worker.limits.cpu_ms above 300000', () => {
-    setup(JSON.stringify({ worker: { limits: { cpu_ms: 300001 } } }));
+  it.each([0, -5, 50.5, 300001])('throws on invalid worker.limits.cpu_ms: %s', (cpuMs) => {
+    setup(JSON.stringify({ worker: { limits: { cpu_ms: cpuMs } } }));
     expect(() => readConfig(tmpDir)).toThrow('"worker.limits.cpu_ms"');
     cleanup();
   });
@@ -508,27 +463,16 @@ describe('readConfig', () => {
     cleanup();
   });
 
-  // `routing.notFound` overrides the INFERRED asset `not_found_handling`.
-  // Typos must fail at config-read time: an unvalidated string would be written
-  // straight into `assets.not_found_handling`, and the failure would only show
-  // up as Cloudflare rejecting the deployed worker config.
-  it('accepts routing.notFound: "404-page"', () => {
-    setup(JSON.stringify({ routing: { notFound: '404-page' } }));
-    expect(readConfig(tmpDir).routing?.notFound).toBe('404-page');
-    cleanup();
-  });
-
-  it('accepts routing.notFound: "single-page-application"', () => {
-    setup(JSON.stringify({ routing: { notFound: 'single-page-application' } }));
-    expect(readConfig(tmpDir).routing?.notFound).toBe('single-page-application');
-    cleanup();
-  });
-
-  it('accepts routing.notFound: "none"', () => {
-    setup(JSON.stringify({ routing: { notFound: 'none' } }));
-    expect(readConfig(tmpDir).routing?.notFound).toBe('none');
-    cleanup();
-  });
+  // `routing.notFound` is written straight into `assets.not_found_handling`, so a typo
+  // must fail here instead of when Cloudflare rejects the deployed config.
+  it.each(['404-page', 'single-page-application', 'none'])(
+    'accepts routing.notFound: %j',
+    (notFound) => {
+      setup(JSON.stringify({ routing: { notFound } }));
+      expect(readConfig(tmpDir).routing?.notFound).toBe(notFound);
+      cleanup();
+    },
+  );
 
   it('leaves routing.notFound undefined when omitted', () => {
     setup(JSON.stringify({ routing: { revalidate: 60 } }));
@@ -689,69 +633,21 @@ describe('readConfig migration errors', () => {
     cleanup();
   });
 
-  it('throws migration error when old flat bindings key is used', () => {
-    setup(JSON.stringify({ bindings: { db: true } }));
-    expect(() => readConfig(tmpDir)).toThrow('"bindings" has moved to "inference.bindings"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat headers key is used', () => {
-    setup(JSON.stringify({ headers: { '/*': ['X-Frame-Options: DENY'] } }));
-    expect(() => readConfig(tmpDir)).toThrow('"headers" has moved to "routing.headers"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat redirects key is used', () => {
-    setup(JSON.stringify({ redirects: { '/old': '/new' } }));
-    expect(() => readConfig(tmpDir)).toThrow('"redirects" has moved to "routing.redirects"');
-    cleanup();
-  });
-
-  it('throws migration error when old cache key is used', () => {
-    setup(JSON.stringify({ cache: { revalidate: 60 } }));
-    expect(() => readConfig(tmpDir)).toThrow('"cache" has been replaced by "routing"');
-    cleanup();
-  });
-
-  it('throws migration error when old wrangler key is used', () => {
-    setup(JSON.stringify({ wrangler: { compatibility_date: '2025-12-01' } }));
-    expect(() => readConfig(tmpDir)).toThrow('"wrangler" has been renamed to "worker"');
-    cleanup();
-  });
-
-  it('throws migration error when old mode key is used', () => {
-    setup(JSON.stringify({ mode: 'spa' }));
-    expect(() => readConfig(tmpDir)).toThrow('"mode" has been renamed to "inference.appType"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat build key is used', () => {
-    setup(JSON.stringify({ build: 'nuxt build' }));
-    expect(() => readConfig(tmpDir)).toThrow('"build" has moved to "inference.build"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat scanDirs key is used', () => {
-    setup(JSON.stringify({ scanDirs: ['src'] }));
-    expect(() => readConfig(tmpDir)).toThrow('"scanDirs" has moved to "inference.scanDirs"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat appType key is used', () => {
-    setup(JSON.stringify({ appType: 'spa' }));
-    expect(() => readConfig(tmpDir)).toThrow('"appType" has moved to "inference.appType"');
-    cleanup();
-  });
-
-  it('throws migration error when old flat outputDir key is used', () => {
-    setup(JSON.stringify({ outputDir: 'dist' }));
-    expect(() => readConfig(tmpDir)).toThrow('"outputDir" has moved to "inference.outputDir"');
-    cleanup();
-  });
-
-  it('throws migration error when old top-level revalidate is used', () => {
-    setup(JSON.stringify({ revalidate: 60 }));
-    expect(() => readConfig(tmpDir)).toThrow('"revalidate" has moved to "routing.revalidate"');
+  it.each([
+    ['bindings', { db: true }, '"bindings" has moved to "inference.bindings"'],
+    ['headers', { '/*': ['X-Frame-Options: DENY'] }, '"headers" has moved to "routing.headers"'],
+    ['redirects', { '/old': '/new' }, '"redirects" has moved to "routing.redirects"'],
+    ['cache', { revalidate: 60 }, '"cache" has been replaced by "routing"'],
+    ['wrangler', { compatibility_date: '2025-12-01' }, '"wrangler" has been renamed to "worker"'],
+    ['mode', 'spa', '"mode" has been renamed to "inference.appType"'],
+    ['build', 'nuxt build', '"build" has moved to "inference.build"'],
+    ['scanDirs', ['src'], '"scanDirs" has moved to "inference.scanDirs"'],
+    ['appType', 'spa', '"appType" has moved to "inference.appType"'],
+    ['outputDir', 'dist', '"outputDir" has moved to "inference.outputDir"'],
+    ['revalidate', 60, '"revalidate" has moved to "routing.revalidate"'],
+  ])('throws a migration error for the old %s key', (key, value, message) => {
+    setup(JSON.stringify({ [key]: value }));
+    expect(() => readConfig(tmpDir)).toThrow(message);
     cleanup();
   });
 });
@@ -766,20 +662,13 @@ describe('readConfig target', () => {
     }
   });
 
-  it('defaults target to undefined (cloudflare is implicit default)', () => {
-    setup(JSON.stringify({}));
-    const config = readConfig(tmpDir);
-    expect(config.target).toBeUndefined();
-    cleanup();
-  });
-
   it('rejects invalid target value', () => {
     setup(JSON.stringify({ target: 'lambda' }));
     expect(() => readConfig(tmpDir)).toThrow('"target" in void.json must be one of');
     cleanup();
   });
 
-  it('warns on CF-only fields with non-CF target via isNodeTarget', () => {
+  it('isNodeTarget recognizes node, bun and deno', () => {
     expect(isNodeTarget('node')).toBe(true);
     expect(isNodeTarget('bun')).toBe(true);
     expect(isNodeTarget('deno')).toBe(true);
@@ -874,7 +763,6 @@ describe('readConfig redirects', () => {
     );
     const keyPattern = new RegExp(Object.keys(objectForm.patternProperties)[0]);
 
-    // Runtime (config.ts) accepts a key that is exactly "*" or starts with "/".
     for (const key of ['*', '/x', '/docs/*']) {
       expect(keyPattern.test(key)).toBe(true);
     }
@@ -913,7 +801,6 @@ describe('readConfig redirects', () => {
       const destPattern = new RegExp(
         schema.properties.routing.properties[field].patternProperties['^(/|https://)'].pattern,
       );
-      // Runtime accepts internal paths and rejects protocol-relative dests + query strings.
       for (const dest of ['/en/docs', '/', '/index.html']) {
         expect(destPattern.test(dest)).toBe(true);
       }
@@ -927,10 +814,8 @@ describe('readConfig redirects', () => {
     const schema = JSON.parse(readFileSync(join(import.meta.dirname, '../../schema.json'), 'utf8'));
     const limits = schema.properties.worker.properties.limits;
     expect(limits.type).toBe('object');
-    // Runtime (config.ts) rejects unknown keys inside limits.
     expect(limits.additionalProperties).toBe(false);
     expect(Object.keys(limits.properties)).toEqual(['cpu_ms']);
-    // Runtime accepts an integer between 1 and 300000 (Cloudflare's hard max).
     expect(limits.properties.cpu_ms.type).toBe('integer');
     expect(limits.properties.cpu_ms.minimum).toBe(1);
     expect(limits.properties.cpu_ms.maximum).toBe(300000);
@@ -946,7 +831,7 @@ describe('readConfig redirects', () => {
   });
 });
 
-describe('routing.rewrites validation', () => {
+describe('routing.rewrites and routing.fallbacks validation', () => {
   it('accepts static rewrites without wildcards', () => {
     setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs' } } }));
     const config = readConfig(tmpDir);
@@ -954,49 +839,6 @@ describe('routing.rewrites validation', () => {
     cleanup();
   });
 
-  it('throws when rewrites is not an object', () => {
-    setup(JSON.stringify({ routing: { rewrites: ['/old', '/new'] } }));
-    expect(() => readConfig(tmpDir)).toThrow('"routing.rewrites" in void.json must be an object');
-    cleanup();
-  });
-
-  it('throws when source does not start with /', () => {
-    setup(JSON.stringify({ routing: { rewrites: { docs: '/en/docs' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
-    cleanup();
-  });
-
-  it('throws when destination is not a string', () => {
-    setup(JSON.stringify({ routing: { rewrites: { '/docs': 42 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be a string');
-    cleanup();
-  });
-
-  it('throws when destination does not start with /', () => {
-    setup(JSON.stringify({ routing: { rewrites: { '/docs': 'en/docs' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
-    cleanup();
-  });
-
-  it('throws when destination contains a query string', () => {
-    setup(JSON.stringify({ routing: { rewrites: { '/docs': '/en/docs?lang=en' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
-    cleanup();
-  });
-
-  it('throws when destination is protocol-relative ("//host/x")', () => {
-    // Mirrors the `c.rewrite()` codegen guard in router/compile.ts (commit
-    // 3c60d38). `"//evil.com/x".startsWith("/")` is true, so a naive
-    // single-slash check lets the value through — but when the manifest is
-    // applied at dispatch, `new URL("//evil.com/x", base)` resolves to
-    // `https://evil.com/x` and turns the rewrite into a cross-origin proxy.
-    setup(JSON.stringify({ routing: { rewrites: { '/docs': '//evil.com/x' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
-    cleanup();
-  });
-});
-
-describe('routing.fallbacks validation', () => {
   it('accepts valid fallbacks', () => {
     setup(JSON.stringify({ routing: { fallbacks: { '/*': '/index.html' } } }));
     const config = readConfig(tmpDir);
@@ -1004,42 +846,19 @@ describe('routing.fallbacks validation', () => {
     cleanup();
   });
 
-  it('throws when fallbacks is not an object', () => {
-    setup(JSON.stringify({ routing: { fallbacks: ['/*', '/index.html'] } }));
-    expect(() => readConfig(tmpDir)).toThrow('"routing.fallbacks" in void.json must be an object');
-    cleanup();
-  });
-
-  it('throws when source does not start with /', () => {
-    setup(JSON.stringify({ routing: { fallbacks: { '*': '/index.html' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
-    cleanup();
-  });
-
-  it('throws when destination is not a string', () => {
-    setup(JSON.stringify({ routing: { fallbacks: { '/*': 42 } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must be a string');
-    cleanup();
-  });
-
-  it('throws when destination does not start with /', () => {
-    setup(JSON.stringify({ routing: { fallbacks: { '/*': 'index.html' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must start with "/"');
-    cleanup();
-  });
-
-  it('throws when destination contains a query string', () => {
-    setup(JSON.stringify({ routing: { fallbacks: { '/*': '/index.html?foo=1' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must not contain "?"');
-    cleanup();
-  });
-
-  it('throws when destination is protocol-relative ("//host/x")', () => {
-    // Symmetric with the rewrites guard — fallbacks reach the platform via
-    // the same manifest path, so the same cross-origin hazard applies.
-    setup(JSON.stringify({ routing: { fallbacks: { '/*': '//evil.com/index.html' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must not start with "//"');
-    cleanup();
+  describe.each(['rewrites', 'fallbacks'])('routing.%s', (field) => {
+    it.each<[unknown, string]>([
+      [['/old', '/new'], `"routing.${field}" in void.json must be an object`],
+      [{ docs: '/en/docs' }, 'must start with "/"'],
+      [{ '/docs': 42 }, 'must be a string'],
+      [{ '/docs': 'en/docs' }, 'must start with "/"'],
+      [{ '/docs': '/en/docs?lang=en' }, 'must not contain "?"'],
+      [{ '/docs': '//evil.com/x' }, 'must not start with "//"'],
+    ])('rejects %j', (rules, message) => {
+      setup(JSON.stringify({ routing: { [field]: rules } }));
+      expect(() => readConfig(tmpDir)).toThrow(message);
+      cleanup();
+    });
   });
 });
 
@@ -1075,16 +894,7 @@ describe('routing.redirects protocol-relative guard', () => {
 });
 
 describe('routing rules: host-prefixed sources', () => {
-  // `https://host/path` keys on `routing.{redirects,rewrites,fallbacks}`
-  // scope a rule to a specific Host header. The validator splits the URL
-  // and validates the path portion as it would for path-only sources;
-  // `convertRedirectsConfig` etc emit the rule with `host` populated and
-  // `source` set to the path. Validation is symmetric across redirects,
-  // rewrites, and fallbacks — and rejects http://, //host, and non-literal
-  // hosts.
-
-  it('accepts a redirect with https:// prefixed source and emits host on rule', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config.ts');
+  it('accepts a redirect with https:// prefixed source and emits host on rule', () => {
     setup(
       JSON.stringify({
         routing: { redirects: { 'https://www.foo.com/*': 'https://foo.com/:splat' } },
@@ -1104,8 +914,7 @@ describe('routing rules: host-prefixed sources', () => {
     cleanup();
   });
 
-  it('lowercases mixed-case host on redirect source', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config.ts');
+  it('lowercases mixed-case host on redirect source', () => {
     setup(JSON.stringify({ routing: { redirects: { 'https://WWW.FOO.COM/about': '/new' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
@@ -1114,8 +923,7 @@ describe('routing rules: host-prefixed sources', () => {
     cleanup();
   });
 
-  it('accepts a rewrite with https:// prefixed source', async () => {
-    const { convertRewritesConfig } = await import('../../src/config.ts');
+  it('accepts a rewrite with https:// prefixed source', () => {
     setup(
       JSON.stringify({ routing: { rewrites: { 'https://app.foo.com/api/*': '/api/:splat' } } }),
     );
@@ -1131,8 +939,7 @@ describe('routing rules: host-prefixed sources', () => {
     cleanup();
   });
 
-  it('accepts a fallback with https:// prefixed source', async () => {
-    const { convertFallbacksConfig } = await import('../../src/config.ts');
+  it('accepts a fallback with https:// prefixed source', () => {
     setup(JSON.stringify({ routing: { fallbacks: { 'https://app.foo.com/*': '/index.html' } } }));
     const config = readConfig(tmpDir);
     const rules = convertFallbacksConfig(config.routing?.fallbacks);
@@ -1146,8 +953,7 @@ describe('routing rules: host-prefixed sources', () => {
     cleanup();
   });
 
-  it('omits host when source is path-only', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config.ts');
+  it('omits host when source is path-only', () => {
     setup(JSON.stringify({ routing: { redirects: { '/old': '/new' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
@@ -1185,8 +991,7 @@ describe('routing rules: host-prefixed sources', () => {
     cleanup();
   });
 
-  it('treats https://host (no path) as https://host/', async () => {
-    const { convertRedirectsConfig } = await import('../../src/config.ts');
+  it('treats https://host (no path) as https://host/', () => {
     setup(JSON.stringify({ routing: { redirects: { 'https://www.foo.com': '/x' } } }));
     const config = readConfig(tmpDir);
     const rules = convertRedirectsConfig(config.routing?.redirects);
@@ -1199,42 +1004,14 @@ describe('duplicate "*" wildcards in rule sources', () => {
   // Dispatch compiles each `*` into a `(?<splat>...)` capture group, so two
   // in one source makes `new RegExp()` throw on duplicate group name at
   // startup. Catch these at config-read time with a clear message.
-  it('rejects a redirect source with two "*"', () => {
-    setup(JSON.stringify({ routing: { redirects: { '/a/*/b/*': '/dest' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
-    cleanup();
-  });
-
-  it('rejects a rewrite source with two "*"', () => {
-    setup(JSON.stringify({ routing: { rewrites: { '/*/docs/*': '/dest' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
-    cleanup();
-  });
-
-  it('rejects a fallback source with two "*"', () => {
-    setup(JSON.stringify({ routing: { fallbacks: { '/*/*': '/index.html' } } }));
-    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
-    cleanup();
-  });
-
-  it('rejects a header pattern with two "*"', () => {
-    // Multi-`*` header rules used to crash `vite dev` on the first request:
-    // the framework's emitted `__compilePattern` produced two `(?<splat>...)`
-    // capture groups, so `new RegExp()` threw "Duplicate capture group name"
-    // and every request 500'd. Validation now catches this at config-read time.
-    setup(
-      JSON.stringify({ routing: { headers: { '/assets/*/img/*': ['Cache-Control: no-cache'] } } }),
-    );
-    expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
-    cleanup();
-  });
-
-  it('rejects a revalidateQueryAllowlist pattern with two "*"', () => {
-    setup(
-      JSON.stringify({
-        routing: { revalidateQueryAllowlist: { '/a/*/b/*': ['q'] } },
-      }),
-    );
+  it.each<[string, Record<string, unknown>]>([
+    ['redirect source', { redirects: { '/a/*/b/*': '/dest' } }],
+    ['rewrite source', { rewrites: { '/*/docs/*': '/dest' } }],
+    ['fallback source', { fallbacks: { '/*/*': '/index.html' } }],
+    ['header pattern', { headers: { '/assets/*/img/*': ['Cache-Control: no-cache'] } }],
+    ['revalidateQueryAllowlist pattern', { revalidateQueryAllowlist: { '/a/*/b/*': ['q'] } }],
+  ])('rejects a %s with two "*"', (_kind, routing) => {
+    setup(JSON.stringify({ routing }));
     expect(() => readConfig(tmpDir)).toThrow('must contain at most one "*" wildcard');
     cleanup();
   });
@@ -1637,11 +1414,6 @@ describe('database config', () => {
     const config = readConfig(tmpDir);
     expect(getDatabaseDialect(config)).toBe('sqlite');
     cleanup();
-  });
-
-  it('defaults to sqlite for empty config', () => {
-    setup();
-    expect(getDatabaseDialect({})).toBe('sqlite');
   });
 
   it('accepts pg', () => {

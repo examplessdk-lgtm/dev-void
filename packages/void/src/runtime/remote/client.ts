@@ -1,14 +1,5 @@
 import { cfAccessHeaders } from '../../shared/cf-access.ts';
 
-/** Base64-encode binary values for JSON transport to the proxy. */
-export function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
-
 function readableMessage(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -124,37 +115,6 @@ export class ProxyClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...body, projectId: this.projectId }),
-      redirect: 'manual',
-    });
-    if (!res.ok) {
-      throw await proxyError(res);
-    }
-    return res;
-  }
-
-  /**
-   * Send a request to the proxy and return the raw Response (for streaming).
-   * Injects `Authorization` header and `projectId` into the JSON body.
-   * Throws on non-OK responses.
-   */
-  async stream(path: string, init: RequestInit): Promise<Response> {
-    let body = init.body;
-    if (typeof body === 'string') {
-      try {
-        const parsed = JSON.parse(body);
-        body = JSON.stringify({ ...parsed, projectId: this.projectId });
-      } catch {
-        // Not JSON, leave body as-is
-      }
-    }
-
-    const res = await globalThis.fetch(`${this.proxyUrl}${path}`, {
-      ...init,
-      headers: {
-        ...(init.headers as Record<string, string>),
-        ...this.authHeaders,
-      },
-      body,
       redirect: 'manual',
     });
     if (!res.ok) {

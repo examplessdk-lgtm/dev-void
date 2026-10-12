@@ -3,7 +3,7 @@ import { parsePrepareArgs } from '../../src/cli/prepare-args.ts';
 
 describe('parsePrepareArgs', () => {
   it('accepts no arguments', () => {
-    expect(parsePrepareArgs([])).toEqual({});
+    expect(() => parsePrepareArgs([])).not.toThrow();
   });
 
   it('rejects unexpected positional arguments', () => {

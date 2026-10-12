@@ -7,38 +7,16 @@ import {
   createPlatformDeploymentManifest,
   parsePlatformDeploymentManifest,
 } from '../../src/manifest.ts';
-import { createPlatformWorkerConfigs } from '../../src/worker-config.ts';
+import { workerConfigs } from '../worker-config-fixture.ts';
 
 function configs(deploymentExecution?: 1) {
-  return createPlatformWorkerConfigs({
-    accountId: 'account',
-    apiUrl: 'https://api.example.com',
-    proxyUrl: 'https://proxy.example.com',
-    emailGatewayUrl: 'https://mail.example.com',
+  return workerConfigs({
     deployment: createPlatformDeploymentManifest({
       application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
       displayName: 'Team',
       installationSlug: 'team',
     }),
     deploymentExecution,
-    installationId: 'team-12345678',
-    ownershipNonce: 'ownership',
-    healthProbeToken: 'probe',
-    platformVersion: '1.0.0',
-    resources: {
-      hyperdrive: 'db',
-      isrCacheKv: 'isr',
-      legacyAssetsKv: 'assets',
-      routingKv: 'routing',
-      zone: 'zone',
-    },
-    runtimeEntrypoints: {
-      api: 'api.mjs',
-      dispatch: 'dispatch.mjs',
-      proxy: 'proxy.mjs',
-      tail: 'tail.mjs',
-      emailGateway: 'mail.mjs',
-    },
   });
 }
 

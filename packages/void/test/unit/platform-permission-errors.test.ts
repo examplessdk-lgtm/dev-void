@@ -4,12 +4,11 @@ import { formatStreamDeployError } from '../../src/cli/deploy-errors.ts';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 vi.mock('../../src/cli/cf-access.ts', () => ({
-  ensureCloudflaredToken: vi.fn(),
   ensurePlatformAccessToken: vi.fn(),
   isCloudflareAccessChallenge: () => false,
 }));
 afterEach(() => vi.unstubAllGlobals());
-const client = () => new PlatformClient('test-token', 'https://api.example.test');
+const client = () => new PlatformClient('test-token', { apiUrl: 'https://api.example.test' });
 const project = 'project_1';
 const collaborator = 'collaborator, admin, or owner';
 const admin = 'admin or owner';

@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import { createVoidRouter, ssrProxy } from '../../src/pages/client.ts';
+import { createVoidRouter, ssrProxy, type VoidRouterConfig } from '../../src/pages/client.ts';
 import { createPageNavigationEngine } from '../../src/pages/navigation-engine.ts';
 import { parseCacheFor } from '../../src/pages/prefetch.ts';
 
 type DeferredTestWindow = Window & {
   __resolveDeferred(group: string, data: unknown): void;
+};
+
+type TestRouterConfig = Partial<Omit<VoidRouterConfig, 'adapter'>> & {
+  adapter?: Partial<VoidRouterConfig['adapter']>;
 };
 
 function stubClientGlobals() {
@@ -60,7 +64,38 @@ function stubClientGlobals() {
   return documentStub;
 }
 
-describe('createVoidRouter prefetch', () => {
+function pageJson(body: unknown): Response {
+  return Response.json(body, { headers: { 'X-VoidPages': 'true' } });
+}
+
+const loadComponent = async () => ({ default: {} });
+
+function createTestRouter({ adapter, ...config }: TestRouterConfig = {}) {
+  return createVoidRouter({
+    components: { home: loadComponent },
+    layoutTree: {},
+    routeMeta: {},
+    matchRoute: () => 'home',
+    viewTransitions: false,
+    prefetchHoverDelay: 75,
+    prefetchDefaultCacheFor: parseCacheFor('30s'),
+    ...config,
+    adapter: {
+      applyUpdate: vi.fn(),
+      createDeferred: () => ({}),
+      isLoading: () => false,
+      resolveDeferred: (_ref, value) => value,
+      rejectDeferred: (_ref, error) => error,
+      ...adapter,
+    },
+  });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('createVoidRouter', () => {
   it('requires the page-data script even when a legacy data-page attribute is present', async () => {
     const documentStub = stubClientGlobals();
     documentStub.getElementById.mockImplementation((id: string) =>
@@ -68,24 +103,7 @@ describe('createVoidRouter prefetch', () => {
         ? { getAttribute: vi.fn(() => JSON.stringify({ component: 'home', props: {} })) }
         : null,
     );
-    await expect(
-      createVoidRouter({
-        adapter: {
-          applyUpdate: vi.fn(),
-          createDeferred: () => ({}),
-          isLoading: () => false,
-          resolveDeferred: (_ref, value) => value,
-          rejectDeferred: (_ref, error) => error,
-        },
-        components: { home: async () => ({ default: {} }) },
-        layoutTree: {},
-        routeMeta: {},
-        matchRoute: () => 'home',
-        viewTransitions: false,
-        prefetchHoverDelay: 75,
-        prefetchDefaultCacheFor: parseCacheFor('30s'),
-      }),
-    ).rejects.toThrow('pages: Missing initial page payload.');
+    await expect(createTestRouter()).rejects.toThrow('pages: Missing initial page payload.');
   });
 
   it.each([
@@ -97,33 +115,12 @@ describe('createVoidRouter prefetch', () => {
     stubClientGlobals();
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () =>
-        Response.json({ component: 'home', props: {} }, { headers: { 'X-VoidPages': 'true' } }),
-      ),
+      vi.fn(async () => pageJson({ component: 'home', props: {} })),
     );
     const applyUpdate = vi.fn();
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: () => ({}),
-        isLoading: () => false,
-        resolveDeferred: (_ref, value) => value,
-        rejectDeferred: (_ref, error) => error,
-      },
-      components: { home: async () => ({ default: {} }) },
-      layoutTree: {},
-      routeMeta: {},
-      matchRoute: () => 'home',
-      viewTransitions: false,
-      prefetchHoverDelay: 75,
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-    });
+    const { router } = await createTestRouter({ adapter: { applyUpdate } });
     await router.visit('/next', options);
     expect(applyUpdate.mock.calls[0][3]).toEqual({ preserveState });
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
   });
 
   it('returns stable route values from the SSR proxy', () => {
@@ -142,14 +139,7 @@ describe('createVoidRouter prefetch', () => {
     const layoutLoader = vi.fn(async () => ({ default: {} }));
     const matchRoute = vi.fn(() => 'users');
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate: vi.fn(),
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
+    const { router } = await createTestRouter({
       components: {
         home: homeLoader,
         layout: layoutLoader,
@@ -159,12 +149,9 @@ describe('createVoidRouter prefetch', () => {
         users: ['layout'],
       },
       matchRoute,
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
       routeMeta: {
         users: {},
       },
-      viewTransitions: false,
     });
 
     expect(() => router.prefetch('/users', { method: 'POST' })).toThrow(
@@ -183,31 +170,15 @@ describe('createVoidRouter prefetch', () => {
       component: 'users',
       props: { users: [] },
     };
-    const fetchMock = vi.fn(() =>
-      Promise.resolve(Response.json(pageData, { headers: { 'X-VoidPages': 'true' } })),
-    );
+    const fetchMock = vi.fn(() => Promise.resolve(pageJson(pageData)));
     vi.stubGlobal('fetch', fetchMock);
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate: vi.fn(),
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        users: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/users' ? 'users' : 'home')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
+    const { router } = await createTestRouter({
+      components: { home: loadComponent, users: loadComponent },
+      matchRoute: (url) => (url === '/users' ? 'users' : 'home'),
       routeMeta: {
         users: {},
       },
-      viewTransitions: false,
     });
 
     await expect(router.prefetch('/users')).resolves.toEqual(pageData);
@@ -226,12 +197,10 @@ describe('createVoidRouter prefetch', () => {
         props: { stats: { count: 42 } },
         deferredKeys: { stats: 'stats' },
       };
-      const fetchMock = vi.fn(async () =>
-        Response.json(pageData, { headers: { 'X-VoidPages': 'true' } }),
-      );
+      const fetchMock = vi.fn(async () => pageJson(pageData));
       vi.stubGlobal('fetch', fetchMock);
       const applyUpdate = vi.fn();
-      const { router } = await createVoidRouter({
+      const { router } = await createTestRouter({
         adapter: {
           applyUpdate,
           createDeferred: () => ({ loading: true, value: null, error: null }),
@@ -242,13 +211,8 @@ describe('createVoidRouter prefetch', () => {
               : { loading: false, value, error: null },
           rejectDeferred: (_ref, error) => ({ loading: false, value: null, error }),
         },
-        components: { home: async () => ({ default: {} }), users: async () => ({ default: {} }) },
-        layoutTree: {},
-        routeMeta: {},
+        components: { home: loadComponent, users: loadComponent },
         matchRoute: () => 'users',
-        viewTransitions: false,
-        prefetchHoverDelay: 75,
-        prefetchDefaultCacheFor: parseCacheFor('30s'),
       });
       try {
         await router.prefetch('/users');
@@ -278,33 +242,15 @@ describe('createVoidRouter prefetch', () => {
       'fetch',
       vi.fn(() => {
         n += 1;
-        return Promise.resolve(
-          Response.json(
-            { component: 'users', props: { v: n } },
-            { headers: { 'X-VoidPages': 'true' } },
-          ),
-        );
+        return Promise.resolve(pageJson({ component: 'users', props: { v: n } }));
       }),
     );
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate: vi.fn(),
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        users: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/users' ? 'users' : 'home')),
+    const { router } = await createTestRouter({
+      components: { home: loadComponent, users: loadComponent },
+      matchRoute: (url) => (url === '/users' ? 'users' : 'home'),
       prefetchDefaultCacheFor: parseCacheFor(['5ms', '10s']),
-      prefetchHoverDelay: 75,
       routeMeta: { users: {} },
-      viewTransitions: false,
     });
 
     await expect(router.prefetch('/users')).resolves.toMatchObject({ props: { v: 1 } });
@@ -328,32 +274,15 @@ describe('createVoidRouter prefetch', () => {
         });
       }
       return Promise.resolve(
-        Response.json(
-          { component: requests === 2 ? 'other' : 'users', props: { version: requests } },
-          { headers: { 'X-VoidPages': 'true' } },
-        ),
+        pageJson({ component: requests === 2 ? 'other' : 'users', props: { version: requests } }),
       );
     });
     vi.stubGlobal('fetch', fetchMock);
     const applyUpdate = vi.fn();
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: () => ({}),
-        isLoading: () => false,
-        resolveDeferred: (_ref, value) => value,
-        rejectDeferred: (_ref, error) => error,
-      },
-      components: {
-        home: async () => ({ default: {} }),
-        users: async () => ({ default: {} }),
-        other: async () => ({ default: {} }),
-      },
-      layoutTree: {},
-      routeMeta: {},
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { home: loadComponent, users: loadComponent, other: loadComponent },
       matchRoute: (url) => (url === '/users' ? 'users' : 'other'),
-      viewTransitions: false,
-      prefetchHoverDelay: 75,
       prefetchDefaultCacheFor: { stale: 0, expires: 5 * 60_000 },
       cacheVisitedPageData: true,
     });
@@ -366,12 +295,7 @@ describe('createVoidRouter prefetch', () => {
     expect(applyUpdate.mock.lastCall?.[0]).toMatchObject({ props: { version: 1 } });
 
     expect(finishRefresh).toBeTypeOf('function');
-    finishRefresh!(
-      Response.json(
-        { component: 'users', props: { version: 3 } },
-        { headers: { 'X-VoidPages': 'true' } },
-      ),
-    );
+    finishRefresh!(pageJson({ component: 'users', props: { version: 3 } }));
     await expect(router.prefetch('/users')).resolves.toMatchObject({ props: { version: 3 } });
   });
 
@@ -395,34 +319,17 @@ describe('createVoidRouter prefetch', () => {
     });
     const fetchMock = vi.fn((url: string) =>
       Promise.resolve(
-        Response.json(
-          {
-            component: url === '/users' ? 'users' : 'dashboard',
-            props: { version: url === '/users' ? 2 : 3 },
-          },
-          { headers: { 'X-VoidPages': 'true' } },
-        ),
+        pageJson({
+          component: url === '/users' ? 'users' : 'dashboard',
+          props: { version: url === '/users' ? 2 : 3 },
+        }),
       ),
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate: vi.fn(),
-        createDeferred: () => ({}),
-        isLoading: () => false,
-        resolveDeferred: (_ref, value) => value,
-        rejectDeferred: (_ref, error) => error,
-      },
-      components: {
-        dashboard: async () => ({ default: {} }),
-        users: async () => ({ default: {} }),
-      },
-      layoutTree: {},
-      routeMeta: {},
+    const { router } = await createTestRouter({
+      components: { dashboard: loadComponent, users: loadComponent },
       matchRoute: (url) => (url === '/dashboard' ? 'dashboard' : 'users'),
-      viewTransitions: false,
-      prefetchHoverDelay: 75,
       prefetchDefaultCacheFor: { stale: 0, expires: 5 * 60_000 },
       cacheVisitedPageData: true,
     });
@@ -459,20 +366,10 @@ describe('createVoidRouter prefetch', () => {
     const applyUpdate = vi.fn();
     vi.stubGlobal(
       'fetch',
-      vi.fn(() =>
-        Promise.resolve(
-          Response.json(
-            {
-              component: 'next',
-              props: { title: 'Next' },
-            },
-            { headers: { 'X-VoidPages': 'true' } },
-          ),
-        ),
-      ),
+      vi.fn(() => Promise.resolve(pageJson({ component: 'next', props: { title: 'Next' } }))),
     );
 
-    const { router, start } = await createVoidRouter({
+    const { router, start } = await createTestRouter({
       adapter: {
         applyUpdate,
         createDeferred: vi.fn(() => ({ loading: true, value: null, error: null })),
@@ -480,16 +377,8 @@ describe('createVoidRouter prefetch', () => {
         rejectDeferred,
         resolveDeferred,
       },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        next: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn(() => 'next'),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+      components: { home: loadComponent, next: loadComponent },
+      matchRoute: () => 'next',
     });
 
     start();
@@ -517,23 +406,9 @@ describe('createVoidRouter prefetch', () => {
     vi.stubGlobal('fetch', vi.fn());
 
     const events: Array<string> = [];
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
       matchRoute,
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
       onNavigationChange(navigation) {
         events.push(navigation.state);
       },
@@ -579,21 +454,10 @@ describe('createVoidRouter prefetch', () => {
       }),
     );
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        fast: vi.fn(async () => ({ default: {} })),
-        home: vi.fn(async () => ({ default: {} })),
-        slow: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => {
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { fast: loadComponent, home: loadComponent, slow: loadComponent },
+      matchRoute: (url) => {
         if (url === '/slow') {
           return 'slow';
         }
@@ -601,11 +465,7 @@ describe('createVoidRouter prefetch', () => {
           return 'fast';
         }
         return 'home';
-      }),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+      },
       onNavigationChange(navigation) {
         events.push(navigation.state);
       },
@@ -619,15 +479,7 @@ describe('createVoidRouter prefetch', () => {
 
     expect(events).toEqual(['loading', 'loading']);
 
-    resolveFast(
-      Response.json(
-        {
-          component: 'fast',
-          props: { title: 'Fast' },
-        },
-        { headers: { 'X-VoidPages': 'true' } },
-      ),
-    );
+    resolveFast(pageJson({ component: 'fast', props: { title: 'Fast' } }));
     await fastVisit;
 
     expect(events).toEqual(['loading', 'loading', 'idle']);
@@ -653,35 +505,15 @@ describe('createVoidRouter prefetch', () => {
           });
         }
         if (url === '/fast') {
-          return Promise.resolve(
-            Response.json(
-              {
-                component: 'fast',
-                props: { title: 'Fast' },
-              },
-              { headers: { 'X-VoidPages': 'true' } },
-            ),
-          );
+          return Promise.resolve(pageJson({ component: 'fast', props: { title: 'Fast' } }));
         }
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate: vi.fn(),
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        fast: vi.fn(async () => ({ default: {} })),
-        home: vi.fn(async () => ({ default: {} })),
-        slow: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => {
+    const { router } = await createTestRouter({
+      components: { fast: loadComponent, home: loadComponent, slow: loadComponent },
+      matchRoute: (url) => {
         if (url === '/slow') {
           return 'slow';
         }
@@ -689,11 +521,7 @@ describe('createVoidRouter prefetch', () => {
           return 'fast';
         }
         return 'home';
-      }),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+      },
     });
 
     const slowVisit = router.visit('/slow');
@@ -710,24 +538,7 @@ describe('createVoidRouter prefetch', () => {
     const applyUpdate = vi.fn();
     vi.stubGlobal('fetch', vi.fn());
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn(() => 'home'),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
-    });
+    const { router } = await createTestRouter({ adapter: { applyUpdate } });
 
     await router.visit('/docs?tab=api#section', {
       preserveState: true,
@@ -750,24 +561,7 @@ describe('createVoidRouter prefetch', () => {
     const matchRoute = vi.fn(() => 'home');
     vi.stubGlobal('fetch', vi.fn());
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute,
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
-    });
+    const { router } = await createTestRouter({ adapter: { applyUpdate }, matchRoute });
 
     await router.visit('/docs?tab=api', {
       preserveState: true,
@@ -790,24 +584,7 @@ describe('createVoidRouter prefetch', () => {
     const applyUpdate = vi.fn();
     vi.stubGlobal('fetch', vi.fn());
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn(() => 'home'),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
-    });
+    const { router } = await createTestRouter({ adapter: { applyUpdate } });
 
     await router.visit('#section', { preserveState: true });
 
@@ -826,36 +603,14 @@ describe('createVoidRouter prefetch', () => {
       if (url !== '/next') {
         throw new Error(`Unexpected fetch: ${url}`);
       }
-      return Promise.resolve(
-        Response.json(
-          {
-            component: 'next',
-            props: { title: 'Next' },
-          },
-          { headers: { 'X-VoidPages': 'true' } },
-        ),
-      );
+      return Promise.resolve(pageJson({ component: 'next', props: { title: 'Next' } }));
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        next: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/next' ? 'next' : 'home')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { home: loadComponent, next: loadComponent },
+      matchRoute: (url) => (url === '/next' ? 'next' : 'home'),
     });
 
     await router.visit('/next', { preserveState: true });
@@ -907,24 +662,10 @@ describe('createVoidRouter prefetch', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        slow: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/slow' ? 'slow' : 'home')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { home: loadComponent, slow: loadComponent },
+      matchRoute: (url) => (url === '/slow' ? 'slow' : 'home'),
     });
 
     const slowVisit = router.visit('/slow').catch(() => undefined);
@@ -940,15 +681,7 @@ describe('createVoidRouter prefetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(window.scrollTo).toHaveBeenCalledWith(0, 42);
 
-    resolveSlow(
-      Response.json(
-        {
-          component: 'slow',
-          props: { title: 'Slow' },
-        },
-        { headers: { 'X-VoidPages': 'true' } },
-      ),
-    );
+    resolveSlow(pageJson({ component: 'slow', props: { title: 'Slow' } }));
     await slowVisit;
 
     expect(applyUpdate).not.toHaveBeenCalled();
@@ -959,36 +692,14 @@ describe('createVoidRouter prefetch', () => {
     window.location.pathname = '/users';
     const applyUpdate = vi.fn();
     const fetchMock = vi.fn(() =>
-      Promise.resolve(
-        Response.json(
-          {
-            component: 'docs',
-            props: { title: 'Docs' },
-          },
-          { headers: { 'X-VoidPages': 'true' } },
-        ),
-      ),
+      Promise.resolve(pageJson({ component: 'docs', props: { title: 'Docs' } })),
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        docs: vi.fn(async () => ({ default: {} })),
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn(() => 'docs'),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { docs: loadComponent, home: loadComponent },
+      matchRoute: () => 'docs',
     });
 
     window.location.pathname = '/docs';
@@ -1042,19 +753,11 @@ describe('createVoidRouter prefetch', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
-        Promise.resolve(
-          Response.json(
-            {
-              component: 'home',
-              props: { stats: null, title: 'Updated' },
-            },
-            { headers: { 'X-VoidPages': 'true' } },
-          ),
-        ),
+        Promise.resolve(pageJson({ component: 'home', props: { stats: null, title: 'Updated' } })),
       ),
     );
 
-    const { router, start } = await createVoidRouter({
+    const { router, start } = await createTestRouter({
       adapter: {
         applyUpdate,
         createDeferred: vi.fn(() => initialRef),
@@ -1062,15 +765,6 @@ describe('createVoidRouter prefetch', () => {
         rejectDeferred,
         resolveDeferred,
       },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn(() => 'home'),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
     });
 
     start();
@@ -1130,36 +824,19 @@ describe('createVoidRouter prefetch', () => {
             });
           });
         }
-        return Promise.resolve(
-          Response.json(
-            {
-              component: 'fast',
-              props: { title: 'Fast' },
-            },
-            { headers: { 'X-VoidPages': 'true' } },
-          ),
-        );
+        return Promise.resolve(pageJson({ component: 'fast', props: { title: 'Fast' } }));
       }),
     );
 
-    const { router, start } = await createVoidRouter({
+    const { router, start } = await createTestRouter({
       adapter: {
-        applyUpdate: vi.fn(),
         createDeferred: vi.fn(() => ({ loading: true, value: null, error: null })),
         isLoading: vi.fn((ref) => Boolean(ref?.loading)),
         rejectDeferred,
         resolveDeferred,
       },
-      components: {
-        fast: vi.fn(async () => ({ default: {} })),
-        home: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/slow' ? 'slow' : 'fast')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+      components: { fast: loadComponent, home: loadComponent },
+      matchRoute: (url) => (url === '/slow' ? 'slow' : 'fast'),
     });
 
     start();
@@ -1209,21 +886,12 @@ describe('createVoidRouter prefetch', () => {
             }),
           );
         }
-        return Promise.resolve(
-          Response.json(
-            {
-              component: 'fast',
-              props: { title: 'Fast' },
-            },
-            { headers: { 'X-VoidPages': 'true' } },
-          ),
-        );
+        return Promise.resolve(pageJson({ component: 'fast', props: { title: 'Fast' } }));
       }),
     );
 
-    const { router } = await createVoidRouter({
+    const { router } = await createTestRouter({
       adapter: {
-        applyUpdate: vi.fn(),
         createDeferred: vi.fn(() => ({ loading: true, value: null, error: null })),
         isLoading: vi.fn((ref) => Boolean(ref?.loading)),
         rejectDeferred: vi.fn((_ref, error) => ({
@@ -1234,16 +902,11 @@ describe('createVoidRouter prefetch', () => {
         resolveDeferred,
       },
       components: {
-        fast: vi.fn(async () => ({ default: {} })),
-        home: vi.fn(async () => ({ default: {} })),
+        fast: loadComponent,
+        home: loadComponent,
         slow: vi.fn(() => slowComponent),
       },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/slow' ? 'slow' : 'fast')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+      matchRoute: (url) => (url === '/slow' ? 'slow' : 'fast'),
     });
 
     const slowVisit = router.visit('/slow').catch(() => undefined);
@@ -1261,38 +924,15 @@ describe('createVoidRouter prefetch', () => {
 });
 
 describe('createVoidRouter other-origin visits', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
   async function createRouter() {
     stubClientGlobals();
-    const fetchMock = vi.fn(async () =>
-      Response.json(
-        { component: 'users', props: { users: [] } },
-        { headers: { 'X-VoidPages': 'true' } },
-      ),
-    );
+    const fetchMock = vi.fn(async () => pageJson({ component: 'users', props: { users: [] } }));
     vi.stubGlobal('fetch', fetchMock);
     const applyUpdate = vi.fn();
-    const { router } = await createVoidRouter({
-      adapter: {
-        applyUpdate,
-        createDeferred: vi.fn(() => ({})),
-        isLoading: vi.fn(() => false),
-        rejectDeferred: vi.fn((_ref, error) => error),
-        resolveDeferred: vi.fn((_ref, value) => value),
-      },
-      components: {
-        home: vi.fn(async () => ({ default: {} })),
-        users: vi.fn(async () => ({ default: {} })),
-      },
-      layoutTree: {},
-      matchRoute: vi.fn((url) => (url === '/users' ? 'users' : 'home')),
-      prefetchDefaultCacheFor: parseCacheFor('30s'),
-      prefetchHoverDelay: 75,
-      routeMeta: {},
-      viewTransitions: false,
+    const { router } = await createTestRouter({
+      adapter: { applyUpdate },
+      components: { home: loadComponent, users: loadComponent },
+      matchRoute: (url) => (url === '/users' ? 'users' : 'home'),
     });
     return { router, fetchMock, applyUpdate };
   }
@@ -1322,7 +962,7 @@ describe('createVoidRouter other-origin visits', () => {
         rejectDeferred: (_ref, error) => error,
         isLoading: () => false,
       },
-      components: { home: async () => ({ default: {} }) },
+      components: { home: loadComponent },
       layoutTree: {},
       routeMeta: {},
       matchRoute: () => 'home',

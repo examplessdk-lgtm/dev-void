@@ -484,3 +484,7 @@ Integration coverage includes:
 - admin dashboard
 - scheduled usage enforcement
 - GitHub App connect/webhook/OIDC routes and the `BuildScheduler` queue/concurrency behavior
+
+## Connected apps
+
+Registered confidential OAuth clients use code + S256 PKCE with identity-only grants. Each publish requires Void consent for an exact artifact and project, then uses an audience-separated, revocable credential and a durable deployment receipt. Admin registration/disablement lives at `/admin/connected-apps`; user disconnection lives at `/oauth/connections`. See [the design record](../../meta/design-docs/0091-connected-apps.md) and [operator guide](../../../docs/guide/platform/administration/connected-apps.md).

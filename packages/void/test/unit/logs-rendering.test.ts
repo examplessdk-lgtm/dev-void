@@ -63,7 +63,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it.each([40, 80])('aligns wrapped log messages and exceptions at %i columns', async (columns) => {
+/** Runs `void logs` with a stdout of the given width and returns the printed lines. */
+async function printLogs(columns: number): Promise<Array<string>> {
   const output = Object.assign(
     new Writable({
       write(_chunk, _encoding, callback) {
@@ -75,9 +76,15 @@ it.each([40, 80])('aligns wrapped log messages and exceptions at %i columns', as
   vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
   const print = vi.spyOn(console, 'log').mockImplementation(() => {});
   await runLogsCommand('/fixture', '', '1h');
+  return print.mock.calls.map((args) => String(args[0] ?? ''));
+}
+
+const UNSAFE_SEQUENCES = ['\x1b]', '\x1b[2J', '\r', '\x07', '\u009b'];
+
+it.each([40, 80])('aligns wrapped log messages and exceptions at %i columns', async (columns) => {
+  const messages = await printLogs(columns);
   expect(intro).not.toHaveBeenCalled();
   expect(stripVTControlCharacters(vi.mocked(outro).mock.calls.at(-1)![0]!)).toBe('1 log entry');
-  const messages = print.mock.calls.map((args) => String(args[0] ?? ''));
   const warn = messages.find((line) => line.includes('[warn]'))!;
   const error = messages.find((line) => line.includes('[error]'))!;
   const exception = messages.find((line) => line.includes('[exception]'))!;
@@ -118,28 +125,16 @@ it('drops terminal control sequences from app log text but keeps colors and line
       ],
     },
   ];
-  const output = Object.assign(
-    new Writable({
-      write(_chunk, _encoding, callback) {
-        callback();
-      },
-    }),
-    { columns: 120 },
-  );
-  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
-  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
-  await runLogsCommand('/fixture', '', '1h');
+  const messages = await printLogs(120);
 
-  const printed = print.mock.calls.map((args) => String(args[0] ?? '')).join('\n');
-  for (const unsafe of ['\x1b]', '\x1b[2J', '\r', '\x07', '\u009b']) {
+  const printed = messages.join('\n');
+  for (const unsafe of UNSAFE_SEQUENCES) {
     expect(printed).not.toContain(unsafe);
   }
   expect(printed).toContain('\x1b[31mred');
   expect(printed).not.toContain('evil.example');
   expect(printed).toContain('Error: see click then 2J');
-  const error = print.mock.calls
-    .map((args) => String(args[0] ?? ''))
-    .find((line) => line.includes('[error]'))!;
+  const error = messages.find((line) => line.includes('[error]'))!;
   expect(stripVTControlCharacters(error).split('\n')).toEqual(['  [error] abc', '          red']);
 });
 
@@ -155,21 +150,9 @@ it('ends app log text with a reset so its styles cannot hide the next printed li
       exceptions: [{ name: 'Error', message: 'x\x1b[7;30;40m' }],
     },
   ];
-  const output = Object.assign(
-    new Writable({
-      write(_chunk, _encoding, callback) {
-        callback();
-      },
-    }),
-    { columns: 120 },
+  const styled = (await printLogs(120)).filter(
+    (line) => line.includes('\x1b[8m') || line.includes('\x1b[7;30;40m'),
   );
-  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
-  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
-  await runLogsCommand('/fixture', '', '1h');
-
-  const styled = print.mock.calls
-    .map((args) => String(args[0] ?? ''))
-    .filter((line) => line.includes('\x1b[8m') || line.includes('\x1b[7;30;40m'));
   expect(styled).toHaveLength(3);
   for (const line of styled) {
     expect(line.lastIndexOf('\x1b[0m')).toBeGreaterThan(
@@ -253,18 +236,7 @@ it('prints stack frames under the error that logged them', async () => {
       ],
     },
   ];
-  const output = Object.assign(
-    new Writable({
-      write(_chunk, _encoding, callback) {
-        callback();
-      },
-    }),
-    { columns: 120 },
-  );
-  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
-  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
-  await runLogsCommand('/fixture', '', '1h');
-  const messages = print.mock.calls.map((args) => String(args[0] ?? ''));
+  const messages = await printLogs(120);
   const header = messages.findIndex((line) => line.includes('/sponsors.svg'));
   expect(header).toBeGreaterThanOrEqual(0);
   expect(
@@ -318,20 +290,8 @@ it('drops terminal control sequences from stack frames', async () => {
       ],
     },
   ];
-  const output = Object.assign(
-    new Writable({
-      write(_chunk, _encoding, callback) {
-        callback();
-      },
-    }),
-    { columns: 120 },
-  );
-  vi.spyOn(process, 'stdout', 'get').mockReturnValue(output as typeof process.stdout);
-  const print = vi.spyOn(console, 'log').mockImplementation(() => {});
-  await runLogsCommand('/fixture', '', '1h');
-
-  const printed = print.mock.calls.map((args) => String(args[0] ?? '')).join('\n');
-  for (const unsafe of ['\x1b]', '\x1b[2J', '\r', '\x07', '\u009b']) {
+  const printed = (await printLogs(120)).join('\n');
+  for (const unsafe of UNSAFE_SEQUENCES) {
     expect(printed).not.toContain(unsafe);
   }
   expect(printed).not.toContain('evil.example');

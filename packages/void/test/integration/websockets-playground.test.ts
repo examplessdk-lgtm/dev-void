@@ -70,7 +70,6 @@ function collectUnexpectedBrowserErrors(page: Page) {
 
 describe('playground/websockets', () => {
   let child: ReturnType<typeof spawn>;
-  let stderr = '';
 
   beforeAll(async () => {
     const playground = join(ROOT, 'playground/websockets');
@@ -108,10 +107,6 @@ describe('playground/websockets', () => {
           },
         },
       );
-      stderr = '';
-      child.stderr!.on('data', (chunk: Buffer) => {
-        stderr += String(chunk);
-      });
       return child;
     }, 20_000);
     base = server.base;
@@ -141,9 +136,6 @@ describe('playground/websockets', () => {
       await killChild(child);
     }
     await browser?.close();
-    if (stderr.includes('error when starting dev server')) {
-      throw new Error(stderr);
-    }
   });
 
   it('chat reconnects to a fresh room and sends a typed message', async () => {

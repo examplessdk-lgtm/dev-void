@@ -1,30 +1,9 @@
 import type { CompileResult } from './compile.ts';
-import { buildRenderChunks, toIslandId } from './emit-shared.ts';
-import type { IslandImport } from './extract-script.ts';
+import { buildRenderChunks, type ResolvedIsland } from './emit-shared.ts';
 
-export function emitVueComponent(result: CompileResult): string {
-  return `
-import { defineComponent, createStaticVNode, provide } from "vue";
-
-const __frontmatter = ${JSON.stringify(result.frontmatter)};
-const __headings = ${JSON.stringify(result.headings)};
-const __html = ${JSON.stringify(result.html)};
-
-export const frontmatter = __frontmatter;
-export const headings = __headings;
-
-export default defineComponent({
-  setup() {
-    provide("__void_frontmatter", __frontmatter);
-    return () => createStaticVNode(__html, 1);
-  }
-});
-`;
-}
-
-export function emitVueComponentWithIslands(
+export function emitVueComponent(
   result: CompileResult,
-  islandImports: ReadonlyArray<IslandImport>,
+  islandImports: ReadonlyArray<ResolvedIsland>,
 ): string {
   const chunks = buildRenderChunks(result.html, islandImports);
 
@@ -40,7 +19,7 @@ export function emitVueComponentWithIslands(
     code += `const ${islandImport.name} = { inheritAttrs: false, render() {
   const props = this.$attrs;
   return h("div", {
-    "data-island": ${JSON.stringify(toIslandId(islandImport))},
+    "data-island": ${JSON.stringify(islandImport.islandId)},
     "data-props": JSON.stringify(props),
     "data-hydrate": ${JSON.stringify(islandImport.strategy)}
   }, h(_raw_island_${islandIndex}, props));
@@ -58,6 +37,9 @@ export function emitVueComponentWithIslands(
     }
   }
 
+  // A single root keeps SSR output free of fragment markers on pages without islands.
+  const root = islandImports.length > 0 ? `[\n      ${vnodes.join(',\n      ')}\n    ]` : vnodes[0];
+
   code += `
 const __frontmatter = ${JSON.stringify(result.frontmatter)};
 const __headings = ${JSON.stringify(result.headings)};
@@ -68,9 +50,7 @@ export const headings = __headings;
 export default defineComponent({
   setup() {
     provide("__void_frontmatter", __frontmatter);
-    return () => [
-      ${vnodes.join(',\n      ')}
-    ];
+    return () => ${root};
   }
 });
 `;

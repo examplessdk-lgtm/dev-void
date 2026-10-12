@@ -1,9 +1,9 @@
-import { analyzeApplicationSync, type ApplicationAnalysis } from '../../application-analysis.ts';
+import { type ApplicationAnalysis } from '../../application-analysis.ts';
 import { type VoidConfig } from '../../config.ts';
-import { detectFramework } from '../../plugin-inference.ts';
 import { assertNoRootSourceConventionConflicts } from '../../project-paths.ts';
 import { validateSsrEntry } from '../../ssr/entry.ts';
-import { detectPreset, FRAMEWORK_PRESETS, hasBackendFiles } from '../preset.ts';
+import { getErrorMessage } from '../output.ts';
+import { detectPreset, hasBackendFiles } from '../preset.ts';
 import { syncWranglerDurableObjects, syncWranglerWebSockets } from '../wrangler.ts';
 
 export type CloudflareDeployAppOptions = {
@@ -24,17 +24,9 @@ export function classifyCloudflareDeployApp(
   root: string,
   voidConfig: VoidConfig,
   options: CloudflareDeployAppOptions,
-  application?: ApplicationAnalysis,
+  application: ApplicationAnalysis,
 ): CloudflareDeployAppClassification {
-  const framework = application?.framework ?? detectFramework(root);
-  if (framework) {
-    const preset = FRAMEWORK_PRESETS[framework.name];
-    if (!preset) {
-      return unsupported(
-        `deploy: --platform cloudflare has no deployment preset for framework ${framework.name}.`,
-      );
-    }
-  }
+  const framework = application.framework;
 
   // Frameworks have their own Worker output. Their Vite dependency does not
   // imply that the project is a standalone SPA.
@@ -65,17 +57,11 @@ export function classifyCloudflareDeployApp(
   }
 
   try {
-    const analysis =
-      application ??
-      analyzeApplicationSync(root, {
-        config: voidConfig,
-        environment: 'prod',
-      });
-    const paths = analysis.paths;
+    const paths = application.paths;
     assertNoRootSourceConventionConflicts(paths);
     validateSsrEntry(root, paths);
-    syncWranglerDurableObjects(root, analysis.durableObjects);
-    syncWranglerWebSockets(root, analysis.websockets);
+    syncWranglerDurableObjects(root, application.durableObjects);
+    syncWranglerWebSockets(root, application.websockets);
   } catch (error) {
     return unsupported(`deploy: ${getErrorMessage(error)}`);
   }
@@ -85,8 +71,4 @@ export function classifyCloudflareDeployApp(
 
 function unsupported(reason: string): CloudflareDeployAppClassification {
   return { supported: false, reason };
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

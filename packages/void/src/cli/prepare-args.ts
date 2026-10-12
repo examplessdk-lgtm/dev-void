@@ -1,8 +1,6 @@
 import { parseArgs } from 'node:util';
 
-export type PrepareArgs = {};
-
-export function parsePrepareArgs(args: Array<string>): PrepareArgs {
+export function parsePrepareArgs(args: Array<string>): void {
   const parsed = parseArgs({
     args,
     options: {},
@@ -13,6 +11,4 @@ export function parsePrepareArgs(args: Array<string>): PrepareArgs {
   if (parsed.positionals.length > 0) {
     throw new Error(`prepare: Unexpected argument '${parsed.positionals[0]}'.`);
   }
-
-  return {};
 }

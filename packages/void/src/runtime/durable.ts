@@ -4,6 +4,77 @@ import { requireRuntimeBinding, withRuntimeEnv } from './env.ts';
 
 const DEFAULT_STORAGE_KEY = '__void_durable_state';
 
+type NativeDurableClass = new (...args: Array<never>) => CloudflareDurableObject<unknown>;
+
+export type DurableObjectApi<TClass extends NativeDurableClass> = {
+  class: TClass;
+  /** @internal Called by the generated Worker entry. */
+  __bind(bindingName: string, resourceName?: string): void;
+  get(name: string): DurableObjectStub<InstanceType<TClass>>;
+  get(
+    namespace: DurableObjectNamespace<InstanceType<TClass>>,
+    name: string,
+  ): DurableObjectStub<InstanceType<TClass>>;
+  getById(id: DurableObjectId): DurableObjectStub<InstanceType<TClass>>;
+  getById(
+    namespace: DurableObjectNamespace<InstanceType<TClass>>,
+    id: DurableObjectId,
+  ): DurableObjectStub<InstanceType<TClass>>;
+};
+
+/** Register a native Durable Object class without altering its lifecycle or RPC methods. */
+export function defineDurableObject<TClass extends NativeDurableClass>(definition: {
+  name?: string;
+  class: TClass;
+}): DurableObjectApi<TClass> {
+  if (definition.name !== undefined && !isResourceName(definition.name)) {
+    throw new Error('durable: name must contain a word starting with a letter.');
+  }
+  let bindingName: string | undefined;
+  function boundNamespace(): DurableObjectNamespace<InstanceType<TClass>> {
+    if (!bindingName) {
+      throw new Error(
+        'durable: this definition is not bound. Default-export it from a file in durable-objects/.',
+      );
+    }
+    return requireRuntimeBinding<DurableObjectNamespace<InstanceType<TClass>>>(bindingName);
+  }
+  return {
+    class: definition.class,
+    __bind(name, resourceName) {
+      if (definition.name !== resourceName) {
+        throw new Error(
+          'durable: name must be statically discoverable in defineDurableObject(). Run void info to inspect this definition.',
+        );
+      }
+      if (bindingName && bindingName !== name) {
+        throw new Error(
+          `durable: definition is already bound to '${bindingName}' and cannot also bind to '${name}'.`,
+        );
+      }
+      bindingName = name;
+    },
+    get(
+      namespaceOrName: DurableObjectNamespace<InstanceType<TClass>> | string,
+      maybeName?: string,
+    ) {
+      const namespace = typeof namespaceOrName === 'string' ? boundNamespace() : namespaceOrName;
+      return namespace.get(
+        namespace.idFromName(typeof namespaceOrName === 'string' ? namespaceOrName : maybeName!),
+      );
+    },
+    getById(
+      namespaceOrId: DurableObjectNamespace<InstanceType<TClass>> | DurableObjectId,
+      maybeId?: DurableObjectId,
+    ) {
+      const namespace = maybeId
+        ? (namespaceOrId as DurableObjectNamespace<InstanceType<TClass>>)
+        : boundNamespace();
+      return namespace.get(maybeId ?? (namespaceOrId as DurableObjectId));
+    },
+  };
+}
+
 export type DurableStateContext<TState, TEnv extends Record<string, unknown>> = {
   state: TState;
   readonly env: TEnv;

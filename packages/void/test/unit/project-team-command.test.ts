@@ -58,6 +58,8 @@ beforeEach(() => {
   keyring.read.mockReset().mockReturnValue(null);
   keyring.write.mockReset().mockReturnValue(true);
   keyring.remove.mockReset().mockReturnValue(true);
+  vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 });
 
 afterEach(() => {
@@ -93,8 +95,6 @@ describe('project team target selection', () => {
         : Response.json({});
     });
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await runProjectCommand(root, { subcommand: 'team', action: 'pending' });
     await runProjectCommand(root, {
@@ -123,7 +123,6 @@ describe('project team target selection', () => {
       const root = rootWithPlatform(platform, { platformUrl: platformA });
       const projectPath = join(root, '.void', 'project.json');
       const originalProject = readFileSync(projectPath, 'utf8');
-      vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
       connect(platformA, 'Platform A');
       connect(platformB, 'Platform B');
       keyring.read.mockImplementation((service: string, account: string) => {
@@ -143,8 +142,6 @@ describe('project team target selection', () => {
           : Response.json({});
       });
       vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-      vi.spyOn(console, 'log').mockImplementation(() => undefined);
-      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
       chmodSync(projectPath, 0o444);
       chmodSync(join(root, '.void'), 0o555);
@@ -185,7 +182,6 @@ describe('project team target selection', () => {
       const platformA = 'https://platform-a.example.test';
       const platformB = 'https://platform-b.example.test';
       const root = rootWithPlatform(platform, { platformUrl: platformA });
-      vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
       vi.stubEnv('VOID_TOKEN', 'void-cloud-token');
       vi.stubEnv('VOID_API_URL', undefined);
       connect(platformA, 'Platform A');
@@ -197,8 +193,6 @@ describe('project team target selection', () => {
       );
       const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
       vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-      vi.spyOn(console, 'log').mockImplementation(() => undefined);
-      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
       await expect(
         runProjectCommand(root, { subcommand: 'team', action: 'pending' }),
@@ -209,14 +203,12 @@ describe('project team target selection', () => {
 
   it('uses an explicit environment origin and its matching token over saved project and active connections', async () => {
     const root = rootWithPlatform('void', { platformUrl: 'https://platform-a.example.test' });
-    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
     connect('https://platform-b.example.test', 'Platform B');
     connect('https://platform-c.example.test', 'Platform C');
     vi.stubEnv('VOID_API_URL', 'https://platform-c.example.test/');
     vi.stubEnv('VOID_TOKEN', 'platform-c-token');
     const fetchMock = vi.fn(async () => Response.json({ invitations: [] }));
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const output: Array<string> = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       output.push(String(chunk));
@@ -238,7 +230,6 @@ describe('project team target selection', () => {
     const platformA = 'https://platform-a.example.test';
     const platformB = 'https://platform-b.example.test';
     const root = rootWithPlatform('void', { platformUrl: platformA });
-    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
     connect(platformA, 'Platform A');
     connect(platformB, 'Platform B');
     keyring.read.mockImplementation((service: string, account: string) =>
@@ -248,8 +239,6 @@ describe('project team target selection', () => {
     );
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('missing login');
     });
@@ -264,7 +253,6 @@ describe('project team target selection', () => {
     const platformA = 'https://platform-a.example.test';
     const platformB = 'https://platform-b.example.test';
     const root = rootWithPlatform('void', { platformUrl: platformA });
-    vi.stubEnv('VOID_PLATFORM_REGISTRY_DIR', join(root, 'registry'));
     connect(platformA, 'Platform A');
     connect(platformB, 'Platform B');
     keyring.read.mockImplementation((service: string, account: string) => {
@@ -282,8 +270,6 @@ describe('project team target selection', () => {
       }),
     );
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await runProjectCommand(root, {
       subcommand: 'team',
@@ -320,7 +306,6 @@ describe('project team target selection', () => {
       written += String(chunk);
       return true;
     });
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const warnedAt: Array<number> = [];
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {
       warnedAt.push(written.length);
@@ -362,8 +347,6 @@ describe('project team target selection', () => {
         }),
       );
     vi.stubGlobal('fetch', withPlatformDiscovery(fetchMock));
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await runProjectCommand(root, {
       subcommand: 'team',
@@ -397,7 +380,6 @@ describe('project team target selection', () => {
         }),
       ),
     );
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const output: Array<string> = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       output.push(String(chunk));
@@ -432,7 +414,6 @@ describe('project team target selection', () => {
           }),
         ),
       );
-      vi.spyOn(console, 'log').mockImplementation(() => undefined);
       const output: Array<string> = [];
       vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
         output.push(String(chunk));
@@ -488,8 +469,6 @@ describe('project team target selection', () => {
       'fetch',
       vi.fn(async () => Response.json({ error }, { status })),
     );
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     const result = runProjectCommand(root, {
       subcommand: 'team',
@@ -518,8 +497,6 @@ describe('project team target selection', () => {
       'fetch',
       vi.fn(async () => new Response(body, { status: 403 })),
     );
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const error = await runProjectCommand(root, {
       subcommand: 'team',
       action: 'accept',
@@ -541,8 +518,6 @@ describe('project team target selection', () => {
         Response.json({ error: 'user is already a project member' }, { status: 409 }),
       ),
     );
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     await expect(
       runProjectCommand(root, {
         subcommand: 'team',

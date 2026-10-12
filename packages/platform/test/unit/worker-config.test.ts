@@ -3,19 +3,13 @@ import {
   createPlatformDeploymentManifest,
   parsePlatformDeploymentManifest,
 } from '../../src/manifest.ts';
-import { createPlatformWorkerConfigs } from '../../src/worker-config.ts';
+import { deployment, deploymentInput, workerConfigs } from '../worker-config-fixture.ts';
 
 describe('platform email deployment manifest', () => {
-  const input = {
-    application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-    displayName: 'Example',
-    installationSlug: 'example',
-  };
-
   it.each([{ emailSharedZoneId: 'mail-zone-id' }, { emailSenderDomain: 'mail.example.org' }])(
     'rejects incomplete shared email settings from the factory',
     (email) => {
-      expect(() => createPlatformDeploymentManifest({ ...input, ...email })).toThrow(
+      expect(() => createPlatformDeploymentManifest({ ...deploymentInput, ...email })).toThrow(
         'requires both emailSenderDomain and emailSharedZoneId',
       );
     },
@@ -23,7 +17,7 @@ describe('platform email deployment manifest', () => {
 
   it('rejects either incomplete shared email setting while parsing', () => {
     const complete = createPlatformDeploymentManifest({
-      ...input,
+      ...deploymentInput,
       emailSharedZoneId: 'mail-zone-id',
       emailSenderDomain: 'mail.example.org',
     });
@@ -48,90 +42,51 @@ describe('platform usage queue bindings', () => {
   ])(
     'attaches private proxy health only at enabled cutover: $trafficState / $publicEndpoints',
     ({ trafficState, publicEndpoints, bound }) => {
-      const deployment = createPlatformDeploymentManifest({
-        application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      });
-      const configs = createPlatformWorkerConfigs({
-        accountId: 'account',
-        apiUrl: 'https://api.example.com',
-        proxyUrl: 'https://proxy.example.com',
-        emailGatewayUrl: 'https://email.example.com',
-        deployment,
-        healthProbeToken: 'probe',
-        installationId: 'example',
-        ownershipNonce: 'ownership',
-        platformVersion: '1.0.0',
-        proxyHealthBinding: true,
-        trafficState,
-        publicEndpoints,
-        resources: {
-          hyperdrive: 'db',
-          isrCacheKv: 'isr',
-          legacyAssetsKv: 'assets',
-          routingKv: 'routing',
-          zone: 'zone',
-        },
-        runtimeEntrypoints: {
-          api: 'api.mjs',
-          proxy: 'proxy.mjs',
-          dispatch: 'dispatch.mjs',
-          tail: 'tail.mjs',
-          emailGateway: 'email.mjs',
-        },
-      });
+      const configs = workerConfigs({ proxyHealthBinding: true, trafficState, publicEndpoints });
       expect(configs.api.services).toEqual(
         bound
           ? [{ binding: 'PLATFORM_PROXY', service: deployment.resources.proxyWorker }]
           : undefined,
       );
-      expect(configs.proxy.services).toEqual([
-        { binding: 'API', service: deployment.resources.apiWorker },
-      ]);
     },
   );
 
+  it('adds no bootstrap service dependencies, assets or email bindings by default', () => {
+    const configs = workerConfigs();
+    expect(configs.api.services).toBeUndefined();
+    expect(configs.api.assets).toBeUndefined();
+    expect(configs.proxy.compatibility_flags).toEqual(['nodejs_compat']);
+    expect(configs.proxy.services).toEqual([
+      { binding: 'API', service: deployment.resources.apiWorker },
+    ]);
+    expect(configs.api).not.toHaveProperty('send_email');
+    expect(configs.proxy).not.toHaveProperty('send_email');
+    expect(configs.emailGateway).not.toHaveProperty('send_email');
+    expect(Object.keys(configs).sort()).toEqual([
+      'api',
+      'dispatch',
+      'emailGateway',
+      'proxy',
+      'tail',
+    ]);
+  });
+
   it('routes shared mail through its configured zone, independent of the application zone', () => {
-    const deployment = createPlatformDeploymentManifest({
-      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
+    const mailDeployment = createPlatformDeploymentManifest({
+      ...deploymentInput,
       emailSharedZoneId: 'mail-zone-id',
       emailSenderDomain: 'mail.example.org',
       authentication: { accessProtection: true },
       capabilities: { email: true },
-      displayName: 'Example',
-      installationSlug: 'example',
     });
-    const configs = createPlatformWorkerConfigs({
-      accountId: 'account',
-      apiUrl: 'https://api.example.com',
-      proxyUrl: 'https://proxy.example.com',
-      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
-      deployment,
-      healthProbeToken: 'probe',
-      installationId: 'installation',
-      ownershipNonce: 'ownership',
-      platformVersion: '1.0.0',
-      resources: {
-        hyperdrive: 'db',
-        isrCacheKv: 'isr',
-        legacyAssetsKv: 'assets',
-        routingKv: 'routing',
-        zone: 'app-zone-id',
-      },
-      runtimeEntrypoints: {
-        api: 'api.mjs',
-        proxy: 'proxy.mjs',
-        emailGateway: 'email-gateway.mjs',
-        tail: 'tail.mjs',
-        dispatch: 'dispatch.mjs',
-      },
+    const configs = workerConfigs({
+      deployment: mailDeployment,
       runtimeApiAssetsDirectory: '/runtime/api/assets',
     });
     const expected = {
       EMAIL_SHARED_ACCOUNT_ID: 'account',
       EMAIL_SHARED_ZONE_ID: 'mail-zone-id',
-      EMAIL_SHARED_INGRESS_NAME: deployment.resources.emailGatewayWorker,
+      EMAIL_SHARED_INGRESS_NAME: mailDeployment.resources.emailGatewayWorker,
     };
     expect(configs.api.vars).toMatchObject(expected);
     expect(configs.emailGateway.vars).toMatchObject(expected);
@@ -180,98 +135,33 @@ describe('platform usage queue bindings', () => {
       publicFetch: true,
     },
   ])(
-    'supports public health probes without adding bootstrap service dependencies: $apiUrl, $proxyUrl, workersDev=$workersDev',
+    'adds global_fetch_strictly_public only for workers.dev probes: $apiUrl, $proxyUrl, workersDev=$workersDev',
     ({ apiUrl, proxyUrl, workersDev, publicFetch }) => {
-      const deployment = createPlatformDeploymentManifest({
-        application: workersDev
-          ? {
-              baseDomain: 'account.workers.dev',
-              zoneName: '',
-              workersDev: { subdomain: 'account', installationId: 'example-123456abcdef' },
-            }
-          : { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      });
-      const configs = createPlatformWorkerConfigs({
-        accountId: 'account',
+      const configs = workerConfigs({
         apiUrl,
         proxyUrl,
-        emailGatewayUrl: 'https://email-gateway.account.workers.dev',
-        deployment,
-        healthProbeToken: 'probe',
-        installationId: 'example-123456abcdef',
-        ownershipNonce: 'ownership',
-        platformVersion: '1.0.0',
-        resources: {
-          hyperdrive: 'db',
-          isrCacheKv: 'isr',
-          legacyAssetsKv: 'assets',
-          routingKv: 'routing',
-          zone: workersDev ? '' : 'zone',
-        },
-        runtimeEntrypoints: {
-          api: 'api.mjs',
-          proxy: 'proxy.mjs',
-          emailGateway: 'email-gateway.mjs',
-          dispatch: 'dispatch.mjs',
-          tail: 'tail.mjs',
-        },
+        ...(workersDev
+          ? {
+              deployment: createPlatformDeploymentManifest({
+                ...deploymentInput,
+                application: {
+                  baseDomain: 'account.workers.dev',
+                  zoneName: '',
+                  workersDev: { subdomain: 'account', installationId: 'example-123456abcdef' },
+                },
+              }),
+            }
+          : {}),
       });
       expect(configs.api.compatibility_flags).toEqual([
         'nodejs_compat',
         ...(publicFetch ? ['global_fetch_strictly_public'] : []),
       ]);
-      expect(configs.api.services).toBeUndefined();
-      expect(configs.api.assets).toBeUndefined();
-      expect(configs.proxy.compatibility_flags).toEqual(['nodejs_compat']);
-      expect(configs.proxy.services).toEqual([
-        { binding: 'API', service: deployment.resources.apiWorker },
-      ]);
-      expect(configs.api).not.toHaveProperty('send_email');
-      expect(configs.proxy).not.toHaveProperty('send_email');
-      expect(configs.emailGateway).not.toHaveProperty('send_email');
-      expect(Object.keys(configs).sort()).toEqual([
-        'api',
-        'dispatch',
-        'emailGateway',
-        'proxy',
-        'tail',
-      ]);
     },
   );
 
   it('binds the existing queue only to trusted platform producers', () => {
-    const deployment = createPlatformDeploymentManifest({
-      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-      displayName: 'Example',
-      installationSlug: 'example',
-    });
-    const configs = createPlatformWorkerConfigs({
-      accountId: 'account',
-      apiUrl: 'https://api.example.com',
-      deployment,
-      healthProbeToken: 'probe',
-      installationId: 'installation',
-      ownershipNonce: 'ownership',
-      platformVersion: '1.0.0',
-      proxyUrl: 'https://proxy.example.com',
-      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
-      resources: {
-        hyperdrive: 'hyperdrive-id',
-        isrCacheKv: 'isr-id',
-        legacyAssetsKv: 'assets-id',
-        routingKv: 'routing-id',
-        zone: 'zone-id',
-      },
-      runtimeEntrypoints: {
-        api: 'api.mjs',
-        dispatch: 'dispatch.mjs',
-        proxy: 'proxy.mjs',
-        emailGateway: 'email-gateway.mjs',
-        tail: 'tail.mjs',
-      },
-    });
+    const configs = workerConfigs();
 
     expect((configs.api.queues as { producers: Array<unknown> }).producers).toContainEqual({
       binding: 'USAGE_EVENTS_QUEUE',
@@ -286,37 +176,10 @@ describe('platform usage queue bindings', () => {
   });
 
   it('keeps the tail worker off workers.dev and preview URLs when endpoints are public', () => {
-    const deployment = createPlatformDeploymentManifest({
-      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-      displayName: 'Example',
-      installationSlug: 'example',
-    });
-    const configs = createPlatformWorkerConfigs({
-      accountId: 'account',
+    const configs = workerConfigs({
       apiUrl: 'https://api.account.workers.dev',
-      deployment,
-      healthProbeToken: 'probe',
-      installationId: 'installation',
-      ownershipNonce: 'ownership',
-      platformVersion: '1.0.0',
       proxyUrl: 'https://proxy.account.workers.dev',
-      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
       publicEndpoints: true,
-      trafficState: 'enabled',
-      resources: {
-        hyperdrive: 'hyperdrive-id',
-        isrCacheKv: 'isr-id',
-        legacyAssetsKv: 'assets-id',
-        routingKv: 'routing-id',
-        zone: 'zone-id',
-      },
-      runtimeEntrypoints: {
-        api: 'api.mjs',
-        dispatch: 'dispatch.mjs',
-        proxy: 'proxy.mjs',
-        emailGateway: 'email-gateway.mjs',
-        tail: 'tail.mjs',
-      },
     });
 
     expect(configs.api.workers_dev).toBe(true);
@@ -325,38 +188,7 @@ describe('platform usage queue bindings', () => {
   });
 
   it('creates core Durable Objects with SQLite while preserving migration tags', () => {
-    const deployment = createPlatformDeploymentManifest({
-      application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-      displayName: 'Example',
-      installationSlug: 'example',
-    });
-    const configs = createPlatformWorkerConfigs({
-      accountId: 'account',
-      apiUrl: 'https://api.example.com',
-      deployment,
-      healthProbeToken: 'probe',
-      installationId: 'installation',
-      ownershipNonce: 'ownership',
-      platformVersion: '1.0.0',
-      proxyUrl: 'https://proxy.example.com',
-      emailGatewayUrl: 'https://email-gateway.account.workers.dev',
-      resources: {
-        hyperdrive: 'hyperdrive-id',
-        isrCacheKv: 'isr-id',
-        legacyAssetsKv: 'assets-id',
-        routingKv: 'routing-id',
-        zone: 'zone-id',
-      },
-      runtimeEntrypoints: {
-        api: 'api.mjs',
-        dispatch: 'dispatch.mjs',
-        proxy: 'proxy.mjs',
-        emailGateway: 'email-gateway.mjs',
-        tail: 'tail.mjs',
-      },
-    });
-
-    expect(configs.api.migrations).toEqual([
+    expect(workerConfigs().api.migrations).toEqual([
       { tag: 'v1', new_sqlite_classes: ['UsageCounter'] },
       { tag: 'v2', new_sqlite_classes: ['CronScheduler'] },
       { tag: 'v3', new_sqlite_classes: ['ErrorAlertMonitor'] },

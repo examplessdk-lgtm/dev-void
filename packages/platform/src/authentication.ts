@@ -1,3 +1,5 @@
+import { isPrintableText, record } from './validate.ts';
+
 /** Platform login and perimeter configuration are independent of app authentication. */
 export const PLATFORM_LOGIN_KINDS = ['github', 'google', 'oidc', 'cloudflare-access'] as const;
 export type PlatformLoginKind = (typeof PLATFORM_LOGIN_KINDS)[number];
@@ -209,22 +211,8 @@ export const DEFAULT_PLATFORM_SESSION_SECONDS: number = 30 * 24 * 60 * 60;
 export const GOOGLE_OIDC_ISSUER = 'https://accounts.google.com';
 export const PLATFORM_AUTH_SETUP_PROOF_PREFIX = 'void.platform.auth.setup.v1';
 
-function record(value: unknown, name: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${name} must be an object.`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function string(value: unknown, name: string, maximum = 512): string {
-  if (
-    typeof value !== 'string' ||
-    !value.trim() ||
-    value.length > maximum ||
-    Array.from(value).some(
-      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
-    )
-  ) {
+  if (!isPrintableText(value, maximum)) {
     throw new Error(`${name} must be a nonempty string of at most ${maximum} characters.`);
   }
   return value.trim();

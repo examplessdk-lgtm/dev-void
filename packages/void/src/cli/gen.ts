@@ -1,26 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { log, select, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
 import { join, dirname, relative } from 'pathslash';
 import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
-import { readConfig, getDatabaseDialect } from '../config.ts';
-import { writeDrizzleConfig } from '../drizzle/config.ts';
+import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
+import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
+import { snapshotDrizzleOutputs } from '../drizzle/generate.ts';
 import { collectMigrations, readJournal } from '../migrations/collect.ts';
-import { assertJournalCoherence, listDrizzleArtifacts } from '../migrations/validate.ts';
+import { assertJournalCoherence } from '../migrations/validate.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import type { GenArgs } from './gen-args.ts';
 import { printSuccess } from './output.ts';
-import { buildDrizzleKitSpawnEnv } from './yarn-pnp.ts';
-
-const drizzleKitBin = join(fileURLToPath(import.meta.resolve('drizzle-kit')), '..', 'bin.cjs');
+import { buildDrizzleKitSpawnEnv, drizzleKitBin } from './yarn-pnp.ts';
 
 export async function runGenCommand(root: string, args: GenArgs): Promise<void> {
   console.log();
@@ -105,126 +96,62 @@ type ColumnSpec = {
   nullable: boolean;
 };
 
-function drizzleColumnDef(col: ColumnSpec): string {
-  const { name, type } = col;
+type ColumnBuilder = { fn: string; options?: string };
+
+const TEXT_COLUMN: ColumnBuilder = { fn: 'text' };
+
+// Types without a builder (`datetime`, `blob`) fall back to a plain `text()` column.
+const COLUMN_BUILDERS: Record<DatabaseDialect, Partial<Record<string, ColumnBuilder>>> = {
+  sqlite: {
+    string: TEXT_COLUMN,
+    text: TEXT_COLUMN,
+    integer: { fn: 'integer' },
+    boolean: { fn: 'integer', options: '{ mode: "boolean" }' },
+    real: { fn: 'real' },
+  },
+  postgresql: {
+    string: TEXT_COLUMN,
+    text: TEXT_COLUMN,
+    integer: { fn: 'integer' },
+    boolean: { fn: 'boolean' },
+    real: { fn: 'doublePrecision' },
+  },
+  mysql: {
+    string: TEXT_COLUMN,
+    text: TEXT_COLUMN,
+    integer: { fn: 'int' },
+    boolean: { fn: 'boolean' },
+    real: { fn: 'double' },
+  },
+};
+
+const BASE_IMPORTS: Record<DatabaseDialect, Array<string>> = {
+  sqlite: ['text', 'integer'],
+  postgresql: ['text', 'serial', 'timestamp'],
+  mysql: ['int', 'text', 'timestamp'],
+};
+
+function drizzleColumnDef(dialect: DatabaseDialect, col: ColumnSpec): string {
+  const { name } = col;
+  const builder = COLUMN_BUILDERS[dialect][col.type];
+  if (!builder) {
+    return `  ${name}: text("${name}"),`;
+  }
+  const args = builder.options ? `"${name}", ${builder.options}` : `"${name}"`;
   const notNull = col.nullable ? '' : '.notNull()';
-  switch (type) {
-    case 'string':
-    case 'text':
-      return `  ${name}: text("${name}")${notNull},`;
-    case 'integer':
-      return `  ${name}: integer("${name}")${notNull},`;
-    case 'boolean':
-      return `  ${name}: integer("${name}", { mode: "boolean" })${notNull}.default(false),`;
-    case 'real':
-      return `  ${name}: real("${name}")${notNull},`;
-    default:
-      return `  ${name}: text("${name}"),`;
-  }
+  const defaultValue = col.type === 'boolean' ? '.default(false)' : '';
+  return `  ${name}: ${builder.fn}(${args})${notNull}${defaultValue},`;
 }
 
-function drizzleImportsForColumns(columns: Array<ColumnSpec>): Array<string> {
-  const types = new Set<string>(['text', 'integer']);
+function drizzleImportsForColumns(
+  dialect: DatabaseDialect,
+  columns: Array<ColumnSpec>,
+): Array<string> {
+  const imports = new Set(BASE_IMPORTS[dialect]);
   for (const col of columns) {
-    switch (col.type) {
-      case 'string':
-      case 'text':
-        types.add('text');
-        break;
-      case 'integer':
-        types.add('integer');
-        break;
-      case 'boolean':
-        types.add('integer');
-        break;
-      case 'real':
-        types.add('real');
-        break;
-      default:
-        types.add('text');
-    }
+    imports.add(COLUMN_BUILDERS[dialect][col.type]?.fn ?? 'text');
   }
-  return [...types].sort();
-}
-
-function drizzleColumnDefPg(col: ColumnSpec): string {
-  const { name, type } = col;
-  const notNull = col.nullable ? '' : '.notNull()';
-  switch (type) {
-    case 'string':
-    case 'text':
-      return `  ${name}: text("${name}")${notNull},`;
-    case 'integer':
-      return `  ${name}: integer("${name}")${notNull},`;
-    case 'boolean':
-      return `  ${name}: boolean("${name}")${notNull}.default(false),`;
-    case 'real':
-      return `  ${name}: doublePrecision("${name}")${notNull},`;
-    default:
-      return `  ${name}: text("${name}"),`;
-  }
-}
-
-function drizzleImportsForColumnsPg(columns: Array<ColumnSpec>): Array<string> {
-  const types = new Set<string>(['text', 'serial', 'timestamp']);
-  for (const col of columns) {
-    switch (col.type) {
-      case 'string':
-      case 'text':
-        types.add('text');
-        break;
-      case 'integer':
-        types.add('integer');
-        break;
-      case 'boolean':
-        types.add('boolean');
-        break;
-      case 'real':
-        types.add('doublePrecision');
-        break;
-      default:
-        types.add('text');
-    }
-  }
-  return [...types].sort();
-}
-
-function drizzleColumnDefMySql(col: ColumnSpec): string {
-  const { name, type } = col;
-  const notNull = col.nullable ? '' : '.notNull()';
-  switch (type) {
-    case 'string':
-    case 'text':
-      return `  ${name}: text("${name}")${notNull},`;
-    case 'integer':
-      return `  ${name}: int("${name}")${notNull},`;
-    case 'boolean':
-      return `  ${name}: boolean("${name}")${notNull}.default(false),`;
-    case 'real':
-      return `  ${name}: double("${name}")${notNull},`;
-    default:
-      return `  ${name}: text("${name}"),`;
-  }
-}
-
-function drizzleImportsForColumnsMySql(columns: Array<ColumnSpec>): Array<string> {
-  const types = new Set<string>(['int', 'text', 'timestamp']);
-  for (const col of columns) {
-    switch (col.type) {
-      case 'integer':
-        types.add('int');
-        break;
-      case 'boolean':
-        types.add('boolean');
-        break;
-      case 'real':
-        types.add('double');
-        break;
-      default:
-        types.add('text');
-    }
-  }
-  return [...types].sort();
+  return [...imports].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -283,87 +210,52 @@ async function resolveValidator(root: string): Promise<Validator> {
   return choice as Validator;
 }
 
-function validatorTypeFor(validator: Validator, col: ColumnSpec): string {
-  if (validator === 'valibot') {
-    return valibotType(col);
-  }
-  if (validator === 'zod') {
-    return zodType(col);
-  }
-  // arktype handled separately via string syntax
-  return arktypeType(col);
-}
+type SchemaValidator = Exclude<Validator, 'none'>;
 
-function valibotType(col: ColumnSpec): string {
-  let base: string;
-  switch (col.type) {
-    case 'string':
-    case 'text':
-    case 'datetime':
-      base = 'v.string()';
-      break;
-    case 'integer':
-    case 'real':
-      base = 'v.number()';
-      break;
-    case 'boolean':
-      base = 'v.boolean()';
-      break;
-    case 'blob':
-      base = 'v.instance(Blob)';
-      break;
-    default:
-      base = 'v.string()';
-  }
-  return col.nullable ? `v.optional(${base})` : base;
-}
+type ValidatorTypes = {
+  string: string;
+  number: string;
+  boolean: string;
+  blob: string;
+  optional: (base: string) => string;
+};
 
-function zodType(col: ColumnSpec): string {
-  let base: string;
-  switch (col.type) {
-    case 'string':
-    case 'text':
-    case 'datetime':
-      base = 'z.string()';
-      break;
-    case 'integer':
-    case 'real':
-      base = 'z.number()';
-      break;
-    case 'boolean':
-      base = 'z.boolean()';
-      break;
-    case 'blob':
-      base = 'z.instanceof(Blob)';
-      break;
-    default:
-      base = 'z.string()';
-  }
-  return col.nullable ? `${base}.optional()` : base;
-}
+const VALIDATOR_TYPES: Record<SchemaValidator, ValidatorTypes> = {
+  valibot: {
+    string: 'v.string()',
+    number: 'v.number()',
+    boolean: 'v.boolean()',
+    blob: 'v.instance(Blob)',
+    optional: (base) => `v.optional(${base})`,
+  },
+  zod: {
+    string: 'z.string()',
+    number: 'z.number()',
+    boolean: 'z.boolean()',
+    blob: 'z.instanceof(Blob)',
+    optional: (base) => `${base}.optional()`,
+  },
+  arktype: {
+    string: 'string',
+    number: 'number',
+    boolean: 'boolean',
+    blob: 'instanceof Blob',
+    optional: (base) => `${base} | undefined`,
+  },
+};
 
-function arktypeType(col: ColumnSpec): string {
-  let base: string;
-  switch (col.type) {
-    case 'string':
-    case 'text':
-    case 'datetime':
-      base = 'string';
-      break;
-    case 'integer':
-    case 'real':
-      base = 'number';
-      break;
-    case 'boolean':
-      base = 'boolean';
-      break;
-    case 'blob':
-      base = 'instanceof Blob';
-      break;
-    default:
-      base = 'string';
-  }
-  return col.nullable ? `${base} | undefined` : base;
+// Column types not listed here (`string`, `text`, `datetime`) validate as strings.
+const VALUE_KINDS: Partial<Record<string, 'number' | 'boolean' | 'blob'>> = {
+  integer: 'number',
+  real: 'number',
+  boolean: 'boolean',
+  blob: 'blob',
+};
+
+function validatorType(validator: SchemaValidator, col: ColumnSpec): string {
+  const types = VALIDATOR_TYPES[validator];
+  const base = types[VALUE_KINDS[col.type] ?? 'string'];
+  return col.nullable ? types.optional(base) : base;
 }
 
 function getImportLine(validator: Validator): string | null {
@@ -379,12 +271,14 @@ function getImportLine(validator: Validator): string | null {
   }
 }
 
-function getBodySchema(validator: Validator, columns: Array<ColumnSpec>): string {
+function getBodySchema(validator: SchemaValidator, columns: Array<ColumnSpec>): string {
   if (validator === 'arktype') {
-    const fields = columns.map((c) => `    ${c.name}: "${arktypeType(c)}",`).join('\n');
+    const fields = columns
+      .map((c) => `    ${c.name}: "${validatorType(validator, c)}",`)
+      .join('\n');
     return `type({\n${fields}\n  })`;
   }
-  const fields = columns.map((c) => `    ${c.name}: ${validatorTypeFor(validator, c)},`).join('\n');
+  const fields = columns.map((c) => `    ${c.name}: ${validatorType(validator, c)},`).join('\n');
   const prefix = validator === 'valibot' ? 'v' : 'z';
   return `${prefix}.object({\n${fields}\n  })`;
 }
@@ -511,59 +405,43 @@ async function runModel(root: string, name: string, columns: Array<ColumnSpec>):
   const modelPath = join(schemaDir, `${name}.ts`);
 
   // 1. Generate Drizzle table definition
+  const colDefs = columns.map((col) => drizzleColumnDef(dialect, col));
+  const columnImports = drizzleImportsForColumns(dialect, columns).join(', ');
   let content: string;
   if (dialect === 'postgresql') {
-    const colDefs = columns.map((col) => drizzleColumnDefPg(col));
-    const columnImports = drizzleImportsForColumnsPg(columns);
-    const allCols = [
+    content = [
+      `import { pgTable, ${columnImports} } from "void/schema-pg";`,
+      '',
+      `export const ${name} = pgTable("${name}", {`,
       `  id: serial("id").primaryKey(),`,
       ...colDefs,
       `  createdAt: timestamp("created_at").notNull().defaultNow(),`,
       `  updatedAt: timestamp("updated_at").notNull().defaultNow(),`,
-    ];
-
-    content = [
-      `import { pgTable, ${columnImports.join(', ')} } from "void/schema-pg";`,
-      '',
-      `export const ${name} = pgTable("${name}", {`,
-      ...allCols,
       '});',
       '',
     ].join('\n');
   } else if (dialect === 'mysql') {
-    const colDefs = columns.map((col) => drizzleColumnDefMySql(col));
-    const columnImports = drizzleImportsForColumnsMySql(columns);
-    const allCols = [
+    content = [
+      `import { mysqlTable, ${columnImports} } from "void/schema-mysql";`,
+      '',
+      `export const ${name} = mysqlTable("${name}", {`,
       `  id: int("id").autoincrement().primaryKey(),`,
       ...colDefs,
       `  createdAt: timestamp("created_at").notNull().defaultNow(),`,
       `  updatedAt: timestamp("updated_at").notNull().defaultNow(),`,
-    ];
-
-    content = [
-      `import { mysqlTable, ${columnImports.join(', ')} } from "void/schema-mysql";`,
-      '',
-      `export const ${name} = mysqlTable("${name}", {`,
-      ...allCols,
       '});',
       '',
     ].join('\n');
   } else {
-    const colDefs = columns.map((col) => drizzleColumnDef(col));
-    const columnImports = drizzleImportsForColumns(columns);
-    const allCols = [
+    content = [
+      `import { sqliteTable, ${columnImports} } from "void/schema-d1";`,
+      `import { sql } from "void/db";`,
+      '',
+      `export const ${name} = sqliteTable("${name}", {`,
       `  id: integer("id").primaryKey({ autoIncrement: true }),`,
       ...colDefs,
       '  createdAt: text("created_at").notNull().default(sql`(datetime(\'now\'))`),',
       '  updatedAt: text("updated_at").notNull().default(sql`(datetime(\'now\'))`),',
-    ];
-
-    content = [
-      `import { sqliteTable, ${columnImports.join(', ')} } from "void/schema-d1";`,
-      `import { sql } from "void/db";`,
-      '',
-      `export const ${name} = sqliteTable("${name}", {`,
-      ...allCols,
       '});',
       '',
     ].join('\n');
@@ -605,27 +483,9 @@ function runMigration(root: string, name: string): void {
   const migrationsDir = readProjectPaths(root).migrationsDir;
   mkdirSync(migrationsDir, { recursive: true });
 
-  // Drift / partial-state gate. Run the same check the rest of the db
-  // commands (`void db status`, `migrate`, `reset`, `deploy`) use as their
-  // preflight, BEFORE any other guard and BEFORE writing any file. This is
-  // the first line of defense and it subsumes several footguns in one pass:
-  //   - `_journal.json` missing but `meta/*_snapshot.json` or `migrations.js`
-  //     still on disk (partial drizzle-kit state — a botched merge / manual
-  //     cleanup that would otherwise let us write a new .sql file the rest
-  //     of the CLI immediately rejects).
-  //   - Journal entries that don't line up with the `.sql` files on disk
-  //     (orphan file / missing file drift).
-  // Must run BEFORE the bundled-mode guard below: when `migrations.js`
-  // survived a bad merge but `_journal.json` is missing, the bundled guard
-  // would otherwise advise "delete migrations.js" and leave the project in
-  // a bare-legacy + orphan-SQL state on the next run. Surfacing the partial
-  // state here points the user at the correct recovery (restore the journal
-  // OR delete all drizzle artifacts) before we look at the bundle at all.
-  // Collect BEFORE the new scaffold so the check sees only pre-existing
-  // state. Bare-legacy (no journal, no artifacts) and the playground
-  // placeholder shape (`entries: []`, no artifacts) are silent-passes in
-  // `assertJournalCoherence`, which is exactly the behavior `gen migration`
-  // wants here.
+  // The same preflight as the other db commands, before any write. It runs
+  // before the bundle check so a leftover migrations.js without a journal
+  // gets the partial-state recovery advice.
   const currentMigrations = collectMigrations(migrationsDir);
   try {
     assertJournalCoherence(migrationsDir, currentMigrations);
@@ -634,28 +494,8 @@ function runMigration(root: string, name: string): void {
     process.exit(1);
   }
 
-  // Refuse to scaffold migrations into a project that uses drizzle-kit's
-  // bundled migration format (`drizzle-kit generate --bundle`, used by
-  // Expo/`durable-sqlite`). Bundled mode emits a `migrations.js` file
-  // alongside `_journal.json` that hard-codes one `import m0000 from
-  // './<tag>.sql'` line per journal entry plus an `{ journal, migrations:
-  // { m0000, m0001, ... } }` export. Drizzle's runtime bundled migrator
-  // iterates `journal.entries` and looks up `migrations[\`m${idx}\`]` by
-  // padded idx. If we append a new journal entry without also adding a
-  // matching `m000N` export to `migrations.js`, the next migration run
-  // blows up at runtime with `Missing migration: <tag>`.
-  //
-  // Rewriting `migrations.js` from here would lock us to drizzle-kit's
-  // exact emit format (import path, padding, trailing comma) and break
-  // silently whenever drizzle-kit bumps that format. Shelling out to
-  // `drizzle-kit generate` doesn't help either — it runs a schema diff, not
-  // a bundle-rebuild from existing SQL. Refusing with a helpful error is
-  // the only honest option: it turns a silent runtime failure into a
-  // deterministic CLI error with a clear recovery path. Fail fast, before
-  // any file write or journal mutation, so there's nothing to roll back.
-  // By the time we get here, `assertJournalCoherence` has already cleared
-  // the partial-state shape (journal missing + bundle on disk), so this
-  // guard only fires on a coherent drizzle state with the bundle present.
+  // Bundled mode needs a matching `m000N` import in migrations.js for every
+  // journal entry, and only drizzle-kit can regenerate that file.
   const bundlePath = join(migrationsDir, 'migrations.js');
   if (existsSync(bundlePath)) {
     log.error(
@@ -668,64 +508,15 @@ function runMigration(root: string, name: string): void {
     process.exit(1);
   }
 
-  // Integrate with a drizzle-managed project by delegating to
-  // `drizzle-kit generate --custom --name <name>`. Drizzle-kit is the
-  // source of truth for both `_journal.json` and `meta/<prefix>_snapshot.
-  // json`, and running it here guarantees three things we cannot produce
-  // in-process without re-implementing a schema compiler:
-  //
-  //   1. A fresh `<timestamp>_<name>.sql` stub under `db/migrations/`
-  //      (drizzle-kit writes an empty `.sql` for `--custom`).
-  //   2. An updated `_journal.json` with a new entry appended (new idx,
-  //      new timestamp, inherited version/breakpoints).
-  //   3. A new `meta/<prefix>_snapshot.json` that is a snapshot of the
-  //      **current** `db/schema.ts`, NOT a clone of the previous
-  //      snapshot.
-  //
-  // Bullet 3 is the whole reason we delegate. Cloning the previous
-  // snapshot in-process would leave the new journal entry pointing at a
-  // stale schema state: if the user had changed `db/schema.ts` before
-  // running `void gen migration` to hand-write the matching DDL, the next
-  // `void db generate` / `drizzle-kit generate` would diff the current
-  // schema against the stale snapshot and re-emit the same DDL the custom
-  // migration had already applied. drizzle-kit's own `generate --custom`
-  // path uses its schema-compilation pipeline, so the emitted snapshot
-  // always matches what drizzle-kit would produce on the next invocation.
-  //
-  // We still verify up front that the snapshot matching the last journal
-  // entry is on disk. Without it drizzle-kit would fail with its own
-  // (less actionable) error; the preflight gives the user a cleaner
-  // message and keeps the refusal consistent with the other `void db`
-  // commands.
-  //
-  // By the time we get here, `assertJournalCoherence` has already
-  // rejected the partial-state shape (missing journal + leftover
-  // snapshots), drift between journal tags and `.sql` files on disk, AND
-  // a structurally invalid `entries` shape (non-array). The bundled-mode
-  // guard above has already refused the `migrations.js` case. This block
-  // handles two remaining drizzle shapes:
-  //   - Journal with entries (the normal case): delegate to drizzle-kit.
-  //   - Empty-entries journal + stale snapshot files: a weird state that
-  //     should have been caught earlier. Refuse defensively — we have no
-  //     snapshot tied to an entry we can chain from.
-  // A journal with `entries: []` AND no accompanying artifacts is the
-  // kitchen-sink playground placeholder and falls through to the bare-
-  // legacy write path below.
+  // With journal entries, delegate to `drizzle-kit generate --custom`: it also
+  // snapshots the current schema, so the next `void db generate` does not
+  // re-emit DDL that the custom migration already applies.
   const existingJournal = readJournal(migrationsDir);
   if (existingJournal !== undefined && existingJournal.entries.length > 0) {
     const lastEntry = existingJournal.entries[existingJournal.entries.length - 1];
     const metaDir = join(migrationsDir, 'meta');
-    // Derive the previous snapshot filename from `lastEntry.tag`, not from
-    // a directory listing. Drizzle-kit's snapshot files are named
-    // `<prefix>_snapshot.json`, where `<prefix>` matches the journal tag's
-    // prefix under either the `timestamp` or `index` drizzle-kit naming
-    // conventions — both are the portion before the first underscore. A
-    // directory-sort-then-last-entry approach would pick up stale snapshots
-    // left behind by a merge or manual cleanup (e.g. a lex-higher rogue
-    // file lurking under `meta/`) and diff the next `void db generate`
-    // against the wrong baseline, re-emitting already-applied schema
-    // changes. Using the journal tag binds us to the snapshot drizzle-kit
-    // actually wrote alongside that entry — the only safe baseline.
+    // Use the snapshot named by the last journal tag, not the newest file in
+    // meta/, which may be a stale leftover.
     const lastSnapshotPrefix = lastEntry.tag.split('_')[0];
     const prevSnapshotPath = join(metaDir, `${lastSnapshotPrefix}_snapshot.json`);
     if (!existsSync(prevSnapshotPath)) {
@@ -738,41 +529,11 @@ function runMigration(root: string, name: string): void {
       process.exit(1);
     }
 
-    // Snapshot `_journal.json` bytes up front so a mid-spawn failure can
-    // byte-restore the file. Drizzle-kit is atomic on success but a
-    // partial write on a crashed invocation would otherwise brick the
-    // project — every subsequent `void db` command then crashes in
-    // `readJournal` / `assertJournalCoherence`.
-    const journalPath = join(metaDir, '_journal.json');
-    const originalJournalBytes: Buffer | null = existsSync(journalPath)
-      ? readFileSync(journalPath)
-      : null;
-    const snapshotsBefore = new Set(
-      readdirSync(metaDir).filter((f) => f.endsWith('_snapshot.json')),
-    );
+    const rollBack = snapshotDrizzleOutputs(migrationsDir);
     const sqlFilesBefore = new Set(readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')));
 
-    // The journal is authoritative once it exists. `existingJournal.
-    // dialect` is the dialect drizzle-kit committed to when the first migration
-    // was generated; every subsequent snapshot under `meta/` is chained off
-    // that same dialect. Reading the dialect from `void.config.ts` and passing it
-    // to `drizzle-kit generate --custom` risks writing a new snapshot in the
-    // WRONG dialect if the user edited `void.config.ts`'s `database` field without
-    // dropping the existing migrations. The next `void db generate` would then
-    // diff against an incompatible chain and corrupt the project.
-    //
-    // Cross-check that the two agree. If they disagree, refuse — the only
-    // correct recovery is an explicit one (revert void.config.ts, or drop
-    // db/migrations/ and regenerate).
-    //
-    // Whitelist the dialects Void supports instead of collapsing anything unknown
-    // to sqlite. A hand-edited or merge-corrupted journal with e.g.
-    // `mysql`, `pg`, or an empty dialect would otherwise silently be
-    // treated as sqlite, producing either a sqlite snapshot on top of
-    // a non-sqlite chain or a confusing "void.config.ts is configured for
-    // X but journal says sqlite" cross-check message. Refuse loudly
-    // instead so the user restores the journal (or drops db/migrations/)
-    // on their terms.
+    // The existing snapshot chain was built for the journal's dialect. Refuse
+    // rather than append a snapshot in a different dialect.
     let journalDialect: 'sqlite' | 'postgresql' | 'mysql';
     if (existingJournal.dialect === 'sqlite') {
       journalDialect = 'sqlite';
@@ -803,26 +564,10 @@ function runMigration(root: string, name: string): void {
     const additionalSchemas = existsSync(authSchemaPath) ? [authSchemaPath] : undefined;
     const configPath = writeDrizzleConfig(
       root,
-      journalDialect === 'postgresql'
-        ? 'postgresql://dummy'
-        : journalDialect === 'mysql'
-          ? 'mysql://dummy'
-          : ':memory:',
+      PLACEHOLDER_DB_URL[journalDialect],
       journalDialect,
       { additionalSchemas },
     );
-
-    // Under Yarn Berry PnP, there is no `node_modules` tree —
-    // dependencies live inside ZIP archives (`.yarn/cache/*.zip`) and are
-    // resolved through `.pnp.cjs`, which patches `fs` +
-    // `Module._resolveFilename` to handle the virtual paths. Plain `node
-    // drizzle-kit` cannot load that resolver, so drizzle-kit fails to
-    // resolve `void/schema-d1` from the user's `db/schema.ts`. The
-    // shared helper walks ancestors for the PnP markers and returns a
-    // child env with `NODE_OPTIONS` pre-populated with the right
-    // `--require` / `--experimental-loader` flags. Non-PnP projects get
-    // a plain clone of `process.env`.
-    const childEnv = buildDrizzleKitSpawnEnv(root);
 
     const result = spawnSync(
       process.execPath,
@@ -832,42 +577,13 @@ function runMigration(root: string, name: string): void {
         stdio: 'pipe',
         encoding: 'utf-8',
         shell: process.platform === 'win32',
-        env: childEnv,
+        // Yarn PnP projects need the PnP loader to resolve `void/schema-*`.
+        env: buildDrizzleKitSpawnEnv(root),
       },
     );
 
     if (result.error || result.status !== 0) {
-      // Rollback: byte-restore the journal and unlink any new files
-      // drizzle-kit may have written before it failed. Best-effort — if
-      // restore itself fails, surface the original error anyway because
-      // that's the actionable one.
-      if (originalJournalBytes !== null) {
-        try {
-          writeFileSync(journalPath, originalJournalBytes);
-        } catch {
-          // Swallow: surfacing the original failure is more useful.
-        }
-      }
-      if (existsSync(metaDir)) {
-        for (const f of readdirSync(metaDir)) {
-          if (f.endsWith('_snapshot.json') && !snapshotsBefore.has(f)) {
-            try {
-              unlinkSync(join(metaDir, f));
-            } catch {
-              // Swallow.
-            }
-          }
-        }
-      }
-      for (const f of readdirSync(migrationsDir)) {
-        if (f.endsWith('.sql') && !sqlFilesBefore.has(f)) {
-          try {
-            unlinkSync(join(migrationsDir, f));
-          } catch {
-            // Swallow.
-          }
-        }
-      }
+      rollBack();
       const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
       log.error(
         [
@@ -880,8 +596,6 @@ function runMigration(root: string, name: string): void {
       process.exit(1);
     }
 
-    // Locate the newly-created .sql file (there should be exactly one
-    // added) so we can tell the user where their custom migration lives.
     const newSqlFile = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
       .find((f) => !sqlFilesBefore.has(f));
@@ -891,25 +605,6 @@ function runMigration(root: string, name: string): void {
 
     printSuccess('Migration created and journal updated.');
     return;
-  }
-
-  // Defensive guard: empty journal accompanied by stale drizzle artifacts
-  // is a weird partial shape. `assertJournalCoherence` should have caught
-  // this earlier (an empty-entries journal plus leftover `meta/*_snapshot.
-  // json` is the same partial-state flavor it rejects elsewhere), but
-  // surface a clear refusal here so we never fall through to bare-legacy
-  // and strand a new .sql file in a project that cannot integrate it.
-  if (existingJournal !== undefined && existingJournal.entries.length === 0) {
-    const drizzleArtifacts = listDrizzleArtifacts(migrationsDir);
-    if (drizzleArtifacts.length > 0) {
-      log.error(
-        'db/migrations/meta/_journal.json has empty entries but stale drizzle-kit snapshots are on disk.',
-      );
-      log.error(
-        'Restore the journal entries from version control (or run `void db generate`), or delete the stale drizzle artifacts and rerun.',
-      );
-      process.exit(1);
-    }
   }
 
   const timestamp = getMigrationTimestamp(migrationsDir);

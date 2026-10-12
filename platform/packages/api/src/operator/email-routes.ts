@@ -711,7 +711,7 @@ export async function addOperatorEmailDomain(
       effect: existing
         ? `The existing assignment for ${domain} belongs to ${project.slug}; use sync to reconcile it.`
         : mx === 'subdomain'
-          ? `${domain} already receives mail; setup will refuse it — name a subdomain such as mail.${domain} instead.`
+          ? `${domain} already receives mail; setup will refuse it — use an unused domain apex or a platform shared email address instead.`
           : credentialKind === 'platform'
             ? `Registers ${domain} for ${project.slug} on the platform's own Cloudflare credential; the zone must be in the platform's account.`
             : `Registers ${domain} for ${project.slug} with the supplied API token.`,

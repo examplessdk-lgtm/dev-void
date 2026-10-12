@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vite-plus/test';
+import { buildMime, normalizeEmail } from '../../../../../packages/void/src/runtime/email/mime.ts';
 
 vi.mock('cloudflare:email', () => ({
   EmailMessage: class {
@@ -100,7 +101,7 @@ function fixture() {
     await next();
   });
   app.route('/email', email);
-  const send = async (key: string, recipients = ['one@example.com']) =>
+  const send = async (key: string, recipients = ['one@example.com'], raw?: Uint8Array) =>
     app.request(
       '/email/send',
       {
@@ -109,7 +110,11 @@ function fixture() {
         body: JSON.stringify({
           from: 'acme+news@mail.example.com',
           recipients,
-          mimeBase64: btoa('From: acme+news@mail.example.com\r\nSubject: hello\r\n\r\nbody'),
+          mimeBase64: btoa(
+            raw
+              ? Array.from(raw, (byte) => String.fromCharCode(byte)).join('')
+              : 'From: acme+news@mail.example.com\r\nSubject: hello\r\n\r\nbody',
+          ),
           idempotencyKey: key,
         }),
       },
@@ -119,6 +124,31 @@ function fixture() {
 }
 
 describe('proxy email admission delivery', () => {
+  it('replays rebuilt SDK multipart MIME without another provider submission', async () => {
+    const test = fixture();
+    const options = {
+      from: 'acme+news@mail.example.com',
+      to: 'one@example.com',
+      subject: 'multipart retry',
+      text: 'Plain text',
+      html: '<p>HTML</p>',
+      attachments: [{ filename: 'note.txt', content: 'Attachment', contentType: 'text/plain' }],
+    };
+    const normalized = await normalizeEmail(options);
+    const firstMime = buildMime(normalized).raw;
+    const retryMime = buildMime(normalized).raw;
+    const first = await test.send('multipart', undefined, firstMime);
+    const retry = await test.send('multipart', undefined, retryMime);
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(await first.json());
+    expect(test.sender).toHaveBeenCalledTimes(1);
+
+    const changed = buildMime(await normalizeEmail({ ...options, text: 'Changed text' })).raw;
+    expect((await test.send('multipart', undefined, changed)).status).toBe(409);
+    expect(test.sender).toHaveBeenCalledTimes(1);
+  });
+
   it('replays a caller key without another provider submission', async () => {
     const test = fixture();
     expect((await test.send('one')).status).toBe(200);

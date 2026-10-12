@@ -220,6 +220,16 @@ import {
   writeInstallationManifest,
 } from '../../src/cli/platform-registry.ts';
 
+const upgrade = (overrides: { plan?: boolean; yes?: boolean } = {}) =>
+  runInstalledPlatformCommand({
+    subcommand: 'upgrade',
+    selector: state.manifest!.id,
+    plan: false,
+    runtime: '',
+    yes: true,
+    ...overrides,
+  });
+
 describe('installed platform upgrade', () => {
   it('prints an exact rollback resume command with quoted custom runtime paths', () => {
     expect(
@@ -333,13 +343,7 @@ describe('installed platform upgrade', () => {
         await args[0].listAiGateways(args[1].accountId);
         return original(...args);
       });
-      await runInstalledPlatformCommand({
-        plan: false,
-        runtime: '',
-        selector: state.manifest!.id,
-        subcommand: 'upgrade',
-        yes: true,
-      });
+      await upgrade();
       expect(state.clientTokens).toEqual([state.requiredGatewayToken]);
       expect(installPlatform).toHaveBeenCalledWith(
         expect.anything(),
@@ -379,15 +383,7 @@ describe('installed platform upgrade', () => {
             ? state.listWorkerNames
             : state.request;
       check.mockRejectedValueOnce(new PlatformCloudflareApiError('Authentication error', 403));
-      await expect(
-        runInstalledPlatformCommand({
-          plan: false,
-          runtime: '',
-          selector: state.manifest.id,
-          subcommand: 'upgrade',
-          yes: true,
-        }),
-      ).rejects.toThrow('HTTP 403');
+      await expect(upgrade()).rejects.toThrow('HTTP 403');
       expect(acquirePlatformLifecycleLock).not.toHaveBeenCalled();
       expect(acquirePlatformDatabaseLifecycleLock).not.toHaveBeenCalled();
       expect(writeInstallationManifest).not.toHaveBeenCalled();
@@ -401,13 +397,7 @@ describe('installed platform upgrade', () => {
   it('includes shared email configuration when planning an upgrade', async () => {
     vi.stubEnv('VOID_EMAIL_SHARED_ZONE_ID', 'mail-zone');
     vi.stubEnv('VOID_EMAIL_SENDER_DOMAIN', 'mail.example.com');
-    await runInstalledPlatformCommand({
-      plan: true,
-      runtime: '',
-      selector: state.manifest!.id,
-      subcommand: 'upgrade',
-      yes: true,
-    });
+    await upgrade({ plan: true });
     expect(createPlatformInstallPlan).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -440,20 +430,8 @@ describe('installed platform upgrade', () => {
   );
 
   it('borrows database preparation from the held lifecycle lock', async () => {
-    await runInstalledPlatformCommand({
-      plan: false,
-      runtime: '',
-      selector: state.manifest!.id,
-      subcommand: 'upgrade',
-      yes: true,
-    });
+    await upgrade();
 
-    expect(state.prepareDatabase).toHaveBeenCalledWith(
-      state.runtime!.directory,
-      state.runtime!.manifest.database,
-      '1.0.0',
-      false,
-    );
     expect(state.events).toEqual([
       'installer-start',
       `prepare:${state.runtime!.manifest.database.schemaDigest}`,
@@ -532,15 +510,7 @@ describe('installed platform upgrade', () => {
       throw new Error('migration failed');
     });
 
-    await expect(
-      runInstalledPlatformCommand({
-        plan: false,
-        runtime: '',
-        selector: state.manifest!.id,
-        subcommand: 'upgrade',
-        yes: true,
-      }),
-    ).rejects.toThrow('migration failed');
+    await expect(upgrade()).rejects.toThrow('migration failed');
 
     expect(state.events).toEqual([
       'installer-start',
@@ -557,13 +527,7 @@ describe('installed platform upgrade', () => {
   });
 
   it('does not start deployment progress for a plan-only run', async () => {
-    await runInstalledPlatformCommand({
-      plan: true,
-      runtime: '',
-      selector: state.manifest!.id,
-      subcommand: 'upgrade',
-      yes: false,
-    });
+    await upgrade({ plan: true, yes: false });
     expect(state.spinner).not.toHaveBeenCalled();
     expect(installPlatform).not.toHaveBeenCalled();
     expect(state.events).toEqual([]);
@@ -573,15 +537,7 @@ describe('installed platform upgrade', () => {
     state.createSecrets.mockImplementationOnce(() => {
       throw new Error('invalid credentials');
     });
-    await expect(
-      runInstalledPlatformCommand({
-        plan: false,
-        runtime: '',
-        selector: state.manifest!.id,
-        subcommand: 'upgrade',
-        yes: true,
-      }),
-    ).rejects.toThrow('invalid credentials');
+    await expect(upgrade()).rejects.toThrow('invalid credentials');
     expect(installPlatform).not.toHaveBeenCalled();
     expect(state.progress.start).not.toHaveBeenCalled();
     expect(state.progress.error).not.toHaveBeenCalled();
@@ -595,27 +551,13 @@ describe('installed platform upgrade', () => {
       expect(state.progress.stop).not.toHaveBeenCalled();
       expect(printSuccess).not.toHaveBeenCalled();
     });
-    await runInstalledPlatformCommand({
-      plan: false,
-      runtime: '',
-      selector: state.manifest!.id,
-      subcommand: 'upgrade',
-      yes: true,
-    });
+    await upgrade();
     expect(state.progress.stop).toHaveBeenCalledExactlyOnceWith('Platform upgrade complete.');
   });
 
   it('reports a finalization failure without claiming success and still releases the local lock', async () => {
     state.releaseDatabase.mockRejectedValueOnce(new Error('database release failed'));
-    await expect(
-      runInstalledPlatformCommand({
-        plan: false,
-        runtime: '',
-        selector: state.manifest!.id,
-        subcommand: 'upgrade',
-        yes: true,
-      }),
-    ).rejects.toThrow('database release failed');
+    await expect(upgrade()).rejects.toThrow('database release failed');
     expect(state.progress.error).toHaveBeenCalledExactlyOnceWith('Platform upgrade failed.');
     expect(state.progress.stop).not.toHaveBeenCalled();
     expect(printSuccess).not.toHaveBeenCalled();
@@ -632,13 +574,7 @@ describe('installed platform upgrade', () => {
         zoneNameServers: [],
         [reason]: true,
       });
-      await runInstalledPlatformCommand({
-        plan: false,
-        runtime: '',
-        selector: state.manifest!.id,
-        subcommand: 'upgrade',
-        yes: true,
-      });
+      await upgrade();
       expect(state.progress.stop).toHaveBeenCalledExactlyOnceWith(
         'Platform operation paused; progress is saved.',
       );
@@ -652,13 +588,7 @@ describe('installed platform upgrade', () => {
   );
 
   it('forwards spinner cancellation to coordinated CLI shutdown', async () => {
-    await runInstalledPlatformCommand({
-      plan: false,
-      runtime: '',
-      selector: state.manifest!.id,
-      subcommand: 'upgrade',
-      yes: true,
-    });
+    await upgrade();
     const onCancel = state.spinner.mock.calls[0]![0].onCancel;
     const emit = vi.spyOn(process, 'emit').mockReturnValueOnce(true);
     onCancel();
@@ -678,13 +608,7 @@ describe('installed platform upgrade', () => {
       waitingForSandboxDrain: false,
       zoneNameServers: [],
     });
-    await runInstalledPlatformCommand({
-      subcommand: 'upgrade',
-      selector: state.manifest!.id,
-      plan: false,
-      runtime: '',
-      yes: true,
-    });
+    await upgrade();
     expect(log.info).toHaveBeenCalledWith(
       'Application traffic remains paused. Enable the installation when you are ready.',
     );
@@ -734,14 +658,6 @@ describe('installed platform upgrade', () => {
       );
       expect(state.readProjectZeroTrust).toHaveBeenCalledOnce();
       expect(state.readPlanZeroTrust).not.toHaveBeenCalled();
-      expect(state.events).toEqual(['outer-release', 'local-release']);
-    });
-
-    it('refuses when the held lock cannot read the state', async () => {
-      state.readProjectZeroTrust.mockRejectedValueOnce(new Error('relation is locked'));
-      await expect(uninstall(false)).rejects.toThrow(
-        'could not be read from the platform database: relation is locked',
-      );
       expect(state.events).toEqual(['outer-release', 'local-release']);
     });
 

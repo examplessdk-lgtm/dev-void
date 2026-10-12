@@ -14,6 +14,7 @@ import {
   type IsrCacheEntry,
   type IsrCacheMetadata,
 } from '@void/isr/core';
+import { MAX_ISR_VARIANTS_PER_PATH } from '@void/isr/runtime';
 import type { Env } from './env.ts';
 import { matchSegmentPattern } from './pattern.ts';
 
@@ -39,21 +40,6 @@ export {
 } from '@void/isr/core';
 export { isrCacheKey } from '@void/isr';
 export type { IsrCacheEntry, IsrCacheMetadata } from '@void/isr/core';
-
-/**
- * Hard cap on rewrite-variant ISR entries per (project, deployment, pathname).
- * The default `revalidateQueryAllowlist = {}` already drops every query param,
- * so most fanout vectors are closed at the variant-key level — but a path
- * with an allowlisted param (e.g. `/search` with `q`) can still be probed
- * with random `q` values. The cap is the second line of defense: once the
- * KV slot for a pathname holds this many variants, new variants stop being
- * written. The worker still renders fresh content; we simply refuse to
- * persist it, so KV growth and revalidation cost stay bounded.
- *
- * Existing variants continue to update so legitimate ISR refresh keeps
- * working; only NEW variants are rejected past the cap.
- */
-export const MAX_ISR_VARIANTS_PER_PATH = 200;
 
 /**
  * Read an ISR cache entry from KV.

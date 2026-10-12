@@ -329,7 +329,6 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
     },
     async configResolved(config) {
       command = config.command;
-      await emitSchemaFacts();
 
       // `.env` is local-only. Vite loads it during production builds by
       // default, so remove file-sourced client values before its replacement
@@ -370,7 +369,6 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       if (!envFile) {
         return;
       }
-      await importUserEnv();
       afterServerReady(server, () => {
         void validateAndWarn();
       });
@@ -388,8 +386,8 @@ export function envSchemaPlugin(root: string, options: EnvSchemaPluginOptions = 
       });
     },
     async buildStart() {
-      // For non-dev (build, prerender), still load the schema so it's
-      // available to subsequent plugins / codegen consumers.
+      // `config` runs once per `vite build --watch` session; re-import so
+      // each rebuild checks client code against the current env.ts.
       if (envFile) {
         await importUserEnv();
       }

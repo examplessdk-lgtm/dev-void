@@ -1323,6 +1323,7 @@ describe('PUT /projects/:id/database-url', () => {
       createHyperdrive: (_url, init) => {
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'db.example.com',
@@ -1331,7 +1332,6 @@ describe('PUT /projects/:id/database-url', () => {
             scheme: 'postgresql',
             user: 'void_user',
           },
-          mtls: { sslmode: 'require' },
         });
         return cfSuccess({ id: 'hd-created', name: hyperdriveName });
       },
@@ -1346,7 +1346,7 @@ describe('PUT /projects/:id/database-url', () => {
         },
         body: JSON.stringify({
           connectionString:
-            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=require',
+            'postgresql://void_user:p%40ss@db.example.com:25060/appdb?sslmode=verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
         }),
       }),
       env,
@@ -1369,6 +1369,7 @@ describe('PUT /projects/:id/database-url', () => {
       createHyperdrive: (_url, init) => {
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'mysql.example.com',
@@ -1445,6 +1446,7 @@ describe('PUT /projects/:id/database-url', () => {
         expect(url).toContain('/hyperdrive/configs/hd-existing');
         expect(JSON.parse(init?.body as string)).toEqual({
           name: hyperdriveName,
+          caching: { disabled: true },
           origin: {
             database: 'appdb',
             host: 'db.example.com',
@@ -1466,7 +1468,7 @@ describe('PUT /projects/:id/database-url', () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          connectionString: 'postgres://void_user:pass@db.example.com/appdb',
+          connectionString: 'postgres://void_user:pass@db.example.com/appdb?sslmode=verify-full',
         }),
       }),
       env,

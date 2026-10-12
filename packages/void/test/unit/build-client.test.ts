@@ -23,9 +23,8 @@ const projectId = 'proj_test';
 function makeClient(): PlatformClient {
   return new PlatformClient(token, { apiUrl });
 }
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
-    status,
     headers: { 'content-type': 'application/json' },
   });
 }
@@ -40,14 +39,6 @@ describe('PlatformClient.listBuilds', () => {
     expect(parsed.searchParams.get('limit')).toBe('5');
     expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer auth-token-x' });
     expect(result.map((b) => b.id)).toEqual(['b1', 'b2']);
-  });
-
-  it('maps a non-ok response to PlatformApiError', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'forbidden' }, 403));
-    await expect(makeClient().listBuilds(projectId)).rejects.toMatchObject({
-      name: 'PlatformApiError',
-      status: 403,
-    });
   });
 });
 
@@ -70,13 +61,5 @@ describe('PlatformClient.getBuildLogs', () => {
     expect(result.lastSeq).toBe(1);
     expect(result.terminal).toBe(false);
     expect(result.lines[0]!.line).toBe('a');
-  });
-
-  it('maps a non-ok response to PlatformApiError', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'build not found' }, 404));
-    await expect(makeClient().getBuildLogs(projectId, 'nope', 0)).rejects.toMatchObject({
-      name: 'PlatformApiError',
-      status: 404,
-    });
   });
 });

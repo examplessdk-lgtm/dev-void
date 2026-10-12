@@ -37,6 +37,15 @@ export async function runPlatformWrangler(
 
 const PLATFORM_WRANGLER_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Opt-in maintainer diagnostics, enabled with VOID_PLATFORM_TIMINGS=1. */
+export function writePlatformTiming(label: string, startedAt: number): void {
+  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
+    process.stderr.write(
+      `[platform timing] ${label} ${(performance.now() - startedAt).toFixed(0)} ms\n`,
+    );
+  }
+}
+
 export async function runPlatformWranglerAtApiBase(
   operation: CloudflareOperation,
   accountId: string,
@@ -48,7 +57,7 @@ export async function runPlatformWranglerAtApiBase(
 ): Promise<CloudflareCommandResult> {
   const startedAt = performance.now();
   const runner = createDefaultRunWrangler(process.cwd(), {
-    launcher: resolveCloudflareOperationArgv(process.cwd()),
+    launcher: resolveCloudflareOperationArgv(),
     parallelWorkerUpload,
     timeoutMs: PLATFORM_WRANGLER_TIMEOUT_MS,
   });
@@ -58,11 +67,7 @@ export async function runPlatformWranglerAtApiBase(
     apiToken,
     cwd,
   });
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] Cloudflare ${operation.type} ${(performance.now() - startedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming(`Cloudflare ${operation.type}`, startedAt);
   const stdout = result.stdout || '';
   const stderr = result.stderr || '';
   // Void owns progress output. Successful commands may still emit banners and

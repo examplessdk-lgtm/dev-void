@@ -26,34 +26,6 @@ type MdPluginWithApi = Plugin & {
 };
 type ScannableEntry = { filePath: string; island: boolean | undefined };
 
-function extractCss(filePath: string): string {
-  const code = readFileSync(filePath, 'utf-8');
-  const parts: Array<string> = [];
-
-  // JS-style CSS imports → @import
-  const jsRe =
-    /^\s*import\b[^"']*["']([^"']+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss))["']/gm;
-  let match;
-  while ((match = jsRe.exec(code)) !== null) {
-    parts.push(`@import ${JSON.stringify(match[1])};`);
-  }
-
-  // Vue <style> block contents (non-scoped only)
-  const styleBlockRe = /<style\b([^>]*)>([\s\S]*?)<\/style>/g;
-  while ((match = styleBlockRe.exec(code)) !== null) {
-    const attrs = match[1];
-    if (/\bscoped\b/.test(attrs)) {
-      continue;
-    }
-    const content = match[2].trim();
-    if (content) {
-      parts.push(content);
-    }
-  }
-
-  return parts.join('\n');
-}
-
 export function islandsPlugin(
   pagesDir: string,
   options?: { root?: string },
@@ -63,10 +35,8 @@ export function islandsPlugin(
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
   let isDev = false;
-  let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
-  /** Resolve an island import and record it in the client manifest. */
   function registerIsland(
     spec: string,
     importerDir: string,
@@ -88,7 +58,6 @@ export function islandsPlugin(
 
       configResolved(config) {
         resolvedConfig = config;
-        viteRoot = config.root;
         isDev = config.command === 'serve';
       },
 
@@ -104,7 +73,6 @@ export function islandsPlugin(
           // Pre-scan island pages to populate the manifest eagerly.
           // This is needed because the client build may load the virtual
           // islands-client entry before island page transforms run.
-          // Scan both pages AND layouts for island imports
           const filesToScan: ReadonlyArray<ScannableEntry> = [
             ...pageScan.pages.map((page) => ({
               filePath: page.componentPath,
@@ -131,7 +99,6 @@ export function islandsPlugin(
             }
           }
 
-          // Collect .vue files needing CSS for island pages
           for (const page of pageScan.pages) {
             if (!page.island) {
               continue;
@@ -152,31 +119,17 @@ export function islandsPlugin(
       },
 
       resolveId: {
-        filter: { id: /^virtual:void-islands-(renderer|client)$|\.vue\.css$/ },
+        filter: { id: /^virtual:void-islands-(renderer|client)$/ },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
             return '\0' + source;
-          }
-          // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
-          // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith('.css')) {
-            const srcPath = normalizePath(source.slice(0, -4));
-            if (islandCssFiles.has(srcPath)) {
-              return srcPath + '.css';
-            }
-            if (srcPath.startsWith('/')) {
-              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
-              if (islandCssFiles.has(absPath)) {
-                return absPath + '.css';
-              }
-            }
           }
         },
       },
 
       load: {
         // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
-        filter: { id: /^\0virtual:void-islands-(renderer|client)$|\.vue\.css$/ },
+        filter: { id: /^\0virtual:void-islands-(renderer|client)$/ },
         handler(id) {
           if (id === '\0' + ISLANDS_RENDERER_ID) {
             if (!pageScan) {
@@ -196,13 +149,6 @@ export function islandsPlugin(
               return '';
             }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
-          }
-          // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith('.css') && !id.startsWith('\0')) {
-            const srcPath = id.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) {
-              return extractCss(srcPath);
-            }
           }
         },
       },
@@ -239,8 +185,6 @@ export function islandsPlugin(
             const replacement = `import ${rawName} from ${specRaw}`;
             edits.push({ start: islandImport.start, end: islandImport.end, text: replacement });
 
-            // Generate wrapper that adds data-island attributes during SSR.
-            // Uses Vue's h() function for createElement.
             wrappers.push(
               `const ${name} = {` +
                 ` inheritAttrs: false,` +
@@ -287,7 +231,6 @@ export function islandsPlugin(
         if (env.command === 'serve') {
           return { optimizeDeps: { include: ['vue'] } };
         }
-        // Only add the islands client entry when content needs it
         if (needsIslandClientBundle(pagesDir, /\.island\.vue$/, true)) {
           return {
             environments: {
@@ -341,7 +284,6 @@ export async function renderIslandPage(pageObj, assetTags) {
   const app = createSSRApp({
     setup() {
       provide("__void_shared", reactive(pageObj.shared || {}));
-      provide("__void_errors", reactive(pageObj.errors || {}));
       provide("__void_params", reactive(pageObj.params || {}));
       if (__frontmatter) provide("__void_frontmatter", __frontmatter);
       // No router provided — islands have no Void Router
@@ -397,7 +339,6 @@ function generateIslandClientEntry(
     const styleRe = /<style\b([^>]*)>/g;
     for (const file of cssFiles) {
       const content = readFileSync(file, 'utf-8');
-      // Extract <style> blocks via Vue SFC query params
       styleRe.lastIndex = 0;
       let index = 0;
       let match;

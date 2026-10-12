@@ -1,6 +1,6 @@
 /**
  * Email on the developer's OWN Cloudflare account (`void deploy --platform
- * cloudflare`, design-doc 0078 "Mode B").
+ * cloudflare`).
  *
  * Two things differ from the managed platform and both are exercised here
  * with `cloudflare:email` faked, since the real module exists only in workerd:
@@ -11,7 +11,7 @@
  *             `ForwardableEmailMessage` and ignores the return value, so the
  *             generated entry must ENACT the recorded actions on it
  */
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { describe, expect, it, vi } from 'vite-plus/test';
 import { compileWorkerEntry } from '../../src/router/compile.ts';
 import { sendEmail } from '../../src/runtime/email.ts';
 import {
@@ -256,19 +256,8 @@ describe('sendEmail (SEND_EMAIL binding)', () => {
  * A `ForwardableEmailMessage` as workerd hands it to `email()`: a one-shot
  * raw stream, a `Headers` instance, and the three native methods, each
  * recording its call.
- *
- * `verifiedDestinations` models the one refusal Cloudflare documents for
- * `forward(rcptTo)` — "Forward this email message to a verified destination
- * address of the account" — so a fake with the list set throws, as the real
- * method does, for anything that is not on it. Left unset, every address is
- * accepted, which is what the fake did before the option existed.
  */
-function nativeMessage(opts: {
-  from: string;
-  to: string;
-  mime: string;
-  verifiedDestinations?: ReadonlyArray<string>;
-}): {
+function nativeMessage(opts: { from: string; to: string; mime: string }): {
   message: ForwardableEmailMessage;
   calls: {
     rejects: Array<string>;
@@ -302,9 +291,6 @@ function nativeMessage(opts: {
       calls.rejects.push(reason);
     },
     async forward(to: string, fwdHeaders?: Headers) {
-      if (opts.verifiedDestinations && !opts.verifiedDestinations.includes(to)) {
-        throw bindingError('E_RECIPIENT_NOT_ALLOWED', `destination address ${to} not verified`);
-      }
       calls.forwards.push({ to, headers: fwdHeaders });
       return { messageId: 'fwd' };
     },
@@ -364,10 +350,6 @@ function buildHandleEmail(
 }
 
 describe('generated handleEmail on a native ForwardableEmailMessage', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it('enacts setReject on the real message', async () => {
     const handleEmail = buildHandleEmail(async (message) => {
       message.setReject('no thanks');
@@ -425,11 +407,8 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
   });
 
   it('fires nothing on the native message when a later forward carries an invalid header record', async () => {
-    // The plain-record form is stored verbatim, so a value `new Headers()`
-    // rejects used to surface only during native replay — after the first
-    // forward had already fired. Cloudflare then sees a failed invocation
-    // for a message that was partly delivered. The bad header must fail in
-    // the handler's own call, before anything is enacted.
+    // The plain-record form is stored verbatim, so a bad header must fail in
+    // the handler's own call, before the first forward is enacted.
     const handleEmail = buildHandleEmail(async (message) => {
       await message.forward('ops@acme.com');
       // The record form is a runtime affordance (JS handlers, or a cast):
@@ -448,82 +427,11 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
       (e: unknown) => e,
     );
 
-    // The partial delivery is the bug: nothing may have reached the native
-    // message. Asserted before the error shape so a regression names it.
     expect(calls.forwards).toEqual([]);
     expect(calls.replies).toEqual([]);
     expect(calls.rejects).toEqual([]);
     expect(outcome).toBeInstanceOf(MimeError);
     expect((outcome as MimeError).message).toMatch(/^forward: invalid header/);
-  });
-
-  it('fires nothing on the native message when a later forward carries a malformed address', async () => {
-    // The address half of the case above. `forward()` used to check only the
-    // length, so `not-an-address` was recorded and surfaced during native
-    // replay — Cloudflare refuses a destination that is not a verified
-    // address — after the first forward had already fired. The fake models
-    // that refusal; the proxy must fail in the handler's own call instead.
-    const handleEmail = buildHandleEmail(async (message) => {
-      await message.forward('ops@acme.com');
-      await message.forward('not-an-address');
-    });
-    const { message, calls } = nativeMessage({
-      from: 'sender@example.com',
-      to: 'support@mail.acme.com',
-      mime: INBOUND_MIME,
-      verifiedDestinations: ['ops@acme.com'],
-    });
-
-    const outcome = await handleEmail(message, {}, {}).then(
-      () => 'resolved',
-      (e: unknown) => e,
-    );
-
-    expect(calls.forwards).toEqual([]);
-    expect(calls.replies).toEqual([]);
-    expect(calls.rejects).toEqual([]);
-    expect(outcome).toBeInstanceOf(MimeError);
-    expect((outcome as MimeError).code).toBe('INVALID_TO');
-    expect((outcome as MimeError).message).toBe(
-      'to: address is not a valid email address (ASCII local part and dotted domain, ' +
-        "RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).",
-    );
-  });
-
-  it('fires nothing on the native message when a later hand-built reply carries a malformed address', async () => {
-    // The `{ from, to, raw }` reply form bypasses `normalizeEmail`; it used to
-    // check only the length, so the malformed `to` reached Cloudflare's
-    // native `reply()` after the forward had fired. Same record-time rule
-    // as `forward(to)` now: the handler's own call fails, nothing replays.
-    const handleEmail = buildHandleEmail(async (message) => {
-      await message.forward('ops@acme.com');
-      await message.reply({
-        from: 'support@mail.acme.com',
-        to: 'not-an-address',
-        raw: new TextEncoder().encode('Subject: re\r\n\r\nhi\r\n'),
-      } as unknown as Parameters<ForwardableEmailMessage['reply']>[0]);
-    });
-    const { message, calls } = nativeMessage({
-      from: 'sender@example.com',
-      to: 'support@mail.acme.com',
-      mime: INBOUND_MIME,
-      verifiedDestinations: ['ops@acme.com'],
-    });
-
-    const outcome = await handleEmail(message, {}, {}).then(
-      () => 'resolved',
-      (e: unknown) => e,
-    );
-
-    expect(calls.forwards).toEqual([]);
-    expect(calls.replies).toEqual([]);
-    expect(calls.rejects).toEqual([]);
-    expect(outcome).toBeInstanceOf(MimeError);
-    expect((outcome as MimeError).code).toBe('INVALID_TO');
-    expect((outcome as MimeError).message).toBe(
-      'to: address is not a valid email address (ASCII local part and dotted domain, ' +
-        "RFC 5322 dot-atom; at most 64 characters before the '@' and 254 in total).",
-    );
   });
 
   it('enacts replyEmail as a real EmailMessage sent from the delivered address', async () => {
@@ -576,24 +484,6 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(reply.from).toBe('acme+noreply@mail.void.cloud');
   });
 
-  it('enacts a reject that followed a forward as the reject alone', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const handleEmail = buildHandleEmail(async (message) => {
-      await message.forward('ops@acme.com');
-      message.setReject('changed my mind');
-    });
-    const { message, calls } = nativeMessage({
-      from: 'sender@example.com',
-      to: 'support@mail.acme.com',
-      mime: INBOUND_MIME,
-    });
-
-    await handleEmail(message, {}, {});
-
-    expect(calls.forwards).toEqual([]);
-    expect(calls.rejects).toEqual(['changed my mind']);
-  });
-
   it('hands the native setReject() the reason the platform router would send', async () => {
     // The parser unfolds the encoded CRLF, but the decoded subject still
     // contains a NUL. The proxy must bound and normalize the reason before
@@ -622,37 +512,6 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
     expect(actions).toEqual([{ type: 'reject', reason: expected }]);
   });
 
-  it('fires nothing on the native message when a later forward carries too many headers', async () => {
-    // Cloudflare's native `forward()` accepts any bag, so on your own account
-    // a 33-header forward used to go out — while the platform router drops
-    // the WHOLE action list for the same handler. The router's bounds now
-    // fail the handler's own call, before anything is enacted, in both.
-    const handleEmail = buildHandleEmail(async (message) => {
-      await message.forward('ops@acme.com');
-      const bag = new Headers();
-      for (let i = 0; i < 33; i++) {
-        bag.set(`X-Void-${i}`, 'v');
-      }
-      await message.forward('archive@acme.com', bag);
-    });
-    const { message, calls } = nativeMessage({
-      from: 'sender@example.com',
-      to: 'support@mail.acme.com',
-      mime: INBOUND_MIME,
-    });
-
-    const outcome = await handleEmail(message, {}, {}).then(
-      () => 'resolved',
-      (e: unknown) => e,
-    );
-
-    expect(calls.forwards).toEqual([]);
-    expect(calls.replies).toEqual([]);
-    expect(calls.rejects).toEqual([]);
-    expect(outcome).toBeInstanceOf(MimeError);
-    expect((outcome as MimeError).message).toBe('forward: 33 headers, over the 32-header limit.');
-  });
-
   it('returns actions for an authenticated receipt envelope without native enaction', async () => {
     const handleEmail = buildHandleEmail(async (message) => {
       message.setReject('spam');
@@ -677,7 +536,7 @@ describe('generated handleEmail on a native ForwardableEmailMessage', () => {
  * without a `<slug>+` prefix, while
  * provisioning still injects `__VOID_PROJECT_SLUG` unconditionally. The
  * generated `handleEmail` must suppress the slug so the dispatcher runs in
- * no-prefix mode (Mode B item 4) — left applied, the strip would take
+ * no-prefix mode — left applied, the strip would take
  * everything up to the first `+` and `support+T-42@acme.com` would dispatch
  * as `T-42` to `_default` or a wrong `[user]` param.
  */

@@ -15,6 +15,7 @@ import {
   type CloudflareNamedResource,
   type CloudflareWorkerCustomDomainOrigin,
 } from './platform-cloudflare.ts';
+import { writePlatformTiming } from './platform-installer-process.ts';
 import {
   type PlatformInstallationSecrets,
   type PlatformInstallerDependencies,
@@ -23,8 +24,12 @@ import {
   type PlatformDatabaseLifecycleLock,
 } from './platform-installer-types.ts';
 import {
+  dnsRecordConfigHash,
+  hasProvisionIntentStep,
+  legacyResourceConfigHash,
   platformAdoptionIntentHash,
   platformProvisionIntentHash,
+  r2BucketConfigHash,
   type PlatformInstallPlan,
   type PlatformInstallPlanAction,
 } from './platform-plan.ts';
@@ -183,11 +188,7 @@ export async function writeRemoteInstallationCheckpointWithoutDatabase(
 ): Promise<void> {
   const startedAt = performance.now();
   await databaseLock?.checkpoint?.(manifest);
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] database checkpoint ${(performance.now() - startedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming('database checkpoint', startedAt);
   const routing = manifest.resources.find(
     (resource) =>
       resource.key === 'routing-kv' &&
@@ -205,11 +206,7 @@ export async function writeRemoteInstallationCheckpointWithoutDatabase(
     REMOTE_INSTALLATION_MANIFEST_KEY,
     JSON.stringify(manifest),
   );
-  if (process.env.VOID_PLATFORM_TIMINGS === '1') {
-    process.stderr.write(
-      `[platform timing] remote checkpoint ${(performance.now() - kvStartedAt).toFixed(0)} ms\n`,
-    );
-  }
+  writePlatformTiming('remote checkpoint', kvStartedAt);
 }
 
 export function recordProvisionIntent(
@@ -219,6 +216,9 @@ export function recordProvisionIntent(
 ): PlatformInstallationManifest {
   const previousResourceId =
     manifest.resources.find((resource) => resource.key === action.key)?.id ?? null;
+  if (hasProvisionIntentStep(manifest, action.key, action.kind, action.name, previousResourceId)) {
+    return manifest;
+  }
   const resultHash = platformProvisionIntentHash(
     manifest,
     action.key,
@@ -226,15 +226,6 @@ export function recordProvisionIntent(
     action.name,
     previousResourceId,
   );
-  const existing = manifest.steps.find(
-    (step) =>
-      (step.key === `provision-intent:${action.key}` ||
-        step.key.startsWith(`provision-intent:${action.key}:`)) &&
-      step.resultHash === resultHash,
-  );
-  if (existing) {
-    return manifest;
-  }
   return recordInstallationStep(
     manifest,
     {
@@ -269,19 +260,7 @@ export function hasProvisionIntent(
 ): boolean {
   const previousResourceId =
     manifest.resources.find((resource) => resource.key === action.key)?.id ?? null;
-  return manifest.steps.some(
-    (step) =>
-      (step.key === `provision-intent:${action.key}` ||
-        step.key.startsWith(`provision-intent:${action.key}:`)) &&
-      step.resultHash ===
-        platformProvisionIntentHash(
-          manifest,
-          action.key,
-          action.kind,
-          action.name,
-          previousResourceId,
-        ),
-  );
+  return hasProvisionIntentStep(manifest, action.key, action.kind, action.name, previousResourceId);
 }
 
 export async function createResource(
@@ -333,7 +312,7 @@ export function recordResource(
               ? hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl))
               : action.kind === 'r2-bucket' && resourceFingerprint
                 ? r2BucketConfigHash(action.name, resourceFingerprint)
-                : hash(JSON.stringify({ kind: action.kind, name: action.name })),
+                : legacyResourceConfigHash(action.kind, action.name),
       id,
       key: action.key,
       kind: action.kind,
@@ -343,10 +322,6 @@ export function recordResource(
     },
     now,
   );
-}
-
-export function r2BucketConfigHash(name: string, fingerprint: string): string {
-  return hash(JSON.stringify({ fingerprint, kind: 'r2-bucket', name }));
 }
 
 export function retainReplacedInstallationResource(
@@ -408,11 +383,6 @@ export async function inventoryUnmanagedPlatformWorkerTraffic(
   plan: PlatformInstallPlan,
   workerName: string,
 ): Promise<ReadonlyArray<unknown>> {
-  if (!client.listWorkerDomains || !client.listWorkerServiceRoutes) {
-    throw new Error(
-      `platform: Cloudflare traffic inventory is required before updating Worker ${JSON.stringify(workerName)}.`,
-    );
-  }
   const [routes, domains] = await Promise.all([
     client.listWorkerServiceRoutes(plan.account.id, workerName),
     client.listWorkerDomains(plan.account.id),
@@ -546,18 +516,6 @@ function requiredBoolean(value: unknown, field: string): boolean {
   return value;
 }
 
-export async function publishPlatformWorkerCustomDomains(
-  client: InstallerClient,
-  accountId: string,
-  workerName: string,
-  origins: ReadonlyArray<CloudflareWorkerCustomDomainOrigin>,
-): Promise<void> {
-  if (!client.publishWorkerCustomDomainsSafely) {
-    throw new Error('platform: Safe Cloudflare Custom Domain publication is unavailable.');
-  }
-  await client.publishWorkerCustomDomainsSafely(accountId, workerName, origins);
-}
-
 function uniqueTriggerRoutes(routes: ReadonlyArray<unknown>): ReadonlyArray<unknown> {
   const seen = new Set<string>();
   return routes.filter((route) => {
@@ -568,15 +526,6 @@ function uniqueTriggerRoutes(routes: ReadonlyArray<unknown>): ReadonlyArray<unkn
     seen.add(key);
     return true;
   });
-}
-
-function dnsRecordConfigHash(
-  name: string,
-  type: string,
-  content: string,
-  proxied: boolean,
-): string {
-  return hash(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }));
 }
 
 export function hash(value: string | Buffer): string {

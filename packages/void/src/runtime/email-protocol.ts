@@ -21,54 +21,71 @@ type ReceiptVerifier = {
   fetch(input: string | Request, init?: RequestInit): Promise<Response>;
 };
 
-async function beforeDeadline<T>(deadline: number, run: () => Promise<T>): Promise<T> {
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) {
-    throw new Error('email receipt verification timeout');
+/**
+ * Settle `run()` within `ms`, or reject with `onTimeout()`. `run` is not
+ * called when `ms` has already elapsed.
+ */
+export async function withTimeout<T>(
+  ms: number,
+  run: () => Promise<T>,
+  onTimeout: () => Error,
+): Promise<T> {
+  if (ms <= 0) {
+    throw onTimeout();
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    run(),
-    new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('email receipt verification timeout')), remaining);
-    }),
-  ]).finally(() => {
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(onTimeout()), ms);
+      }),
+    ]);
+  } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
     }
-  });
+  }
 }
 
-async function readResponseJson(response: Response, deadline: number): Promise<unknown> {
-  const declaredLength = response.headers.get('content-length');
+/**
+ * Read a JSON body of at most `maxBytes`, each read bounded by `race`. A
+ * declared length must be exact.
+ */
+export async function readBoundedJson(
+  response: Response,
+  maxBytes: number,
+  race: <T>(run: () => Promise<T>) => Promise<T>,
+  { rejectEncoding = false }: { rejectEncoding?: boolean } = {},
+): Promise<unknown> {
+  const declared = response.headers.get('content-length');
   if (
-    response.headers.has('content-encoding') ||
-    !response.body ||
-    (declaredLength !== null &&
-      (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RECEIPT_VERIFICATION_BYTES))
+    (rejectEncoding && response.headers.has('content-encoding')) ||
+    (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > maxBytes))
   ) {
-    throw new Error('invalid email receipt verification response');
+    void response.body?.cancel().catch(() => {});
+    throw new Error('email response refused before reading');
   }
-  const expectedLength = declaredLength === null ? null : Number(declaredLength);
-  const reader = response.body.getReader();
-  const bytes = new Uint8Array(MAX_RECEIPT_VERIFICATION_BYTES);
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('email response is empty');
+  }
+  const bytes = new Uint8Array(maxBytes);
   let size = 0;
   try {
     for (;;) {
-      const chunk = await beforeDeadline(deadline, () => reader.read());
+      const chunk = await race(() => reader.read());
       if (chunk.done) {
         break;
       }
-      const nextSize = size + chunk.value.byteLength;
-      if (nextSize > bytes.byteLength) {
-        throw new Error('email receipt verification response too large');
+      if (size + chunk.value.byteLength > maxBytes) {
+        throw new Error('email response too large');
       }
       bytes.set(chunk.value, size);
-      size = nextSize;
+      size += chunk.value.byteLength;
     }
   } finally {
-    // An uncooperative stream may never settle cancellation. Start cleanup,
-    // but do not let it extend the hard request-and-response deadline.
+    // Do not await cancellation: an uncooperative stream may never settle it.
     void reader.cancel().catch(() => {});
     try {
       reader.releaseLock();
@@ -76,8 +93,8 @@ async function readResponseJson(response: Response, deadline: number): Promise<u
       // A timed-out read may still be settling after cancellation.
     }
   }
-  if (size === 0 || (expectedLength !== null && size !== expectedLength)) {
-    throw new Error('invalid email receipt verification response length');
+  if (declared !== null && size !== Number(declared)) {
+    throw new Error('email response length mismatch');
   }
   return JSON.parse(decoder.decode(bytes.subarray(0, size)));
 }
@@ -89,10 +106,12 @@ export async function verifyEmailReceiptThroughProxy(
   input: ReceiptVerificationInput,
 ): Promise<boolean> {
   const deadline = Date.now() + RECEIPT_VERIFICATION_DEADLINE_MS;
+  const beforeDeadline = <T>(run: () => Promise<T>): Promise<T> =>
+    withTimeout(deadline - Date.now(), run, () => new Error('email receipt verification timeout'));
   const controller = new AbortController();
   let response: Response | undefined;
   try {
-    response = await beforeDeadline(deadline, () =>
+    response = await beforeDeadline(() =>
       proxy.fetch('https://proxy/email/verify-receipt', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-void-internal': projectToken },
@@ -103,7 +122,9 @@ export async function verifyEmailReceiptThroughProxy(
     if (!response.ok) {
       return false;
     }
-    const body = await readResponseJson(response, deadline);
+    const body = await readBoundedJson(response, MAX_RECEIPT_VERIFICATION_BYTES, beforeDeadline, {
+      rejectEncoding: true,
+    });
     return (
       !!body &&
       typeof body === 'object' &&

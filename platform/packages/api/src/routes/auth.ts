@@ -23,7 +23,11 @@ import {
   isValidCodeVerifier,
 } from '../auth/pkce.ts';
 import { updateUserRevokingInheritedDestinations } from '../auth/profile.ts';
-import { isAllowedRedirect, isLocalhostRedirect } from '../auth/redirects.ts';
+import {
+  isAllowedRedirect,
+  isLocalhostRedirect,
+  isAuthorizationRedirect,
+} from '../auth/redirects.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
 import { acceptsBrowserHtml, platformBrowserError } from '../browser-page.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
@@ -139,7 +143,12 @@ app.get('/login', async (context) => {
   }
 
   if (
-    !isAllowedRedirect(redirect, context.env.DASHBOARD_URL, context.env.PLATFORM_INSTALLATION_ID)
+    !isAllowedRedirect(
+      redirect,
+      context.env.DASHBOARD_URL,
+      context.env.PLATFORM_INSTALLATION_ID,
+      context.env.AUTH_REDIRECT_URI,
+    )
   ) {
     return context.json({ error: 'redirect must be a localhost or dashboard URL' }, 400);
   }
@@ -160,11 +169,18 @@ app.get('/login', async (context) => {
   const codeChallengeMethod = context.req.query('code_challenge_method');
   let cliState: string | null = null;
 
-  if (codeChallenge || codeChallengeMethod) {
+  if (
+    codeChallenge ||
+    codeChallengeMethod ||
+    isAuthorizationRedirect(redirect, context.env.AUTH_REDIRECT_URI)
+  ) {
     const redirectUrl = new URL(redirect);
     cliState = redirectUrl.searchParams.get('state');
 
-    if (!isLocalhostRedirect(redirectUrl)) {
+    if (
+      !isLocalhostRedirect(redirectUrl) &&
+      !isAuthorizationRedirect(redirect, context.env.AUTH_REDIRECT_URI)
+    ) {
       return context.json({ error: 'CLI code exchange requires a localhost redirect' }, 400);
     }
     if (!cliState) {
@@ -327,7 +343,12 @@ app.get('/callback', async (context) => {
 
   // Re-validate redirect after decoding
   if (
-    !isAllowedRedirect(redirect, context.env.DASHBOARD_URL, context.env.PLATFORM_INSTALLATION_ID)
+    !isAllowedRedirect(
+      redirect,
+      context.env.DASHBOARD_URL,
+      context.env.PLATFORM_INSTALLATION_ID,
+      context.env.AUTH_REDIRECT_URI,
+    )
   ) {
     return context.json({ error: 'invalid redirect' }, 400);
   }
@@ -508,7 +529,10 @@ app.get('/callback', async (context) => {
 
   const redirectUrl = new URL(redirect);
 
-  if (isLocalhostRedirect(redirectUrl)) {
+  if (
+    isLocalhostRedirect(redirectUrl) ||
+    isAuthorizationRedirect(redirect, context.env.AUTH_REDIRECT_URI)
+  ) {
     if (codeChallenge && codeChallengeMethod === CLI_CODE_CHALLENGE_METHOD && cliState) {
       const authCode = crypto.randomUUID();
       await storeAuthCode(db, authCode, jwt, CLI_AUTH_CODE_TTL_SECONDS, {

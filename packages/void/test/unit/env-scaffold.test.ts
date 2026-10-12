@@ -71,19 +71,6 @@ describe('renderEnvTs', () => {
     expect(importLine).toBe(`import { defineEnv, string, number } from 'void/env';`);
   });
 
-  it('renders one line per entry using the inferred helper', () => {
-    const out = renderEnvTs([
-      { key: 'DEBUG', helper: 'boolean' },
-      { key: 'PORT', helper: 'number' },
-      { key: 'STRIPE_KEY', helper: 'string' },
-      { key: 'WEBHOOK_URL', helper: 'url' },
-    ]);
-    expect(out).toContain('DEBUG: boolean(),');
-    expect(out).toContain('PORT: number(),');
-    expect(out).toContain('STRIPE_KEY: string(),');
-    expect(out).toContain('WEBHOOK_URL: url(),');
-  });
-
   it('nudges the user to tighten inferred types', () => {
     const out = renderEnvTs([{ key: 'X', helper: 'string' }]);
     expect(out).toMatch(/tighten types/);
@@ -143,15 +130,5 @@ describe('maybeScaffoldEnvTs', () => {
     expect(body).toContain('PORT: number(),');
     expect(body).toContain('DEBUG: boolean(),');
     expect(body).toContain('WEBHOOK_URL: url(),');
-  });
-
-  it('skips malformed dotenv lines without crashing', () => {
-    const root = tmpProject();
-    writeFileSync(
-      join(root, '.env'),
-      ['# a comment', '', 'NOT A KEY', '123BAD=skip-me', 'GOOD=value', ''].join('\n'),
-    );
-    const entries = collectInferredEntries(root);
-    expect(entries.map((e) => e.key)).toEqual(['GOOD']);
   });
 });

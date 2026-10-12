@@ -88,7 +88,6 @@ function createDatabase(
     createMigrationHandler(
       { DB: db, __VOID_PROXY_TOKEN: 'test-token' },
       migrations,
-      'sqlite',
       undefined,
       buildMigrationPlanBundle(migrations),
     );
@@ -170,6 +169,11 @@ describe('D1 migration ownership', () => {
       expect(recovered.error).toContain(
         'wait for this migration to finish before retrying recovery',
       );
+      expect(
+        sqlite
+          .prepare("SELECT status FROM _void_migration_attempts WHERE attempt_id = 'legacy'")
+          .get()?.status,
+      ).toBe('running');
       expect((await handler([])(apply('contender'))).status).toBe(409);
     } finally {
       resume.resolve();

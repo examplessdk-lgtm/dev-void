@@ -7,10 +7,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import { hasDeploySchemaDrift } from '../../src/cli/deploy.ts';
+import { hasDeploySchemaDrift } from '../../src/cli/deploy-drift.ts';
 import { generateStarterMigration } from '../../src/cli/init.ts';
 import { createPagesStarterTemplate, type ScaffoldStarterMode } from '../../src/cli/template.ts';
 
@@ -74,7 +74,7 @@ function createStarterApp(starterMode: Exclude<ScaffoldStarterMode, 'static'>): 
 
   for (const [filePath, content] of Object.entries(template.files)) {
     const fullPath = join(root, filePath);
-    mkdirSync(fullPath.slice(0, fullPath.lastIndexOf('/')), { recursive: true });
+    mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, content);
   }
 
