@@ -1,0 +1,29 @@
+docs/guide/ai.md
+  s_77824b01a12d99::t_df21755156d860 265-281
+packages/void/src/runtime/ai.ts
+  s_77824b01a12d99::t_5f50d651931389 46-49,392,450-454,461,463,476-483,486-488,519,523,544,550,588-593,651,653-659,669-670,796-843
+packages/void/test/unit/ai.test.ts
+  s_77824b01a12d99::t_8ff6922524d997 907-949
+platform/packages/proxy/src/ai.ts
+  s_77824b01a12d99::t_b642d69ed562cc 5,391-434
+platform/packages/proxy/src/types.ts
+  s_77824b01a12d99::t_2b78c707d2dcf6 10-13
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_77824b01a12d99::t_e9bcaa46a813d9 1427-1469
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "99a12ec98e25fb9cb7afcc48e493f9b66320a47d",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
