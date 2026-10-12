@@ -41,7 +41,7 @@ platform/packages/api/src/admin/routes/connected-apps.ts
 docs/guide/platform/administration/connected-apps.md
   s_77824b01a12d99::t_f08d58349014d0 1-55
 docs/reference/api/deploy.md
-  s_77824b01a12d99::t_def31467e4cad5 19
+  s_77824b01a12d99::t_def31467e4cad5 1-4,13-18,19,20-23
   s_77824b01a12d99::t_a81382986c1d36 5-12
 platform/packages/api/src/admin/react/pages.ts
   s_77824b01a12d99::t_e08cef207e3558 2-4,82-84
@@ -93,6 +93,18 @@ platform/packages/api/src/auth/redirects.ts
   s_77824b01a12d99::t_45577614222ad2 7,16,37-39,43-44,48,53-56
 platform/packages/api/test/integration/helpers.ts
   s_77824b01a12d99::t_09a294d3425168 366,378,565-567
+packages/deploy-core/src/artifact-digest.ts
+  s_77824b01a12d99::t_86c04a5c665ffa 1-19
+packages/deploy-core/src/index.ts
+  s_77824b01a12d99::t_851f95aa3a589b 349
+packages/void/package.json
+  s_a387cc89f12e5a::t_87d9d625ae500b 330-333
+packages/void/src/deploy.ts
+  s_77824b01a12d99::t_3e74965a7caecb 1-5,6-7,10-124
+packages/void/test/unit/deploy-artifact-preparation.test.ts
+  s_77824b01a12d99::t_5cca1ae0ac1a04 1-68
+packages/void/vite.config.ts
+  s_a387cc89f12e5a::t_a3a2708223f183 64
 ---
 {
   "schema_version": "authorship/3.0.0",
