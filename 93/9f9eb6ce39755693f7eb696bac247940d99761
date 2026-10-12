@@ -1,0 +1,23 @@
+packages/void/src/cli/init.ts
+  s_0de8d6f1e725fb::t_7a94925f2d925e 2011,2014-2015
+packages/void/test/integration/init-install.test.ts
+  s_0de8d6f1e725fb::t_796bf2eefd39d3 80
+packages/void/test/unit/cf-version-runner.test.ts
+  s_0de8d6f1e725fb::t_f4f97debce0b6b 46,286-300,302-310,312-322,324-365,367-368,370-389,391-477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "939f9eb6ce39755693f7eb696bac247940d99761",
+  "prompts": {},
+  "sessions": {
+    "s_0de8d6f1e725fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12f55-69e3-7c52-8fc8-99b51bd7d1c7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
