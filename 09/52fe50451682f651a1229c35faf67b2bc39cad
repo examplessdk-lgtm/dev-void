@@ -1,0 +1,65 @@
+packages/void/AGENTS.md
+  s_05bbef54562b66::t_86dfffcc9114fe 9-10
+packages/void/package.json
+  s_05bbef54562b66::t_7513089e7cf621 375-376
+packages/void/src/cli/auth-link.ts
+  s_05bbef54562b66::t_5ee7780e551bb5 5,23,35
+packages/void/src/cli/cli.ts
+  s_05bbef54562b66::t_665ba412c97a56 21,70
+packages/void/src/cli/cloudflare-login-output.ts
+  s_05bbef54562b66::t_5206658afea6a7 3,27
+packages/void/src/cli/db.ts
+  s_05bbef54562b66::t_35912eb37318e7 52,317
+packages/void/src/cli/email.ts
+  s_05bbef54562b66::t_841039605c04ae 41,560
+packages/void/src/cli/github-cmd.ts
+  s_05bbef54562b66::t_0e4cc35a052e88 19,229,257-258,311,393-395
+packages/void/src/cli/help.ts
+  s_05bbef54562b66::t_299867779f5e31 5,1473
+packages/void/src/cli/init.ts
+  s_05bbef54562b66::t_59e3914012d072 31,1599
+packages/void/src/cli/login.ts
+  s_05bbef54562b66::t_831147f4136ca9 12,77
+packages/void/src/cli/output.ts
+  s_05bbef54562b66::t_8ba2d77acc44f3 14,18-30,111-114,117-118,123,125-134,136
+packages/void/src/cli/platform-auth-config.ts
+  s_05bbef54562b66::t_07eb19ec688f48 16,101
+packages/void/src/cli/platform-auth-recovery.ts
+  s_05bbef54562b66::t_2cd376288daf67 8,246
+packages/void/src/cli/platform-cmd.ts
+  s_05bbef54562b66::t_223f1659a1b250 5,108,246-247,277
+packages/void/src/cli/platform-install-auth.ts
+  s_05bbef54562b66::t_9ec8186c1ed4be 15,261
+packages/void/src/cli/platform-lifecycle.ts
+  s_05bbef54562b66::t_c6ee1855c93d82 18,597,1266,1272
+packages/void/src/cli/platform-management.ts
+  s_05bbef54562b66::t_79137409096ebc 16,575
+packages/void/src/cli/platform-setup.ts
+  s_05bbef54562b66::t_787fd454b95dc1 4,23-24
+packages/void/src/cli/project-team.ts
+  s_05bbef54562b66::t_4faf3007d05b40 9,109
+packages/void/src/cli/projects.ts
+  s_05bbef54562b66::t_d2c935ced58f8e 4,40
+packages/void/test/integration/terminal-links.test.ts
+  s_05bbef54562b66::t_0a7327e66ffc26 1-53
+packages/void/test/unit/output-note.test.ts
+  s_05bbef54562b66::t_7631eab523de3b 31-48
+pnpm-lock.yaml
+  s_05bbef54562b66::t_02726f9b95c882 714-716,7714-7717,9903-9906,9952-9955,16388-16389,19339-19343,19416-19420
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0952fe50451682f651a1229c35faf67b2bc39cad",
+  "prompts": {},
+  "sessions": {
+    "s_05bbef54562b66": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12f80-c08d-71e3-993f-4ed3e9bcb29d",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
