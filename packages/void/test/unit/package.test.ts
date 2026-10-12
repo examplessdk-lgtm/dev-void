@@ -96,9 +96,9 @@ describe('buildVoidManifest', () => {
 
   it('carries revalidate into manifest.revalidate and omits it when unset or 0', () => {
     const revalidate = { '/blog/:slug': 120, '*': 60 };
-    expect(buildVoidManifest({ bindings: makeBindings(), revalidate }).revalidate).toEqual(
-      revalidate,
-    );
+    expect(
+      Object.entries(buildVoidManifest({ bindings: makeBindings(), revalidate }).revalidate ?? {}),
+    ).toEqual(Object.entries(revalidate));
     expect(buildVoidManifest({ bindings: makeBindings() }).revalidate).toBeUndefined();
     expect(
       buildVoidManifest({ bindings: makeBindings(), revalidate: 0 }).revalidate,
