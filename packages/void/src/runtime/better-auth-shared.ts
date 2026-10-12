@@ -222,10 +222,19 @@ function appendAuthHeaders(
     return;
   }
 
+  // A route policy that already keeps the response out of shared caches is as safe
+  // as no-store and may allow browser revalidation (ETag + 304) of private data.
+  const routeKeepsPrivate = hasCacheDirective(c.res.headers.get('cache-control'), [
+    'private',
+    'no-store',
+  ]);
   source.forEach((value, key) => {
     // getSession's response policy belongs to the session endpoint. An anonymous
     // lookup must not make the application's public page or asset uncacheable.
-    if (!includeCachePolicy && ['cache-control', 'pragma'].includes(key.toLowerCase())) {
+    if (
+      (!includeCachePolicy || routeKeepsPrivate) &&
+      ['cache-control', 'pragma'].includes(key.toLowerCase())
+    ) {
       return;
     }
     c.header(key, value, {
@@ -234,14 +243,17 @@ function appendAuthHeaders(
   });
   if (
     source.has('set-cookie') &&
-    !(source.get('cache-control') ?? '')
-      .split(',')
-      .some((directive) =>
-        ['private', 'no-store', 'no-cache'].includes(directive.trim().toLowerCase()),
-      )
+    !routeKeepsPrivate &&
+    !hasCacheDirective(source.get('cache-control'), ['private', 'no-store', 'no-cache'])
   ) {
     c.header('Cache-Control', 'private, no-store');
   }
+}
+
+function hasCacheDirective(policy: string | null, directives: Array<string>): boolean {
+  return (policy ?? '')
+    .split(',')
+    .some((directive) => directives.includes(directive.trim().toLowerCase()));
 }
 
 function resolveUserConfig(

@@ -99,3 +99,75 @@ describe('real anonymous Better Auth lookup cache policy', () => {
     await expect(response.json()).resolves.toBeNull();
   });
 });
+
+describe('real authenticated Better Auth session cache policy', () => {
+  async function signedInApp(routeHeaders: Record<string, string>) {
+    const database = memoryAdapter({ user: [], session: [], account: [], verification: [] });
+    const runtime = createVoidAuthRuntime(
+      'sqlite',
+      async () => ({ database, dispose: async () => {} }),
+      async () => {},
+    );
+    const app = new Hono();
+    app.use(async (c, next) => runtime.runVoidAuthMiddleware(c, next, options));
+    app.on(['GET', 'POST'], '/api/auth/*', (c) => runtime.handleVoidAuthRequest(c, options));
+    app.get('/api/report', (c) => c.text('report', 200, routeHeaders));
+    const signUp = await app.request(
+      'https://app.test/api/auth/sign-up/email',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Cache user',
+          email: 'cache-user@example.test',
+          password: 'correct-horse-battery-staple',
+        }),
+      },
+      env,
+    );
+    expect(signUp.status).toBe(200);
+    const cookie = signUp.headers
+      .getSetCookie()
+      .map((value) => value.split(';')[0])
+      .join('; ');
+    const session = await app.request(
+      'https://app.test/api/auth/get-session',
+      { headers: { cookie } },
+      env,
+    );
+    await expect(session.json()).resolves.toMatchObject({
+      user: { email: 'cache-user@example.test' },
+    });
+    return { app, cookie };
+  }
+
+  it.each(['private, no-cache', 'private, max-age=60', 'no-store'])(
+    'keeps a route policy that already stays out of shared caches: %s',
+    async (policy) => {
+      const { app, cookie } = await signedInApp({ 'cache-control': policy, etag: 'W/"report-1"' });
+      const response = await app.request(
+        'https://app.test/api/report',
+        { headers: { cookie } },
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe(policy);
+      expect(response.headers.has('pragma')).toBe(false);
+      expect(response.headers.get('etag')).toBe('W/"report-1"');
+    },
+  );
+
+  it.each([null, 'public, max-age=60', 'no-cache'])(
+    'applies the session lookup no-store to a route policy of %s',
+    async (policy) => {
+      const { app, cookie } = await signedInApp(policy ? { 'cache-control': policy } : {});
+      const response = await app.request(
+        'https://app.test/api/report',
+        { headers: { cookie } },
+        env,
+      );
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('pragma')).toBe('no-cache');
+    },
+  );
+});
