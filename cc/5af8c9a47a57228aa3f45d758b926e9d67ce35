@@ -1,0 +1,31 @@
+docs/.vitepress/theme/HomeCli.vue
+  s_316d9314e13e4c::t_bb57a155d51b1d 1-300
+docs/.vitepress/theme/terminal/README.md
+  s_316d9314e13e4c::t_8c1854cb7f701f 1-9
+docs/public/void-cli.svg
+  s_316d9314e13e4c::t_1592cb921d6a1f 1-13
+test/terminal-demos/README.md
+  s_316d9314e13e4c::t_6e628ead8a5a0e 3,7,28
+docs/.vitepress/theme/terminal/TerminalPlayer.vue
+  s_316d9314e13e4c::t_e88778b51111df 11,13,210-216,417-462
+test/terminal-demos/TerminalDemos.vue
+  s_316d9314e13e4c::t_5511c13f36e140 4-6
+test/terminal-demos/timeline.test.ts
+  s_316d9314e13e4c::t_5cc30d5030ef73 3-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cc5af8c9a47a57228aa3f45d758b926e9d67ce35",
+  "prompts": {},
+  "sessions": {
+    "s_316d9314e13e4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10ad5-8944-72e3-b6d3-336861cf7d12",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}

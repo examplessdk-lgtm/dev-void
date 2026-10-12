@@ -1,0 +1,41 @@
+docs/.vitepress/theme/Home.vue
+  s_316d9314e13e4c::t_6b6c6388e7db46 31,53
+docs/.vitepress/theme/HomeResourceCode.vue
+  s_316d9314e13e4c::t_a81c6e2eefa96c 30-56,63,156-157,186-189
+docs/.vitepress/theme/assets/security/cloudflare.svg
+  s_316d9314e13e4c::t_e942b606b56208 1-5
+docs/.vitepress/theme/assets/security/github.svg
+  s_316d9314e13e4c::t_2ee7f2b9b13862 1
+docs/.vitepress/theme/assets/security/google.svg
+  s_316d9314e13e4c::t_f352d3a57663ad 1
+docs/.vitepress/theme/assets/security/openid.svg
+  s_316d9314e13e4c::t_7f90ad2cbd992e 1
+docs/.vitepress/theme/assets/security/README.md
+  s_a12d14d1888beb::t_fae2a05311431b 1-8
+docs/public/platform-feature-placeholder.svg
+  s_a12d14d1888beb::t_6542ccd4d7c95e 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "337deafb32a3f81d920b60681c4f34b6f54772ad",
+  "prompts": {},
+  "sessions": {
+    "s_316d9314e13e4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10ad5-8944-72e3-b6d3-336861cf7d12",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_a12d14d1888beb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10af1-857b-7d31-b510-09bcb4aa9dc0",
+        "model": "unknown"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
