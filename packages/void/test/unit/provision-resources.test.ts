@@ -1617,6 +1617,7 @@ describe('provisionCloudflareResources — account reconciliation + config pin',
       ).rejects.toThrow(new RegExp(`account mismatch.*${pinned}.*acct-B`, 's'));
       expect(run2.calls).toEqual([]);
       expect(restCalled).toBe(false);
+      expect(readConfig()).toEqual(after1);
     },
   );
 
