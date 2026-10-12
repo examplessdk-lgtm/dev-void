@@ -1,0 +1,27 @@
+platform/packages/api/README.md
+  s_904b90eb5dd75e::t_b96343dfb9c215 245-256
+platform/packages/api/src/deploy/execute.ts
+  s_904b90eb5dd75e::t_aaf0f3e48dd4fc 609-613
+platform/packages/api/src/deployment-execution.ts
+  s_904b90eb5dd75e::t_edd84b5ba4adf3 10,104-108,110,162-169
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_904b90eb5dd75e::t_820c678d28d977 188-215,617,636-643,657-659,676
+platform/packages/api/test/unit/deployment-input-staging.test.ts
+  s_904b90eb5dd75e::t_f9231890655969 81-118,128,133,136,141,163,179,202-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "42501d9e38095c11186390bba4ac8122d187ad0d",
+  "prompts": {},
+  "sessions": {
+    "s_904b90eb5dd75e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-e615-7983-ae59-f7de338ae041",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
