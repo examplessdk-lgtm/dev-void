@@ -103,14 +103,12 @@ describe('real anonymous Better Auth lookup cache policy', () => {
 describe('real authenticated Better Auth session cache policy', () => {
   async function signedInApp(routeHeaders: Record<string, string>) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [] });
-    const runtime = createVoidAuthRuntime(
-      'sqlite',
-      async () => ({ database, dispose: async () => {} }),
-      async () => {},
-    );
+    const runtime = createVoidAuthRuntime('sqlite', async () => {});
     const app = new Hono();
-    app.use(async (c, next) => runtime.runVoidAuthMiddleware(c, next, options));
-    app.on(['GET', 'POST'], '/api/auth/*', (c) => runtime.handleVoidAuthRequest(c, options));
+    app.use(async (c, next) => runtime.runVoidAuthMiddleware(c, next, options, database));
+    app.on(['GET', 'POST'], '/api/auth/*', (c) =>
+      runtime.handleVoidAuthRequest(c, options, database),
+    );
     app.get('/api/report', (c) => c.text('report', 200, routeHeaders));
     const signUp = await app.request(
       'https://app.test/api/auth/sign-up/email',
