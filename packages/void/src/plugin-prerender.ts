@@ -1,6 +1,6 @@
 import { join } from 'pathslash';
 import type { Plugin } from 'vite';
-import { resolveDistDir, resolveWorkerDirName } from './cli/deploy.ts';
+import { resolveDistDir, resolveWorkerDirName } from './cli/build-output-dir.ts';
 import { isNodeTarget, type VoidConfig } from './config.ts';
 import { voidLog, voidWarn, setShowTimestamp } from './log.ts';
 import { prerenderPages, prerenderPagesNode } from './prerender.ts';

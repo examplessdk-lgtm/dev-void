@@ -9,7 +9,6 @@ let DEV_BASE: string;
 
 describe('playground/vinext-pages dev', () => {
   let child: ReturnType<typeof spawn>;
-  let serverOutput = () => '';
 
   beforeAll(async () => {
     const server = await startServer((port) => {
@@ -38,15 +37,11 @@ describe('playground/vinext-pages dev', () => {
       return child;
     }, 20_000);
     DEV_BASE = server.base;
-    serverOutput = server.output;
   });
 
   afterAll(async () => {
     if (child) {
       await killChild(child);
-    }
-    if (serverOutput().includes('error when starting dev server')) {
-      throw new Error(serverOutput());
     }
   });
 

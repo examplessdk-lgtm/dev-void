@@ -44,18 +44,11 @@ export function cfAccessHeaders(
       if (!records || typeof records !== 'object' || Array.isArray(records)) {
         return {};
       }
-      const entry =
-        records &&
-        typeof records === 'object' &&
-        !Array.isArray(records) &&
-        Object.hasOwn(records, origin)
-          ? records[origin]
-          : undefined;
-      if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
-        return accessHeaders(entry as Record<string, unknown>);
-      }
       if (Object.hasOwn(records, origin)) {
-        return {};
+        const entry = records[origin];
+        return entry && typeof entry === 'object' && !Array.isArray(entry)
+          ? accessHeaders(entry as Record<string, unknown>)
+          : {};
       }
     } catch {
       // Invalid explicit configuration never falls back to credentials for another recipient.

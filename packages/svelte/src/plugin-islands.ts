@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, relative } from 'pathslash';
+import { preprocess, type CompileResult, type PreprocessorGroup } from 'svelte/compiler';
 import { normalizePath, type Plugin, type ResolvedConfig } from 'vite';
 import { generateComponentManifest, scanPages, resolveEffectiveLayoutChain } from 'void/pages';
 import type { PageScanResult } from 'void/pages';
@@ -7,7 +8,6 @@ import {
   resolveSpecifier,
   needsIslandClientBundle,
   rewriteCssImportForVirtualModule,
-  extractCssImports,
   computePagesNeedingClientJS,
   watchPagesForRescan,
   ISLANDS_RENDERER_ID,
@@ -32,6 +32,19 @@ type MdPluginWithApi = Plugin & {
   };
 };
 type ScannableEntry = { filePath: string; island: boolean | undefined };
+/** The shared API of vite-plugin-svelte, set on its `vite-plugin-svelte:config` plugin. */
+type SveltePluginApi = {
+  options: { preprocess?: PreprocessorGroup | Array<PreprocessorGroup> };
+  idParser: (id: string, ssr: boolean) => unknown;
+  compileSvelte: (
+    request: unknown,
+    code: string,
+    options: unknown,
+    environment: unknown,
+    sourcemap?: unknown,
+  ) => Promise<{ compiled: CompileResult }>;
+};
+type SvelteConfigPlugin = Plugin & { api?: SveltePluginApi };
 
 export function islandsPlugin(
   pagesDir: string,
@@ -42,10 +55,8 @@ export function islandsPlugin(
   const islandManifest = new Map<string, IslandEntry>();
   const islandCssFiles = new Set<string>();
   let isDev = false;
-  let viteRoot = '';
   let resolvedConfig: ResolvedConfig | null = null;
 
-  /** Resolve an island import and record it in the client manifest. */
   function registerIsland(
     spec: string,
     importerDir: string,
@@ -67,7 +78,6 @@ export function islandsPlugin(
 
       configResolved(config) {
         resolvedConfig = config;
-        viteRoot = config.root;
         isDev = config.command === 'serve';
       },
 
@@ -83,7 +93,6 @@ export function islandsPlugin(
           // Pre-scan island pages to populate the manifest eagerly.
           // This is needed because the client build may load the virtual
           // islands-client entry before island page transforms run.
-          // Scan both pages AND layouts for island imports
           const filesToScan: ReadonlyArray<ScannableEntry> = [
             ...pageScan.pages.map((page) => ({
               filePath: page.componentPath,
@@ -110,7 +119,6 @@ export function islandsPlugin(
             }
           }
 
-          // Collect page and layout files needing CSS for island pages
           for (const page of pageScan.pages) {
             if (!page.island) {
               continue;
@@ -132,7 +140,7 @@ export function islandsPlugin(
 
       resolveId: {
         filter: {
-          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.svelte\.css$/,
+          id: /^(virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(source) {
           if (source === ISLANDS_RENDERER_ID || source === ISLANDS_CLIENT_ENTRY_ID) {
@@ -143,27 +151,13 @@ export function islandsPlugin(
           if (source.startsWith(WRAPPER_PREFIX)) {
             return source;
           }
-          // Virtual island CSS modules — no \0 prefix so Vite CSS pipeline processes them.
-          // Return absolute path so CSS @import resolution uses the correct directory.
-          if (source.endsWith('.css')) {
-            const srcPath = normalizePath(source.slice(0, -4));
-            if (islandCssFiles.has(srcPath)) {
-              return srcPath + '.css';
-            }
-            if (srcPath.startsWith('/')) {
-              const absPath = normalizePath(resolve(viteRoot, srcPath.slice(1)));
-              if (islandCssFiles.has(absPath)) {
-                return absPath + '.css';
-              }
-            }
-          }
         },
       },
 
       load: {
         filter: {
           // eslint-disable-next-line no-control-regex -- Vite virtual module null-byte prefix
-          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)|\.svelte\.css$/,
+          id: /^(\0virtual:void-islands-(renderer|client)|\/@void-island-wrap\/)/,
         },
         handler(id) {
           if (id === '\0' + ISLANDS_RENDERER_ID) {
@@ -185,16 +179,8 @@ export function islandsPlugin(
             }
             return generateIslandClientEntry(islandManifest, islandCssFiles, isDev);
           }
-          // Virtual wrapper component — generates a .svelte wrapper
           if (id.startsWith(WRAPPER_PREFIX)) {
             return generateWrapperComponent(id);
-          }
-          // Virtual island CSS module — resolveId returns absolute path
-          if (id.endsWith('.css') && !id.startsWith('\0')) {
-            const srcPath = id.slice(0, -4);
-            if (islandCssFiles.has(srcPath)) {
-              return extractCssImports(srcPath);
-            }
           }
         },
       },
@@ -222,7 +208,6 @@ export function islandsPlugin(
 
             const { absPath, islandId } = registerIsland(spec, importerDir, strategy);
 
-            // Rewrite import to point to virtual wrapper component
             const wrapperUrl =
               WRAPPER_PREFIX +
               encodeURIComponent(islandId) +
@@ -249,7 +234,6 @@ export function islandsPlugin(
         if (env.command === 'serve') {
           return { optimizeDeps: { include: ['svelte'] } };
         }
-        // Only add the islands client entry when content needs it
         if (needsIslandClientBundle(pagesDir, /\.island\.svelte$/, true)) {
           return {
             environments: {
@@ -268,46 +252,66 @@ export function islandsPlugin(
     },
     {
       name: 'void-svelte:islands-style',
-      // Only the build's client entry imports `?island-style` (dev CSS comes
-      // from Void's dev CSS collector), so this raw file reader never needs
-      // to run on the dev server.
+      // Only the build's client entry imports `<file>.svelte.css?island-style`
+      // (dev CSS comes from Void's dev CSS collector).
+      // - The id stays next to the component, so CSS url() resolves as in the
+      //   component, and it misses vite-plugin-svelte's `.svelte?` filter.
+      // - The CSS comes from vite-plugin-svelte's own preprocess options and
+      //   compile, so the scope hashes match the SSR markup.
+      // - The component is compiled here, not loaded with `this.load`: island
+      //   pages and layouts render only on the server, and loading them would
+      //   resolve their server-only imports in the client build.
+      // - vite-plugin-svelte's `?svelte&type=style` id is not used: it only
+      //   reads CSS already cached on the module, and its cssScopeTo drops the
+      //   CSS when the component is not imported by the client build.
       apply: 'build',
 
       resolveId: {
-        filter: { id: /\?island-style&/ },
+        filter: { id: /\.svelte\.css\?island-style$/ },
         handler(source) {
           return source;
         },
       },
 
       load: {
-        filter: { id: /\?island-style&/ },
-        handler(id) {
-          // ?island-style&index=N&lang.{ext} — return raw CSS of Nth <style> block
-          const filePath = id.replace(/\?island-style&.*$/, '');
-          const params = new URLSearchParams(id.slice(id.indexOf('?island-style&') + 1));
-          const index = parseInt(params.get('index') || '0', 10);
-          const content = readFileSync(filePath, 'utf-8');
-          const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/g;
-          let match;
-          let i = 0;
-          while ((match = styleBlockRe.exec(content)) !== null) {
-            if (i === index) {
-              return match[1];
-            }
-            i++;
+        filter: { id: /\.svelte\.css\?island-style$/ },
+        async handler(id) {
+          const file = id.slice(0, -'.css?island-style'.length);
+          const api = resolvedConfig?.plugins.find(
+            (plugin): plugin is SvelteConfigPlugin => plugin.name === 'vite-plugin-svelte:config',
+          )?.api;
+          if (typeof api?.compileSvelte !== 'function' || typeof api.idParser !== 'function') {
+            this.error(
+              'Svelte island page styles need the @sveltejs/vite-plugin-svelte version that @void/svelte depends on.',
+            );
           }
-          return '/* style block not found */';
+          this.addWatchFile(file);
+          let code = readFileSync(file, 'utf-8');
+          let map: unknown;
+          if (api.options.preprocess) {
+            const processed = await preprocess(code, api.options.preprocess, { filename: file });
+            code = processed.code;
+            map = processed.map;
+            // This compile is outside the module graph, so `vite build --watch`
+            // only sees files the preprocessor read (Sass partials) if listed.
+            for (const dependency of processed.dependencies ?? []) {
+              this.addWatchFile(dependency);
+            }
+          }
+          const { compiled } = await api.compileSvelte(
+            api.idParser(file, false),
+            code,
+            api.options,
+            this.environment,
+            map,
+          );
+          return { code: compiled.css?.code ?? '', map: compiled.css?.map ?? null };
         },
       },
     },
   ];
 }
 
-/**
- * Generate a virtual Svelte wrapper component from a wrapper URL.
- * The URL encodes: src (absolute component path), island (ID), hydrate (strategy).
- */
 function generateWrapperComponent(id: string): string {
   const url = new URL(id, 'file://');
   const src = decodeURIComponent(url.searchParams.get('src') || '');
@@ -359,7 +363,6 @@ export async function renderIslandPage(pageObj, assetTags) {
       layouts: layoutComponents,
       pageProps: pageObj.props,
       shared: pageObj.shared || {},
-      errors: pageObj.errors || {},
       params: pageObj.params || {},
       router: null,
       stores: null,
@@ -406,22 +409,11 @@ function generateIslandClientEntry(
     for (const file of cssFiles) {
       const content = readFileSync(file, 'utf-8');
 
-      // Extract <style> blocks → emit ?island-style imports
-      const styleRe = /<style\b([^>]*)>/g;
-      styleRe.lastIndex = 0;
-      let styleIndex = 0;
-      let styleMatch;
-      while ((styleMatch = styleRe.exec(content)) !== null) {
-        const attrs = styleMatch[1];
-        const langMatch = attrs.match(/\blang\s*=\s*["'](\w+)["']/);
-        const lang = langMatch ? langMatch[1] : 'css';
-        lines.push(
-          `import ${JSON.stringify(file + '?island-style&index=' + styleIndex + '&lang.' + lang)};`,
-        );
-        styleIndex++;
+      // A Svelte component has at most one top-level <style>.
+      if (/<style\b/.test(content)) {
+        lines.push(`import ${JSON.stringify(file + '.css?island-style')};`);
       }
 
-      // Extract CSS imports from <script> blocks
       for (const item of findStaticCssImports(content, file)) {
         lines.push(rewriteCssImportForVirtualModule(item.statement, item.specifier, file));
       }

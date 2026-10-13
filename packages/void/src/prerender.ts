@@ -1,22 +1,22 @@
 import { execFile } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'pathslash';
 import pc from 'picocolors';
 import { getApiUrl, getProxyUrl, getToken } from './cli/auth.ts';
 import { ensurePlatformProxyAccess } from './cli/cf-access.ts';
+import { readProjectIdField } from './cli/project.ts';
 import { ensureWranglerCompat } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
 import { voidLog, voidWarn } from './log.ts';
-import { renderPrerenderPaths, type PrerenderResult } from './prerender-render.ts';
+import {
+  outputFileForPath,
+  readPrerenderPathsResponse,
+  renderPrerenderPaths,
+  type PrerenderResult,
+} from './prerender-render.ts';
 export type { PrerenderResult } from './prerender-render.ts';
 import { scopedAccessCredentials } from './shared/cf-access.ts';
+import { collectFiles } from './shared/collect-files.ts';
 import { stripInternalEnvKeys } from './shared/env.ts';
 import { buildEnv } from './shared/untrusted-env.ts';
 
@@ -37,23 +37,6 @@ export type PrerenderWorkerModule = {
 export type PrerenderRunResult = PrerenderResult & {
   paths: Array<string>;
 };
-
-function outputFileForPath(path: string): string {
-  return path === '/' ? 'index.html' : `${path.slice(1)}.html`;
-}
-
-async function readPrerenderPathsResponse(response: Response): Promise<Array<string>> {
-  if (!response.ok) {
-    throw new Error(`prerender: Failed to collect prerender paths. HTTP ${response.status}.`);
-  }
-
-  const payload = (await response.json()) as { paths?: unknown };
-  if (!Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === 'string')) {
-    throw new Error('prerender: Failed to collect prerender paths. Response payload is invalid.');
-  }
-
-  return payload.paths;
-}
 
 function normalizeWorkerModulePath(path: string): string {
   return path.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -85,22 +68,6 @@ function resolveWorkerModuleType(relativePath: string): PrerenderWorkerModuleTyp
   }
 
   return null;
-}
-
-function collectFiles(dir: string): Array<string> {
-  const files: Array<string> = [];
-  const entries = readdirSync(dir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...collectFiles(fullPath));
-    } else {
-      files.push(fullPath);
-    }
-  }
-
-  return files;
 }
 
 export function collectPrerenderWorkerModules(
@@ -147,7 +114,6 @@ export function collectPrerenderWorkerModules(
 
 export type PrerenderBindingsInput = {
   wranglerVars: Record<string, unknown> | undefined;
-  env: Record<string, string>;
   voidToken: string | null | undefined;
   voidProjectId: string | undefined;
   voidProxyUrl?: string;
@@ -156,14 +122,10 @@ export type PrerenderBindingsInput = {
 };
 
 export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<string, unknown> {
-  const { sanitized: wranglerVars, stripped: wranglerStripped } = stripInternalEnvKeys(
-    input.wranglerVars,
-  );
-  const { sanitized: env, stripped: envStripped } = stripInternalEnvKeys(input.env);
-  const allStripped = [...new Set([...wranglerStripped, ...envStripped])];
-  if (allStripped.length > 0) {
+  const { sanitized: wranglerVars, stripped } = stripInternalEnvKeys(input.wranglerVars);
+  if (stripped.length > 0) {
     voidWarn(
-      `Ignoring internal env keys in prerender inputs: ${allStripped.join(', ')}. These are reserved for Void runtime use.`,
+      `Ignoring internal env keys in prerender inputs: ${stripped.join(', ')}. These are reserved for Void runtime use.`,
     );
   }
 
@@ -185,7 +147,7 @@ export function buildPrerenderBindings(input: PrerenderBindingsInput): Record<st
       voidBindings.__VOID_REMOTE = '1';
     }
   }
-  return { ...wranglerVars, ...env, ...voidBindings };
+  return { ...wranglerVars, ...voidBindings };
 }
 
 async function createCloudflarePrerenderRunner(options: {
@@ -207,29 +169,20 @@ async function createCloudflarePrerenderRunner(options: {
   const wranglerCompat = ensureWranglerCompat(root, readConfig(root), workerDir);
   const workerMain = wranglerConfig.main ?? 'index.js';
 
-  // Local `.env` values never enter a production prerender. Code that needs
-  // production server configuration must read it at runtime from remote secrets.
-  const env: Record<string, string> = {};
-
   // Resolve Void projectId via a three-level chain:
   //   1. explicit options.projectId — passed from runFullDeploy so the
   //      `void deploy --project <slug>` flow works even when the in-memory
   //      config hasn't been persisted to .void/project.json yet.
-  //   2. VOID_DEPLOY_PROJECT_ID env var — crosses the process boundary for
-  //      the static-output path, where plugin-prerender's closeBundle runs
-  //      inside the vite build subprocess and can't see the parent's config.
+  //   2. VOID_DEPLOY_PROJECT_ID env var — only when the caller exports it.
+  //      Managed builds skip plugin prerender (VOID_DEPLOY_BUILD=1) and
+  //      runFullDeploy passes projectId instead.
   //   3. .void/project.json — existing on-disk fallback for linked projects.
   let voidProjectId: string | undefined = options.projectId;
   if (!voidProjectId) {
     voidProjectId = process.env.VOID_DEPLOY_PROJECT_ID || undefined;
   }
   if (!voidProjectId) {
-    const projectJsonPath = join(root, '.void', 'project.json');
-    try {
-      voidProjectId = JSON.parse(readFileSync(projectJsonPath, 'utf-8')).projectId;
-    } catch {
-      // No linked project — prerender without Void credentials.
-    }
+    voidProjectId = readProjectIdField(root);
   }
   // A token is only useful alongside a project ID. Avoid touching the system
   // keychain for ordinary unlinked builds, which also keeps parallel prerenders
@@ -243,10 +196,11 @@ async function createCloudflarePrerenderRunner(options: {
   if (voidProxyUrl) {
     ensurePlatformProxyAccess(getApiUrl(root), voidProxyUrl);
   }
+  // Local `.env` values never enter a production prerender; production server
+  // configuration is read at runtime from remote secrets.
   const bindings = buildPrerenderBindings({
     accessEnv: process.env,
     wranglerVars: wranglerConfig.vars,
-    env,
     voidToken,
     voidProjectId,
     voidProxyUrl,
@@ -420,7 +374,7 @@ async function runNodePrerenderRunner<T>(root: string, config: NodeRunnerConfig)
     `
 import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { renderPrerenderPaths } from ${JSON.stringify(nodeRendererUrl)};
+import { readPrerenderPathsResponse, renderPrerenderPaths } from ${JSON.stringify(nodeRendererUrl)};
 
 const config = JSON.parse(process.argv[2]);
 const { mode, ssrDir, clientDir } = config;
@@ -436,18 +390,12 @@ if (!fetch) {
 // The second argument is the Hono env. Its marker is what lets the built app
 // answer path discovery; HTTP servers never pass it.
 async function collectPaths() {
-  const response = await fetch(
-    new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
-    { __VOID_PRERENDER: "1" },
+  return readPrerenderPathsResponse(
+    await fetch(
+      new Request("http://localhost${PRERENDER_PATHS_ENDPOINT}", { method: "POST" }),
+      { __VOID_PRERENDER: "1" },
+    ),
   );
-  if (!response.ok) {
-    throw new Error("prerender: Failed to collect prerender paths. HTTP " + response.status + ".");
-  }
-  const payload = await response.json();
-  if (!payload || !Array.isArray(payload.paths) || !payload.paths.every((path) => typeof path === "string")) {
-    throw new Error("prerender: Failed to collect prerender paths. Response payload is invalid.");
-  }
-  return payload.paths;
 }
 
 async function renderPaths(paths) {

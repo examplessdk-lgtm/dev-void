@@ -7,10 +7,6 @@
  * supported — if the user writes one, we detect the resulting resolution
  * error and re-throw with guidance pointing at the offending specifier.
  *
- * Used by:
- *   - `plugin-env-schema.ts` (dev plugin, HMR re-imports)
- *   - `cli/env-validation.ts` (deploy + `void env check`)
- *
  * Side-effect contract: loading the file evaluates the user's `defineEnv`
  * call, which registers the schema in the singleton state in
  * `runtime/env-public.ts`. Callers read the result from there.
@@ -58,14 +54,6 @@ function looksLikeAlias(specifier: string): boolean {
   return specifier.startsWith('~') || specifier.startsWith('#');
 }
 
-/**
- * Load the user's env.ts via native `import()`. The URL gets a cache-busting
- * query param so HMR re-imports re-evaluate the file.
- *
- * On resolution failures, wraps the error with the source file path, and if
- * the failed specifier looks like a tsconfig path alias, appends guidance
- * explaining that env.ts doesn't resolve aliases.
- */
 export async function loadUserEnvFile(envFile: string): Promise<void> {
   // Counter + timestamp so back-to-back HMR reloads in the same millisecond
   // still produce distinct URLs (Node's ESM loader caches by URL).

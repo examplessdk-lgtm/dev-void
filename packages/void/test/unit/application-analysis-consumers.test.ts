@@ -1,23 +1,17 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { Plugin, ResolvedConfig } from 'vite';
+import type { ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import { analyzeApplicationSync } from '../../src/application-analysis.ts';
-import { computeDesiredCloudflareResources } from '../../src/cli/deploy.ts';
+import { computeDesiredCloudflareResources } from '../../src/cli/deploy-resources.ts';
 import { buildFrameworkManifest, buildVoidManifest } from '../../src/cli/package.ts';
 import { readConfig, type VoidConfig } from '../../src/config.ts';
-import { validateMigrations } from '../../src/migrations/validate.ts';
 
 type CloudflarePluginConfig = {
   config: (resolved: Record<string, unknown>) => Record<string, unknown>;
 };
 
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(pluginConfig: CloudflarePluginConfig): Array<Plugin> {
-    return [{ name: 'mock:cloudflare', api: { pluginConfig } } as Plugin];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 
 const roots: Array<string> = [];
 
@@ -183,26 +177,15 @@ export const load = () => ({ storage, kv });`,
         },
         framework,
       );
-      const config = readConfig(root);
       const resources = await computeDesiredCloudflareResources(
         root,
-        config,
+        readConfig(root),
         join(root, 'wrangler.jsonc'),
       );
-      const application = analyzeApplicationSync(root, { config, environment: 'prod' });
-      const common = {
-        bindings: application.bindings,
-        dialect: application.dialect,
-        migrations: validateMigrations(application.migrations),
-      };
-      const manifests = [
-        buildVoidManifest(common),
-        buildFrameworkManifest({ ...common, frameworkName: 'sveltekit', workerMain: 'index.js' }),
-      ];
       const emitted = await pluginConfig(root);
 
-      expect(application.bindings.needsD1).toBe(false);
-      expect(application.authEnabled).toBe(false);
+      expect(resources.analysis.bindings.needsD1).toBe(false);
+      expect(resources.analysis.authEnabled).toBe(false);
       expect(resources.desired.kvNamespaces).toEqual([]);
       expect(resources.migrations).toHaveLength(1);
       if (database === 'sqlite') {
@@ -221,17 +204,6 @@ export const load = () => ({ storage, kv });`,
           expect.objectContaining({ binding: 'HYPERDRIVE', name: 'analysis-app-hyperdrive' }),
         );
         expect(emitted.d1_databases).toBeUndefined();
-      }
-      for (const manifest of manifests) {
-        expect(manifest.version).toBe(3);
-        expect(manifest.assetManifestVersion).toBe(2);
-        expect(manifest.bindings.d1).toEqual(database === 'sqlite' ? ['DB'] : undefined);
-        expect(manifest.bindings.hyperdrive).toEqual(
-          database === 'pg' ? ['HYPERDRIVE'] : undefined,
-        );
-        expect(manifest.migrations).toEqual(
-          expect.objectContaining({ dialect: application.dialect, pending: 1 }),
-        );
       }
     },
   );

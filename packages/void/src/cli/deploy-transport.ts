@@ -4,7 +4,12 @@ import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { CLOUDFLARE_DEPLOY_BUILD_ENV } from '../shared/env.ts';
 import { WRANGLER_AUTH_CREDENTIAL_ENV_VARS } from '../shared/untrusted-env.ts';
 import { CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV } from '../shared/version-metadata.ts';
-import { requireProvisionModule, loadedProvisionModule } from './deploy-provision.ts';
+import {
+  assertNoTransportRedirectInProjectDotenv,
+  deleteEnvVarCaseAware,
+  provisionEnv,
+  resolvePinnedApiBaseUrl,
+} from './provision.ts';
 
 /**
  * Marks a build child as driven by a MANAGED `void deploy`.
@@ -21,15 +26,13 @@ import { requireProvisionModule, loadedProvisionModule } from './deploy-provisio
  * later `void dev` in the same shell.
  *
  * Deliberately NOT set by `runCloudflareDeploy` (`--platform cloudflare`): that flow
- * hands the built output to `wrangler deploy` against the user's own account and IS the
- * self-host path the warning is about. (It rejects framework SSR outright today, so no
- * Class A build reaches it either way.)
+ * deploys the built output to the user's own account and IS the self-host path the
+ * warning is about.
  */
 export const MANAGED_DEPLOY_BUILD_ENV = { VOID_DEPLOY_BUILD: '1' } as const;
 
 /** Remove managed-only build markers from an explicit native Cloudflare child. */
 export function scrubManagedDeployBuildMarkers(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const { deleteEnvVarCaseAware } = requireProvisionModule();
   deleteEnvVarCaseAware(env, 'VOID_DEPLOY_PROJECT_ID');
   deleteEnvVarCaseAware(env, CLOUDFLARE_PRESERVE_BINDINGS_BUILD_ENV);
   for (const name of Object.keys(MANAGED_DEPLOY_BUILD_ENV)) {
@@ -72,6 +75,13 @@ const DEPLOY_WRANGLER_DOTENV_FILES = ['.env', '.env.local', '.env.', '.env..loca
  */
 const DEPLOY_VITE_DOTENV_FILES = ['.env', '.env.local', '.env.production', '.env.production.local'];
 
+/** The first non-blank ambient selector of a non-top-level worker/config, if any. */
+export function findAmbientConfigOverride(): string | undefined {
+  return ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH'].find((name) =>
+    process.env[name]?.trim(),
+  );
+}
+
 /**
  * FAIL CLOSED when the AMBIENT env selects a non-top-level worker/config for the
  * Cloudflare backend, which deploys the top-level environment of the canonical root
@@ -80,21 +90,43 @@ const DEPLOY_VITE_DOTENV_FILES = ['.env', '.env.local', '.env.production', '.env
  * rather than silently deploy a target the drift-check / provision never reasoned about.
  */
 function assertNoAmbientConfigOverride(): void {
-  const cloudflareEnv = process.env.CLOUDFLARE_ENV;
-  if (typeof cloudflareEnv === 'string' && cloudflareEnv.trim().length > 0) {
+  const override = findAmbientConfigOverride();
+  if (override === 'CLOUDFLARE_ENV') {
     throw new Error(
       'CLOUDFLARE_ENV is set. --platform cloudflare deploys the TOP-LEVEL environment of ' +
         'your root wrangler config only (a named environment can carry a different account, ' +
         'worker name, or binding set). Unset CLOUDFLARE_ENV and retry.',
     );
   }
-  const configPathOverride = process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH;
-  if (typeof configPathOverride === 'string' && configPathOverride.trim().length > 0) {
+  if (override) {
     throw new Error(
       'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. --platform cloudflare builds from the ' +
         'canonical root wrangler config only. Unset it and retry.',
     );
   }
+}
+
+/** Which of `names` the project dotenv `file` declares; win32 keys match case-insensitively. */
+function findDotenvDeclaration(
+  root: string,
+  file: string,
+  names: ReadonlyArray<string>,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const caseInsensitive = platform === 'win32';
+  const rawKeys = scanWranglerDotenvKeys(join(root, file));
+  const keys = caseInsensitive ? new Set([...rawKeys].map((key) => key.toLowerCase())) : rawKeys;
+  return names.find((name) => keys.has(caseInsensitive ? name.toLowerCase() : name));
+}
+
+/** The first dotenv file wrangler reloads that declares `WRANGLER_CI_OVERRIDE_NAME`. */
+export function findWranglerCiOverrideDotenvFile(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  return DEPLOY_WRANGLER_DOTENV_FILES.find((file) =>
+    findDotenvDeclaration(root, file, ['WRANGLER_CI_OVERRIDE_NAME'], platform),
+  );
 }
 
 /**
@@ -111,27 +143,25 @@ export function assertNoConfigOverrideInProjectDotenv(
   root: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  const caseInsensitive = platform === 'win32';
-  const declaresAny = (file: string, names: ReadonlyArray<string>): string | undefined => {
-    const rawKeys = scanWranglerDotenvKeys(join(root, file));
-    const keys = caseInsensitive ? new Set([...rawKeys].map((key) => key.toLowerCase())) : rawKeys;
-    return names.find((name) => keys.has(caseInsensitive ? name.toLowerCase() : name));
-  };
   // WRANGLER_CI_OVERRIDE_NAME reaches the DEPLOY step via wrangler's `--env=` dotenv reload.
-  for (const file of DEPLOY_WRANGLER_DOTENV_FILES) {
-    if (declaresAny(file, ['WRANGLER_CI_OVERRIDE_NAME'])) {
-      throw new Error(
-        `the project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which wrangler reloads on ` +
-          `every command and applies AFTER config load to REPLACE the deployed worker name — so ` +
-          `\`wrangler deploy\` would upload a worker whose name was never validated. Remove it from ` +
-          `"${file}" (set it in your shell/CI only if you truly need a CI name override).`,
-      );
-    }
+  const ciOverrideFile = findWranglerCiOverrideDotenvFile(root, platform);
+  if (ciOverrideFile) {
+    throw new Error(
+      `the project file "${ciOverrideFile}" sets WRANGLER_CI_OVERRIDE_NAME, which wrangler reloads on ` +
+        `every command and applies AFTER config load to REPLACE the deployed worker name — so ` +
+        `\`wrangler deploy\` would upload a worker whose name was never validated. Remove it from ` +
+        `"${ciOverrideFile}" (set it in your shell/CI only if you truly need a CI name override).`,
+    );
   }
   // CLOUDFLARE_ENV / CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH reach the BUILD via Vite's
   // production `loadEnv`, whose file set is disjoint from wrangler's `--env=` files.
   for (const file of DEPLOY_VITE_DOTENV_FILES) {
-    const offender = declaresAny(file, ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH']);
+    const offender = findDotenvDeclaration(
+      root,
+      file,
+      ['CLOUDFLARE_ENV', 'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH'],
+      platform,
+    );
     if (offender) {
       throw new Error(
         `the project file "${file}" sets ${offender}, which the Cloudflare Vite plugin reads at ` +
@@ -151,11 +181,10 @@ export function assertNoConfigOverrideInProjectDotenv(
  * Returns the single resolved API base URL to pin into every child env.
  */
 export function resolveDeployTransport(root: string, rootConfig: Record<string, unknown>): string {
-  const provision = requireProvisionModule();
   assertNoAmbientConfigOverride();
-  provision.assertNoTransportRedirectInProjectDotenv(root);
+  assertNoTransportRedirectInProjectDotenv(root);
   assertNoConfigOverrideInProjectDotenv(root);
-  return provision.resolvePinnedApiBaseUrl(
+  return resolvePinnedApiBaseUrl(
     process.env,
     readWranglerTopLevelString(rootConfig, 'compliance_region'),
   );
@@ -167,27 +196,21 @@ export function resolveDeployTransport(root: string, rootConfig: Record<string, 
  * selector incl. `CLOUDFLARE_ENV` + win32 case variants, pins ONE account + API base),
  * then scrubs the deploy-specific config-override selectors on top.
  *
- * This is the env {@link createDeployWranglerRunner} spawns `whoami` / `d1 migrations apply`
- * / `deploy` with, so it deliberately KEEPS the wrangler-auth credentials — only the
- * untrusted-code children layer {@link scrubWranglerAuthCredentials} on top. Exported so a
- * test can assert that directly.
+ * {@link createDeployWranglerRunner} runs the deploy's Cloudflare operations with this
+ * env, so it KEEPS the Cloudflare credentials; only children that run project code layer
+ * {@link scrubWranglerAuthCredentials} on top.
  */
 export function deployChildEnv(
   accountId: string | undefined,
   apiBaseUrl: string,
 ): NodeJS.ProcessEnv {
-  const provision = requireProvisionModule();
-  const env = provision.provisionEnv({ accountId, apiBaseUrl });
+  const env = provisionEnv({ accountId, apiBaseUrl });
   for (const name of DEPLOY_CONFIG_OVERRIDE_ENV_VARS) {
-    provision.deleteEnvVarCaseAware(env, name);
+    deleteEnvVarCaseAware(env, name);
   }
-  // Pin WRANGLER_LOG=log for the whole deploy so wrangler's `d1 migrations list` sentinels
-  // ('No migrations to apply!' / 'Migrations to be applied:'), emitted at logger level
-  // `log`, are NEVER suppressed by an ambient WRANGLER_LOG=none|error|warn|info — otherwise
-  // a declined/partial apply prints no marker and the pending-check would pass open. The
-  // canonical spelling is scrubbed case-aware FIRST so no mixed-case ambient value shadows
-  // the pin on win32; `log` is wrangler's own default level, so normal output is unchanged.
-  provision.deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
+  // Pin Wrangler's default log level. Delete case-aware first so a mixed-case
+  // ambient value cannot shadow the pin on win32.
+  deleteEnvVarCaseAware(env, 'WRANGLER_LOG');
   env.WRANGLER_LOG = 'log';
   // Void owns the browser OAuth lifecycle. Never allow Wrangler to fall back to
   // its plaintext credential file while a Void command is using that session.
@@ -197,32 +220,17 @@ export function deployChildEnv(
 
 /**
  * Delete every {@link WRANGLER_AUTH_CREDENTIAL_ENV_VARS} entry from `env` IN PLACE and
- * return it, for a child that executes UNTRUSTED project code and needs no Cloudflare
- * credential of its own.
- *
- * The case-aware delete lives in the provision module, which ONLY the Cloudflare fork
- * loads (a managed deploy must not pay `proper-lockfile`'s import-time side effects). One
- * caller — `runDrizzleKitGenerate`, via the shared schema-drift check — also runs on the
- * MANAGED path, where that module is legitimately absent, so read the memoized handle
- * directly instead of {@link requireProvisionModule} (which throws when the fork never ran)
- * and fall back to the exact-case delete. That fallback IS the whole rule off win32 (POSIX
- * env keys are case-sensitive); the case-insensitive win32 sweep only matters for the
- * Cloudflare fork, and by the time either call site runs there the module is always loaded.
+ * return it, for a Cloudflare-fork child that executes UNTRUSTED project code.
  */
 export function scrubWranglerAuthCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const deleteVar =
-    loadedProvisionModule?.deleteEnvVarCaseAware ??
-    ((target: NodeJS.ProcessEnv, name: string): void => {
-      delete target[name];
-    });
   for (const name of WRANGLER_AUTH_CREDENTIAL_ENV_VARS) {
-    deleteVar(env, name);
+    deleteEnvVarCaseAware(env, name);
   }
   // These are not Wrangler credentials, but native Cloudflare builds do not
   // need either one: DATABASE_URL is consumed only by the parent-side
   // provision/migration steps, and VOID_TOKEN belongs to the managed target.
-  deleteVar(env, 'DATABASE_URL');
-  deleteVar(env, 'VOID_TOKEN');
+  deleteEnvVarCaseAware(env, 'DATABASE_URL');
+  deleteEnvVarCaseAware(env, 'VOID_TOKEN');
   return env;
 }
 
@@ -244,10 +252,10 @@ export function buildSchemaProbeEnv(accountId: string, apiBaseUrl: string): Node
   // schema conditioned on this internal marker consistent with the build,
   // this prevents an ambient case variant from shadowing the pinned value on
   // Windows.
-  requireProvisionModule().deleteEnvVarCaseAware(env, CLOUDFLARE_DEPLOY_BUILD_ENV);
+  deleteEnvVarCaseAware(env, CLOUDFLARE_DEPLOY_BUILD_ENV);
   env[CLOUDFLARE_DEPLOY_BUILD_ENV] = '1';
   // Scrub any ambient spelling first (case-aware on win32) so it cannot shadow the pin.
-  requireProvisionModule().deleteEnvVarCaseAware(env, 'NODE_ENV');
+  deleteEnvVarCaseAware(env, 'NODE_ENV');
   env.NODE_ENV = 'production';
   return env;
 }

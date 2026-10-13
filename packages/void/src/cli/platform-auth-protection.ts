@@ -120,6 +120,26 @@ export async function verifyProtectionWorkerOrigins(
   }
 }
 
+function stringList(value: unknown): Array<string> | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
+}
+
+function protectionContext(value: Record<string, unknown>) {
+  const { installationId, userId, sessionId, revision, lifecycleVersion } = value;
+  const origins = stringList(value.origins);
+  return typeof installationId === 'string' &&
+    typeof userId === 'string' &&
+    typeof sessionId === 'string' &&
+    typeof revision === 'number' &&
+    Number.isSafeInteger(revision) &&
+    typeof lifecycleVersion === 'string' &&
+    origins
+    ? { installationId, userId, sessionId, revision, lifecycleVersion, origins }
+    : undefined;
+}
+
 export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Promise<void> {
   const manifest =
     args.target === 'show' ? undefined : resolveInstallationManifest(args.installation);
@@ -143,33 +163,25 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
       ensurePlatformAccessToken(origin, false, true);
     }
   }
-  let context = await operator.request('/config/auth/protection');
+  const live = await operator.request('/config/auth/protection');
   if (args.target === 'show') {
-    console.log(
-      JSON.stringify({ protection: context.protection, origins: context.origins }, null, 2),
-    );
+    console.log(JSON.stringify({ protection: live.protection, origins: live.origins }, null, 2));
     return;
   }
+  let context = protectionContext(live);
   if (
     !manifest ||
     manifest.status !== 'installed' ||
     !manifest.endpoints.proxyUrl ||
     normalizePlatformApiUrl(manifest.endpoints.apiUrl ?? '') !== origin ||
-    context.installationId !== manifest.id ||
-    typeof context.userId !== 'string' ||
-    typeof context.sessionId !== 'string' ||
-    typeof context.revision !== 'number' ||
-    typeof context.lifecycleVersion !== 'string' ||
-    !Number.isSafeInteger(context.revision) ||
-    !Array.isArray(context.origins) ||
-    context.origins.some((value) => typeof value !== 'string')
+    !context ||
+    context.installationId !== manifest.id
   ) {
     throw new Error(
       'platform: Protection settings must belong to this completed installation. Repair or upgrade it first.',
     );
   }
-  let lifecycleVersion = context.lifecycleVersion;
-  let origins = context.origins as Array<string>;
+  let origins = context.origins;
   if (!origins.includes(origin) || !origins.includes(new URL(manifest.endpoints.proxyUrl).origin)) {
     throw new Error(
       'platform: The live API and proxy origins differ from installation recovery state. Repair the installation first.',
@@ -257,17 +269,13 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
         } else {
           writeInstallationManifest(currentManifest);
         }
-        context = await operator.request('/config/auth/protection');
-        const rawLockedOrigins: unknown = context.origins;
-        const lockedOrigins = Array.isArray(rawLockedOrigins)
-          ? rawLockedOrigins.filter((value: unknown): value is string => typeof value === 'string')
-          : [];
+        const locked = await operator.request('/config/auth/protection');
+        const lockedOrigins = stringList(locked.origins);
         if (
           normalizePlatformApiUrl(currentManifest.endpoints.apiUrl ?? '') !== origin ||
           !currentManifest.endpoints.proxyUrl ||
-          context.installationId !== currentManifest.id ||
-          lockedOrigins.length !==
-            (Array.isArray(rawLockedOrigins) ? rawLockedOrigins.length : -1) ||
+          locked.installationId !== currentManifest.id ||
+          !lockedOrigins ||
           !lockedOrigins.includes(origin) ||
           !lockedOrigins.includes(new URL(currentManifest.endpoints.proxyUrl).origin)
         ) {
@@ -330,22 +338,16 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
       // Resource checkpointing changes lifecycleVersion. Refresh it after releasing the
       // lifecycle lock, then verify the origins against that exact captured version. A
       // later lifecycle mutation makes this proof stale at the operator API.
-      context = await operator.request('/config/auth/protection');
+      context = protectionContext(await operator.request('/config/auth/protection'));
       if (
+        !context ||
         context.installationId !== currentManifest.id ||
-        typeof context.userId !== 'string' ||
-        typeof context.sessionId !== 'string' ||
-        typeof context.revision !== 'number' ||
-        typeof context.lifecycleVersion !== 'string' ||
-        !Array.isArray(context.origins) ||
-        context.origins.some((value: unknown) => typeof value !== 'string') ||
         JSON.stringify(context.origins) !== JSON.stringify(origins)
       ) {
         throw new Error(
           'platform: Protection settings changed while Access resources were being checkpointed. Review and retry.',
         );
       }
-      lifecycleVersion = context.lifecycleVersion;
       await verifyProtectionWorkerOrigins(cloudflare, currentManifest, origins, false);
     }
     const expiresAt = new Date(Date.now() + 300_000).toISOString();
@@ -357,7 +359,7 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
           userId: context.userId,
           sessionId: context.sessionId,
           revision: context.revision,
-          lifecycleVersion,
+          lifecycleVersion: context.lifecycleVersion,
           protection,
           expiresAt,
         }),
@@ -365,7 +367,7 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
       .digest('base64url');
     const body = {
       revision: context.revision,
-      lifecycleVersion,
+      lifecycleVersion: context.lifecycleVersion,
       protection,
       expiresAt,
       signature,
@@ -378,7 +380,7 @@ export async function runPlatformProtectionConfig(args: PlatformConfigArgs): Pro
       console.error(JSON.stringify(preview, null, 2));
     }
     const result = await operator.request('/config/auth/protection', { method: 'POST', body });
-    save({ protectionUpdateJson: JSON.stringify({ revision: result.revision, protection }) });
+    writePendingInstallationSecrets(currentManifest, checkpoint);
     promoteInstallationSecrets(currentManifest);
     console.log(
       JSON.stringify({ ...result, protection, retainedAccessApplications: true }, null, 2),

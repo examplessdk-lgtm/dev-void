@@ -2,27 +2,17 @@ import { log } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { PlatformApiError, type PlatformClient } from '../../src/cli/client.ts';
 import { runGithubLink } from '../../src/cli/github-cmd.ts';
+import { browserCallback, throwOnProcessExit } from '../helpers/github-cli.ts';
 
-// Mock node:child_process so openBrowser never launches a real browser; the
-// localhost callback server is driven directly by fetch in each test.
-const mockExecFile = vi.fn();
-vi.mock('node:child_process', () => ({
-  execFile: (...args: Array<unknown>) => mockExecFile(...args),
-}));
-
-const originalFetch = globalThis.fetch.bind(globalThis);
+// Keep openBrowser from launching a real browser.
+vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
 type FakeClient = Pick<PlatformClient, 'getGithubLinkUrl' | 'completeGithubLink'>;
 
 let exitSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  mockExecFile.mockReset();
-  // process.exit -> throw so we can assert the error-path exit without killing
-  // the test runner.
-  exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-    throw new Error(`process.exit(${code})`);
-  }) as never);
+  exitSpy = throwOnProcessExit();
 });
 
 afterEach(() => {
@@ -30,46 +20,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/**
- * Run runGithubLink against a fake client, intercepting the authorize URL the
- * command requests (via the fake getGithubLinkUrl) so the test can POST back to
- * the localhost callback with whatever query it wants.
- *
- * `completeGithubLink` and the callback query are configurable per test.
- */
+/** Runs runGithubLink and sends the callback redirect that `callbackQuery` builds. */
 function drive(opts: {
   completeGithubLink: FakeClient['completeGithubLink'];
   callbackQuery: (callbackUrl: URL) => URL;
 }): Promise<void> {
-  let resolveCallback!: (url: URL) => void;
-  const callbackReady = new Promise<URL>((resolve) => {
-    resolveCallback = resolve;
-  });
-
+  const callback = browserCallback(opts.callbackQuery);
   const client: FakeClient = {
-    getGithubLinkUrl: vi.fn(async (redirect: string) => {
-      // `redirect` is the localhost callback URL (with the command's state).
-      resolveCallback(new URL(redirect));
-      return { url: 'https://github.com/login/oauth/authorize?client_id=x' };
-    }),
+    getGithubLinkUrl: callback.authUrl,
     completeGithubLink: opts.completeGithubLink,
   };
-
-  const run = runGithubLink(client as unknown as PlatformClient);
-
-  // Once the command has built the callback URL, fire the simulated browser
-  // redirect back at the localhost server. Swallow fetch errors: on the
-  // error paths the server is torn down mid-response (process.exit / throw),
-  // which can surface as ECONNRESET on the in-flight request — irrelevant to
-  // what we're asserting (the command's outcome).
-  const fired = callbackReady.then(async (callbackUrl) => {
-    const hit = opts.callbackQuery(callbackUrl);
-    await originalFetch(hit).catch(() => {});
-  });
-
-  // Settle on the command's outcome, but make sure the fetch is also drained so
-  // no dangling promise leaks across tests.
-  return run.finally(() => fired.catch(() => {}));
+  return callback.settle(runGithubLink(client as unknown as PlatformClient));
 }
 
 describe('runGithubLink', () => {

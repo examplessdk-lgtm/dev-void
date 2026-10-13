@@ -12,7 +12,7 @@ import { inferDefaultSlug } from './resolve-project.ts';
  * caller's prompt callback returns `undefined` (cancel).
  *
  * The shared retry loop keeps `promptAndCreateProject` (deploy/link paths)
- * and the AI-setup path in `index.ts` in sync.
+ * and the AI-setup path in `plugin-ai-setup.ts` in sync.
  */
 export async function createProjectWithSlugRetry(
   client: PlatformClient,
@@ -65,7 +65,7 @@ export async function promptAndCreateProject(
   }
   const config: ProjectConfig = { projectId: project.id, slug: project.slug };
   if (options.link !== false) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
   }
   if (project.owner_email_destination) {
     // The platform registers the owner's address after it has answered, so
@@ -94,10 +94,7 @@ export function isRetryableCreateError(error: PlatformApiError): boolean {
 }
 
 function isSlugRelatedError(error: PlatformApiError): boolean {
-  // Inspect BOTH `code` (parsed error/message field) and `body` (full response
-  // text). The server's current short-slug response embeds "slug" in `error`,
-  // but a future generic code like "forbidden" with the slug detail only in a
-  // separate message field would slip past a `code ?? body` short-circuit.
+  // The slug detail may be in either field.
   const haystack = `${error.code ?? ''} ${error.body ?? ''}`.toLowerCase();
   return haystack.includes('slug');
 }

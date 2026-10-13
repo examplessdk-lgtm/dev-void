@@ -5,6 +5,7 @@ import {
   createD1Database,
   enableD1ReadReplication,
   createHyperdrive,
+  ensureHyperdriveCachingDisabled,
   getDispatchWorkerProxyToken,
   parseHyperdriveConnectionString,
   removeQueueConsumer,
@@ -283,7 +284,6 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgresql',
         user: 'user',
       },
-      mtls: { sslmode: 'require' },
     });
   });
 
@@ -301,9 +301,38 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgresql',
         user: 'user',
       },
-      mtls: { sslmode: 'require' },
     });
   });
+
+  it.each([
+    'require',
+    'verify-ca',
+    'verify-full',
+    'verify-full&sslrootcert=system',
+    'verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
+    'require&sslrootcert=./rds-ca.pem',
+  ])('sends no Hyperdrive TLS settings for PostgreSQL sslmode=%s', (sslmode) => {
+    expect(
+      parseHyperdriveConnectionString(
+        `postgresql://user:pass@db.example.com/app_db?sslmode=${sslmode}`,
+      ),
+    ).not.toHaveProperty('mtls');
+  });
+
+  it.each(['disable', 'prefer', 'no-verify'])(
+    'rejects PostgreSQL sslmode=%s before calling Cloudflare',
+    async (sslmode) => {
+      await expect(
+        createHyperdrive(
+          ACCOUNT,
+          TOKEN,
+          'proj-hyperdrive',
+          `postgresql://user:pass@db.example.com/app?sslmode=${sslmode}`,
+        ),
+      ).rejects.toThrow(/Unsupported sslmode/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('parses MySQL connection strings and defaults to port 3306', () => {
     expect(parseHyperdriveConnectionString('mysql://user:p%40ss@mysql.example.com/app_db')).toEqual(
@@ -327,12 +356,13 @@ describe('Hyperdrive connection strings', () => {
       ACCOUNT,
       TOKEN,
       'proj-hyperdrive',
-      'postgres://user:pass@db.example.com:5432/app?sslmode=verify-full',
+      'postgres://user:pass@db.example.com:5432/app?sslmode=verify-full&sslrootcert=/home/dev/prod-ca-2021.crt',
     );
 
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       name: 'proj-hyperdrive',
+      caching: { disabled: true },
       origin: {
         database: 'app',
         host: 'db.example.com',
@@ -341,24 +371,24 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgres',
         user: 'user',
       },
-      mtls: { sslmode: 'verify-full' },
     });
   });
 
-  it('sends parsed origin fields when updating Hyperdrive configs', async () => {
+  it('sends no TLS settings when updating Hyperdrive configs, so Cloudflare keeps the existing ones', async () => {
     fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'hd_1', name: 'proj-hyperdrive' }));
 
     await updateHyperdrive(
       ACCOUNT,
       TOKEN,
       'hd_1',
-      'postgresql://user:pass@db.example.com/app',
+      'postgresql://user:pass@db.example.com/app?sslmode=verify-full&sslrootcert=system',
       'proj-hyperdrive',
     );
 
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       name: 'proj-hyperdrive',
+      caching: { disabled: true },
       origin: {
         database: 'app',
         host: 'db.example.com',
@@ -367,6 +397,42 @@ describe('Hyperdrive connection strings', () => {
         scheme: 'postgresql',
         user: 'user',
       },
+    });
+  });
+
+  it('leaves a Hyperdrive config with caching already off unchanged', async () => {
+    fetchMock.mockResolvedValueOnce(cfSuccess({ id: 'hd_1', caching: { disabled: true } }));
+
+    await ensureHyperdriveCachingDisabled(ACCOUNT, TOKEN, 'hd_1');
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acc_test/hyperdrive/configs/hd_1',
+    );
+    expect([undefined, 'GET']).toContain((init as RequestInit).method);
+  });
+
+  it('turns caching off with a PATCH that sends no origin', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        cfSuccess({
+          id: 'hd_1',
+          caching: { disabled: false, max_age: 60, stale_while_revalidate: 15 },
+        }),
+      )
+      .mockResolvedValueOnce(cfSuccess({ id: 'hd_1' }));
+
+    await ensureHyperdriveCachingDisabled(ACCOUNT, TOKEN, 'hd_1');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/acc_test/hyperdrive/configs/hd_1',
+    );
+    expect((init as RequestInit).method).toBe('PATCH');
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      caching: { disabled: true },
     });
   });
 

@@ -25,8 +25,8 @@ export function frameworkTriggersDispatchPath(root: string): string {
  */
 export function writeFrameworkTriggersDispatch(root: string, devTriggerToken: string): void {
   const paths = readProjectPaths(root);
-  const jobs = scanJobsSync(root, paths.cronsDir);
-  const queues = scanQueuesSync(root, paths.queuesDir);
+  const jobs = scanJobsSync(paths.cronsDir);
+  const queues = scanQueuesSync(paths.queuesDir);
   const target = frameworkTriggersDispatchPath(root);
   mkdirSync(dirname(target), { recursive: true });
   // Owner-only, like `.void/dev-trigger-token`: this module embeds the same
@@ -72,9 +72,7 @@ export function frameworkTriggersPlugin(root: string, options: FrameworkTriggers
       // generated `__jobs`/`__queues` table at codegen time) are picked up
       // without a full restart.
       //
-      // chokidar emits POSIX-style paths on every platform, so normalize the
-      // root prefixes to match — otherwise this comparison silently no-ops
-      // on Windows where `join(root, 'crons')` uses backslashes.
+      // Watcher paths are native (backslashes on Windows); normalize before comparing.
       const paths = readProjectPaths(root);
       const cronsPrefix = normalizePath(paths.cronsDir);
       const queuesPrefix = normalizePath(paths.queuesDir);
@@ -87,13 +85,8 @@ export function frameworkTriggersPlugin(root: string, options: FrameworkTriggers
           return;
         }
         writeDispatch();
-        // The dispatch file lives under `.void/`, which `envPlugin.config`
-        // adds to `server.watch.ignored` (to stop miniflare's SQLite writes
-        // from triggering infinite HMR). Without explicit invalidation the
-        // worker environment would keep returning the cached dispatch
-        // module on the next dynamic import, so a renamed/added cron would
-        // never route until the dev server restarts. Walk every Vite
-        // environment and drop the cached dispatch module.
+        // In the Class A composition, `envPlugin.config` ignores `.void/` in the
+        // watcher, so Vite never invalidates the cached dispatch module itself.
         for (const env of Object.values(server.environments)) {
           const mod = env.moduleGraph.getModuleById(dispatchPath);
           if (mod) {
@@ -262,8 +255,8 @@ export async function handleDevTrigger(request, env, ctx) {
 `;
 }
 
-/** Append any missing `lines` to the project's `.gitignore`. */
-function ensureGitignoreLines(root: string, lines: ReadonlyArray<string>): void {
+/** Append any missing `lines` to the project's `.gitignore` and return the appended ones. */
+function ensureGitignoreLines(root: string, lines: ReadonlyArray<string>): ReadonlyArray<string> {
   const gitignorePath = join(root, '.gitignore');
   let contents = '';
   if (existsSync(gitignorePath)) {
@@ -272,10 +265,28 @@ function ensureGitignoreLines(root: string, lines: ReadonlyArray<string>): void 
   const existing = new Set(contents.split('\n').map((line) => line.trim()));
   const missing = lines.filter((line) => !existing.has(line));
   if (missing.length === 0) {
-    return;
+    return [];
   }
   const sep = contents.length === 0 || contents.endsWith('\n') ? '' : '\n';
   writeFileSync(gitignorePath, `${contents}${sep}${missing.join('\n')}\n`);
+  return missing;
+}
+
+/** Remove `lines` from the project's `.gitignore`, if it still exists. */
+function removeGitignoreLines(root: string, lines: ReadonlyArray<string>): void {
+  const gitignorePath = join(root, '.gitignore');
+  if (lines.length === 0 || !existsSync(gitignorePath)) {
+    return;
+  }
+  const contents = readFileSync(gitignorePath, 'utf-8');
+  const remove = new Set(lines);
+  const next = contents
+    .split('\n')
+    .filter((line) => !remove.has(line.trim()))
+    .join('\n');
+  if (next !== contents) {
+    writeFileSync(gitignorePath, next);
+  }
 }
 
 const NITRO_MIDDLEWARE_FILENAME = '__void-dev-trigger.ts';
@@ -553,12 +564,15 @@ export const onRequest = defineMiddleware(async (context, next) => {
  * one-shot snippet they can paste into their existing middleware.
  *
  * If we wrote the file we remove it on dev-server close so the user's
- * source tree stays clean.
+ * source tree stays clean. `src/middleware.ts` belongs to the user, so the
+ * `.gitignore` line we add for it is removed too; otherwise a middleware they
+ * write later would be silently left out of git.
  */
 export function astroDevTriggerInjectPlugin(root: string): Plugin {
   const middlewarePath = join(root, ASTRO_MIDDLEWARE_RELATIVE);
   const middlewareDirIndexPath = join(root, 'src', 'middleware', 'index.ts');
   let wroteFile = false;
+  let addedGitignoreLines: ReadonlyArray<string> = [];
 
   const ensureFile = () => {
     if (existsSync(middlewarePath) || existsSync(middlewareDirIndexPath)) {
@@ -578,6 +592,8 @@ export function astroDevTriggerInjectPlugin(root: string): Plugin {
     if (wroteFile) {
       rmSync(middlewarePath, { force: true });
     }
+    removeGitignoreLines(root, addedGitignoreLines);
+    addedGitignoreLines = [];
   };
 
   return {
@@ -586,7 +602,7 @@ export function astroDevTriggerInjectPlugin(root: string): Plugin {
     configureServer(server) {
       ensureFile();
       if (wroteFile) {
-        ensureGitignoreLines(root, [ASTRO_MIDDLEWARE_RELATIVE]);
+        addedGitignoreLines = ensureGitignoreLines(root, [ASTRO_MIDDLEWARE_RELATIVE]);
       }
       server.httpServer?.once('close', cleanup);
       process.once('exit', cleanup);

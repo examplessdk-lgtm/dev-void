@@ -13,13 +13,9 @@ import {
   parseCloudflareAuthSession,
 } from './cloudflare-auth.ts';
 import { prepareExistingCloudflareDeploy } from './cloudflare-link.ts';
-import { createCloudflareProcessRunner } from './cloudflare-process.ts';
+import { createCloudflareProcessRunner, isCleanCloudflareExit } from './cloudflare-process.ts';
 import { log } from './deploy-helpers.ts';
-import {
-  isCleanWranglerExit,
-  CloudflareAuthSecretError,
-  BETTER_AUTH_SECRET_NAME,
-} from './deploy-resources.ts';
+import { CloudflareAuthSecretError, BETTER_AUTH_SECRET_NAME } from './deploy-resources.ts';
 import { deployChildEnv } from './deploy-transport.ts';
 import { type DeployWranglerRun, type DeployWranglerRunResult } from './deploy-types.ts';
 import {
@@ -66,7 +62,7 @@ export async function prepareExistingCloudflareDeployWithAuth(
       { type: 'auth.whoami', configPath },
       { capture: true },
     );
-    const session = isCleanWranglerExit(identity)
+    const session = isCleanCloudflareExit(identity)
       ? parseCloudflareAuthSession(identity.data)
       : null;
     const wrongAccount =
@@ -175,28 +171,14 @@ export async function chooseCloudflareDeployAccount(options: {
   return account.id;
 }
 
-/**
- * wrangler's own interactivity gate (`isNonInteractiveOrCI`, workers-utils): `ci-info`'s `isCI`
- * OR either stdio not a TTY. The email step (3b-ii) uses THIS rather than the deploy's `isCI`
- * (stdin-only, or a CI token source): wrangler asks its own y/n on a destructive `addresses`
- * plan change after the upload under the same gate, and the two halves of one deploy must call
- * the same run interactive — otherwise Void would prompt where wrangler then throws in "CI", or
- * skip a prompt wrangler goes on to ask.
- */
+/** Non-interactive when CI is detected or stdin/stdout is not a TTY. */
 export function isWranglerNonInteractiveOrCI(): boolean {
   return ciInfoIsCI || !(process.stdin.isTTY && process.stdout.isTTY);
 }
 
 /**
- * Borrow the wrangler session's bearer for the two email calls wrangler has no command for
- * (0078 "The flow, by lane": subdomain routing enable, the subaddressing PATCH, plus the
- * read-only zone classification). Spawns `wrangler auth token --json` through the deploy runner
- * — the pinned uploader, the pinned account + API base — with `WRANGLER_WRITE_LOGS=false`
- * layered on the child env: without it wrangler appends the token to
- * `~/.wrangler/logs/wrangler-*.log`, mode `-rw-r--r--` (`shouldLogToDisk`). The captured stdout
- * is parsed and the token string is handed to the caller's closure ONLY: it is never logged,
- * never placed in `process.env` or any later child env, and never part of an error — every
- * failure resolves `null`, which the email module reports as "session bearer unavailable".
+ * Read the current Cloudflare session bearer through the pinned deploy runner, for API calls
+ * Void makes itself. The token goes only to the caller; every failure resolves `null`.
  */
 export async function runWranglerAuthToken(
   runWrangler: DeployWranglerRun,
@@ -205,18 +187,12 @@ export async function runWranglerAuthToken(
   let result: DeployWranglerRunResult;
   try {
     result = await Promise.resolve(
-      runWrangler(
-        { type: 'auth.token', configPath },
-        {
-          capture: true,
-          env: { WRANGLER_WRITE_LOGS: 'false' },
-        },
-      ),
+      runWrangler({ type: 'auth.token', configPath }, { capture: true }),
     );
   } catch {
     return null;
   }
-  if (!isCleanWranglerExit(result)) {
+  if (!isCleanCloudflareExit(result)) {
     return null;
   }
   const parsed = result.data as { type?: unknown; token?: unknown } | null | undefined;
@@ -311,7 +287,7 @@ export async function ensureCloudflareAuthSecret(options: {
       'put-failed',
     );
   }
-  if (!isCleanWranglerExit(put)) {
+  if (!isCleanCloudflareExit(put)) {
     throw new CloudflareAuthSecretError(
       `deploy: could not create the remote ${BETTER_AUTH_SECRET_NAME} ` +
         `(Cloudflare command exit ${String(put.status)}). No worker was uploaded. ` +

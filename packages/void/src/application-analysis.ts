@@ -8,7 +8,7 @@ import { collectMigrations } from './migrations/collect.ts';
 import { detectFramework, FRAMEWORK_SCAN_DIRS, inferProjectBindings } from './plugin-inference.ts';
 import { resolveProjectPaths } from './project-paths.ts';
 import { scanQueuesSync } from './queues/scan.ts';
-import { hasEmailHandlers, scanEmailHandlersSync } from './router/email.ts';
+import { scanEmailHandlersSync } from './router/email.ts';
 import { isRouteEnabledForEnvironment, type RouteEnvironment } from './router/parse-filename.ts';
 import { scanMiddlewareSync, scanRoutePatternsSync } from './router/scan.ts';
 import { scanWebSocketRoutesSync } from './router/websocket.ts';
@@ -18,11 +18,6 @@ export type ApplicationReasons = {
   database: Array<string>;
   kv: Array<string>;
   r2: Array<string>;
-  ai: Array<string>;
-  sandbox: Array<string>;
-  live: Array<string>;
-  email: Array<string>;
-  queues: Array<string>;
 };
 
 export type ApplicationAnalysis = {
@@ -76,8 +71,8 @@ export function analyzeApplicationSync(
   };
   const dialect = getDatabaseDialect(config);
   const migrations = collectMigrations(paths.migrationsDir);
-  const jobs = scanJobsSync(root, paths.cronsDir);
-  const queues = scanQueuesSync(root, paths.queuesDir);
+  const jobs = scanJobsSync(paths.cronsDir);
+  const queues = scanQueuesSync(paths.queuesDir);
   const allWebsockets = scanWebSocketRoutesSync(root, paths);
   const websockets = allWebsockets.filter((route) =>
     isRouteEnabledForEnvironment(route, environment),
@@ -87,7 +82,7 @@ export function analyzeApplicationSync(
   const email = scanEmailHandlersSync(paths.sourceRoot);
   const overrides = config.inference?.bindings;
   const bindingReason = (
-    key: 'db' | 'kv' | 'storage' | 'ai' | 'email',
+    key: 'db' | 'kv' | 'storage',
     label: string,
     inferredReason: string,
   ): string => (overrides?.[key] ? `inference.bindings.${key} enables ${label}` : inferredReason);
@@ -95,13 +90,6 @@ export function analyzeApplicationSync(
     database: [],
     kv: bindings.needsKV ? [bindingReason('kv', 'KV', 'app uses env.KV')] : [],
     r2: bindings.needsR2 ? [bindingReason('storage', 'R2', 'app uses env.STORAGE (R2)')] : [],
-    ai: bindings.needsAI ? [bindingReason('ai', 'Workers AI', 'app uses Workers AI')] : [],
-    sandbox: bindings.needsSandbox
-      ? [isSandboxEnabled(config) ? 'void.config.ts enables Sandbox' : 'app uses void/sandbox']
-      : [],
-    live: bindings.needsLive ? ['app uses void/live'] : [],
-    email: bindings.needsEmail ? [bindingReason('email', 'email', 'app uses void/email')] : [],
-    queues: bindings.needsQueues ? ['app uses void/queues'] : [],
   };
   const databaseName = dialect === 'sqlite' ? 'a D1 database' : 'a Hyperdrive database';
   if (bindings.needsD1) {
@@ -118,12 +106,6 @@ export function analyzeApplicationSync(
   }
   if (migrations.length > 0) {
     reasons.database.push(`checked-in migrations need ${databaseName}`);
-  }
-  for (const queue of queues) {
-    reasons.queues.push(`queues/${queue.filePath} requires ${queue.bindingName}`);
-  }
-  if (hasEmailHandlers(email)) {
-    reasons.email.push('email/ contains inbound email handlers');
   }
   return {
     root,

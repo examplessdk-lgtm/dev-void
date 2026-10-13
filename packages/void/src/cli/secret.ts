@@ -8,12 +8,77 @@ import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
 import type { SecretArgs } from './secret-args.ts';
 
+type SecretEntry = { name: string; value: string };
+
+type SecretBackend = {
+  /** Named in the sync confirmation. */
+  target: string;
+  list(): Promise<Array<string>>;
+  put(name: string, value: string): Promise<void>;
+  sync(secrets: Array<SecretEntry>): Promise<void>;
+  delete(name: string): Promise<void>;
+};
+
 export async function runSecretCommand(root: string, args: SecretArgs): Promise<void> {
   console.log();
 
+  const backend = await resolveSecretBackend(root, args);
+
+  if (args.action === 'list') {
+    const names = await backend.list();
+    if (names.length === 0) {
+      outro('No secrets set.');
+      return;
+    }
+    note(names.map((name) => `  ${name}`).join('\n'), 'Secrets');
+    outro(formatCount(names.length, 'secret'));
+    return;
+  }
+
+  if (args.action === 'put') {
+    const value = args.value ?? (await readSecretValue());
+    await validateSecretValues(root, [{ name: args.name, value }]);
+    await backend.put(args.name, value);
+    printSuccess(`Secret ${args.name} set.`);
+    return;
+  }
+
+  if (args.action === 'sync') {
+    const secrets = parseDotenvFile(args.file);
+    if (secrets.length === 0) {
+      log.warn('No secrets found in file.');
+      outro('Nothing to sync.');
+      return;
+    }
+
+    await validateSecretValues(root, secrets);
+
+    log.info(`Found ${formatCount(secrets.length, 'secret')}:`);
+    for (const s of secrets) {
+      log.message(`  ${s.name}`);
+    }
+
+    const proceed = await confirm({
+      message: `This will overwrite ${formatCount(secrets.length, 'secret')} in the ${backend.target}. Continue?`,
+    });
+    if (isCancel(proceed) || !proceed) {
+      cancel('Secret sync cancelled.');
+      process.exit(0);
+    }
+
+    await backend.sync(secrets);
+    printSuccess(`Synced ${formatCount(secrets.length, 'secret')}.`);
+    return;
+  }
+
+  await backend.delete(args.name);
+  printSuccess(`Secret ${args.name} deleted.`);
+}
+
+async function resolveSecretBackend(root: string, args: SecretArgs): Promise<SecretBackend> {
   const platform = readDeploymentPlatform(root);
   if (platform === 'cloudflare') {
-    return runCloudflareSecretCommand(root, args);
+    return resolveCloudflareSecretBackend(root, args);
   }
   if (platform === 'none') {
     throw new Error('secret: Deployment is disabled. Run `void init` to choose a platform.');
@@ -45,61 +110,28 @@ export async function runSecretCommand(root: string, args: SecretArgs): Promise<
     projectId = config.projectId;
   }
 
-  if (args.action === 'list') {
-    const secrets = await client.listSecrets(projectId);
-    if (secrets.length === 0) {
-      outro('No secrets set.');
-      return;
-    }
-    note(secrets.map((s) => `  ${s.name}`).join('\n'), 'Secrets');
-    outro(formatCount(secrets.length, 'secret'));
-    return;
-  }
-
-  if (args.action === 'put') {
-    const value = args.value ?? (await readSecretValue());
-    await validateSecretValues(root, [{ name: args.name, value }]);
-    await client.setSecret(projectId, args.name, value);
-    printSuccess(`Secret ${args.name} set.`);
-    return;
-  }
-
-  if (args.action === 'sync') {
-    const secrets = parseDotenvFile(args.file);
-    if (secrets.length === 0) {
-      log.warn('No secrets found in file.');
-      outro('Nothing to sync.');
-      return;
-    }
-
-    await validateSecretValues(root, secrets);
-
-    log.info(`Found ${formatCount(secrets.length, 'secret')}:`);
-    for (const s of secrets) {
-      log.message(`  ${s.name}`);
-    }
-
-    const proceed = await confirm({
-      message: `This will overwrite ${formatCount(secrets.length, 'secret')} in the remote environment. Continue?`,
-    });
-    if (isCancel(proceed) || !proceed) {
-      cancel('Secret sync cancelled.');
-      process.exit(0);
-    }
-
-    for (const s of secrets) {
-      await client.setSecret(projectId, s.name, s.value);
-      log.step(`Set ${s.name}`);
-    }
-    printSuccess(`Synced ${formatCount(secrets.length, 'secret')}.`);
-    return;
-  }
-
-  await client.deleteSecret(projectId, args.name);
-  printSuccess(`Secret ${args.name} deleted.`);
+  return {
+    target: 'remote environment',
+    list: async () => (await client.listSecrets(projectId)).map((s) => s.name),
+    put: async (name, value) => {
+      await client.setSecret(projectId, name, value);
+    },
+    sync: async (secrets) => {
+      for (const s of secrets) {
+        await client.setSecret(projectId, s.name, s.value);
+        log.step(`Set ${s.name}`);
+      }
+    },
+    delete: async (name) => {
+      await client.deleteSecret(projectId, name);
+    },
+  };
 }
 
-async function runCloudflareSecretCommand(root: string, args: SecretArgs): Promise<void> {
+async function resolveCloudflareSecretBackend(
+  root: string,
+  args: SecretArgs,
+): Promise<SecretBackend> {
   if (args.projectName) {
     throw new Error(
       'secret: --project selects a Void platform project and is not used for direct Cloudflare apps.',
@@ -113,49 +145,13 @@ async function runCloudflareSecretCommand(root: string, args: SecretArgs): Promi
     syncCloudflareSecrets,
   } = await import('./cloudflare-operations.ts');
   const context = resolveCloudflareOperationContext(root);
-
-  if (args.action === 'list') {
-    const secrets = await listCloudflareSecrets(context);
-    if (secrets.length === 0) {
-      outro('No secrets set.');
-      return;
-    }
-    note(secrets.map((name) => `  ${name}`).join('\n'), 'Secrets');
-    outro(formatCount(secrets.length, 'secret'));
-    return;
-  }
-  if (args.action === 'put') {
-    const value = args.value ?? (await readSecretValue());
-    await validateSecretValues(root, [{ name: args.name, value }]);
-    await putCloudflareSecret(context, args.name, value);
-    printSuccess(`Secret ${args.name} set.`);
-    return;
-  }
-  if (args.action === 'sync') {
-    const secrets = parseDotenvFile(args.file);
-    if (secrets.length === 0) {
-      log.warn('No secrets found in file.');
-      outro('Nothing to sync.');
-      return;
-    }
-    await validateSecretValues(root, secrets);
-    log.info(`Found ${formatCount(secrets.length, 'secret')}:`);
-    for (const secret of secrets) {
-      log.message(`  ${secret.name}`);
-    }
-    const proceed = await confirm({
-      message: `This will overwrite ${formatCount(secrets.length, 'secret')} in the Cloudflare Worker. Continue?`,
-    });
-    if (isCancel(proceed) || !proceed) {
-      cancel('Secret sync cancelled.');
-      process.exit(0);
-    }
-    await syncCloudflareSecrets(context, secrets);
-    printSuccess(`Synced ${formatCount(secrets.length, 'secret')}.`);
-    return;
-  }
-  await deleteCloudflareSecret(context, args.name);
-  printSuccess(`Secret ${args.name} deleted.`);
+  return {
+    target: 'Cloudflare Worker',
+    list: () => listCloudflareSecrets(context),
+    put: (name, value) => putCloudflareSecret(context, name, value),
+    sync: (secrets) => syncCloudflareSecrets(context, secrets),
+    delete: (name) => deleteCloudflareSecret(context, name),
+  };
 }
 
 const SECRET_KEY_RE = /^[A-Z][A-Z0-9_]*$/;

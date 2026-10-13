@@ -49,7 +49,7 @@ export async function maybeSetupDeployProject(root: string): Promise<ProjectConf
   });
   if (result.action === 'select') {
     const config = { projectId: result.project.id, slug: result.project.slug };
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
     log.step(`Linked project: ${config.slug}`);
     return config;
   }

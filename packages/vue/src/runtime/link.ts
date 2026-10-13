@@ -1,4 +1,9 @@
-import { isModifiedEvent, mergeDataIntoHref, type VoidRouter } from 'void/pages-client';
+import {
+  isModifiedEvent,
+  mergeDataIntoHref,
+  type PrefetchOptions,
+  type VoidRouter,
+} from 'void/pages-client';
 import {
   computed,
   defineComponent,
@@ -14,16 +19,6 @@ import {
 type PrefetchStrategy = 'hover' | 'click' | 'mount' | 'visible';
 type LinkMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type NavigateEvent = { preventDefault(): void };
-type PrefetchOptions = {
-  cacheFor?: number | string | [string, string];
-  method?: LinkMethod;
-};
-
-function hasPrefetch(
-  prefetch: boolean | PrefetchStrategy | ReadonlyArray<PrefetchStrategy>,
-): boolean {
-  return prefetch !== false;
-}
 
 function callHandler(handler: unknown, event: Event): void {
   if (Array.isArray(handler)) {
@@ -89,12 +84,9 @@ export const Link: Component = defineComponent({
       if (hrefWithData.value === current) {
         return;
       }
-      const options: PrefetchOptions = {};
+      const options: PrefetchOptions = { method: normalizedMethod.value };
       if (props.cacheFor !== undefined) {
         options.cacheFor = props.cacheFor;
-      }
-      if (normalizedMethod.value) {
-        options.method = normalizedMethod.value;
       }
       router.prefetch(hrefWithData.value, options);
     }
@@ -204,7 +196,7 @@ export const Link: Component = defineComponent({
     });
 
     return () => {
-      if (hasPrefetch(props.prefetch) && !isGet.value) {
+      if (props.prefetch !== false && !isGet.value) {
         throw new Error(
           'Link: prefetch only supports GET links. Remove `prefetch` or use method="GET".',
         );

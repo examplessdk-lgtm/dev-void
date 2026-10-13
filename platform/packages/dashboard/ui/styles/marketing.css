@@ -1,11 +1,20 @@
 /**
- * Dashboard shell and button styles
+ * Dashboard shell styles
  * Wrapped in @layer marketing for higher priority than base
  */
 
 @layer marketing {
   .wrapper {
-    @apply relative mx-auto w-full max-w-[calc(100vw-2rem)] divide-stroke overflow-x-clip border-r border-l border-stroke min-[90rem]:max-w-[90rem] dark:divide-nickel dark:border-nickel;
+    position: relative;
+    width: 100%;
+    max-width: calc(100vw - 2rem);
+    margin-inline: auto;
+    overflow-x: clip;
+    border-inline: 1px solid var(--color-border);
+
+    @media (min-width: 90rem) {
+      max-width: 90rem;
+    }
   }
 
   .wrapper--ticks::before {
@@ -51,86 +60,6 @@
 
     .wrapper--ticks::after {
       border-right-color: var(--color-nickel);
-    }
-  }
-
-  .button {
-    @apply inline-flex items-center justify-center gap-2 overflow-hidden squircle bg-white px-4 py-2 font-medium text-primary outline outline-stroke transition-all select-none hover:scale-105 hover:shadow-md dark:bg-transparent dark:text-white dark:outline-nickel dark:hover:bg-white dark:hover:text-primary;
-    transition-duration: 250ms;
-    transition-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
-
-    &:active {
-      scale: 0.95;
-    }
-
-    &.button--primary {
-      @apply relative transform-gpu overflow-visible text-white transition-transform outline-none hover:scale-105 hover:text-white dark:hover:bg-transparent dark:hover:text-white;
-
-      & > * {
-        position: relative;
-        z-index: 10;
-        isolation: isolate;
-      }
-
-      &:hover {
-        &::before {
-          filter: brightness(130%);
-          transform: scaleX(1.0125) scaleY(1.025);
-        }
-
-        &::after {
-          transform: scaleX(1.0125) scaleY(1.025);
-        }
-      }
-
-      &::before {
-        content: '';
-        position: absolute;
-        top: -3px;
-        left: -3px;
-        right: -3px;
-        bottom: -3px;
-        background-color: #cccccc;
-        background-image: url('../assets/primary-button-background.jpg');
-        background-size: 150% 150%;
-        background-position: center;
-        border-radius: calc(0.5rem + 3px);
-        z-index: -2;
-        animation: move-background 16s ease-in-out infinite;
-        transition: all 200ms ease-in-out;
-      }
-
-      &::after {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: var(--color-primary);
-        z-index: -1;
-        border-radius: 0.5rem;
-        transition: all 300ms ease-in-out;
-      }
-
-      @supports (corner-shape: squircle) {
-        &::before {
-          border-radius: 32px;
-          corner-shape: squircle;
-        }
-
-        &::after {
-          border-radius: 26px;
-          corner-shape: squircle;
-        }
-      }
-    }
-  }
-
-  @keyframes move-background {
-    0%,
-    100% {
-      background-position: 40% 40%;
-    }
-    50% {
-      background-position: 60% 60%;
     }
   }
 }

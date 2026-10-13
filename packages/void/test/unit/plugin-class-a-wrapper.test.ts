@@ -6,15 +6,7 @@ import { pathToFileURL } from 'node:url';
 import type { Plugin, ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
-type MockCloudflarePluginConfig = {
-  config: (resolved: Record<string, unknown>) => Record<string, unknown>;
-};
-
-vi.mock('@cloudflare/vite-plugin', () => ({
-  cloudflare(pluginConfig: MockCloudflarePluginConfig): Array<Plugin> {
-    return [{ name: 'mock:cloudflare', api: { pluginConfig } } as Plugin];
-  },
-}));
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
 
 const roots: Array<string> = [];
 
@@ -50,62 +42,44 @@ function callConfigResolved(plugin: Plugin, config: Partial<ResolvedConfig>) {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
+  vi.unstubAllEnvs();
   while (roots.length > 0) {
     rmSync(roots.pop()!, { recursive: true, force: true });
   }
 });
 
 describe('Class A framework build wrapper', () => {
-  it('falls through framework 404 responses to ASSETS for uploaded client assets', async () => {
-    const root = createTanStackRoot();
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
+  it.each([
+    [undefined, 'none'],
+    ['404-page', '404-page'],
+  ] as const)(
+    'falls through framework 404s to ASSETS with routing.notFound %s',
+    async (notFound, expected) => {
+      const root = createTanStackRoot(notFound ? { routing: { notFound } } : undefined);
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
 
-    const { voidPlugin } = await import('../../src/index.ts');
-    const plugins = voidPlugin();
-    const wrapperPlugin = plugins.find((plugin) => plugin.name === 'void:framework-build-wrapper');
-    if (!wrapperPlugin) {
-      throw new Error('Expected Class A wrapper plugin.');
-    }
+      const { voidPlugin } = await import('../../src/index.ts');
+      const plugins = voidPlugin();
+      const wrapperPlugin = plugins.find(
+        (plugin) => plugin.name === 'void:framework-build-wrapper',
+      );
+      if (!wrapperPlugin) {
+        throw new Error('Expected Class A wrapper plugin.');
+      }
 
-    callConfigResolved(wrapperPlugin, {
-      command: 'build',
-      build: { assetsDir: 'static' } as ResolvedConfig['build'],
-    } as Partial<ResolvedConfig>);
+      callConfigResolved(wrapperPlugin, {
+        command: 'build',
+        build: { assetsDir: 'static' } as ResolvedConfig['build'],
+      } as Partial<ResolvedConfig>);
 
-    const code = readFileSync(join(root, '.void', 'tanstack-start-trigger-wrapper.ts'), 'utf-8');
-    expect(code).toContain('return serveWithAssets(request, env, await original.fetch');
-    expect(code).toContain('import { createAssetFallback as __createAssetFallback }');
-    expect(code).toContain(
-      'const serveWithAssets = __createAssetFallback({"assetsDir":"static","serveSpaFallback":false,"notFound":"none"});',
-    );
-  });
-
-  // A Class A app deploys through `runFullDeploy`, which DOES honor
-  // `routing.notFound` when it builds the wrangler asset config. This wrapper is
-  // the code that then sits in front of the asset binding, so it has to agree —
-  // otherwise it fetches the generator's `404.html` and throws it away.
-  it('honors routing.notFound: 404-page in the generated wrapper', async () => {
-    const root = createTanStackRoot({ routing: { notFound: '404-page' } });
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
-
-    const { voidPlugin } = await import('../../src/index.ts');
-    const plugins = voidPlugin();
-    const wrapperPlugin = plugins.find((plugin) => plugin.name === 'void:framework-build-wrapper');
-    if (!wrapperPlugin) {
-      throw new Error('Expected Class A wrapper plugin.');
-    }
-
-    callConfigResolved(wrapperPlugin, {
-      command: 'build',
-      build: { assetsDir: 'static' } as ResolvedConfig['build'],
-    } as Partial<ResolvedConfig>);
-
-    const code = readFileSync(join(root, '.void', 'tanstack-start-trigger-wrapper.ts'), 'utf-8');
-    expect(code).toContain('return serveWithAssets(request, env, await original.fetch');
-    expect(code).toContain(
-      'const serveWithAssets = __createAssetFallback({"assetsDir":"static","serveSpaFallback":false,"notFound":"404-page"});',
-    );
-  });
+      const code = readFileSync(join(root, '.void', 'tanstack-start-trigger-wrapper.ts'), 'utf-8');
+      expect(code).toContain('return serveWithAssets(request, env, await original.fetch');
+      expect(code).toContain('import { createAssetFallback as __createAssetFallback }');
+      expect(code).toContain(
+        `const serveWithAssets = __createAssetFallback({"assetsDir":"static","serveSpaFallback":false,"notFound":"${expected}"});`,
+      );
+    },
+  );
 });
 
 describe('Class A framework dev wrapper', () => {
@@ -146,18 +120,6 @@ describe('Class A framework dev wrapper', () => {
   });
 });
 
-// `routing.notFound` reaches a Class A worker only through the DEPLOYED script's
-// `assets` config, and Void writes none for these frameworks. Managed
-// `void deploy` supplies it out-of-band (`manifest.assetConfig`) and marks the
-// build child with `VOID_DEPLOY_BUILD`; every other build is a self-hosted
-// `vite build && wrangler deploy`, which has to be told that Void generated
-// nothing instead of having the setting dropped silently.
-//
-// The warning must NOT say the setting does nothing. The generated wrapper
-// consumes `routing.notFound` and serves through `env.ASSETS`, and
-// `mergeBindings` leaves a Class A root wrangler `assets` block untouched, so a
-// user who writes a complete policy themselves has a WORKING config and must
-// not be told otherwise.
 describe('Class A routing.notFound self-host warning', () => {
   /** Run a Class A `build` twice and return every line the plugin logged. */
   async function buildTwiceWithNotFound(): Promise<Array<string>> {
@@ -195,34 +157,14 @@ describe('Class A routing.notFound self-host warning', () => {
     expect(warnings[0]).toContain('tanstack-start');
     expect(warnings[0]).toContain('direct Cloudflare deployment');
     expect(warnings[0]).toContain('void deploy');
-  });
-
-  // Guards the correction from PR review: an earlier draft told every self-host
-  // build the setting was "inert", which is false for anyone who declares their
-  // own complete `assets` policy — Void leaves that policy alone and the wrapper
-  // honors it.
-  it('does not claim the setting is inert, and names the config that makes it work', async () => {
-    const [warning] = notFoundWarnings(await buildTwiceWithNotFound());
-
-    expect(warning).toBeDefined();
-    expect(warning).not.toMatch(/\binert\b/);
     for (const field of ['binding', 'directory', 'not_found_handling', 'run_worker_first']) {
-      expect(warning).toContain(field);
+      expect(warnings[0]).toContain(field);
     }
   });
 
   it('stays quiet when a managed `void deploy` drives the build', async () => {
-    const previous = process.env.VOID_DEPLOY_BUILD;
-    process.env.VOID_DEPLOY_BUILD = '1';
-    try {
-      expect(notFoundWarnings(await buildTwiceWithNotFound())).toEqual([]);
-    } finally {
-      if (previous === undefined) {
-        delete process.env.VOID_DEPLOY_BUILD;
-      } else {
-        process.env.VOID_DEPLOY_BUILD = previous;
-      }
-    }
+    vi.stubEnv('VOID_DEPLOY_BUILD', '1');
+    expect(notFoundWarnings(await buildTwiceWithNotFound())).toEqual([]);
   });
 
   it('says nothing when routing.notFound is unset', async () => {

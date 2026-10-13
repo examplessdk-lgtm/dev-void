@@ -4,6 +4,7 @@ import { requireRuntimeBinding } from './env.ts';
 import { UsageLimit } from './limits.ts';
 import {
   SandboxContainer,
+  SANDBOX_PORT_HEADER,
   validateSandboxOptions,
   type SandboxCapability,
   type SandboxOptions,
@@ -106,7 +107,10 @@ function encodeOptions(value: unknown): { options: unknown; finish(): void } {
   return { options: { ...options, abort }, finish };
 }
 
-function client(capability: SandboxCapability): SandboxClient {
+function client(
+  capability: SandboxCapability,
+  nativeFetch?: (request: Request) => Promise<Response>,
+): SandboxClient {
   const call = async (operation: string, args: Array<unknown>): Promise<unknown> => {
     try {
       return await capability.invoke(operation, args);
@@ -191,7 +195,22 @@ function client(capability: SandboxCapability): SandboxClient {
       const process = await execute(argv, options);
       return process.output();
     },
-    fetch: async (port, request) => (await call('fetch', [port, request])) as Response,
+    fetch: async (port, request) => {
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+        return (await call('fetch', [port, request])) as Response;
+      }
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new TypeError('Invalid Sandbox TCP port.');
+      }
+      if (!nativeFetch) {
+        throw new SandboxUnavailableError(
+          'Sandbox WebSockets require a native Cloudflare deployment.',
+        );
+      }
+      const headers = new Headers(request.headers);
+      headers.set(SANDBOX_PORT_HEADER, String(port));
+      return nativeFetch(new Request(request, { headers }));
+    },
     running: async () => (await call('running', [])) as boolean,
     destroy: async () => {
       await call('destroy', []);
@@ -249,6 +268,6 @@ export async function getSandbox(
   const stub =
     requireRuntimeBinding<DurableObjectNamespace<VoidPlatformSandbox>>(binding).getByName(id);
   await stub.configure(sandboxOptions);
-  return client(stub);
+  return client(stub, (request) => stub.fetch(request));
 }
 export const sandbox: { get: typeof getSandbox } = { get: getSandbox };

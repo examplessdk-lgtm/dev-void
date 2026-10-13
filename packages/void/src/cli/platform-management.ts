@@ -1,8 +1,6 @@
-import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
-  createPlatformResourceOwnershipMarker,
   parsePlatformInstallationManifest,
-  parsePlatformResourceOwnershipMarker,
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
@@ -15,7 +13,7 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { confirm, isCancel, log, outro, select } from '@voidzero-dev/vite-plus-prompts';
-import { printSuccess, createSpinner, note, pc } from './output.ts';
+import { printSuccess, createSpinner, formatUrl, note, pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { platformDatabaseNameFromOwnerUrl } from './platform-auth-database.ts';
 import {
@@ -47,9 +45,14 @@ import {
 } from './platform-lifecycle.ts';
 import {
   createPlatformInstallPlan,
+  dnsRecordConfigHash,
   formatPlatformInstallPlan,
+  hasProvisionIntentStep,
+  legacyResourceConfigHash,
+  matchesRecordedR2Fingerprint,
   platformAdoptionIntentHash,
-  platformProvisionIntentHash,
+  r2BucketConfigHash,
+  resourceMarkerProblem,
   revalidatePlatformInstallAction,
 } from './platform-plan.ts';
 import {
@@ -79,13 +82,12 @@ import {
   type PurgeResourcesClient,
   type PurgeResourcesCredential,
 } from './platform-teardown.ts';
-import { trackedPlatformWorkerTraffic } from './platform-traffic.ts';
 import {
   assertProjectZeroTrustAllowsUninstall,
   type PlatformProjectZeroTrustState,
 } from './platform-zero-trust-uninstall.ts';
 
-export type PlatformManagementClient = Pick<
+type PlatformManagementClient = Pick<
   PlatformCloudflareClient,
   | 'deleteKvValue'
   | 'deleteResource'
@@ -103,14 +105,13 @@ export type PlatformManagementClient = Pick<
   | 'listR2Buckets'
   | 'listWorkerNames'
   | 'putKvValue'
-  | 'removeRoutes'
 >;
 
-export type PlatformUninstallClient = PlatformManagementClient &
+type PlatformUninstallClient = PlatformManagementClient &
   Pick<PlatformCloudflareClient, 'listWorkerDomains' | 'listWorkerServiceRoutes'> &
-  Partial<PurgeResourcesClient>;
+  PurgeResourcesClient;
 
-export type PlatformOwnershipClient = Pick<
+type PlatformOwnershipClient = Pick<
   PlatformManagementClient,
   | 'findZone'
   | 'getHyperdriveConfig'
@@ -168,7 +169,7 @@ export async function verifyPlatformInstallationOwnership(
   );
 }
 
-export type PlatformManagementDependencies = Readonly<{
+type PlatformManagementDependencies = Readonly<{
   checkpoint?: (manifest: PlatformInstallationManifest) => Promise<void>;
   confirm?: (message: string, initialValue: boolean) => Promise<boolean>;
   databaseUrl?: string;
@@ -282,11 +283,10 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
   let reportResult: (() => void) | undefined;
 
   const execute = async (
-    currentManifest: PlatformInstallationManifest,
+    manifest: PlatformInstallationManifest,
     databaseLock?: PlatformDatabaseLifecycleLock,
     databaseCheckpointExists = false,
   ): Promise<void> => {
-    const manifest = currentManifest;
     if (args.subcommand === 'rollback') {
       assertPlatformRollbackCompatibility(manifest, runtime!, rollbackSourceRuntime!);
     }
@@ -572,7 +572,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       if (result.setupPending) {
         const code = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
         if (code) {
-          log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+          log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
           console.log(`One-time administrator setup code: ${code}`);
         }
       }
@@ -724,10 +724,7 @@ export function assertPlatformRollbackCompatibility(
       'platform: The authoritative installation checkpoint does not record the installed runtime database schema. Repair or roll forward before rollback.',
     );
   }
-  if (
-    (target.manifest.safetyProtocols?.sandboxDrain ?? 0) <
-    (installation.safetyProtocols?.sandboxDrain ?? 0)
-  ) {
+  if (target.manifest.safetyProtocols.sandboxDrain < installation.safetyProtocols.sandboxDrain) {
     throw new Error(
       'platform: The rollback target predates the installed sandbox-drain safety protocol.',
     );
@@ -800,25 +797,11 @@ export async function disablePlatform(
   planOnly: boolean,
   dependencies: PlatformManagementDependencies = {},
 ): Promise<void> {
-  const reconciled = await recoverDurablyMarkedProvisionIntents(client, initialManifest);
-  const writeLifecycleCheckpoint = (
-    checkpointClient: PlatformManagementClient,
-    checkpointManifest: PlatformInstallationManifest,
-  ) =>
-    writeLifecycleCheckpointWithoutDatabase(
-      checkpointClient,
-      checkpointManifest,
-      dependencies.checkpoint,
-    );
-  const writeRemoteManifestIfPresent = (
-    checkpointClient: PlatformManagementClient,
-    checkpointManifest: PlatformInstallationManifest,
-  ) =>
-    writeRemoteManifestIfPresentWithoutDatabase(
-      checkpointClient,
-      checkpointManifest,
-      dependencies.checkpoint,
-    );
+  const manifest = await recoverDurablyMarkedProvisionIntents(client, initialManifest);
+  const saveCheckpoint = (state: PlatformInstallationManifest) =>
+    writeLifecycleCheckpoint(client, state, dependencies.checkpoint);
+  const saveRemoteManifest = (state: PlatformInstallationManifest) =>
+    writeRemoteManifest(client, state, dependencies.checkpoint);
   note(
     'Block all platform traffic and the platform API. Routes, custom domains, Workers, and data stay installed.',
     'Disable plan',
@@ -827,12 +810,11 @@ export async function disablePlatform(
     outro('No Cloudflare or local installation state was changed.');
     return;
   }
-  const manifest = reconciled;
   if (manifest !== initialManifest) {
     writeInstallationManifest(manifest);
   }
   const alreadyDisabled = manifest.status === 'disabled';
-  const missing = await verifyPlatformMutationOwnership(
+  await verifyPlatformMutationOwnership(
     client,
     manifest,
     new Set([
@@ -851,8 +833,7 @@ export async function disablePlatform(
     writeInstallationManifest(next);
   }
   try {
-    await writeRemoteManifestIfPresent(client, next);
-    const zone = next.resources.find((resource) => resource.key === 'zone');
+    await saveRemoteManifest(next);
     const routing = requireResource(next, 'routing-kv');
     const trafficGeneration = currentTrafficGeneration(next);
     await client.putKvValue(
@@ -861,24 +842,18 @@ export async function disablePlatform(
       PLATFORM_DISABLED_KEY,
       PLATFORM_DISABLED_VALUE,
     );
-    const trackedTraffic = trackedPlatformWorkerTraffic(next);
-    await client.removeRoutes(
-      next.account.id,
-      !zone || missing.has(zone.key) ? null : zone.id,
-      trackedTraffic,
-    );
     next = markTrafficAttachmentsRetained(next);
     if (!hasLifecycleStep(next, `disable:${trafficGeneration}:routes`)) {
       next = recordLifecycleStep(next, `disable:${trafficGeneration}:routes`);
     }
-    await writeLifecycleCheckpoint(client, next);
+    await saveCheckpoint(next);
     next = transitionInstallation(next, 'disabled', new Date().toISOString());
-    await writeLifecycleCheckpoint(client, next);
+    await saveCheckpoint(next);
     printSuccess(`${next.deployment.displayName} is disabled. Its data was not changed.`);
   } catch (error) {
     next = transitionInstallation(next, 'failed', new Date().toISOString());
     writeInstallationManifest(next);
-    await writeRemoteManifestIfPresent(client, next).catch(() => {});
+    await saveRemoteManifest(next).catch(() => {});
     throw error;
   }
 }
@@ -889,26 +864,11 @@ export async function uninstallPlatform(
   args: Extract<PlatformArgs, { subcommand: 'uninstall' }>,
   dependencies: PlatformManagementDependencies = {},
 ): Promise<void> {
-  const reconciled = await recoverDurablyMarkedProvisionIntents(client, initialManifest);
-  const manifest = reconciled;
-  const writeLifecycleCheckpoint = (
-    checkpointClient: PlatformManagementClient,
-    checkpointManifest: PlatformInstallationManifest,
-  ) =>
-    writeLifecycleCheckpointWithoutDatabase(
-      checkpointClient,
-      checkpointManifest,
-      dependencies.checkpoint,
-    );
-  const writeRemoteManifestIfPresent = (
-    checkpointClient: PlatformManagementClient,
-    checkpointManifest: PlatformInstallationManifest,
-  ) =>
-    writeRemoteManifestIfPresentWithoutDatabase(
-      checkpointClient,
-      checkpointManifest,
-      dependencies.checkpoint,
-    );
+  const manifest = await recoverDurablyMarkedProvisionIntents(client, initialManifest);
+  const saveCheckpoint = (state: PlatformInstallationManifest) =>
+    writeLifecycleCheckpoint(client, state, dependencies.checkpoint);
+  const saveRemoteManifest = (state: PlatformInstallationManifest) =>
+    writeRemoteManifest(client, state, dependencies.checkpoint);
   const retainData = !args.purgeData;
   const purgeResources = args.purgeResources;
   const routingKv = manifest.resources.find((resource) => resource.key === 'routing-kv');
@@ -933,7 +893,6 @@ export async function uninstallPlatform(
   if (purgeResources) {
     await assertNoPlatformProjects(dependencies.readProjects);
   }
-  const purgeResourcesClient = purgeResources ? requirePurgeResourcesClient(client) : null;
   if (args.plan || (interactive && !args.yes)) {
     note(
       purgeResources
@@ -954,9 +913,9 @@ export async function uninstallPlatform(
       pc.bold('Uninstall plan'),
     );
   }
-  if (purgeResourcesClient) {
+  if (purgeResources) {
     const credentialCheck = checkPurgeResourcesCredentials(
-      purgeResourcesClient,
+      client,
       manifest,
       dependencies.credential ?? { source: 'environment', aiGatewayToken: false },
     );
@@ -974,11 +933,6 @@ export async function uninstallPlatform(
   }
   if (manifest !== initialManifest) {
     writeInstallationManifest(manifest);
-  }
-  if (!interactive && !args.yes) {
-    throw new Error(
-      'platform: Non-interactive `void platform uninstall` requires --yes to acknowledge Cloudflare changes. Run with --plan first to inspect them.',
-    );
   }
   if (interactive && !args.yes) {
     const proceed = await confirmAction(
@@ -1104,7 +1058,7 @@ export async function uninstallPlatform(
     throw error;
   }
   try {
-    await writeRemoteManifestIfPresent(client, next);
+    await saveRemoteManifest(next);
     const routing = hasRoutingCheckpoint ? requireResource(next, 'routing-kv') : undefined;
     disablingTraffic = true;
     if (routing) {
@@ -1123,7 +1077,7 @@ export async function uninstallPlatform(
         key,
         resource.ownership === 'created' ? 'deleted' : 'retained',
       );
-      await writeLifecycleCheckpoint(client, next);
+      await saveCheckpoint(next);
     }
     const workers = new Set(
       next.resources
@@ -1143,22 +1097,20 @@ export async function uninstallPlatform(
           { databaseUrl: dependencies.databaseUrl },
         );
         if (!missing.has(worker.key)) {
-          const trackedTraffic = trackedPlatformWorkerTraffic(next, new Set([worker.name]));
-          await client.removeRoutes(next.account.id, zone.id, trackedTraffic);
           next = markTrafficAttachmentsRetained(next);
           next = recordLifecycleStep(next, `uninstall:routes:${worker.key}`);
-          await writeLifecycleCheckpoint(client, next);
+          await saveCheckpoint(next);
         }
       }
     }
-    if (purgeResourcesClient && hasRoutingCheckpoint) {
+    if (purgeResources && hasRoutingCheckpoint) {
       next = await runPurgeResourcesTeardown(
         {
-          client: purgeResourcesClient,
+          client,
           checkpoint: async (checkpointManifest) => {
             // Keep `next` current so a failure records the progress made.
             next = checkpointManifest;
-            await writeLifecycleCheckpoint(client, checkpointManifest);
+            await saveCheckpoint(checkpointManifest);
           },
           verify: (checkpointManifest, keys) =>
             verifyPlatformMutationOwnership(client, checkpointManifest, keys, {
@@ -1218,7 +1170,7 @@ export async function uninstallPlatform(
       }
       if (!hasRoutingCheckpoint && resource.kind !== 'zone') {
         next = updateResourceState(next, resource.key, 'retained');
-        await writeLifecycleCheckpoint(client, next);
+        await saveCheckpoint(next);
         continue;
       }
       if (!shouldDeleteResource(resource, retainData)) {
@@ -1229,12 +1181,12 @@ export async function uninstallPlatform(
           resource.ownership === 'created' &&
           !hasNamedResource(await client.listAiGateways(next.account.id), resource);
         next = updateResourceState(next, resource.key, removed ? 'deleted' : 'retained');
-        await writeLifecycleCheckpoint(client, next);
+        await saveCheckpoint(next);
         continue;
       }
       if ((resource.kind === 'dns-record' && !zone) || (resource.kind === 'queue' && queuesInUse)) {
         next = updateResourceState(next, resource.key, 'retained');
-        await writeLifecycleCheckpoint(client, next);
+        await saveCheckpoint(next);
         continue;
       }
       const immediatelyMissing = await verifyPlatformMutationOwnership(
@@ -1252,15 +1204,15 @@ export async function uninstallPlatform(
           resource.key,
           resource.ownership === 'created' ? 'deleted' : 'retained',
         );
-        await writeLifecycleCheckpoint(client, next);
+        await saveCheckpoint(next);
         continue;
       }
       await client.deleteResource(next.account.id, resource, zone?.id);
       next = updateResourceState(next, resource.key, 'deleted');
-      await writeLifecycleCheckpoint(client, next);
+      await saveCheckpoint(next);
     }
     const completed = transitionInstallation(next, 'uninstalled', new Date().toISOString());
-    await writeRemoteManifestIfPresent(client, completed);
+    await saveRemoteManifest(completed);
     next = completed;
     writeInstallationManifest(completed);
     if (!retainData) {
@@ -1282,7 +1234,7 @@ export async function uninstallPlatform(
     await stopProjectZeroTrustHold().catch(() => {});
     next = transitionInstallation(next, 'failed', new Date().toISOString());
     writeInstallationManifest(next);
-    await writeRemoteManifestIfPresent(client, next).catch(() => {});
+    await saveRemoteManifest(next).catch(() => {});
     throw error;
   }
 }
@@ -1302,12 +1254,7 @@ export async function recoverDurablyMarkedProvisionIntents(
   const pending = candidates.filter(
     ([key, kind, name]) =>
       !manifest.resources.some((resource) => resource.key === key) &&
-      manifest.steps.some(
-        (step) =>
-          (step.key === `provision-intent:${key}` ||
-            step.key.startsWith(`provision-intent:${key}:`)) &&
-          step.resultHash === platformProvisionIntentHash(manifest, key, kind, name),
-      ),
+      hasProvisionIntentStep(manifest, key, kind, name),
   );
   if (pending.length === 0) {
     return manifest;
@@ -1328,7 +1275,7 @@ export async function recoverDurablyMarkedProvisionIntents(
       continue;
     }
     const resource: InstallationResource = {
-      configHash: createHash('sha256').update(JSON.stringify({ kind, name })).digest('hex'),
+      configHash: legacyResourceConfigHash(kind, name),
       id: live.id,
       key,
       kind,
@@ -1446,32 +1393,6 @@ function purgeResourcesPlanText(manifest: PlatformInstallationManifest): string 
         ]
       : []),
   ].join('\n');
-}
-
-function requirePurgeResourcesClient(client: PlatformUninstallClient): PurgeResourcesClient {
-  const required: ReadonlyArray<keyof PurgeResourcesClient> = [
-    'deleteAccessResource',
-    'deleteDispatchNamespaceScript',
-    'deleteEmailRoutingRule',
-    'deleteQueueConsumer',
-    'deleteR2Object',
-    'deleteWorkerDomain',
-    'deleteWorkerRoute',
-    'emptyR2Bucket',
-    'forceDeleteWorker',
-    'getAccessResource',
-    'getEmailRoutingCatchAll',
-    'listDispatchNamespaceScripts',
-    'listEmailRoutingRules',
-    'listQueueConsumers',
-    'listWorkerDependents',
-    'listWorkerRoutes',
-    'resetEmailRoutingCatchAll',
-  ];
-  if (required.some((method) => typeof client[method] !== 'function')) {
-    throw new Error('platform: This Cloudflare client cannot run --purge-resources.');
-  }
-  return client as PurgeResourcesClient;
 }
 
 function describeKeptResources(
@@ -1646,7 +1567,7 @@ async function verifyPlatformMutationOwnership(
       }
     }
     if (attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** attempt));
+      await delay(50 * 2 ** attempt);
     }
   }
   if (rawRemote === null) {
@@ -1738,9 +1659,7 @@ async function verifyPlatformMutationOwnership(
         const live = await client.getHyperdriveConfig(accountId, resource.id);
         exists = live.id === resource.id && live.name === resource.name;
         if (exists) {
-          const legacyHash = createHash('sha256')
-            .update(JSON.stringify({ kind: resource.kind, name: resource.name }))
-            .digest('hex');
+          const legacyHash = legacyResourceConfigHash(resource.kind, resource.name);
           const malformedLegacyHash = !/^[a-f0-9]{64}$/.test(resource.configHash);
           if (options.databaseUrl && resource.ownership !== 'adopted') {
             const expected = hyperdriveOriginFromConnectionString(options.databaseUrl);
@@ -1798,9 +1717,7 @@ async function verifyPlatformMutationOwnership(
             current.content,
             current.proxied,
           );
-          const legacyHash = createHash('sha256')
-            .update(JSON.stringify({ kind: resource.kind, name: resource.name }))
-            .digest('hex');
+          const legacyHash = legacyResourceConfigHash(resource.kind, resource.name);
           const expectedHash = dnsRecordConfigHash(resource.name, 'AAAA', '100::', true);
           if (
             liveHash !== resource.configHash &&
@@ -1827,16 +1744,7 @@ async function verifyPlatformMutationOwnership(
       );
       exists = live !== undefined;
       if (live) {
-        const liveHash = live.fingerprint
-          ? r2BucketConfigHash(resource.name, live.fingerprint)
-          : null;
-        const legacyHash = createHash('sha256')
-          .update(JSON.stringify({ kind: resource.kind, name: resource.name }))
-          .digest('hex');
-        if (
-          liveHash === null ||
-          (resource.configHash !== liveHash && resource.configHash !== legacyHash)
-        ) {
+        if (!matchesRecordedR2Fingerprint(resource.configHash, live)) {
           throw ownershipError(`r2-bucket ${resource.name} changed creation fingerprint`);
         }
         const marker = await client.getR2Object(
@@ -1874,21 +1782,7 @@ function hasMatchingResourceIntent(
   resource: InstallationResource,
 ): boolean {
   if (resource.ownership === 'created') {
-    const previousResourceId =
-      manifest.resources.find((entry) => entry.key === resource.key)?.id ?? null;
-    return manifest.steps.some(
-      (step) =>
-        (step.key === `provision-intent:${resource.key}` ||
-          step.key.startsWith(`provision-intent:${resource.key}:`)) &&
-        step.resultHash ===
-          platformProvisionIntentHash(
-            manifest,
-            resource.key,
-            resource.kind,
-            resource.name,
-            previousResourceId,
-          ),
-    );
+    return hasProvisionIntentStep(manifest, resource.key, resource.kind, resource.name);
   }
   if (resource.ownership === 'adopted') {
     return manifest.steps.some(
@@ -1957,48 +1851,14 @@ function hasNamedResource(
   return entries.some((entry) => entry.id === resource.id && entry.name === resource.name);
 }
 
-function dnsRecordConfigHash(
-  name: string,
-  type: string,
-  content: string,
-  proxied: boolean,
-): string {
-  return createHash('sha256')
-    .update(JSON.stringify({ content, kind: 'dns-record', name, proxied, type }))
-    .digest('hex');
-}
-
-function r2BucketConfigHash(name: string, fingerprint: string): string {
-  return createHash('sha256')
-    .update(JSON.stringify({ fingerprint, kind: 'r2-bucket', name }))
-    .digest('hex');
-}
-
 function verifyResourceMarker(
   value: string | null | undefined,
   manifest: PlatformInstallationManifest,
   resource: InstallationResource,
 ): void {
-  if (!value) {
-    throw ownershipError(`${resource.kind} ${resource.name} has no ownership marker`);
-  }
-  let actual;
-  try {
-    actual = parsePlatformResourceOwnershipMarker(JSON.parse(value) as unknown);
-  } catch {
-    throw ownershipError(`${resource.kind} ${resource.name} has an invalid ownership marker`);
-  }
-  const expected = createPlatformResourceOwnershipMarker({
-    accountId: manifest.account.id,
-    installationId: manifest.id,
-    ownershipNonce: manifest.ownershipNonce,
-    resourceId: resource.id,
-    resourceKey: resource.key,
-    resourceKind: resource.kind,
-    resourceName: resource.name,
-  });
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw ownershipError(`${resource.kind} ${resource.name} belongs to another installation`);
+  const problem = resourceMarkerProblem(value, manifest, resource);
+  if (problem) {
+    throw ownershipError(`${resource.kind} ${resource.name} ${problem}`);
   }
 }
 
@@ -2038,6 +1898,9 @@ function updateResourceState(
   return recordInstallationResource(manifest, { ...resource, state }, new Date().toISOString());
 }
 
+// Cloudflare has no precondition for route or custom domain deletion, so even a
+// checked record id can be reused before DELETE. The routing KV gate blocks
+// traffic instead, and attachments stay for dashboard cleanup.
 function markTrafficAttachmentsRetained(
   manifest: PlatformInstallationManifest,
 ): PlatformInstallationManifest {
@@ -2075,16 +1938,16 @@ function recordLifecycleStep(
   return recordInstallationStep(manifest, { completedAt: now, key, resultHash: 'completed' }, now);
 }
 
-async function writeLifecycleCheckpointWithoutDatabase(
+async function writeLifecycleCheckpoint(
   client: PlatformManagementClient,
   manifest: PlatformInstallationManifest,
   databaseCheckpoint?: (manifest: PlatformInstallationManifest) => Promise<void>,
 ): Promise<void> {
   writeInstallationManifest(manifest);
-  await writeRemoteManifestIfPresentWithoutDatabase(client, manifest, databaseCheckpoint);
+  await writeRemoteManifest(client, manifest, databaseCheckpoint);
 }
 
-async function writeRemoteManifestIfPresentWithoutDatabase(
+async function writeRemoteManifest(
   client: PlatformManagementClient,
   manifest: PlatformInstallationManifest,
   databaseCheckpoint?: (manifest: PlatformInstallationManifest) => Promise<void>,

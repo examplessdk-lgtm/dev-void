@@ -46,7 +46,7 @@ function createEdgeMock() {
 }
 
 describe('revalidate — managed (platform proxy)', () => {
-  it('forwards { paths } to the proxy /revalidate endpoint (no self-host regression)', async () => {
+  it('forwards { paths } to the proxy /revalidate endpoint', async () => {
     const fetchMock = vi.fn(
       async (_url: string, _init: RequestInit) => new Response('ok', { status: 200 }),
     );
@@ -119,19 +119,15 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('{ paths } (request host) deletes EXACTLY the requested (host, path) entries from KV and both edge variants — no over-purge', async () => {
+  it('{ paths } with a request host deletes only the requested entries from KV and both edge variants', async () => {
     const { store, kv, delete: kvDelete } = createKvMock();
     store.set(isrKey(DPL, HOST, '/'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST, '/blog/x'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST, '/keepme'), new ArrayBuffer(4));
-    // Target edge variants (both should be purged).
     edge.store.set(htmlEdgeKey(HOST, '/', DPL), new Response('x'));
     edge.store.set(jsonEdgeKey(HOST, '/', DPL), new Response('x'));
     edge.store.set(htmlEdgeKey(HOST, '/blog/x', DPL), new Response('x'));
     edge.store.set(jsonEdgeKey(HOST, '/blog/x', DPL), new Response('x'));
-    // UNRELATED edge variants for a path NOT being revalidated — an over-purging
-    // implementation (e.g. deleting sibling variants, or purging by prefix) would
-    // wrongly remove these. They MUST survive.
     edge.store.set(htmlEdgeKey(HOST, '/keepme', DPL), new Response('x'));
     edge.store.set(jsonEdgeKey(HOST, '/keepme', DPL), new Response('x'));
 
@@ -142,12 +138,10 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
       },
     );
 
-    // Exactly the requested (host, path) KV keys are gone; the untouched one survives.
     expect(store.has(isrKey(DPL, HOST, '/'))).toBe(false);
     expect(store.has(isrKey(DPL, HOST, '/blog/x'))).toBe(false);
     expect(store.has(isrKey(DPL, HOST, '/keepme'))).toBe(true);
 
-    // Both edge variants purged for each requested path; unrelated ones survive.
     expect(edge.store.has(htmlEdgeKey(HOST, '/', DPL))).toBe(false);
     expect(edge.store.has(jsonEdgeKey(HOST, '/', DPL))).toBe(false);
     expect(edge.store.has(htmlEdgeKey(HOST, '/blog/x', DPL))).toBe(false);
@@ -155,16 +149,12 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(edge.store.has(htmlEdgeKey(HOST, '/keepme', DPL))).toBe(true);
     expect(edge.store.has(jsonEdgeKey(HOST, '/keepme', DPL))).toBe(true);
 
-    // EXACT KV delete calls: precisely the two requested (host, path) keys, no
-    // extras. An over-purge (e.g. also deleting `/keepme`) would fail here.
     expect(kvDelete).toHaveBeenCalledTimes(2);
     expect(kvDelete.mock.calls.map((c) => c[0])).toEqual([
       isrKey(DPL, HOST, '/'),
       isrKey(DPL, HOST, '/blog/x'),
     ]);
 
-    // EXACT edge delete calls: html + json for each requested path (correct
-    // host/id), in purge order, with no unrelated deletes.
     expect(edge.delete).toHaveBeenCalledTimes(4);
     expect(edge.delete.mock.calls.map((c) => c[0])).toEqual([
       htmlEdgeKey(HOST, '/', DPL),
@@ -198,14 +188,10 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     expect(edge.store.has(jsonEdgeKey(HOST, '/search', DPL, variantB))).toBe(false);
   });
 
-  // Cron/queue handlers stamp the deployment id WITHOUT a request host (the F1
-  // fix), so a host-less `revalidate({ paths })` must enumerate EVERY registered
-  // host from the registry and purge each host's (host, path) entry.
-  it('{ paths } with NO request host purges every REGISTERED host (cron/queue purge via registry)', async () => {
+  it('{ paths } without a request host (cron/queue) purges every registered host', async () => {
     const { store, kv, delete: kvDelete } = createKvMock();
     const HOST_A = 'a.example';
     const HOST_B = 'b.example';
-    // Two hosts have cached the same path; both are registered.
     store.set(isrKey(DPL, HOST_A, '/p'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST_B, '/p'), new ArrayBuffer(4));
     store.set(hostRegistryKey(DPL, HOST_A), new ArrayBuffer(0));
@@ -213,23 +199,20 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     edge.store.set(htmlEdgeKey(HOST_A, '/p', DPL), new Response('x'));
     edge.store.set(htmlEdgeKey(HOST_B, '/p', DPL), new Response('x'));
 
-    // NO __VOID_ISR_HOST — the cron/queue path relies entirely on the registry.
     await envContext.run({ ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL }, async () => {
       await revalidate({ paths: ['/p'] });
     });
 
-    // Both registered hosts' KV + edge entries purged.
     expect(store.has(isrKey(DPL, HOST_A, '/p'))).toBe(false);
     expect(store.has(isrKey(DPL, HOST_B, '/p'))).toBe(false);
     expect(edge.store.has(htmlEdgeKey(HOST_A, '/p', DPL))).toBe(false);
     expect(edge.store.has(htmlEdgeKey(HOST_B, '/p', DPL))).toBe(false);
-    // One KV delete per registered host (order-independent).
     expect(kvDelete.mock.calls.map((c) => c[0]).sort()).toEqual(
       [isrKey(DPL, HOST_A, '/p'), isrKey(DPL, HOST_B, '/p')].sort(),
     );
   });
 
-  it('{ paths } with no request host and an EMPTY registry is a silent no-op (nothing purged)', async () => {
+  it('{ paths } without a request host and with an empty registry purges nothing', async () => {
     const { store, kv, delete: kvDelete } = createKvMock();
     store.set(isrKey(DPL, HOST, '/'), new ArrayBuffer(4));
 
@@ -237,17 +220,13 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
       await revalidate({ paths: ['/'] });
     });
 
-    // No registered host and no request host → no host to purge → key survives.
     expect(store.has(isrKey(DPL, HOST, '/'))).toBe(true);
     expect(kvDelete).not.toHaveBeenCalled();
     expect(edge.delete).not.toHaveBeenCalled();
   });
 
-  // The authoritative KV purge must never depend on the Cache API: the edge purge
-  // is guarded, so a degraded `caches.default` (scheduled/queue handlers, or no
-  // Cache API) fails open without blocking the KV delete.
-  it('purges KV via the registry even when the Cache API is degraded (edge fails open, KV still purged)', async () => {
-    // Degraded Cache API: reading `caches.default` throws.
+  // The edge purge fails open, so the KV purge never depends on the Cache API.
+  it('purges KV via the registry when the Cache API is unavailable', async () => {
     vi.stubGlobal('caches', {
       get default(): Cache {
         throw new Error('Cache API unavailable');
@@ -258,31 +237,24 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
     store.set(isrKey(DPL, HOST, '/'), new ArrayBuffer(4));
     store.set(hostRegistryKey(DPL, HOST), new ArrayBuffer(0));
 
-    // No __VOID_ISR_HOST → host comes from the registry; the degraded edge must
-    // not throw and must not block the KV purge.
     await expect(
       envContext.run({ ISR_CACHE: kv, __VOID_ISR_DEPLOYMENT_ID: DPL }, async () => {
         await revalidate({ paths: ['/'] });
       }),
     ).resolves.toBeUndefined();
 
-    // KV delete completed despite the swallowed edge throw.
     expect(store.has(isrKey(DPL, HOST, '/'))).toBe(false);
     expect(kvDelete).toHaveBeenCalledWith(isrKey(DPL, HOST, '/'));
   });
 
   it('{ all: true } lists the shared deployment prefix, splits each host, and purges every entry across pages', async () => {
-    // pageSize 2 forces the cursor loop to iterate across multiple pages.
     const { store, kv, list } = createKvMock(2);
     const HOST2 = 'other.example';
     store.set(isrKey(DPL, HOST, '/'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST, '/a'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST, '/b/c'), new ArrayBuffer(4));
-    // A SECOND host under the same deployment — its key must be purged too, and
-    // its host must be split back out of the scanned key correctly.
     store.set(isrKey(DPL, HOST2, '/d'), new ArrayBuffer(4));
     store.set(isrKey(DPL, HOST, '/e'), new ArrayBuffer(4));
-    // A different deployment's entry must never be touched.
     store.set(isrKey('other_dpl', HOST, '/x'), new ArrayBuffer(4));
 
     await envContext.run(
@@ -292,7 +264,6 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
       },
     );
 
-    // Every (host, path) under THIS deployment is gone; the other deployment survives.
     for (const [h, p] of [
       [HOST, '/'],
       [HOST, '/a'],
@@ -303,19 +274,12 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
       expect(store.has(isrKey(DPL, h, p))).toBe(false);
     }
     expect(store.has(isrKey('other_dpl', HOST, '/x'))).toBe(true);
-    // Cursor loop ran more than once (5 keys / pageSize 2 → 3 list calls).
     expect(list.mock.calls.length).toBeGreaterThan(1);
-    // EVERY list call is scoped to THIS deployment's prefix. An unscoped
-    // `kv.list()` (or a wrong/missing prefix) would enumerate — and therefore
-    // purge — other deployments' keys; assert the prefix on every page.
     const listPrefix = isrPrefix(DPL);
     for (const [opts] of list.mock.calls) {
       expect((opts as { prefix?: string }).prefix).toBe(listPrefix);
     }
-    // The first page starts with no cursor.
     expect((list.mock.calls[0][0] as { cursor?: string }).cursor).toBeUndefined();
-    // Edge purge issued with the host SPLIT from the scanned key (path round-tripped
-    // through denormalizeIsrPath), including the second host.
     expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST, '/', DPL));
     expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST, '/b/c', DPL));
     expect(edge.delete).toHaveBeenCalledWith(htmlEdgeKey(HOST2, '/d', DPL));
@@ -324,7 +288,7 @@ describe('revalidate — self-host (own ISR_CACHE + edge)', () => {
 
 describe('revalidate — unconfigured (silent no-op)', () => {
   beforeEach(() => {
-    // No caches.default stub — an unconfigured worker must not even reach it.
+    // An unconfigured worker must not touch the Cache API.
     vi.stubGlobal('caches', undefined);
   });
   afterEach(() => {
@@ -345,7 +309,6 @@ describe('revalidate — unconfigured (silent no-op)', () => {
     await envContext.run({ ISR_CACHE: kv }, async () => {
       await revalidate({ paths: ['/'] });
     });
-    // Early return before any delete — the key survives.
     expect(store.has(isrKey(DPL, HOST, '/'))).toBe(true);
     expect(kvDelete).not.toHaveBeenCalled();
   });

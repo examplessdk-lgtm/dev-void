@@ -24,6 +24,15 @@ type OperationEnvelopeFields = {
   error?: string | null;
 };
 
+/** True only for a child that ran to completion with a clean exit 0. */
+export function isCleanCloudflareExit(
+  result: Pick<ProcessResult, 'status' | 'signal' | 'error'>,
+): boolean {
+  return (
+    result.status === 0 && result.signal == null && (result.error == null || result.error === '')
+  );
+}
+
 /** Decode the private process envelope once, retaining cancellation provenance. */
 export function decodeCloudflareOperationResult<T extends ProcessResult>(
   result: T,
@@ -89,7 +98,7 @@ export function decodeCloudflareOperationResult<T extends ProcessResult>(
 }
 
 /** Echo a decoded result to the terminal when the caller did not capture it. */
-export function writeUncapturedOperationOutput(result: { stdout: string; stderr: string }): void {
+function writeUncapturedOperationOutput(result: { stdout: string; stderr: string }): void {
   if (result.stdout) {
     process.stdout.write(result.stdout);
   }
@@ -103,8 +112,9 @@ export function createCloudflareProcessRunner(options: {
   accountId?: string;
   apiBaseUrl?: string;
   env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv);
+  timeoutMs?: number;
 }) {
-  const [command, ...prefix] = resolveCloudflareOperationArgv(options.root);
+  const [command, ...prefix] = resolveCloudflareOperationArgv();
   return (
     operation: CloudflareOperation,
     run: { capture: boolean; input?: string; cwd?: string },
@@ -124,6 +134,7 @@ export function createCloudflareProcessRunner(options: {
       shell: false,
       windowsHide: true,
       maxBuffer: 32 * 1024 * 1024,
+      timeout: options.timeoutMs,
       stdio: streaming ? ['inherit', 'inherit', 'inherit'] : ['pipe', 'pipe', 'pipe'],
     });
     const raw = {

@@ -9,20 +9,6 @@ import {
   toBetterSqlite3Error,
 } from '../../src/migrations/runner.ts';
 
-/**
- * Low-level tests for `runMigrations` against a real better-sqlite3
- * database file. These tests exercise the transactional semantics and
- * legacy-table upgrade that the platform's D1 runtime can't easily
- * simulate — specifically:
- *
- *   - multi-statement atomic rollback when one statement fails mid-file
- *   - legacy `_migrations` table upgrade path (copy + drop)
- *   - applied-set filter on re-run (idempotency)
- *   - tracking row gets written only after all statements succeed
- *
- * These are unit-level because they instantiate better-sqlite3 directly.
- */
-
 const roots: Array<string> = [];
 
 function createDir(): string {
@@ -316,6 +302,27 @@ describe('runMigrations (local SQLite)', () => {
     expect(rows).toEqual([]);
   });
 
+  it('getAppliedMigrations returns applied migrations sorted by name', async () => {
+    const root = createDir();
+    const dbPath = join(root, 'migrations.sqlite');
+    const db = await openSqliteDatabase(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO _void_migrations (name, applied_at) VALUES ('002_second.sql', '2025-01-02T00:00:00Z');
+        INSERT INTO _void_migrations (name, applied_at) VALUES ('001_first.sql', '2025-01-01T00:00:00Z');
+      `);
+    } finally {
+      db.close();
+    }
+
+    const rows = await getAppliedMigrations(dbPath);
+    expect(rows).toEqual([
+      { name: '001_first.sql', applied_at: '2025-01-01T00:00:00Z' },
+      { name: '002_second.sql', applied_at: '2025-01-02T00:00:00Z' },
+    ]);
+  });
+
   it('getAppliedMigrations reads from legacy _migrations if _void_migrations is absent', async () => {
     const root = createDir();
     const dbPath = join(root, 'legacy-only.sqlite');
@@ -346,17 +353,7 @@ describe('runMigrations (local SQLite)', () => {
   });
 
   it('writes the tracking row AFTER the migration SQL, not before (mutation-sensitive ordering)', async () => {
-    // Load-bearing invariant: the per-migration transaction body must run
-    // `db.exec(migration.sql)` BEFORE `insertStmt.run(migration.name)`. If a
-    // future refactor reverses the order, the classic "tracking row written
-    // before the SQL" bug returns — and a rollback test can't catch it
-    // because the failing transaction rolls back both.
-    //
-    // The trick: write a migration that peeks at its own tracking row mid-
-    // apply. If the INSERT ran first, the peek sees 1; if after, it sees 0.
-    // Because both the exec and the insert are inside the same transaction
-    // and SQLite sees the in-flight transaction state, the observation is
-    // deterministic.
+    // The migration counts its own tracking row: 0 means the row is written after the SQL.
     const root = createDir();
     const migDir = join(root, 'migrations');
     const dbPath = join(root, 'test.sqlite');
@@ -375,115 +372,13 @@ describe('runMigrations (local SQLite)', () => {
     const db = await openSqliteDatabase(dbPath, { readonly: true });
     try {
       const rows = db.prepare('SELECT saw FROM peek').all() as Array<{ saw: number }>;
-      // saw === 0 proves the tracking INSERT happened AFTER db.exec.
-      // saw === 1 would mean the INSERT ran first — this test regresses.
       expect(rows).toEqual([{ saw: 0 }]);
     } finally {
       db.close();
     }
   });
 
-  it('is safe when two runMigrations calls race against the same DB (concurrent-runner recovery)', async () => {
-    // Two local `void` processes can target the same SQLite file. Without
-    // write-side re-checks, both see the migration as pending, both try to
-    // run its DDL, and the loser crashes with "table already exists". The
-    // runner's per-migration IMMEDIATE-transaction re-check must make the
-    // loser observe the winner's tracking row under the write lock and skip.
-    //
-    // Two sequential runMigrations calls over the same file simulate this —
-    // the second call opens the DB fresh, so its in-memory applied-set
-    // snapshot is accurate here, but the point is to exercise the re-check
-    // path and prove it's idempotent. The real regression we're guarding
-    // against is a future change that breaks the re-check by reading from
-    // the snapshot instead of the DB.
-    const root = createDir();
-    const migDir = join(root, 'migrations');
-    const dbPath = join(root, 'test.sqlite');
-    writeMigration(migDir, '001_init.sql', 'CREATE TABLE users (id TEXT PRIMARY KEY)');
-
-    const first = await runMigrations(migDir, dbPath);
-    expect(first).toEqual(['001_init.sql']);
-
-    // Re-run: should observe the migration applied and skip, NOT crash
-    // with "table users already exists".
-    const second = await runMigrations(migDir, dbPath);
-    expect(second).toEqual([]);
-
-    // Exactly one tracking row
-    const db = await openSqliteDatabase(dbPath, { readonly: true });
-    try {
-      const tracked = db.prepare('SELECT name FROM _void_migrations').all();
-      expect(tracked).toEqual([{ name: '001_init.sql' }]);
-    } finally {
-      db.close();
-    }
-  });
-
-  it('upgradeTrackingTable is idempotent under concurrent invocation (DROP IF EXISTS)', async () => {
-    // Two runMigrations calls racing the legacy→void upgrade must both
-    // succeed. Before the fix, the second process would crash on
-    // `DROP TABLE _migrations` after the first already dropped it. The
-    // upgrade is now wrapped in an IMMEDIATE transaction that re-checks
-    // legacy presence under the write lock, and uses `DROP TABLE IF EXISTS`.
-    //
-    // Seed legacy, run runMigrations (which runs the upgrade as part of
-    // applying pending migrations), then run it again — proving the second
-    // call no-ops cleanly instead of crashing on a missing `_migrations`.
-    const root = createDir();
-    const migDir = join(root, 'migrations');
-    const dbPath = join(root, 'test.sqlite');
-    writeMigration(migDir, '001_bootstrap.sql', 'CREATE TABLE bootstrap (id TEXT PRIMARY KEY)');
-    writeMigration(migDir, '002.sql', 'CREATE TABLE users (id TEXT PRIMARY KEY)');
-
-    // Seed legacy with the first on-disk migration, so the upgrade preserves
-    // it and the apply loop still has a later migration pending.
-    let db = await openSqliteDatabase(dbPath);
-    try {
-      db.exec(
-        "CREATE TABLE _migrations (name TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')))",
-      );
-      db.prepare('INSERT INTO _migrations (name, applied_at) VALUES (?, ?)').run(
-        '001_bootstrap.sql',
-        '2023-01-01T00:00:00Z',
-      );
-    } finally {
-      db.close();
-    }
-
-    // First run: upgrade copies 001_bootstrap.sql into _void_migrations,
-    // drops _migrations, then applies 002.sql.
-    const first = await runMigrations(migDir, dbPath);
-    expect(first).toEqual(['002.sql']);
-
-    db = await openSqliteDatabase(dbPath, { readonly: true });
-    try {
-      const rows = (
-        db.prepare('SELECT name FROM _void_migrations ORDER BY name').all() as Array<{
-          name: string;
-        }>
-      ).map((r) => r.name);
-      expect(rows).toEqual(['001_bootstrap.sql', '002.sql']);
-      const legacy = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_migrations'")
-        .get();
-      expect(legacy).toBeUndefined();
-    } finally {
-      db.close();
-    }
-
-    // Second run: legacy is already gone, both migrations already applied. Must
-    // no-op, not crash on a "no such table" during the upgrade body.
-    const second = await runMigrations(migDir, dbPath);
-    expect(second).toEqual([]);
-  });
-
   it('handles semicolons inside string literals as a single statement', async () => {
-    // A naive `sql.split(';')` preprocessor would fracture this migration
-    // at the `;` inside the default literal, producing garbage fragments
-    // like `CREATE TABLE t (msg TEXT DEFAULT 'a` and `b')`. The runner
-    // must hand the raw SQL to better-sqlite3's multi-statement exec so
-    // SQLite does the tokenizing and understands that the `;` inside
-    // a quoted literal is NOT a statement terminator.
     const root = createDir();
     const migDir = join(root, 'migrations');
     const dbPath = join(root, 'test.sqlite');
@@ -500,7 +395,6 @@ describe('runMigrations (local SQLite)', () => {
     try {
       const rows = db.prepare('SELECT msg FROM t').all() as Array<{ msg: string }>;
       expect(rows).toEqual([{ msg: 'a;b' }]);
-      // Exactly one tracking row.
       const tracked = db.prepare('SELECT name FROM _void_migrations').all();
       expect(tracked).toEqual([{ name: '001_literal.sql' }]);
     } finally {

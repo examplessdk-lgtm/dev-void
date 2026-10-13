@@ -3,22 +3,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { createCodeChallenge } from '../../src/cli/auth.ts';
 import {
   PlatformApiError,
-  type GithubConnection,
   type GithubInstallation,
   type PlatformClient,
-  type ProjectResponse,
 } from '../../src/cli/client.ts';
 import * as gitMetadata from '../../src/cli/git-metadata.ts';
 import type { GithubArgs } from '../../src/cli/github-args.ts';
 import { runConnect } from '../../src/cli/github-cmd.ts';
 import * as output from '../../src/cli/output.ts';
+import {
+  browserCallback,
+  makeConnection,
+  makeProject,
+  projectId,
+  slug,
+  throwOnProcessExit,
+} from '../helpers/github-cli.ts';
 
-// Mock node:child_process so openBrowser (called by awaitBrowserCallback) never
-// launches a real browser; the localhost callback is driven directly by fetch.
-const mockExecFile = vi.fn();
-vi.mock('node:child_process', () => ({
-  execFile: (...args: Array<unknown>) => mockExecFile(...args),
-}));
+// Keep openBrowser from launching a real browser.
+vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
 // Partial mock of @voidzero-dev/vite-plus-prompts: only `text` is replaced (for the repo
 // prompt); everything else — including `log`, which the spies below target —
@@ -29,24 +31,8 @@ vi.mock('@voidzero-dev/vite-plus-prompts', async (importOriginal) => {
   return { ...actual, text: (...args: Array<unknown>) => mockText(...args) };
 });
 
-const originalFetch = globalThis.fetch.bind(globalThis);
-
-const projectId = 'proj_test';
-const slug = 'my-app';
 const installationId = '123456';
 const repoFullName = 'octocat/hello-world';
-
-function makeProject(): ProjectResponse {
-  return {
-    id: projectId,
-    user_id: 'user_1',
-    slug,
-    type: 'void',
-    created_at: '2024-01-01T00:00:00Z',
-    custom_domain: null,
-    role: 'owner',
-  };
-}
 
 function makeInstallation(): GithubInstallation {
   return {
@@ -60,21 +46,6 @@ function makeInstallation(): GithubInstallation {
     status: 'active',
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:00:00Z',
-  };
-}
-
-function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnection {
-  return {
-    id: 'conn_1',
-    project_id: projectId,
-    installation_id: installationId,
-    repo_full_name: repoFullName,
-    branch: 'main',
-    build_executor: 'container',
-    workflow_path: '.github/workflows/void-deploy.yml',
-    created_at: '2024-01-01T00:00:00Z',
-    updated_at: '2024-01-01T00:00:00Z',
-    ...overrides,
   };
 }
 
@@ -95,15 +66,12 @@ const baseArgs: Extract<GithubArgs, { subcommand: 'connect' }> = {
 };
 
 /**
- * Drive runConnect against a fake client. `getGithubConnectAuthorizeUrl` (the
- * round-trip URL builder) resolves the localhost callback URL the moment the
- * command requests it, so the test can POST back to the callback with whatever
- * query it wants (mirroring the link/join command tests). When `callbackQuery`
- * is omitted the round-trip is never expected to start, so no callback fires.
+ * Runs runConnect against a fake client. `callbackQuery` and `joinCallbackQuery`
+ * build the browser redirects for the connect-authorize and join round-trips;
+ * when one is omitted, that round-trip sends no redirect.
  */
 function driveConnect(opts: {
   connectGithub: ReturnType<typeof vi.fn>;
-  getGithubConnectAuthorizeUrl?: ReturnType<typeof vi.fn>;
   callbackQuery?: (callbackUrl: URL) => URL;
   listGithubInstallations?: ReturnType<typeof vi.fn>;
   getGithubJoinUrl?: ReturnType<typeof vi.fn>;
@@ -118,33 +86,11 @@ function driveConnect(opts: {
   getGithubJoinUrl: ReturnType<typeof vi.fn>;
   completeGithubJoin: ReturnType<typeof vi.fn>;
 } {
-  let resolveCallback: ((url: URL) => void) | undefined;
-  const callbackReady = new Promise<URL>((resolve) => {
-    resolveCallback = resolve;
-  });
-
-  const getGithubConnectAuthorizeUrl =
-    opts.getGithubConnectAuthorizeUrl ??
-    vi.fn(async (redirect: string) => {
-      // `redirect` is the localhost callback URL (with the command's state).
-      resolveCallback?.(new URL(redirect));
-      return { url: 'https://github.com/login/oauth/authorize?client_id=x' };
-    });
-
-  let resolveJoinCallback: ((url: URL) => void) | undefined;
-  const joinCallbackReady = new Promise<URL>((resolve) => {
-    resolveJoinCallback = resolve;
-  });
-
-  const getGithubJoinUrl =
-    opts.getGithubJoinUrl ??
-    vi.fn(async (redirect: string) => {
-      resolveJoinCallback?.(new URL(redirect));
-      return { url: 'https://github.com/login/oauth/authorize?client_id=x' };
-    });
+  const connect = browserCallback(opts.callbackQuery);
+  const join = browserCallback(opts.joinCallbackQuery);
+  const getGithubJoinUrl = opts.getGithubJoinUrl ?? join.authUrl;
   const completeGithubJoin =
     opts.completeGithubJoin ?? vi.fn(async () => ({ status: 'joined', count: 0 }));
-
   const listGithubInstallations =
     opts.listGithubInstallations ?? vi.fn(async () => [makeInstallation()]);
 
@@ -152,34 +98,17 @@ function driveConnect(opts: {
     listProjects: vi.fn(async () => [makeProject()]),
     listGithubInstallations,
     connectGithub: opts.connectGithub,
-    getGithubConnectAuthorizeUrl,
+    getGithubConnectAuthorizeUrl: connect.authUrl,
     getGithubJoinUrl,
     completeGithubJoin,
   } as unknown as PlatformClient;
 
   const run = runConnect('/project', client, { ...baseArgs, ...opts.args });
 
-  // Fire the simulated browser redirect once the round-trip's callback URL is
-  // known. Swallow fetch errors: on the error paths the server is torn down
-  // mid-response (process.exit / throw), which can surface as ECONNRESET.
-  const fired = opts.callbackQuery
-    ? callbackReady.then(async (callbackUrl) => {
-        const hit = opts.callbackQuery!(callbackUrl);
-        await originalFetch(hit).catch(() => {});
-      })
-    : Promise.resolve();
-
-  const joinFired = opts.joinCallbackQuery
-    ? joinCallbackReady.then(async (callbackUrl) => {
-        const hit = opts.joinCallbackQuery!(callbackUrl);
-        await originalFetch(hit).catch(() => {});
-      })
-    : Promise.resolve();
-
   return {
-    promise: run.finally(() => fired.catch(() => {})).finally(() => joinFired.catch(() => {})),
+    promise: join.settle(connect.settle(run)),
     connectGithub: opts.connectGithub,
-    getGithubConnectAuthorizeUrl,
+    getGithubConnectAuthorizeUrl: connect.authUrl,
     listGithubInstallations,
     getGithubJoinUrl,
     completeGithubJoin,
@@ -194,15 +123,12 @@ let infoSpy: ReturnType<typeof vi.spyOn>;
 const originalIsTTY = process.stdin.isTTY;
 
 beforeEach(() => {
-  mockExecFile.mockReset();
   mockText.mockReset();
   // A CI checkout must not supply a default repository for these prompt fixtures.
   vi.stubEnv('GITHUB_REPOSITORY', undefined);
   // Force the non-interactive (non-TTY) path so tests never hit clack prompts.
   (process.stdin as { isTTY?: boolean }).isTTY = false;
-  exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-    throw new Error(`process.exit(${code})`);
-  }) as never);
+  exitSpy = throwOnProcessExit();
   successSpy = vi.spyOn(output, 'printSuccess').mockImplementation(() => {});
   errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
   messageSpy = vi.spyOn(log, 'message').mockImplementation(() => {});

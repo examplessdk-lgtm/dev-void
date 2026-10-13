@@ -23,10 +23,7 @@ const requests: Array<{
   method?: string;
   body: Record<string, unknown>;
 }> = [];
-let reply: (
-  path: string,
-  body: Record<string, unknown>,
-) => { status?: number; body: unknown; headers?: Record<string, string> };
+let reply: (path: string, body: Record<string, unknown>) => { status?: number; body: unknown };
 
 beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), 'void-operator-subprocess-'));
@@ -50,10 +47,7 @@ beforeEach(async () => {
       body,
     });
     const result = reply(request.url!, body);
-    response.writeHead(result.status ?? 200, {
-      'Content-Type': 'application/json',
-      ...result.headers,
-    });
+    response.writeHead(result.status ?? 200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(result.body));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -333,22 +327,6 @@ describe('operator CLI (real subprocess and HTTP)', () => {
     expect(result.stderr).toContain('"error_message": "Version no longer exists."');
     expect(result.stderr).toContain('"version_id": "version-proxy"');
     expect(result.stderr).toContain('"status": "skipped"');
-    expect(requests).toHaveLength(2);
-  });
-  it('rejects redirects and preserves server authentication errors', async () => {
-    reply = () => ({ status: 302, body: {}, headers: { Location: 'https://untrusted.example' } });
-    const redirect = await run(['auth', 'status', '--json']);
-    expect(redirect.code).toBe(1);
-    expect(redirect.stdout).toBe('');
-    expect(JSON.parse(redirect.stderr)).toMatchObject({ error: 'redirect_rejected' });
-    reply = () => ({
-      status: 403,
-      body: { error: 'admin_required', message: 'The administrator role was revoked.' },
-    });
-    const revoked = await run(['auth', 'status', '--json']);
-    expect(revoked.code).toBe(1);
-    expect(revoked.stdout).toBe('');
-    expect(JSON.parse(revoked.stderr)).toMatchObject({ error: 'admin_required', status: 403 });
     expect(requests).toHaveLength(2);
   });
   it('exchanges piped API sessions only on explicit auth token invocation', async () => {

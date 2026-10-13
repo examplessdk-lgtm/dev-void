@@ -346,6 +346,7 @@ export type {
 } from './target.ts';
 
 export { canonicalJson } from './canonical-json.ts';
+export { deployArtifactDigest } from './artifact-digest.ts';
 export { isRecord } from './is-record.ts';
 export { tokenizeSql, type SqlSegment } from './sql-tokenize.ts';
 export {

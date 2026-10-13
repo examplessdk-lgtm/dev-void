@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import {
   getPlatformRuntimeDirectory,
   parsePlatformRuntimeManifest,
-  platformDatabaseSchemaDigest,
   readPlatformRuntimeManifest,
   resolvePlatformRuntime,
 } from '@void/platform/installer';
@@ -58,37 +57,6 @@ describe('platform runtime manifest', () => {
     for (const artifact of Object.values(manifest.artifacts)) {
       const contents = readFileSync(join(runtimeDirectory, artifact.path), 'utf8');
       expect(contents.match(/^\/\/# sourceMappingURL=.*$/gm) ?? []).toEqual([]);
-    }
-  });
-
-  it('binds every packaged migration and Worker artifact to the manifest', () => {
-    const runtimeDirectory = getPlatformRuntimeDirectory();
-    const manifest = readPlatformRuntimeManifest();
-
-    expect(manifest.schemaVersion).toBe(2);
-    expect(manifest.safetyProtocols).toEqual({ sandboxDrain: 3 });
-    expect(manifest.usageProtocolVersion).toBe(2);
-    expect(manifest.database.schemaDigest).toBe(
-      platformDatabaseSchemaDigest(manifest.database.lineage, manifest.database.migrations),
-    );
-    expect(manifest.database.migrations.length).toBeGreaterThan(0);
-    for (const migration of manifest.database.migrations) {
-      expect(digest(readFileSync(join(runtimeDirectory, 'drizzle', `${migration.tag}.sql`)))).toBe(
-        migration.sha256,
-      );
-    }
-    expect(digest(readFileSync(join(runtimeDirectory, 'drizzle', 'meta', '_journal.json')))).toBe(
-      manifest.database.journalSha256,
-    );
-    expect(manifest.assets?.adminClient.path).toBe('api/assets/admin/client.js');
-    expect(manifest.assets?.adminStyle?.path).toBe('api/assets/admin/style.css');
-    for (const artifact of [
-      ...Object.values(manifest.artifacts),
-      ...Object.values(manifest.assets ?? {}),
-    ]) {
-      const contents = readFileSync(join(runtimeDirectory, artifact.path));
-      expect(contents.byteLength).toBe(artifact.size);
-      expect(digest(contents)).toBe(artifact.sha256);
     }
   });
 

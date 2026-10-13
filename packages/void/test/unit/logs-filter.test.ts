@@ -107,8 +107,6 @@ describe('filterLogEntries', () => {
   });
 
   it("--level log matches entries whose log line has no level (printEntry renders those as '[log]')", () => {
-    // `printEntry` falls back to 'log' for nullish levels; the filter must
-    // do the same so that `--level log` matches what the renderer shows.
     const E_NULLISH_LEVEL = entry({
       // Cast covers the user-DTO case where `level` is missing or undefined.
       logs: [
@@ -129,10 +127,7 @@ describe('filterLogEntries', () => {
     expect(filterLogEntries([E_OK, E_EXCEPTION], undefined, 'TypeError')).toEqual([E_EXCEPTION]);
   });
 
-  it('substring filter "error" no longer conflates levels — only matches messages containing the literal word', () => {
-    // Older behavior: --filter error would match every error-level line because
-    // "[error]" appeared in renderings. The new --filter is a clean substring
-    // search over the raw message text and exception name/message.
+  it('substring filter "error" matches message text, not the log level', () => {
     const errorWordEntry = entry({
       logs: [{ level: 'info', message: ['this is an error in the message'], timestamp: 0 }],
     });
@@ -141,17 +136,29 @@ describe('filterLogEntries', () => {
       undefined,
       'error',
     );
-    // E_ERROR_LOG message is "boom" — no literal "error" substring, so it's filtered out.
-    // Only entries whose text literally contains "error" come through.
     expect(result).toEqual([errorWordEntry]);
   });
 
   it('--level error AND --filter websocket: ANDs both conditions', () => {
     const result = filterLogEntries([E_OK, E_ERROR_LOG, E_MIXED, E_INFO_LOG], 'error', 'websocket');
-    // Only E_MIXED has both an error-level log AND a "websocket" substring.
     expect(result).toEqual([E_MIXED]);
   });
 });
+
+function setFetchMock() {
+  const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
+  globalThis.fetch = withPlatformDiscovery(fetchMock);
+  return fetchMock;
+}
+
+/** The API request URL; the platform discovery request never reaches the mock. */
+function requestUrl(fetchMock: ReturnType<typeof vi.fn>): string {
+  const call = fetchMock.mock.calls[0];
+  if (!call) {
+    throw new Error('fetch was not called');
+  }
+  return String(call[0]);
+}
 
 describe('PlatformClient.getLogs URL', () => {
   const originalFetch = globalThis.fetch;
@@ -161,27 +168,12 @@ describe('PlatformClient.getLogs URL', () => {
     vi.restoreAllMocks();
   });
 
-  function setFetchMock() {
-    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
-    globalThis.fetch = withPlatformDiscovery(fetchMock);
-    return fetchMock;
-  }
-
-  function lastUrl(fetchMock: ReturnType<typeof vi.fn>): string {
-    const calls = fetchMock.mock.calls as Array<Array<unknown>>;
-    if (calls.length === 0) {
-      throw new Error('fetch was not called');
-    }
-    const first = calls[0]?.[0];
-    return String(first);
-  }
-
   it('omits level when not provided', async () => {
     const fetchMock = setFetchMock();
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getLogs('proj_1', '1h');
 
-    const url = lastUrl(fetchMock);
+    const url = requestUrl(fetchMock);
     expect(url).toContain('since=1h');
     expect(url).not.toContain('level=');
   });
@@ -191,7 +183,7 @@ describe('PlatformClient.getLogs URL', () => {
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getLogs('proj_1', '1h', 200, undefined, 'all');
 
-    expect(lastUrl(fetchMock)).not.toContain('level=');
+    expect(requestUrl(fetchMock)).not.toContain('level=');
   });
 
   it("appends level=error when level === 'error'", async () => {
@@ -199,7 +191,7 @@ describe('PlatformClient.getLogs URL', () => {
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getLogs('proj_1', '1h', 200, undefined, 'error');
 
-    expect(lastUrl(fetchMock)).toContain('level=error');
+    expect(requestUrl(fetchMock)).toContain('level=error');
   });
 
   it('serializes deploymentId and level together', async () => {
@@ -207,7 +199,7 @@ describe('PlatformClient.getLogs URL', () => {
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getLogs('proj_1', '1h', 200, 'dpl_abc', 'warn');
 
-    const url = lastUrl(fetchMock);
+    const url = requestUrl(fetchMock);
     expect(url).toContain('deploymentId=dpl_abc');
     expect(url).toContain('level=warn');
   });
@@ -221,26 +213,12 @@ describe('PlatformClient.getRequests URL', () => {
     vi.restoreAllMocks();
   });
 
-  function setFetchMock() {
-    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () => Response.json({ data: [] }));
-    globalThis.fetch = withPlatformDiscovery(fetchMock);
-    return fetchMock;
-  }
-
-  function lastUrl(fetchMock: ReturnType<typeof vi.fn>): string {
-    const calls = fetchMock.mock.calls as Array<Array<unknown>>;
-    if (calls.length === 0) {
-      throw new Error('fetch was not called');
-    }
-    return String(calls[0]?.[0]);
-  }
-
   it('hits the /requests endpoint with since and limit, omitting status by default', async () => {
     const fetchMock = setFetchMock();
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getRequests('proj_1', '12h');
 
-    const url = lastUrl(fetchMock);
+    const url = requestUrl(fetchMock);
     expect(url).toContain('/projects/proj_1/requests?');
     expect(url).toContain('since=12h');
     expect(url).toContain('limit=200');
@@ -252,7 +230,7 @@ describe('PlatformClient.getRequests URL', () => {
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getRequests('proj_1', '1h', 200, 'all');
 
-    expect(lastUrl(fetchMock)).not.toContain('status=');
+    expect(requestUrl(fetchMock)).not.toContain('status=');
   });
 
   it('appends a status class filter', async () => {
@@ -260,6 +238,6 @@ describe('PlatformClient.getRequests URL', () => {
     const client = new PlatformClient('tok', { apiUrl: 'http://localhost:1234' });
     await client.getRequests('proj_1', '1h', 200, '5xx');
 
-    expect(lastUrl(fetchMock)).toContain('status=5xx');
+    expect(requestUrl(fetchMock)).toContain('status=5xx');
   });
 });

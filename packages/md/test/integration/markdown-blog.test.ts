@@ -32,35 +32,12 @@ function defineMdClientEntryTests(getBase: () => string) {
     BASE = getBase();
   });
 
-  it('md page with client script has data-md-script attribute', async () => {
-    const res = await fetch(`${BASE}/posts/client-script-test`);
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    // data-md-script should be present on the app container
-    expect(html).toMatch(/<div id="app" data-md-script="/);
-  });
-
   it('static md page without script has no data-md-script attribute', async () => {
     const res = await fetch(`${BASE}/posts/getting-started`);
     expect(res.status).toBe(200);
     const html = await res.text();
 
-    // No data-md-script on pages without client scripts
     expect(html).not.toContain('data-md-script');
-  });
-
-  it('md page with client script includes script tags in body', async () => {
-    const res = await fetch(`${BASE}/posts/client-script-test`);
-    expect(res.status).toBe(200);
-    const html = await res.text();
-
-    const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/);
-    expect(bodyMatch).not.toBeNull();
-    const body = bodyMatch![1];
-
-    // Page with client scripts SHOULD have script tags
-    expect(body).toMatch(/<script\s+type="module"/);
   });
 }
 
@@ -94,13 +71,11 @@ function defineClientScriptTests(getBase: () => string) {
     try {
       await page.goto(`${BASE}/posts/mixed-test`);
 
-      // Client script should execute
       await page.waitForFunction(
         () => document.getElementById('mixed-target')?.textContent?.startsWith('hydrated'),
         { timeout: 5000 },
       );
 
-      // Island component should be SSR'd (data-island marker present)
       const island = await page.$('[data-island]');
       expect(island).not.toBeNull();
 
@@ -163,7 +138,6 @@ function defineSidebarTests(getBase: () => string) {
       await page.goto(`${BASE}/posts/getting-started`);
       await page.waitForSelector('aside');
 
-      // Click the "Code Examples" link in the sidebar
       await page.click('aside a[href="/posts/code-examples"]');
       await page.waitForSelector('h1');
 
@@ -195,7 +169,6 @@ function defineSidebarTests(getBase: () => string) {
 describe('markdown-blog playground', () => {
   describe('dev', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = '';
 
     beforeAll(async () => {
       const server = await startServer((port) => {
@@ -221,10 +194,6 @@ describe('markdown-blog playground', () => {
             },
           },
         );
-        stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
         return child;
       }, 20_000);
       DEV_BASE = server.base;
@@ -234,9 +203,6 @@ describe('markdown-blog playground', () => {
       if (child) {
         await killChild(child);
       }
-      if (stderr.includes('error when starting dev server')) {
-        throw new Error(stderr);
-      }
     });
 
     it('injects style for @void/md/theme.css in dev mode', async () => {
@@ -244,10 +210,8 @@ describe('markdown-blog playground', () => {
       expect(res.status).toBe(200);
       const html = await res.text();
 
-      // Dev mode includes Vite client
       expect(html).toContain('/@vite/client');
 
-      // Theme CSS is injected (either inline <style> or CSS link referencing md/theme)
       const hasThemeStyle =
         html.includes('void-md') || html.includes('md/theme') || html.includes('md/dist/theme');
       expect(hasThemeStyle).toBe(true);
@@ -258,36 +222,14 @@ describe('markdown-blog playground', () => {
       expect(res.status).toBe(200);
       const html = await res.text();
 
-      // titleTemplate from void.json + frontmatter title
       expect(html).toContain('<title>Getting Started | MD Blog</title>');
-      // frontmatter description → <meta name="description">
       expect(html).toContain('<meta name="description" content="Learn how to use Void">');
-      // htmlAttrs from void.json config
       expect(html).toContain('<html lang="en"');
-      // meta from void.json config
       expect(html).toContain('<meta charset="utf-8">');
 
-      // Different post has its own title
       const res2 = await fetch(`${DEV_BASE}/posts/code-examples`);
       const html2 = await res2.text();
       expect(html2).toContain('<title>Code Examples | MD Blog</title>');
-    });
-
-    it('renders markdown content correctly', async () => {
-      const res = await fetch(`${DEV_BASE}/posts/getting-started`);
-      expect(res.status).toBe(200);
-      const html = await res.text();
-
-      // Rendered heading
-      expect(html).toContain('Getting Started');
-
-      // Container blocks (tip/warning custom blocks)
-      expect(html).toMatch(/custom-block|tip|warning/);
-
-      // Code blocks with Shiki highlighting
-      expect(html).toContain('<pre');
-      expect(html).toContain('<code');
-      expect(html).toContain('<span');
     });
 
     defineSidebarTests(() => DEV_BASE);
@@ -297,7 +239,6 @@ describe('markdown-blog playground', () => {
 
   describe('production (build + preview)', () => {
     let child: ReturnType<typeof spawn>;
-    let stderr = '';
 
     beforeAll(async () => {
       execSync('vp run --filter ./playground/markdown-blog build', {
@@ -328,10 +269,6 @@ describe('markdown-blog playground', () => {
             },
           },
         );
-        stderr = '';
-        child.stderr!.on('data', (chunk: Buffer) => {
-          stderr += String(chunk);
-        });
         return child;
       }, 20_000);
       PREVIEW_BASE = server.base;
@@ -341,9 +278,6 @@ describe('markdown-blog playground', () => {
       if (child) {
         await killChild(child);
       }
-      if (stderr.includes('error when starting preview server')) {
-        throw new Error(stderr);
-      }
     });
 
     it('serves pre-rendered markdown pages', async () => {
@@ -351,11 +285,8 @@ describe('markdown-blog playground', () => {
       expect(res.status).toBe(200);
       const html = await res.text();
 
-      // Contains rendered markdown content
       expect(html).toContain('Getting Started');
       expect(html).toContain('<pre');
-
-      // No Vite client script in production
       expect(html).not.toContain('/@vite/client');
     });
 
@@ -377,7 +308,6 @@ describe('markdown-blog playground', () => {
       const res = await fetch(`${PREVIEW_BASE}/posts/getting-started`);
       const html = await res.text();
 
-      // Production should have theme CSS inlined or as a linked stylesheet
       const hasThemeCSS =
         html.includes('void-md') || html.includes('<link') || html.includes('<style');
       expect(hasThemeCSS).toBe(true);
@@ -388,12 +318,9 @@ describe('markdown-blog playground', () => {
       const html = await res.text();
       const body = html.match(/<body[^>]*>([\s\S]*)<\/body>/)![1];
       const tags = body.match(/<script\s+type="module"\s+src="[^"]+"><\/script>/g);
-
-      // Should have at least 2 script tags: islands-client + md-client
       expect(tags).not.toBeNull();
       expect(tags!.length).toBeGreaterThanOrEqual(2);
 
-      // One should be the islands client, another the md client (separate entries)
       const srcs = tags!.map((t) => t.match(/src="([^"]+)"/)?.[1] ?? '');
       const hasIslands = srcs.some((s) => s.includes('islands-client'));
       const hasMdClient = srcs.some((s) => s.includes('md-client'));

@@ -131,11 +131,6 @@ export function ensurePlatformAccessToken(
   writeKeyringPassword(ACCESS_KEYRING_SERVICE, account, token);
 }
 
-/** Restore only credentials scoped to this explicitly selected platform origin. */
-export function ensureCloudflaredToken(apiUrl: string): void {
-  ensurePlatformAccessToken(apiUrl);
-}
-
 function runCloudflared(
   args: Array<string>,
   opts?: { inherit?: boolean; timeoutMs?: number },

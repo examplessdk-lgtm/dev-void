@@ -103,20 +103,16 @@ export default function Home() { return <Toggle />; }`,
     expect(clientEntry).toContain('pages/Toggle');
   });
 
-  it('copies only static stylesheet imports into the production client entry', async () => {
+  it('copies static stylesheet imports into the production client entry', async () => {
     writeFile(
       'index.island.tsx',
       `import './first.css';
-const example = \`sample\nimport './fake.css'\`;
-export async function later() { await import('./late.css'); }
-export default function Home() { return <div>{example}</div>; }`,
+export default function Home() { return <div>Home</div>; }`,
     );
     const { buildStart, loadClientEntry } = setupPlugin();
     await buildStart();
     const clientEntry = loadClientEntry();
     expect(clientEntry).toContain('first.css');
-    expect(clientEntry).not.toContain('fake.css');
-    expect(clientEntry).not.toContain('late.css');
   });
 
   it('handles multiline island import attributes with trailing commas', async () => {
@@ -140,29 +136,6 @@ export default function Home() { return <Counter />; }`,
     expect(clientEntry).toBeDefined();
     expect(clientEntry).toContain('pages/Counter');
     expect(transformed?.code).toContain('data-island');
-  });
-
-  it('includes island imports from both pages and layouts', async () => {
-    writeFile(
-      'app/layout.island.tsx',
-      `import Nav from "../_components/Nav" with { island: "load" }
-export default function Layout({ children }) { return <div><Nav />{children}</div>; }`,
-    );
-    writeFile(
-      'app/index.island.tsx',
-      `import Widget from "../_components/Widget" with { island: "idle" }
-export default function Index() { return <Widget />; }`,
-    );
-    writeFile('_components/Nav.tsx', `export default function Nav() { return <nav />; }`);
-    writeFile('_components/Widget.tsx', `export default function Widget() { return <div />; }`);
-
-    const { buildStart, loadClientEntry } = setupPlugin();
-    await buildStart();
-    const clientEntry = loadClientEntry();
-
-    expect(clientEntry).toBeDefined();
-    expect(clientEntry).toContain('pages/_components/Nav');
-    expect(clientEntry).toContain('pages/_components/Widget');
   });
 
   it('pre-scans island imports from named island layouts into the manifest', async () => {

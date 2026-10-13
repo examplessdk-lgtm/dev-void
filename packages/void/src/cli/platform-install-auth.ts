@@ -7,10 +7,12 @@ import {
   parsePlatformAuthenticationSetup,
   parsePlatformLoginConfiguration,
   platformDashboardUrl,
+  type PlatformAppAccess,
   type PlatformDeploymentManifest,
   type PlatformLoginKind,
 } from '@void/platform';
 import { confirm, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
+import { formatUrl } from './output.ts';
 import {
   activatePlatformAccessCredentials,
   parsePlatformAccessSetupSpec,
@@ -22,8 +24,8 @@ import type { PlatformCloudflareClient } from './platform-cloudflare.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
 import { platformPromptAnswer } from './platform-setup.ts';
 
-export type AppAccessFile = {
-  mode: import('@void/platform').PlatformAppAccess;
+type AppAccessFile = {
+  mode: PlatformAppAccess;
   tokenEnv?: string;
   identityProviderIds?: Array<string>;
   policyIds?: Array<string>;
@@ -37,6 +39,11 @@ type AuthFile = {
   protection?: unknown;
   cloudflareAccess?: PlatformAccessSetupSpec;
 };
+
+function defaultConnectionId(kind: PlatformLoginKind): string {
+  return kind === 'oidc' ? 'company' : kind === 'cloudflare-access' ? 'access' : kind;
+}
+
 export type PlatformAuthSelection = {
   authentication: PlatformDeploymentManifest['authentication'];
   file?: AuthFile;
@@ -135,9 +142,6 @@ export async function selectInstallationAuthentication(
     }
     return { authentication: recorded };
   }
-  if (!process.stdin.isTTY && !choices.loginMethods && choices.accessProtection === undefined) {
-    return { authentication: { providers: ['github'] } };
-  }
   const providers =
     choices.loginMethods ??
     (!process.stdin.isTTY
@@ -211,7 +215,7 @@ export async function collectInstallationAuthentication(
     selection.authentication.providers.map((kind) => ({
       configuration: {
         kind,
-        id: kind === 'oidc' ? 'company' : kind === 'cloudflare-access' ? 'access' : kind,
+        id: defaultConnectionId(kind),
         label:
           kind === 'github'
             ? 'GitHub'
@@ -254,12 +258,12 @@ export async function collectInstallationAuthentication(
           yes: access.yes,
         })
       : undefined;
-  console.log(`Login callback URL: ${plan.apiUrl}/auth/callback`);
+  console.log(`Login callback URL: ${formatUrl(`${plan.apiUrl}/auth/callback`)}`);
   for (const entry of entries) {
     const config = { ...entry.configuration };
     const kind = config.kind as PlatformLoginKind;
     if (!config.id) {
-      config.id = kind === 'oidc' ? 'company' : kind === 'cloudflare-access' ? 'access' : kind;
+      config.id = defaultConnectionId(kind);
     }
     if (prepared?.login && prepared.login.configuration.id === config.id) {
       const connection = prepared.login;

@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import type { CloudflareOperation } from '@void/deploy-cloudflare';
+import type { CloudflareCommandResult, CloudflareOperation } from '@void/deploy-cloudflare';
 import {
   encodeCloudflareVersionMessage,
   deployCloudflareVersionTraffic,
@@ -15,8 +15,9 @@ import {
 } from '@void/deploy-cloudflare';
 import { join } from 'pathslash';
 import { materializeCloudflareConfig, persistCloudflareConfig } from '../cloudflare-config.ts';
-import { scanWranglerDotenvKeys } from '../shared/dotenv.ts';
 import { createCloudflareProcessRunner } from './cloudflare-process.ts';
+import { findAmbientConfigOverride, findWranglerCiOverrideDotenvFile } from './deploy-transport.ts';
+import { getErrorMessage } from './output.ts';
 import {
   assertNoTransportRedirectInProjectDotenv,
   deleteEnvVarCaseAware,
@@ -31,21 +32,10 @@ import {
   type WranglerCustomDomain,
 } from './wrangler.ts';
 
-export type CloudflareOperationResult = {
-  status: number;
-  stdout: string;
-  stderr: string;
-  signal?: NodeJS.Signals | null;
-  error?: string | null;
-  data?: unknown;
-  errorCode?: number;
-  failure?: 'not-found' | 'durable-migration' | 'containers-unavailable';
-};
-
 export type CloudflareOperationRunner = (
   args: CloudflareOperation,
   options: { capture: boolean; input?: string },
-) => CloudflareOperationResult | Promise<CloudflareOperationResult>;
+) => CloudflareCommandResult | Promise<CloudflareCommandResult>;
 
 export type CloudflareOperationContext = {
   accountId: string;
@@ -54,10 +44,6 @@ export type CloudflareOperationContext = {
   workerName: string;
   runWrangler: CloudflareOperationRunner;
 };
-
-export type CloudflareCustomDomainPublisher = (
-  context: CloudflareOperationContext,
-) => Promise<void>;
 
 export type CloudflareWorkerVersion = {
   id: string;
@@ -127,7 +113,7 @@ export async function listCloudflareSecrets(
     configPath: context.configPath,
     workerName: context.workerName,
   });
-  const parsed = parseJson(result.data, 'Cloudflare secret list');
+  const parsed = requireData(result.data, 'Cloudflare secret list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare secret list returned an unexpected response.');
   }
@@ -235,7 +221,7 @@ export async function executeCloudflareD1Sql(
     sql: sql,
     configPath: context.operation.configPath,
   });
-  const parsed = parseJson(result.data, 'Cloudflare D1 execute');
+  const parsed = requireData(result.data, 'Cloudflare D1 execute');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare D1 execute returned an unexpected response.');
   }
@@ -267,7 +253,7 @@ export async function readCloudflareD1Migrations(
       .map((row) => (typeof row.name === 'string' ? row.name : null))
       .filter((name): name is string => name !== null);
   } catch (error) {
-    if (/no such table/i.test(errorMessage(error))) {
+    if (/no such table/i.test(getErrorMessage(error))) {
       return [];
     }
     throw error;
@@ -321,7 +307,7 @@ export async function readCloudflareWorkerStatus(
 
 /** Return only versions that Cloudflare records as members of a production deployment. */
 export function parseCloudflareDeployedVersionIds(value: unknown): Array<string> {
-  const parsed = parseJson(value, 'Cloudflare deployment list');
+  const parsed = requireData(value, 'Cloudflare deployment list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare deployment list returned an unexpected response.');
   }
@@ -358,7 +344,7 @@ export function parseCloudflareDeployedVersionIds(value: unknown): Array<string>
 }
 
 export function parseCloudflareVersions(value: unknown): Array<CloudflareWorkerVersion> {
-  const parsed = parseJson(value, 'Cloudflare version list');
+  const parsed = requireData(value, 'Cloudflare version list');
   if (!Array.isArray(parsed)) {
     throw new Error('Cloudflare version list returned an unexpected response.');
   }
@@ -386,7 +372,7 @@ export function parseCloudflareVersions(value: unknown): Array<CloudflareWorkerV
 }
 
 export function parseActiveVersionId(value: unknown): string | null {
-  const parsed = parseJson(value, 'Cloudflare deployment status');
+  const parsed = requireData(value, 'Cloudflare deployment status');
   if (typeof parsed !== 'object' || parsed === null) {
     throw new Error('Cloudflare deployment status returned an unexpected response.');
   }
@@ -551,7 +537,7 @@ export async function activateCloudflareExistingVersion(
       recordPublishedTraffic(context.configPath, currentTriggerConfig);
     }
   } catch (error) {
-    recoveryFailure = errorMessage(error);
+    recoveryFailure = getErrorMessage(error);
   }
   throw new Error(
     recoveryFailure
@@ -598,7 +584,6 @@ export async function changeCloudflareDomain(
   hostname: string,
   action: 'add' | 'delete',
   runner?: CloudflareOperationRunner,
-  emptyDomainPublisher?: CloudflareCustomDomainPublisher,
 ): Promise<{ modified: boolean; domains: Array<WranglerCustomDomain> }> {
   const context = resolveCloudflareOperationContext(root, runner);
   const before = readWranglerCustomDomains(root);
@@ -611,7 +596,7 @@ export async function changeCloudflareDomain(
   const triggerConfigPath = join(triggerConfigDir, 'wrangler.json');
   const deployRoutes = async (): Promise<void> => {
     if (readWranglerCustomDomains(root).domains.length === 0) {
-      await (emptyDomainPublisher ?? publishEmptyCloudflareCustomDomainSet)(context);
+      await publishEmptyCloudflareCustomDomainSet(context);
       return;
     }
     writeDomainTriggerConfig(context, before.configPath, triggerConfigPath);
@@ -632,11 +617,11 @@ export async function changeCloudflareDomain(
       throw new Error(
         `Cloudflare rejected the domain trigger update and also rejected the automatic remote restore. ` +
           `The local Wrangler config was restored, but remote route state may be partially applied. ` +
-          `${errorMessage(error)} Restore failed: ${errorMessage(restoreError)}`,
+          `${getErrorMessage(error)} Restore failed: ${getErrorMessage(restoreError)}`,
       );
     }
     throw new Error(
-      `Cloudflare rejected the domain trigger update; both the local config and remote triggers were restored. ${errorMessage(error)}`,
+      `Cloudflare rejected the domain trigger update; both the local config and remote triggers were restored. ${getErrorMessage(error)}`,
     );
   } finally {
     rmSync(triggerConfigDir, { recursive: true, force: true });
@@ -675,7 +660,7 @@ export async function publishEmptyCloudflareCustomDomainSet(
 /** Adapt the direct empty-domain API call to the deployment package's result contract. */
 export function createCloudflareEmptyDomainPublisher(
   context: CloudflareOperationContext,
-): () => Promise<CloudflareOperationResult> {
+): () => Promise<CloudflareCommandResult> {
   return async () => {
     try {
       await publishEmptyCloudflareCustomDomainSet(context);
@@ -689,7 +674,7 @@ export function createCloudflareEmptyDomainPublisher(
 /** Publish an explicit empty Cron Trigger set through Void's pinned cf transport. */
 export function createCloudflareEmptyCronPublisher(
   context: CloudflareOperationContext,
-): () => Promise<CloudflareOperationResult> {
+): () => Promise<CloudflareCommandResult> {
   return async () => {
     try {
       return await run(context, {
@@ -738,7 +723,7 @@ async function run(
   context: CloudflareOperationContext,
   args: CloudflareOperation,
   options?: { capture?: boolean; input?: string },
-): Promise<CloudflareOperationResult> {
+): Promise<CloudflareCommandResult> {
   const result = await Promise.resolve(
     context.runWrangler(args, {
       capture: options?.capture ?? true,
@@ -774,41 +759,32 @@ function createCloudflareOperationRunner(
 }
 
 function assertNoOperationConfigOverride(root: string): void {
-  if (process.env.CLOUDFLARE_ENV?.trim()) {
+  const override = findAmbientConfigOverride();
+  if (override === 'CLOUDFLARE_ENV') {
     throw new Error(
       'CLOUDFLARE_ENV is set. Void Cloudflare operations target the top-level config only.',
     );
   }
-  if (process.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH?.trim()) {
+  if (override) {
     throw new Error(
       'CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH is set. Void Cloudflare operations use the root Wrangler config only.',
     );
   }
-  for (const file of ['.env', '.env.local', '.env.', '.env..local']) {
-    const keys = scanWranglerDotenvKeys(join(root, file));
-    const containsOverride =
-      process.platform === 'win32'
-        ? [...keys].some((key) => key.toLowerCase() === 'wrangler_ci_override_name')
-        : keys.has('WRANGLER_CI_OVERRIDE_NAME');
-    if (containsOverride) {
-      throw new Error(
-        `Project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which can replace the pinned Worker name. Remove it before running this command.`,
-      );
-    }
+  const file = findWranglerCiOverrideDotenvFile(root);
+  if (file) {
+    throw new Error(
+      `Project file "${file}" sets WRANGLER_CI_OVERRIDE_NAME, which can replace the pinned Worker name. Remove it before running this command.`,
+    );
   }
 }
 
-function parseJson(value: unknown, label: string): unknown {
+function requireData(value: unknown, label: string): unknown {
   if (value === undefined) {
     throw new Error(label + ' did not return structured data.');
   }
   return value;
 }
 
-function failedOperationResult(error: unknown): CloudflareOperationResult {
-  return { status: 1, stdout: '', stderr: errorMessage(error), error: errorMessage(error) };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function failedOperationResult(error: unknown): CloudflareCommandResult {
+  return { status: 1, stdout: '', stderr: getErrorMessage(error), error: getErrorMessage(error) };
 }

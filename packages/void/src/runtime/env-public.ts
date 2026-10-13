@@ -117,21 +117,10 @@ export function defineEnv<S extends AnySchema>(schema: S): InferEnv<S> {
 }
 
 /**
- * Internal: validate the entire schema against the worker's actual env on
- * the first request per isolate. Catches bad remote-secret values and
- * post-deploy drift that the deploy CLI can't see (it only knows secret
- * names, not their values).
- *
- * Spliced into the generated worker entry by `compileWorkerEntry`. Cached
- * after the first call so subsequent requests pay no cost.
- *
- * Async lifecycle: this function awaits any async Standard Schema
- * validators (zod `refine`, arktype async narrows, etc.) and seeds the
- * per-key cache with the resolved values. Subsequent reads via `env.X`
- * hit the sync cache — async work only happens here, at boot. If a user
- * accesses `env.X` for a key with an async validator *before* this
- * function has run (e.g. during module-top-level code), the proxy will
- * throw with guidance pointing back to this boot-time pre-validation.
+ * Internal: validate the whole schema against the worker env once per isolate,
+ * from the generated worker entry. Catches remote-secret values the deploy CLI
+ * cannot see. Async validators are awaited here and their values cached, so
+ * later synchronous `env.X` reads can serve them.
  */
 export async function _validateEnvOnce(envValues: unknown): Promise<void> {
   if (registry.bootValidation) {
@@ -152,20 +141,12 @@ export async function _validateEnvOnce(envValues: unknown): Promise<void> {
   };
   const report = await validateAllEnvWithValues(registry.schema, values);
   if (report.valid) {
-    // Seed the sync cache with already-validated values so subsequent
-    // `env.X` reads (including ones with async validators) hit the cache
-    // instead of re-running validation. The cache key is the current raw
-    // runtime env (matches what `readKey` will use). If no runtime env is
-    // bound (e.g. called in an isolated test), skip seeding — the validator
-    // result is still cached via registry.bootValidation.
+    // Seed the per-key cache, keyed by the raw env as in `readKey`.
     try {
       const cacheKey = getRawRuntimeEnv() as object;
       const cache = getValidatedCache(cacheKey);
       for (const [key, value] of report.values) {
-        // Never seed internal framework bindings (__VOID_*, __PROJECT_*, and —
-        // while ISR is active — ISR_CACHE), even when the user's schema
-        // declares one: `env.X` must not expose them. `readKey` also
-        // short-circuits internal names.
+        // Internal bindings stay hidden even when the schema declares them.
         if (isInternalBinding(key, cacheKey as RuntimeEnv)) {
           continue;
         }
@@ -251,10 +232,7 @@ export class EnvValidationError extends Error {
   readonly issues: Array<StandardSchemaV1.Issue>;
 
   constructor(key: string, issues: Array<StandardSchemaV1.Issue>) {
-    // Messages supplied to this constructor are expected to be pre-redacted
-    // by the caller (readKey / _validateEnvOnce / validateAllEnvWithValues).
-    // We intentionally don't re-scan here — we don't know the raw value at
-    // this point in the chain — so the contract is enforced upstream.
+    // Callers redact messages first; the raw value is not known here.
     super(`Invalid env "${key}": ${issues.map((i) => i.message).join(', ')}`);
     this.name = 'EnvValidationError';
     this.key = key;
@@ -263,18 +241,11 @@ export class EnvValidationError extends Error {
 }
 
 function readKey(key: string): unknown {
-  // Internal framework bindings (__VOID_*, __PROJECT_*, and — while ISR is
-  // active — ISR_CACHE) are never exposed through the public `env` proxy —
-  // treat them as absent BEFORE consulting the schema/cache. This holds even
-  // when a user's defineEnv schema declares one and boot validation seeded its
-  // raw value; returning `undefined` matches the "not in schema / not found"
-  // behavior of the filtered env. The exact-name (ISR_CACHE) gate needs the raw
-  // env, so resolve it up front and reuse it as the cache key below.
+  // Internal bindings stay hidden even when the schema declares them.
   const rawEnv = getRawRuntimeEnv();
   if (isInternalBinding(key, rawEnv)) {
     return undefined;
   }
-  // Filtered env hides internal __VOID_*/__PROJECT_* bindings from user code.
   const filtered = getRuntimeEnv() as Record<string, unknown>;
   const clientValues = getClientEnvValues();
   const rawValue = Object.hasOwn(clientValues, key) ? clientValues[key] : filtered[key];
@@ -317,13 +288,7 @@ function readKey(key: string): unknown {
 /**
  * Typed env proxy. Reads from the runtime env, validating declared keys
  * on first access and passing through bindings / unknown keys unchanged.
- *
- * Sync-only: the `get` trap must be synchronous, so validators that return
- * a `Promise` cannot be awaited here. For async Standard Schema validators,
- * `_validateEnvOnce()` pre-resolves them at worker boot and seeds the
- * per-env cache; property reads then serve the cached value synchronously.
- * If an async validator is encountered here without a prior pre-validation,
- * the trap throws with guidance on how to resolve it.
+ * Async validators must be resolved first by `_validateEnvOnce()`.
  */
 export const env = new Proxy({} as Record<string, unknown>, {
   get(_target, key) {

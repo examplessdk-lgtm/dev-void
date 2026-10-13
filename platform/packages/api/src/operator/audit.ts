@@ -58,6 +58,19 @@ function auditTarget(
 ): string | undefined {
   const segments = path.split('/');
   const id = pathIdentifier(segments[1]);
+  if (segments[0] === 'oauth' && segments[1] === 'clients') {
+    if (segments[2] === 'register') {
+      return JSON.stringify({
+        name: boundedString(body.name, 80),
+        operator: boundedString(body.operator, 160),
+        redirectUris: boundedList(body.redirectUris, 10, 2048),
+        scopes: boundedList(body.scopes, 2, 32),
+      });
+    }
+    if (segments[2] === 'disable') {
+      return JSON.stringify({ clientId: boundedString(body.id, 128) });
+    }
+  }
   if (segments[0] === 'config' && segments[1] === 'auth') {
     return JSON.stringify({
       connectionId: pathIdentifier(segments[3]),

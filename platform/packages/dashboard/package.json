@@ -12,22 +12,21 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@base-ui/react": "1.8.0",
-    "@iconify/react": "^6.0.2",
-    "@nkzw/stack": "2.3.2",
+    "@astryxdesign/core": "catalog:",
+    "@astryxdesign/theme-neutral": "catalog:",
+    "@stylexjs/stylex": "catalog:",
     "@void/platform": "workspace:*",
     "hono": "catalog:platform",
+    "lucide-react": "1.52.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:platform",
-    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@void/react": "workspace:*",
     "@voidcloud/api": "workspace:*",
-    "tailwindcss": "^4.3.3",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",

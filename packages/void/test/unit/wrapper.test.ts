@@ -492,28 +492,38 @@ describe('generated wrapper queue dispatch', () => {
 });
 
 describe('generateWrapper with migrations', () => {
-  const tmpRoot = join(import.meta.dirname, '..', '..', '.test-wrapper-tmp');
-  const workerDir = join(tmpRoot, 'server');
-  const projectRoot = join(tmpRoot, 'project');
-
+  const roots: Array<string> = [];
   afterEach(() => {
-    rmSync(tmpRoot, { recursive: true, force: true });
+    for (const root of roots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
-  it('generates wrapper with /__void/migrate handler', async () => {
-    // Set up fake worker dir with a minimal entry
+  function createMigrationFixture(migration?: { name: string; sql: string }): {
+    workerDir: string;
+    projectRoot: string;
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'void-wrapper-migrations-'));
+    roots.push(root);
+    const workerDir = join(root, 'server');
+    const projectRoot = join(root, 'project');
     mkdirSync(workerDir, { recursive: true });
     writeFileSync(
       join(workerDir, 'index.mjs'),
       'export default { fetch() { return new Response("ok"); } };',
     );
-
-    // Set up fake project with a migration
     mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_test.sql'),
-      'CREATE TABLE test (id INTEGER PRIMARY KEY);',
-    );
+    if (migration) {
+      writeFileSync(join(projectRoot, 'db', 'migrations', migration.name), migration.sql);
+    }
+    return { workerDir, projectRoot };
+  }
+
+  it('embeds SQLite migrations, a self-contained handler and the readiness probe', async () => {
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_create_users.sql',
+      sql: 'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);',
+    });
 
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
@@ -521,80 +531,29 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'sqlite',
     });
 
-    // Original entry should be renamed
-    expect(existsSync(join(workerDir, '__original.mjs'))).toBe(true);
-
-    // Wrapper should be written as index.mjs
     const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('/__void/migrate');
-    expect(wrapper).toContain('createMigrationHandler');
     expect(wrapper).toContain('__migrations');
-    expect(wrapper).toContain('import original from "./__original.mjs"');
-
-    expect(existsSync(join(workerDir, '__void_migration_handler.mjs'))).toBe(true);
-  });
-
-  it('bundles the SQLite migration handler into a self-contained worker module', async () => {
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_test.sql'),
-      'CREATE TABLE test (id INTEGER PRIMARY KEY);',
-    );
-
-    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
-      ...base,
-      hasMigrations: true,
-      migrationDialect: 'sqlite',
-    });
+    expect(wrapper).toContain('001_create_users.sql');
+    expect(wrapper).toContain('CREATE TABLE users');
 
     const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
     expect(handler).not.toMatch(/from\s+["']\.\.\//);
     expect(handler).not.toContain('../migrations/canonical-json');
     expect(handler).not.toContain('../canonical-json-');
     expect(handler).toContain('function canonicalJson');
-  });
 
-  it('includes migrations JSON in wrapper source', async () => {
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_create_users.sql'),
-      'CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);',
-    );
-
-    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
-      ...base,
-      hasMigrations: true,
-    });
-
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('001_create_users.sql');
-    expect(wrapper).toContain('CREATE TABLE users');
+    expect(wrapper).toMatch(/Response\.json\(\s*\{\s*ready:\s*true\s*\}\s*\)/);
+    const readyIdx = wrapper.indexOf('/__void/ready');
+    const originalIdx = wrapper.indexOf('original.fetch');
+    expect(readyIdx).toBeGreaterThanOrEqual(0);
+    expect(originalIdx).toBeGreaterThan(readyIdx);
   });
 
   it('uses PG migration handler when dialect is postgresql', async () => {
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_test.sql'),
-      'CREATE TABLE test (id SERIAL PRIMARY KEY);',
-    );
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_test.sql',
+      sql: 'CREATE TABLE test (id SERIAL PRIMARY KEY);',
+    });
 
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
@@ -602,12 +561,6 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'postgresql',
     });
 
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('/__void/migrate');
-    expect(wrapper).toContain('createMigrationHandler');
-    expect(wrapper).toContain('"postgresql"');
-
-    expect(existsSync(join(workerDir, '__void_migration_handler.mjs'))).toBe(true);
     const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
     expect(handler).not.toContain('import("pg")');
     expect(
@@ -633,16 +586,10 @@ describe('generateWrapper with migrations', () => {
   });
 
   it('uses the MySQL migration handler when dialect is mysql', async () => {
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_test.sql'),
-      'CREATE TABLE test (id INT);',
-    );
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_test.sql',
+      sql: 'CREATE TABLE test (id INT);',
+    });
 
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
@@ -650,62 +597,15 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'mysql',
     });
 
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('/__void/migrate');
-    expect(wrapper).toContain('"mysql"');
-    expect(existsSync(join(workerDir, '__void_migration_handler.mjs'))).toBe(true);
-  });
-
-  it('intercepts GET /__void/ready with {ready:true} when wrapper is generated', async () => {
-    // Platform's deploy-time readiness probe (packages/api/src/routes/deploy.ts)
-    // expects a JSON 200 from GET /__void/ready before dispatching migrations.
-    // Without this, the request falls through to the user's framework handler
-    // (e.g. SvelteKit -> env.ASSETS), which returns CF's "Assets have not yet
-    // been deployed to this script." stub during WfP propagation, causing the
-    // probe to retry until exhaustion.
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-    writeFileSync(
-      join(projectRoot, 'db', 'migrations', '001_test.sql'),
-      'CREATE TABLE test (id INTEGER PRIMARY KEY);',
-    );
-
-    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
-      ...base,
-      hasMigrations: true,
-      migrationDialect: 'sqlite',
-    });
-
-    const wrapper = readFileSync(join(workerDir, 'index.mjs'), 'utf-8');
-    expect(wrapper).toContain('/__void/ready');
-    expect(wrapper).toMatch(/Response\.json\(\s*\{\s*ready:\s*true\s*\}\s*\)/);
-    // Must be checked before delegating to original.fetch, otherwise the
-    // user's framework handler will see the request.
-    const readyIdx = wrapper.indexOf('/__void/ready');
-    const originalIdx = wrapper.indexOf('original.fetch');
-    expect(readyIdx).toBeGreaterThanOrEqual(0);
-    expect(originalIdx).toBeGreaterThan(readyIdx);
+    const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
+    expect(handler).toContain('VARCHAR(255)');
   });
 
   it('does not generate migration handler when hasMigrations is false', async () => {
-    mkdirSync(workerDir, { recursive: true });
-    writeFileSync(
-      join(workerDir, 'index.mjs'),
-      'export default { fetch() { return new Response("ok"); } };',
-    );
-
-    mkdirSync(join(projectRoot, 'db', 'migrations'), { recursive: true });
-
-    // Create fake cron handler
+    const { workerDir, projectRoot } = createMigrationFixture();
     mkdirSync(join(projectRoot, 'crons'), { recursive: true });
     writeFileSync(join(projectRoot, 'crons', 'daily.ts'), 'export default async () => {};');
 
-    // Only crons, no migrations
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
       crons: [{ name: 'daily', filePath: 'daily.ts', crons: ['0 0 * * *'] }],

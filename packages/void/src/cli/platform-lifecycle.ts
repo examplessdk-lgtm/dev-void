@@ -15,7 +15,7 @@ import {
   text,
 } from '@voidzero-dev/vite-plus-prompts';
 import { resolve } from 'pathslash';
-import { printSuccess, cliCommandName, createSpinner, note, pc } from './output.ts';
+import { printSuccess, cliCommandName, createSpinner, formatUrl, note, pc } from './output.ts';
 import {
   selectInstallationAppAccess,
   prepareInstallationAppAccess,
@@ -85,7 +85,6 @@ import {
   platformSetupPages,
   platformSetupFieldHelp,
 } from './platform-setup.ts';
-import { passwordWithPlaceholder } from './prompt-password.ts';
 
 export function resolvePlatformInstallDatabaseUrl(
   checkpoint: Record<string, string> | null,
@@ -595,7 +594,7 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       }
       if (choice === 'setup') {
         note(
-          `Create a Hyperdrive in account ${accountId} with any unused name${suggestedNameAvailable ? ` such as ${suggestedName}` : ''}. Point it at the same dedicated PostgreSQL database you will give Void, use a runtime database user, and disable SQL result caching. If your organization manages Hyperdrive, ask its administrator to create it. Then rerun this command and select it from the list.\nSetup: https://developers.cloudflare.com/hyperdrive/get-started/`,
+          `Create a Hyperdrive in account ${accountId} with any unused name${suggestedNameAvailable ? ` such as ${suggestedName}` : ''}. Point it at the same dedicated PostgreSQL database you will give Void, use a runtime database user, and disable SQL result caching. If your organization manages Hyperdrive, ask its administrator to create it. Then rerun this command and select it from the list.\nSetup: ${formatUrl('https://developers.cloudflare.com/hyperdrive/get-started/')}`,
           pc.bold('Set up Hyperdrive first'),
         );
         outro('No Cloudflare or local installation state was changed.');
@@ -1264,13 +1263,13 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       outro(`Installation ${result.manifest.id} is safely checkpointed.`);
       return;
     }
-    log.info(`API URL: ${plan.apiUrl}`);
+    log.info(`API URL: ${formatUrl(plan.apiUrl)}`);
     if (result.emailOperationId) {
       log.info(`Shared email routing ready. Operation: ${result.emailOperationId}.`);
     }
     const completedAuthCode = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
     if (result.setupPending && completedAuthCode) {
-      log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+      log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
       console.log(`One-time administrator setup code: ${completedAuthCode}`);
       log.info(
         'Confirm your identity in the browser, then test and enable any additional login methods in Settings.',
@@ -1341,11 +1340,7 @@ export async function verifyPlatformAiGatewayPlan(
       deploymentExecution: preview.actions.some((entry) => entry.key === 'deployment-queue'),
     });
   } catch (error) {
-    if (
-      error instanceof PlatformCloudflareApiError &&
-      (error.status === 401 || error.status === 403) &&
-      error.requestPath?.includes('/ai-gateway/')
-    ) {
+    if (isPlatformTokenAuthorizationError(error, '/ai-gateway/')) {
       throw new Error(
         'platform: The runtime token could not verify AI Gateway access. Include Account → AI Gateway → Edit for this account, then retry. No platform resources were created.',
         { cause: error },
@@ -1494,9 +1489,7 @@ async function promptSecret(
     validate: (input: string | undefined) => (input ? validate?.(input) : 'A value is required.'),
   };
   const value = masked
-    ? placeholder
-      ? await passwordWithPlaceholder({ ...options, placeholder })
-      : await password(options)
+    ? await password({ ...options, placeholder })
     : await text({ ...options, placeholder });
   if (isCancel(value) || typeof value === 'symbol') {
     throw new Error('platform: Cancelled.');

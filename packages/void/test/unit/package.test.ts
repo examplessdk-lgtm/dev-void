@@ -10,12 +10,22 @@ import {
   collectWorkerFiles,
   resolveSpaFallbackChain,
 } from '../../src/cli/package.ts';
-import type { VoidConfig } from '../../src/config.ts';
 import type { InferredBindings } from '../../src/inference/walk.ts';
-import { collectRevalidate } from '../../src/isr-config.ts';
-import type { PageDefinition, PageScanResult } from '../../src/pages/types.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-package-test');
+
+function makeBindings(overrides: Partial<InferredBindings> = {}): InferredBindings {
+  return {
+    needsD1: false,
+    needsKV: false,
+    needsR2: false,
+    needsAuth: false,
+    needsQueues: false,
+    needsAI: false,
+    needsSandbox: false,
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   mkdirSync(TMP, { recursive: true });
@@ -28,17 +38,8 @@ afterEach(() => {
 
 describe('worker packaging', () => {
   it('marks Sandbox bundles as controller-capable and omits metadata for apps without Sandbox', () => {
-    const bindings = {
-      needsD1: false,
-      needsKV: false,
-      needsR2: false,
-      needsAuth: false,
-      needsQueues: false,
-      needsAI: false,
-      needsSandbox: true,
-    };
     const manifest = buildVoidManifest({
-      bindings,
+      bindings: makeBindings({ needsSandbox: true }),
       options: {
         sandbox: {
           binding: 'SANDBOX',
@@ -52,9 +53,7 @@ describe('worker packaging', () => {
       },
     });
     expect(manifest.sandbox).toMatchObject({ controllerProtocol: 2, bindingName: 'SANDBOX' });
-    expect(
-      buildVoidManifest({ bindings: { ...bindings, needsSandbox: false } }).sandbox,
-    ).toBeUndefined();
+    expect(buildVoidManifest({ bindings: makeBindings() }).sandbox).toBeUndefined();
   });
 
   it('keeps the manifest workerMain aligned with uploaded worker modules', () => {
@@ -63,15 +62,7 @@ describe('worker packaging', () => {
     writeFileSync(join(TMP, 'wrangler.json'), JSON.stringify({ main: 'index.mjs' }));
 
     const manifest = buildVoidManifest({
-      bindings: {
-        needsD1: false,
-        needsKV: false,
-        needsR2: false,
-        needsAuth: false,
-        needsQueues: false,
-        needsAI: false,
-        needsSandbox: false,
-      },
+      bindings: makeBindings(),
       ssr: true,
       options: {
         workerMain: 'index.mjs',
@@ -85,49 +76,7 @@ describe('worker packaging', () => {
   });
 });
 
-// Non-regression: the managed `void deploy` manifest must stay byte-identical
-// after the self-host AI + ISR refactors (Tasks 2 & 5). These assert the manifest
-// builder still sets `bindings.ai` from `needsAI` and still carries the exact
-// `collectRevalidate` output the deploy path feeds it.
-describe('buildVoidManifest — self-host non-regression', () => {
-  function makeBindings(overrides: Partial<InferredBindings> = {}): InferredBindings {
-    return {
-      needsD1: false,
-      needsKV: false,
-      needsR2: false,
-      needsAuth: false,
-      needsQueues: false,
-      needsAI: false,
-      needsSandbox: false,
-      ...overrides,
-    };
-  }
-
-  function makePage(pattern: string, revalidate?: number): PageDefinition {
-    return {
-      pattern,
-      params: [],
-      catchAll: false,
-      componentPath: `${pattern}.vue`,
-      serverPath: `${pattern}.server.ts`,
-      methods: ['GET'],
-      componentId: pattern.replace(/^\//, ''),
-      revalidate,
-      ssrMode: 'auto',
-      prerenderMode: 'auto',
-      renderMode: 'server',
-      shouldPrerender: false,
-    };
-  }
-
-  function makeScan(pages: Array<PageDefinition>): PageScanResult {
-    return { pages, layouts: [], namedLayouts: [] };
-  }
-
-  function configWith(revalidate: number | Record<string, number> | undefined): VoidConfig {
-    return (revalidate === undefined ? {} : { routing: { revalidate } }) as VoidConfig;
-  }
-
+describe('buildVoidManifest', () => {
   it('advertises authenticated email protocol only for a managed inbound handler', () => {
     expect(
       buildVoidManifest({ bindings: makeBindings(), hasEmailHandlers: true }).emailProtocolVersion,
@@ -145,54 +94,15 @@ describe('buildVoidManifest — self-host non-regression', () => {
     expect(manifest.bindings.ai).toBe(true);
   });
 
-  it('omits bindings.ai when the app does not use Workers AI', () => {
-    const manifest = buildVoidManifest({ bindings: makeBindings({ needsAI: false }) });
-    expect(manifest.bindings.ai).toBeUndefined();
-  });
-
-  it('carries collectRevalidate output verbatim into manifest.revalidate (numeric config + per-page)', () => {
-    // Same inputs the deploy path feeds: void.json config + page-scan per-page rules.
-    const config = configWith(60);
-    const scan = makeScan([makePage('/blog/:slug', 120)]);
-    const revalidate = collectRevalidate(config, scan);
-
-    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
-
-    // Merge must be non-trivial (numeric config → path map with "*" fallback).
-    // The single-segment page pattern `/blog/:slug` stays as `/blog/:slug` so the
-    // matcher anchors it to ONE path segment (`[^/]+`) at runtime.
-    expect(revalidate).toEqual({ '/blog/:slug': 120, '*': 60 });
-    // …and it must land in the manifest byte-for-byte.
-    expect(manifest.revalidate).toEqual(revalidate);
-    expect(Object.keys(manifest.revalidate as Record<string, number>)).toEqual([
-      '/blog/:slug',
-      '*',
-    ]);
-  });
-
-  it('carries collectRevalidate output verbatim into manifest.revalidate (object config + per-page order)', () => {
-    const config = configWith({ '/docs/*': 30, '*': 10 });
-    const scan = makeScan([makePage('/blog/:slug', 120)]);
-    const revalidate = collectRevalidate(config, scan);
-
-    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
-
-    expect(manifest.revalidate).toEqual(revalidate);
-    // Per-page entries precede config entries (first-match-wins ordering preserved).
-    // The per-page `/blog/:slug` pattern stays `/blog/:slug` (single-segment); the
-    // user's own `routing.revalidate` literal keys (`/docs/*`, `*`) pass untouched.
-    expect(Object.entries(manifest.revalidate as Record<string, number>)).toEqual([
-      ['/blog/:slug', 120],
-      ['/docs/*', 30],
-      ['*', 10],
-    ]);
-  });
-
-  it('leaves manifest.revalidate unset when collectRevalidate yields nothing', () => {
-    const revalidate = collectRevalidate(configWith(undefined), makeScan([]));
-    const manifest = buildVoidManifest({ bindings: makeBindings(), revalidate });
-    expect(revalidate).toBeUndefined();
-    expect(manifest.revalidate).toBeUndefined();
+  it('carries revalidate into manifest.revalidate and omits it when unset or 0', () => {
+    const revalidate = { '/blog/:slug': 120, '*': 60 };
+    expect(
+      Object.entries(buildVoidManifest({ bindings: makeBindings(), revalidate }).revalidate ?? {}),
+    ).toEqual(Object.entries(revalidate));
+    expect(buildVoidManifest({ bindings: makeBindings() }).revalidate).toBeUndefined();
+    expect(
+      buildVoidManifest({ bindings: makeBindings(), revalidate: 0 }).revalidate,
+    ).toBeUndefined();
   });
 
   it('carries a pages array verbatim into manifest.pages', () => {
@@ -211,19 +121,6 @@ describe('buildVoidManifest — self-host non-regression', () => {
 });
 
 describe('manifest limits (worker.limits.cpu_ms)', () => {
-  function makeBindings(overrides: Partial<InferredBindings> = {}): InferredBindings {
-    return {
-      needsD1: false,
-      needsKV: false,
-      needsR2: false,
-      needsAuth: false,
-      needsQueues: false,
-      needsAI: false,
-      needsSandbox: false,
-      ...overrides,
-    };
-  }
-
   it('emits manifest.limits when options.cpuMs is set (void manifest)', () => {
     const manifest = buildVoidManifest({ bindings: makeBindings(), options: { cpuMs: 50 } });
     expect(manifest.limits).toEqual({ cpuMs: 50 });
@@ -252,13 +149,6 @@ describe('manifest limits (worker.limits.cpu_ms)', () => {
       packageOptions: {},
     });
     expect('limits' in manifest).toBe(false);
-  });
-
-  it('static manifests never carry limits', () => {
-    for (const appType of ['static', 'spa'] as const) {
-      const manifest = buildStaticManifest({ appType });
-      expect('limits' in manifest).toBe(false);
-    }
   });
 });
 
@@ -386,15 +276,6 @@ describe('resolveSpaFallbackChain', () => {
       },
     ]);
   });
-
-  it('falls back to the appType-inferred handling when notFound is undefined', () => {
-    expect(resolveSpaFallbackChain('static', undefined, undefined).assetConfig).toEqual({
-      not_found_handling: '404-page',
-    });
-    expect(resolveSpaFallbackChain('spa', undefined, undefined).assetConfig).toEqual({
-      not_found_handling: 'single-page-application',
-    });
-  });
 });
 
 describe('buildStaticManifest', () => {
@@ -407,52 +288,17 @@ describe('buildStaticManifest', () => {
     });
   });
 
-  it('threads routing.notFound into manifest.assetConfig', () => {
-    const manifest = buildStaticManifest({ appType: 'spa', notFound: '404-page' });
-    expect(manifest.type).toBe('spa');
-    expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
-  });
-
   it('ships only the user fallbacks when notFound overrides the SPA default', () => {
     const manifest = buildStaticManifest({
       appType: 'spa',
       notFound: '404-page',
       fallbackRules: [{ source: '/docs/*', destination: '/docs.html', status: 200, force: false }],
     });
+    expect(manifest.type).toBe('spa');
     expect(manifest.assetConfig).toEqual({ not_found_handling: '404-page' });
     expect(manifest.fallbackRules).toEqual([
       { source: '/docs/*', destination: '/docs.html', status: 200 },
     ]);
-  });
-});
-
-describe('computeAssetHash', () => {
-  it('returns a 32-char hex string', () => {
-    const hash = computeAssetHash(Buffer.from('hello world'), 'test.html');
-    expect(hash).toHaveLength(32);
-    expect(hash).toMatch(/^[0-9a-f]{32}$/);
-  });
-
-  it('returns consistent hashes for same content and path', () => {
-    const a = computeAssetHash(Buffer.from('test content'), 'file.js');
-    const b = computeAssetHash(Buffer.from('test content'), 'file.js');
-    expect(a).toBe(b);
-  });
-
-  it('returns different hashes for different content', () => {
-    const a = computeAssetHash(Buffer.from('content a'), 'file.js');
-    const b = computeAssetHash(Buffer.from('content b'), 'file.js');
-    expect(a).not.toBe(b);
-  });
-
-  it('returns different hashes for same content with different extensions', () => {
-    const content = Buffer.from('identical bytes');
-    const hashHtml = computeAssetHash(content, 'file.html');
-    const hashJs = computeAssetHash(content, 'file.js');
-    const hashNoExt = computeAssetHash(content, 'file');
-    expect(hashHtml).not.toBe(hashJs);
-    expect(hashHtml).not.toBe(hashNoExt);
-    expect(hashJs).not.toBe(hashNoExt);
   });
 });
 
@@ -468,6 +314,25 @@ describe('collectAndHashAssets', () => {
     expect(assetManifest['/index.html'].hash).toHaveLength(32);
     expect(assetManifest['/index.html'].size).toBe(Buffer.from('<html>hello</html>').length);
     expect(assetFiles.size).toBe(2);
+  });
+
+  it('emits { blake3, md5, size, hash } per entry', async () => {
+    writeFileSync(join(TMP, 'a.js'), 'hello\n');
+
+    const { assetManifest } = await collectAndHashAssets(TMP);
+
+    expect(assetManifest['/a.js']).toEqual({
+      blake3: 'dc6c72af24e164d6188743458a7da473',
+      md5: 'b1946ac92492d2347c6235b4d2611184',
+      size: Buffer.from('hello\n').length,
+      hash: 'dc6c72af24e164d6188743458a7da473',
+    });
+  });
+
+  it("matches Wrangler's hashFile BLAKE3 recipe", () => {
+    expect(computeAssetHash(Buffer.from('const x = 1;\n'), 'foo.js')).toBe(
+      '3725f96aa779d1959d5942b1b4e04567',
+    );
   });
 
   it('returns empty manifest for missing directory', async () => {

@@ -4,12 +4,11 @@ import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import { log } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
-  cloudflareAuthNeedsTerminal,
   createBundledCloudflareAuthRunner,
   ensureCloudflareAuthentication,
   runCloudflareAuthCommand,
 } from '../../src/cli/cloudflare-auth.ts';
-import { createDeployWranglerRunner, loadProvisionModule } from '../../src/cli/deploy.ts';
+import { createDeployWranglerRunner } from '../../src/cli/deploy.ts';
 
 vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:child_process')>()),
@@ -41,7 +40,6 @@ describe('cf browser login', () => {
       },
     ],
   ] as const)('%s shows the live login prompt', async (_, create) => {
-    await loadProvisionModule();
     vi.spyOn(log, 'info').mockImplementation(() => {});
     let reads = 0;
     vi.mocked(spawnSync).mockImplementation((_command, args, options) => {
@@ -99,7 +97,7 @@ describe('cf browser login', () => {
       false,
     );
     expect(result).toMatchObject({ status: 0, data: { removed: true } });
-    expect(vi.mocked(spawnSync).mock.calls[0]?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+    expect(vi.mocked(spawnSync).mock.calls[0]?.[2]?.stdio).toEqual(['pipe', 'pipe', 'pipe']);
     expect(stdout).toHaveBeenCalledWith('Session removed.\n');
     expect(stderr).toHaveBeenCalledWith('Provider note.\n');
   });
@@ -132,11 +130,5 @@ describe('cf browser login', () => {
     child.emit('error', new Error('spawn failed'));
     child.emit('close', 0, null);
     await expect(result).resolves.toMatchObject({ status: null, error: 'spawn failed' });
-  });
-
-  it('only streams browser login', () => {
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.login' })).toBe(true);
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.whoami' })).toBe(false);
-    expect(cloudflareAuthNeedsTerminal({ type: 'auth.token' })).toBe(false);
   });
 });

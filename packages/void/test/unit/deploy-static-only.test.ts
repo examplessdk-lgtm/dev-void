@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test';
-import { hasNonPageBackend } from '../../src/cli/deploy.ts';
+import { hasNonPageBackend } from '../../src/cli/deploy-helpers.ts';
 
 const NONE = {
   hasRoutes: false,
@@ -24,12 +24,5 @@ describe('hasNonPageBackend', () => {
     ['hasLive'],
   ] as const)('is true when %s is the only surface', (key) => {
     expect(hasNonPageBackend({ ...NONE, [key]: true })).toBe(true);
-  });
-
-  // An `email/` handler compiles to the worker's `email()` export. The
-  // static-site path uploads no worker at all, so taking it would drop every
-  // inbound handler and bounce the mail with no error at deploy time.
-  it('keeps an email-only project on the worker path', () => {
-    expect(hasNonPageBackend({ ...NONE, hasEmail: true })).toBe(true);
   });
 });

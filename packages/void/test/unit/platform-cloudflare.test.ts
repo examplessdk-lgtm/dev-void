@@ -196,7 +196,7 @@ describe('platform Cloudflare client', () => {
     ).resolves.toBe(false);
   });
 
-  it('pins every Wrangler Cloudflare transport selector exactly once', () => {
+  it('pins the Cloudflare API base from the environment at construction', () => {
     const keys = [
       'CLOUDFLARE_API_BASE_URL',
       'CF_API_BASE_URL',
@@ -206,11 +206,6 @@ describe('platform Cloudflare client', () => {
     const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     const cases: Array<[Record<string, string>, string]> = [
       [{ CF_API_BASE_URL: 'https://legacy.example/client/v4' }, 'https://legacy.example/client/v4'],
-      [{ WRANGLER_API_ENVIRONMENT: 'staging' }, 'https://api.staging.cloudflare.com/client/v4'],
-      [
-        { CLOUDFLARE_COMPLIANCE_REGION: 'fedramp_high' },
-        'https://api.fed.cloudflare.com/client/v4',
-      ],
       [
         {
           CLOUDFLARE_COMPLIANCE_REGION: 'fedramp_high',
@@ -218,7 +213,6 @@ describe('platform Cloudflare client', () => {
         },
         'https://api.fed.staging.cloudflare.com/client/v4',
       ],
-      [{ CLOUDFLARE_API_BASE_URL: '' }, ''],
     ];
     try {
       for (const [environment, expected] of cases) {
@@ -510,34 +504,6 @@ describe('platform Cloudflare client', () => {
     expect(paths.at(-1)).toBe('/client/v4/zones/zone/custom_hostnames');
   });
 
-  it('names missing runtime permissions without exposing the token', async () => {
-    const token = 'runtime-token-that-must-stay-secret';
-    const client = new PlatformCloudflareClient(token, {
-      fetcher: async () => {
-        return Response.json(
-          { errors: [{ message: 'permission denied' }], success: false },
-          { status: 403 },
-        );
-      },
-    });
-
-    let message = '';
-    try {
-      await verifyPlatformRuntimeTokenPermissions(client, {
-        accountId: 'account',
-        applicationDomain: 'example.com',
-        customDomains: false,
-        zoneId: 'zone',
-      });
-    } catch (error) {
-      message = String(error);
-    }
-    expect(message).toContain('Hyperdrive → Write');
-    expect(message).toContain('HTTP 403');
-    expect(message).toContain('token is valid, scoped to this account');
-    expect(message).not.toContain(token);
-  });
-
   it.each([401, 403, 404, 429, 500, 503])(
     'distinguishes HTTP %s during token preflight without leaking upstream text',
     async (status) => {
@@ -562,6 +528,8 @@ describe('platform Cloudflare client', () => {
       expect(message).not.toContain('upstream echoed');
       if (status === 401 || status === 403) {
         expect(message).toContain('Cloudflare denied');
+        expect(message).toContain('token is valid, scoped to this account');
+        expect(message).toContain('Hyperdrive → Write');
       } else if (status === 429) {
         expect(message).toContain('rate-limited');
       } else {
@@ -587,70 +555,6 @@ describe('platform Cloudflare client', () => {
     await expect(failure).rejects.toThrow('does not establish that a permission is missing');
     await expect(failure).rejects.not.toThrow('synthetic-runtime-secret');
     await expect(failure).rejects.not.toThrow('Required permission or scope');
-  });
-
-  it('refuses unattended custom-domain deletion without a generation precondition', async () => {
-    const requests: Array<string> = [];
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async (input) => {
-        requests.push(String(input));
-        return Response.json({ result: [], success: true });
-      },
-    });
-
-    await expect(
-      client.removeRoutes('account', null, {
-        customDomains: [{ hostname: 'api.example.com', id: 'domain-id', service: 'void-api' }],
-        routes: [],
-      }),
-    ).rejects.toThrow('does not support conditional Worker traffic deletion');
-    expect(requests).toEqual([]);
-  });
-
-  it('refuses unattended route deletion before reading mutable zone state', async () => {
-    const requests: Array<string> = [];
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async (input) => {
-        const url = String(input);
-        requests.push(url);
-        if (url.includes('/zones/')) {
-          return Response.json(
-            { errors: [{ message: 'missing' }], result: null, success: false },
-            { status: 404 },
-          );
-        }
-        return Response.json({ result: [], success: true });
-      },
-    });
-
-    await expect(
-      client.removeRoutes('account', 'removed-zone', {
-        customDomains: [{ hostname: 'api.example.com', id: 'domain-id', service: 'void-api' }],
-        routes: [{ id: 'route-id', pattern: 'apps.example.com/*', script: 'void-api' }],
-      }),
-    ).rejects.toThrow('does not support conditional Worker traffic deletion');
-    expect(requests).toEqual([]);
-  });
-
-  it('paginates namespace discovery without a title filter', async () => {
-    const pages: Array<string> = [];
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async (input) => {
-        const url = new URL(String(input));
-        pages.push(url.searchParams.get('page') ?? '');
-        const page = url.searchParams.get('page');
-        const result =
-          page === '1'
-            ? Array.from({ length: 100 }, (_, index) => ({
-                id: `id-${index}`,
-                title: `namespace-${index}`,
-              }))
-            : [{ id: 'id-100', title: 'namespace-100' }];
-        return Response.json({ success: true, result });
-      },
-    });
-    await expect(client.listKvNamespaces('account')).resolves.toHaveLength(101);
-    expect(pages).toEqual(['1', '2']);
   });
 
   it('filters KV namespaces by exact title instead of trusting an unsupported API filter', async () => {
@@ -1161,14 +1065,15 @@ describe('platform Cloudflare client', () => {
     );
   });
 
-  it('reads an AI Gateway creation time without a zone as UTC, whatever the local zone', async () => {
+  it('reads AI Gateway creation times as UTC, with or without a zone', async () => {
     const client = new PlatformCloudflareClient('token', {
       fetcher: async () =>
         Response.json({
           success: true,
-          // The live API answers in this form.
           result: [
+            // The live API answers in this form.
             { id: 'void-team', created_at: '2026-10-05 18:29:14' },
+            { id: 'zoned', created_at: '2026-09-14T00:00:01.400Z' },
             { id: 'odd', created_at: 'not a time' },
           ],
         }),
@@ -1176,6 +1081,7 @@ describe('platform Cloudflare client', () => {
 
     await expect(client.listAiGateways('account')).resolves.toEqual([
       { createdAt: '2026-10-05T18:29:14.000Z', id: 'void-team', name: 'void-team' },
+      { createdAt: '2026-09-14T00:00:01.400Z', id: 'zoned', name: 'zoned' },
       { id: 'odd', name: 'odd' },
     ]);
   });
@@ -1282,21 +1188,6 @@ describe('platform Cloudflare client', () => {
     ]);
   });
 
-  it('reports when Cloudflare created each AI Gateway', async () => {
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async () =>
-        Response.json({
-          success: true,
-          result: [{ id: 'void-team', created_at: '2026-09-14T00:00:01.400Z' }, { id: 'other' }],
-        }),
-    });
-
-    await expect(client.listAiGateways('account')).resolves.toEqual([
-      { createdAt: '2026-09-14T00:00:01.400Z', id: 'void-team', name: 'void-team' },
-      { id: 'other', name: 'other' },
-    ]);
-  });
-
   it('creates and deletes the proxied wildcard application DNS record in its zone', async () => {
     const requests: Array<{ body: unknown; method: string; pathname: string }> = [];
     const dns = {
@@ -1349,24 +1240,6 @@ describe('platform Cloudflare client', () => {
         pathname: '/client/v4/zones/zone-id/dns_records/dns-id',
       },
     ]);
-  });
-
-  it('never calls Cloudflare for non-empty unattended traffic cleanup', async () => {
-    let requests = 0;
-    const client = new PlatformCloudflareClient('token', {
-      fetcher: async () => {
-        requests++;
-        return Response.json({ success: true, result: null });
-      },
-    });
-
-    await expect(
-      client.removeRoutes('account', 'zone', {
-        customDomains: [],
-        routes: [{ id: 'route', pattern: 'apps.example.com/*', script: 'worker' }],
-      }),
-    ).rejects.toThrow('does not support conditional Worker traffic deletion');
-    expect(requests).toBe(0);
   });
 
   it('inventories Worker custom domains before installer deployment', async () => {

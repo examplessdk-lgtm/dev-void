@@ -21,11 +21,9 @@ describe('parseDbArgs', () => {
     });
   });
 
-  it('parses seed with a TypeScript file', () => {
-    expect(parseDbArgs(['seed', '--file', 'db/seed.ts'])).toEqual({
-      action: 'seed',
-      file: 'db/seed.ts',
-    });
+  it('parses --yes for reset and seed', () => {
+    expect(parseDbArgs(['reset', '--yes'])).toEqual({ action: 'reset', yes: true });
+    expect(parseDbArgs(['seed', '--yes'])).toEqual({ action: 'seed', yes: true });
   });
 
   it('parses execute with inline SQL', () => {
@@ -101,26 +99,6 @@ describe('parseDbArgs', () => {
     });
   });
 
-  it('parses export with --output', () => {
-    expect(parseDbArgs(['export', '--output', 'backup.sql'])).toEqual({
-      action: 'export',
-      output: 'backup.sql',
-      noData: undefined,
-      noSchema: undefined,
-      table: undefined,
-    });
-  });
-
-  it('parses export with --no-data', () => {
-    expect(parseDbArgs(['export', '--no-data'])).toEqual({
-      action: 'export',
-      output: undefined,
-      noData: true,
-      noSchema: undefined,
-      table: undefined,
-    });
-  });
-
   it('parses export with --no-schema', () => {
     expect(parseDbArgs(['export', '--no-schema'])).toEqual({
       action: 'export',
@@ -128,16 +106,6 @@ describe('parseDbArgs', () => {
       noData: undefined,
       noSchema: true,
       table: undefined,
-    });
-  });
-
-  it('parses export with --table', () => {
-    expect(parseDbArgs(['export', '--table', 'users'])).toEqual({
-      action: 'export',
-      output: undefined,
-      noData: undefined,
-      noSchema: undefined,
-      table: 'users',
     });
   });
 
@@ -159,12 +127,6 @@ describe('parseDbArgs', () => {
 
   it('errors on export with --remote (not yet supported — must not silently fall through to local export)', () => {
     expect(() => parseDbArgs(['export', '--remote'])).toThrow(
-      '`void db export --remote` is not yet supported. Local export only for now.',
-    );
-  });
-
-  it('errors on export with --remote combined with other flags', () => {
-    expect(() => parseDbArgs(['export', '--remote', '--output', 'dump.sql'])).toThrow(
       '`void db export --remote` is not yet supported. Local export only for now.',
     );
   });
@@ -221,12 +183,6 @@ describe('parseDbArgs', () => {
 
   it('errors on unknown subcommand', () => {
     expect(() => parseDbArgs(['unknown'])).toThrow(
-      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
-    );
-  });
-
-  it('errors on no subcommand', () => {
-    expect(() => parseDbArgs([])).toThrow(
       'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
     );
   });

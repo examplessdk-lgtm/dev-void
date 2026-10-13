@@ -17,30 +17,8 @@
 type Fields = Record<string, unknown>;
 
 function format(message: string, fields?: Fields): string {
-  // `msg` first key for greppability; remaining fields after. The `message`
-  // arg always wins over a user-provided `fields.msg` (safer — never silently
-  // drops the explicit primary message).
-  //
-  // Use `Object.create(null)` so the payload has no prototype chain — this
-  // makes assigning `payload.__proto__ = ...` a plain own-property write
-  // instead of triggering the `Object.prototype.__proto__` setter (which
-  // would mutate the payload's prototype and let an inherited `toJSON`
-  // hijack `JSON.stringify`).
-  //
-  // Use `Object.entries` (own enumerable keys only) instead of `for...in` to
-  // avoid copying inherited properties. Skip `toJSON` so a user-provided
-  // method cannot hijack `JSON.stringify(payload)` and emit an arbitrary
-  // shape that bypasses the `msg` contract. Skip `__proto__` and
-  // `constructor` for defense in depth (the null-prototype payload already
-  // neutralizes the `__proto__` setter, but skipping the keys keeps the
-  // intent explicit). Skip function values for the same reason —
-  // `JSON.stringify` would silently drop them, but excluding them explicitly
-  // keeps the output deterministic.
-  //
-  // The whole field-normalization loop runs inside the try/catch because
-  // `Object.entries(fields)` itself may invoke enumerable getters or proxy
-  // traps that throw. A logging call must never propagate exceptions from
-  // user-provided fields.
+  // `message` always wins over `fields.msg`. The loop sits inside the try because
+  // getters and proxy traps on `fields` may throw; logging must never throw.
   try {
     const payload: Record<string, unknown> = Object.create(null);
     payload.msg = message;
@@ -57,9 +35,6 @@ function format(message: string, fields?: Fields): string {
     }
     return JSON.stringify(payload);
   } catch {
-    // Non-stringifiable values (e.g. circular refs) or throwing accessors
-    // /proxy traps — fall back to a safe shape so a logging call never
-    // throws.
     return JSON.stringify({ msg: message, error: 'log: fields not serializable' });
   }
 }

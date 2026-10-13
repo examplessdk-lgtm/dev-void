@@ -16,7 +16,8 @@ export type VoidSolidOptions = Readonly<{
 // dep optimizer prebundles the package with esbuild's default `automatic` JSX
 // transform, emitting `import { jsx } from "react/jsx-runtime"` — which then
 // fails to resolve in a Solid project. Letting `vite-plugin-solid` see the
-// source directly keeps JSX compilation correct.
+// source directly keeps JSX compilation correct. It also keeps one copy of the
+// Solid context objects shared by the virtual page modules and user components.
 function excludeRuntimeFromOptimizeDeps() {
   return { exclude: [SOLID_RUNTIME_PACKAGE] };
 }

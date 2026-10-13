@@ -158,3 +158,7 @@ Invitation history remains available after an involved account is removed. The s
 remains visible when that account's login no longer exists.
 
 `void platform signup open` allows anyone to sign up. Everyone who signs up can deploy apps on your application domain, so check how those apps [share cookies](/guide/platform/installation/domains#adding-a-domain) before opening signup. Use `void platform signup restrict` to require an allowlist match again. Disallowing an entry affects future signup; it does not suspend an existing account.
+
+## Connected apps
+
+Register separate applications as OAuth clients through [Connected apps](./connected-apps.md). Users connect their identity and approve each publish on Void.

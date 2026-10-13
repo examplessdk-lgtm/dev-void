@@ -81,20 +81,7 @@ describe('platform registry', () => {
 
   it('rejects a fresh installation slug after a competing checkpoint appears', () => {
     const directory = temporaryRegistry();
-    let manifest = createPlatformInstallationManifest({
-      account: { id: 'account', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
-    manifest = { ...manifest, status: 'planned' };
-    writeInstallationManifest(manifest, directory);
+    writeInstallationManifest({ ...exampleInstallation(), status: 'planned' }, directory);
 
     expect(() => assertPlatformInstallationSlugAvailable('example', directory)).toThrow(
       'already uses this name',
@@ -291,18 +278,7 @@ describe('platform registry', () => {
 
   it('keeps recovery material private and removes it explicitly', () => {
     const directory = temporaryRegistry();
-    const manifest = createPlatformInstallationManifest({
-      account: { id: 'account_123', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    const manifest = exampleInstallation();
     writeInstallationManifest(manifest, directory);
     writePendingInstallationSecrets(manifest, { databaseUrl: 'postgres://secret' }, directory);
     expect(readInstallationRecoverySecrets(manifest, directory)).toEqual({
@@ -328,18 +304,7 @@ describe('platform registry', () => {
 
   it('migrates legacy plaintext recovery material to an encrypted envelope', () => {
     const directory = temporaryRegistry();
-    const manifest = createPlatformInstallationManifest({
-      account: { id: 'account_123', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    const manifest = exampleInstallation();
     writeInstallationManifest(manifest, directory);
     const legacyPath = join(directory, 'account_123', 'example-a1b2c3d4.recovery');
     writeFileSync(legacyPath, JSON.stringify({ databaseUrl: 'postgres://legacy-secret' }), {
@@ -357,18 +322,7 @@ describe('platform registry', () => {
 
   it('authenticates encrypted recovery material to the installation identity', () => {
     const directory = temporaryRegistry();
-    const manifest = createPlatformInstallationManifest({
-      account: { id: 'account_123', name: 'Account' },
-      createdAt: '2026-09-14T00:00:00.000Z',
-      deployment: createPlatformDeploymentManifest({
-        application: { baseDomain: 'example.com', zoneName: 'example.com' },
-        displayName: 'Example',
-        installationSlug: 'example',
-      }),
-      id: 'example-a1b2c3d4',
-      ownershipNonce: '0123456789abcdef0123456789abcdef',
-      platformVersion: '1.0.0',
-    });
+    const manifest = exampleInstallation();
     writeInstallationManifest(manifest, directory);
     writePendingInstallationSecrets(manifest, { databaseUrl: 'postgres://secret' }, directory);
     promoteInstallationSecrets(manifest, directory);

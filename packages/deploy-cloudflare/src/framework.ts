@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { applyEdits, modify, parse } from 'jsonc-parser';
+import { parse } from 'jsonc-parser';
 import { dirname, join, relative } from 'pathslash';
+import { setJsoncValue } from './config.ts';
 
 export type CloudflareFrameworkDeployConfig = Readonly<{
   configPath: string;
@@ -33,12 +34,7 @@ export function writeCloudflareFrameworkDeployConfig(
     : '{}\n';
   let content = initial;
   const upsert = (path: Array<string>, value: unknown): void => {
-    content = applyEdits(
-      content,
-      modify(content, path, value, {
-        formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
-      }),
-    );
+    content = setJsoncValue(content, path, value);
   };
 
   upsert(['name'], options.name);

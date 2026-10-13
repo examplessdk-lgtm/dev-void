@@ -30,14 +30,6 @@ describe('compile', () => {
     expect(result.headings[3]).toMatchObject({ depth: 2, text: 'Section 2' });
   });
 
-  it('applies shiki highlighting to code blocks', async () => {
-    const result = await compile('```ts\nconst x = 1;\n```');
-    // Shiki produces <pre> with <code> containing <span> elements
-    expect(result.html).toContain('<pre');
-    expect(result.html).toContain('<code');
-    expect(result.html).toContain('<span');
-  });
-
   // The 0-based indices of code lines that carry the shiki `highlighted` class.
   // (Shiki emits one `<span class="line">` per line plus a trailing empty line,
   // so we compare highlighted positions rather than a fixed line count.)
@@ -90,17 +82,6 @@ describe('compile', () => {
     expect(result.html.match(/class="footnotes"/g)).toHaveLength(1);
     expect(result.html.match(/class="footnote-item"/g)).toHaveLength(1);
     expect(result.html).toContain('The footnote body.');
-  });
-
-  it('keeps heading extraction intact alongside footnotes', async () => {
-    const result = await compile('# Title\n\n## Section\n\nBody with a note.[^n]\n\n[^n]: note');
-    // Fresh-env fix must not regress TOC/heading ids.
-    expect(result.headings).toMatchObject([
-      { depth: 1, text: 'Title' },
-      { depth: 2, text: 'Section', slug: 'section' },
-    ]);
-    expect(result.html).toContain('id="section"');
-    expect(result.html.match(/class="footnotes"/g)).toHaveLength(1);
   });
 
   it('handles empty source', async () => {

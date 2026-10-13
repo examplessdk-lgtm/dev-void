@@ -5,6 +5,7 @@ import {
   type AiProviderFetchInit,
   type AiProviderOptions,
 } from './ai-types.ts';
+import { bytesToBase64 } from './base64.ts';
 import { getRawRuntimeEnv, type RuntimeEnv } from './env-raw.ts';
 import { UsageLimit, limitFromResponse } from './limits.ts';
 
@@ -101,15 +102,6 @@ function copyBinaryView(value: ArrayBufferView): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer as ArrayBuffer;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -286,19 +278,13 @@ async function responseFromResult(result: unknown): Promise<Response> {
   return Response.json(result);
 }
 
-function splitImageOptions(options: unknown): {
-  endpoint: string;
-  runOptions: Record<string, unknown> | undefined;
-} {
+function imageRunOptions(options: unknown): Record<string, unknown> | undefined {
   if (typeof options !== 'object' || options === null) {
-    return { endpoint: 'images/generations', runOptions: undefined };
+    return undefined;
   }
 
-  const { endpoint, ...runOptions } = options as Record<string, unknown>;
-  return {
-    endpoint: typeof endpoint === 'string' ? endpoint : 'images/generations',
-    runOptions: Object.keys(runOptions).length > 0 ? runOptions : undefined,
-  };
+  const { endpoint: _endpoint, ...runOptions } = options as Record<string, unknown>;
+  return Object.keys(runOptions).length > 0 ? runOptions : undefined;
 }
 
 function resolveProviderKey(
@@ -475,9 +461,7 @@ function makeProxyBackend(send: ProxySend, runtimeEnv: RuntimeEnv): AiBackend {
       return readProxyResult(res);
     },
     async image(model, inputs, options) {
-      const { runOptions } = splitImageOptions(options);
-
-      return proxyFetch('run', { model, inputs, options: runOptions });
+      return proxyFetch('run', { model, inputs, options: imageRunOptions(options) });
     },
     async providerFetch(provider, path, init, options) {
       return proxyFetch(
@@ -568,8 +552,7 @@ function makeDirectBackend(
   return {
     run,
     async image(model, inputs, options) {
-      const { runOptions } = splitImageOptions(options);
-      return responseFromResult(await run(model, inputs, runOptions));
+      return responseFromResult(await run(model, inputs, imageRunOptions(options)));
     },
     async providerFetch(provider, path, init, options) {
       if (!gatewayId) {

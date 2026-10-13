@@ -8,11 +8,11 @@ import type { CloudflareOperation } from '@void/deploy-cloudflare';
 import { PLATFORM_DISABLED_KEY, type PlatformInstallationManifest } from '@void/platform';
 import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test';
 import { hyperdriveOriginFromConnectionString } from '../../src/cli/platform-cloudflare.ts';
+import { verifyPlatformWorkerCutoverVersions } from '../../src/cli/platform-installer-cutover.ts';
+import { type PlatformInstallerDependencies } from '../../src/cli/platform-installer-types.ts';
 import {
   createPlatformInstallationSecrets,
   installPlatform,
-  verifyPlatformWorkerCutoverVersions,
-  type PlatformInstallerDependencies,
 } from '../../src/cli/platform-installer.ts';
 import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import { listInstallationManifests } from '../../src/cli/platform-registry.ts';
@@ -258,7 +258,10 @@ async function createFakeCloudflare() {
     putR2Object: async (_account: string, bucket: string, key: string, value: string) => {
       r2.set(`${bucket}/${key}`, value);
     },
-    removeRoutes: async () => {},
+    // Worker reads fall back to the provider process, which this fake models.
+    request: async (path: string): Promise<never> => {
+      throw new Error(`No Cloudflare API read expected: ${path}`);
+    },
   };
   const planningClient = {
     findZone: async (): Promise<never> => {
@@ -367,7 +370,11 @@ async function runInstall(
       }),
     claimDatabase: async () => {},
     client: cloud.client,
-    migrateDatabase: async () => {},
+    prepareDatabase: async () => ({
+      appliedMigrations: 0,
+      previousSchemaDigest: '',
+      schemaDigest: '',
+    }),
     revalidateBeforeWorkerDeploy: async () => {},
     verifyHealth: async () => {},
     ...(options.bootstrapEmail ? { bootstrapEmail: options.bootstrapEmail } : {}),

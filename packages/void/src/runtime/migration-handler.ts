@@ -4,8 +4,8 @@ import {
   getMigrationPlanHashInput,
   isSingleStatement,
   splitSqlStatements,
-  type MigrationPlanHashInput,
 } from '@void/deploy-core';
+import type { MigrationExecutionPlan, MigrationPlanBundle } from '../migrations/plan.ts';
 
 export type MigrationEntry = {
   name: string;
@@ -33,28 +33,6 @@ export type MigrationResponse = {
   warnings?: Array<string>;
 };
 
-type MigrationExecutionPlan = {
-  name: string;
-  dialect: 'sqlite';
-  classifierVersion: number;
-  sqlHash: string;
-  planHash: string;
-  stability: 'stable' | 'legacy';
-  warnings?: Array<string>;
-} & (
-  | { kind: 'single-statement' }
-  | { kind: 'breakpoint-framed'; statements: Array<string> }
-  | { kind: 'legacy-unsplit-multi-statement'; allowLegacy: boolean }
-);
-
-type MigrationPlanBundle = {
-  protocolVersion: 2;
-  classifierVersion: number;
-  migrationListHash: string;
-  destructiveValidation: 'passed';
-  plans: Array<MigrationExecutionPlan>;
-};
-
 type AttemptRow = {
   attempt_id: string;
   deployment_id: string | null;
@@ -72,7 +50,6 @@ const SUPPORTED_CLASSIFIER_VERSION = 1;
 export function createMigrationHandler(
   env: Record<string, unknown>,
   migrations: Array<MigrationEntry> | undefined,
-  _dialect: 'sqlite' | 'postgresql' | 'mysql',
   runAuthMigrations?: () => Promise<void>,
   planBundle?: MigrationPlanBundle,
 ) {
@@ -669,7 +646,7 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 async function hashPlan(plan: MigrationExecutionPlan): Promise<string> {
-  return sha256Hex(canonicalJson(getMigrationPlanHashInput(plan as MigrationPlanHashInput)));
+  return sha256Hex(canonicalJson(getMigrationPlanHashInput(plan)));
 }
 
 async function runD1LegacyMigrations(
@@ -734,7 +711,7 @@ async function recordLegacyMigration(db: D1Database, name: string): Promise<void
     .run();
 }
 
-function splitMigrationSql(sql: string): Array<string> {
+export function splitMigrationSql(sql: string): Array<string> {
   const lines = sql.split(/\r?\n/);
   if (
     !lines.some((line) => isStatementBreakpointLine(line) || hasInlineStatementBreakpoint(line))

@@ -207,7 +207,6 @@ export async function renderPage(pageObj, assetTags) {
       layouts: layoutComponents,
       pageProps: pageObj.props,
       shared: pageObj.shared || {},
-      errors: pageObj.errors || {},
       params: pageObj.params || {},
       router: createSsrRouter(pageObj.url || "/", pageObj.params || {}),
       routeUrl: pageObj.url || "/",
@@ -255,7 +254,6 @@ const pageStore = writable(null);
 const propsStore = writable({});
 const layoutsStore = writable([]);
 const sharedStore = writable({});
-const errorsStore = writable({});
 const paramsStore = writable({});
 let routeUrl = window.location.pathname + window.location.search + window.location.hash;
 let routeParams = {};
@@ -272,7 +270,6 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
       applyUpdate(pageData, comp, layouts) {
         propsStore.set(pageData.props);
         sharedStore.set(pageData.shared || {});
-        errorsStore.set(pageData.errors || {});
         routeParams = pageData.params || {};
         paramsStore.set(routeParams);
         layoutsStore.set(layouts);
@@ -299,13 +296,12 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
 
 const reactiveRouter = createRouterFacade(router, () => routeUrl, () => routeParams);
 
-setActionRouter(reactiveRouter);
+setActionRouter(router);
 
 pageStore.set(initialComponent);
 propsStore.set(initialPageData.props);
 layoutsStore.set(initialLayouts);
 sharedStore.set(initialPageData.shared || {});
-errorsStore.set(initialPageData.errors || {});
 routeParams = initialPageData.params || {};
 paramsStore.set(routeParams);
 
@@ -318,7 +314,6 @@ const appOptions = {
     layouts: initialLayouts,
     pageProps: initialPageData.props,
     shared: initialPageData.shared || {},
-    errors: initialPageData.errors || {},
     params: initialPageData.params || {},
     router,
     routeUrl,
@@ -328,7 +323,6 @@ const appOptions = {
       props: propsStore,
       layouts: layoutsStore,
       shared: sharedStore,
-      errors: errorsStore,
       params: paramsStore,
       route: routeStore,
       navigation: navigationStore,

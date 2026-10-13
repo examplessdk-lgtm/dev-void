@@ -1,7 +1,7 @@
 import { outro, log, select, confirm, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
 import { getToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
-import { createSpinner, dim, ensureUtc, formatCount, printSuccess } from './output.ts';
+import { createSpinner, dim, formatCount, formatRelativeTime, printSuccess } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 
 export async function runRollbackCommand(root: string, deployId?: string): Promise<void> {
@@ -57,7 +57,7 @@ export async function runRollbackCommand(root: string, deployId?: string): Promi
       message: 'Select a deployment to roll back to:',
       options: candidates.map((d) => ({
         value: d.id,
-        label: `${d.id} ${dim(formatAge(d.deployed_at))}`,
+        label: `${d.id} ${dim(d.deployed_at ? formatRelativeTime(d.deployed_at) : '')}`,
         hint: d.source ? `via ${d.source}` : undefined,
       })),
     });
@@ -143,7 +143,7 @@ async function runCloudflareRollback(root: string, deployId?: string): Promise<v
       message: 'Select a version to roll back to:',
       options: candidates.map((version) => ({
         value: version.id,
-        label: `${version.id} ${dim(formatAge(version.createdAt))}`,
+        label: `${version.id} ${dim(version.createdAt ? formatRelativeTime(version.createdAt) : '')}`,
         hint: version.metadata
           ? formatCount(version.metadata.migrations.length, 'migration')
           : 'migration state unknown',
@@ -222,24 +222,4 @@ async function confirmUnrevertedMigrations(
     ),
   );
   await confirmRollbackOrExit();
-}
-
-function formatAge(deployedAt: string | null): string {
-  if (!deployedAt) {
-    return '';
-  }
-  const diffMs = Date.now() - new Date(ensureUtc(deployedAt)).getTime();
-  if (diffMs < 60_000) {
-    return 'just now';
-  }
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) {
-    return `${minutes}m ago`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours}h ago`;
-  }
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }

@@ -226,6 +226,7 @@ export type ApiEnv = Env & {
      * credential's project, owner, revocation, and expiry checks pass.
      */
     deployCredential?: string;
+    oauthApproval?: string;
     /** Only set by the Queue executor, never by request authentication. */
     deploymentExecution?: {
       operation: import('./deployment-operation-types.ts').DeploymentOperation;

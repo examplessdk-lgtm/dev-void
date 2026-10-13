@@ -1,9 +1,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { AssetConfig, HeaderRule, RedirectRule } from '@void/deploy-core';
 import {
-  applyEdits,
   createScanner,
-  modify,
   parse,
   parseTree,
   type Node,
@@ -11,6 +9,7 @@ import {
   SyntaxKind,
 } from 'jsonc-parser';
 import { dirname, join, relative, resolve } from 'pathslash';
+import { setJsoncValue } from './config.ts';
 
 export type CloudflareStaticDeployConfig = Readonly<{
   configPath: string;
@@ -100,10 +99,7 @@ export function writeCloudflareStaticDeployConfig(options: CloudflareStaticDeplo
   const originalComments = extractCommentTokens(source);
   let content = source;
   const upsert = (path: Array<string>, value: unknown): void => {
-    const edits = modify(content, path, value, {
-      formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
-    });
-    content = applyEdits(content, edits);
+    content = setJsoncValue(content, path, value);
   };
 
   upsert(['name'], options.name);

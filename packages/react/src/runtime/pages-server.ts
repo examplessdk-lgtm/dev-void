@@ -100,14 +100,28 @@ export async function renderReactPage({
       )
     : element;
 
+  // React calls onError inside its work loop, so it must not throw. The outer
+  // Suspense turns page errors into a client-render fallback; fail the render
+  // instead when they happen before the shell, so the caller serves its error page.
+  let shellError: { error: unknown } | undefined;
+  let shellSent = false;
   const appStream = await renderToReadableStream(renderElement, {
     onError(error) {
       if (error === DEFERRED_SHELL_CANCEL_REASON) {
         return;
       }
-      throw error;
+      if (shellSent) {
+        console.error(error);
+        return;
+      }
+      shellError ??= { error };
     },
   });
+  if (shellError) {
+    await appStream.cancel(shellError.error);
+    throw shellError.error;
+  }
+  shellSent = true;
   const renderedAppStream = pageObj.deferredKeys ? readDeferredShell(appStream) : appStream;
   const pageData = serializePageData(pageObj);
   const headHtml = pageObj.head ? renderHeadToString(pageObj.head) : '';

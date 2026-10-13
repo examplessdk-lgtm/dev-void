@@ -6,16 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
 import { envSchemaPlugin } from '../../src/plugin-env-schema.ts';
 
-/**
- * Integration coverage for the auto-discovery path of `envSchemaPlugin`.
- * Unit tests already cover `findEnvFile` and `generateEnvTypes` in isolation;
- * here we assert the plugin's `config()` hook glues them together correctly
- * (finds env.ts at the root, writes `.void/env.d.ts`, and produces content
- * that augments both `void/env` and `void/handler`). A silent regression in
- * this path would leave users without typed `env.X` / `c.env.X` access even
- * though `env.ts` exists.
- */
-
 const roots: Array<string> = [];
 
 function createTempRoot(): string {
@@ -140,15 +130,12 @@ describe('envSchemaPlugin auto-discovery', () => {
     expect(existsSync(dtsPath)).toBe(true);
 
     const dts = readFileSync(dtsPath, 'utf-8');
-    // Top-level export makes this a module augmentation (required; see the
-    // "declare module augmentation requires `export {}`" pitfall in AGENTS.md).
+    // `export {}` makes the file an augmentation instead of an ambient module.
     expect(dts).toContain('export {}');
-    // Augments both public type surfaces — env proxy and Hono c.env bindings.
     expect(dts).toContain('declare module "void/env"');
     expect(dts).toContain('declare module "void/handler"');
     expect(dts).toContain('interface ValidatedEnv extends _VoidEnvShape');
     expect(dts).toContain('interface CloudBindings extends _VoidEnvShape');
-    // Generated import path is relative from .void/ back to env.ts.
     expect(dts).toContain('typeof import("../env.ts")');
   });
 
@@ -349,10 +336,7 @@ describe('envSchemaPlugin auto-discovery', () => {
     });
   });
 
-  // The define-overlap warning runs in `configResolved`. We register the
-  // schema directly via `defineEnv` (rather than through a temp env.ts loaded
-  // by jiti) so the singleton the plugin reads matches the one the test
-  // mutated — jiti's own module instance is invisible to vitest imports.
+  // Register via defineEnv: jiti's env.ts module instance is invisible to Vitest.
   it('warns when vite `define` shadows a schema env key', async () => {
     const { defineEnv } = await import('../../src/runtime/env-public.ts');
     const { string } = await import('../../src/runtime/env-helpers.ts');
@@ -509,57 +493,59 @@ describe('envSchemaPlugin reserved __VOID_ names', () => {
     defineEnv({});
   });
 
-  for (const command of ['serve', 'build'] as const) {
-    for (const withEnvTs of [false, true]) {
-      it.each(['__VOID_PROXY_TOKEN', '__VOID_EMAIL_FROM'])(
-        `rejects %s in .env (${command}, env.ts: ${withEnvTs})`,
-        async (key) => {
-          const root = createTempRoot();
-          if (withEnvTs) {
-            writeFileSync(join(root, 'env.ts'), 'export default {};\n');
-          }
-          writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${key}=local\n`);
+  // The .env check does not depend on the command, so serve covers it.
+  for (const withEnvTs of [false, true]) {
+    it.each(['__VOID_PROXY_TOKEN', '__VOID_EMAIL_FROM'])(
+      `rejects %s in .env (env.ts: ${withEnvTs})`,
+      async (key) => {
+        const root = createTempRoot();
+        if (withEnvTs) {
+          writeFileSync(join(root, 'env.ts'), 'export default {};\n');
+        }
+        writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${key}=local\n`);
 
-          await expect(runConfigFor(root, command)).rejects.toThrow(
-            `.env defines names reserved for Void: ${key}. Void sets these itself; remove them. ` +
-              'To trigger crons or queues locally, use the x-void-dev-trigger header printed at dev start.',
-          );
-        },
-      );
-    }
+        await expect(runConfigFor(root, 'serve')).rejects.toThrow(
+          `.env defines names reserved for Void: ${key}. Void sets these itself; remove them. ` +
+            'To trigger crons or queues locally, use the x-void-dev-trigger header printed at dev start.',
+        );
+      },
+    );
+  }
 
-    // Wrangler loads these forms into the dev Worker too.
-    it.each([
-      ['export __VOID_PROXY_TOKEN=x', '__VOID_PROXY_TOKEN'],
-      ['__VOID_EMAIL_FROM: a@b.c', '__VOID_EMAIL_FROM'],
-    ])(`rejects the Wrangler-only line %s in .env (${command})`, async (line, key) => {
-      const root = createTempRoot();
-      writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${line}\n`);
+  // Wrangler loads these forms into the dev Worker too.
+  it.each([
+    ['export __VOID_PROXY_TOKEN=x', '__VOID_PROXY_TOKEN'],
+    ['__VOID_EMAIL_FROM: a@b.c', '__VOID_EMAIL_FROM'],
+  ])('rejects the Wrangler-only line %s in .env', async (line, key) => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), `API_URL=http://localhost\n${line}\n`);
 
-      await expect(runConfigFor(root, command)).rejects.toThrow(
-        `.env defines names reserved for Void: ${key}.`,
-      );
-    });
+    await expect(runConfigFor(root, 'serve')).rejects.toThrow(
+      `.env defines names reserved for Void: ${key}.`,
+    );
+  });
 
-    it(`ignores __VOID_ in a comment or a value (${command})`, async () => {
-      const root = createTempRoot();
-      writeFileSync(
-        join(root, '.env'),
-        '# __VOID_X=1\nAPI_URL=http://localhost/__VOID_X\nNOTE: __VOID_Y=2\n',
-      );
+  it('ignores __VOID_ in a comment or a value', async () => {
+    const root = createTempRoot();
+    writeFileSync(
+      join(root, '.env'),
+      '# __VOID_X=1\nAPI_URL=http://localhost/__VOID_X\nNOTE: __VOID_Y=2\n',
+    );
 
-      await expect(runConfigFor(root, command)).resolves.toBeUndefined();
-    });
+    await expect(runConfigFor(root, 'serve')).resolves.toBeUndefined();
+  });
 
-    it(`accepts a normal .env and a reserved name set only in the shell (${command})`, async () => {
-      const root = createTempRoot();
-      writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');
-      vi.stubEnv('__VOID_PROXY_TOKEN', 'from-shell');
+  it('accepts a normal .env and a reserved name set only in the shell', async () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.env'), 'API_URL=http://localhost\n');
+    vi.stubEnv('__VOID_PROXY_TOKEN', 'from-shell');
 
-      await expect(runConfigFor(root, command)).resolves.toBeUndefined();
-    });
+    await expect(runConfigFor(root, 'serve')).resolves.toBeUndefined();
+  });
 
-    it(`rejects a reserved name declared in env.ts (${command})`, async () => {
+  it.each(['serve', 'build'] as const)(
+    'rejects a reserved name declared in env.ts (%s)',
+    async (command) => {
       const { defineEnv } = await import('../../src/runtime/env-public.ts');
       const { string } = await import('../../src/runtime/env-helpers.ts');
       const root = createTempRoot();
@@ -569,6 +555,6 @@ describe('envSchemaPlugin reserved __VOID_ names', () => {
       await expect(runConfigFor(root, command)).rejects.toThrow(
         'env.ts declares names reserved for Void: __VOID_X.',
       );
-    });
-  }
+    },
+  );
 });

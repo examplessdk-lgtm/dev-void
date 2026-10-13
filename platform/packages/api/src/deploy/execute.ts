@@ -6,6 +6,7 @@ import {
 import { and, eq, sql as drizzleSql } from 'drizzle-orm';
 import { type Context } from 'hono';
 import { paginatedR2Delete, type AssetManifestEntry } from '../assets.ts';
+import { verifyOAuthDeployment, OAuthError } from '../auth/oauth.ts';
 import { getPlatformCapabilities } from '../capabilities.ts';
 import {
   getProject,
@@ -250,6 +251,39 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
     return context.json({ event: 'error', message: shapeError }, 400);
   }
   const incomingManifest = body.manifest as DeployManifest;
+  if (
+    context.get('oauthApproval') &&
+    !context.env.DEPLOYMENTS_QUEUE &&
+    !context.get('deploymentExecution')
+  ) {
+    return context.json(
+      {
+        event: 'error',
+        message: 'Connected app publishing requires the platform deployment Queue.',
+      },
+      503,
+    );
+  }
+  if (context.get('oauthApproval') && !context.get('deploymentExecution')) {
+    try {
+      await verifyOAuthDeployment(
+        context.get('db'),
+        context.get('oauthApproval')!,
+        projectId,
+        context.req.header('x-void-deploy-idempotency-key'),
+        body,
+        context.get('companyIdentity'),
+      );
+    } catch (error) {
+      return context.json(
+        {
+          event: 'error',
+          message: error instanceof Error ? error.message : 'Publish approval is invalid.',
+        },
+        error instanceof OAuthError ? error.status : 403,
+      );
+    }
+  }
   // Stored deployment manifests remain readable without this contract. Only
   // new SQLite builds that run migrations must include their verified plan.
   const migrations = incomingManifest.migrations;
@@ -572,13 +606,11 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
     return context.json({ error: 'invalid deployment idempotency key' }, 400);
   }
   const stagedInput = durable
-    ? await prepareDeploymentInput(
-        context.env.STATIC_ASSETS_R2,
-        projectId,
-        body,
-        workerFiles,
-        context.get('deployCredential'),
-      )
+    ? await prepareDeploymentInput(context.env.STATIC_ASSETS_R2, projectId, body, workerFiles, {
+        appType: incomingManifest.type,
+        credentialId: context.get('deployCredential'),
+        oauthApproval: context.get('oauthApproval'),
+      })
     : null;
   const cutoverOwnerId = execution?.operation.owner_id ?? crypto.randomUUID();
   let precheckResult:

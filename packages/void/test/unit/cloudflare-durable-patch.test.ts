@@ -221,4 +221,22 @@ describe('Sandbox migration storage identity', () => {
       ),
     ).not.toThrow();
   });
+  it('rejects reuse of a legacy Sandbox namespace', () => {
+    expect(() =>
+      assertSandboxNamespaceConfig(
+        {
+          durable_objects: { bindings: [{ name: 'SANDBOX', class_name: 'Sandbox' }] },
+          containers: [
+            {
+              name: 'void-sandbox',
+              class_name: 'Sandbox',
+              image: 'docker.io/cloudflare/sandbox:0.12.10',
+            },
+          ],
+          migrations: [{ tag: 'void-sandbox-v1', new_sqlite_classes: ['Sandbox'] }],
+        },
+        sandbox,
+      ),
+    ).toThrow('new Durable Object namespace');
+  });
 });

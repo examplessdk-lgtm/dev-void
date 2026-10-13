@@ -1,12 +1,11 @@
-import { execFile } from 'node:child_process';
 import type { PlatformDeploymentManifest } from '@void/platform';
 import { type CANCEL_SYMBOL, isCancel, log } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
-import { pc } from './output.ts';
+import { formatLink, pc } from './output.ts';
 import type { PlatformManagementAccess } from './platform-auth.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
 
-export type PlatformSetupPage = Readonly<{
+type PlatformSetupPage = Readonly<{
   title: string;
   url: string;
   instructions: string;
@@ -21,13 +20,8 @@ export function platformPromptAnswer<T>(value: T | typeof CANCEL_SYMBOL): T {
   return value;
 }
 
-export function platformSetupLink(
-  page: Pick<PlatformSetupPage, 'title' | 'url'>,
-  hyperlinks: boolean = supportsSetupLinks(),
-): string {
-  return hyperlinks
-    ? '\u001b]8;;' + page.url + '\u001b\\' + pc.underline(page.title) + '\u001b]8;;\u001b\\'
-    : page.title + ': ' + pc.underline(page.url);
+export function platformSetupLink(page: Pick<PlatformSetupPage, 'title' | 'url'>): string {
+  return formatLink(pc.underline(page.title), page.url);
 }
 
 export function platformSetupFieldHelp(
@@ -65,19 +59,6 @@ export function platformSetupFieldHelp(
   }
 }
 
-function supportsSetupLinks(): boolean {
-  return (
-    !!process.stdout.isTTY &&
-    (['ghostty', 'iTerm.app', 'WezTerm', 'vscode', 'WarpTerminal'].includes(
-      process.env.TERM_PROGRAM ?? '',
-    ) ||
-      !!process.env.WT_SESSION ||
-      !!process.env.VTE_VERSION ||
-      !!process.env.KONSOLE_VERSION ||
-      process.env.TERM === 'xterm-kitty')
-  );
-}
-
 /** Dashboard keys use permission-catalog labels, which can differ from product names. */
 function platformAccountTokenPermissions(includeAiGateway: boolean) {
   return [
@@ -109,17 +90,12 @@ function plansZoneCreation(plan: PlatformInstallPlan): boolean {
 
 export function platformManagementSetupPage(
   plan: PlatformInstallPlan,
-  options: { access?: PlatformManagementAccess | false } = {},
+  options: { access: PlatformManagementAccess | false },
 ): PlatformSetupPage {
   const createsZone = plansZoneCreation(plan);
   const zoneName = plan.deployment.application.zoneName;
   const apiHostname = plan.deployment.controlPlane.apiHostname;
-  const access =
-    options.access ??
-    (plan.deployment.authentication.accessProtection ||
-    plan.deployment.authentication.providers.includes('cloudflare-access')
-      ? { protection: !!plan.deployment.authentication.accessProtection, readOnly: false }
-      : undefined);
+  const { access } = options;
   const zones = [
     ...(zoneName ? [zoneName] : []),
     ...(apiHostname && apiHostname !== zoneName && !apiHostname.endsWith(`.${zoneName}`)
@@ -187,6 +163,12 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
     ...(plan.deployment.capabilities.customDomains
       ? [{ key: 'ssl_and_certificates', type: 'edit' }]
       : []),
+    ...(plan.deployment.capabilities.sandbox
+      ? [
+          { key: 'containers', type: 'edit' },
+          { key: 'cloudchamber', type: 'edit' },
+        ]
+      : []),
     // Email domain setup and destination consent use this token.
     ...(plan.deployment.capabilities.email
       ? [
@@ -241,17 +223,17 @@ export function platformSetupPages(plan: PlatformInstallPlan): {
     },
     r2: {
       title: 'R2 upload token',
-      // R2's form accepts the token type but does not read permission/name
-      // prefills. Open creation directly and make the remaining choice explicit.
       url:
         'https://dash.cloudflare.com/?' +
         new URLSearchParams({
           to: '/' + plan.account.id + '/r2/api-tokens/create',
           type: 'account',
+          name: plan.deployment.displayName + ' Uploads',
+          permission: 'object-write',
+          bucketScope: 'all',
         }),
       instructions: [
-        'Select Object Read & Write.',
-        'Keep Apply to all buckets in this account selected.',
+        'Review the preselected Object Read & Write access to all buckets in this account.',
         'Create the token, then copy the Access Key ID and Secret Access Key into the CLI.',
       ].join('\n'),
     },
@@ -400,7 +382,7 @@ export function openPlatformSetupPage(
   }
   if (dependencies.interactive ?? process.stdin.isTTY === true) {
     try {
-      (dependencies.open ?? ((url) => openBrowser(url, execFile)))(page.url);
+      (dependencies.open ?? openBrowser)(page.url);
     } catch {
       log.info('Could not open the browser. Use the link above.');
     }

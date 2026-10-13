@@ -1,10 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ApprovedCloudflareKvBinding } from '@void/deploy-cloudflare';
 import { readStoredResourceName } from '@void/deploy-cloudflare';
 import { confirm, isCancel, log } from '@voidzero-dev/vite-plus-prompts';
-import { modify, applyEdits } from 'jsonc-parser';
-import { join } from 'pathslash';
-import { TYPED_CONFIG_FILE } from '../config-loader.ts';
 import { writeVoidProjectConfig } from '../config-write.ts';
 import { resolveBindingNames, type VoidConfig } from '../config.ts';
 
@@ -49,21 +45,7 @@ export async function chooseCloudflareIsr(
       return answer === true;
     })
   )(message);
-  if (existsSync(join(root, TYPED_CONFIG_FILE))) {
-    writeVoidProjectConfig(root, { ...config, routing: { ...config.routing, isr: enabled } });
-  } else {
-    const path = join(root, 'void.json');
-    const source = existsSync(path) ? readFileSync(path, 'utf8') : '{}\n';
-    writeFileSync(
-      path,
-      applyEdits(
-        source,
-        modify(source, ['routing', 'isr'], enabled, {
-          formattingOptions: { insertSpaces: true, tabSize: 2 },
-        }),
-      ),
-    );
-  }
+  writeVoidProjectConfig(root, { ...config, routing: { ...config.routing, isr: enabled } });
   config.routing = { ...config.routing, isr: enabled };
   log.info(
     `Saved routing.isr: ${String(enabled)} in void.config.ts. ISR caching ${enabled ? 'will be enabled in this deployment' : 'stays disabled until you change this setting'}.`,

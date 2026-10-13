@@ -3,21 +3,17 @@ import type MarkdownExit from 'markdown-exit';
 
 const EXTERNAL_URL_RE = /^[a-z]+:/i;
 
-export type LinkOptions = Readonly<{
-  externalAttrs?: Record<string, string>;
-}>;
+const EXTERNAL_ATTRS: Record<string, string> = {
+  target: '_blank',
+  rel: 'noreferrer',
+};
 
 /**
  * Adds target="_blank" and rel="noreferrer" to external links.
  * Normalizes internal .md links to route paths.
  * Ported from VitePress.
  */
-export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
-  const externalAttrs = options?.externalAttrs ?? {
-    target: '_blank',
-    rel: 'noreferrer',
-  };
-
+export function linkPlugin(md: MarkdownExit): void {
   md.renderer.rules.link_open = (
     tokens: Array<Token>,
     idx: number,
@@ -40,7 +36,7 @@ export function linkPlugin(md: MarkdownExit, options?: LinkOptions): void {
 
     if (EXTERNAL_URL_RE.test(url)) {
       // External link — add target/rel attributes
-      for (const [key, val] of Object.entries(externalAttrs)) {
+      for (const [key, val] of Object.entries(EXTERNAL_ATTRS)) {
         token.attrSet(key, val);
       }
     } else {

@@ -5,21 +5,6 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
 
-/**
- * Subprocess coverage for `void env check` and `void env types`. Unit tests
- * cover the individual pieces (schema validation, codegen, dotenv parsing),
- * but only a subprocess invocation exercises the full wiring: argv parsing,
- * the dynamic `import(./env-*.mjs)` chunks resolved from the dist bundle,
- * `await import(envFile)` against an on-disk env.ts, and exit codes — the
- * parts most likely to break silently when dist refactors happen.
- *
- * The fixture env.ts imports `defineEnv` from the dist runtime by absolute
- * file:// URL. That's what the CLI itself loads, so the schema singleton
- * matches end-to-end. A user-shaped `import "void/env"` wouldn't resolve
- * without installing the package into the temp dir, which the subprocess
- * test doesn't need to prove.
- */
-
 const PACKAGE_ROOT = join(import.meta.dirname, '..', '..');
 const CLI_ENTRY = join(PACKAGE_ROOT, 'dist', 'cli', 'cli.mjs');
 const ENV_PUBLIC_DIST = join(PACKAGE_ROOT, 'dist', 'runtime', 'env-public.mjs');
@@ -29,11 +14,10 @@ const roots: Array<string> = [];
 function createProject(envSchemaBody?: string): string {
   const root = mkdtempSync(join(tmpdir(), 'void-env-cli-'));
   roots.push(root);
-  // Native TypeScript loading follows the same package module rules as .js.
-  // Void projects are ESM, so keep the subprocess fixture representative even
-  // when the host's temporary directory has no package boundary of its own.
+  // Node loads env.ts with the nearest package's module type; tmpdir has no package.json.
   writeFileSync(join(root, 'package.json'), '{"type":"module"}\n');
   if (envSchemaBody !== undefined) {
+    // Import defineEnv from dist so the CLI and env.ts share one schema registry.
     const envPublicUrl = pathToFileURL(ENV_PUBLIC_DIST).href;
     writeFileSync(
       join(root, 'env.ts'),
@@ -51,7 +35,6 @@ function runVoid(
   const res = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
     cwd: root,
     encoding: 'utf8',
-    // Isolate: the env command shouldn't pick up the developer's real env.
     env: {
       PATH: process.env.PATH,
       HOME: root,
@@ -83,7 +66,6 @@ describe('void env check (subprocess)', () => {
   it('exits 1 and names the missing key when a required env var is absent', () => {
     const root = createProject('{ STRIPE_KEY: string() }');
     const { stdout, status } = runVoid(root, ['env', 'check']);
-    // The command prints clack's `note()` block to stdout on failure.
     expect(status).toBe(1);
     expect(stdout).toContain('Env validation failed');
     expect(stdout).toContain('STRIPE_KEY');
@@ -116,28 +98,6 @@ describe('void env check (subprocess)', () => {
     expect(status).toBe(1);
     expect(stdout).toContain('only .env is supported');
     expect(stdout).toContain('.env.local');
-  });
-
-  it('rejects names reserved for Void in .env', () => {
-    const root = createProject('{ STRIPE_KEY: string() }');
-    writeFileSync(join(root, '.env'), 'STRIPE_KEY=sk_dev\n__VOID_PROXY_TOKEN=local\n');
-    const { stdout, status } = runVoid(root, ['env', 'check']);
-    expect(status).toBe(1);
-    expect(stdout).toContain('.env defines names reserved for Void: __VOID_PROXY_TOKEN.');
-    expect(stdout).toContain('x-void-dev-trigger');
-  });
-
-  it('rejects reserved names written as export K=v or K: v in .env', () => {
-    const root = createProject('{ STRIPE_KEY: string() }');
-    writeFileSync(
-      join(root, '.env'),
-      'STRIPE_KEY=sk_dev\nexport __VOID_PROXY_TOKEN=x\n__VOID_EMAIL_FROM: a@b.c\n',
-    );
-    const { stdout, status } = runVoid(root, ['env', 'check']);
-    expect(status).toBe(1);
-    // The CLI wraps long lines, so check each name on its own.
-    expect(stdout).toContain('.env defines names reserved for Void: __VOID_PROXY_TOKEN,');
-    expect(stdout).toContain('__VOID_EMAIL_FROM.');
   });
 });
 

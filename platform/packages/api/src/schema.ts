@@ -19,6 +19,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import type { PlatformOidcIdentity, CompanyIdentity } from './auth/identity-types.ts';
+import type { OAuthScope, OAuthRequestData, OAuthSession } from './auth/oauth-types.ts';
 import type { PlatformWorkerName, PlatformEnv } from './operator/platform-workers.ts';
 import type { PlanId } from './tiers.ts';
 import type {
@@ -71,6 +72,64 @@ export const oauthAccounts = pgTable(
   (table) => [
     uniqueIndex('idx_oauth_accounts_provider_id').on(table.provider, table.provider_id),
     index('idx_oauth_accounts_user_id').on(table.user_id),
+  ],
+);
+
+export const oauthClients = pgTable('oauth_clients', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  operator: text('operator').notNull(),
+  redirect_uris: jsonb('redirect_uris').notNull().$type<Array<string>>(),
+  scopes: jsonb('scopes').notNull().$type<Array<OAuthScope>>(),
+  secret_hash: text('secret_hash').notNull(),
+  enabled: boolean('enabled').notNull().default(true),
+  created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+export const oauthGrants = pgTable(
+  'oauth_grants',
+  {
+    id: text('id').primaryKey(),
+    client_id: text('client_id')
+      .notNull()
+      .references(() => oauthClients.id),
+    user_id: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    session: jsonb('session').notNull().$type<OAuthSession>(),
+    token_hash: text('token_hash').notNull(),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+    revoked_at: timestamp('revoked_at', { mode: 'string', withTimezone: true }),
+    created_at: timestamp('created_at', { mode: 'string', withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('oauth_grants_token').on(table.token_hash),
+    index('oauth_grants_user').on(table.user_id),
+    index('oauth_grants_expiry').on(table.expires_at),
+  ],
+);
+
+export const oauthRequests = pgTable(
+  'oauth_requests',
+  {
+    id: text('id').primaryKey(),
+    client_id: text('client_id').references(() => oauthClients.id),
+    user_id: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    browser_hash: text('browser_hash').notNull(),
+    data: jsonb('data').notNull().$type<OAuthRequestData>(),
+    code_hash: text('code_hash'),
+    code_expires_at: timestamp('code_expires_at', { mode: 'string', withTimezone: true }),
+    approved_at: timestamp('approved_at', { mode: 'string', withTimezone: true }),
+    consumed_at: timestamp('consumed_at', { mode: 'string', withTimezone: true }),
+    expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('oauth_requests_code').on(table.code_hash),
+    index('oauth_requests_expiry').on(table.expires_at),
   ],
 );
 

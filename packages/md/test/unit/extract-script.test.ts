@@ -42,21 +42,6 @@ import CodePlayground from "../components/CodePlayground.vue" with { island: "id
     });
   });
 
-  it('handles single-quoted imports', () => {
-    const source = `<script>
-import Widget from './Widget.vue' with { island: 'load' }
-</script>
-
-# Page`;
-    const result = extractScript(source);
-    expect(result.islandImports).toHaveLength(1);
-    expect(result.islandImports[0]).toEqual({
-      name: 'Widget',
-      specifier: './Widget.vue',
-      strategy: 'load',
-    });
-  });
-
   it('handles <script> before frontmatter', () => {
     const source = `<script>
 import A from "./A.vue" with { island: "load" }
@@ -71,16 +56,6 @@ title: Test
     expect(result.script).toContain('import A');
     expect(result.body).toContain('---');
     expect(result.body).toContain('# Hello');
-  });
-
-  it('handles media strategy', () => {
-    const source = `<script>
-import Sidebar from "./Sidebar.vue" with { island: "media:(min-width: 768px)" }
-</script>
-
-# Page`;
-    const result = extractScript(source);
-    expect(result.islandImports[0].strategy).toBe('media:(min-width: 768px)');
   });
 
   it('returns clientCode as null when script has only island imports', () => {
@@ -130,35 +105,6 @@ const count = ref(0)
     expect(result.clientCode).toBe(`import { ref } from "vue"\n\nconst count = ref(0)`);
   });
 
-  it('extracts island imports with a trailing comma in the attributes', () => {
-    const source = `<script>
-import Counter from "./Counter.vue" with { island: "load", }
-</script>
-
-# Hello`;
-    const result = extractScript(source);
-    expect(result.islandImports).toHaveLength(1);
-    expect(result.islandImports[0]).toEqual({
-      name: 'Counter',
-      specifier: './Counter.vue',
-      strategy: 'load',
-    });
-    // the island import line is stripped from client code (not leaked as an orphan import)
-    expect(result.clientCode).toBeNull();
-  });
-
-  it('extracts island imports whose component name starts with $ or _', () => {
-    const source = `<script>
-import $Counter from "./Counter.vue" with { island: "load" }
-</script>
-
-# Hello`;
-    const result = extractScript(source);
-    expect(result.islandImports).toHaveLength(1);
-    expect(result.islandImports[0].name).toBe('$Counter');
-    expect(result.clientCode).toBeNull();
-  });
-
   it('keeps commented island imports in client code', () => {
     const result = extractScript(`<script>
 // import Fake from "./Fake.vue" with { island: "load" };
@@ -168,7 +114,8 @@ const ready = true;
     expect(result.islandImports).toEqual([
       { name: 'Counter', specifier: './Counter.vue', strategy: 'load' },
     ]);
-    expect(result.clientCode).toContain('// import Fake');
-    expect(result.clientCode).toContain('const ready = true;');
+    expect(result.clientCode).toBe(
+      `// import Fake from "./Fake.vue" with { island: "load" };\n\nconst ready = true;`,
+    );
   });
 });

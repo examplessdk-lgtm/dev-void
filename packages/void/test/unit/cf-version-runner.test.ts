@@ -1,6 +1,6 @@
 import childProcess, { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
 import { connect, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -20,10 +20,7 @@ import {
   deployCloudflareVersionTriggers,
   encodeCloudflareVersionMessage,
 } from '../../../deploy-cloudflare/src/version.ts';
-import {
-  operationFixture,
-  operationFixtureRequest,
-} from '../../../deploy-cloudflare/test/operation-fixture.ts';
+import { operationFixture } from '../../../deploy-cloudflare/test/operation-fixture.ts';
 import { voidSecretDraftVersion } from '../../../deploy-cloudflare/test/secret-draft-fixture.ts';
 import { prepareCfBuildOutput } from '../../src/cli/cf-build-output.ts';
 import { uploadPinnedCloudflareVersion } from '../../src/cli/cf-version-api.ts';
@@ -36,6 +33,7 @@ import {
 } from '../../src/cli/cf-version-runner.ts';
 
 const roots: Array<string> = [];
+const cleanups: Array<() => unknown> = [];
 const pinnedCfVersion = JSON.parse(
   readFileSync(fileURLToPath(import.meta.resolve('cf/package.json')), 'utf8'),
 ).version as string;
@@ -45,6 +43,52 @@ const cfUserAgent = `cf-cli/${pinnedCfVersion} void/${voidVersion}`;
 // Each real cf subprocess loads cf's bundle before it does any work. That takes about half a
 // second when idle and several seconds on a busy machine, which can pass Vitest's 5s default.
 const REAL_CF_TIMEOUT_MS = process.platform === 'win32' ? 20_000 : 15_000;
+const REAL_CF_ACTIVATION_TIMEOUT_MS = process.platform === 'win32' ? 60_000 : 30_000;
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Serve a fake Cloudflare API until the test ends and return its base URL. */
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  );
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
+}
+
+/** The real pinned cf, whose child sees only a synthetic token and the fake API. */
+function pinnedCf(apiBaseUrl: string, accountId = 'account-id', env: NodeJS.ProcessEnv = {}) {
+  return createCfCommand({
+    accountId,
+    apiBaseUrl,
+    verifyUploader: () => true,
+    env: () => ({
+      PATH: process.env.PATH,
+      SYSTEMROOT: process.env.SYSTEMROOT,
+      WINDIR: process.env.WINDIR,
+      TMP: process.env.TMP,
+      TEMP: process.env.TEMP,
+      CI: 'true',
+      CLOUDFLARE_API_TOKEN: 'synthetic-token',
+      CLOUDFLARE_ACCOUNT_ID: accountId,
+      CLOUDFLARE_API_BASE_URL: apiBaseUrl,
+      ...env,
+    }),
+  });
+}
 
 it(
   'reads the exact immutable SDK draft source through the real pinned cf HTTP transport',
@@ -53,30 +97,18 @@ it(
     const draft = voidSecretDraftVersion();
     const requests: Array<string> = [];
     const userAgents: Array<string | undefined> = [];
-    const server = createServer((request, response) => {
-      requests.push(request.url ?? '');
-      userAgents.push(request.headers['user-agent']);
-      request.resume();
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = await listen(
+      createServer((request, response) => {
+        requests.push(request.url ?? '');
+        userAgents.push(request.headers['user-agent']);
+        request.resume();
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ success: true, errors: [], messages: [], result: draft }));
+      }),
+    );
     try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const command = createCfCommand({
-        accountId: 'test-account',
-        apiBaseUrl,
-        verifyUploader: () => true,
-        env: () => ({
-          PATH: process.env.PATH,
-          SYSTEMROOT: process.env.SYSTEMROOT,
-          WINDIR: process.env.WINDIR,
-          CI: 'true',
-          CLI_VERSION: 'inherited-version void/stale',
-          CLOUDFLARE_API_TOKEN: 'synthetic-token',
-          CLOUDFLARE_ACCOUNT_ID: 'test-account',
-          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-        }),
+      const command = pinnedCf(apiBaseUrl, 'test-account', {
+        CLI_VERSION: 'inherited-version void/stale',
       });
       const commands: Array<{ args: Array<string>; bounds: unknown }> = [];
       const runner = createCfVersionRunner({
@@ -109,22 +141,11 @@ it(
       expect(commands[0]!.bounds).toMatchObject({ timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
       expect(JSON.stringify(result)).not.toContain('synthetic-token');
     } finally {
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections();
-      });
       await prepared.dispose();
     }
   },
   REAL_CF_TIMEOUT_MS,
 );
-afterEach(() => {
-  vi.restoreAllMocks();
-  syncBuiltinESMExports();
-  for (const root of roots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 it(
   'preserves real cf provider codes so a missing Worker can reach its first upload',
@@ -132,80 +153,44 @@ it(
     const root = mkdtempSync(join(tmpdir(), 'void-cf-missing-worker-'));
     roots.push(root);
     const requests: Array<string> = [];
-    const server = createServer((request, response) => {
-      requests.push(request.url ?? '');
-      request.resume();
-      response.writeHead(404, { 'Content-Type': 'application/json' });
-      response.end(
-        JSON.stringify({
-          success: false,
-          errors: [{ code: 10007, message: 'The given script does not exist.' }],
-          result: null,
-        }),
-      );
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const script = `
-      import { createCfCommand } from ${JSON.stringify(new URL('../../src/cli/cf-version-runner.ts', import.meta.url).href)};
-      const command = createCfCommand({
-        accountId: 'test-account', apiBaseUrl: ${JSON.stringify(apiBaseUrl)},
-        env: () => process.env, verifyUploader: () => true,
-      });
-      console.log(JSON.stringify(await command(
-        ['workers', 'deployments', 'list', '--worker', 'missing-worker'],
-        { cwd: ${JSON.stringify(root)}, capture: true },
-      )));
-    `;
-      const stdout = await new Promise<string>((resolve, reject) => {
-        execFile(
-          process.execPath,
-          ['--input-type=module', '-e', script],
-          {
-            cwd: root,
-            timeout: 20_000,
-            env: {
-              PATH: process.env.PATH,
-              SYSTEMROOT: process.env.SYSTEMROOT,
-              WINDIR: process.env.WINDIR,
-              TMP: process.env.TMP,
-              TEMP: process.env.TEMP,
-              CI: 'true',
-              CLOUDFLARE_API_TOKEN: 'synthetic-token',
-              CLOUDFLARE_ACCOUNT_ID: 'test-account',
-              CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-            },
-          },
-          (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
+    const apiBaseUrl = await listen(
+      createServer((request, response) => {
+        requests.push(request.url ?? '');
+        request.resume();
+        response.writeHead(404, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 10007, message: 'The given script does not exist.' }],
+            result: null,
+          }),
         );
-      });
-      const missing = JSON.parse(stdout);
-      expect(missing.status).toBe(1);
-      expect(missing.errorCode).toBe(10007);
-      expect(requests).toEqual([
-        '/client/v4/accounts/test-account/workers/scripts/missing-worker/deployments',
-      ]);
-      const operations: Array<string> = [];
-      const result = await activateCloudflareVersion({
-        workerName: 'missing-worker',
-        message: 'review',
-        verifyUploader: () => true,
-        verifyInheritedSecrets: true,
-        runWrangler: operationFixture((args) => {
-          operations.push(args.slice(0, 2).join(' '));
-          return args[1] === 'upload'
-            ? { status: 1, stdout: '', stderr: 'Test stopped before uploading.' }
-            : missing;
-        }),
-      });
-      expect(result).toMatchObject({ ok: false, reason: 'upload-failed' });
-      expect(operations).toEqual(['deployments status', 'versions list', 'versions upload']);
-    } finally {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-    }
+      }),
+    );
+    const missing = await pinnedCf(apiBaseUrl, 'test-account')(
+      ['workers', 'deployments', 'list', '--worker', 'missing-worker'],
+      { cwd: root, capture: true },
+    );
+    expect(missing.status).toBe(1);
+    expect(missing.errorCode).toBe(10007);
+    expect(requests).toEqual([
+      '/client/v4/accounts/test-account/workers/scripts/missing-worker/deployments',
+    ]);
+    const operations: Array<string> = [];
+    const result = await activateCloudflareVersion({
+      workerName: 'missing-worker',
+      message: 'review',
+      verifyUploader: () => true,
+      verifyInheritedSecrets: true,
+      runWrangler: operationFixture((args) => {
+        operations.push(args.slice(0, 2).join(' '));
+        return args[1] === 'upload'
+          ? { status: 1, stdout: '', stderr: 'Test stopped before uploading.' }
+          : missing;
+      }),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'upload-failed' });
+    expect(operations).toEqual(['deployments status', 'versions list', 'versions upload']);
   },
   REAL_CF_TIMEOUT_MS,
 );
@@ -216,39 +201,23 @@ it(
     const prepared = await output();
     const requests: Array<string> = [];
     const userAgents: Array<string | undefined> = [];
-    const server = createServer((request, response) => {
-      requests.push(request.url ?? '');
-      userAgents.push(request.headers['user-agent']);
-      request.resume();
-      response.writeHead(404, { 'Content-Type': 'application/json' });
-      response.end(
-        JSON.stringify({
-          success: false,
-          errors: [{ code: 10007, message: 'The given script does not exist.' }],
-          result: null,
-        }),
-      );
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = await listen(
+      createServer((request, response) => {
+        requests.push(request.url ?? '');
+        userAgents.push(request.headers['user-agent']);
+        request.resume();
+        response.writeHead(404, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            success: false,
+            errors: [{ code: 10007, message: 'The given script does not exist.' }],
+            result: null,
+          }),
+        );
+      }),
+    );
     try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const command = createCfCommand({
-        accountId: 'account-id',
-        apiBaseUrl,
-        verifyUploader: () => true,
-        env: () => ({
-          PATH: process.env.PATH,
-          SYSTEMROOT: process.env.SYSTEMROOT,
-          WINDIR: process.env.WINDIR,
-          TMP: process.env.TMP,
-          TEMP: process.env.TEMP,
-          CI: 'true',
-          CLOUDFLARE_API_TOKEN: 'synthetic-token',
-          CLOUDFLARE_ACCOUNT_ID: 'account-id',
-          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-        }),
-      });
-      const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
+      const result = await pinnedCf(apiBaseUrl)(['workers', 'versions', 'create', '--prebuilt'], {
         cwd: prepared.directory,
         capture: true,
       });
@@ -264,9 +233,6 @@ it(
       expect(userAgents).toEqual([cfUserAgent]);
     } finally {
       prepared.dispose();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
     }
   },
   REAL_CF_TIMEOUT_MS,
@@ -277,44 +243,28 @@ it(
   async () => {
     const prepared = await output();
     const requests: Array<{ method: string; path: string }> = [];
-    const server = createServer((request, response) => {
-      requests.push({ method: request.method!, path: request.url! });
-      request.resume();
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(
-        JSON.stringify({
-          success: true,
-          errors: [],
-          messages: [],
-          result: {
-            default_environment: {
-              environment: 'production',
-              script: { id: 'void-test', last_deployed_from: 'api' },
+    const apiBaseUrl = await listen(
+      createServer((request, response) => {
+        requests.push({ method: request.method!, path: request.url! });
+        request.resume();
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            success: true,
+            errors: [],
+            messages: [],
+            result: {
+              default_environment: {
+                environment: 'production',
+                script: { id: 'void-test', last_deployed_from: 'api' },
+              },
             },
-          },
-        }),
-      );
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+          }),
+        );
+      }),
+    );
     try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const command = createCfCommand({
-        accountId: 'account-id',
-        apiBaseUrl,
-        verifyUploader: () => true,
-        env: () => ({
-          PATH: process.env.PATH,
-          SYSTEMROOT: process.env.SYSTEMROOT,
-          WINDIR: process.env.WINDIR,
-          TMP: process.env.TMP,
-          TEMP: process.env.TEMP,
-          CI: 'true',
-          CLOUDFLARE_API_TOKEN: 'synthetic-token',
-          CLOUDFLARE_ACCOUNT_ID: 'account-id',
-          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-        }),
-      });
-      const result = await command(['workers', 'versions', 'create', '--prebuilt'], {
+      const result = await pinnedCf(apiBaseUrl)(['workers', 'versions', 'create', '--prebuilt'], {
         cwd: prepared.directory,
         capture: true,
       });
@@ -328,221 +278,203 @@ it(
       ]);
     } finally {
       prepared.dispose();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections();
-      });
     }
   },
   REAL_CF_TIMEOUT_MS,
 );
 
-// This exercises several real cf subprocesses; Windows CI takes about 14s
-// before assertion/cleanup overhead, and a loaded machine slows each cf
-// start, so a 15s deadline leaves no margin on any platform.
-it('uploads an ordinary API-origin revision with genuine cf reads and UUID-pinned inheritance', async () => {
-  const current = '11111111-1111-4111-8111-111111111111';
-  const next = '22222222-2222-4222-8222-222222222222';
-  const triggerConfig = {
-    workers_dev: true,
-    preview_urls: true,
-    routes: [],
-    crons: [],
-    queueConsumers: [],
-    workflows: [],
-  };
-  const message = encodeCloudflareVersionMessage([], triggerConfig);
-  const prepared = await output({
-    secrets: { required: ['AUTH_SECRET'] },
-    version_metadata: { binding: 'APP_VERSION' },
-    send_email: [
-      {
+// This exercises multiple fresh cf subprocesses. Windows CI has exceeded 30s
+// across those startups; bound each child and give the complete protocol a
+// separate Windows budget, including assertion and cleanup overhead.
+it(
+  'uploads an ordinary API-origin revision with genuine cf reads and UUID-pinned inheritance',
+  async () => {
+    const current = '11111111-1111-4111-8111-111111111111';
+    const next = '22222222-2222-4222-8222-222222222222';
+    const triggerConfig = {
+      workers_dev: true,
+      preview_urls: true,
+      routes: [],
+      crons: [],
+      queueConsumers: [],
+      workflows: [],
+    };
+    const message = encodeCloudflareVersionMessage([], triggerConfig);
+    const prepared = await output({
+      secrets: { required: ['AUTH_SECRET'] },
+      version_metadata: { binding: 'APP_VERSION' },
+      send_email: [
+        {
+          name: 'SEND_EMAIL',
+          allowed_sender_addresses: ['sender@example.test'],
+          allowed_destination_addresses: ['receiver@example.test'],
+        },
+      ],
+    });
+    const originalConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
+    let traffic = [{ version_id: current, percentage: 100 }];
+    let uploaded = false;
+    const events: Array<string> = [];
+    const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Array<Buffer> = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const text = Buffer.concat(chunks).toString('utf8');
+      const row = {
+        method: request.method!,
+        path: request.url!,
+        body: text ? JSON.parse(text) : {},
+      };
+      requests.push(row);
+      const path = new URL(row.path, 'http://localhost').pathname;
+      let result: unknown;
+      if (row.method === 'POST' && path.endsWith('/workers/workers/void-test/versions')) {
+        uploaded = true;
+        events.push('upload');
+        result = { id: next, urls: [`https://${next.slice(0, 8)}-void-test.example.workers.dev`] };
+      } else if (row.method === 'GET' && path.endsWith('/deployments')) {
+        events.push('owner');
+        result = { deployments: [{ versions: traffic }] };
+      } else if (row.method === 'GET' && path.endsWith('/versions')) {
+        result = [
+          { id: current, number: 1, annotations: { 'workers/message': message } },
+          ...(uploaded
+            ? [{ id: next, number: 2, annotations: { 'workers/message': message } }]
+            : []),
+        ];
+      } else if (row.method === 'GET' && path.endsWith(`/versions/${current}`)) {
+        events.push('secret-source');
+        result = {
+          id: current,
+          number: 1,
+          bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+          annotations: { 'workers/message': message },
+        };
+      } else if (row.method === 'GET' && path.endsWith('/services/void-test')) {
+        result = {
+          default_environment: {
+            environment: 'production',
+            script: { id: 'void-test', last_deployed_from: 'api' },
+          },
+        };
+      } else {
+        response.writeHead(501);
+        response.end('Unexpected local test request');
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
+    });
+    const apiBaseUrl = await listen(server);
+    try {
+      const command = pinnedCf(apiBaseUrl);
+      const calls: Array<Array<string>> = [];
+      const runCf: Parameters<typeof createCfVersionRunner>[0]['runCf'] = async (args, options) => {
+        calls.push(args);
+        // These mutation acknowledgements retain the activation protocol's state;
+        // all discovery reads and the actual version POST use the real transports.
+        if (args.slice(0, 3).join(' ') === 'workers deployments create') {
+          traffic = JSON.parse(args[args.indexOf('--versions') + 1]!);
+          events.push('activate');
+          return { status: 0, stdout: '{}', stderr: '' };
+        }
+        if (args.slice(0, 3).join(' ') === 'workers triggers deploy') {
+          events.push('triggers');
+          return { status: 0, stdout: '{}', stderr: '' };
+        }
+        return command(args, { timeoutMs: REAL_CF_TIMEOUT_MS, ...options });
+      };
+      const runner = createCfVersionRunner({
+        output: prepared,
+        workerName: 'void-test',
+        runCf,
+        pinnedUpload: {
+          accountId: 'account-id',
+          apiBaseUrl,
+          getToken: async () => 'synthetic-token',
+          verifyUploader: () => true,
+        },
+        verifyResources: createCfResourceVerifier({
+          configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+          runCf,
+          runWrangler: () => {
+            throw new Error('An app without paid bindings must not probe paid services.');
+          },
+          verifyCompatibilityRunner: () => true,
+        }),
+      });
+      const result = await activateCloudflareVersion({
+        runWrangler: runner,
+        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
+        workerName: 'void-test',
+        verifyUploader: () => true,
+        verifyInheritedSecrets: true,
+        expectedPreviousVersionId: current,
+        requireVersionMetadata: true,
+        pinActiveSecrets: createActiveSecretPinner({
+          output: prepared,
+          handoffPending: false,
+          requiredNames: ['AUTH_SECRET'],
+        }),
+        readinessAttempts: 1,
+        message,
+        fetch: async (url) => {
+          expect(String(url)).toBe(
+            `https://${next.slice(0, 8)}-void-test.example.workers.dev/__void/ready`,
+          );
+          expect(traffic).toEqual([{ version_id: current, percentage: 100 }]);
+          events.push('ready');
+          return Response.json({ ready: true, versionId: next });
+        },
+      });
+      expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
+        ok: true,
+        versionId: next,
+        previousVersionId: current,
+      });
+      expect(prepared.activeSecrets).toEqual({
+        versionId: current,
+        bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      });
+      const posts = requests.filter((row) => row.method === 'POST');
+      expect(posts).toHaveLength(1);
+      expect(posts[0]!.path).toBe(
+        '/client/v4/accounts/account-id/workers/workers/void-test/versions',
+      );
+      expect(posts[0]!.body.bindings).toContainEqual({
+        name: 'AUTH_SECRET',
+        type: 'inherit',
+        version_id: current,
+      });
+      expect(posts[0]!.body.bindings).toContainEqual({
         name: 'SEND_EMAIL',
+        type: 'send_email',
         allowed_sender_addresses: ['sender@example.test'],
         allowed_destination_addresses: ['receiver@example.test'],
-      },
-    ],
-  });
-  const originalConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
-  let traffic = [{ version_id: current, percentage: 100 }];
-  let uploaded = false;
-  const events: Array<string> = [];
-  const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
-  const server = createServer(async (request, response) => {
-    const chunks: Array<Buffer> = [];
-    for await (const chunk of request) {
-      chunks.push(Buffer.from(chunk));
+      });
+      expect(posts[0]!.body.bindings).toContainEqual({
+        name: 'APP_VERSION',
+        type: 'version_metadata',
+      });
+      expect(requests.some((row) => row.path.includes('/services/'))).toBe(false);
+      expect(calls.some((args) => args.slice(0, 3).join(' ') === 'workers versions create')).toBe(
+        false,
+      );
+      expect(events.indexOf('upload')).toBeLessThan(events.indexOf('ready'));
+      expect(events.indexOf('ready')).toBeLessThan(events.indexOf('activate'));
+      expect(events.indexOf('activate')).toBeLessThan(events.indexOf('triggers'));
+      expect(
+        events.slice(0, events.indexOf('upload')).filter((event) => event === 'owner'),
+      ).toHaveLength(2);
+      expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(originalConfig);
+    } finally {
+      prepared.dispose();
     }
-    const text = Buffer.concat(chunks).toString('utf8');
-    const row = {
-      method: request.method!,
-      path: request.url!,
-      body: text ? JSON.parse(text) : {},
-    };
-    requests.push(row);
-    const path = new URL(row.path, 'http://localhost').pathname;
-    let result: unknown;
-    if (row.method === 'POST' && path.endsWith('/workers/workers/void-test/versions')) {
-      uploaded = true;
-      events.push('upload');
-      result = { id: next, urls: [`https://${next.slice(0, 8)}-void-test.example.workers.dev`] };
-    } else if (row.method === 'GET' && path.endsWith('/deployments')) {
-      events.push('owner');
-      result = { deployments: [{ versions: traffic }] };
-    } else if (row.method === 'GET' && path.endsWith('/versions')) {
-      result = [
-        { id: current, number: 1, annotations: { 'workers/message': message } },
-        ...(uploaded ? [{ id: next, number: 2, annotations: { 'workers/message': message } }] : []),
-      ];
-    } else if (row.method === 'GET' && path.endsWith(`/versions/${current}`)) {
-      events.push('secret-source');
-      result = {
-        id: current,
-        number: 1,
-        bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
-        annotations: { 'workers/message': message },
-      };
-    } else if (row.method === 'GET' && path.endsWith('/services/void-test')) {
-      result = {
-        default_environment: {
-          environment: 'production',
-          script: { id: 'void-test', last_deployed_from: 'api' },
-        },
-      };
-    } else {
-      response.writeHead(501);
-      response.end('Unexpected local test request');
-      return;
-    }
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-    const command = createCfCommand({
-      accountId: 'account-id',
-      apiBaseUrl,
-      verifyUploader: () => true,
-      env: () => ({
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        TMP: process.env.TMP,
-        TEMP: process.env.TEMP,
-        CI: 'true',
-        CLOUDFLARE_API_TOKEN: 'synthetic-token',
-        CLOUDFLARE_ACCOUNT_ID: 'account-id',
-        CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-      }),
-    });
-    const calls: Array<Array<string>> = [];
-    const runCf: Parameters<typeof createCfVersionRunner>[0]['runCf'] = async (args, options) => {
-      calls.push(args);
-      // These mutation acknowledgements retain the activation protocol's state;
-      // all discovery reads and the actual version POST use the real transports.
-      if (args.slice(0, 3).join(' ') === 'workers deployments create') {
-        traffic = JSON.parse(args[args.indexOf('--versions') + 1]!);
-        events.push('activate');
-        return { status: 0, stdout: '{}', stderr: '' };
-      }
-      if (args.slice(0, 3).join(' ') === 'workers triggers deploy') {
-        events.push('triggers');
-        return { status: 0, stdout: '{}', stderr: '' };
-      }
-      return command(args, options);
-    };
-    const runner = createCfVersionRunner({
-      output: prepared,
-      workerName: 'void-test',
-      runCf,
-      pinnedUpload: {
-        accountId: 'account-id',
-        apiBaseUrl,
-        getToken: async () => 'synthetic-token',
-        verifyUploader: () => true,
-      },
-      verifyResources: createCfResourceVerifier({
-        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
-        runCf,
-        runWrangler: () => {
-          throw new Error('An app without paid bindings must not probe paid services.');
-        },
-        verifyCompatibilityRunner: () => true,
-      }),
-    });
-    const result = await activateCloudflareVersion({
-      runWrangler: runner,
-      configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
-      workerName: 'void-test',
-      verifyUploader: () => true,
-      verifyInheritedSecrets: true,
-      expectedPreviousVersionId: current,
-      requireVersionMetadata: true,
-      pinActiveSecrets: createActiveSecretPinner({
-        output: prepared,
-        handoffPending: false,
-        requiredNames: ['AUTH_SECRET'],
-      }),
-      readinessAttempts: 1,
-      message,
-      fetch: async (url) => {
-        expect(String(url)).toBe(
-          `https://${next.slice(0, 8)}-void-test.example.workers.dev/__void/ready`,
-        );
-        expect(traffic).toEqual([{ version_id: current, percentage: 100 }]);
-        events.push('ready');
-        return Response.json({ ready: true, versionId: next });
-      },
-    });
-    expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
-      ok: true,
-      versionId: next,
-      previousVersionId: current,
-    });
-    expect(prepared.activeSecrets).toEqual({
-      versionId: current,
-      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
-    });
-    const posts = requests.filter((row) => row.method === 'POST');
-    expect(posts).toHaveLength(1);
-    expect(posts[0]!.path).toBe(
-      '/client/v4/accounts/account-id/workers/workers/void-test/versions',
-    );
-    expect(posts[0]!.body.bindings).toContainEqual({
-      name: 'AUTH_SECRET',
-      type: 'inherit',
-      version_id: current,
-    });
-    expect(posts[0]!.body.bindings).toContainEqual({
-      name: 'SEND_EMAIL',
-      type: 'send_email',
-      allowed_sender_addresses: ['sender@example.test'],
-      allowed_destination_addresses: ['receiver@example.test'],
-    });
-    expect(posts[0]!.body.bindings).toContainEqual({
-      name: 'APP_VERSION',
-      type: 'version_metadata',
-    });
-    expect(requests.some((row) => row.path.includes('/services/'))).toBe(false);
-    expect(calls.some((args) => args.slice(0, 3).join(' ') === 'workers versions create')).toBe(
-      false,
-    );
-    expect(events.indexOf('upload')).toBeLessThan(events.indexOf('ready'));
-    expect(events.indexOf('ready')).toBeLessThan(events.indexOf('activate'));
-    expect(events.indexOf('activate')).toBeLessThan(events.indexOf('triggers'));
-    expect(
-      events.slice(0, events.indexOf('upload')).filter((event) => event === 'owner'),
-    ).toHaveLength(2);
-    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(originalConfig);
-  } finally {
-    prepared.dispose();
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-    });
-  }
-}, 30_000);
+  },
+  REAL_CF_ACTIVATION_TIMEOUT_MS,
+);
 
 it(
   'captures a version list larger than Node’s default child-process buffer',
@@ -554,55 +486,19 @@ it(
       number: 1,
       modules: [{ name: 'index.js', content_base64: 'a'.repeat(2 * 1024 * 1024) }],
     };
-    const server = createServer((request, response) => {
-      request.resume();
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ success: true, errors: [], result: [version] }));
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const script = `
-      import { createCfCommand } from ${JSON.stringify(new URL('../../src/cli/cf-version-runner.ts', import.meta.url).href)};
-      const command = createCfCommand({
-        accountId: 'test-account', apiBaseUrl: ${JSON.stringify(apiBaseUrl)},
-        env: () => process.env, verifyUploader: () => true,
-      });
-      const result = await command(
-        ['workers', 'versions', 'list', '--worker-id', 'large-worker', '--per-page', '10'],
-        { cwd: ${JSON.stringify(root)}, capture: true },
-      );
-      console.log(JSON.stringify({ status: result.status, length: result.stdout.length, error: result.error }));
-    `;
-      const stdout = await new Promise<string>((resolve, reject) => {
-        execFile(
-          process.execPath,
-          ['--input-type=module', '-e', script],
-          {
-            cwd: root,
-            timeout: 20_000,
-            env: {
-              PATH: process.env.PATH,
-              SYSTEMROOT: process.env.SYSTEMROOT,
-              WINDIR: process.env.WINDIR,
-              TMP: process.env.TMP,
-              TEMP: process.env.TEMP,
-              CI: 'true',
-              CLOUDFLARE_API_TOKEN: 'synthetic-token',
-              CLOUDFLARE_ACCOUNT_ID: 'test-account',
-              CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-            },
-          },
-          (error, stdout, stderr) => (error ? reject(new Error(stderr)) : resolve(stdout)),
-        );
-      });
-      expect(JSON.parse(stdout)).toEqual({ status: 0, length: expect.any(Number), error: null });
-      expect((JSON.parse(stdout) as { length: number }).length).toBeGreaterThan(1024 * 1024);
-    } finally {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-    }
+    const apiBaseUrl = await listen(
+      createServer((request, response) => {
+        request.resume();
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ success: true, errors: [], result: [version] }));
+      }),
+    );
+    const result = await pinnedCf(apiBaseUrl, 'test-account')(
+      ['workers', 'versions', 'list', '--worker-id', 'large-worker', '--per-page', '10'],
+      { cwd: root, capture: true },
+    );
+    expect(result).toMatchObject({ status: 0, error: null });
+    expect(result.stdout.length).toBeGreaterThan(1024 * 1024);
   },
   REAL_CF_TIMEOUT_MS,
 );
@@ -900,137 +796,130 @@ async function verifyPinnedUpload(atomic: boolean): Promise<void> {
         }),
       );
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    try {
-      const uploaded = await uploadPinnedCloudflareVersion({
-        output: prepared,
-        accountId: 'account-id',
-        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
-        workerName: 'void-test',
-        token: 'synthetic-token',
-        atomic,
-        verifyUploader: () => true,
-      });
-      expect(uploaded.id).toBe('22222222-2222-4222-8222-222222222222');
-      expect(requests.map(({ userAgent }) => userAgent)).toEqual(
-        requests.map(() => `void/${voidVersion}`),
-      );
-      const upload = requests.find(({ url }) =>
-        url.endsWith(atomic ? '/versions?deploy=true' : '/versions'),
-      );
-      expect(upload).toBeDefined();
-      const body = JSON.parse(upload!.body);
-      expect(body.bindings).toEqual(
-        expect.arrayContaining([
-          { name: 'AUTH_SECRET', type: 'inherit', version_id: activeVersionId },
-          { name: 'KEY', type: 'inherit', version_id: activeVersionId },
-          { name: 'DASHBOARD_VAR', type: 'inherit', version_id: activeVersionId },
-          { name: 'APP_VERSION', type: 'version_metadata' },
-          { name: 'JOBS', type: 'queue', queue_name: 'jobs', delivery_delay: 7 },
-          { name: 'AI', type: 'ai' },
-          { name: 'POSTGRES', type: 'hyperdrive', id: 'a'.repeat(32) },
-          {
-            name: 'SERVICE',
-            type: 'service',
-            service: 'utility-worker',
-            entrypoint: 'Rpc',
-            props: { enabled: true },
-          },
-          {
-            name: 'MAIL',
-            type: 'send_email',
-            allowed_destination_addresses: ['fixture@example.test'],
-            allowed_sender_addresses: ['sender@example.test'],
-          },
-          { name: 'METRICS', type: 'analytics_engine', dataset: 'metrics' },
-          { name: 'VECTORS', type: 'vectorize', index_name: 'vectors' },
-          { name: 'BROWSER', type: 'browser' },
-          { name: 'IMAGES', type: 'images' },
-          {
-            name: 'DISPATCH',
-            type: 'dispatch_namespace',
-            namespace: 'dispatch',
-            outbound: { worker: { service: 'outbound-worker' }, params: [{ name: 'tenant' }] },
-          },
-          {
-            name: 'WORKFLOW',
-            type: 'workflow',
-            workflow_name: 'external-workflow',
-            script_name: 'external-worker',
-          },
-          {
-            name: 'LOCAL_WORKFLOW',
-            type: 'workflow',
-            workflow_name: 'local-workflow',
-            class_name: 'LocalJob',
-          },
-        ]),
-      );
-      expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
-      expect(body.exports).toEqual({
-        LocalJob: { type: 'workflow', name: 'local-workflow' },
-        ExportOnlyJob: { type: 'workflow', name: 'export-only-workflow' },
-        Rpc: { type: 'worker', cache: { enabled: false } },
-        Departed: { type: 'durable-object', state: 'transferred', transferred_to: 'target-worker' },
-        Arriving: {
-          type: 'durable-object',
-          state: 'expecting-transfer',
-          storage: 'sqlite',
-          transfer_from: 'source-worker',
+    const uploaded = await uploadPinnedCloudflareVersion({
+      output: prepared,
+      accountId: 'account-id',
+      apiBaseUrl: await listen(server),
+      workerName: 'void-test',
+      token: 'synthetic-token',
+      atomic,
+      verifyUploader: () => true,
+    });
+    expect(uploaded.id).toBe('22222222-2222-4222-8222-222222222222');
+    expect(requests.map(({ userAgent }) => userAgent)).toEqual(
+      requests.map(() => `void/${voidVersion}`),
+    );
+    const upload = requests.find(({ url }) =>
+      url.endsWith(atomic ? '/versions?deploy=true' : '/versions'),
+    );
+    expect(upload).toBeDefined();
+    const body = JSON.parse(upload!.body);
+    expect(body.bindings).toEqual(
+      expect.arrayContaining([
+        { name: 'AUTH_SECRET', type: 'inherit', version_id: activeVersionId },
+        { name: 'KEY', type: 'inherit', version_id: activeVersionId },
+        { name: 'DASHBOARD_VAR', type: 'inherit', version_id: activeVersionId },
+        { name: 'APP_VERSION', type: 'version_metadata' },
+        { name: 'JOBS', type: 'queue', queue_name: 'jobs', delivery_delay: 7 },
+        { name: 'AI', type: 'ai' },
+        { name: 'POSTGRES', type: 'hyperdrive', id: 'a'.repeat(32) },
+        {
+          name: 'SERVICE',
+          type: 'service',
+          service: 'utility-worker',
+          entrypoint: 'Rpc',
+          props: { enabled: true },
         },
-      });
-      expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(
-        originalWorkerConfig,
-      );
-      expect(worker.exports.LocalJob).toEqual({
-        type: 'workflow',
-        name: 'local-workflow',
-        limits: { steps: 7 },
-        concurrency: { limit: 2 },
-        schedules: ['0 * * * *'],
-        defaultRetention: { successRetention: '1 day', errorRetention: '3 days' },
-      });
-      expect(body.assets).toEqual({
-        jwt: 'completion-token',
-        config: { not_found_handling: 'none' },
-      });
-      expect(body.bindings).toContainEqual({ name: 'ASSETS', type: 'assets' });
-      expect(body.containers).toBeUndefined();
-      expect(requests.some(({ url }) => url.includes('/containers/'))).toBe(false);
-      const session = requests.find(({ url }) => url.endsWith('/assets-upload-session'));
-      const manifest = JSON.parse(session!.body).manifest as Record<string, { hash: string }>;
-      expect(Object.keys(manifest)).toEqual(
-        expect.arrayContaining([
-          '/index.html',
-          '/module.js',
-          '/style.css',
-          '/image.png',
-          '/opaque.unknown',
-        ]),
-      );
-      expect(Object.keys(manifest)).toHaveLength(5);
-      const assetUploads = requests.filter(({ url }) => url.includes('/assets/upload'));
-      for (const [name, contentType, contents] of [
-        ['index.html', 'text/html', Buffer.from('<h1>Public</h1>')],
-        ['module.js', 'text/javascript', Buffer.from('export const ready = true;')],
-        ['style.css', 'text/css', Buffer.from('body { color: red; }')],
-        ['image.png', 'image/png', Buffer.from([137, 80, 78, 71])],
-        ['opaque.unknown', 'application/null', Buffer.from('opaque')],
-      ] as const) {
-        const hash = manifest[`/${name}`].hash;
-        const upload = assetUploads.find(({ body }) => body.includes(`name="${hash}"`));
-        expect(upload?.body).toContain(`filename="${hash}"`);
-        expect(upload?.body).toContain(`Content-Type: ${contentType}`);
-        expect(upload?.body).toContain(contents.toString('base64'));
-      }
-      expect(assetUploads.map(({ authorization }) => authorization)).toEqual(
-        Array(5).fill('Bearer asset-token'),
-      );
-    } finally {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+        {
+          name: 'MAIL',
+          type: 'send_email',
+          allowed_destination_addresses: ['fixture@example.test'],
+          allowed_sender_addresses: ['sender@example.test'],
+        },
+        { name: 'METRICS', type: 'analytics_engine', dataset: 'metrics' },
+        { name: 'VECTORS', type: 'vectorize', index_name: 'vectors' },
+        { name: 'BROWSER', type: 'browser' },
+        { name: 'IMAGES', type: 'images' },
+        {
+          name: 'DISPATCH',
+          type: 'dispatch_namespace',
+          namespace: 'dispatch',
+          outbound: { worker: { service: 'outbound-worker' }, params: [{ name: 'tenant' }] },
+        },
+        {
+          name: 'WORKFLOW',
+          type: 'workflow',
+          workflow_name: 'external-workflow',
+          script_name: 'external-worker',
+        },
+        {
+          name: 'LOCAL_WORKFLOW',
+          type: 'workflow',
+          workflow_name: 'local-workflow',
+          class_name: 'LocalJob',
+        },
+      ]),
+    );
+    expect(body.modules).toEqual([expect.objectContaining({ name: 'index.js' })]);
+    expect(body.exports).toEqual({
+      LocalJob: { type: 'workflow', name: 'local-workflow' },
+      ExportOnlyJob: { type: 'workflow', name: 'export-only-workflow' },
+      Rpc: { type: 'worker', cache: { enabled: false } },
+      Departed: { type: 'durable-object', state: 'transferred', transferred_to: 'target-worker' },
+      Arriving: {
+        type: 'durable-object',
+        state: 'expecting-transfer',
+        storage: 'sqlite',
+        transfer_from: 'source-worker',
+      },
+    });
+    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(
+      originalWorkerConfig,
+    );
+    expect(worker.exports.LocalJob).toEqual({
+      type: 'workflow',
+      name: 'local-workflow',
+      limits: { steps: 7 },
+      concurrency: { limit: 2 },
+      schedules: ['0 * * * *'],
+      defaultRetention: { successRetention: '1 day', errorRetention: '3 days' },
+    });
+    expect(body.assets).toEqual({
+      jwt: 'completion-token',
+      config: { not_found_handling: 'none' },
+    });
+    expect(body.bindings).toContainEqual({ name: 'ASSETS', type: 'assets' });
+    expect(body.containers).toBeUndefined();
+    expect(requests.some(({ url }) => url.includes('/containers/'))).toBe(false);
+    const session = requests.find(({ url }) => url.endsWith('/assets-upload-session'));
+    const manifest = JSON.parse(session!.body).manifest as Record<string, { hash: string }>;
+    expect(Object.keys(manifest)).toEqual(
+      expect.arrayContaining([
+        '/index.html',
+        '/module.js',
+        '/style.css',
+        '/image.png',
+        '/opaque.unknown',
+      ]),
+    );
+    expect(Object.keys(manifest)).toHaveLength(5);
+    const assetUploads = requests.filter(({ url }) => url.includes('/assets/upload'));
+    for (const [name, contentType, contents] of [
+      ['index.html', 'text/html', Buffer.from('<h1>Public</h1>')],
+      ['module.js', 'text/javascript', Buffer.from('export const ready = true;')],
+      ['style.css', 'text/css', Buffer.from('body { color: red; }')],
+      ['image.png', 'image/png', Buffer.from([137, 80, 78, 71])],
+      ['opaque.unknown', 'application/null', Buffer.from('opaque')],
+    ] as const) {
+      const hash = manifest[`/${name}`].hash;
+      const upload = assetUploads.find(({ body }) => body.includes(`name="${hash}"`));
+      expect(upload?.body).toContain(`filename="${hash}"`);
+      expect(upload?.body).toContain(`Content-Type: ${contentType}`);
+      expect(upload?.body).toContain(contents.toString('base64'));
     }
+    expect(assetUploads.map(({ authorization }) => authorization)).toEqual(
+      Array(5).fill('Bearer asset-token'),
+    );
   } finally {
     prepared.dispose();
   }
@@ -1041,6 +930,126 @@ it('uploads live secrets and multiple asset batches when the latest upload is in
 
 it('uploads live secrets and multiple asset batches for atomic publication', () =>
   verifyPinnedUpload(true));
+
+it('uploads Worker limits, placement and cache with pinned secrets', async () => {
+  const prepared = await output({
+    secrets: { required: ['AUTH_SECRET'] },
+    limits: { cpu_ms: 30_000 },
+    placement: { mode: 'smart' },
+    cache: { enabled: true, cross_version_cache: true },
+    logpush: true,
+    tail_consumers: [{ service: 'tail-worker' }],
+  });
+  try {
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: '11111111-1111-4111-8111-111111111111',
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    });
+    const uploads: Array<Record<string, unknown>> = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Array<Buffer> = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.from(chunk));
+      }
+      if (request.method === 'POST') {
+        uploads.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result:
+            request.method === 'GET'
+              ? {
+                  id: '11111111-1111-4111-8111-111111111111',
+                  bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+                }
+              : { id: '22222222-2222-4222-8222-222222222222', urls: [] },
+        }),
+      );
+    });
+    const uploaded = await uploadPinnedCloudflareVersion({
+      output: prepared,
+      accountId: 'account-id',
+      apiBaseUrl: await listen(server),
+      workerName: 'void-test',
+      token: 'synthetic-token',
+      atomic: false,
+      verifyUploader: () => true,
+    });
+    expect(uploaded.id).toBe('22222222-2222-4222-8222-222222222222');
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]).toMatchObject({
+      limits: { cpu_ms: 30_000 },
+      placement: { mode: 'smart' },
+      cache_options: { enabled: true, cross_version_cache: true },
+      bindings: [
+        {
+          name: 'AUTH_SECRET',
+          type: 'inherit',
+          version_id: '11111111-1111-4111-8111-111111111111',
+        },
+      ],
+    });
+    expect(uploads[0]).not.toHaveProperty('logpush');
+    expect(uploads[0]).not.toHaveProperty('tail_consumers');
+  } finally {
+    prepared.dispose();
+  }
+});
+
+it.each([
+  { region: 'aws:us-east-1' },
+  { host: 'db.example.test:5432' },
+  { hostname: 'api.example.test' },
+])('rejects targeted placement with pinned secrets before any upload: %j', async (placement) => {
+  const prepared = await output({ secrets: { required: ['AUTH_SECRET'] }, placement });
+  try {
+    await pinActiveWorkerSecrets({
+      output: prepared,
+      activeVersionId: '11111111-1111-4111-8111-111111111111',
+      bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+      requiredNames: ['AUTH_SECRET'],
+    });
+    const requests: Array<string> = [];
+    const server = createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          result:
+            request.method === 'GET'
+              ? {
+                  id: '11111111-1111-4111-8111-111111111111',
+                  bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }],
+                }
+              : { id: '22222222-2222-4222-8222-222222222222', urls: [] },
+        }),
+      );
+    });
+    await expect(
+      uploadPinnedCloudflareVersion({
+        output: prepared,
+        accountId: 'account-id',
+        apiBaseUrl: await listen(server),
+        workerName: 'void-test',
+        token: 'synthetic-token',
+        atomic: true,
+        verifyUploader: () => true,
+      }),
+    ).rejects.toThrow(
+      `Cloudflare placement.${Object.keys(placement)[0]} cannot be deployed while the Worker has secrets. Remove cloudflare.placement from void.config.ts, or set it to { mode: 'smart' }.`,
+    );
+    expect(requests).toEqual([]);
+  } finally {
+    prepared.dispose();
+  }
+});
 
 it.each(['missing name', 'duplicate name', 'external collision', 'class collision'] as const)(
   'rejects an invalid local Workflow declaration before any provider request: %s',
@@ -1136,12 +1145,12 @@ it.each(['missing', 'owned', 'foreign', 'malformed', 'unrelated 404'] as const)(
         }),
       );
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = await listen(server);
     try {
       const upload = uploadPinnedCloudflareVersion({
         output: prepared,
         accountId: 'account-id',
-        apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+        apiBaseUrl,
         workerName: 'void-test',
         token: 'synthetic-token',
         atomic: true,
@@ -1161,9 +1170,6 @@ it.each(['missing', 'owned', 'foreign', 'malformed', 'unrelated 404'] as const)(
       expect(requests[1]?.path).toBe('/client/v4/accounts/account-id/workflows/jobs');
     } finally {
       prepared.dispose();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
     }
   },
 );
@@ -1362,23 +1368,24 @@ async function containerOutput() {
   return prepared;
 }
 
-async function verifyContainerUpload(
-  mode:
-    | 'create'
-    | 'existing'
-    | 'pending'
-    | 'image-error'
-    | 'foreign'
-    | 'lost-readback'
-    | 'local'
-    | 'lost-image-metadata'
-    | 'foreign-namespace'
-    | 'settings-change'
-    | 'keys-change'
-    | 'omitted-defaults'
-    | 'readiness-failure'
-    | 'key-order',
-) {
+type ContainerMode =
+  | 'create'
+  | 'existing'
+  | 'pending'
+  | 'image-error'
+  | 'foreign'
+  | 'lost-readback'
+  | 'local'
+  | 'lost-image-metadata'
+  | 'foreign-namespace'
+  | 'settings-change'
+  | 'keys-change'
+  | 'omitted-defaults'
+  | 'readiness-failure'
+  | 'key-order';
+
+/** A pinned Sandbox output and a fake Containers and Workers API that records each request. */
+async function containerApi(mode: ContainerMode) {
   const prepared = await containerOutput();
   const built = await readBuildOutput(prepared.directory);
   const existing = [
@@ -1452,8 +1459,7 @@ async function verifyContainerUpload(
           : {}),
       }
     : undefined;
-  let imageAttempts = 0;
-  let versionVisibleAttempts = 0;
+  const counts = { imageAttempts: 0, versionVisibleAttempts: 0 };
   let applicationReads = 0;
   const originalApplication = structuredClone(application);
   const server = createServer(async (request, response) => {
@@ -1487,7 +1493,7 @@ async function verifyContainerUpload(
         status:
           mode === 'image-error'
             ? 'error'
-            : mode === 'pending' && ++imageAttempts === 1
+            : mode === 'pending' && ++counts.imageAttempts === 1
               ? 'pending'
               : 'ready',
       };
@@ -1497,7 +1503,7 @@ async function verifyContainerUpload(
         urls: ['https://22222222-void-test.account.workers.dev'],
       };
     } else if (row.url.endsWith(`/scripts/void-test/versions/${uploadedPinnedVersion}`)) {
-      if (mode === 'pending' && ++versionVisibleAttempts === 1) {
+      if (mode === 'pending' && ++counts.versionVisibleAttempts === 1) {
         status = 404;
         code = 100146;
       } else {
@@ -1553,33 +1559,27 @@ async function verifyContainerUpload(
       }),
     );
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const runCf = vi.fn(() => ({
-    status: 0,
-    stdout: 'Pushed image: registry.cloudflare.com/account-id/sandbox:fixture\n',
-    stderr: '',
-  }));
-  const inspect =
-    mode === 'local'
-      ? vi
-          .spyOn(childProcess, 'execFile')
-          .mockImplementation((_file, _args, _options, callback) => {
-            (callback as (error: null, stdout: string, stderr: string) => void)(
-              null,
-              JSON.stringify([containerImage]),
-              '',
-            );
-            return {} as ReturnType<typeof execFile>;
-          })
-      : undefined;
-  syncBuiltinESMExports();
-  try {
-    const changedSettings = mode === 'settings-change' || mode === 'keys-change';
-    if (changedSettings || mode === 'readiness-failure') {
+  return {
+    prepared,
+    existing,
+    expectedImages,
+    requests,
+    counts,
+    originalApplication,
+    application: () => application,
+    apiBaseUrl: await listen(server),
+  };
+}
+
+it.each(['settings-change', 'keys-change', 'readiness-failure'] as const)(
+  'leaves the live Sandbox application unchanged when activation stops: %s',
+  async (mode) => {
+    const api = await containerApi(mode);
+    try {
+      const changedSettings = mode !== 'readiness-failure';
       const commands: Array<Array<string>> = [];
-      const configPath = join(roots.at(-1)!, 'dist/ssr/wrangler.json');
       const runner = createCfVersionRunner({
-        output: prepared,
+        output: api.prepared,
         workerName: 'void-test',
         verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
         runCf: (args) => {
@@ -1602,7 +1602,7 @@ async function verifyContainerUpload(
         },
         pinnedUpload: {
           accountId: 'account-id',
-          apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+          apiBaseUrl: api.apiBaseUrl,
           getToken: async () => 'synthetic-token',
           verifyUploader: () => true,
         },
@@ -1611,7 +1611,7 @@ async function verifyContainerUpload(
       const result = await activateCloudflareVersion({
         runWrangler: runner,
         workerName: 'void-test',
-        configPath,
+        configPath: join(roots.at(-1)!, 'dist/ssr/wrangler.json'),
         verifyUploader: () => true,
         message: 'Verify Container candidate isolation.',
         readinessAttempts: 1,
@@ -1622,8 +1622,8 @@ async function verifyContainerUpload(
         reason: changedSettings ? 'upload-failed' : 'readiness-failed',
       });
       expect(readiness).toHaveBeenCalledTimes(changedSettings ? 0 : 1);
-      expect(requests.filter((row) => row.method === 'PATCH')).toEqual([]);
-      expect(application).toEqual(originalApplication);
+      expect(api.requests.filter((row) => row.method === 'PATCH')).toEqual([]);
+      expect(api.application()).toEqual(api.originalApplication);
       expect(
         commands.some((args) => args.slice(0, 3).join(' ') === 'workers deployments create'),
       ).toBe(false);
@@ -1632,14 +1632,53 @@ async function verifyContainerUpload(
           'diagnostic',
           expect.stringContaining('settings differ from the live application'),
         );
-        expect(requests.every((row) => row.method === 'GET')).toBe(true);
+        expect(api.requests.every((row) => row.method === 'GET')).toBe(true);
       }
-      return;
+    } finally {
+      api.prepared.dispose();
     }
+  },
+);
+
+it.each([
+  'create',
+  'existing',
+  'pending',
+  'image-error',
+  'foreign',
+  'lost-readback',
+  'local',
+  'lost-image-metadata',
+  'foreign-namespace',
+  'omitted-defaults',
+  'key-order',
+] as const)('preserves pinned Sandbox image and application lifecycle: %s', async (mode) => {
+  const { prepared, requests, counts, existing, expectedImages, apiBaseUrl } =
+    await containerApi(mode);
+  const runCf = vi.fn(() => ({
+    status: 0,
+    stdout: 'Pushed image: registry.cloudflare.com/account-id/sandbox:fixture\n',
+    stderr: '',
+  }));
+  const inspect =
+    mode === 'local'
+      ? vi
+          .spyOn(childProcess, 'execFile')
+          .mockImplementation((_file, _args, _options, callback) => {
+            (callback as (error: null, stdout: string, stderr: string) => void)(
+              null,
+              JSON.stringify([containerImage]),
+              '',
+            );
+            return {} as ReturnType<typeof execFile>;
+          })
+      : undefined;
+  syncBuiltinESMExports();
+  try {
     const upload = uploadPinnedCloudflareVersion({
       output: prepared,
       accountId: 'account-id',
-      apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+      apiBaseUrl,
       workerName: 'void-test',
       token: 'synthetic-token',
       atomic: true,
@@ -1711,8 +1750,8 @@ async function verifyContainerUpload(
       }
       expect(requests.at(-1)?.method).toBe('GET');
       if (mode === 'pending') {
-        expect(imageAttempts).toBe(2);
-        expect(versionVisibleAttempts).toBe(2);
+        expect(counts.imageAttempts).toBe(2);
+        expect(counts.versionVisibleAttempts).toBe(2);
       }
       if (mode === 'local') {
         expect(runCf).toHaveBeenCalledWith(
@@ -1744,28 +1783,8 @@ async function verifyContainerUpload(
     inspect?.mockRestore();
     syncBuiltinESMExports();
     prepared.dispose();
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
   }
-}
-
-it.each([
-  'create',
-  'existing',
-  'pending',
-  'image-error',
-  'foreign',
-  'lost-readback',
-  'local',
-  'lost-image-metadata',
-  'foreign-namespace',
-  'settings-change',
-  'keys-change',
-  'omitted-defaults',
-  'readiness-failure',
-  'key-order',
-] as const)('preserves pinned Sandbox image and application lifecycle: %s', verifyContainerUpload);
+});
 
 it.each([false, true])(
   'publishes the intended custom domain before pinned-secret bootstrap readiness (atomic=%s)',
@@ -1808,7 +1827,7 @@ it.each([false, true])(
         }),
       );
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = await listen(server);
     try {
       const pinActiveSecrets = createActiveSecretPinner({
         output: prepared,
@@ -1862,7 +1881,7 @@ it.each([false, true])(
         }),
         pinnedUpload: {
           accountId: 'account-id',
-          apiBaseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`,
+          apiBaseUrl,
           getToken: async () => 'synthetic-token',
           verifyUploader: () => true,
         },
@@ -1890,9 +1909,6 @@ it.each([false, true])(
       });
       expect(events).toEqual(['activate', 'publish-domain', 'readiness']);
     } finally {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
       await prepared.dispose();
     }
   },
@@ -1950,29 +1966,11 @@ it(
       verifyUploader: () => true,
       env: () => env,
     });
-    const result = await command(['--version'], { cwd: root, capture: true });
+    const result = await command(['--version'], { cwd: root, capture: false });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).not.toContain('UNPINNED_PROJECT_CF_EXECUTED');
     expect(result.stdout.trim()).toBe(`${pinnedCfVersion} void/${voidVersion}`);
     expect(env.CLI_VERSION).toBe('inherited-version void/stale');
-  },
-  REAL_CF_TIMEOUT_MS,
-);
-
-it(
-  'captures noninteractive cf output when Void owns the terminal',
-  async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-cf-quiet-command-'));
-    roots.push(root);
-    const command = createCfCommand({
-      accountId: 'test-account',
-      apiBaseUrl: 'https://api.cloudflare.com/client/v4',
-      verifyUploader: () => true,
-      env: () => ({ PATH: process.env.PATH, CI: 'true' }),
-    });
-    const result = await command(['--version'], { cwd: root, capture: false });
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain(pinnedCfVersion);
   },
   REAL_CF_TIMEOUT_MS,
 );
@@ -2089,70 +2087,24 @@ it('uses the configured HTTP proxy for direct cf activation reads', async () => 
     upstream.on('close', () => tunnels.delete(upstream));
     upstream.on('error', () => socket.destroy());
   });
-  await Promise.all([
-    new Promise<void>((resolve) => api.listen(0, '127.0.0.1', resolve)),
-    new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve)),
-  ]);
-  try {
-    const proxyUrl = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
-    const apiBaseUrl = 'http://cf-proxy-test.invalid/client/v4';
-    const script = `
-      import { createCfCommand } from ${JSON.stringify(new URL('../../src/cli/cf-version-runner.ts', import.meta.url).href)};
-      const command = createCfCommand({
-        accountId: 'test-account', apiBaseUrl: ${JSON.stringify(apiBaseUrl)},
-        env: () => process.env, verifyUploader: () => true,
-      });
-      const result = await command(
-        ['workers', 'versions', 'list', '--worker-id', 'proxy-worker'],
-        { cwd: ${JSON.stringify(root)}, capture: true },
-      );
-      console.log(JSON.stringify({ status: result.status, stdout: result.stdout }));
-    `;
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        process.execPath,
-        ['--input-type=module', '-e', script],
-        {
-          cwd: root,
-          timeout: 20_000,
-          env: {
-            PATH: process.env.PATH,
-            SYSTEMROOT: process.env.SYSTEMROOT,
-            WINDIR: process.env.WINDIR,
-            TMP: process.env.TMP,
-            TEMP: process.env.TEMP,
-            CI: 'true',
-            HTTP_PROXY: proxyUrl,
-            NO_PROXY: '',
-            CLOUDFLARE_API_TOKEN: 'synthetic-token',
-            CLOUDFLARE_ACCOUNT_ID: 'test-account',
-            CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-          },
-        },
-        (error, stdout, stderr) =>
-          error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(stdout),
-      );
-    });
-    const result = JSON.parse(stdout) as { status: number; stdout: string };
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('00000000-0000-0000-0000-000000000001');
-    expect(requests).toEqual([
-      'http://cf-proxy-test.invalid/client/v4/accounts/test-account/workers/workers/proxy-worker/versions',
-    ]);
-  } finally {
+  await listen(api);
+  const proxyUrl = new URL(await listen(proxy)).origin;
+  // Open tunnels keep the servers from closing.
+  cleanups.push(() => {
     for (const tunnel of tunnels) {
       tunnel.destroy();
     }
-    await Promise.all(
-      [api, proxy].map(
-        (server) =>
-          new Promise<void>((resolve, reject) => {
-            server.close((error) => (error ? reject(error) : resolve()));
-            server.closeAllConnections();
-          }),
-      ),
-    );
-  }
+  });
+  const apiBaseUrl = 'http://cf-proxy-test.invalid/client/v4';
+  const result = await pinnedCf(apiBaseUrl, 'test-account', { HTTP_PROXY: proxyUrl, NO_PROXY: '' })(
+    ['workers', 'versions', 'list', '--worker-id', 'proxy-worker'],
+    { cwd: root, capture: true },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain('00000000-0000-0000-0000-000000000001');
+  expect(requests).toEqual([
+    'http://cf-proxy-test.invalid/client/v4/accounts/test-account/workers/workers/proxy-worker/versions',
+  ]);
 }, 30_000);
 
 it('preserves activation metadata and sorts cf version history for the existing protocol', async () => {
@@ -2191,20 +2143,12 @@ it('preserves activation metadata and sorts cf version history for the existing 
         };
       },
     });
-    const common = ['-c', 'generated.json', '--env=', '--name', 'void-test'];
-    const deployment = await runner(
-      operationFixtureRequest(['deployments', 'status', ...common, '--json']),
-      {
-        capture: true,
-      },
-    );
+    const target = { configPath: 'generated.json', workerName: 'void-test' };
+    const deployment = await runner({ type: 'deployments.status', ...target }, { capture: true });
     expect(deployment.data).toEqual({
       versions: [{ version_id: 'one', percentage: 100 }],
     });
-    const versions = await runner(
-      operationFixtureRequest(['versions', 'list', ...common, '--json']),
-      { capture: true },
-    );
+    const versions = await runner({ type: 'versions.list', ...target }, { capture: true });
     expect((versions.data as Array<{ id: string }>).map((item: { id: string }) => item.id)).toEqual(
       ['one', 'two'],
     );
@@ -2220,16 +2164,12 @@ it('preserves activation metadata and sorts cf version history for the existing 
       '1',
     ]);
     await runner(
-      operationFixtureRequest([
-        'versions',
-        'upload',
-        ...common,
-        '--message',
-        'void:metadata',
-        '--preview-alias',
-        'void-ready',
-        '--strict',
-      ]),
+      {
+        type: 'versions.upload',
+        ...target,
+        message: 'void:metadata',
+        previewAlias: 'void-ready',
+      },
       { capture: true },
     );
     expect(calls.at(-1)).toEqual([
@@ -2243,15 +2183,12 @@ it('preserves activation metadata and sorts cf version history for the existing 
       'void-ready',
     ]);
     await runner(
-      operationFixtureRequest([
-        'versions',
-        'deploy',
-        '00000000-0000-0000-0000-000000000001@100',
-        ...common,
-        '--message',
-        'void:metadata',
-        '--yes',
-      ]),
+      {
+        type: 'versions.deploy',
+        ...target,
+        message: 'void:metadata',
+        versions: [{ versionId: '00000000-0000-0000-0000-000000000001', percentage: 100 }],
+      },
       { capture: false },
     );
     const deployArgs = calls.at(-1)!;
@@ -2292,7 +2229,7 @@ it.each(['newest-first', 'oldest-first'] as const)(
         },
       });
       const result = await runner(
-        operationFixtureRequest(['versions', 'list', '--name', 'void-test']),
+        { type: 'versions.list', workerName: 'void-test' },
         { capture: true },
       );
       expect(
@@ -2331,15 +2268,7 @@ it('applies the immutable trigger snapshot through a private cf output copy', as
       },
     });
     const result = await runner(
-      operationFixtureRequest([
-        'triggers',
-        'deploy',
-        '-c',
-        triggerConfig,
-        '--env=',
-        '--name',
-        'void-test',
-      ]),
+      { type: 'triggers.deploy', configPath: triggerConfig, workerName: 'void-test' },
       { capture: false },
     );
     expect(result.status).toBe(0);
@@ -2464,29 +2393,12 @@ it(
         }),
       );
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = await listen(server);
     try {
-      const apiBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/client/v4`;
-      const command = createCfCommand({
-        accountId: 'account-id',
-        apiBaseUrl,
-        verifyUploader: () => true,
-        env: () => ({
-          PATH: process.env.PATH,
-          SYSTEMROOT: process.env.SYSTEMROOT,
-          WINDIR: process.env.WINDIR,
-          TMP: process.env.TMP,
-          TEMP: process.env.TEMP,
-          CI: 'true',
-          CLOUDFLARE_API_TOKEN: 'synthetic-token',
-          CLOUDFLARE_ACCOUNT_ID: 'account-id',
-          CLOUDFLARE_API_BASE_URL: apiBaseUrl,
-        }),
-      });
       const runner = createCfVersionRunner({
         output: prepared,
         workerName: 'void-test',
-        runCf: command,
+        runCf: pinnedCf(apiBaseUrl),
         verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
       });
       const result = await deployCloudflareVersionTriggers({
@@ -2521,9 +2433,6 @@ it(
       expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(original);
     } finally {
       prepared.dispose();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
     }
   },
   REAL_CF_TIMEOUT_MS,
@@ -2666,18 +2575,28 @@ it('uses cf for Queue triggers, consumer cleanup, and version binding reads', as
       },
     });
     const invalid = await runner(
-      operationFixtureRequest(['versions', 'deploy', 'invalid@100', '--name', 'void-test']),
       {
-        capture: true,
+        type: 'versions.deploy',
+        workerName: 'void-test',
+        versions: [{ versionId: 'invalid', percentage: 100 }],
       },
+      { capture: true },
     );
     expect(invalid.status).toBe(1);
-    const triggerArgs = ['triggers', 'deploy', '-c', triggerConfig, '--name', 'void-test'];
-    expect((await runner(operationFixtureRequest(triggerArgs), { capture: false })).status).toBe(0);
-    const removeArgs = ['queues', 'consumer', 'remove', 'jobs', 'void-test'];
-    expect((await runner(operationFixtureRequest(removeArgs), { capture: false })).status).toBe(0);
-    const viewArgs = ['versions', 'view', 'version-id', '--name', 'void-test'];
-    const version = await runner(operationFixtureRequest(viewArgs), { capture: true });
+    const trigger = await runner(
+      { type: 'triggers.deploy', configPath: triggerConfig, workerName: 'void-test' },
+      { capture: false },
+    );
+    expect(trigger.status).toBe(0);
+    const remove = await runner(
+      { type: 'queues.consumer.remove', queueName: 'jobs', workerName: 'void-test' },
+      { capture: false },
+    );
+    expect(remove.status).toBe(0);
+    const version = await runner(
+      { type: 'versions.view', versionId: 'version-id', workerName: 'void-test' },
+      { capture: true },
+    );
     expect(
       (version.data as { resources: { bindings: Array<unknown> } }).resources.bindings,
     ).toEqual([{ name: 'SECRET', type: 'secret_text' }]);
@@ -2710,20 +2629,21 @@ it('accepts only the staged static assets directory already sealed into prebuilt
         return { status: 0, stdout: '', stderr: '' };
       },
     });
-    const common = ['--name', 'void-test', '--assets'];
     expect(
       (
-        await runner(operationFixtureRequest(['versions', 'upload', ...common, '/staged/assets']), {
-          capture: true,
-        })
+        await runner(
+          { type: 'versions.upload', workerName: 'void-test', assetsDirectory: '/staged/assets' },
+          { capture: true },
+        )
       ).status,
     ).toBe(0);
     expect(calls.at(-1)?.slice(0, 4)).toEqual(['workers', 'versions', 'create', '--prebuilt']);
     expect(
       (
-        await runner(operationFixtureRequest(['deploy', ...common, '/wrong/assets']), {
-          capture: true,
-        })
+        await runner(
+          { type: 'worker.deploy', workerName: 'void-test', assetsDirectory: '/wrong/assets' },
+          { capture: true },
+        )
       ).status,
     ).toBe(1);
     expect(calls).toHaveLength(1);
@@ -2766,33 +2686,18 @@ it.each(['r2', 'queue'] as const)(
         verifyResources: verifier,
       });
       expect(
-        (
-          await runner(operationFixtureRequest(['versions', 'upload', '--name', 'void-test']), {
-            capture: true,
-          })
-        ).status,
+        (await runner({ type: 'versions.upload', workerName: 'void-test' }, { capture: true }))
+          .status,
       ).toBe(1);
       expect(
-        (
-          await runner(operationFixtureRequest(['deploy', '--name', 'void-test']), {
-            capture: true,
-          })
-        ).status,
+        (await runner({ type: 'worker.deploy', workerName: 'void-test' }, { capture: true }))
+          .status,
       ).toBe(1);
       expect(
         (
           await runner(
-            operationFixtureRequest([
-              'triggers',
-              'deploy',
-              '-c',
-              triggerConfig,
-              '--name',
-              'void-test',
-            ]),
-            {
-              capture: true,
-            },
+            { type: 'triggers.deploy', configPath: triggerConfig, workerName: 'void-test' },
+            { capture: true },
           )
         ).status,
       ).toBe(1);
@@ -2836,11 +2741,8 @@ it('uploads when existing R2 and Queue bindings are verified by exact identity',
       }),
     });
     expect(
-      (
-        await runner(operationFixtureRequest(['versions', 'upload', '--name', 'void-test']), {
-          capture: true,
-        })
-      ).status,
+      (await runner({ type: 'versions.upload', workerName: 'void-test' }, { capture: true }))
+        .status,
     ).toBe(0);
     expect(cfCalls).toEqual([
       ['r2', 'buckets', 'get', 'bucket', '--cf-r2-jurisdiction', 'eu'],

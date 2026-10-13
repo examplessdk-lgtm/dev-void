@@ -198,7 +198,7 @@ it('allows upgrading the 0.25.0 and 0.26.0 schema after adding the proxy token g
     lineage: string;
     rollbackSafeFrom: Array<{ platformVersion: string; schemaDigest: string }>;
   };
-  expect(journal.entries.at(-1)?.tag).toBe('0058_project_proxy_token_gen');
+  expect(journal.entries.some((entry) => entry.tag === '0058_project_proxy_token_gen')).toBe(true);
   const previous = journal.entries.filter((entry) => entry.idx < 58);
   expect(previous.at(-1)?.tag).toBe('0057_github_authority_constraints');
   const schemaDigest = platformDatabaseSchemaDigest(
@@ -219,4 +219,29 @@ it('allows upgrading the 0.25.0 and 0.26.0 schema after adding the proxy token g
     { platformVersion: '0.25.0', schemaDigest },
     { platformVersion: '0.26.0', schemaDigest },
   ]);
+});
+
+// 0.27.0 ignores OAuth tables and rejects the new deployment token audience.
+it('retains rollback to 0.27.0 after adding registered OAuth clients', () => {
+  const root = resolve(import.meta.dirname, '../../drizzle');
+  const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8'));
+  const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8'));
+  expect(journal.entries.at(-1)?.tag).toBe('0059_oauth_clients');
+  const schemaDigest = platformDatabaseSchemaDigest(
+    compatibility.lineage,
+    journal.entries
+      .filter((entry: { idx: number }) => entry.idx < 59)
+      .map((entry: { idx: number; tag: string; when: number }) => ({
+        index: entry.idx,
+        tag: entry.tag,
+        timestampMillis: entry.when,
+        sha256: createHash('sha256')
+          .update(readFileSync(resolve(root, entry.tag + '.sql')))
+          .digest('hex'),
+      })),
+  );
+  expect(compatibility.rollbackSafeFrom).toContainEqual({
+    platformVersion: '0.27.0',
+    schemaDigest,
+  });
 });

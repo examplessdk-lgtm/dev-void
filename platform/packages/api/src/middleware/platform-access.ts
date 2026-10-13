@@ -57,6 +57,16 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
     }
     const path = context.req.path;
     const method = context.req.method;
+    // These routes independently authenticate the client or its scoped grant.
+    // Browser consent records the human Access identity; grant validation also
+    // checks its underlying session, including during queued execution.
+    if (
+      (method === 'POST' &&
+        ['/oauth/token', '/oauth/revoke', '/oauth/deployment-requests'].includes(path)) ||
+      (method === 'GET' && path === '/oauth/userinfo')
+    ) {
+      return next();
+    }
     const probe =
       context.env.PLATFORM_HEALTH_PROBE_TOKEN &&
       context.req.header('X-Void-Platform-Probe') === context.env.PLATFORM_HEALTH_PROBE_TOKEN;
@@ -85,9 +95,9 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
     if (path === '/projects' || path.startsWith('/projects/')) {
       const authorization = context.req.header('Authorization');
       const payload = authorization?.startsWith('Bearer ')
-        ? await verifyJwt(authorization.slice(7), context.env.JWT_SECRET, 'deploy')
+        ? await verifyJwt(authorization.slice(7), context.env.JWT_SECRET)
         : null;
-      if (payload?.project) {
+      if (payload?.project && (payload.aud === 'deploy' || payload.aud === 'oauth-deploy')) {
         // Normal API middleware still enforces the exact project/build/endpoint scope.
         return next();
       }

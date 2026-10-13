@@ -28,6 +28,8 @@ export type JwtPayload = Readonly<{
   operatorOrigin?: string;
   /** Revocable human session; never used for project-scoped build credentials. */
   sid?: string;
+  /** Delegated application deployment, accepted only by the OAuth-aware runtime. */
+  oauthApproval?: string;
 }>;
 
 const EXPIRY_SECONDS = 30 * 24 * 60 * 60; // 30 days

@@ -7,6 +7,15 @@ import { islandsPlugin } from '../../src/plugin-islands.ts';
 const TMP = join(import.meta.dirname, '__tmp_islands_plugin__');
 const PAGES_DIR = join(TMP, 'pages');
 type HookWithHandler<T> = { handler: T };
+type MockServer = {
+  watcher: EventEmitter;
+  environments: {
+    client: {
+      moduleGraph: { getModuleById(): null; invalidateModule(): void };
+    };
+  };
+  middlewares: { use(): void };
+};
 type IslandsPluginHooks = {
   configResolved?: (config: {
     root: string;
@@ -14,27 +23,7 @@ type IslandsPluginHooks = {
     plugins: ReadonlyArray<unknown>;
   }) => void;
   buildStart?: (() => Promise<void>) | HookWithHandler<() => Promise<void>>;
-  configureServer?:
-    | ((server: {
-        watcher: EventEmitter;
-        environments: {
-          client: {
-            moduleGraph: { getModuleById(): null; invalidateModule(): void };
-          };
-        };
-        middlewares: { use(): void };
-      }) => void)
-    | HookWithHandler<
-        (server: {
-          watcher: EventEmitter;
-          environments: {
-            client: {
-              moduleGraph: { getModuleById(): null; invalidateModule(): void };
-            };
-          };
-          middlewares: { use(): void };
-        }) => void
-      >;
+  configureServer?: ((server: MockServer) => void) | HookWithHandler<(server: MockServer) => void>;
   load?: ((id: string) => string | undefined) | HookWithHandler<(id: string) => string | undefined>;
 };
 
@@ -136,12 +125,10 @@ const count = ref(0)
     const clientEntry = loadClientEntry();
 
     expect(clientEntry).toBeDefined();
-    // The island manifest should contain the Counter component from the layout
     expect(clientEntry).toContain('pages/_components/Counter');
   });
 
   it('pre-scans island imports from island pages into the manifest', async () => {
-    // Island page with an island import (no layout)
     writeFile(
       'index.island.vue',
       `<script setup>
@@ -149,7 +136,6 @@ import Toggle from "./Toggle.vue" with { island: "idle" }
 </script>
 <template><Toggle /></template>`,
     );
-    // The island component
     writeFile(
       'Toggle.vue',
       `<script setup>
@@ -168,7 +154,6 @@ const on = ref(false)
   });
 
   it('includes island imports from both pages and layouts', async () => {
-    // Island layout with one island import
     writeFile(
       'app/layout.island.vue',
       `<script setup>
@@ -176,7 +161,6 @@ import Nav from "../_components/Nav.vue" with { island: "load" }
 </script>
 <template><Nav /><slot /></template>`,
     );
-    // Island page with a different island import
     writeFile(
       'app/index.island.vue',
       `<script setup>
@@ -184,7 +168,6 @@ import Widget from "../_components/Widget.vue" with { island: "idle" }
 </script>
 <template><Widget /></template>`,
     );
-    // Both island components (under _ prefix so scanPages ignores them)
     writeFile('_components/Nav.vue', `<template><nav>Nav</nav></template>`);
     writeFile('_components/Widget.vue', `<template><div>Widget</div></template>`);
 
@@ -193,7 +176,6 @@ import Widget from "../_components/Widget.vue" with { island: "idle" }
     const clientEntry = loadClientEntry();
 
     expect(clientEntry).toBeDefined();
-    // Both should be in the manifest
     expect(clientEntry).toContain('pages/_components/Nav');
     expect(clientEntry).toContain('pages/_components/Widget');
   });
@@ -240,11 +222,9 @@ title: Hello
     await buildStart();
     configureServer();
 
-    // Before adding the named layout, the renderer should NOT contain it
     const rendererBefore = loadRenderer();
     expect(rendererBefore).not.toContain('_layouts/article');
 
-    // Now create the named layout file AND update the markdown to reference it
     writeFile('_layouts/article.island.vue', `<template><article><slot /></article></template>`);
     writeFile(
       'blog/hello.md',
@@ -256,7 +236,6 @@ title: Hello
 # Hello`,
     );
 
-    // Simulate a file add event for the new layout
     watcher.emit('add', join(PAGES_DIR, '_layouts/article.island.vue'));
 
     // Wait for the 50ms debounce + async scanPages to complete
@@ -278,7 +257,6 @@ import Sidebar from "./Sidebar.vue" with { island: "load" }
 </script>
 <template><slot /></template>`,
     );
-    // Island page
     writeFile(
       'index.island.vue',
       `<script setup></script>
@@ -290,7 +268,6 @@ import Sidebar from "./Sidebar.vue" with { island: "load" }
     await buildStart();
     const clientEntry = loadClientEntry();
 
-    // Sidebar should NOT be in the manifest since the layout is not an island layout
     expect(clientEntry).not.toContain('Sidebar');
   });
 });

@@ -286,7 +286,6 @@ export async function renderPage(pageObj, assetTags) {
   const app = createSSRApp({
     setup() {
       provide("__void_shared", reactive(pageObj.shared || {}));
-      provide("__void_errors", reactive(pageObj.errors || {}));
       provide("__void_params", reactive(pageObj.params || {}));
       provide("__void_router", createSsrRouter(pageObj.url || "/", pageObj.params || {}));
       provide("__void_navigation", idleNavigationState());
@@ -338,7 +337,6 @@ import { parseCacheFor } from "void/pages-prefetch";
 ${generateComponentManifest(scan, pagesDir)}
 
 const shared = reactive({});
-const errors = reactive({});
 const params = reactive({});
 const currentComponent = shallowRef(null);
 const currentLayouts = shallowRef([]);
@@ -368,7 +366,6 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
       applyUpdate(pageData, comp, layouts, options) {
         if (!options?.preserveState) currentPageKey.value++;
         replaceRecord(shared, pageData.shared || {});
-        replaceRecord(errors, pageData.errors || {});
         replaceRecord(params, pageData.params || {});
         currentProps.value = pageData.props;
         currentLayouts.value = layouts;
@@ -397,7 +394,6 @@ const reactiveRouter = createRouterFacade(router, () => routeUrl.value, () => pa
 setActionRouter(reactiveRouter);
 
 Object.assign(shared, initialPageData.shared || {});
-replaceRecord(errors, initialPageData.errors || {});
 replaceRecord(params, initialPageData.params || {});
 currentProps.value = initialPageData.props;
 currentComponent.value = initialComponent;
@@ -409,7 +405,6 @@ const createVoidApp = appEl.getAttribute("data-void-ssr") === "false" ? createAp
 const app = createVoidApp({
   setup() {
     provide("__void_shared", shared);
-    provide("__void_errors", errors);
     provide("__void_params", params);
     provide("__void_router", reactiveRouter);
     provide("__void_navigation", navigation);

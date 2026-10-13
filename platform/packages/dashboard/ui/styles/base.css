@@ -1,6 +1,5 @@
 /**
- * Unified Base Styles
- * Shared foundation for both docs and marketing layouts
+ * Dashboard resets and base element styles
  * Wrapped in @layer base for lowest cascade priority
  */
 
@@ -23,8 +22,13 @@
   /* Universal box-sizing */
   *,
   ::before,
-  ::after {
+  ::after,
+  ::backdrop,
+  ::file-selector-button {
     box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid var(--color-border);
   }
 
   /* HTML baseline */
@@ -34,6 +38,8 @@
     -webkit-text-size-adjust: 100%;
     overflow-x: clip;
     font-family: var(--font-sans);
+    tab-size: 4;
+    -webkit-tap-highlight-color: transparent;
   }
 
   /* Body baseline */
@@ -54,24 +60,8 @@
     color: var(--color-text-1);
   }
 
-  html [img-dark] {
-    display: none;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    html [img-light] {
-      display: none;
-    }
-
-    html [img-dark] {
-      display: initial;
-    }
-  }
-
   /* Custom scrollbar - global */
   * {
-    @apply border-border;
-
     scrollbar-width: thin;
     scrollbar-color: var(--color-divider) transparent;
   }
@@ -107,13 +97,17 @@
   h5,
   h6 {
     margin: 0;
+    font-size: inherit;
     font-family: var(--font-heading);
     font-weight: 500;
     line-height: 1.2;
+    color: inherit;
   }
 
   p {
     margin: 0;
+    font: inherit;
+    color: inherit;
   }
 
   strong,
@@ -158,6 +152,7 @@
   embed,
   object {
     display: block;
+    vertical-align: middle;
   }
 
   figure {
@@ -176,16 +171,22 @@
   optgroup,
   select,
   textarea {
+    font: inherit;
+    letter-spacing: inherit;
     border: 0;
+    border-radius: 0;
     padding: 0;
     line-height: inherit;
     color: inherit;
+    background-color: transparent;
+    opacity: 1;
   }
 
   button {
     font-family: inherit;
     background-color: transparent;
     background-image: none;
+    appearance: button;
   }
 
   button:enabled,
@@ -271,22 +272,7 @@
     z-index: 9999;
   }
 
-  /* Math rendering */
-  mjx-container {
-    overflow-x: auto;
-  }
-
-  mjx-container > svg {
-    display: inline-block;
-    margin: auto;
-  }
-}
-
-@utility squircle {
-  border-radius: 6px;
-
-  @supports (corner-shape: squircle) {
-    border-radius: 32px;
-    corner-shape: squircle;
+  [hidden]:where(:not([hidden='until-found'])) {
+    display: none !important;
   }
 }

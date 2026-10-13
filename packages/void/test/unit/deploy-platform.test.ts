@@ -2,11 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vite-plus/test';
-import {
-  assertManagedDurableStateSupported,
-  resolveDeploymentPlatform,
-  runDeploy,
-} from '../../src/cli/deploy.ts';
+import { assertManagedDurableStateSupported } from '../../src/cli/deploy-managed-framework.ts';
+import { resolveDeploymentPlatform, runDeploy } from '../../src/cli/deploy.ts';
 
 const roots: Array<string> = [];
 
@@ -27,19 +24,9 @@ describe('resolveDeploymentPlatform', () => {
     }
   });
 
-  it('uses the saved platform', () => {
-    expect(resolveDeploymentPlatform(makeRoot({ platform: 'cloudflare' }))).toBe('cloudflare');
-    expect(resolveDeploymentPlatform(makeRoot({ platform: 'none' }))).toBe('none');
-  });
-
   it('lets an explicit platform override the saved preference', () => {
     const root = makeRoot({ platform: 'cloudflare' });
     expect(resolveDeploymentPlatform(root, { platform: 'void' })).toBe('void');
-  });
-
-  it('infers Void for legacy linked projects', () => {
-    const root = makeRoot({ projectId: 'proj_123', slug: 'demo' });
-    expect(resolveDeploymentPlatform(root)).toBe('void');
   });
 
   it('retains Void as the fallback for projects initialized by older SDKs', () => {

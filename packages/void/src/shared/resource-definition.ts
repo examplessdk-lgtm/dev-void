@@ -59,7 +59,7 @@ export function readResourceDefinition(
         source === 'void/ws'
           ? new Set(['defineRoom', 'defineWebSocket'])
           : source === 'void/durable'
-            ? new Set(['defineDurableState'])
+            ? new Set(['defineDurableState', 'defineDurableObject'])
             : new Set<string>();
       for (const specifier of declaration.specifiers ?? []) {
         const local = specifier.local as AstNode | undefined;

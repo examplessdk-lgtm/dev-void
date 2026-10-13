@@ -9,6 +9,7 @@ import {
   type HeadDescriptor,
   type HeadConfig,
 } from './head.ts';
+import { escapeScriptJson } from './script-json.ts';
 import { serializePageData } from './serialize.ts';
 import type { DevCssAsset, PageRenderMode } from './types.ts';
 import { ValidationError } from './validation-error.ts';
@@ -20,13 +21,7 @@ const RENDER_ERROR_ASSET_TAGS_KEY = '__voidPageAssetTags';
 
 /** Escape characters that are unsafe inside inline <script> tags to prevent XSS. */
 export function safeJsonStringify(value: unknown): string {
-  const json = JSON.stringify(value) ?? 'null';
-  return json
-    .replaceAll('<', '\\u003c')
-    .replaceAll('>', '\\u003e')
-    .replaceAll('&', '\\u0026')
-    .replaceAll('\u2028', '\\u2028')
-    .replaceAll('\u2029', '\\u2029');
+  return escapeScriptJson(JSON.stringify(value) ?? 'null');
 }
 
 export type PageObject = {
@@ -533,10 +528,14 @@ export async function handlePageGet(
     c,
     'text/html; charset=utf-8',
     options?.dev === true,
-    (group, data) =>
-      `\n<script>window.__resolveDeferred?window.__resolveDeferred(${safeJsonStringify(group)},${safeJsonStringify(data)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},${safeJsonStringify(data)}])</script>`,
-    (group, error) =>
-      `\n<script>window.__rejectDeferred?window.__rejectDeferred(${safeJsonStringify(group)},${safeJsonStringify(error)}):(window.__deferredQueue??=[]).push([${safeJsonStringify(group)},0,${safeJsonStringify(error)}])</script>`,
+    (group, data) => {
+      const g = safeJsonStringify(group);
+      return `\n<script>(function(d){window.__resolveDeferred?window.__resolveDeferred(${g},d):(window.__deferredQueue??=[]).push([${g},d])})(${safeJsonStringify(data)})</script>`;
+    },
+    (group, error) => {
+      const g = safeJsonStringify(group);
+      return `\n<script>(function(e){window.__rejectDeferred?window.__rejectDeferred(${g},e):(window.__deferredQueue??=[]).push([${g},0,e])})(${safeJsonStringify(error)})</script>`;
+    },
     assetTags,
   );
 }

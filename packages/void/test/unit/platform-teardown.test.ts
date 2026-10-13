@@ -3,20 +3,15 @@ vi.mock('../../src/cli/output.ts', async (importOriginal) => ({
   printSuccess: vi.fn(),
 }));
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { stripVTControlCharacters } from 'node:util';
+import { rmSync } from 'node:fs';
 import {
   createPlatformDeploymentManifest,
   createPlatformInstallationManifest,
-  createPlatformResourceOwnershipMarker,
   PLATFORM_DISABLED_KEY,
   PLATFORM_R2_OWNERSHIP_MARKER_KEY,
   recordInstallationResource,
   recordInstallationStep,
   transitionInstallation,
-  type InstallationResource,
   type InstallationResourceKind,
   type PlatformInstallationManifest,
   type ResourceOwnership,
@@ -24,21 +19,21 @@ import {
 import { log, note } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { printSuccess } from '../../src/cli/output.ts';
-import {
-  PlatformCloudflareApiError,
-  PlatformCloudflareClient,
-} from '../../src/cli/platform-cloudflare.ts';
+import { PlatformCloudflareApiError } from '../../src/cli/platform-cloudflare.ts';
+import { readPlatformProjectSlugsConnection } from '../../src/cli/platform-installer-database.ts';
 import { uninstallPlatform } from '../../src/cli/platform-management.ts';
 import {
   listInstallationManifests,
-  promoteInstallationSecrets,
   readInstallationRecoverySecrets,
-  writeInstallationManifest,
-  writePendingInstallationSecrets,
 } from '../../src/cli/platform-registry.ts';
-import { readPlatformProjectSlugsConnection } from '../../src/cli/platform-teardown.ts';
 import { recordPlatformWorkerTraffic } from '../../src/cli/platform-traffic.ts';
 import { projectZeroTrustUninstallState } from '../../src/cli/platform-zero-trust-uninstall.ts';
+import {
+  expectInOrder,
+  noteText,
+  ownershipMarker,
+  persistInstallation,
+} from '../helpers/platform-installation.ts';
 
 vi.mock('@voidzero-dev/vite-plus-prompts', async (original) => {
   const actual = await original<typeof import('@voidzero-dev/vite-plus-prompts')>();
@@ -230,29 +225,6 @@ function installedManifest(
   return manifest;
 }
 
-function persist(manifest: PlatformInstallationManifest): void {
-  const directory = mkdtempSync(join(tmpdir(), 'void-platform-teardown-test-'));
-  directories.push(directory);
-  process.env.VOID_PLATFORM_REGISTRY_DIR = directory;
-  writeInstallationManifest(manifest);
-  writePendingInstallationSecrets(manifest, { databaseUrl: 'postgres://recovery' });
-  promoteInstallationSecrets(manifest);
-}
-
-function marker(manifest: PlatformInstallationManifest, resource: InstallationResource): string {
-  return JSON.stringify(
-    createPlatformResourceOwnershipMarker({
-      accountId: manifest.account.id,
-      installationId: manifest.id,
-      ownershipNonce: manifest.ownershipNonce,
-      resourceId: resource.id,
-      resourceKey: resource.key,
-      resourceKind: resource.kind,
-      resourceName: resource.name,
-    }),
-  );
-}
-
 /** A Cloudflare account that enforces the delete rules seen live. */
 function cloudflare(manifest: PlatformInstallationManifest) {
   const calls: Array<string> = [];
@@ -263,7 +235,7 @@ function cloudflare(manifest: PlatformInstallationManifest) {
   const workerMarkers = new Map(
     manifest.resources
       .filter((resource) => resource.kind === 'worker')
-      .map((resource) => [resource.name, marker(manifest, resource)]),
+      .map((resource) => [resource.name, ownershipMarker(manifest, resource)]),
   );
   const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
   const live = {
@@ -299,7 +271,7 @@ function cloudflare(manifest: PlatformInstallationManifest) {
         {
           fingerprint: FINGERPRINT,
           objects: new Map([
-            [PLATFORM_R2_OWNERSHIP_MARKER_KEY, marker(manifest, bucket)],
+            [PLATFORM_R2_OWNERSHIP_MARKER_KEY, ownershipMarker(manifest, bucket)],
             ['assets/a.txt', 'a'],
           ]),
         },
@@ -547,7 +519,6 @@ function cloudflare(manifest: PlatformInstallationManifest) {
         remote = value;
       }
     },
-    removeRoutes: async () => {},
     listEmailRoutingRules: async (zone: string) => {
       calls.push(`GET email-rules ${zone}`);
       return [...live.emailRules];
@@ -591,30 +562,37 @@ function dependencies(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function noteText(title: string): string {
-  return String(
-    vi
-      .mocked(note)
-      .mock.calls.filter(([, noteTitle]) => stripVTControlCharacters(noteTitle ?? '') === title)
-      .at(-1)?.[0] ?? '',
-  );
-}
-
-function expectInOrder(text: string, lines: ReadonlyArray<string>): void {
-  const positions = lines.map((line) => text.indexOf(line));
-  expect(
-    positions.map((position, index) => [lines[index], position >= 0]),
-    text,
-  ).toEqual(lines.map((line) => [line, true]));
-  expect(positions, text).toEqual([...positions].sort((left, right) => left - right));
-}
-
 function deletes(fake: ReturnType<typeof cloudflare>): Array<string> {
   return fake.calls.filter((call) => call.startsWith('DELETE') || call.startsWith('EMPTY'));
 }
 
 function changes(fake: ReturnType<typeof cloudflare>): Array<string> {
   return fake.calls.filter((call) => !call.startsWith('GET'));
+}
+
+/** Runs a plain uninstall that stops at its last write, after every resource was recorded as kept. */
+async function stopPlainUninstallAtLastWrite(
+  fake: ReturnType<typeof cloudflare>,
+  manifest: PlatformInstallationManifest,
+): Promise<PlatformInstallationManifest> {
+  const putKvValue = fake.putKvValue;
+  let failed = false;
+  fake.putKvValue = async (account, namespace, key, value) => {
+    if (!failed && value.includes('"status":"uninstalled"')) {
+      failed = true;
+      throw new Error('checkpoint write failed');
+    }
+    return putKvValue(account, namespace, key, value);
+  };
+  await expect(
+    uninstallPlatform(
+      fake,
+      manifest,
+      { ...purgeResourcesArgs, purgeResources: false, purgeData: false },
+      dependencies(),
+    ),
+  ).rejects.toThrow('checkpoint write failed');
+  return listInstallationManifests()[0]!;
 }
 
 const FULL_ORDER = [
@@ -648,7 +626,7 @@ const FULL_ORDER = [
 describe('uninstall --purge-resources', () => {
   it('plans every deletion in order and every kept resource, using only reads', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     await uninstallPlatform(fake, manifest, { ...purgeResourcesArgs, plan: true }, dependencies());
@@ -697,7 +675,7 @@ describe('uninstall --purge-resources', () => {
 
   it('shows the deletion plan before interactive confirmation and leaves cancellation unchanged', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const confirm = vi.fn(async () => {
       expect(noteText('Uninstall plan')).toContain(`5. worker: ${names.apiWorker}`);
@@ -720,7 +698,7 @@ describe('uninstall --purge-resources', () => {
 
   it('deletes in an order Cloudflare accepts, with the tail Worker after its producers and routing KV last', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     await uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies());
@@ -764,39 +742,9 @@ describe('uninstall --purge-resources', () => {
     expect(printSuccess).toHaveBeenCalledWith('Uninstalled Example.');
   });
 
-  it('detaches queue consumers that Cloudflare names by script_name before deleting their Workers', async () => {
-    const manifest = installedManifest();
-    persist(manifest);
-    const fake = cloudflare(manifest);
-    // Answer with the documented consumer shape, read by the real client.
-    fake.listQueueConsumers = async (account: string, queue: string) => [
-      ...(await new PlatformCloudflareClient('token', {
-        fetcher: async () =>
-          Response.json({
-            success: true,
-            result: (fake.live.consumers.get(queue) ?? []).map((entry) =>
-              entry.script === null
-                ? { consumer_id: entry.id, type: 'http_pull' }
-                : { consumer_id: entry.id, script_name: entry.script, type: 'worker' },
-            ),
-          }),
-      }).listQueueConsumers(account, queue)),
-    ];
-
-    await uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies());
-
-    expect(fake.live.consumers.get('cron-id')).toEqual([]);
-    expect(fake.live.consumers.get('usage-id')).toEqual([
-      { id: 'foreign-consumer', script: 'someone-else' },
-    ]);
-    expect(fake.calls).toContain('DELETE queue-consumer cron-id cron-consumer');
-    expect(fake.calls).toContain('DELETE queue-consumer usage-id usage-consumer');
-    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
-  });
-
   it('resumes after a failure without repeating finished deletions', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE queue ${names.usageQueue}`, new Error('temporary failure'));
 
@@ -821,30 +769,44 @@ describe('uninstall --purge-resources', () => {
     expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 
-  it('resumes an R2 deletion after its ownership marker was removed', async () => {
-    const manifest = installedManifest();
-    persist(manifest);
-    const fake = cloudflare(manifest);
-    fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
+  it.each([
+    { bucket: 'with a creation fingerprint', legacy: false },
+    { bucket: 'recorded before creation fingerprints', legacy: true },
+  ])(
+    'resumes an R2 deletion after its ownership marker was removed, for a bucket $bucket',
+    async ({ legacy }) => {
+      let manifest = installedManifest();
+      if (legacy) {
+        const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
+        manifest = recordInstallationResource(
+          manifest,
+          { ...bucket, configHash: hash({ kind: 'r2-bucket', name: bucket.name }) },
+          manifest.updatedAt,
+        );
+      }
+      persistInstallation(manifest, directories);
+      const fake = cloudflare(manifest);
+      fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
 
-    await expect(
-      uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies()),
-    ).rejects.toThrow('temporary failure');
-    expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
+      await expect(
+        uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies()),
+      ).rejects.toThrow('temporary failure');
+      expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
 
-    await uninstallPlatform(
-      fake,
-      listInstallationManifests()[0]!,
-      purgeResourcesArgs,
-      dependencies(),
-    );
-    expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
-    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
-  });
+      await uninstallPlatform(
+        fake,
+        listInstallationManifests()[0]!,
+        purgeResourcesArgs,
+        dependencies(),
+      );
+      expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
+      expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    },
+  );
 
   it('refuses an R2 bucket replaced after its ownership marker was removed', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
     await expect(
@@ -863,12 +825,12 @@ describe('uninstall --purge-resources', () => {
 
   it('refuses before any change when a Worker no longer carries this installation marker', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const replacement = { ...manifest, ownershipNonce: 'replacement-owner-nonce-00000000' };
     fake.live.workers.set(
       names.proxyWorker,
-      marker(
+      ownershipMarker(
         replacement,
         manifest.resources.find((resource) => resource.key === 'proxy-worker')!,
       ),
@@ -883,7 +845,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps a route that now serves another Worker, lists why, and does not let it block a rerun', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.routes[1]!.script = 'someone-else';
     // A later, unrelated stop makes the run resume.
@@ -913,7 +875,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps a custom domain that now serves another Worker and continues', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.domains[0]!.service = 'someone-else';
 
@@ -929,7 +891,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps a DNS record whose configuration changed and continues', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.listDnsRecords = async (_zone: string, name: string) =>
       fake.live.dns
@@ -952,7 +914,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps an Access application whose name changed and continues', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
 
@@ -969,7 +931,7 @@ describe('uninstall --purge-resources', () => {
 
   it('detaches Email Routing rules that send mail to the gateway Worker before deleting it', async () => {
     const manifest = installedManifest({ email: true });
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const gateway = names.emailGatewayWorker;
     fake.live.emailRules.push(
@@ -1004,7 +966,7 @@ describe('uninstall --purge-resources', () => {
 
   it('leaves an Email Routing catch-all that sends mail to another Worker', async () => {
     const manifest = installedManifest({ email: true });
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.catchAll = { enabled: true, workerName: 'someone-else' };
 
@@ -1017,7 +979,7 @@ describe('uninstall --purge-resources', () => {
 
   it('names the Email Routing permission when the credential cannot read the rules', async () => {
     const manifest = installedManifest({ email: true });
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.listEmailRoutingRules = async () => {
       throw new PlatformCloudflareApiError('Authentication error', 403);
@@ -1033,7 +995,7 @@ describe('uninstall --purge-resources', () => {
 
   it('makes no Email Routing call when the platform does not send email', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     await uninstallPlatform(fake, manifest, { ...purgeResourcesArgs, plan: true }, dependencies());
@@ -1045,7 +1007,7 @@ describe('uninstall --purge-resources', () => {
 
   it('finishes with --purge-resources what a stopped --purge-data uninstall kept', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     // The namespace still holds an application Worker, so --purge-data stops.
@@ -1077,24 +1039,10 @@ describe('uninstall --purge-resources', () => {
 
   it('finishes with --purge-resources what a stopped plain uninstall kept, including routing KV', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
-    const putKvValue = fake.putKvValue;
-    let failed = false;
-    // Stop at the last write, after every resource was recorded as kept.
-    fake.putKvValue = async (account: string, namespace: string, key: string, value: string) => {
-      if (!failed && value.includes('"status":"uninstalled"')) {
-        failed = true;
-        throw new Error('checkpoint write failed');
-      }
-      return putKvValue(account, namespace, key, value);
-    };
-    const plain = { ...purgeResourcesArgs, purgeResources: false, purgeData: false };
 
-    await expect(uninstallPlatform(fake, manifest, plain, dependencies())).rejects.toThrow(
-      'checkpoint write failed',
-    );
-    const stopped = listInstallationManifests()[0]!;
+    const stopped = await stopPlainUninstallAtLastWrite(fake, manifest);
     expect(stopped.status).toBe('failed');
     expect(stopped.resources.find((resource) => resource.key === 'routing-kv')?.state).toBe(
       'retained',
@@ -1109,34 +1057,16 @@ describe('uninstall --purge-resources', () => {
 
   it('refuses before any change when a Worker a stopped uninstall kept no longer carries this installation marker', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
-    const putKvValue = fake.putKvValue;
-    let failed = false;
-    // Stop at the last write, after every resource was recorded as kept.
-    fake.putKvValue = async (account: string, namespace: string, key: string, value: string) => {
-      if (!failed && value.includes('"status":"uninstalled"')) {
-        failed = true;
-        throw new Error('checkpoint write failed');
-      }
-      return putKvValue(account, namespace, key, value);
-    };
-    await expect(
-      uninstallPlatform(
-        fake,
-        manifest,
-        { ...purgeResourcesArgs, purgeResources: false, purgeData: false },
-        dependencies(),
-      ),
-    ).rejects.toThrow('checkpoint write failed');
-    const stopped = listInstallationManifests()[0]!;
+    const stopped = await stopPlainUninstallAtLastWrite(fake, manifest);
     expect(stopped.resources.find((resource) => resource.key === 'proxy-worker')?.state).toBe(
       'retained',
     );
     const replacement = { ...manifest, ownershipNonce: 'replacement-owner-nonce-00000000' };
     fake.live.workers.set(
       names.proxyWorker,
-      marker(
+      ownershipMarker(
         replacement,
         manifest.resources.find((resource) => resource.key === 'proxy-worker')!,
       ),
@@ -1157,7 +1087,7 @@ describe('uninstall --purge-resources', () => {
 
   it('lists an Access resource an earlier --purge-resources kept with the other kept resources, not as connected', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.access.set('access-app', { accountId: 'account', name: 'renamed' });
     // A later, unrelated stop makes the run resume.
@@ -1184,7 +1114,7 @@ describe('uninstall --purge-resources', () => {
 
   it('never reopens an uninstall that finished', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     await uninstallPlatform(
       fake,
@@ -1208,7 +1138,7 @@ describe('uninstall --purge-resources', () => {
 
   it('never forces a Worker that a Worker outside the installation binds to, and names it', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.foreignWorkers.add('customer-worker');
     fake.live.serviceBindings.push({ from: 'customer-worker', to: names.proxyWorker as string });
@@ -1240,7 +1170,7 @@ describe('uninstall --purge-resources', () => {
 
   it('never forces a Worker whose dependent has a recorded name but is not proven to be the installation’s', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     // While the run is going, another Worker takes the API Worker's name and
     // still binds to the proxy.
@@ -1250,7 +1180,7 @@ describe('uninstall --purge-resources', () => {
       if (args[1].name === names.proxyWorker) {
         fake.live.workers.set(
           names.apiWorker as string,
-          marker(
+          ownershipMarker(
             replacement,
             manifest.resources.find((resource) => resource.key === 'api-worker')!,
           ),
@@ -1274,7 +1204,7 @@ describe('uninstall --purge-resources', () => {
         resource.key === 'api-worker' ? { ...resource, state: 'deleted' as const } : resource,
       ),
     };
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(recorded);
 
     const error = await uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies()).catch(
@@ -1289,7 +1219,7 @@ describe('uninstall --purge-resources', () => {
 
   it('never forces a Worker when Cloudflare cannot list what depends on it', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.listWorkerDependents = async () => {
       throw new PlatformCloudflareApiError('Authentication error (code 10000)', 403);
@@ -1305,7 +1235,7 @@ describe('uninstall --purge-resources', () => {
 
   it('stops with a clear message when Cloudflare refuses the tail Worker, and never forces it', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.live.foreignTailProducer = true;
 
@@ -1335,7 +1265,7 @@ describe('uninstall --purge-resources', () => {
 
   it('refuses before any change while projects remain, in the plan too', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const withProjects = dependencies({ readProjects: async () => ['blog', 'shop'] });
     const message = [
@@ -1384,7 +1314,7 @@ describe('uninstall --purge-resources', () => {
 
   it('refuses browser login before any change and names the token permissions', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const oauth = dependencies({ credential: { source: 'oauth', aiGatewayToken: true } });
 
@@ -1404,7 +1334,7 @@ describe('uninstall --purge-resources', () => {
 
   it('names a token permission that a read probe shows is missing', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     fake.listDnsRecords = async () => {
       throw new PlatformCloudflareApiError('Authentication error', 403);
@@ -1420,7 +1350,7 @@ describe('uninstall --purge-resources', () => {
 
   it('makes no Workers for Platforms call when the installation has no dispatch namespace', async () => {
     const manifest = installedManifest({ dispatchNamespace: false });
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     await uninstallPlatform(fake, manifest, { ...purgeResourcesArgs, plan: true }, dependencies());
@@ -1438,7 +1368,7 @@ describe('uninstall --purge-resources', () => {
         resource.key === 'service-token' ? { ...resource, accountId: 'identity' } : resource,
       ),
     };
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
 
     await uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies());
@@ -1455,7 +1385,7 @@ describe('uninstall --purge-resources', () => {
         resource.key === 'service-token' ? { ...resource, accountId: 'identity' } : resource,
       ),
     };
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     const getAccessResource = fake.getAccessResource;
     fake.getAccessResource = async (account: string, kind: string, id: string) => {
@@ -1475,7 +1405,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps an AI Gateway that Cloudflare shows was not created during installation', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     // Someone deleted the original gateway and made a new one with the same id.
     fake.live.aiGateways[0]!.createdAt = '2026-10-01T00:00:00.000Z';
@@ -1494,7 +1424,7 @@ describe('uninstall --purge-resources', () => {
 
   it('keeps an AI Gateway whose creation time Cloudflare does not report', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     delete fake.live.aiGateways[0]!.createdAt;
 
@@ -1506,7 +1436,7 @@ describe('uninstall --purge-resources', () => {
 
   it('stops before deleting application Workers when a project appears during the run', async () => {
     const manifest = installedManifest();
-    persist(manifest);
+    persistInstallation(manifest, directories);
     const fake = cloudflare(manifest);
     let reads = 0;
     // Both checks before the first change see no project; one is created after.
@@ -1520,32 +1450,5 @@ describe('uninstall --purge-resources', () => {
     expect(deletes(fake).some((call) => call.startsWith('DELETE dispatch-'))).toBe(false);
     expect(fake.live.namespaceScripts.has('leftover-app')).toBe(true);
     expect(listInstallationManifests()[0]?.status).toBe('failed');
-  });
-
-  it('resumes an R2 deletion for a bucket recorded before creation fingerprints', async () => {
-    let manifest = installedManifest();
-    const bucket = manifest.resources.find((resource) => resource.kind === 'r2-bucket')!;
-    manifest = recordInstallationResource(
-      manifest,
-      { ...bucket, configHash: hash({ kind: 'r2-bucket', name: bucket.name }) },
-      manifest.updatedAt,
-    );
-    persist(manifest);
-    const fake = cloudflare(manifest);
-    fake.failures.set(`DELETE r2-bucket ${names.assetsBucket}`, new Error('temporary failure'));
-
-    await expect(
-      uninstallPlatform(fake, manifest, purgeResourcesArgs, dependencies()),
-    ).rejects.toThrow('temporary failure');
-    expect(fake.live.buckets.get(names.assetsBucket)?.objects.size).toBe(0);
-
-    await uninstallPlatform(
-      fake,
-      listInstallationManifests()[0]!,
-      purgeResourcesArgs,
-      dependencies(),
-    );
-    expect(fake.live.buckets.has(names.assetsBucket)).toBe(false);
-    expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
   });
 });

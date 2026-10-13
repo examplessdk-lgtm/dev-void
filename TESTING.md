@@ -51,9 +51,9 @@ The runner adds coverage that imports cannot describe:
 `--list` does not refresh builds, so built-export coverage can expand when the command executes.
 Affected selection is conservative, not a proof that all behavior is covered: computed imports,
 filesystem reads, generated artifacts, and external services can introduce additional dependencies.
-Explicitly run a known consumer when changing one of those boundaries, and add a selector regression
-when introducing a new fixture layout. Changes to packaging still need the packed checks below;
-changes to metaframework output still need `build:all` and the artifact check.
+Explicitly run a known consumer when changing one of those boundaries. Changes to packaging still
+need the packed checks below; changes to metaframework output still need `build:all` and the
+artifact check.
 
 For a leaf-module edit with known import-based consumers, Vitest's native related command is useful:
 
@@ -143,16 +143,14 @@ repeat those production builds. `vpr test:all` runs the same artifact check loca
 
 Integration sharding uses [measured duration estimates](test/integration-timings.ts), rather than
 filename hashes. [The sequencer](test/sequencer.ts) packs the longest files first and starts costly
-fixtures early. Estimates affect scheduling only: new files receive a fallback estimate, and
-membership tests ensure every discovered file appears exactly once. Refresh the estimates when
-the suite's costs change materially. Seeded file shuffling remains available for isolation checks.
+fixtures early. Estimates affect scheduling only: new files receive a fallback estimate. Refresh
+the estimates when the suite's costs change materially. Seeded file shuffling remains available
+for isolation checks.
 
 The four adapter suites share their client and island test definitions in `test/`. Each runs the
 full browser behavior contract against its production preview build, plus a dev-mode navigation,
 island hydration/interaction smoke check, SSR/protocol assertions, and HMR checks. This keeps both
-runtime modes covered without repeating the full browser matrix. Before integrations start,
-their sources are snapshotted so another test cloning a fixture cannot capture an in-flight HMR
-edit. Dependencies stay linked to the installed workspace, and snapshots are removed afterward.
+runtime modes covered without repeating the full browser matrix.
 
 Use production functions in unit tests. A copy of a hook's implementation inside a test cannot
 catch regressions in the real hook. Shared form-value equality has one direct suite, and actual
@@ -247,8 +245,7 @@ VOID_TEST_BROWSER=webkit vp test run packages/react/test/integration packages/vu
 Use `waitForIslandsHydrated` from `test/browser-helpers.ts` before asserting island state or
 interacting with islands. Pass the expected minimum count when checking a multi-island fixture.
 Each island imports and hydrates independently, so a selector matching one hydrated island does
-not establish that its siblings are ready. The helper rejects empty or partially hydrated pages;
-`packages/void/test/integration/browser-helpers.test.ts` covers these cases.
+not establish that its siblings are ready. The helper rejects empty or partially hydrated pages.
 
 For SPA navigation, wait for a client readiness signal before setting the document marker and
 clicking. The Nuxt and SvelteKit playgrounds expose `h1[data-hydrated="true"]` after client startup.

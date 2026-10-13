@@ -2,38 +2,14 @@ import { describe, expect, it } from 'vite-plus/test';
 import { parseGithubArgs } from '../../src/cli/github-args.ts';
 
 describe('parseGithubArgs', () => {
-  describe('install', () => {
-    it('parses install with no args', () => {
-      expect(parseGithubArgs(['install'])).toEqual({ subcommand: 'install' });
+  describe.each(['install', 'installations', 'link', 'join'] as const)('%s', (subcommand) => {
+    it('parses with no args', () => {
+      expect(parseGithubArgs([subcommand])).toEqual({ subcommand });
     });
 
-    it('rejects extra positional', () => {
-      expect(() => parseGithubArgs(['install', 'extra'])).toThrow(
-        "github: Unexpected argument 'extra'.",
-      );
-    });
-
-    it('rejects a flag', () => {
-      expect(() => parseGithubArgs(['install', '--flag'])).toThrow(
-        "github: Unexpected argument '--flag'.",
-      );
-    });
-  });
-
-  describe('installations', () => {
-    it('parses installations with no args', () => {
-      expect(parseGithubArgs(['installations'])).toEqual({ subcommand: 'installations' });
-    });
-
-    it('rejects extra positional', () => {
-      expect(() => parseGithubArgs(['installations', 'extra'])).toThrow(
-        "github: Unexpected argument 'extra'.",
-      );
-    });
-
-    it('rejects a flag', () => {
-      expect(() => parseGithubArgs(['installations', '--flag'])).toThrow(
-        "github: Unexpected argument '--flag'.",
+    it.each(['extra', '--flag'])('rejects %s', (arg) => {
+      expect(() => parseGithubArgs([subcommand, arg])).toThrow(
+        `github: Unexpected argument '${arg}'.`,
       );
     });
   });
@@ -97,30 +73,6 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('parses --executor container', () => {
-      const result = parseGithubArgs(['connect', '--executor', 'container']);
-      expect(result).toEqual({
-        subcommand: 'connect',
-        projectName: '',
-        installationId: undefined,
-        repo: undefined,
-        branch: undefined,
-        executor: 'container',
-      });
-    });
-
-    it('parses --executor github_actions', () => {
-      const result = parseGithubArgs(['connect', '--executor', 'github_actions']);
-      expect(result).toEqual({
-        subcommand: 'connect',
-        projectName: '',
-        installationId: undefined,
-        repo: undefined,
-        branch: undefined,
-        executor: 'github_actions',
-      });
-    });
-
     it('parses --workflow', () => {
       const result = parseGithubArgs(['connect', '--workflow', '.github/workflows/ci.yml']);
       expect(result).toEqual({
@@ -134,12 +86,6 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('throws when --workflow has no value', () => {
-      expect(() => parseGithubArgs(['connect', '--workflow'])).toThrow(
-        'github: --workflow requires a value.',
-      );
-    });
-
     it('parses --project flag', () => {
       const result = parseGithubArgs(['connect', '--project', 'my-project']);
       expect(result).toEqual({
@@ -150,12 +96,6 @@ describe('parseGithubArgs', () => {
         branch: undefined,
         executor: undefined,
       });
-    });
-
-    it('--project flag is an alias for the positional', () => {
-      const positional = parseGithubArgs(['connect', 'my-project']);
-      const flag = parseGithubArgs(['connect', '--project', 'my-project']);
-      expect(flag).toEqual(positional);
     });
 
     it('rejects --project when positional already set', () => {
@@ -192,103 +132,6 @@ describe('parseGithubArgs', () => {
         branch: 'main',
         executor: 'container',
       });
-    });
-
-    it('parses all flags together with --project flag', () => {
-      expect(
-        parseGithubArgs([
-          'connect',
-          '--project',
-          'my-project',
-          '--installation',
-          '42',
-          '--repo',
-          'owner/repo',
-          '--branch',
-          'main',
-          '--executor',
-          'container',
-        ]),
-      ).toEqual({
-        subcommand: 'connect',
-        projectName: 'my-project',
-        installationId: '42',
-        repo: 'owner/repo',
-        branch: 'main',
-        executor: 'container',
-      });
-    });
-
-    it('rejects --installation with no value', () => {
-      expect(() => parseGithubArgs(['connect', '--installation'])).toThrow(
-        'github: --installation requires a value.',
-      );
-    });
-
-    it('rejects --installation with empty value', () => {
-      expect(() => parseGithubArgs(['connect', '--installation', ''])).toThrow(
-        'github: --installation requires a value.',
-      );
-    });
-
-    it('rejects --installation with whitespace-only value', () => {
-      expect(() => parseGithubArgs(['connect', '--installation', '   '])).toThrow(
-        'github: --installation requires a value.',
-      );
-    });
-
-    it('rejects --repo with no value', () => {
-      expect(() => parseGithubArgs(['connect', '--repo'])).toThrow(
-        'github: --repo requires a value.',
-      );
-    });
-
-    it('rejects --repo with empty value', () => {
-      expect(() => parseGithubArgs(['connect', '--repo', ''])).toThrow(
-        'github: --repo requires a value.',
-      );
-    });
-
-    it('rejects --branch with no value', () => {
-      expect(() => parseGithubArgs(['connect', '--branch'])).toThrow(
-        'github: --branch requires a value.',
-      );
-    });
-
-    it('rejects --branch with empty value', () => {
-      expect(() => parseGithubArgs(['connect', '--branch', ''])).toThrow(
-        'github: --branch requires a value.',
-      );
-    });
-
-    it('rejects --project with no value', () => {
-      expect(() => parseGithubArgs(['connect', '--project'])).toThrow(
-        'github: --project requires a value.',
-      );
-    });
-
-    it('rejects --project with empty value', () => {
-      expect(() => parseGithubArgs(['connect', '--project', ''])).toThrow(
-        'github: --project requires a value.',
-      );
-    });
-
-    it('rejects --executor with no value', () => {
-      expect(() => parseGithubArgs(['connect', '--executor'])).toThrow(
-        'github: --executor requires a value.',
-      );
-    });
-
-    it('rejects --executor with empty value', () => {
-      expect(() => parseGithubArgs(['connect', '--executor', ''])).toThrow(
-        'github: --executor requires a value.',
-      );
-    });
-
-    it('rejects invalid --executor value', () => {
-      expect(() => parseGithubArgs(['connect', '--executor', 'docker'])).toThrow(
-        'github: invalid --executor (expected container|github_actions).',
-      );
     });
 
     it('rejects unknown flag', () => {
@@ -332,12 +175,6 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('--project flag is an alias for the positional', () => {
-      const positional = parseGithubArgs(['update', 'my-project']);
-      const flag = parseGithubArgs(['update', '--project', 'my-project']);
-      expect(flag).toEqual(positional);
-    });
-
     it('parses --branch flag', () => {
       expect(parseGithubArgs(['update', '--branch', 'release'])).toEqual({
         subcommand: 'update',
@@ -356,30 +193,6 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('rejects --branch with whitespace-only value', () => {
-      expect(() => parseGithubArgs(['update', '--branch', '   '])).toThrow(
-        'github: --branch requires a value.',
-      );
-    });
-
-    it('parses --executor container', () => {
-      expect(parseGithubArgs(['update', '--executor', 'container'])).toEqual({
-        subcommand: 'update',
-        projectName: '',
-        branch: undefined,
-        executor: 'container',
-      });
-    });
-
-    it('parses --executor github_actions', () => {
-      expect(parseGithubArgs(['update', '--executor', 'github_actions'])).toEqual({
-        subcommand: 'update',
-        projectName: '',
-        branch: undefined,
-        executor: 'github_actions',
-      });
-    });
-
     it('parses --workflow', () => {
       expect(parseGithubArgs(['update', '--workflow', '.github/workflows/ci.yml'])).toEqual({
         subcommand: 'update',
@@ -388,12 +201,6 @@ describe('parseGithubArgs', () => {
         executor: undefined,
         workflowPath: '.github/workflows/ci.yml',
       });
-    });
-
-    it('throws when --workflow has no value', () => {
-      expect(() => parseGithubArgs(['update', '--workflow'])).toThrow(
-        'github: --workflow requires a value.',
-      );
     });
 
     it('parses project name with both flags together', () => {
@@ -414,39 +221,9 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('rejects --branch with no value', () => {
-      expect(() => parseGithubArgs(['update', '--branch'])).toThrow(
-        'github: --branch requires a value.',
-      );
-    });
-
-    it('rejects --branch with empty value', () => {
-      expect(() => parseGithubArgs(['update', '--branch', ''])).toThrow(
-        'github: --branch requires a value.',
-      );
-    });
-
-    it('rejects --project with no value', () => {
-      expect(() => parseGithubArgs(['update', '--project'])).toThrow(
-        'github: --project requires a value.',
-      );
-    });
-
     it('rejects --project when positional already set', () => {
       expect(() => parseGithubArgs(['update', 'my-project', '--project', 'other'])).toThrow(
         "github: Unexpected argument 'other'.",
-      );
-    });
-
-    it('rejects --executor with no value', () => {
-      expect(() => parseGithubArgs(['update', '--executor'])).toThrow(
-        'github: --executor requires a value.',
-      );
-    });
-
-    it('rejects invalid --executor value', () => {
-      expect(() => parseGithubArgs(['update', '--executor', 'docker'])).toThrow(
-        'github: invalid --executor (expected container|github_actions).',
       );
     });
 
@@ -459,6 +236,22 @@ describe('parseGithubArgs', () => {
     it('rejects extra positional after project name', () => {
       expect(() => parseGithubArgs(['update', 'my-project', 'extra'])).toThrow(
         "github: Unexpected argument 'extra'.",
+      );
+    });
+  });
+
+  describe.each(['connect', 'update'] as const)('%s --executor', (subcommand) => {
+    it.each(['container', 'github_actions'] as const)('parses %s', (executor) => {
+      expect(parseGithubArgs([subcommand, '--executor', executor])).toEqual({
+        subcommand,
+        projectName: '',
+        executor,
+      });
+    });
+
+    it('rejects an invalid value', () => {
+      expect(() => parseGithubArgs([subcommand, '--executor', 'docker'])).toThrow(
+        'github: invalid --executor (expected container|github_actions).',
       );
     });
   });
@@ -485,21 +278,9 @@ describe('parseGithubArgs', () => {
       });
     });
 
-    it('--project flag is an alias for the positional', () => {
-      const positional = parseGithubArgs(['status', 'my-project']);
-      const flag = parseGithubArgs(['status', '--project', 'my-project']);
-      expect(flag).toEqual(positional);
-    });
-
     it('rejects --project when positional already set', () => {
       expect(() => parseGithubArgs(['status', 'my-project', '--project', 'other'])).toThrow(
         "github: Unexpected argument 'other'.",
-      );
-    });
-
-    it('rejects --project with no value', () => {
-      expect(() => parseGithubArgs(['status', '--project'])).toThrow(
-        'github: --project requires a value.',
       );
     });
 
@@ -565,46 +346,32 @@ describe('parseGithubArgs', () => {
         "github: Unexpected argument '--nope'.",
       );
     });
-
-    it('throws when --project has no value', () => {
-      expect(() => parseGithubArgs(['disconnect', '--project'])).toThrow(
-        'github: --project requires a value.',
-      );
-    });
   });
 
-  describe('link', () => {
-    it('parses link with no args', () => {
-      expect(parseGithubArgs(['link'])).toEqual({ subcommand: 'link' });
-    });
-
-    it('rejects extra positional', () => {
-      expect(() => parseGithubArgs(['link', 'extra'])).toThrow(
-        "github: Unexpected argument 'extra'.",
-      );
-    });
-
-    it('rejects a flag', () => {
-      expect(() => parseGithubArgs(['link', '--flag'])).toThrow(
-        "github: Unexpected argument '--flag'.",
-      );
-    });
-  });
-
-  describe('join', () => {
-    it('parses join with no args', () => {
-      expect(parseGithubArgs(['join'])).toEqual({ subcommand: 'join' });
-    });
-
-    it('rejects extra positional', () => {
-      expect(() => parseGithubArgs(['join', 'x'])).toThrow("github: Unexpected argument 'x'.");
-    });
-
-    it('rejects a flag', () => {
-      expect(() => parseGithubArgs(['join', '--flag'])).toThrow(
-        "github: Unexpected argument '--flag'.",
-      );
-    });
+  it.each<[subcommand: string, flag: string, value: string | undefined]>([
+    ['connect', '--installation', undefined],
+    ['connect', '--installation', ''],
+    ['connect', '--installation', '   '],
+    ['connect', '--repo', undefined],
+    ['connect', '--repo', ''],
+    ['connect', '--branch', undefined],
+    ['connect', '--branch', ''],
+    ['connect', '--executor', undefined],
+    ['connect', '--executor', ''],
+    ['connect', '--workflow', undefined],
+    ['connect', '--project', undefined],
+    ['connect', '--project', ''],
+    ['update', '--branch', undefined],
+    ['update', '--branch', ''],
+    ['update', '--branch', '   '],
+    ['update', '--executor', undefined],
+    ['update', '--workflow', undefined],
+    ['update', '--project', undefined],
+    ['status', '--project', undefined],
+    ['disconnect', '--project', undefined],
+  ])('%s %s rejects the value %j', (subcommand, flag, value) => {
+    const args = value === undefined ? [subcommand, flag] : [subcommand, flag, value];
+    expect(() => parseGithubArgs(args)).toThrow(`github: ${flag} requires a value.`);
   });
 
   describe('unknown subcommand', () => {

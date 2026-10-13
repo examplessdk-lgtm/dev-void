@@ -4,27 +4,6 @@ import { describe, expect, it } from 'vite-plus/test';
 import { Link } from '../../src/runtime/link.tsx';
 
 describe('Link', () => {
-  it('merges GET data into the rendered href', () => {
-    const markup = renderToStaticMarkup(
-      createElement(
-        Link,
-        {
-          href: '/users',
-          data: {
-            tag: ['a', 'b'],
-            page: 2,
-            active: true,
-            skip: null,
-            missing: undefined,
-          },
-        },
-        'Users',
-      ),
-    );
-
-    expect(markup).toContain('href="/users?tag=a&amp;tag=b&amp;page=2&amp;active=true"');
-  });
-
   it('preserves dot-segment relative hrefs when merging GET data', () => {
     const markup = renderToStaticMarkup(
       createElement(

@@ -194,7 +194,7 @@ function shellQuoteExecutable(value: string): string {
 }
 
 /** Resolve the bundled cf transport without consulting project dependencies. */
-export function resolveCloudflareOperationArgv(_root: string): Array<string> {
+export function resolveCloudflareOperationArgv(): Array<string> {
   const directory = dirname(fileURLToPath(import.meta.url));
   const entry = [
     join(directory, 'cloudflare-operation-process.ts'),

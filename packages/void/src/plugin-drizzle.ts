@@ -267,7 +267,7 @@ function createPrimaryDb(d1) {
       },
     },
 
-    async configureServer(server) {
+    async configureServer() {
       if (!schema) {
         return;
       }
@@ -297,17 +297,6 @@ function createPrimaryDb(d1) {
             '         Run `void db generate` to create migration files for dev startup and deploy.',
         );
       }
-
-      // Watch schema files for changes → regenerate db.d.ts
-      const watchPath = schema.path;
-      const regenerate = (path: string) => {
-        if (path === watchPath || (schema.type === 'directory' && path.startsWith(watchPath))) {
-          generateDbDts(outDir, schema, dialect);
-        }
-      };
-      server.watcher.on('change', regenerate);
-      server.watcher.on('add', regenerate);
-      server.watcher.on('unlink', regenerate);
     },
   };
 }

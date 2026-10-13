@@ -143,15 +143,11 @@ describe('compileRouteTable auth integration', () => {
       auth: sqliteAuth,
       migrationHandlerPath: '/resolved/migration-handler.mjs',
       migrations: [{ name: '001_init.sql', sql: 'select 1;' }],
-      migrationDialect: 'sqlite',
     });
 
     expect(code).toContain('runVoidAuthMigrations');
     expect(code).toContain(
-      'runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
-    );
-    expect(code).toContain(
-      'runVoidAuthMigrations(new Request(request.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
+      'runVoidAuthMigrations(__voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
     );
     expect(code).toContain('export async function __voidHandleInternalRoute(request)');
     expect(code).toContain('if (request.method === "POST" && url.pathname === "/__void/migrate")');
@@ -165,7 +161,6 @@ describe('compileRouteTable auth integration', () => {
       bindingNames: { d1: 'myapp_db' },
       migrationHandlerPath: '/resolved/migration-handler.mjs',
       migrations: [{ name: '001_init.sql', sql: 'select 1;' }],
-      migrationDialect: 'sqlite',
     });
 
     expect(code).toContain('env["myapp_db"]');
@@ -173,7 +168,7 @@ describe('compileRouteTable auth integration', () => {
     expect(code).toContain('return { ...env, DB: env["myapp_db"] };');
     expect(code).toContain('__createMigrationHandler(\n    __voidGetMigrationEnv(),');
     expect(code).toContain(
-      'runVoidAuthMigrations(new Request(c.req.url), __voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
+      'runVoidAuthMigrations(__voidGetMigrationEnv(), __voidAuthOptions, __voidAuthMigrationSchema)',
     );
   });
 });

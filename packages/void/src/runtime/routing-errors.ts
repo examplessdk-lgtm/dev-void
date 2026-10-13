@@ -21,7 +21,7 @@ export type ErrorRenderer = {
   ) => Promise<Response>;
   onError: (error: Error, context: Context) => Promise<Response> | Response;
 };
-const __VOID_ERROR_PAGE_FONT_STACK =
+const ERROR_PAGE_FONT_STACK =
   'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const errorStack = Error as unknown as {
   captureStackTrace?: (error: Error, constructor?: Function) => void;
@@ -30,10 +30,8 @@ const errorStack = Error as unknown as {
 
 /** Error rendering is shared by generated Pages apps; production never includes exception details. */
 export function createErrorRenderer(options: ErrorRendererOptions): ErrorRenderer {
-  const __VOID_DEV = options.dev === true;
-  const __VOID_PROJECT_ROOT = options.projectRoot;
-  const __VOID_HOME_DIR = options.homeDir;
-  function __voidEscapeHtml(value: unknown): string {
+  const dev = options.dev === true;
+  function escapeHtml(value: unknown): string {
     return String(value)
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
@@ -41,7 +39,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       .replaceAll('"', '&quot;');
   }
 
-  function __voidShouldServeHtmlErrorPage(request: Request): boolean {
+  function shouldServeHtmlErrorPage(request: Request): boolean {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return false;
     }
@@ -60,18 +58,18 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return !accept || accept.includes('text/html') || accept.includes('*/*');
   }
 
-  function __voidNormalizeFsPath(value: unknown): string {
+  function normalizeFsPath(value: unknown): string {
     return typeof value === 'string' ? value.replaceAll('\\', '/') : '';
   }
 
-  function __voidIsAbsolutePath(value: string): boolean {
+  function isAbsolutePath(value: string): boolean {
     return value.startsWith('/') || /^[A-Za-z]:\//.test(value);
   }
 
-  function __voidDisplayPath(value: unknown): string {
-    const path = __voidNormalizeFsPath(value);
-    const homeDir = __voidNormalizeFsPath(__VOID_HOME_DIR);
-    const projectRoot = __voidNormalizeFsPath(__VOID_PROJECT_ROOT);
+  function toDisplayPath(value: unknown): string {
+    const path = normalizeFsPath(value);
+    const homeDir = normalizeFsPath(options.homeDir);
+    const projectRoot = normalizeFsPath(options.projectRoot);
     if (!path) {
       return '';
     }
@@ -86,9 +84,9 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return path;
   }
 
-  function __voidEditorHref(value: unknown, line: number, column: number): string {
-    const path = __voidNormalizeFsPath(value);
-    if (!__voidIsAbsolutePath(path)) {
+  function editorHref(value: unknown, line: number, column: number): string {
+    const path = normalizeFsPath(value);
+    if (!isAbsolutePath(path)) {
       return '';
     }
     return (
@@ -101,14 +99,14 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     );
   }
 
-  function __voidCreateStackFrame(
+  function createStackFrame(
     functionName: string | null | undefined,
     file: unknown,
     line: unknown,
     column: unknown,
     raw: string,
   ): StackFrame | null {
-    const normalizedFile = __voidNormalizeFsPath(file);
+    const normalizedFile = normalizeFsPath(file);
     const lineNumber = Number(line);
     const columnNumber = Number(column);
     if (!normalizedFile || !Number.isFinite(lineNumber) || lineNumber <= 0) {
@@ -120,21 +118,21 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       file: normalizedFile,
       line: lineNumber,
       column: safeColumn,
-      displayPath: __voidDisplayPath(normalizedFile),
-      href: __voidEditorHref(normalizedFile, lineNumber, safeColumn),
+      displayPath: toDisplayPath(normalizedFile),
+      href: editorHref(normalizedFile, lineNumber, safeColumn),
       raw: raw || '',
     };
   }
 
-  function __voidParseFrameLocation(value: string): StackFrame | null {
+  function parseFrameLocation(value: string): StackFrame | null {
     const match = value.match(/^(.*):(\d+):(\d+)$/);
     if (!match) {
       return null;
     }
-    return __voidCreateStackFrame('', match[1], Number(match[2]), Number(match[3]), value);
+    return createStackFrame('', match[1], Number(match[2]), Number(match[3]), value);
   }
 
-  function __voidParseStackFrames(stack: string): Array<StackFrame> {
+  function parseStackFrames(stack: string): Array<StackFrame> {
     if (!stack) {
       return [];
     }
@@ -147,16 +145,16 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       let frame = null;
       let match = line.match(/^at\s+(?:async\s+)?(.+?)\s+\((.+)\)$/);
       if (match) {
-        const location = __voidParseFrameLocation(match[2]);
+        const location = parseFrameLocation(match[2]);
         frame = location ? { ...location, functionName: match[1] } : null;
       } else {
         match = line.match(/^at\s+(.+)$/);
         if (match) {
-          frame = __voidParseFrameLocation(match[1]);
+          frame = parseFrameLocation(match[1]);
         } else {
           match = line.match(/^(.*?)@(.+)$/);
           if (match) {
-            const location = __voidParseFrameLocation(match[2]);
+            const location = parseFrameLocation(match[2]);
             frame = location ? { ...location, functionName: match[1] } : null;
           }
         }
@@ -168,13 +166,13 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return frames;
   }
 
-  function __voidGetStackFrames(error: unknown): Array<StackFrame> {
+  function getStackFrames(error: unknown): Array<StackFrame> {
     if (!(error instanceof Error)) {
       return [];
     }
     if (!error.stack && typeof errorStack.captureStackTrace === 'function') {
       try {
-        errorStack.captureStackTrace(error, __voidGetStackFrames);
+        errorStack.captureStackTrace(error, getStackFrames);
       } catch {
         // Ignore runtimes that reject captureStackTrace on thrown errors.
       }
@@ -191,7 +189,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
             const line = callSite.getLineNumber?.();
             const column = callSite.getColumnNumber?.();
             const functionName = callSite.getFunctionName?.() || callSite.getMethodName?.() || '';
-            const frame = __voidCreateStackFrame(
+            const frame = createStackFrame(
               functionName,
               fileName || '',
               line,
@@ -214,16 +212,16 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     } finally {
       errorStack.prepareStackTrace = originalPrepareStackTrace;
     }
-    return __voidParseStackFrames(typeof error.stack === 'string' ? error.stack : '');
+    return parseStackFrames(typeof error.stack === 'string' ? error.stack : '');
   }
 
-  function __voidDescribeThrownValue(value: unknown): ErrorDetails {
+  function describeThrownValue(value: unknown): ErrorDetails {
     if (value instanceof Error) {
       return {
         name: value.name || 'Error',
         message: value.message || '',
         stack: typeof value.stack === 'string' ? value.stack : '',
-        frames: __voidGetStackFrames(value),
+        frames: getStackFrames(value),
       };
     }
     if (typeof value === 'string') {
@@ -242,15 +240,15 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return { name: 'Thrown value', message, stack: '', frames: [] };
   }
 
-  function __voidRenderStack(entry: ErrorDetails): string {
+  function renderStack(entry: ErrorDetails): string {
     if (Array.isArray(entry.frames) && entry.frames.length > 0) {
       const items = entry.frames
         .map((frame) => {
           const name = frame.functionName || '(anonymous)';
           const location = frame.displayPath + ':' + frame.line + ':' + frame.column;
-          const body = `<span class="__void-error-frame-function">${__voidEscapeHtml(name)}</span><span class="__void-error-frame-location">${__voidEscapeHtml(location)}</span>`;
+          const body = `<span class="__void-error-frame-function">${escapeHtml(name)}</span><span class="__void-error-frame-location">${escapeHtml(location)}</span>`;
           if (frame.href) {
-            return `<a class="__void-error-frame" href="${__voidEscapeHtml(frame.href)}">${body}</a>`;
+            return `<a class="__void-error-frame" href="${escapeHtml(frame.href)}">${body}</a>`;
           }
           return `<div class="__void-error-frame is-static">${body}</div>`;
         })
@@ -260,17 +258,17 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     if (!entry.stack) {
       return '';
     }
-    return `<div class="__void-error-stack"><div class="__void-error-stack-label">Stack trace</div><pre>${__voidEscapeHtml(entry.stack)}</pre></div>`;
+    return `<div class="__void-error-stack"><div class="__void-error-stack-label">Stack trace</div><pre>${escapeHtml(entry.stack)}</pre></div>`;
   }
 
-  function __voidCollectErrorChain(error: unknown): Array<ErrorDetails & { label: string }> {
+  function collectErrorChain(error: unknown): Array<ErrorDetails & { label: string }> {
     const chain = [];
     const seen = new Set();
     let current = error;
     let depth = 0;
     while (current != null && depth < 8 && !seen.has(current)) {
       seen.add(current);
-      const entry = __voidDescribeThrownValue(current);
+      const entry = describeThrownValue(current);
       chain.push({
         label: depth === 0 ? 'Error' : 'Cause ' + depth,
         ...entry,
@@ -299,18 +297,18 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     return chain;
   }
 
-  function __voidRenderDevErrorOverlay(status: number, title: string, error: unknown): string {
-    const chain = __voidCollectErrorChain(error);
+  function renderDevErrorOverlay(status: number, title: string, error: unknown): string {
+    const chain = collectErrorChain(error);
     const errorCountLabel = chain.length + (chain.length === 1 ? ' Error' : ' Errors');
     const sections = chain
       .map((entry, index) => {
         const heading = entry.name || (index === 0 ? title : 'Cause');
         const message = entry.message || title;
-        const stack = __voidRenderStack(entry);
+        const stack = renderStack(entry);
         if (index === 0) {
-          return `<section class="__void-error-section is-root"><p class="__void-error-message">${__voidEscapeHtml(message)}</p>${stack}</section>`;
+          return `<section class="__void-error-section is-root"><p class="__void-error-message">${escapeHtml(message)}</p>${stack}</section>`;
         }
-        return `<section class="__void-error-section"><div class="__void-error-kicker">${__voidEscapeHtml(entry.label)}</div><h2>${__voidEscapeHtml(heading)}</h2><p>${__voidEscapeHtml(message)}</p>${stack}</section>`;
+        return `<section class="__void-error-section"><div class="__void-error-kicker">${escapeHtml(entry.label)}</div><h2>${escapeHtml(heading)}</h2><p>${escapeHtml(message)}</p>${stack}</section>`;
       })
       .join('');
     return `<style>
@@ -319,7 +317,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       inset: 0;
       z-index: 2147483647;
       pointer-events: none;
-      font-family: ${__VOID_ERROR_PAGE_FONT_STACK};
+      font-family: ${ERROR_PAGE_FONT_STACK};
       color: #f5f5f5;
     }
     .__void-error-backdrop {
@@ -382,7 +380,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       padding: 12px 8px;
       box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
       cursor: pointer;
-      font: 700 13px/1 ${__VOID_ERROR_PAGE_FONT_STACK};
+      font: 700 13px/1 ${ERROR_PAGE_FONT_STACK};
       letter-spacing: 0.04em;
       text-transform: uppercase;
       transition: transform 180ms ease, opacity 180ms ease;
@@ -541,16 +539,16 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       }
     }
   </style>
-<aside class="__void-error-overlay" data-void-error-overlay role="dialog" aria-label="Void dev error overlay"><div class="__void-error-backdrop" data-void-error-backdrop></div><section class="__void-error-panel"><button type="button" class="__void-error-close" data-void-error-close aria-label="Minimize error overlay"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.757 3.757 12.243 12.243M12.243 3.757 3.757 12.243" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></button><header class="__void-error-header"><p class="__void-error-status">${__voidEscapeHtml(String(status) + ': ' + title)}</p></header>${sections}</section><button type="button" class="__void-error-minimized" data-void-error-toggle aria-label="Show dev error overlay" aria-expanded="true">${__voidEscapeHtml(errorCountLabel)}</button><script>(function(){const script=document.currentScript;if(!(script instanceof HTMLScriptElement))return;const root=script.closest("[data-void-error-overlay]");if(!(root instanceof HTMLElement))return;const backdrop=root.querySelector("[data-void-error-backdrop]");const closeButton=root.querySelector("[data-void-error-close]");const toggle=root.querySelector("[data-void-error-toggle]");const setMinimized=(minimized)=>{root.classList.toggle("is-minimized", minimized);if(toggle instanceof HTMLElement)toggle.setAttribute("aria-expanded", minimized ? "false" : "true");};if(backdrop instanceof HTMLElement)backdrop.addEventListener("click",()=>setMinimized(true));if(closeButton instanceof HTMLElement)closeButton.addEventListener("click",()=>setMinimized(true));if(toggle instanceof HTMLElement)toggle.addEventListener("click",()=>setMinimized(false));})();</script></aside>`;
+<aside class="__void-error-overlay" data-void-error-overlay role="dialog" aria-label="Void dev error overlay"><div class="__void-error-backdrop" data-void-error-backdrop></div><section class="__void-error-panel"><button type="button" class="__void-error-close" data-void-error-close aria-label="Minimize error overlay"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.757 3.757 12.243 12.243M12.243 3.757 3.757 12.243" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></button><header class="__void-error-header"><p class="__void-error-status">${escapeHtml(String(status) + ': ' + title)}</p></header>${sections}</section><button type="button" class="__void-error-minimized" data-void-error-toggle aria-label="Show dev error overlay" aria-expanded="true">${escapeHtml(errorCountLabel)}</button><script>(function(){const script=document.currentScript;if(!(script instanceof HTMLScriptElement))return;const root=script.closest("[data-void-error-overlay]");if(!(root instanceof HTMLElement))return;const backdrop=root.querySelector("[data-void-error-backdrop]");const closeButton=root.querySelector("[data-void-error-close]");const toggle=root.querySelector("[data-void-error-toggle]");const setMinimized=(minimized)=>{root.classList.toggle("is-minimized", minimized);if(toggle instanceof HTMLElement)toggle.setAttribute("aria-expanded", minimized ? "false" : "true");};if(backdrop instanceof HTMLElement)backdrop.addEventListener("click",()=>setMinimized(true));if(closeButton instanceof HTMLElement)closeButton.addEventListener("click",()=>setMinimized(true));if(toggle instanceof HTMLElement)toggle.addEventListener("click",()=>setMinimized(false));})();</script></aside>`;
   }
 
-  function __voidInjectDevErrorOverlay(html: string, overlay: string): string {
+  function injectDevErrorOverlay(html: string, overlay: string): string {
     return /<\/body\s*>/i.test(html)
       ? html.replace(/<\/body\s*>/i, overlay + '</body>')
       : html + overlay;
   }
 
-  function __voidGetErrorAssetCss(error: unknown): string {
+  function getErrorAssetCss(error: unknown): string {
     const tags =
       error &&
       (typeof error === 'object' || typeof error === 'function') &&
@@ -562,31 +560,29 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       : '';
   }
 
-  function __voidInjectErrorAssetCss(html: string, css: string): string {
+  function injectErrorAssetCss(html: string, css: string): string {
     if (!css) {
       return html;
     }
     return /<\/head\s*>/i.test(html) ? html.replace(/<\/head\s*>/i, css + '</head>') : css + html;
   }
 
-  function __voidRenderErrorPage(status: number, title: string, error?: unknown): string {
+  function renderErrorPage(status: number, title: string, error?: unknown): string {
     const heading = status + ': ' + title;
     const prefix = status + ': ';
     const overlay =
-      __VOID_DEV && status === 500 && error
-        ? __voidRenderDevErrorOverlay(status, title, error)
-        : '';
+      dev && status === 500 && error ? renderDevErrorOverlay(status, title, error) : '';
     return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${__voidEscapeHtml(heading)}</title>
-    ${__voidGetErrorAssetCss(error)}
+    <title>${escapeHtml(heading)}</title>
+    ${getErrorAssetCss(error)}
     <style>
       :root {
         color-scheme: light dark;
-        font-family: ${__VOID_ERROR_PAGE_FONT_STACK};
+        font-family: ${ERROR_PAGE_FONT_STACK};
         background: #f5f5f5;
         color: #171717;
       }
@@ -598,7 +594,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
         place-items: center;
         padding: 24px;
         background: radial-gradient(circle at top, rgba(255, 255, 255, 0.96), rgba(245, 245, 245, 0.96) 52%), linear-gradient(180deg, #fafafa 0%, #f1f1f1 100%);
-        font: 500 16px/1.5 ${__VOID_ERROR_PAGE_FONT_STACK};
+        font: 500 16px/1.5 ${ERROR_PAGE_FONT_STACK};
       }
       main {
         inline-size: min(100%, 560px);
@@ -612,7 +608,7 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
       }
       h1 {
         margin: 0;
-        font: 400 clamp(1.5rem, 1.2rem + 1vw, 2rem) / 1.1 ${__VOID_ERROR_PAGE_FONT_STACK};
+        font: 400 clamp(1.5rem, 1.2rem + 1vw, 2rem) / 1.1 ${ERROR_PAGE_FONT_STACK};
         letter-spacing: -0.03em;
       }
       strong {
@@ -635,29 +631,26 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
   </head>
   <body>
     <main>
-      <h1><strong>${__voidEscapeHtml(prefix)}</strong>${__voidEscapeHtml(title)}</h1>
+      <h1><strong>${escapeHtml(prefix)}</strong>${escapeHtml(title)}</h1>
     </main>
     ${overlay}
   </body>
 </html>`;
   }
 
-  function __voidCreateErrorResponse(
+  function createErrorResponse(
     request: Request,
     status: number,
     title: string,
     error?: unknown,
   ): Response {
-    if (!__voidShouldServeHtmlErrorPage(request)) {
+    if (!shouldServeHtmlErrorPage(request)) {
       return new Response(title, { status });
     }
-    return new Response(
-      request.method === 'HEAD' ? null : __voidRenderErrorPage(status, title, error),
-      {
-        status,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      },
-    );
+    return new Response(request.method === 'HEAD' ? null : renderErrorPage(status, title, error), {
+      status,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    });
   }
 
   async function serveCustomPage(
@@ -672,16 +665,13 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
         const request = new Request(new URL('/' + status + '.html', c.req.url));
         const response: Response = await assets.fetch(request);
         if (response.ok) {
-          const assetCss = __voidGetErrorAssetCss(error);
+          const assetCss = getErrorAssetCss(error);
           const showOverlay =
-            __VOID_DEV && status === 500 && !!error && __voidShouldServeHtmlErrorPage(c.req.raw);
+            dev && status === 500 && !!error && shouldServeHtmlErrorPage(c.req.raw);
           if (assetCss || showOverlay) {
-            const html = __voidInjectErrorAssetCss(await response.text(), assetCss);
+            const html = injectErrorAssetCss(await response.text(), assetCss);
             const body = showOverlay
-              ? __voidInjectDevErrorOverlay(
-                  html,
-                  __voidRenderDevErrorOverlay(status, fallbackText, error),
-                )
+              ? injectDevErrorOverlay(html, renderDevErrorOverlay(status, fallbackText, error))
               : html;
             return new Response(c.req.method === 'HEAD' ? null : body, {
               status,
@@ -697,10 +687,10 @@ export function createErrorRenderer(options: ErrorRendererOptions): ErrorRendere
     } catch {
       /* Asset failure falls back to the built-in page. */
     }
-    return __voidCreateErrorResponse(c.req.raw, status, fallbackText, error);
+    return createErrorResponse(c.req.raw, status, fallbackText, error);
   }
   return {
-    createResponse: __voidCreateErrorResponse,
+    createResponse: createErrorResponse,
     serveCustomPage,
     onError: (error, c) => {
       if (

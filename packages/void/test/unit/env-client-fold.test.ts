@@ -1,7 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vite-plus/test';
+import { describe, expect, it } from 'vite-plus/test';
 import { envClientFoldPlugin } from '../../src/plugin-env-client-fold.ts';
-import { number, string } from '../../src/runtime/env-helpers.ts';
-import { defineEnv } from '../../src/runtime/env-public.ts';
 
 const ROOT = '/project';
 type MessagePayload = string | { message: string };
@@ -9,7 +7,7 @@ type FoldContext = ReturnType<typeof makeContext>;
 type TransformHandler = (this: FoldContext, code: string, id: string) => unknown | Promise<unknown>;
 type ConfigResolvedHandler = (
   this: FoldContext,
-  config: { envPrefix?: string | Array<string>; env?: Record<string, string> },
+  config: { env?: Record<string, string> },
 ) => unknown | Promise<unknown>;
 type HookWithHandler<T> = { handler: T };
 
@@ -56,7 +54,6 @@ function getConfigResolvedHandler(plugin: ReturnType<typeof envClientFoldPlugin>
 }
 
 type RunOpts = {
-  envPrefix?: string | Array<string>;
   env?: Record<string, string>;
   environmentName?: string;
 };
@@ -70,25 +67,14 @@ async function runFold(
   const ctx = makeContext(opts.environmentName ?? 'client');
   const cr = getConfigResolvedHandler(plugin);
   if (cr) {
-    await cr.call(ctx, {
-      envPrefix: opts.envPrefix ?? 'VITE_',
-      env: opts.env ?? {},
-    });
+    await cr.call(ctx, { env: opts.env ?? {} });
   }
   const handler = getTransformHandler(plugin);
   const result = (await handler.call(ctx, code, id)) as TransformResult | undefined | null;
   return { ctx, result };
 }
 
-function resetSchema() {
-  defineEnv({});
-}
-
 describe('envClientFoldPlugin', () => {
-  beforeEach(() => {
-    resetSchema();
-  });
-
   it('folds a VITE_-prefixed key with a .env value into a string literal', async () => {
     const code = `import { env } from "void/env";\nconsole.log(env.VITE_TITLE);\n`;
     const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
@@ -126,28 +112,6 @@ describe('envClientFoldPlugin', () => {
     ].join('\n');
     const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
       env: { VITE_TITLE: 'Hello' },
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('does not fold custom-prefix keys', async () => {
-    const code = `import { env } from "void/env";\nconsole.log(env.PUBLIC_TITLE);\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      envPrefix: 'PUBLIC_',
-      env: { PUBLIC_TITLE: 'Public' },
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('does not fold keys from custom prefix arrays', async () => {
-    const code = [
-      `import { env } from "void/env";`,
-      `const a = env.PUBLIC_A;`,
-      `const b = env.NEXT_PUBLIC_B;`,
-    ].join('\n');
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      envPrefix: ['PUBLIC_', 'NEXT_PUBLIC_'],
-      env: { PUBLIC_A: 'aa', NEXT_PUBLIC_B: 'bb' },
     });
     expect(result).toBeFalsy();
   });
@@ -214,42 +178,9 @@ describe('envClientFoldPlugin', () => {
     expect(result?.code).toContain(`console.log("1", "2")`);
   });
 
-  it('falls back to schema defaults when a key is absent from .env', async () => {
-    defineEnv({ VITE_PORT: number().default(3000) });
-    const code = `import { env } from "void/env";\nconst p = env.VITE_PORT;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: {}, // nothing from .env; schema default should kick in
-    });
-    expect(result?.code).toContain(`"3000"`);
-  });
-
-  it('does not expose server-only schema defaults to the client', async () => {
-    // Server-only default must not leak into fold output even if it has a
-    // default — it still fails the prefix check.
-    defineEnv({ PORT: number().default(3000) });
-    const code = `import { env } from "void/env";\nconst p = env.PORT;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: {},
-    });
-    expect(result).toBeFalsy();
-  });
-
-  it('prefers .env value over schema default', async () => {
-    defineEnv({ VITE_TITLE: string().default('Default') });
-    const code = `import { env } from "void/env";\nconst t = env.VITE_TITLE;\n`;
-    const { result } = await runFold(code, `${ROOT}/src/page.ts`, {
-      env: { VITE_TITLE: 'FromEnv' },
-    });
-    expect(result?.code).toContain(`"FromEnv"`);
-    expect(result!.code).not.toContain('Default');
-  });
-
   it('reports apply: build and enforce: post', () => {
     const plugin = envClientFoldPlugin();
     expect(plugin.apply).toBe('build');
-    // `enforce: 'post'` ensures we run AFTER framework SFC compilers (Svelte,
-    // Vue, Astro) so `.svelte`/`.vue`/`.astro` ids arrive as compiled JS we
-    // can parse and fold.
     expect(plugin.enforce).toBe('post');
   });
 });

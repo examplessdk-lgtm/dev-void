@@ -10,7 +10,6 @@ import type {
   CloudflareWorkerDomain,
   CloudflareWorkerRoute,
   PlatformManagedWorkerTraffic,
-  PlatformTrackedWorkerTraffic,
 } from './platform-cloudflare.ts';
 
 export function platformManagedWorkerTraffic(
@@ -69,18 +68,6 @@ export function platformTrafficAttachmentWorker(
       : null;
   }
   return null;
-}
-
-export function trackedPlatformWorkerTraffic(
-  _manifest: PlatformInstallationManifest,
-  _workers?: ReadonlySet<string>,
-): PlatformTrackedWorkerTraffic {
-  // Cloudflare does not expose a generation precondition for route or custom
-  // domain deletion. Even an immutable record id can be repurposed between a
-  // client-side ownership check and DELETE, so no observed attachment is safe
-  // for unattended cleanup. Disable traffic through the installation-owned KV
-  // gate and retain attachments for explicit dashboard cleanup.
-  return { customDomains: [], routes: [] };
 }
 
 export function recordPlatformWorkerTraffic(

@@ -69,8 +69,7 @@ export function useForm(
   // that returns the current global errors object. This allows useForm to
   // derive errors from the global state, surviving component re-creation
   // during Solid's reactive tree rebuild after router.visit().
-  const globalErrors: Record<string, string> | (() => Record<string, string>) | null =
-    useContext(ErrorsContext);
+  const globalErrors = useContext(ErrorsContext);
   const [data, setDataStore] = createStore<Record<string, unknown>>({ ...defaults });
   const [localErrors, setLocalErrors] = createSignal<Record<string, string>>({});
   const errors = createMemo(() => {
@@ -86,18 +85,19 @@ export function useForm(
     if (typeof globalErrors === 'function') {
       return globalErrors();
     }
-    return globalErrors as unknown as Record<string, string>;
+    return globalErrors;
   });
   const [pending, setPending] = createSignal(false);
   const [error, setError] = createSignal<VoidActionError | null>(null);
   const [wasSuccessful, setWasSuccessful] = createSignal(false);
   const [recentlySuccessful, setRecentlySuccessful] = createSignal(false);
 
-  let defaults_ = { ...defaults };
+  const [defaults_, setDefaults] = createSignal<Record<string, unknown>>({ ...defaults });
   let successTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const hasChanges = createMemo(() => {
-    return Object.keys(defaults_).some((key) => !isEqualFormValue(data[key], defaults_[key]));
+    const current = defaults_();
+    return Object.keys(current).some((key) => !isEqualFormValue(data[key], current[key]));
   });
 
   function setData(field: string, value: unknown) {
@@ -106,10 +106,10 @@ export function useForm(
 
   function reset(...fields: ReadonlyArray<string>) {
     if (fields.length === 0) {
-      setDataStore(reconcile({ ...defaults_ }));
+      setDataStore(reconcile({ ...defaults_() }));
     } else {
       for (const field of fields) {
-        setDataStore(field, defaults_[field]);
+        setDataStore(field, defaults_()[field]);
       }
     }
   }
@@ -167,7 +167,7 @@ export function useForm(
 
       setWasSuccessful(true);
       setRecentlySuccessful(true);
-      defaults_ = { ...data };
+      setDefaults({ ...data });
       successTimeout = setTimeout(() => {
         setRecentlySuccessful(false);
       }, 2000);

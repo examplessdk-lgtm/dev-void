@@ -27,7 +27,7 @@
  */
 
 import { join } from 'pathslash';
-import { glob, globSync } from 'tinyglobby';
+import { globSync } from 'tinyglobby';
 
 const EMAIL_EXTENSIONS = ['ts', 'mts', 'js', 'mjs'];
 
@@ -250,27 +250,9 @@ function parseEmailFiles(files: Array<string>): {
   return { addresses, defaultHandler };
 }
 
-export async function scanEmailHandlers(
-  root: string,
-  emailDir = 'email',
-): Promise<EmailHandlersScan> {
-  const pattern = `*.{${EMAIL_EXTENSIONS.join(',')}}`;
-  const files = await glob(pattern, {
-    cwd: join(root, emailDir),
-    absolute: false,
-  }).catch(() => [] as Array<string>);
-  return parseEmailFiles(files);
-}
-
 export function scanEmailHandlersSync(root: string, emailDir = 'email'): EmailHandlersScan {
   const pattern = `*.{${EMAIL_EXTENSIONS.join(',')}}`;
-  let files: Array<string>;
-  try {
-    files = globSync(pattern, { cwd: join(root, emailDir), absolute: false });
-  } catch {
-    files = [];
-  }
-  return parseEmailFiles(files);
+  return parseEmailFiles(globSync(pattern, { cwd: join(root, emailDir) }));
 }
 
 export function hasEmailHandlers(scan: EmailHandlersScan): boolean {

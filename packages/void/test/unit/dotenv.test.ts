@@ -38,25 +38,14 @@ describe('parseDotenv', () => {
     expect(out).toEqual({ A: '1', B: '2', C: '3' });
   });
 
-  it('skips invalid keys by default', () => {
+  it('skips invalid keys', () => {
     const out = parseDotenv('GOOD=1\n1BAD=2\nALSO-BAD=3\n');
     expect(out).toEqual({ GOOD: '1' });
   });
 
-  it('throws on invalid keys when skipInvalidKeys=false', () => {
-    expect(() => parseDotenv('1BAD=2\n', { skipInvalidKeys: false })).toThrow(
-      /dotenv: Invalid key/,
-    );
-  });
-
-  it('expands by default', () => {
+  it('expands references to earlier keys', () => {
     const out = parseDotenv('BASE=https://example.com\nAPI=${BASE}/v1\n');
     expect(out).toEqual({ BASE: 'https://example.com', API: 'https://example.com/v1' });
-  });
-
-  it('skips expansion when expand=false', () => {
-    const out = parseDotenv('BASE=https://example.com\nAPI=${BASE}/v1\n', { expand: false });
-    expect(out.API).toBe('${BASE}/v1');
   });
 });
 
@@ -74,7 +63,7 @@ describe('parseDotenv — lines Vite and Wrangler both read', () => {
     ['exportE=7', { exportE: '7' }],
     ['export F', {}],
   ])('%j', (line, expected) => {
-    expect(parseDotenv(line, { expand: false })).toEqual(expected);
+    expect(parseDotenv(line)).toEqual(expected);
   });
 
   it('lets a later export line win over an earlier plain line', () => {
@@ -118,7 +107,7 @@ describe('parseDotenv — values read as Vite reads them', () => {
       { DATABASE_URL: 'postgres://db/app' },
     ],
   ])('%s', (_name, content, expected) => {
-    expect(parseDotenv(content, { expand: false })).toEqual(expected);
+    expect(parseDotenv(content)).toEqual(expected);
   });
 });
 
@@ -135,13 +124,6 @@ describe('parseDotenvFile', () => {
       HOST: 'api.example.com',
       URL: 'https://api.example.com',
     });
-  });
-
-  it('reads an export line with an inline comment', () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-dotenv-'));
-    const file = join(root, '.env');
-    writeFileSync(file, 'export DATABASE_URL="postgres://db/app" # local\n');
-    expect(parseDotenvFile(file)).toEqual({ DATABASE_URL: 'postgres://db/app' });
   });
 });
 

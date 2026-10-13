@@ -6,8 +6,25 @@ export type PrerenderResult = {
   failed: Array<{ path: string; error: string }>;
 };
 
-function outputFileForPath(path: string): string {
+export function outputFileForPath(path: string): string {
   return path === '/' ? 'index.html' : `${path.slice(1)}.html`;
+}
+
+export async function readPrerenderPathsResponse(response: Response): Promise<Array<string>> {
+  if (!response.ok) {
+    throw new Error(`prerender: Failed to collect prerender paths. HTTP ${response.status}.`);
+  }
+
+  const payload = (await response.json()) as { paths?: unknown } | null;
+  if (
+    !payload ||
+    !Array.isArray(payload.paths) ||
+    !payload.paths.every((path) => typeof path === 'string')
+  ) {
+    throw new Error('prerender: Failed to collect prerender paths. Response payload is invalid.');
+  }
+
+  return payload.paths;
 }
 
 function pageDataFileForPath(path: string): string {

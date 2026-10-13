@@ -1,11 +1,10 @@
 import type { CloudflareTriggerConfig } from '@void/deploy-cloudflare';
+import { isRecord } from '@void/deploy-core';
 
 type ReadCloudflare = (path: string) => Promise<unknown>;
 
 function record(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return isRecord(value) ? value : null;
 }
 
 function sameStrings(actual: ReadonlyArray<string>, expected: ReadonlyArray<string>): boolean {

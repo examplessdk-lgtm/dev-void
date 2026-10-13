@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
 import type { PlatformInstallationManifest } from '@void/platform';
 import { confirm, log, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
@@ -7,6 +6,7 @@ import { note, pc } from './output.ts';
 import {
   PlatformAccessClient,
   platformAccessIdentityProvider,
+  platformAccessNonce,
   provisionPlatformAccess,
   type PlatformAccessCheckpoint,
   type PlatformAccessProvisionResult,
@@ -570,10 +570,7 @@ export async function preparePlatformAccessSetup(input: {
         version: 1 as const,
         accountId,
         installationId: input.plan.installationId,
-        nonce: createHash('sha256')
-          .update(`void-access:${input.ownershipNonce}`)
-          .digest('hex')
-          .slice(0, 32),
+        nonce: platformAccessNonce(input.ownershipNonce),
         resources: {},
       };
   let loginClientSecret = spec.loginClientSecretEnv

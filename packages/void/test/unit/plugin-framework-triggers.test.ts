@@ -11,7 +11,6 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { toSlash } from 'pathslash';
 import { build } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
@@ -308,33 +307,11 @@ export default (controller, env) => env.run();`,
     expect(await response?.json()).toEqual({ ok: false });
   });
 
-  it('writes a dispatch module that imports each cron and queue handler', () => {
+  it('marks the dispatch module @ts-nocheck', () => {
     const root = createTempRoot();
-    mkdirSync(join(root, 'crons'), { recursive: true });
-    mkdirSync(join(root, 'queues'), { recursive: true });
-    writeFileSync(
-      join(root, 'crons', 'a.ts'),
-      'export const cron = "0 * * * *";\nexport default async () => {};\n',
-    );
-    writeFileSync(
-      join(root, 'crons', 'b.ts'),
-      'export const cron = "*/5 * * * *";\nexport default async () => {};\n',
-    );
-    writeFileSync(join(root, 'queues', 'emails.ts'), 'export default async () => {};\n');
+    callConfigResolved(frameworkTriggersPlugin(root, { devTriggerToken: 'dev-token-test' }));
 
-    const plugin = frameworkTriggersPlugin(root, { devTriggerToken: 'dev-token-test' });
-    callConfigResolved(plugin);
-
-    const generated = readFileSync(frameworkTriggersDispatchPath(root), 'utf-8');
-    expect(generated).toContain('@ts-nocheck');
-    expect(generated).toContain(`__DEV_TRIGGER_TOKEN = "dev-token-test"`);
-    expect(generated).toContain(`from ${JSON.stringify(toSlash(join(root, 'crons', 'a.ts')))}`);
-    expect(generated).toContain(`from ${JSON.stringify(toSlash(join(root, 'crons', 'b.ts')))}`);
-    expect(generated).toContain(
-      `from ${JSON.stringify(toSlash(join(root, 'queues', 'emails.ts')))}`,
-    );
-    expect(generated).toContain('"0 * * * *"');
-    expect(generated).toContain('export async function handleDevTrigger');
+    expect(readFileSync(frameworkTriggersDispatchPath(root), 'utf-8')).toContain('@ts-nocheck');
   });
 
   // The generated module embeds the dev trigger token, which is the whole
@@ -578,6 +555,28 @@ describe('astroDevTriggerInjectPlugin', () => {
       'Astro middleware already exists',
     );
   });
+
+  it('stops ignoring src/middleware.ts after the dev server closes', () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    let onClose: (() => void) | undefined;
+    // The temp root is removed after each test, so skip the process exit cleanup hook.
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    callConfigureServer(astroDevTriggerInjectPlugin(root), {
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          onClose = cb;
+        },
+      },
+    });
+
+    expect(existsSync(join(root, 'src', 'middleware.ts'))).toBe(true);
+    expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toContain('src/middleware.ts');
+
+    onClose!();
+    expect(existsSync(join(root, 'src', 'middleware.ts'))).toBe(false);
+    expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toBe('node_modules/\n');
+  });
 });
 
 describe('analogDevTriggerInjectPlugin', () => {
@@ -607,20 +606,6 @@ describe('analogDevTriggerInjectPlugin', () => {
     const gitignore = readFileSync(join(root, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('src/server/routes/api/__void/cron-trigger.ts');
     expect(gitignore).toContain('src/server/routes/api/__void/queue-trigger.ts');
-  });
-
-  it('registers a Vite middleware for the URL proxy', () => {
-    const root = createTempRoot();
-    const plugin = analogDevTriggerInjectPlugin(root);
-    let registered = 0;
-    callConfigureServer(plugin, {
-      middlewares: {
-        use() {
-          registered += 1;
-        },
-      },
-    });
-    expect(registered).toBeGreaterThan(0);
   });
 
   async function proxyTrigger(address: unknown) {

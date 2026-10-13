@@ -11,18 +11,18 @@ type FenceRender = (
 ) => string | Promise<string>;
 
 /**
- * Adds line number gutter to code blocks.
- * Supports `:line-numbers` / `:no-line-numbers` per-block control and `{=N}` start line.
+ * Adds a line number gutter to code blocks that opt in with `:line-numbers`.
+ * `{=N}` sets the start line.
  * Ported from VitePress.
  */
-export function lineNumberPlugin(md: MarkdownExit, enable = false): void {
+export function lineNumberPlugin(md: MarkdownExit): void {
   const fence = md.renderer.rules.fence as FenceRender;
   md.renderer.rules.fence = async (...args: Parameters<FenceRender>) => {
     const rawCode = await fence(...args);
     const [tokens, idx] = args;
     const info = tokens[idx].info;
 
-    if ((!enable && !/:line-numbers\b/.test(info)) || (enable && /:no-line-numbers\b/.test(info))) {
+    if (!/:line-numbers\b/.test(info)) {
       return rawCode;
     }
 

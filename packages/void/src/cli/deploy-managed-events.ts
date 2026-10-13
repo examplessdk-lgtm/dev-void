@@ -1,4 +1,5 @@
 import { createDeployArtifact, createDeployUploadPayload } from '@void/deploy-core';
+import { getContentType } from '@void/edge';
 import { type SpinnerResult } from '@voidzero-dev/vite-plus-prompts';
 import { type NotFoundHandling, type RoutingConfig } from '../config.ts';
 import { getTokenSource } from './auth.ts';
@@ -12,10 +13,10 @@ import { log, DeployEventError } from './deploy-helpers.ts';
 import { type ApplyDeployEventResult, type StreamDeployResult } from './deploy-types.ts';
 import { uploadAssetsToR2, type DirectR2PutItem } from './direct-r2-upload.ts';
 import { type GitDeployMetadata } from './git-metadata.ts';
-import { lintDestinationSplats, lintDuplicateSources, mergeRoutingRules } from './headers.ts';
+import { lintRoutingPhases, mergeRoutingRules } from './headers.ts';
 import { type CliLogger } from './log-file.ts';
 import { formatCount } from './output.ts';
-import { getAssetContentType, type AssetManifestEntry } from './package.ts';
+import { type AssetManifestEntry } from './package.ts';
 import type { DeployEvent, DeployManifest } from './types.ts';
 
 /**
@@ -223,29 +224,38 @@ export async function streamDeployEvents(
  *   3. R2 PUT failures (4xx, 5xx, network) are surfaced with the asset
  *      path + hash so the user can correlate against the JSONL trace.
  */
-export async function streamDirectR2Deploy(
-  client: PlatformClient,
-  projectId: string,
-  manifest: DeployManifest,
-  assetManifest: Record<string, AssetManifestEntry>,
-  assetFiles: Map<string, Buffer>,
-  needed: Array<string>,
-  gitMetadata: GitDeployMetadata | undefined,
-  preflightUsed: boolean,
-  workerFiles: Map<string, Buffer> | undefined,
-  s: SpinnerResult,
-  cliLog?: CliLogger,
-): Promise<StreamDeployResult> {
+export async function streamDirectR2Deploy({
+  client,
+  projectId,
+  manifest,
+  assetManifest,
+  assetFiles,
+  needed,
+  gitMetadata,
+  preflightUsed,
+  workerFiles,
+  spinner: s,
+  cliLog,
+}: {
+  client: PlatformClient;
+  projectId: string;
+  manifest: DeployManifest;
+  assetManifest: Record<string, AssetManifestEntry>;
+  assetFiles: Map<string, Buffer>;
+  needed: Array<string>;
+  gitMetadata?: GitDeployMetadata;
+  /** Whether preflight let the server reuse any stored asset. */
+  preflightUsed: boolean;
+  workerFiles?: Map<string, Buffer>;
+  spinner: SpinnerResult;
+  cliLog?: CliLogger;
+}): Promise<StreamDeployResult> {
   if (needed.length > 0) {
-    // Memory: drop buffers for assets the server already has so peak
-    // memory tracks `needed`, not the full bundle. Skipped entries become
-    // GC-eligible immediately rather than after `finalizeDeploy` returns.
-    // The pre-prune size is captured for the JSONL log only. We materialize
-    // the key list before deleting so the iterator isn't disturbed mid-walk.
+    // Drop buffers the server already has so peak memory tracks `needed`,
+    // not the full bundle.
     const neededPaths = new Set(needed);
     const preBufferCount = assetFiles.size;
-    const allPaths = Array.from(assetFiles.keys());
-    for (const path of allPaths) {
+    for (const path of assetFiles.keys()) {
       if (!neededPaths.has(path)) {
         assetFiles.delete(path);
       }
@@ -269,9 +279,6 @@ export async function streamDirectR2Deploy(
     for (const path of needed) {
       const entry = assetManifest[path];
       if (!entry) {
-        // Should never fire — `needed` is preflight's projection of
-        // assetManifest. Defensive throw makes the cause obvious if a
-        // future preflight regression slips through.
         throw new Error(`internal: preflight returned ${path} but assetManifest has no entry`);
       }
       if (seenBlake3.has(entry.blake3)) {
@@ -287,7 +294,8 @@ export async function streamDirectR2Deploy(
         blake3: entry.blake3,
         md5: entry.md5,
         size: entry.size,
-        contentType: getAssetContentType(path),
+        // Signed into the presigned PUT; dispatch serves with the same table.
+        contentType: getContentType(path),
       };
     });
 
@@ -315,9 +323,6 @@ export async function streamDirectR2Deploy(
       }
       const body = assetFiles.get(path);
       if (!body) {
-        // Defensive — `uniqueNeeded` came from `assetManifest`, which was
-        // constructed from `assetFiles`. If this fires, the upstream
-        // collection diverged from preflight.
         throw new Error(
           `internal: asset ${path} declared in manifest but missing from buffer cache`,
         );
@@ -403,33 +408,18 @@ export function warnUnpublishedRouting(result: StreamDeployResult): void {
   );
 }
 
-/**
- * Merge `_headers` / `_redirects` in `dir` with `void.config.ts` routing rules
- * for a managed deploy, then lint each phase independently: duplicates across
- * phases (redirects vs fallbacks) don't shadow each other, only duplicates
- * within a phase do. Destinations with a literal `*` are flagged because only
- * `:name` tokens are substituted at dispatch time.
- */
+/** Merge `_headers` / `_redirects` in `dir` with `void.config.ts` routing rules, then lint them. */
 export function mergeAndLintRoutingRules(
   dir: string,
   routing: RoutingConfig | undefined,
 ): ReturnType<typeof mergeRoutingRules> {
   const merged = mergeRoutingRules({ dir, routing });
   warnRedundantForceOn3xx(merged.redundantForceOn3xx);
-  lintDuplicateSources(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDuplicateSources(merged.fallbackRules, 'fallbacks (post-asset)');
-  lintDestinationSplats(merged.redirectRules, 'redirects/rewrites (pre-asset)');
-  lintDestinationSplats(merged.fallbackRules, 'fallbacks (post-asset)');
+  lintRoutingPhases(merged);
   return merged;
 }
 
-/**
- * Emit a single aggregated lint warning when a `_redirects` file contains
- * one or more `!` force suffixes on 3xx entries (e.g. `301!`, `302!`).
- * The `!` is a no-op on redirects — we parse them as if the `!` weren't
- * there — but we nudge the user to clean up for clarity. Silenced when
- * `count === 0`.
- */
+/** Warn once about `!` suffixes on 3xx `_redirects` entries, which are no-ops. */
 export function warnRedundantForceOn3xx(count: number): void {
   if (count === 0) {
     return;
@@ -440,21 +430,9 @@ export function warnRedundantForceOn3xx(count: number): void {
 }
 
 /**
- * Class B/C framework deploys pin `not_found_handling: 'none'`, so
- * `routing.notFound` does nothing there — say so instead of dropping it
- * silently.
- *
- * These presets emit no `run_worker_first`, so Cloudflare's default applies and
- * the asset layer answers before the framework worker: real prerendered files
- * already win. `not_found_handling` only governs what the framework's own
- * `env.ASSETS.fetch()` delegation returns, which is framework-internal
- * plumbing. Honoring the override there would be a behavior change, not a fix —
- * `single-page-application` makes an unmatched delegation return
- * `dist/client/index.html` at **200** (Astro/SvelteKit hybrid builds commonly
- * prerender the root, so real 404s silently become the home page), and
- * `404-page` steals the 404 from the framework's own error route.
- *
- * Silenced when unset.
+ * Class B/C framework deploys pin `not_found_handling: 'none'`, so warn when
+ * `routing.notFound` is set. Honoring it would turn framework 404s into a 200
+ * `index.html` or take the 404 from the framework's own error route.
  */
 export function warnIgnoredNotFoundForFramework(
   notFound: NotFoundHandling | undefined,

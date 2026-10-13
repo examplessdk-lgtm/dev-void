@@ -2,20 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vite-plus/test';
 
-/**
- * Regression guard for the `void/env` package export map.
- *
- * Background: `@cloudflare/vite-plugin` sets the workerd environment's
- * resolve conditions to `["workerd", "worker", "module", "browser"]`. Node
- * export-map resolution walks keys in declaration order, so if `browser`
- * appears before a workerd-specific branch the worker bundle silently
- * picks the client-only stub and throws `readClientKey` at request time
- * for any non-VITE_ key.
- *
- * These tests exercise the raw export map against the condition sets we
- * know real runtimes use, so a future edit that reintroduces the ordering
- * bug fails here instead of in a user's prod deploy.
- */
+// @cloudflare/vite-plugin resolves workerd with ["workerd","worker","module","browser"];
+// export keys match in order, so the worker branches must stay before "browser".
 
 type ExportEntry = string | { [condition: string]: ExportEntry };
 

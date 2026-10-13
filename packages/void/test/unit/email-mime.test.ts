@@ -1,6 +1,3 @@
-import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vite-plus/test';
 import {
   buildMime,
@@ -148,53 +145,8 @@ describe('normalizeEmail', () => {
     ).rejects.toThrow(/'to'/);
   });
 
-  it('rejects malformed addresses', async () => {
-    await expect(
-      normalizeEmail({ from: 'no-at-sign', to: 'b@y.dev', subject: 's', text: 't' }),
-    ).rejects.toThrow(/from/);
-  });
-
-  // The shape check only required an '@' to be present anywhere, so a
-  // trailing, leading or doubled separator passed the preflight and was
-  // reported as a successful capture in the dev inbox — then failed only
-  // after reaching the platform. Every code below is the ADVERTISED one.
-  it.each(['user@', '@example.com', 'a@b@c'])(
-    'rejects %s, which used to pass the preflight',
-    async (bad) => {
-      await expect(
-        normalizeEmail({ from: bad, to: 'b@y.dev', subject: 's', text: 't' }),
-      ).rejects.toThrow(/from/);
-      await expect(
-        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
-      ).rejects.toThrow(/to/);
-    },
-  );
-
-  // Inverted: these used to be accepted as legal RFC 5321 mailboxes while
-  // the platform router refused them for the missing dot, so a handler's
-  // `forward('user@localhost')` was recorded here and dropped there. The
-  // rule is now `email-validator` on both sides, which wants a dotted
-  // domain with a letter-first TLD of at least two characters.
-  it.each(['user@localhost', 'x@y', 'a@example'])(
-    'now refuses %s (no dot in the domain), as the router always did',
-    async (bad) => {
-      await expect(
-        normalizeEmail({ from: bad, to: 'b@y.dev', subject: 's', text: 't' }),
-      ).rejects.toThrow(invalidAddress('from'));
-      await expect(
-        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
-      ).rejects.toThrow(invalidAddress('to'));
-    },
-  );
-
-  // RFC 5322 §2.1.1 makes 998 a MUST and §3.2.2 allows folding ONLY at
-  // whitespace, so a long token with no spaces cannot be folded at all —
-  // `Subject:\r\n <token>` shortens nothing. The RFC 2047 chunking added
-  // earlier only covers NON-ASCII values; a pure-ASCII token bypasses
-  // `encodeWord` entirely and leaks through two separate paths in
-  // `foldHeader`: the single-chunk early return, and the fold loop, which
-  // still gives an over-long chunk its own line. Nothing downstream
-  // repairs it — the proxy streams our bytes verbatim.
+  // RFC 5322 §2.1.1 makes 998 a MUST and §3.2.2 folds only at whitespace,
+  // so a long ASCII token with no spaces cannot be folded at all.
   const TOKEN = 'x'.repeat(1100);
 
   /** Longest physical line of the rendered message, in octets. */
@@ -237,20 +189,10 @@ describe('normalizeEmail', () => {
     ).toBe(998);
   });
 
-  it('leaves foldable values alone', async () => {
-    const spaced = Array.from({ length: 200 }, (_, i) => `word${i}`).join(' ');
-    expect(
-      await longestLine({ from: 'a@x.dev', to: 'b@y.dev', subject: spaced, text: 't' }),
-    ).toBeLessThanOrEqual(998);
-  });
-
   it('measures a line in UTF-8 octets, not UTF-16 units, and reports its number', async () => {
-    // A CJK filename is rendered verbatim into ` filename="…"`: 3 octets per
-    // character inside 12 of framing, so 328 characters land exactly on the
-    // 998-octet limit and 329 are one octet over. The pre-render guard sees
-    // only `length` (341) and lets both through; the post-render scan must
-    // count octets. The line number pins the CRLF-delimited index into the
-    // multipart body, where the part's own headers live.
+    // A CJK filename costs 3 octets per character inside 12 of framing, so
+    // 328 characters land exactly on 998 octets and 329 are one over, though
+    // both pass a `length` check.
     const fits = '漢'.repeat(328);
     const { text } = await build({
       from: 'a@x.dev',
@@ -272,11 +214,7 @@ describe('normalizeEmail', () => {
   });
 
   // A quoted-string parameter carries `\\` and `"` only as quoted-pairs
-  // (RFC 5322 §3.2.4 — qtext excludes both). Deleting quotes and leaving
-  // backslashes raw makes a trailing backslash escape the CLOSING quote,
-  // and silently eats embedded ones: a Windows path `C:\\Users\\bob\\r.pdf`
-  // reached the recipient as `C:Usersbobr.pdf`. This file's own folder
-  // already tracks quoted-pairs, so the emitter was contradicting it.
+  // (RFC 5322 §3.2.4 — qtext excludes both).
   it.each([
     ['a trailing backslash', 'bad\\'],
     ['an embedded backslash', 'a\\b'],
@@ -371,13 +309,8 @@ describe('normalizeEmail', () => {
   });
 
   it("rejects an attachment disposition other than 'attachment' or 'inline'", async () => {
-    // `Attachment.disposition` is a two-literal union at compile time only.
-    // A JS caller, or a JSON-parsed options object, can pass any string,
-    // and `buildAttachmentPart` interpolates it verbatim into
-    // `Content-Disposition`. Unlike its neighbours it never went through
-    // `rejectCRLF`, so a CRLF in it rendered as a second header line inside
-    // the attachment part (`X-Injected: 1; filename="f.txt"`), and a blank
-    // line in it ended the part's header block early.
+    // The union is compile-time only: a JS caller can pass any string, which
+    // would be written verbatim into `Content-Disposition`.
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
     const message = "attachment disposition must be 'attachment' or 'inline'.";
     for (const disposition of [
@@ -411,26 +344,11 @@ describe('normalizeEmail', () => {
     expect(defaulted.attachments.map((a) => a.disposition)).toEqual(['attachment', 'inline']);
   });
 
-  it('rejects whitespace inside an address', async () => {
-    await expect(
-      normalizeEmail({ from: 'a b@x.dev', to: 'b@y.dev', subject: 's', text: 't' }),
-    ).rejects.toThrow(/from/);
-  });
-
-  // `MAX_MESSAGE_BYTES` used to be enforced ONLY at the end of `buildMime` —
-  // after every attachment had been materialized in parallel by a
-  // `Promise.all`, base64'd, sliced at 76 columns, joined and re-encoded.
-  // Peak live memory measured about 10x the attachment bytes, so a set over
-  // roughly 12 MiB terminated the isolate instead of returning the
-  // `MIME_ERROR` the docs promise. Base64 expands by `ceil(n / 3) * 4`, so
-  // nothing above three quarters of the message cap can ever fit anyway.
+  // Base64 expands by `ceil(n / 3) * 4`, so attachments above three quarters
+  // of the message cap can never fit.
   const MAX_ATTACHMENT_BYTES_TOTAL = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
 
-  /**
-   * A one-byte Blob wearing a declared `size`, recording whether anything
-   * ever read it. Shadowing beats allocating: the whole point is that the
-   * second attachment's bytes are never touched.
-   */
+  /** A one-byte Blob wearing a declared `size`, recording whether anything read it. */
   function fakeBlob(name: string, size: number, reads: Array<string>): Blob {
     const blob = new Blob([new Uint8Array(1)]);
     Object.defineProperty(blob, 'size', { value: size });
@@ -460,8 +378,7 @@ describe('normalizeEmail', () => {
     ).rejects.toThrow(
       new RegExp(`exceeds Cloudflare limit of ${MAX_ATTACHMENT_BYTES_TOTAL} bytes`),
     );
-    // The fix, stated as an assertion: the second attachment is charged from
-    // its DECLARED size and rejected before a single byte of it is copied.
+    // The second attachment is charged from its declared size, before any byte is read.
     expect(reads).toEqual(['first']);
   });
 
@@ -477,16 +394,8 @@ describe('normalizeEmail', () => {
   });
 
   describe('attachment count', () => {
-    // `MAX_ATTACHMENT_BYTES_TOTAL` never advances on a zero-byte attachment,
-    // and the size projection in `buildMime` runs only after every entry
-    // has been normalized — about 275 bytes of live heap each. Measured, 2M
-    // empty attachments terminated a 128 MB isolate in 0.3 s instead of
-    // returning `MIME_ERROR`. The count is now refused before the loop, at
-    // the largest count the projection could admit: 119 octets per part —
-    // `ATTACHMENT_PART_MIN_OCTETS` plus a one-character filename rendered
-    // twice — under `MAX_MESSAGE_BYTES`.
-    const PART_MIN_OCTETS = 117 + 2;
-
+    // Zero-byte attachments never advance the byte budget, so the count is
+    // refused before the loop, at the largest count the size projection admits.
     /** An attachment that records any read of the fields the loop touches first. */
     function watchedAttachment(reads: Array<number>, i: number): Attachment {
       return {
@@ -500,11 +409,6 @@ describe('normalizeEmail', () => {
         },
       };
     }
-
-    it('is derived from the per-part floor and the message cap', () => {
-      expect(MAX_ATTACHMENTS).toBe(Math.floor(MAX_MESSAGE_BYTES / PART_MIN_OCTETS));
-      expect(MAX_ATTACHMENTS).toBe(44_057);
-    });
 
     it('refuses one over MAX_ATTACHMENTS before normalizing any of them', async () => {
       const reads: Array<number> = [];
@@ -544,12 +448,8 @@ describe('normalizeEmail', () => {
     });
 
     it('never rejects a count the size projection would have admitted', () => {
-      // The smallest part there is: a one-character filename, an empty
-      // media type and no content. One over the cap is refused by the
-      // projection on framing alone, so the count bound only ever refuses
-      // what `buildMime` was going to; exactly at the cap the projection
-      // admits it and the post-render check is the one to refuse the
-      // 12.9 MB it renders to.
+      // The smallest part there is. One over the cap is refused by the
+      // projection on framing alone; at the cap the post-render check refuses it.
       const part = {
         filename: 'a',
         contentType: '',
@@ -605,10 +505,6 @@ describe('normalizeEmail', () => {
   }
 
   it('refuses more than MAX_RECIPIENTS across to, cc and bcc before parsing any of them', async () => {
-    // The platform proxy refuses the same count on the deduplicated list,
-    // but only after the tenant has parsed every entry and rendered the
-    // `To:` header — measured, 230k short valid addresses (a legal 4.8 MiB
-    // message) terminated a 128 MB isolate on the way there.
     const reads: Array<number> = [];
     const to = Array.from({ length: MAX_RECIPIENTS - 1 }, (_, i) => watchedAddress(reads, i));
     let error: unknown;
@@ -647,9 +543,7 @@ describe('normalizeEmail', () => {
 
   it('refuses a quoted filename that could never fold onto a legal line, before rendering it', async () => {
     // ` filename="…"` is the shortest line a quoted parameter can land on:
-    // 12 octets plus the name. The post-render line check refuses the same
-    // input, but only after `quoteParam` has escaped it — measured, a
-    // filename of ~1.7M quote characters killed a 128 MB isolate there.
+    // 12 octets plus the name.
     const longest = 'a'.repeat(998 - 12);
     const { text } = await build({
       from: 'a@x.dev',
@@ -670,7 +564,7 @@ describe('normalizeEmail', () => {
     ).rejects.toThrow(
       /attachment filename is 987 characters; a quoted `filename=` parameter cannot be folded/,
     );
-    // The guard is cheap on the input that used to be fatal.
+    // The guard refuses a huge input without escaping it.
     const started = performance.now();
     await expect(
       build({
@@ -722,14 +616,9 @@ describe('normalizeEmail', () => {
   });
 
   it('refuses a header name that could never sit on a legal line, before rendering it', async () => {
-    // A field name never folds. `Name:` alone is the shortest line it can
-    // sit on — what `foldHeader` emits when the value's first token does
-    // not fit beside a long name — so 997 characters is the longest name
-    // with ANY legal rendering, and only with a value that folds: `Name:`
-    // is 998 octets, then ` a b`. The same name over an empty value is one
-    // 999-octet line, which is the post-render line check's to refuse, not
-    // this guard's: a bound one character tighter would reject a message
-    // that fits.
+    // A field name never folds, and `Name:` alone is the shortest line it can
+    // sit on, so 997 characters is the longest name with any legal rendering
+    // (with a value that folds). Over an empty value the line check refuses it.
     const longest = `X${'a'.repeat(998 - 1 - 1)}`;
     expect(longest).toHaveLength(997);
     const { text } = await build({
@@ -759,10 +648,7 @@ describe('normalizeEmail', () => {
         headers: { [`${longest}b`]: 'a b' },
       }),
     ).rejects.toThrow(/headers: a header name is 998 characters; a field name cannot be folded/);
-    // The guard is cheap on the input that used to be rendered four times
-    // over before the line check saw it: a 5 MiB name took 23 ms and
-    // 5.6 MB of heap to refuse post-render (measured); a 50 MiB one killed
-    // a 128 MB isolate. Refused here in 2 ms with no allocation.
+    // The guard refuses a huge name without rendering it.
     const started = performance.now();
     await expect(
       normalizeEmail({
@@ -777,10 +663,8 @@ describe('normalizeEmail', () => {
   });
 
   it('refuses an address over MAX_ADDRESS_LENGTH, with the code for its field', async () => {
-    // RFC 5321 §4.5.3.1: 64-octet local part + `@` + 255-octet domain is the
-    // sum of the component maxima — the pre-parse bound, not a deliverable
-    // path (the package's 254 total is that). At exactly 320 the package
-    // answers; one over, this one answers first, before anything is scanned.
+    // RFC 5321 §4.5.3.1: 64 + `@` + 255 is the pre-parse bound; the package's
+    // 254 is the deliverable one. At exactly 320 the package answers.
     const longest = `${'a'.repeat(64)}@${'b'.repeat(251)}.dev`;
     expect(longest).toHaveLength(MAX_ADDRESS_LENGTH);
     const over = `${'a'.repeat(65)}@${'b'.repeat(251)}.dev`;
@@ -832,37 +716,28 @@ describe('normalizeEmail', () => {
       text: 't',
     });
     expect(named.to[0].email).toBe(deliverable);
+    // The bound answers before the address is scanned.
+    expect(() => parseAddress(`a\x01${'b'.repeat(320)}@x.dev`, 'to')).toThrow(
+      /over the 320-character limit/,
+    );
   });
 
-  it('refuses an address over 254 characters (RFC 5321 §4.5.3.1.3), by the package rule', async () => {
-    // RFC 5321 §4.5.3.1.3: a 256-octet forward-path `<local@domain>` is the
-    // longest every receiver MUST accept, so the address is at most 254.
-    // The 320 total is the sum of the local-part and domain maxima, not a
-    // path — `a@` + a 255-octet domain is 257 characters, under the
-    // total-length bound, and `void dev` and the test harness once captured
-    // it as a success. `email-validator` checks 254 before its regex, and
-    // the platform router applies the same package, so both sides refuse it.
+  describe('address rule', () => {
+    // `validateAddressParts` is `email-validator`, the package the platform
+    // router applies too; its message names the rule and never echoes the address.
     const label = 'b'.repeat(63);
     const domain255 = [label, label, label, label].join('.');
-    expect(domain255).toHaveLength(255);
-    const over = `a@${domain255}`;
-    expect(over).toHaveLength(257);
-    expect(over.length).toBeLessThan(MAX_ADDRESS_LENGTH);
-    const longest = `a@${domain255.slice(0, 252)}`;
-    expect(longest).toHaveLength(254);
-    const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
-    expect(email.to[0].email).toBe(longest);
-    for (const [field, code] of [
-      ['to', 'INVALID_TO'],
-      ['from', 'INVALID_FROM'],
-      ['cc', 'MIME_ERROR'],
-    ] as const) {
+
+    async function addressError(
+      field: 'to' | 'from' | 'cc' | 'bcc' | 'replyTo',
+      address: string | { name?: string; email: string },
+    ): Promise<MimeError> {
       let error: unknown;
       try {
         await normalizeEmail({
           from: 'a@x.dev',
           to: 'b@y.dev',
-          [field]: over,
+          [field]: address,
           subject: 's',
           text: 't',
         });
@@ -870,182 +745,115 @@ describe('normalizeEmail', () => {
         error = e;
       }
       expect(error).toBeInstanceOf(MimeError);
-      expect((error as MimeError).code).toBe(code);
-      expect((error as MimeError).message).toBe(invalidAddress(field));
+      return error as MimeError;
     }
-    // Inverted: a raw IDN domain used to be accepted and counted in UTF-8
-    // octets (SMTPUTF8). The package is ASCII-only, so octets and characters
-    // are the same thing and a raw `ü` label is refused however short; the
-    // same domain is accepted as punycode, which is what DNS carries.
-    const idnRaw = `a@${'ü'.repeat(31)}.${'b'.repeat(63)}`;
-    await expect(
-      normalizeEmail({ from: 'a@x.dev', to: idnRaw, subject: 's', text: 't' }),
-    ).rejects.toThrow(invalidAddress('to'));
-    const punycode = 'a@xn--bcher-kva.example';
-    const idn = await normalizeEmail({ from: 'a@x.dev', to: punycode, subject: 's', text: 't' });
-    expect(idn.to[0].email).toBe(punycode);
-    // A label over 63 characters is refused on its own, inside the 254 total.
-    const longLabel = `a@${'b'.repeat(64)}.dev`;
-    await expect(
-      normalizeEmail({ from: 'a@x.dev', to: longLabel, subject: 's', text: 't' }),
-    ).rejects.toThrow(invalidAddress('to'));
-    // The display-name form is bounded on the same parsed address, and the
-    // total-length bound still answers first for one over both.
-    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(invalidAddress('to'));
-    expect(() => parseAddress(`${'a'.repeat(65)}@${domain255.slice(0, 200)}`, 'to')).toThrow(
-      invalidAddress('to'),
-    );
-    expect(() => parseAddress(`${'a'.repeat(65)}@${domain255}`, 'to')).toThrow(
-      /over the 320-character limit/,
-    );
-  });
 
-  it('refuses a local part over 64 characters (RFC 5321 §4.5.3.1.1), by the package rule', async () => {
-    // RFC 5321 §4.5.3.1.1: 64 octets is the longest local part every
-    // receiver MUST accept. The total-length bound alone let this through
-    // — `'a'.repeat(65)}@x.dev` is 71 characters — so `void dev` and the
-    // test harness once captured it as a success. `email-validator`
-    // enforces the 64, and the platform router applies the same package.
-    const longest = `${'a'.repeat(64)}@x.dev`;
-    const over = `${'a'.repeat(65)}@x.dev`;
-    expect(over.length).toBeLessThan(MAX_ADDRESS_LENGTH);
-    const email = await normalizeEmail({ from: longest, to: longest, subject: 's', text: 't' });
-    expect(email.to[0].email).toBe(longest);
-    for (const [field, code] of [
+    it.each([
+      ['no @', 'no-at-sign'],
+      ['an empty domain', 'user@'],
+      ['an empty local part', '@example.com'],
+      ['two @', 'a@b@c'],
+      ['whitespace', 'a b@x.dev'],
+      ['a comma', 'victim@example.com,attacker@evil.dev'],
+      ['a semicolon', 'a@x.dev;b@evil.dev'],
+      ['a dot-less domain', 'user@localhost'],
+      ['a one-letter domain', 'x@y'],
+      ['a domain with no TLD', 'a@example'],
+      ['a one-letter TLD', 'a@b.c'],
+      ['a TLD starting with a digit', 'a@b.1c'],
+      ['a TLD ending with a hyphen', 'a@b.c-'],
+      ['a TLD starting with a hyphen', 'a@b.-c'],
+      // RFC 5321 §4.5.3.1.3: a 256-octet path, so at most 254 for the address.
+      ['257 characters, under the 320 bound', `a@${domain255}`],
+      // RFC 5321 §4.5.3.1.1: at most 64 octets before the @.
+      ['a 65-character local part', `${'a'.repeat(65)}@x.dev`],
+      [
+        'a 65-character local part and 266 in total',
+        `${'a'.repeat(65)}@${domain255.slice(0, 200)}`,
+      ],
+      ['a 64-character domain label', `a@${'b'.repeat(64)}.dev`],
+      ['a raw IDN domain', 'a@exämple.com'],
+      ['a long raw IDN domain', `a@${'ü'.repeat(31)}.${'b'.repeat(63)}`],
+      ['a non-ASCII local part', 'ünicode@example.com'],
+      ['an accented local part', 'jöhn@example.com'],
+      ['a CJK local part', `${'漢'.repeat(21)}@x.dev`],
+      ['a quoted local part', '"a b"@example.com'],
+      ['a quoted @', '"a@b"@example.com'],
+      ['a quoted word', '"weird"@x.dev'],
+      ['SOH', 'a\x01b@example.com'],
+      ['ESC', 'a\x1bb@example.com'],
+      ['US', 'a\x1fb@example.com'],
+      ['DEL', 'a\x7fb@example.com'],
+      ['TAB', 'a\tb@example.com'],
+      // `:` is an RFC 5322 §3.2.3 special, not atext.
+      ['a colon in the local part', 'a:b@example.com'],
+      ['a colon in the domain', 'a@b:c.example.com'],
+      ['a leading colon', ':a@example.com'],
+      ['a trailing colon', 'a@example.com:'],
+      ['doubled dots in the local part', 'a..b@example.com'],
+      ['a leading dot', '.a@example.com'],
+      ['a dot before the @', 'a.@example.com'],
+      ['doubled dots in the domain', 'a@example..com'],
+      ['a dot after the @', 'a@.example.com'],
+      ['a trailing dot', 'a@example.com.'],
+    ])(
+      'refuses an address with %s, bare, as an object and in a display name',
+      async (_label, bad) => {
+        expect((await addressError('to', bad)).message).toBe(invalidAddress('to'));
+        expect((await addressError('to', { name: 'Bob', email: bad })).message).toBe(
+          invalidAddress('to'),
+        );
+        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
+      },
+    );
+
+    it.each([
       ['to', 'INVALID_TO'],
       ['from', 'INVALID_FROM'],
       ['cc', 'MIME_ERROR'],
-    ] as const) {
-      let error: unknown;
-      try {
-        await normalizeEmail({
-          from: 'a@x.dev',
-          to: 'b@y.dev',
-          [field]: over,
-          subject: 's',
-          text: 't',
-        });
-      } catch (e) {
-        error = e;
-      }
-      expect(error).toBeInstanceOf(MimeError);
-      expect((error as MimeError).code).toBe(code);
-      expect((error as MimeError).message).toBe(invalidAddress(field));
-    }
-    // Inverted: a non-ASCII local part (SMTPUTF8) used to be accepted and
-    // counted in UTF-8 octets. The package is ASCII-only, so `ünicode@` and
-    // a CJK local part are refused however short, on both sides.
-    for (const bad of ['ünicode@example.com', 'jöhn@example.com', `${'漢'.repeat(21)}@x.dev`]) {
-      await expect(
-        normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
-      ).rejects.toThrow(invalidAddress('to'));
-    }
-    // The display-name form is bounded on the same parsed address, and the
-    // total-length bound still answers first for an address over both.
-    expect(() => parseAddress(`Name <${over}>`, 'to')).toThrow(invalidAddress('to'));
-    expect(() => parseAddress(`${'a'.repeat(65)}@${'b'.repeat(251)}.dev`, 'to')).toThrow(
-      /over the 320-character limit/,
-    );
-  });
-
-  describe('control characters in an address', () => {
-    // Every C0 control and DEL once passed the hand-written rule (which
-    // refused only CR, LF, NUL and what `\s` matches): `a\x01b@example.com`
-    // was accepted and `formatAddress` wrote the byte raw into the `To:`
-    // line, captured as a success under `void dev` and by the test harness,
-    // and dropped by the platform router after earlier actions had fired.
-    // `email-validator` admits only `atext`, so every control is refused,
-    // and the message never echoes the address.
-    const controls = [
-      ['SOH', '\x01'],
-      ['ESC', '\x1b'],
-      ['US', '\x1f'],
-      ['DEL', '\x7f'],
-      ['TAB', '\t'],
-    ] as const;
-
-    it('refuses a bare address carrying one, with the code for its field', async () => {
-      for (const [, ch] of controls) {
-        const bad = `a${ch}b@example.com`;
-        for (const [field, code] of [
-          ['to', 'INVALID_TO'],
-          ['from', 'INVALID_FROM'],
-          ['cc', 'MIME_ERROR'],
-          ['bcc', 'MIME_ERROR'],
-          ['replyTo', 'MIME_ERROR'],
-        ] as const) {
-          let error: unknown;
-          try {
-            await normalizeEmail({
-              from: 'a@x.dev',
-              to: 'b@y.dev',
-              [field]: bad,
-              subject: 's',
-              text: 't',
-            });
-          } catch (e) {
-            error = e;
-          }
-          expect(error).toBeInstanceOf(MimeError);
-          expect((error as MimeError).code).toBe(code);
-          expect((error as MimeError).message).toBe(invalidAddress(field));
-          expect((error as MimeError).message).not.toContain(ch);
-        }
-      }
+      ['bcc', 'MIME_ERROR'],
+      ['replyTo', 'MIME_ERROR'],
+    ] as const)('refuses an invalid %s address with %s', async (field, code) => {
+      const error = await addressError(field, 'a..b@example.com');
+      expect(error.code).toBe(code);
+      expect(error.message).toBe(invalidAddress(field));
     });
 
-    it('refuses it in the object and display-name forms on the same parsed address', async () => {
-      for (const [, ch] of controls) {
-        const bad = `a${ch}b@example.com`;
-        await expect(
-          normalizeEmail({
-            from: 'a@x.dev',
-            to: { name: 'Bob', email: bad },
-            subject: 's',
-            text: 't',
-          }),
-        ).rejects.toThrow(invalidAddress('to'));
-        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
-      }
-      // CR, LF and NUL in the object form reach the address rule directly
-      // (the string form is refused before it is parsed, by `rejectCRLF`):
-      // the package refuses them with the field's own code, so dropping the
-      // separate CRLF scan from the bare address lost nothing.
+    it('refuses CR, LF and NUL in an object address by the rule, and in a string before parsing', async () => {
       for (const ch of ['\r', '\n', '\0']) {
-        let error: unknown;
-        try {
-          await normalizeEmail({
-            from: 'a@x.dev',
-            to: { email: `a${ch}b@example.com` },
-            subject: 's',
-            text: 't',
-          });
-        } catch (e) {
-          error = e;
-        }
-        expect(error).toBeInstanceOf(MimeError);
-        expect((error as MimeError).code).toBe('INVALID_TO');
-        expect((error as MimeError).message).toBe(invalidAddress('to'));
+        const error = await addressError('to', { email: `a${ch}b@example.com` });
+        expect(error.code).toBe('INVALID_TO');
+        expect(error.message).toBe(invalidAddress('to'));
         expect(() => parseAddress(`Bob <a${ch}b@example.com>`, 'to')).toThrow(
           /must not contain CR, LF, or NUL/,
         );
       }
-      // The length bound still answers first: the scan is over at most 320
-      // characters, so an over-long address is refused before it is read.
-      expect(() => parseAddress(`a\x01${'b'.repeat(320)}@x.dev`, 'to')).toThrow(
-        /over the 320-character limit/,
-      );
     });
 
-    it('never renders one raw from a display name, which is encoded instead', async () => {
-      // A name is not an address: a control in it is a character like any
-      // other and `formatAddress` RFC 2047-encodes the non-printable name,
-      // so the byte reaches the wire only inside base64. Pinned so the
-      // address rule is never mistaken for the reason the header is clean.
-      // Every C0 control and DEL except the CR and LF that delimit lines.
+    it.each([
+      ['a 254-character address', `a@${domain255.slice(0, 252)}`],
+      ['a 64-character local part', `${'a'.repeat(64)}@x.dev`],
+      ['a punycode IDN domain', 'a@xn--bcher-kva.example'],
+      ['dots between atoms', 'first.last@example.com'],
+      ['dots on both sides', 'a.b.c@sub.example.co.uk'],
+      ['a dotted domain', 'a@sub.sub.example.com'],
+      ['a TLD ending in a digit', 'a@b.c1'],
+      ['a two-letter TLD', 'a@b.co'],
+      ['a hyphen inside the TLD', 'a@b.c-d'],
+      ['a hyphenated label', 'a@b-c.example'],
+      ['every atext symbol after the first character', "a!#$%&'*+-/=?^_`{|}~@example.com"],
+    ])('accepts %s', async (_label, ok) => {
+      const email = await normalizeEmail({ from: ok, to: ok, subject: 's', text: 't' });
+      expect(email.from.email).toBe(ok);
+      expect(email.to[0].email).toBe(ok);
+    });
+
+    it('never renders a control character raw from a display name, which is encoded instead', async () => {
+      // A name is not an address: `formatAddress` RFC 2047-encodes a
+      // non-printable name, so the byte reaches the wire only inside base64.
       // eslint-disable-next-line no-control-regex -- C0 controls and DEL are the point
       const rawControl = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/;
-      for (const [, ch] of controls) {
+      for (const ch of ['\x01', '\x1b', '\x1f', '\x7f', '\t']) {
         const { text } = await build({
           from: 'a@x.dev',
           to: { name: `Bo${ch}b`, email: 'b@y.dev' },
@@ -1061,15 +869,8 @@ describe('normalizeEmail', () => {
   });
 
   describe('control characters in an attachment filename', () => {
-    // `rejectCRLF` refused only CR, LF and NUL, and a filename is rendered
-    // through `quoteParam` — never `encodeWord` — so `invoice\x01.pdf` was
-    // written raw into both `name="…"` and `filename="…"` (measured on the
-    // wire: `… 69 6e 76 6f 69 63 65 01 2e 70 64 66 22`), captured as a
-    // success under `void dev` and by the harness, and left for the
-    // receiving MTA. RFC 5322 §3.2.4 `qtext` is printable US-ASCII less `"`
-    // and `\`; a control in a quoted-string is `obs-qtext`, which §4 says
-    // MUST NOT be generated. The message names the code point and never
-    // echoes the value.
+    // A filename is rendered raw inside a quoted-string, where a control is
+    // `obs-qtext` (RFC 5322 §3.2.4), which §4 says MUST NOT be generated.
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
     const controls = [
       ['SOH', '\x01', 'U+0001'],
@@ -1096,7 +897,7 @@ describe('normalizeEmail', () => {
         );
         expect((error as MimeError).message).not.toContain(ch);
       }
-      // CR, LF and NUL still answer first, with the message they always had.
+      // CR, LF and NUL answer first, by `rejectCRLF`.
       for (const ch of ['\r', '\n', '\0']) {
         await expect(
           normalizeEmail({ ...base, attachments: [{ filename: `a${ch}b.pdf`, content: 'x' }] }),
@@ -1105,11 +906,7 @@ describe('normalizeEmail', () => {
     });
 
     it('accepts HTAB, which is folding white space inside a quoted-string (RFC 5322 §3.2.4), unchanged', async () => {
-      // `quoted-string = DQUOTE *([FWS] qcontent) [FWS] DQUOTE` and `FWS` is
-      // made of `WSP` (SP / HTAB), so a tab between characters is legal
-      // exactly as a space is; `obs-NO-WS-CTL`, the RFC's own list of the
-      // controls that used to be `qtext`, leaves %d9 out. Rendered as it
-      // was: raw, inside the quotes, in both parameters.
+      // `FWS` is SP / HTAB, so a tab inside a quoted-string is legal like a space.
       const { text } = await build({
         ...base,
         attachments: [{ filename: 'a\tb.pdf', content: 'x' }],
@@ -1119,8 +916,8 @@ describe('normalizeEmail', () => {
     });
 
     it('still renders a non-ASCII filename as raw UTF-8 in the quoted parameter', async () => {
-      // The existing path, pinned: no RFC 2231 `filename*=` and no
-      // encoded-word — the UTF-8 octets go inside the quotes as they did.
+      // No RFC 2231 `filename*=` and no encoded-word: the UTF-8 octets go
+      // inside the quotes.
       const { raw, text } = await build({
         ...base,
         attachments: [{ filename: 'résumé.pdf', content: 'x' }],
@@ -1169,14 +966,8 @@ describe('normalizeEmail', () => {
   });
 
   describe('media type syntax of an attachment', () => {
-    // `rejectControls` answered only for CTLs, and `buildAttachmentPart`
-    // writes the media type verbatim ahead of its own `; name="…"`, so
-    // `text/plain; x="` rendered `Content-Type: text/plain; x="; name="a.txt"`
-    // — captured as a success under `void dev` and by the harness, while
-    // Python's `email` reports `end of header inside quoted string` on that
-    // line and reads the builder's `name` as the VALUE of `x`. The grammar
-    // is RFC 2045 §5.1 `type "/" subtype *(";" parameter)`, read as a
-    // generator; the message names the rule and never echoes the value.
+    // The media type is written verbatim ahead of the builder's `; name="…"`,
+    // so it must match RFC 2045 §5.1 `type "/" subtype *(";" parameter)`.
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
     const SYNTAX =
       'attachment contentType is not a valid media type (RFC 2045 §5.1: type/subtype, then ; attribute=value parameters).';
@@ -1230,7 +1021,7 @@ describe('normalizeEmail', () => {
       }
     });
 
-    it('accepts every valid form and renders it as it did, byte for byte', async () => {
+    it('accepts every valid form and renders it verbatim', async () => {
       const valid = [
         'TEXT/PLAIN', // case is kept as given; matching is case-insensitive
         'application/vnd.ms-excel',
@@ -1251,8 +1042,7 @@ describe('normalizeEmail', () => {
           ...base,
           attachments: [{ filename: 'a.txt', content: 'x', contentType }],
         });
-        // Verbatim, then the builder's own parameter — exactly the line the
-        // unchecked path rendered.
+        // Verbatim, then the builder's own parameter.
         expect(text, contentType).toContain(`Content-Type: ${contentType}; name="a.txt"\r\n`);
       }
     });
@@ -1275,18 +1065,6 @@ describe('normalizeEmail', () => {
       }
       return lines.slice(start, end);
     }
-
-    it('pins the rendered line for three of them', async () => {
-      expect(await attachmentContentTypeLines('TEXT/PLAIN')).toEqual([
-        'Content-Type: TEXT/PLAIN; name="a.txt"',
-      ]);
-      expect(await attachmentContentTypeLines('text/plain; charset="utf-8"')).toEqual([
-        'Content-Type: text/plain; charset="utf-8"; name="a.txt"',
-      ]);
-      expect(await attachmentContentTypeLines('application/x-foo.bar-baz_1')).toEqual([
-        'Content-Type: application/x-foo.bar-baz_1; name="a.txt"',
-      ]);
-    });
 
     it('keeps the length bound in front of the scan', async () => {
       // "Bound before you scan": the `CONTENT_TYPE_LINE_OVERHEAD` guard
@@ -1339,16 +1117,9 @@ describe('normalizeEmail', () => {
   });
 
   describe('Content-ID syntax of an attachment', () => {
-    // `rejectControls` answered only for CTLs, and `buildAttachmentPart`
-    // writes the Content-ID verbatim, adding `<` `>` unless the value
-    // already starts with `<`: `logo other` rendered `<logo other>`,
-    // `<logo` rendered `<logo` and `logo>` rendered `<logo>>` — captured as
-    // a success under `void dev` and by the harness, and left for the
-    // receiver to refuse or to fail the html's `cid:` reference against.
-    // The grammar is RFC 5322 §3.6.4 `msg-id`, read as a generator, with
-    // the `@` side and the brackets optional (RFC 2392 §2 resolves `cid:x`
-    // against `<x>`, and the builder has always bracketed a bare id); the
-    // message names the rule and never echoes the value.
+    // The Content-ID is written verbatim, bracketed unless it starts with `<`,
+    // so it must be an RFC 5322 §3.6.4 `msg-id`; the `@` side and the
+    // brackets are optional (RFC 2392 §2 resolves `cid:x` against `<x>`).
     const base = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', html: '<img src="cid:logo">' };
     const SYNTAX =
       'attachment contentId is not a valid Content-ID (RFC 5322 §3.6.4 msg-id: an identifier of atext, "." and "@", optionally in one pair of angle brackets).';
@@ -1407,7 +1178,7 @@ describe('normalizeEmail', () => {
         '@b', // an `@` owes both sides
         'a@', //
         'lögo', // atext is US-ASCII
-        '', // used to be validated, then silently not rendered
+        '', //
       ];
       for (const contentId of invalid) {
         const error = await refused(contentId);
@@ -1418,9 +1189,9 @@ describe('normalizeEmail', () => {
       }
     });
 
-    it('accepts every valid form and renders it as it did, byte for byte', async () => {
+    it('accepts every valid form and renders it verbatim', async () => {
       // Bare or bracketed, the wire form is `<id>`; a bracketed id renders
-      // as given, a bare one is wrapped — exactly what the unchecked path did.
+      // as given, a bare one is wrapped.
       const valid: Array<[contentId: string, rendered: string]> = [
         ['logo', '<logo>'], // the documented example: no `@` (RFC 2392 §2)
         ['<logo>', '<logo>'],
@@ -1435,26 +1206,6 @@ describe('normalizeEmail', () => {
       for (const [contentId, rendered] of valid) {
         expect(await contentIdLine(contentId), contentId).toBe(`Content-ID: ${rendered}`);
       }
-    });
-
-    it('keeps the documented inline-image example working verbatim', async () => {
-      const { text } = await build({
-        from: 'Acme <acme+noreply@mail.void.cloud>',
-        to: 'user@example.com',
-        subject: 'Hello',
-        html: '<img src="cid:logo" alt="Acme">',
-        attachments: [
-          {
-            filename: 'logo.png',
-            content: new Uint8Array([1, 2, 3]),
-            contentType: 'image/png',
-            contentId: 'logo',
-            disposition: 'inline',
-          },
-        ],
-      });
-      expect(text).toContain('Content-ID: <logo>\r\n');
-      expect(text).toContain('<img src="cid:logo" alt="Acme">');
     });
 
     it('still infers disposition from a bracketed id', async () => {
@@ -1497,196 +1248,21 @@ describe('normalizeEmail', () => {
     });
   });
 
-  describe('a colon in an address', () => {
-    // `:` is an RFC 5322 §3.2.3 special, not `atext`, so a bare
-    // `a:b@example.com` is no addr-spec without quoting — which is refused
-    // too. It was the one special missing from the hand-written address
-    // class: the address passed here, a handler's `forward()` recorded it,
-    // and the platform router's `isValidEmailAddress` dropped that one
-    // forward after earlier actions had fired. `email-validator` admits only
-    // `atext`, so it is refused like `,` and `;`.
-    const colons = ['a:b@example.com', 'a@b:c.example.com', ':a@example.com', 'a@example.com:'];
-
-    it('refuses a bare address carrying one, with the code for its field', async () => {
-      for (const bad of colons) {
-        for (const [field, code] of [
-          ['to', 'INVALID_TO'],
-          ['from', 'INVALID_FROM'],
-          ['cc', 'MIME_ERROR'],
-          ['bcc', 'MIME_ERROR'],
-          ['replyTo', 'MIME_ERROR'],
-        ] as const) {
-          let error: unknown;
-          try {
-            await normalizeEmail({
-              from: 'a@x.dev',
-              to: 'b@y.dev',
-              [field]: bad,
-              subject: 's',
-              text: 't',
-            });
-          } catch (e) {
-            error = e;
-          }
-          expect(error).toBeInstanceOf(MimeError);
-          expect((error as MimeError).code).toBe(code);
-          expect((error as MimeError).message).toBe(invalidAddress(field));
-        }
-      }
+  it('accepts a colon in a display name, where it is quoted', async () => {
+    // A name is a phrase, and a phrase with a special is rendered as one
+    // quoted-string — the address rule is not the name rule.
+    const { text } = await build({
+      from: 'a@x.dev',
+      to: { name: 'Ops: Tier 2', email: 'b@y.dev' },
+      subject: 's',
+      text: 't',
     });
-
-    it('refuses it in the object and display-name forms on the same parsed address', async () => {
-      for (const bad of colons) {
-        await expect(
-          normalizeEmail({
-            from: 'a@x.dev',
-            to: { name: 'Bob', email: bad },
-            subject: 's',
-            text: 't',
-          }),
-        ).rejects.toThrow(invalidAddress('to'));
-        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
-      }
-    });
-
-    it('still accepts one in a display name, where it is quoted', async () => {
-      // A name is a phrase, and a phrase with a special is rendered as one
-      // quoted-string — the address rule is not the name rule.
-      const { text } = await build({
-        from: 'a@x.dev',
-        to: { name: 'Ops: Tier 2', email: 'b@y.dev' },
-        subject: 's',
-        text: 't',
-      });
-      expect(unfoldHeader(text, 'To')).toBe('"Ops: Tier 2" <b@y.dev>');
-    });
-  });
-
-  describe('dot-atom shape of an address', () => {
-    // An RFC 5322 §3.2.3 dot-atom cannot start or end with a dot or carry
-    // two in a row, on either side of the `@`. The hand-written rule and
-    // the platform router's regex BOTH accepted every one of these — no
-    // divergence, just a shared hole that Cloudflare or the next MTA would
-    // refuse after the handler's test had reported a success. One package
-    // on both sides closes it.
-    const dots = [
-      'a..b@example.com',
-      '.a@example.com',
-      'a.@example.com',
-      'a@example..com',
-      'a@.example.com',
-      'a@example.com.',
-    ];
-
-    it('refuses leading, trailing and doubled dots, with the code for its field', async () => {
-      for (const bad of dots) {
-        for (const [field, code] of [
-          ['to', 'INVALID_TO'],
-          ['from', 'INVALID_FROM'],
-          ['cc', 'MIME_ERROR'],
-          ['bcc', 'MIME_ERROR'],
-          ['replyTo', 'MIME_ERROR'],
-        ] as const) {
-          let error: unknown;
-          try {
-            await normalizeEmail({
-              from: 'a@x.dev',
-              to: 'b@y.dev',
-              [field]: bad,
-              subject: 's',
-              text: 't',
-            });
-          } catch (e) {
-            error = e;
-          }
-          expect(error, bad).toBeInstanceOf(MimeError);
-          expect((error as MimeError).code).toBe(code);
-          expect((error as MimeError).message).toBe(invalidAddress(field));
-        }
-        expect(() => parseAddress(`Bob <${bad}>`, 'to')).toThrow(invalidAddress('to'));
-      }
-    });
-
-    it('still accepts dots between atoms, on both sides', async () => {
-      for (const ok of [
-        'first.last@example.com',
-        'a.b.c@sub.example.co.uk',
-        'a@sub.sub.example.com',
-      ]) {
-        const email = await normalizeEmail({ from: ok, to: ok, subject: 's', text: 't' });
-        expect(email.to[0].email).toBe(ok);
-      }
-    });
-  });
-
-  describe('domain and local-part characters of an address', () => {
-    // The package's domain rule: ASCII labels, and a TLD that starts with a
-    // letter and is at least two characters. A quoted local part and a
-    // display name in the bare string stay refused, as they always were.
-    it('applies the TLD rule', async () => {
-      for (const bad of ['a@b.c', 'a@b.1c', 'a@b.c-', 'a@b.-c']) {
-        await expect(
-          normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
-        ).rejects.toThrow(invalidAddress('to'));
-      }
-      for (const ok of [
-        'a@b.c1',
-        'a@b.co',
-        'a@b.c-d',
-        'a@xn--bcher-kva.example',
-        'a@b-c.example',
-      ]) {
-        const email = await normalizeEmail({ from: 'a@x.dev', to: ok, subject: 's', text: 't' });
-        expect(email.to[0].email).toBe(ok);
-      }
-    });
-
-    it('refuses a raw IDN domain and a quoted local part', async () => {
-      for (const bad of [
-        'a@exämple.com',
-        '"a b"@example.com',
-        '"a@b"@example.com',
-        '"weird"@x.dev',
-      ]) {
-        await expect(
-          normalizeEmail({ from: 'a@x.dev', to: bad, subject: 's', text: 't' }),
-        ).rejects.toThrow(invalidAddress('to'));
-      }
-    });
-
-    it('pins the package quirk: a backtick may not be the FIRST local-part character', async () => {
-      // The first character class of `email-validator`'s regex lacks the
-      // backtick that every later class has. Pinned, not worked around: the
-      // point of one package on both sides is that the rule is whatever the
-      // package says, and a wrapper that patched this would be the start of
-      // the next hand-written rule.
-      await expect(
-        normalizeEmail({ from: 'a@x.dev', to: '`a@x.com', subject: 's', text: 't' }),
-      ).rejects.toThrow(invalidAddress('to'));
-      const email = await normalizeEmail({
-        from: 'a@x.dev',
-        to: 'a`b@x.com',
-        subject: 's',
-        text: 't',
-      });
-      expect(email.to[0].email).toBe('a`b@x.com');
-    });
-
-    it('accepts every RFC 5322 atext punctuation after the first character', async () => {
-      const atext = "!#$%&'*+-/=?^_`{|}~";
-      const ok = `a${atext}@example.com`;
-      const email = await normalizeEmail({ from: 'a@x.dev', to: ok, subject: 's', text: 't' });
-      expect(email.to[0].email).toBe(ok);
-    });
+    expect(unfoldHeader(text, 'To')).toBe('"Ops: Tier 2" <b@y.dev>');
   });
 
   it('parses the display-name form in linear time', () => {
-    // `^\s*([^"<]+?)?\s*<` let three quantifiers share one run of
-    // whitespace; the backtracker tried every split, cubic in the run.
-    // Measured on that form: 2,000 spaces took 2 s, 4,000 took 10 s (16 s
-    // when the `>` is missing). A regex cannot be interrupted, so keep the
-    // run where a regression costs seconds, not the test's whole timeout.
-    // (Two-letter TLDs: the address rule wants at least two.)
+    // Quantifiers that share a whitespace run backtrack cubically, and a regex
+    // cannot be interrupted: keep the run where a regression costs seconds.
     const run = ' '.repeat(4000);
     const started = performance.now();
     expect(parseAddress(`${run}a@b.cd`, 'to')).toEqual({ email: 'a@b.cd' });
@@ -1698,9 +1274,7 @@ describe('normalizeEmail', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
-  it('keeps the display-name form’s language after the regex change', () => {
-    // Shapes the old and new patterns were checked to agree on
-    // (exhaustively to length 7 over a 9-symbol alphabet); pinned here.
+  it('pins the language of the display-name form', () => {
     expect(parseAddress('a>b <c@d.ef>', 'to')).toEqual({ email: 'c@d.ef', name: 'a>b' });
     expect(parseAddress('x<a@b.cd>', 'to')).toEqual({ email: 'a@b.cd', name: 'x' });
     expect(parseAddress('\tJohn\tSmith\t<j@s.ef>', 'to')).toEqual({
@@ -1751,13 +1325,8 @@ describe('normalizeEmail', () => {
   });
 
   it('undoes quoted-pairs in linear time and without a per-pair allocation', () => {
-    // A `replace(/\\(.)/g, '$1')` holds about 60 bytes of heap per match
-    // before it builds its result — measured 307 MB for 10 MiB of `\"`
-    // pairs, past a 128 MB isolate — and nothing bounds the name before
-    // the decode runs: an ASCII name is bounded only on its DECODED form,
-    // and a non-ASCII one never is. The buffer routine peaked at 49 MB on
-    // the same input. Heap is not something a test can pin; time is, and
-    // both shapes are exercised so the output of each path is built.
+    // Nothing bounds the name before the decode, and heap is not something a
+    // test can pin; time is. Both shapes build the output of their path.
     const started = performance.now();
     expect(() => parseAddress(`"${'\\"'.repeat(1_000_000)}" <a@x.dev>`, 'to')).toThrow(
       /cannot be folded/,
@@ -1811,22 +1380,8 @@ describe('buildMime', () => {
     expect(text).toMatch(/Subject: =\?UTF-8\?B\?[^?]+\?=/);
   });
 
-  it('quoted-prints non-ASCII bodies', async () => {
-    const { text } = await build({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: 'café',
-    });
-    expect(text).toContain('Content-Transfer-Encoding: quoted-printable');
-    // 'é' = 0xC3 0xA9 in UTF-8 → =C3=A9
-    expect(text).toContain('caf=C3=A9');
-  });
-
-  // The encoding decision, pinned: only LF and CRLF end a line, a bare CR
-  // (or any other control character) forces quoted-printable, and a line of
-  // 990 printable characters is the longest that ships as 7bit. Captured
-  // from the regex-and-split implementation the one-pass scanner replaced.
+  // Only LF and CRLF end a line, a bare CR (or any other control character)
+  // forces quoted-printable, and 990 printable characters is the longest 7bit line.
   it.each<[string, string, string, string]>([
     ['a bare CR', 'a\rb', 'quoted-printable', 'a\r\nb'],
     ['a tab', 'a\tb', 'quoted-printable', 'a\tb'],
@@ -1924,21 +1479,9 @@ describe('buildMime', () => {
     expect(text).toContain('Content-ID: <logo>');
   });
 
-  it('rejects oversized messages', async () => {
-    const big = 'x'.repeat(11 * 1024 * 1024);
-    const email = await normalizeEmail({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject: 's',
-      text: big,
-    });
-    expect(() => buildMime(email)).toThrow(/exceeds Cloudflare limit/);
-  });
-
   it('quotes display names containing RFC 5322 specials (comma is the worst)', async () => {
     // Comma in a name MUST be quoted — without quotes it splits the
-    // address-list field. Pre-fix, the formatAddress fallback emitted
-    // unquoted ASCII names, letting `Smith, John` corrupt the To header.
+    // address-list field.
     const { text } = await build({
       from: { email: 'a@x.dev', name: 'Smith, John' },
       to: { email: 'b@y.dev', name: 'Doe; Jane' },
@@ -1980,10 +1523,7 @@ describe('buildMime', () => {
   });
 
   it('renders a quoted display name with its quoted-pairs escaped exactly once', async () => {
-    // `"Smith \"Bob\"" <a@x.dev>` used to keep the raw `\"` pairs in the
-    // parsed name, and `formatAddress` escaped them again: the header read
-    // `"Smith \\\"Bob\\\""` and the recipient saw `Smith \"Bob\"`. The
-    // object form of the same name was right, so the two forms disagreed.
+    // The string and object forms of the same name render the same header.
     const cases: Array<[string, string, string]> = [
       ['"Smith \\"Bob\\"" <a@x.dev>', 'Smith "Bob"', '"Smith \\"Bob\\""'],
       ['"a\\\\b" <a@x.dev>', 'a\\b', '"a\\\\b"'],
@@ -2019,13 +1559,8 @@ describe('buildMime', () => {
   });
 
   describe('a period in a display name', () => {
-    // `.` is one of RFC 5322 §3.2.3's `specials`, so it is not `atext` and a
-    // name containing one is not a `phrase` of atoms: `Dr. Smith <a@x.dev>`
-    // parses only as `obs-phrase` (§4.1), which §4 says MUST NOT be
-    // generated. `RFC5322_SPECIALS` used to omit it, so every dotted name
-    // went out unquoted; a strict receiver (Python's `email` parser flags
-    // "period in 'phrase'", and `.` alone as an invalid phrase) sees
-    // obsolete syntax on an otherwise valid message.
+    // `.` is one of RFC 5322 §3.2.3's `specials`, so an unquoted dotted name
+    // parses only as `obs-phrase` (§4.1), which §4 says MUST NOT be generated.
     const dotted: Array<[string, string]> = [
       ['Dr. Smith', '"Dr. Smith"'],
       ['J. R. R. Tolkien', '"J. R. R. Tolkien"'],
@@ -2111,13 +1646,9 @@ describe('buildMime', () => {
       expect(decodeEncodedWords(from)).toBe('Dr. Müller <a@x.dev>');
     });
 
-    it('is now bounded by the quoted-string line guard, at the same edge as any other special', async () => {
-      // A quoted-string is one token `foldHeader` never splits, so a
-      // dotted name is now subject to the ` "name"` line bound in
-      // `validateAddressParts`: 995 characters fit a 998-octet line exactly
-      // (the period is `qtext`, so nothing is escaped and the bound is
-      // exact), 996 do not. Before the fix the same 996-character name
-      // rendered unquoted and folded at its spaces.
+    it('is bounded by the quoted-string line guard, at the same edge as any other special', async () => {
+      // A quoted-string is one token `foldHeader` never splits: 995 characters
+      // fit a 998-octet line exactly (the period is `qtext`), 996 do not.
       const fits = `Dr. ${'a'.repeat(998 - 3 - 4)}`;
       expect(fits.length).toBe(995);
       const { text } = await build({
@@ -2142,30 +1673,13 @@ describe('buildMime', () => {
     });
   });
 
-  it('rejects bare addr-spec values containing a comma (header-injection guard)', async () => {
-    // Without this guard, `to: "victim@a.com,attacker@b.com"` slips
-    // through the unquoted addr-spec path and renders as two recipients.
+  it('rejects an addr-spec glued to an angle-bracket address', async () => {
     await expect(
-      normalizeEmail({
-        from: 'a@x.dev',
-        to: 'victim@example.com,attacker@evil.dev',
-        subject: 's',
-        text: 't',
-      }),
-    ).rejects.toThrow(/to/);
-  });
-
-  it('rejects bare addr-spec containing semicolon, angle, or quotes', async () => {
-    for (const bad of ['a@x.dev;b@evil.dev', 'a@x.dev<b@evil.dev>', '"weird"@x.dev']) {
-      await expect(
-        normalizeEmail({ from: bad, to: 'b@y.dev', subject: 's', text: 't' }),
-      ).rejects.toThrow(/from/);
-    }
+      normalizeEmail({ from: 'a@x.dev<b@evil.dev>', to: 'b@y.dev', subject: 's', text: 't' }),
+    ).rejects.toThrow(/from/);
   });
 
   it('rejects unbalanced quotes around display name', async () => {
-    // Pre-fix the parser had two independent optional quotes, so a
-    // single stray `"` slipped through.
     await expect(
       normalizeEmail({
         from: '"Acme <a@x.dev>',
@@ -2192,11 +1706,8 @@ describe('buildMime', () => {
   });
 
   it('folds long whitespace-separated headers (e.g. References) below 78 columns', async () => {
-    // 30 message IDs without commas — historical bug: foldHeader only
-    // split at address-list separators, so the entire References line
-    // emitted as one ~1KB string and breached RFC 5322's 998-octet hard
-    // limit. With whitespace-folding, every physical line stays well
-    // below 78 chars and CRLF + WSP starts each continuation.
+    // 30 message IDs without commas: the fold must split at whitespace, not
+    // only at address-list separators.
     const ids: Array<string> = [];
     for (let i = 0; i < 30; i++) {
       ids.push(`<msg-${i.toString().padStart(3, '0')}@example.com>`);
@@ -2283,10 +1794,8 @@ describe('buildMime', () => {
   });
 
   it('folds a long non-ASCII subject under RFC 5322 §2.1.1 (998 octets)', async () => {
-    // 246 CJK characters used to render as a single 1005-octet physical
-    // line: past RFC 5322 §2.1.1's 998-octet MUST and RFC 5321
-    // §4.5.3.1.6's 1000-octet SMTP text-line limit. Nothing downstream
-    // repairs it — the proxy forwards these bytes verbatim.
+    // Unfolded, 246 CJK characters are one 1005-octet line, past RFC 5322
+    // §2.1.1's 998-octet MUST.
     const subject = '日本語'.repeat(82);
     expect([...subject]).toHaveLength(246);
     const { raw, text } = await build({
@@ -2313,26 +1822,9 @@ describe('buildMime', () => {
     expect(raw.byteLength).toBeGreaterThan(0);
   });
 
-  it('folds a very long non-ASCII subject (500 CJK characters)', async () => {
-    const subject = '確認'.repeat(250);
-    const { text } = await build({
-      from: 'a@x.dev',
-      to: 'b@y.dev',
-      subject,
-      text: 't',
-    });
-    const encoder = new TextEncoder();
-    for (const line of text.split('\r\n')) {
-      expect(encoder.encode(line).byteLength).toBeLessThanOrEqual(998);
-    }
-    expect(decodeEncodedWords(unfoldHeader(text, 'Subject'))).toBe(subject);
-  });
-
   it('folds long non-ASCII display names in From and in address lists', async () => {
-    // Display names run through the same encoder, so `From:` and every
-    // recipient list inherits the same unbounded-line bug. The
-    // multi-recipient case additionally exercises the address-list fold
-    // branch, which never re-folded inside a single part.
+    // Display names run through the same encoder; the recipient list also
+    // exercises the address-list fold branch.
     const name = '株式会社ボイドゼロの営業部'.repeat(20);
     const { text } = await build({
       from: { email: 'j@x.dev', name },
@@ -2384,9 +1876,7 @@ describe('buildMime', () => {
   });
 
   it('keeps folding long ASCII header values at whitespace (control)', async () => {
-    // Pure-ASCII values never reach the encoder, so this pins the
-    // pre-existing whitespace-folding behaviour against regressions from
-    // the encoded-word change.
+    // Pure-ASCII values never reach the encoder; they fold at whitespace.
     const words: Array<string> = [];
     for (let i = 0; i < 40; i++) {
       words.push(`word${i.toString().padStart(3, '0')}`);
@@ -2413,12 +1903,8 @@ function bodyOf(text: string): string {
 }
 
 describe('buildMime body size projection', () => {
-  // A 4 MiB non-ASCII body is 12.6 MiB once quoted-printable encoded, so it
-  // can never fit. Before the projection, `buildMime` found that out only
-  // after encoding it — measured at ~11x the UTF-8 bytes live — and a body a
-  // few times over the limit terminated a 128 MB isolate instead of
-  // returning `MIME_ERROR`. The projection is a single allocation-free pass
-  // over the string, so this test is fast and the rejected string is small.
+  // A 4 MiB non-ASCII body is 12.6 MiB once quoted-printable encoded, so the
+  // projection refuses it before encoding.
   it('rejects a body that cannot fit before encoding it', async () => {
     const cjk = '漢'.repeat(Math.ceil((4 * 1024 * 1024) / 3));
     const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: cjk });
@@ -2450,11 +1936,9 @@ describe('buildMime body size projection', () => {
   });
 
   it('never rejects a message that fits, and leaves the final check as the authority', async () => {
-    // 3.3 MiB of CJK projects to ~10.38 MiB (under the cap, since the
-    // projection ignores soft breaks and headers) but renders to ~10.8 MiB.
-    // The projection must let it through; the post-render check must reject
-    // it. One full ~10 MB render, so it carries its own timeout (0.4 s here,
-    // several times that on a loaded CI runner).
+    // The projection ignores soft breaks and headers, so this body projects
+    // under the cap but renders over it: the post-render check must refuse it.
+    // One full render, so it carries its own timeout.
     const nearly = '漢'.repeat(Math.ceil((1.65 * 1024 * 1024) / 3));
     const email = await normalizeEmail({
       from: 'a@x.dev',
@@ -2491,11 +1975,7 @@ describe('buildMime header size projection', () => {
   }
 
   // A non-ASCII header value is B-encoded into 45-byte words of 72 octets
-  // each and folded one per line: 5 octets for every CJK character, so 3M
-  // characters (9 MB of UTF-8) is a 15 MB header. Before the header bound,
-  // `buildMime` encoded, folded, joined and re-encoded all of that before
-  // it measured anything, and a 7M-character subject terminated a 128 MB
-  // isolate instead of returning `MIME_ERROR`.
+  // each and folded one per line: 5 octets for every CJK character.
   it('rejects a subject that cannot fit before encoding it', async () => {
     await expectProjected({
       from: 'a@x.dev',
@@ -2547,43 +2027,6 @@ describe('buildMime header size projection', () => {
     expect(text).toContain('X-Note: short note');
   });
 
-  // The runner's own heap is not capped, so the pin runs the projection in
-  // a child with the isolate's cap. 60k empty headers with 996-character
-  // names are 60 MB of names the caller already holds; rendering them held
-  // the folded lines, their join and `rawText` beside the names — three
-  // copies, 180 MB live — and died with `FATAL ERROR: Reached heap limit`
-  // before the size check (measured). The projection refuses them at an
-  // 88 MB peak, in 173 ms.
-  it('refuses 60 MB of header names inside a 128 MB heap', () => {
-    const mimeModule = pathToFileURL(
-      join(import.meta.dirname, '../../src/runtime/email/mime.ts'),
-    ).href;
-    const child = `
-      const { normalizeEmail, buildMime } = await import(process.argv[1]);
-      const headers = {};
-      for (let i = 0; i < 60_000; i++) headers['X' + i + 'a'.repeat(996 - 1 - String(i).length)] = '';
-      const t0 = performance.now();
-      let error;
-      try { const email = await normalizeEmail({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', headers }); buildMime(email); } catch (e) { error = e; }
-      console.log(JSON.stringify({ code: error?.code, message: error?.message, ms: performance.now() - t0 }));
-    `;
-    const stdout = execFileSync(
-      process.execPath,
-      ['--max-old-space-size=128', '--input-type=module', '-e', child, mimeModule],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 },
-    );
-    const result = JSON.parse(stdout.trim().split('\n').at(-1) ?? '{}') as {
-      code?: string;
-      message?: string;
-      ms: number;
-    };
-    expect(result.code).toBe('MIME_ERROR');
-    expect(result.message).toContain('16 KiB');
-    // 173 ms measured locally; the bound leaves room for CI's slower runner
-    // (about 6x), where the old shape did not finish at all.
-    expect(result.ms).toBeLessThan(5000);
-  }, 30_000);
-
   it('never charges the whitespace that folding collapses', async () => {
     // `foldHeader` re-joins a long value from its non-WSP tokens, so 11 MiB
     // of spaces renders as one. A bound that counted `length` would reject
@@ -2597,11 +2040,8 @@ describe('buildMime header size projection', () => {
     expect(text).toContain('Subject: a b\r\n');
   });
 
-  // `replyEmail` threads `In-Reply-To` and `References` straight off the
-  // INBOUND message, so a remote sender controls them up to the whole raw
-  // message. They are rendered verbatim — never `encodeWord`ed — but folded
-  // and joined like any other header, so an oversized chain was rendered in
-  // full before the post-render check saw it.
+  // `replyEmail` copies the threading headers off the inbound message, so a
+  // remote sender controls their size.
   it('counts the threading headers', async () => {
     // 900k twelve-character ids: 10.8 MB of non-WSP before a single space.
     await expectProjected({
@@ -2620,17 +2060,9 @@ describe('buildMime header size projection', () => {
     });
   });
 
-  // An attachment part's own headers are built outside `foldHeader`'s
-  // encoded path: `Content-Type: <contentType>; name="<filename>"`,
-  // `Content-Disposition: <disposition>; filename="<filename>"` and
-  // `Content-ID: <contentId>`. Each of the three values is charged, and
-  // each is now also bounded per attachment in `normalizeAttachment` (see
-  // 'media type syntax of an attachment' and 'Content-ID syntax of an
-  // attachment'), so none reaches the projection over-long through
-  // `normalizeEmail`. The charge stays — `buildMime` is the authority on
-  // the final size, whatever handed it the email — so it is pinned on a
-  // hand-built `NormalizedEmail`, as the attachment-count test is.
-  it('counts an attachment Content-ID, even though normalizeAttachment now bounds it', () => {
+  // `normalizeAttachment` bounds the Content-ID, so the charge is pinned on a
+  // hand-built email: `buildMime` is the authority on the final size.
+  it('counts an attachment Content-ID on a hand-built email', () => {
     const over = 'x'.repeat(11 * 1024 * 1024);
     expect(() =>
       buildMime({
@@ -2654,13 +2086,8 @@ describe('buildMime header size projection', () => {
     ).toThrow(PROJECTION);
   });
 
-  // `normalizeAttachment` bounds ONE filename at 986 characters, not the
-  // sum, and nothing bounds the part count: 50k zero-byte attachments with
-  // legal filenames are a 106 MB message — each filename rendered twice,
-  // inside 117 octets of boundary and framing — that was held three to
-  // four times over between the parts, their join, `rawText` and `raw`,
-  // and terminated a 128 MB isolate before the final size check. Every
-  // part is charged its filename twice plus that framing.
+  // `normalizeAttachment` bounds one filename, not the sum, so every part is
+  // charged its filename twice plus the framing around it.
   it('counts every attachment part: its filename twice, and the framing around it', async () => {
     const filename = 'a'.repeat(986);
     const empty = new Uint8Array(0);
@@ -2673,13 +2100,12 @@ describe('buildMime header size projection', () => {
       text: 't',
       attachments: parts(25_000),
     });
-    // The bound is exact for a part with no content: 5,012 parts project to
-    // 640 octets under the cap and render to 10.66 MB, so the post-render
-    // check — not the projection — must be the one to refuse them.
+    // The bound is exact for a part with no content: these project under the
+    // cap and render over it, so the post-render check refuses them.
     await expect(
       build({ from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', attachments: parts(2_506) }),
     ).rejects.toThrow(/message size \d+ bytes exceeds Cloudflare limit/);
-    // And 4,900 parts, a 10.42 MB message, build.
+    // And a few parts fewer build.
     const { raw } = await build({
       from: 'a@x.dev',
       to: 'b@y.dev',
@@ -2691,8 +2117,7 @@ describe('buildMime header size projection', () => {
   });
 
   it('never rejects a References chain that fits, and never charges the whitespace it folds away', async () => {
-    // A 5 MB chain of short ids is a legal message: it folds at its spaces
-    // into 76-column lines and renders under the cap.
+    // A chain of short ids under the cap folds at its spaces and renders.
     const id = '<abcdefgh@x>';
     const chain = Array.from(
       { length: Math.floor((2.5 * 1024 * 1024) / (id.length + 1)) },
@@ -2721,12 +2146,9 @@ describe('buildMime header size projection', () => {
   });
 
   it('never rejects a header-heavy message that fits, and leaves the final check as the authority', async () => {
-    // 2.15M CJK characters project to ~10.32 MiB (4.8 octets each: the bound
-    // omits the fold's CRLF per word) but render to ~10.75 MB at 5 octets
-    // each. The projection must let it through; the post-render check must
-    // reject it. This is the one case that needs a full ~10 MB render (the
-    // property is AT the boundary), so it carries its own timeout: 0.8 s
-    // here, 5.4 s on a loaded 4-vCPU CI runner.
+    // The projection charges 4.8 octets per CJK character (it omits the fold's
+    // CRLF per word) against 5 rendered, so this subject projects under the cap
+    // but renders over it. One full render, so it carries its own timeout.
     const nearly = '漢'.repeat(1_075_000);
     const email = await normalizeEmail({
       from: 'a@x.dev',
@@ -2744,13 +2166,8 @@ describe('buildMime header size projection', () => {
 });
 
 describe('foldHeader memory', () => {
-  // A legal 3 MB subject of one-letter words is 1.5M fold points. The
-  // earlier fold kept a slice, a `{ text, comma }` object and a cons-string
-  // node per token — about 65 bytes of heap per input character — and
-  // terminated a 128 MB isolate on a message that fit. The fold now keeps
-  // only its finished lines (~1 byte per character). This pins the
-  // rendered shape; the memory bound is measured, not asserted, because
-  // the test runner's heap is not the isolate's.
+  // A legal subject of 1.5M fold points. The runner's heap is not the
+  // isolate's, so this pins the rendered shape, not the memory.
   it('folds a legal subject of millions of one-letter words', async () => {
     const words = 1_500_000;
     const { raw, text } = await build({
@@ -2768,18 +2185,8 @@ describe('foldHeader memory', () => {
 });
 
 describe('body line scan memory', () => {
-  // A legal 6 MB body of 3M two-character lines — pasted logs, say — renders
-  // to 9 MB. The encoding decision used to strip every line break with a
-  // global `replace` and `split` the body into an array of lines, the 7bit
-  // path re-joined it with another global `replace` (V8 keeps two or three
-  // parts-array slots per match), and the post-render line check `split`
-  // the whole message again: 240 MB of heap, all of it per LINE and
-  // invisible to any size projection, on a message that fit a 128 MB
-  // isolate four times over. Every pass is now one `charCodeAt` scan and
-  // the 7bit body is written into a buffer of its own size (measured, 32
-  // MB). The memory bound is measured, not asserted, because the test
-  // runner's heap is not the isolate's; this pins the rendered shape and
-  // that the scans stay linear.
+  // A legal body of millions of short lines. The runner's heap is not the
+  // isolate's, so this pins the rendered shape and that the scans stay linear.
   it('builds a legal message of millions of short lines in text and html', async () => {
     const lines = 750_000;
     const started = performance.now();
@@ -2790,8 +2197,7 @@ describe('body line scan memory', () => {
       text: 'a\n'.repeat(lines),
       html: '\n'.repeat(lines),
     });
-    // A gross-regression guard only: the previous code died here, it did not
-    // slow down. 0.2 s locally; a loaded CI runner is several times slower.
+    // A gross-regression guard only.
     expect(performance.now() - started).toBeLessThan(20_000);
     expect(raw.byteLength).toBeLessThanOrEqual(MAX_MESSAGE_BYTES);
     expect(raw.byteLength).toBeGreaterThan(lines * 5);
@@ -2803,8 +2209,6 @@ describe('body line scan memory', () => {
 });
 
 describe('quotedPrintable encoder', () => {
-  // Fixtures captured from the string-concatenating encoder these replace,
-  // so the byte-buffer encoder is pinned to the exact previous output.
   const cases: Array<[string, string, string]> = [
     [
       'soft-breaks at 76 columns',

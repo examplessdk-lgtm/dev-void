@@ -5,7 +5,6 @@ export default defineConfig({
     entry: [
       'src/index.ts',
       'src/plugin.ts',
-      'src/runtime/index.ts',
       'src/runtime/pages-client.ts',
       'src/runtime/pages-server.ts',
     ],

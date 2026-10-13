@@ -101,8 +101,7 @@ function rewriteUrl(url: URL, destination: string): URL {
 }
 
 function rewriteRequest(request: Request, url: URL, originalUrl: string): Request {
-  const headers = new Headers(request.headers);
-  headers.set('X-Void-Original-URL', originalUrl);
   const rewritten = new Request(url.toString(), request);
-  return new Request(rewritten, { headers });
+  rewritten.headers.set('X-Void-Original-URL', originalUrl);
+  return rewritten;
 }

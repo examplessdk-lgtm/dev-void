@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { log as clackLog } from '@voidzero-dev/vite-plus-prompts';
+import { readFileSync } from 'node:fs';
+import { isCancel, log as clackLog, text } from '@voidzero-dev/vite-plus-prompts';
 import { join, resolve } from 'pathslash';
 import { findEnvFile } from '../codegen/env-types.ts';
 import { type DatabaseDialect, type VoidConfig, isNodeTarget } from '../config.ts';
@@ -23,13 +23,12 @@ import {
 } from './deploy-types.ts';
 import { fetchRemoteSecretNames, formatEnvReport, validateProdEnv } from './env-validation.ts';
 import { type CliLogger } from './log-file.ts';
-import { formatCount, pc } from './output.ts';
+import { formatCount, getErrorMessage, pc } from './output.ts';
 import {
   detectPreset,
   formatProjectCommand,
   resolveProjectCommand,
   type StaticPreset,
-  type FrameworkPreset,
 } from './preset.ts';
 import {
   attachSelectedPlatform,
@@ -52,14 +51,13 @@ import type { WrapperFeatures } from './wrapper.ts';
 import { needsWrapper, generateWrapper } from './wrapper.ts';
 
 export const log: Record<
-  'error' | 'info' | 'message' | 'step' | 'success' | 'warn',
+  'error' | 'info' | 'message' | 'step' | 'warn',
   (message: string) => void
 > = {
   error: (message: string) => clackLog.error(formatCloudflareUserMessage(message)),
   info: (message: string) => clackLog.info(formatCloudflareUserMessage(message)),
   message: (message: string) => clackLog.message(formatCloudflareUserMessage(message)),
   step: (message: string) => clackLog.step(formatCloudflareUserMessage(message)),
-  success: (message: string) => clackLog.step(formatCloudflareUserMessage(message)),
   warn: (message: string) => clackLog.warn(formatCloudflareUserMessage(message)),
 };
 
@@ -87,10 +85,6 @@ const EMPTY_BINDINGS = {
   needsAI: false,
   needsSandbox: false,
 };
-
-export function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function readLiveBindingConfigFromDeployment(
   deployment: DeploymentResponse | undefined,
@@ -284,7 +278,7 @@ export async function promptDeployProjectConfig(
   }
   const config = { projectId: result.project.id, slug: result.project.slug };
   if (link) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
     log.step(`Linked to ${pc.blue(config.slug)}`);
     cliLog?.info('project_linked', { projectId: config.projectId, slug: config.slug });
   } else {
@@ -423,7 +417,7 @@ export async function createProjectFromSlug(
   const project = await client.createProject(slug);
   const config = { projectId: project.id, slug: project.slug };
   if (shouldLinkDeployProject(root, client.apiUrl)) {
-    writeProjectConfig(root, attachSelectedPlatform(root, config, client.apiUrl));
+    writeProjectConfig(root, attachSelectedPlatform(config, client.apiUrl));
   }
   log.step(`Project created: ${pc.blue(config.slug)}`);
   reportProjectCreationWarnings(project);
@@ -438,9 +432,9 @@ export function getGitCommit(root: string): string | null {
       return githubSha;
     }
 
-    // `git status` can invoke a repo-configured `core.fsmonitor` hook, so keep
-    // the CF Access service-token pair out of these git children too (matches
-    // the build spawns).
+    // `git status` can run a repo-configured `core.fsmonitor` hook, so scrub
+    // credentials like the build spawns. No `localBinRoot`: `git` must never
+    // resolve to a binary shipped in the project's node_modules/.bin.
     const gitEnv = buildEnv();
     // Check if in a git repo
     execSync('git rev-parse --is-inside-work-tree', { cwd: root, stdio: 'ignore', env: gitEnv });
@@ -489,8 +483,7 @@ export function validateDeployMigrations(
 
 /**
  * Ensure a managed external SQL project has Hyperdrive, prompting for the
- * connection string when it is missing. When the resources endpoint is not
- * available, Hyperdrive is checked at deploy time instead.
+ * connection string when it is missing.
  */
 export async function ensureManagedHyperdrive(
   client: PlatformClient,
@@ -501,14 +494,12 @@ export async function ensureManagedHyperdrive(
   try {
     resources = await client.getResources(projectId);
   } catch {
-    // Resources endpoint not available — Hyperdrive will be checked at deploy time
+    // Best effort: the platform checks Hyperdrive again during the deploy.
   }
   if (!resources || resources.some((resource) => resource.type === 'hyperdrive')) {
     return;
   }
-  const { text: promptText, isCancel: isCancelPrompt } =
-    await import('@voidzero-dev/vite-plus-prompts');
-  const connectionString = await promptText({
+  const connectionString = await text({
     message: `Your project uses ${dialect === 'mysql' ? 'MySQL' : 'PostgreSQL'}. Enter your connection string:`,
     placeholder:
       dialect === 'mysql'
@@ -526,7 +517,7 @@ export async function ensureManagedHyperdrive(
       }
     },
   });
-  if (isCancelPrompt(connectionString)) {
+  if (isCancel(connectionString)) {
     log.info('Deploy cancelled.');
     process.exit(0);
   }
@@ -582,68 +573,4 @@ export async function assertEnvSchemaValid(
     );
   }
   throw new DeployEventError('deploy: Aborting because env.ts schema is not satisfied.');
-}
-
-/**
- * Resolve the top-level build output directory.
- *
- * When a framework preset is available, uses its workerDir to derive the
- * parent directory (e.g. "build/server" → "build"). This gives framework-
- * specific error messages when the output is missing.
- *
- * For non-framework (Void app) deploys, defaults to "dist".
- */
-export function resolveDistDir(
-  root: string,
-  fwPreset?: FrameworkPreset,
-  buildCommand?: string,
-): string {
-  if (fwPreset) {
-    // Derive the top-level build dir from the preset's workerDir
-    // e.g. "build/server" → "build", "dist/ssr" → "dist"
-    const topDir = fwPreset.workerDir.split('/')[0];
-    const distDir = join(root, topDir);
-    if (!existsSync(distDir)) {
-      throw new Error(
-        `deploy: Build output directory '${topDir}' not found. Run '${buildCommand ?? fwPreset.buildCommand}' first.`,
-      );
-    }
-    return distDir;
-  }
-  return join(root, 'dist');
-}
-
-/**
- * Resolve the worker output subdirectory name within the build dir.
- *
- * When a framework preset is available, uses the preset's workerDir to
- * derive the subdirectory name and gives a framework-specific error.
- *
- * For non-framework (Void app) deploys, probes for known subdirectories.
- */
-export function resolveWorkerDirName(
-  distDir: string,
-  fwPreset?: FrameworkPreset,
-  buildCommand?: string,
-): string {
-  if (fwPreset) {
-    // Derive the subdirectory from the preset's workerDir
-    // e.g. "build/server" → "server", "dist/ssr" → "ssr"
-    const parts = fwPreset.workerDir.split('/');
-    const subDir = parts.slice(1).join('/');
-    if (!existsSync(join(distDir, subDir))) {
-      throw new Error(
-        `deploy: Worker output '${fwPreset.workerDir}' not found. Run '${buildCommand ?? fwPreset.buildCommand}' first.`,
-      );
-    }
-    return subDir;
-  }
-
-  // Non-framework: probe for known output subdirectories
-  for (const name of ['ssr', 'rsc', 'server']) {
-    if (existsSync(join(distDir, name))) {
-      return name;
-    }
-  }
-  throw new Error('deploy: Worker output not found. Expected dist/ssr/ or dist/rsc/.');
 }

@@ -579,7 +579,6 @@ type HyperdriveOrigin = Readonly<{
 type HyperdriveConfigPayload = Readonly<{
   name?: string;
   origin: HyperdriveOrigin;
-  mtls?: Readonly<{ sslmode: 'require' | 'verify-ca' | 'verify-full' }>;
 }>;
 
 function decodeUrlPart(value: string): string {
@@ -637,15 +636,14 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
   }
 
   const sslmode = url.searchParams.get('sslmode');
-  let mtls: HyperdriveConfigPayload['mtls'];
-  if (sslmode) {
-    if (sslmode !== 'require' && sslmode !== 'verify-ca' && sslmode !== 'verify-full') {
-      throw new InvalidHyperdriveConnectionStringError(
-        'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
-      );
-    }
-    mtls = { sslmode };
+  if (sslmode && sslmode !== 'require' && sslmode !== 'verify-ca' && sslmode !== 'verify-full') {
+    throw new InvalidHyperdriveConnectionStringError(
+      'Unsupported sslmode. Cloudflare Hyperdrive supports "require", "verify-ca", or "verify-full".',
+    );
   }
+  // No `mtls` is sent. A new Hyperdrive gets Cloudflare's default `require` mode, and a PUT
+  // keeps the TLS settings already on the Hyperdrive. The verify modes need a CA certificate
+  // uploaded to Cloudflare, which a URL cannot carry; `sslrootcert` names a file on the client.
 
   return {
     origin: {
@@ -656,7 +654,6 @@ export function parseHyperdriveConnectionString(connectionString: string): Hyper
       scheme,
       user: decodeUrlPart(url.username),
     },
-    ...(mtls === undefined ? {} : { mtls }),
   };
 }
 
@@ -666,7 +663,11 @@ export async function createHyperdrive(
   name: string,
   connectionString: string,
 ): Promise<HyperdriveInfo> {
-  const payload = { name, ...parseHyperdriveConnectionString(connectionString) };
+  const payload = {
+    name,
+    caching: { disabled: true },
+    ...parseHyperdriveConnectionString(connectionString),
+  };
   return cfFetch<HyperdriveInfo>(`${CF_API_BASE}/${accountId}/hyperdrive/configs`, apiToken, {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -682,6 +683,7 @@ export async function updateHyperdrive(
 ): Promise<HyperdriveInfo> {
   const payload = {
     ...(name === undefined ? {} : { name }),
+    caching: { disabled: true },
     ...parseHyperdriveConnectionString(connectionString),
   };
   return cfFetch<HyperdriveInfo>(
@@ -692,6 +694,30 @@ export async function updateHyperdrive(
       body: JSON.stringify(payload),
     },
   );
+}
+
+/**
+ * Hyperdrive never invalidates cached reads when the app writes, so project
+ * databases run uncached. A config may predate this setting, so deploys
+ * converge it. PATCH changes caching only and needs no origin password.
+ */
+export async function ensureHyperdriveCachingDisabled(
+  accountId: string,
+  apiToken: string,
+  hyperdriveId: string,
+): Promise<void> {
+  const url = `${CF_API_BASE}/${accountId}/hyperdrive/configs/${hyperdriveId}`;
+  const config = await cfFetch<Readonly<{ caching?: Readonly<{ disabled?: boolean }> }>>(
+    url,
+    apiToken,
+  );
+  if (config.caching?.disabled === true) {
+    return;
+  }
+  await cfFetch(url, apiToken, {
+    method: 'PATCH',
+    body: JSON.stringify({ caching: { disabled: true } }),
+  });
 }
 
 export async function deleteHyperdrive(

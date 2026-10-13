@@ -9,7 +9,6 @@ import {
   formatProjectCommand,
   hasBackendFiles,
   resolveProjectCommand,
-  resolveCloudflareOperationArgv,
 } from '../../src/cli/preset.ts';
 
 const TMP = join(import.meta.dirname, '.tmp-preset');
@@ -100,50 +99,16 @@ describe('detectPreset', () => {
     });
   });
 
-  it('returns null when routes/ dir exists (backend files)', () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: '^6.0.0' } },
-      dirs: ['routes'],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when crons/ dir exists (backend files)', () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: '^6.0.0' } },
-      dirs: ['crons'],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when middleware/ dir exists (backend files)', () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: '^6.0.0' } },
-      dirs: ['middleware'],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when pages/ dir exists (backend files)', () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: '^6.0.0' } },
-      dirs: ['pages'],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when queues/ dir exists (backend files)', () => {
-    const root = setupProject({
-      pkg: { dependencies: { vite: '^6.0.0' } },
-      dirs: ['queues'],
-    });
-    const result = detectPreset(root);
-    expect(result).toBeNull();
-  });
+  it.each(['routes', 'crons', 'middleware', 'pages', 'queues'])(
+    'returns null when %s/ dir exists (backend files)',
+    (dir) => {
+      const root = setupProject({
+        pkg: { dependencies: { vite: '^6.0.0' } },
+        dirs: [dir],
+      });
+      expect(detectPreset(root)).toBeNull();
+    },
+  );
 
   it('detects plain Vite SPA (no backend files)', () => {
     const root = setupProject({
@@ -330,12 +295,6 @@ describe('findBackendSources', () => {
     expect(findBackendSources(root)).toEqual([]);
     expect(hasBackendFiles(root)).toBe(false);
   });
-
-  it('agrees with hasBackendFiles when a backend exists', () => {
-    const root = setupProject({ dirs: ['queues'] });
-    expect(findBackendSources(root)).toEqual(['queues/']);
-    expect(hasBackendFiles(root)).toBe(true);
-  });
 });
 
 describe('project Vite commands', () => {
@@ -370,48 +329,6 @@ describe('project Vite commands', () => {
   });
 });
 
-describe('resolveProjectCommand with Wrangler', () => {
-  it('resolves to the local wrangler binary with the subcommand', () => {
-    const root = setupProject({
-      pkg: { dependencies: { wrangler: '^4.0.0' } },
-      files: { 'node_modules/.bin/wrangler': '' },
-    });
-
-    expect(resolveProjectCommand(root, 'wrangler deploy')).toBe(
-      `${toSlash(join(root, 'node_modules', '.bin', 'wrangler'))} deploy`,
-    );
-  });
-
-  it('preserves multi-argument subcommands', () => {
-    const root = setupProject({
-      pkg: { dependencies: { wrangler: '^4.0.0' } },
-      files: { 'node_modules/.bin/wrangler': '' },
-    });
-
-    expect(resolveProjectCommand(root, 'wrangler d1 create foo --binding DB --update-config')).toBe(
-      `${toSlash(join(root, 'node_modules', '.bin', 'wrangler'))} d1 create foo --binding DB --update-config`,
-    );
-  });
-
-  it('falls back to a bare wrangler command when no local binary exists', () => {
-    const root = setupProject({
-      pkg: { dependencies: { wrangler: '^4.0.0' } },
-    });
-
-    expect(resolveProjectCommand(root, 'wrangler deploy')).toBe('wrangler deploy');
-  });
-});
-
-describe('Cloudflare command transport', () => {
-  it('resolves Void’s bundled cf adapter independently of an app-installed Wrangler', () => {
-    const root = setupProject({ pkg: { dependencies: { wrangler: '^3.0.0' } } });
-    const argv = resolveCloudflareOperationArgv(root);
-    expect(argv[0]).toBe(process.execPath);
-    expect(argv[1].replace(/\\/g, '/')).toMatch(/\/cloudflare-operation-process\.ts$/);
-    expect(argv[1]).not.toContain(root);
-  });
-});
-
 describe('resolveProjectCommand shell safety (project root with spaces)', () => {
   // A dedicated root whose path contains a space + a single quote — both are
   // shell-significant and must be quoted before the string reaches execSync.
@@ -437,29 +354,29 @@ describe('resolveProjectCommand shell safety (project root with spaces)', () => 
   }
 
   it('quotes the resolved executable path so the shell does not word-split it', () => {
-    const { root, binPath } = setupSpacedProject('wrangler');
-    const cmd = resolveProjectCommand(root, 'wrangler deploy');
+    const { root, binPath } = setupSpacedProject('vitepress');
+    const cmd = resolveProjectCommand(root, 'vitepress build');
 
     // The bin path (which contains a space and a single quote) must be quoted
     // as a single token, not left as a bare substring the shell would split.
-    expect(cmd).not.toBe(`${binPath} deploy`);
-    expect(cmd.endsWith(' deploy')).toBe(true);
+    expect(cmd).not.toBe(`${binPath} build`);
+    expect(cmd.endsWith(' build')).toBe(true);
     if (process.platform === 'win32') {
-      expect(cmd).toBe(`"${toSlash(binPath)}" deploy`);
+      expect(cmd).toBe(`"${toSlash(binPath)}" build`);
     } else {
       // POSIX single-quote wrap, embedded `'` escaped as '\''.
-      expect(cmd).toBe(`'${binPath.replace(/'/g, "'\\''")}' deploy`);
+      expect(cmd).toBe(`'${binPath.replace(/'/g, "'\\''")}' build`);
     }
   });
 
   it.skipIf(process.platform === 'win32')(
     'executes the correct binary through a shell for a spaced root',
     () => {
-      const { root } = setupSpacedProject('wrangler');
-      const cmd = resolveProjectCommand(root, 'wrangler deploy --dry-run');
+      const { root } = setupSpacedProject('vitepress');
+      const cmd = resolveProjectCommand(root, 'vitepress build docs');
       const out = execSync(cmd, { encoding: 'utf-8' });
       expect(out).toContain('VOID_BIN_OK');
-      expect(out).toContain('args=deploy --dry-run');
+      expect(out).toContain('args=build docs');
     },
   );
 

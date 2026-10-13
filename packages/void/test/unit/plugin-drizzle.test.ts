@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 vi.mock('../../src/log', () => ({
   voidLog: vi.fn(),
@@ -26,16 +27,6 @@ function createProjectRoot(options?: { schema?: boolean }): string {
   }
   roots.push(root);
   return root;
-}
-
-function getHookHandler<T>(hook: T | { handler: T } | undefined): T {
-  if (typeof hook === 'function') {
-    return hook;
-  }
-  if (hook && typeof hook === 'object' && 'handler' in hook) {
-    return hook.handler;
-  }
-  throw new Error('Expected Vite hook handler.');
 }
 
 type FakePoolRecord = {

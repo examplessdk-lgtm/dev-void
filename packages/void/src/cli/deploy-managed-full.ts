@@ -22,14 +22,13 @@ import { requiresSandboxPlatformImage, resolveSandboxConfig } from '../sandbox/c
 import { resolveRemoteMode } from '../shared/env.ts';
 import { buildEnv } from '../shared/untrusted-env.ts';
 import { validateSsrEntry } from '../ssr/entry.ts';
+import { resolveDistDir, resolveWorkerDirName } from './build-output-dir.ts';
 import { PlatformClient } from './client.ts';
 import { assertDeploySchemaDriftFree } from './deploy-drift.ts';
 import {
   resolveFullDeployBuildCommand,
   log,
   getExitCode,
-  resolveDistDir,
-  resolveWorkerDirName,
   resolveDeployLiveBindingConfig,
   hasNonPageBackend,
   hasPrerenderSources,
@@ -88,7 +87,7 @@ export async function runFullDeploy(
 
   assertManagedDurableStateSupported(root);
 
-  // 3. Build (child process to avoid Vite API side effects on bundle output)
+  // Build in a child process to avoid Vite API side effects on bundle output.
   if (!skipBuild) {
     const { label: buildCmd, command: buildExec } = resolveFullDeployBuildCommand(
       root,
@@ -98,9 +97,7 @@ export async function runFullDeploy(
     cliLog?.info('build_start', { command: buildCmd });
     const buildStartedAt = Date.now();
     try {
-      // Pass VOID_DEPLOY_PROJECT_ID so plugin-prerender (running inside this
-      // child vite build) can resolve the Void projectId without relying on
-      // .void/project.json, which may be stale or absent under `--project <slug>`.
+      // VOID_DEPLOY_PROJECT_ID marks a managed build: platform dispatch owns routing and ISR.
       execSync(buildExec, {
         cwd: root,
         stdio: 'inherit',
@@ -118,8 +115,8 @@ export async function runFullDeploy(
     cliLog?.info('build_skipped', { reason: 'skipBuild' });
   }
 
-  // 4. Resolve build output paths from build artifacts (avoids re-resolving
-  // Vite config in the main process — plugins only run once inside the build)
+  // Resolve output paths from build artifacts instead of re-resolving the Vite
+  // config here; plugins run only once, inside the build.
   const frameworkBuildCmd = fwPreset
     ? formatProjectCommand(root, fwPreset.buildCommand)
     : undefined;
@@ -144,7 +141,7 @@ export async function runFullDeploy(
     }
   }
 
-  // 5. Framework mode (Class A — passed from runDeploy)
+  // Class A framework mode, detected by runDeploy.
   const isFrameworkMode = detected != null;
 
   // Managed static prerender is deliberately outside the Vite subprocess. The
@@ -212,7 +209,7 @@ export async function runFullDeploy(
 
   assertDeploySchemaDriftFree(root, dialect);
 
-  // 7. Collect and validate migrations (before Hyperdrive check so migrations can gate provisioning)
+  // Validate migrations before the Hyperdrive check so migrations can gate provisioning.
   const validatedMigrations = validateDeployMigrations(paths.migrationsDir, analysis.migrations);
 
   // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
@@ -332,7 +329,6 @@ export async function runFullDeploy(
             voidToken: await client.createPrerenderToken(config.projectId),
           });
 
-  // 8. Read wrangler compat settings for Cloudflare targets
   const wranglerCompat = resolveDeployWranglerCompat(
     root,
     voidConfig,
@@ -345,13 +341,8 @@ export async function runFullDeploy(
   );
   const workerMain = resolveDeployWorkerMain(voidConfig, join(distDir, workerDirName));
 
-  // Production env values are remote secrets; dotenv is local-only.
-  const envVars: Record<string, string> = {};
-
-  // 9a. Validate against env.ts schema if present.
   await assertEnvSchemaValid(root, client, config.projectId);
 
-  // 10. Package & Upload
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
 
@@ -396,8 +387,8 @@ export async function runFullDeploy(
     framework: detected?.name,
   });
   const packageStartedAt = Date.now();
-  const neededSet = skipped > 0 ? new Set(needed) : null;
   const voidPackageOptions = {
+    bindingNames: analysis.bindingNames,
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
     cpuMs: voidConfig.worker?.limits?.cpu_ms,
@@ -427,7 +418,6 @@ export async function runFullDeploy(
       ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
       framework: isFrameworkMode ? detected!.name : undefined,
       revalidate,
-      vars: envVars,
       queues,
       prerender: uniquePrerenderPaths,
       assetConfig,
@@ -467,19 +457,19 @@ export async function runFullDeploy(
     mode: 'full',
     durationMs: Date.now() - packageStartedAt,
   });
-  const result = await streamDirectR2Deploy(
+  const result = await streamDirectR2Deploy({
     client,
-    config.projectId,
+    projectId: config.projectId,
     manifest,
     assetManifest,
     assetFiles,
     needed,
     gitMetadata,
-    neededSet !== null,
+    preflightUsed: skipped > 0,
     workerFiles,
-    s,
+    spinner: s,
     cliLog,
-  );
+  });
 
   note(
     formatDeploySummary({

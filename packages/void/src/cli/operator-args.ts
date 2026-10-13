@@ -1,3 +1,4 @@
+import { parsePlatformLoginId } from '@void/platform';
 import { OPERATOR_MAX_TIMEOUT_MS } from './operator-client.ts';
 
 /** Public operator commands. This table also drives nested CLI help. */
@@ -9,7 +10,7 @@ export type OperatorCommand = {
   optionalPositional?: boolean;
   usage?: Array<string>;
   values?: Record<string, string>;
-  booleans?: Array<string>;
+  booleans?: Record<string, string>;
   method?: 'POST';
   path: string;
 };
@@ -21,7 +22,9 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Sign in as a platform administrator',
     path: '/session',
     values: { provider: 'OAuth provider' },
-    booleans: ['token-stdin'],
+    booleans: {
+      'token-stdin': 'Read a full API session from stdin for explicit operator session exchange',
+    },
   },
   {
     group: 'auth',
@@ -40,7 +43,9 @@ export const operatorCommands: Array<OperatorCommand> = [
     action: 'token',
     description: 'Print an operator token; exchange an API session with --token-stdin',
     path: '/session',
-    booleans: ['token-stdin'],
+    booleans: {
+      'token-stdin': 'Read a full API session from stdin for explicit operator session exchange',
+    },
   },
   {
     group: 'user',
@@ -132,7 +137,9 @@ export const operatorCommands: Array<OperatorCommand> = [
     action: 'status',
     description: 'Inspect saved platform Zero Trust configuration and project state counts',
     path: '/zero-trust',
-    booleans: ['check'],
+    booleans: {
+      check: 'Also check the saved settings against Cloudflare Access (several API calls)',
+    },
   },
   {
     group: 'zero-trust',
@@ -144,7 +151,11 @@ export const operatorCommands: Array<OperatorCommand> = [
       policies: 'Comma-separated reusable Access policy IDs',
       'existing-projects': 'Required when enabling: protected or public for existing projects',
     },
-    booleans: ['token-stdin', 'protect-new-projects', 'public-apps'],
+    booleans: {
+      'token-stdin': 'Read the Access management API token from stdin',
+      'protect-new-projects': 'Protect newly created projects by default',
+      'public-apps': 'Manage public app rules without identity policies',
+    },
     method: 'POST',
   },
   {
@@ -230,7 +241,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     path: '/deployments/:id/logs',
     positional: ['id'],
     values: { since: 'Duration or ISO timestamp', cursor: 'Opaque continuation cursor' },
-    booleans: ['follow'],
+    booleans: { follow: 'Poll new logs until interrupted or the build ends' },
   },
   {
     group: 'build',
@@ -246,7 +257,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     path: '/builds/:id/logs',
     positional: ['id'],
     values: { since: 'Last received sequence number' },
-    booleans: ['follow'],
+    booleans: { follow: 'Poll new logs until interrupted or the build ends' },
   },
   {
     group: 'signup',
@@ -370,7 +381,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Rotate project proxy tokens on tenant Workers',
     path: '/system/rotate-proxy-tokens',
     values: { project: 'Project ID' },
-    booleans: ['all'],
+    booleans: { all: 'Rotate every project' },
     method: 'POST',
   },
   {
@@ -435,7 +446,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     path: '/email/attempts/:id/resolve',
     positional: ['id'],
     values: { reason: 'Audit reason without recipient or message content' },
-    booleans: ['ended'],
+    booleans: { ended: 'Attest that the original provider execution has ended' },
     method: 'POST',
   },
   {
@@ -448,7 +459,7 @@ export const operatorCommands: Array<OperatorCommand> = [
       outcome: 'Provider outcome: applied or not-applied',
       reason: 'Audit reason for the verified provider outcome',
     },
-    booleans: ['ended'],
+    booleans: { ended: 'Attest that the original provider execution has ended' },
     method: 'POST',
   },
   {
@@ -468,7 +479,7 @@ export const operatorCommands: Array<OperatorCommand> = [
       outcome: 'Provider outcome: applied or not-applied',
       reason: 'Audit reason for the verified provider outcome',
     },
-    booleans: ['ended'],
+    booleans: { ended: 'Attest that the original provider execution has ended' },
     method: 'POST',
   },
   {
@@ -485,7 +496,7 @@ export const operatorCommands: Array<OperatorCommand> = [
     path: '/email/domains',
     positional: ['domain'],
     values: { project: 'Project id or slug' },
-    booleans: ['token-stdin'],
+    booleans: { 'token-stdin': 'Read a scoped Cloudflare API token from stdin' },
     method: 'POST',
   },
   {
@@ -517,7 +528,9 @@ export const operatorCommands: Array<OperatorCommand> = [
     description: 'Remove an email domain and its Cloudflare setup',
     path: '/email/domains/:domain/remove',
     positional: ['domain'],
-    booleans: ['token-stdin'],
+    booleans: {
+      'token-stdin': 'Read a replacement Cloudflare token for blocked project cleanup from stdin',
+    },
     method: 'POST',
   },
   {
@@ -576,8 +589,7 @@ export type OperatorArgs = {
   yes: boolean;
   follow: boolean;
   tokenStdin: boolean;
-  provider: string;
-  providerExplicit?: boolean;
+  provider?: string;
   timeoutMs?: number;
   method: 'GET' | 'POST';
   path: string;
@@ -593,11 +605,9 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     'json',
     'plan',
     'yes',
-    'follow',
-    'token-stdin',
+    // No command declares `--force`; parsing it as a boolean reports it as an unknown flag.
     'force',
-    'ended',
-    ...operatorCommands.flatMap((command) => command.booleans ?? []),
+    ...operatorCommands.flatMap((command) => Object.keys(command.booleans ?? {})),
   ]);
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
@@ -636,8 +646,7 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
     yes: flags.has('yes'),
     follow: flags.has('follow'),
     tokenStdin: flags.has('token-stdin'),
-    provider: values.provider ?? 'github',
-    ...(values.provider ? { providerExplicit: true } : {}),
+    provider: values.provider,
     method: 'GET',
     path: '',
     query: {},
@@ -693,9 +702,11 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   }
   for (const name of flags) {
     if (
-      !['json', ...(command.method ? ['yes', 'plan'] : []), ...(command.booleans ?? [])].includes(
-        name,
-      )
+      ![
+        'json',
+        ...(command.method ? ['yes', 'plan'] : []),
+        ...Object.keys(command.booleans ?? {}),
+      ].includes(name)
     ) {
       throw new Error(`platform: Unknown flag '--${name}' for ${group} ${action}.`);
     }
@@ -708,7 +719,9 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   if (identitySignupEntry) {
     const connectionId = parameters[1]!;
     const subject = parameters[2]!;
-    if (!/^[a-z][a-z0-9-]{0,63}$/.test(connectionId)) {
+    try {
+      parsePlatformLoginId(connectionId);
+    } catch {
       throw new Error('platform: Invalid login connection ID.');
     }
     if (!subject || subject.length > 255) {
@@ -774,7 +787,7 @@ export function parseOperatorArgs(args: Array<string>): OperatorArgs {
   }
   // Command-specific booleans other than the session's own `--token-stdin`
   // ride the body, where the server reads them as JSON booleans.
-  for (const name of command.booleans ?? []) {
+  for (const name of Object.keys(command.booleans ?? {})) {
     if (name !== 'token-stdin' && flags.has(name)) {
       parsed.body[name] = true;
     }

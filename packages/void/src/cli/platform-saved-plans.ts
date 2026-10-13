@@ -1,10 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'pathslash';
+import { writeFileAtomic } from '../shared/atomic-write.ts';
 import { parsePlatformArgs, type PlatformArgs } from './platform-args.ts';
 import { platformRegistryDirectory } from './platform-registry.ts';
 
-export type SavedPlatformInstallPlan = Readonly<{
+type SavedPlatformInstallPlan = Readonly<{
   id: string;
   accountName: string;
   savedAt: string;
@@ -65,14 +66,11 @@ export function savePlatformInstallChoices(
   };
   const plan = parseSavedPlan(record);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const path = join(directory, `plan-${plan.id}.json`);
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporary, JSON.stringify(record, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, path);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+  writeFileAtomic(
+    join(directory, `plan-${plan.id}.json`),
+    JSON.stringify(record, null, 2) + '\n',
+    0o600,
+  );
   return plan;
 }
 

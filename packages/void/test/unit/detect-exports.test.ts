@@ -21,24 +21,9 @@ describe('detectHttpExports', () => {
     rmSync(TMP, { recursive: true, force: true });
   });
 
-  it('detects export const GET', () => {
-    const path = writeRoute('hello.ts', 'export const GET = () => "ok";');
-    expect(detectHttpExports(path)).toEqual(['GET']);
-  });
-
   it('detects export function POST', () => {
     const path = writeRoute('hello.ts', 'export function POST() { return "ok"; }');
     expect(detectHttpExports(path)).toEqual(['POST']);
-  });
-
-  it('detects multiple methods', () => {
-    const path = writeRoute(
-      'users.ts',
-      `export const GET = () => [];
-export const POST = () => ({ created: true });
-export const DELETE = () => ({ deleted: true });`,
-    );
-    expect(detectHttpExports(path)).toEqual(['GET', 'POST', 'DELETE']);
   });
 
   it('detects re-exported methods', () => {

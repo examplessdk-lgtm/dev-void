@@ -1,12 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { globSync, readFileSync, realpathSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { deletedFiles, planAffectedTests } from './affected-tests.ts';
 import { createAffectedVcsProvider } from './affected-vcs.ts';
 
-export async function runAffected(root, values) {
+async function runAffected(root, values) {
   root = realpathSync(root);
   if (values.help) {
     console.log('vp run test [--base <ref>] [--list] [--unit]');
@@ -130,19 +130,17 @@ export async function runAffected(root, values) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    const { values } = parseArgs({
-      options: {
-        base: { type: 'string' },
-        list: { type: 'boolean' },
-        unit: { type: 'boolean' },
-        help: { type: 'boolean', short: 'h' },
-      },
-    });
-    await runAffected(fileURLToPath(new URL('../', import.meta.url)), values);
-  } catch (error) {
-    console.error(error);
-    process.exitCode = 1;
-  }
+try {
+  const { values } = parseArgs({
+    options: {
+      base: { type: 'string' },
+      list: { type: 'boolean' },
+      unit: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+  });
+  await runAffected(fileURLToPath(new URL('../', import.meta.url)), values);
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
 }

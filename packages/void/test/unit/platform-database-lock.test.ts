@@ -1,9 +1,9 @@
 import { PGlite } from '@electric-sql/pglite';
 import { getPlatformRuntimeDirectory, readPlatformRuntimeManifest } from '@void/platform/installer';
 import { afterEach, beforeEach, expect, it, vi } from 'vite-plus/test';
+import { claimPlatformDatabase } from '../../src/cli/platform-installer-database.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
-  claimPlatformDatabase,
   type PlatformDatabaseLifecycleLock,
 } from '../../src/cli/platform-installer.ts';
 

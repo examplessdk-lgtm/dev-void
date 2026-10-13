@@ -27,6 +27,8 @@ export const githubSubcommands: Array<SubcommandDef> = [
   { name: 'join', description: "Join your organization's shared GitHub App installations" },
 ];
 
+type Executor = 'container' | 'github_actions';
+
 export type GithubArgs =
   | { subcommand: 'install' }
   | { subcommand: 'installations' }
@@ -38,14 +40,14 @@ export type GithubArgs =
       installationId?: string;
       repo?: string;
       branch?: string;
-      executor?: 'container' | 'github_actions';
+      executor?: Executor;
       workflowPath?: string;
     }
   | {
       subcommand: 'update';
       projectName: string;
       branch?: string;
-      executor?: 'container' | 'github_actions';
+      executor?: Executor;
       workflowPath?: string;
     }
   | {
@@ -58,31 +60,60 @@ export type GithubArgs =
       yes?: boolean;
     };
 
+function parseExecutor(value: string): Executor {
+  if (value !== 'container' && value !== 'github_actions') {
+    throw new Error('github: invalid --executor (expected container|github_actions).');
+  }
+  return value;
+}
+
+/**
+ * Parses `[project] [flags]`, where `--project <name>` is an alias for the
+ * positional. Value flags require a non-blank value and receive it untrimmed.
+ */
+function parseProjectArgs(
+  rest: Array<string>,
+  valueFlags: Record<string, (value: string) => void>,
+  booleanFlags: Record<string, () => void> = {},
+): string {
+  let projectName = '';
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (Object.hasOwn(booleanFlags, arg)) {
+      booleanFlags[arg]();
+      continue;
+    }
+    if (arg !== '--project' && !Object.hasOwn(valueFlags, arg)) {
+      if (arg.startsWith('-') || projectName) {
+        throw new Error(`github: Unexpected argument '${arg}'.`);
+      }
+      projectName = arg;
+      continue;
+    }
+    const value = rest[++i];
+    if (value === undefined || value.trim() === '') {
+      throw new Error(`github: ${arg} requires a value.`);
+    }
+    if (arg !== '--project') {
+      valueFlags[arg](value);
+    } else if (projectName) {
+      throw new Error(`github: Unexpected argument '${value}'.`);
+    } else {
+      projectName = value;
+    }
+  }
+  return projectName;
+}
+
 export function parseGithubArgs(args: Array<string>): GithubArgs {
   const [subcommand, ...rest] = args;
 
-  if (subcommand === 'install') {
-    if (rest.length > 0) {
-      throw new Error(`github: Unexpected argument '${rest[0]}'.`);
-    }
-    return { subcommand };
-  }
-
-  if (subcommand === 'installations') {
-    if (rest.length > 0) {
-      throw new Error(`github: Unexpected argument '${rest[0]}'.`);
-    }
-    return { subcommand };
-  }
-
-  if (subcommand === 'link') {
-    if (rest.length > 0) {
-      throw new Error(`github: Unexpected argument '${rest[0]}'.`);
-    }
-    return { subcommand };
-  }
-
-  if (subcommand === 'join') {
+  if (
+    subcommand === 'install' ||
+    subcommand === 'installations' ||
+    subcommand === 'link' ||
+    subcommand === 'join'
+  ) {
     if (rest.length > 0) {
       throw new Error(`github: Unexpected argument '${rest[0]}'.`);
     }
@@ -90,211 +121,54 @@ export function parseGithubArgs(args: Array<string>): GithubArgs {
   }
 
   if (subcommand === 'connect') {
-    let projectName = '';
-    let installationId: string | undefined;
-    let repo: string | undefined;
-    let branch: string | undefined;
-    let executor: 'container' | 'github_actions' | undefined;
-    let workflowPath: string | undefined;
-
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--installation') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --installation requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --installation requires a value.');
-        }
-        installationId = value;
-      } else if (arg === '--repo') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --repo requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --repo requires a value.');
-        }
-        repo = value;
-      } else if (arg === '--branch') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --branch requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --branch requires a value.');
-        }
-        branch = value;
-      } else if (arg === '--project') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --project requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --project requires a value.');
-        }
-        if (projectName) {
-          throw new Error(`github: Unexpected argument '${value}'.`);
-        }
-        projectName = value;
-      } else if (arg === '--executor') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --executor requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --executor requires a value.');
-        }
-        if (value !== 'container' && value !== 'github_actions') {
-          throw new Error('github: invalid --executor (expected container|github_actions).');
-        }
-        executor = value;
-      } else if (arg === '--workflow') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --workflow requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --workflow requires a value.');
-        }
-        workflowPath = value.trim();
-      } else if (arg.startsWith('-')) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else if (projectName) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else {
-        projectName = arg;
-      }
-    }
-
-    return { subcommand, projectName, installationId, repo, branch, executor, workflowPath };
+    const parsed: Extract<GithubArgs, { subcommand: 'connect' }> = { subcommand, projectName: '' };
+    parsed.projectName = parseProjectArgs(rest, {
+      '--installation': (value) => {
+        parsed.installationId = value;
+      },
+      '--repo': (value) => {
+        parsed.repo = value;
+      },
+      '--branch': (value) => {
+        parsed.branch = value;
+      },
+      '--executor': (value) => {
+        parsed.executor = parseExecutor(value);
+      },
+      '--workflow': (value) => {
+        parsed.workflowPath = value.trim();
+      },
+    });
+    return parsed;
   }
 
   if (subcommand === 'update') {
-    let projectName = '';
-    let branch: string | undefined;
-    let executor: 'container' | 'github_actions' | undefined;
-    let workflowPath: string | undefined;
-
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--branch') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --branch requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --branch requires a value.');
-        }
-        // Store the trimmed branch so the no-op check and the PATCH both use the
-        // canonical name — a padded value like 'main ' would never match
-        // refs/heads/main at OIDC exchange time and would cancel in-flight builds
-        // for the old branch.
-        branch = value.trim();
-      } else if (arg === '--project') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --project requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --project requires a value.');
-        }
-        if (projectName) {
-          throw new Error(`github: Unexpected argument '${value}'.`);
-        }
-        projectName = value;
-      } else if (arg === '--executor') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --executor requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --executor requires a value.');
-        }
-        if (value !== 'container' && value !== 'github_actions') {
-          throw new Error('github: invalid --executor (expected container|github_actions).');
-        }
-        executor = value;
-      } else if (arg === '--workflow') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --workflow requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --workflow requires a value.');
-        }
-        workflowPath = value.trim();
-      } else if (arg.startsWith('-')) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else if (projectName) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else {
-        projectName = arg;
-      }
-    }
-
-    return { subcommand, projectName, branch, executor, workflowPath };
+    const parsed: Extract<GithubArgs, { subcommand: 'update' }> = { subcommand, projectName: '' };
+    parsed.projectName = parseProjectArgs(rest, {
+      // Trimmed so the no-op check and the PATCH both use the canonical branch name.
+      '--branch': (value) => {
+        parsed.branch = value.trim();
+      },
+      '--executor': (value) => {
+        parsed.executor = parseExecutor(value);
+      },
+      '--workflow': (value) => {
+        parsed.workflowPath = value.trim();
+      },
+    });
+    return parsed;
   }
 
   if (subcommand === 'status') {
-    let projectName = '';
-
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--project') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --project requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --project requires a value.');
-        }
-        if (projectName) {
-          throw new Error(`github: Unexpected argument '${value}'.`);
-        }
-        projectName = value;
-      } else if (arg.startsWith('-')) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else if (projectName) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else {
-        projectName = arg;
-      }
-    }
-
-    return { subcommand, projectName };
+    return { subcommand, projectName: parseProjectArgs(rest, {}) };
   }
 
   if (subcommand === 'disconnect') {
-    let projectName = '';
     let yes = false;
-
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === '--yes' || arg === '-y') {
-        yes = true;
-      } else if (arg === '--project') {
-        if (i + 1 >= rest.length) {
-          throw new Error('github: --project requires a value.');
-        }
-        const value = rest[++i]!;
-        if (value.trim() === '') {
-          throw new Error('github: --project requires a value.');
-        }
-        if (projectName) {
-          throw new Error(`github: Unexpected argument '${value}'.`);
-        }
-        projectName = value;
-      } else if (arg.startsWith('-')) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else if (projectName) {
-        throw new Error(`github: Unexpected argument '${arg}'.`);
-      } else {
-        projectName = arg;
-      }
-    }
-
+    const confirm = () => {
+      yes = true;
+    };
+    const projectName = parseProjectArgs(rest, {}, { '--yes': confirm, '-y': confirm });
     return { subcommand, projectName, yes };
   }
 

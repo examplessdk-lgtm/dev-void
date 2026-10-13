@@ -6,6 +6,13 @@ import { discoverSchema, schemaSpecifier } from './discover.ts';
 
 type DrizzleDialect = 'sqlite' | 'postgresql' | 'mysql';
 
+/** drizzle-kit `generate` needs a URL but never connects. */
+export const PLACEHOLDER_DB_URL: Record<DrizzleDialect, string> = {
+  sqlite: ':memory:',
+  postgresql: 'postgresql://dummy',
+  mysql: 'mysql://dummy',
+};
+
 /**
  * Write a temporary drizzle-kit config, by default to `.void/drizzle.config.json`.
  * Schema and migration paths are relative to the project root: drizzle-kit
@@ -101,8 +108,7 @@ function removeProjectDrizzleConfigWithUrl(root: string): void {
   if (
     typeof url === 'string' &&
     url.includes('://') &&
-    url !== 'postgresql://dummy' &&
-    url !== 'mysql://dummy'
+    !Object.values(PLACEHOLDER_DB_URL).includes(url)
   ) {
     rmSync(configPath, { force: true });
   }

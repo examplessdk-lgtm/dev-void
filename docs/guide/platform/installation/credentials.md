@@ -39,6 +39,8 @@ Use the following permissions for the core platform. Cloudflare may label write 
 | Account | Hyperdrive         | Write      | Write                                   |
 | Account | Account Analytics  | Read       | Read                                    |
 | Account | AI Gateway         | Edit       | Edit when installing with browser login |
+| Account | Containers         | —          | Edit                                    |
+| Account | Cloudchamber       | —          | Edit                                    |
 | Zone    | Zone               | Read       | —                                       |
 | Zone    | DNS                | Edit       | —                                       |
 | Zone    | Workers Routes     | Edit       | —                                       |
@@ -72,7 +74,7 @@ The installer deploys the email gateway, prepares the shared mail route, and ver
 
 ## R2 Upload Credentials
 
-In the **R2 token creation** form opened by the installer, select **Object Read & Write** and **Apply to all buckets in this account (including newly created buckets)**. Create an account token, or a user token if your role requires it. Save its **Access Key ID** and **Secret Access Key** in your password manager. These differ from the management and runtime API tokens. See [R2’s token instructions](https://developers.cloudflare.com/r2/api/tokens/).
+The installer opens the **R2 token creation** form with a token name based on your platform's display name, **Object Read & Write**, and **Apply to all buckets in this account (including newly created buckets)** preselected. Review the settings and create an account token, or a user token if your role requires it. Save its **Access Key ID** and **Secret Access Key** in your password manager, then paste both into the installer. These differ from the management and runtime API tokens. See [R2’s token instructions](https://developers.cloudflare.com/r2/api/tokens/).
 
 ## Signing and Encryption Keys {#signing-and-encryption-keys}
 

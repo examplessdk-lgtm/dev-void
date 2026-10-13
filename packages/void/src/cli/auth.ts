@@ -1,10 +1,11 @@
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { browserPageLead, browserPageStatus, renderBrowserPage } from '@void/platform/browser-page';
 import { join } from 'pathslash';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
-import { ensureCloudflaredToken } from './cf-access.ts';
+import { ensurePlatformAccessToken } from './cf-access.ts';
 import { deleteKeyringPassword, readKeyringPassword, writeKeyringPassword } from './keyring.ts';
 import {
   getActivePlatformConnection,
@@ -18,11 +19,6 @@ const CONFIG_DIR = join(homedir(), '.void');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 const KEYRING_SERVICE = 'dev.void.cli';
 
-// ---------------------------------------------------------------------------
-// Keyring helpers — try/catch around `new Entry` for environments where the
-// native addon fails at runtime (CI, Docker, SSH, etc.)
-// ---------------------------------------------------------------------------
-
 function keyringGet(account: string): string | null {
   return readKeyringPassword(KEYRING_SERVICE, account);
 }
@@ -35,14 +31,9 @@ function keyringDelete(account: string): boolean {
   return deleteKeyringPassword(KEYRING_SERVICE, account);
 }
 
-// ---------------------------------------------------------------------------
-// Config file — non-sensitive fields only (api).
-// Origin-scoped file credentials remain readable when a keychain is unavailable.
-// ---------------------------------------------------------------------------
-
+// Legacy origin-scoped tokens, moved to the keychain when read.
 type Config = {
   tokens?: Record<string, string>;
-  api?: string;
 };
 
 function readConfig(): Config {
@@ -161,26 +152,14 @@ export function getTokenSource(): 'ci' | 'manual' {
   return process.env.VOID_TOKEN ? 'ci' : 'manual';
 }
 
-export function saveToken(
-  token: string,
-  root: string = process.cwd(),
-  dependencies: { keyringSet?: (account: string, password: string) => boolean } = {},
-): void {
-  savePlatformToken(token, getApiUrl(root), dependencies);
-}
-
 export function readPlatformToken(apiUrl: string): string | null {
   return readOriginScopedToken(apiUrl, readConfig());
 }
 
-export function savePlatformToken(
-  token: string,
-  origin: string,
-  dependencies: { keyringSet?: (account: string, password: string) => boolean } = {},
-): void {
+export function savePlatformToken(token: string, origin: string): void {
   const apiUrl = normalizePlatformApiUrl(origin);
   const account = platformCredentialAccount(apiUrl);
-  if ((dependencies.keyringSet ?? keyringSet)(account, token)) {
+  if (keyringSet(account, token)) {
     return;
   }
   throw new Error(
@@ -189,7 +168,7 @@ export function savePlatformToken(
 }
 
 export function removeToken(root: string = process.cwd()): boolean {
-  const apiUrl = normalizePlatformApiUrl(getApiUrl(root));
+  const apiUrl = getApiUrl(root);
   const account = platformCredentialAccount(apiUrl);
   let removed = false;
 
@@ -235,9 +214,8 @@ async function exchangeLoginCode(
   state: string,
   codeVerifier: string,
 ): Promise<string> {
-  const base = apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`;
-  ensureCloudflaredToken(apiUrl);
-  const res = await fetch(new URL('auth/cli/token', base), {
+  ensurePlatformAccessToken(apiUrl);
+  const res = await fetch(`${apiUrl}/auth/cli/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...cfAccessHeaders(process.env, apiUrl) },
     body: JSON.stringify({
@@ -315,53 +293,35 @@ function page(title: string, message: string): string {
   });
 }
 
-export function openBrowser(
-  url: string,
-  execFile: typeof import('node:child_process').execFile,
-): void {
+export function openBrowser(url: string, run: typeof execFile = execFile): void {
   // Launch via argv (execFile), never a shell: the URL is passed as a single
   // argument so shell metacharacters in it can't be interpreted as commands.
   const ignore = (): void => {};
   if (process.platform === 'win32') {
     // Avoid cmd.exe interpreting URL query separators such as & as shell commands.
-    execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
+    run('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
     return;
   }
   if (process.platform === 'darwin') {
-    execFile('open', [url], ignore);
+    run('open', [url], ignore);
     return;
   }
   // Linux — including WSL2 where `xdg-open` typically has no usable handler.
   // Try `wslview` (wslu), then fall back to the Windows URL handler.
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
-    execFile('wslview', [url], (error) => {
+    run('wslview', [url], (error) => {
       if (error) {
-        execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
+        run('rundll32.exe', ['url.dll,FileProtocolHandler', url], ignore);
       }
     });
     return;
   }
-  execFile('xdg-open', [url], ignore);
+  run('xdg-open', [url], ignore);
 }
 
 /**
- * Start a local HTTP callback server, open the browser to a caller-built
- * authorize URL, and wait for the redirect back to `http://localhost:PORT/callback`.
- *
- * The server validates the `state` it appended to the callback URL against the
- * incoming request, then runs the caller's `finalize` hook INSIDE the request
- * handler (so the browser only ever sees the success page after the underlying
- * exchange/link actually succeeded). On finalize success it renders the success
- * HTML and resolves with finalize's return value; on finalize failure it
- * renders the same "could not complete" failure page the login flow uses and
- * rejects with the thrown error. The server is always closed before settling.
- *
- * `onUrl` is invoked with the authorize URL once the local server is listening,
- * so callers can show the URL to the user as a manual fallback when the browser
- * fails to open (common on WSL2, headless SSH, Docker, etc.). To match the
- * login flow it fires immediately before the browser is opened.
- *
- * `execFile` is injectable so tests can avoid launching a real browser.
+ * Serve `http://localhost:PORT/callback`, open the browser at the caller's
+ * authorize URL, and settle with `finalize`'s result. The server closes before settling.
  */
 export async function awaitBrowserCallback<T>(options: {
   /** Caller-generated; appended to the callback URL and validated on the incoming request. */
@@ -369,34 +329,26 @@ export async function awaitBrowserCallback<T>(options: {
   /** Given `http://localhost:PORT/callback?state=…`, return the URL to open. */
   buildAuthUrl: (callback: URL) => Promise<string> | string;
   /**
-   * Runs INSIDE the request handler, after state/error/validate checks pass and
-   * BEFORE the success page is rendered. Resolve to settle the outer promise
-   * with this value (success page shown); throw to render the failure page and
-   * reject the outer promise with the thrown error.
+   * Runs inside the request handler, so the browser sees the success page only
+   * after it resolves; a throw renders the failure page and rejects.
    */
   finalize: (params: URLSearchParams) => Promise<T>;
   /** Name the completed action in the browser. Defaults to sign-in. */
   successTitle?: string;
   /** Map an `?error=…` query to a user message (return null to ignore). */
   describeError?: (params: URLSearchParams) => string | null;
-  /**
-   * Reject an otherwise-valid callback request (renders a 400 page) WITHOUT
-   * settling, so the server keeps listening for a subsequent valid callback.
-   * Used by login to reject `?token=` and missing-`code` requests. Return a
-   * message to reject, or null to accept.
-   */
+  /** Return a message to answer 400 and keep listening for a valid callback, or null to accept. */
   validate?: (params: URLSearchParams) => string | null;
-  /** Optional, invoked with the authorize URL before the browser is opened. */
+  /** Invoked with the authorize URL before the browser opens, for a manual fallback. */
   onUrl?: (url: string) => void;
   /** Default 5 minutes. */
   timeoutMs?: number;
-  /** Injectable for tests; defaults to the real `node:child_process` `execFile`. */
-  execFile?: typeof import('node:child_process').execFile;
+  /** Injectable for tests; defaults to `node:child_process` `execFile`. */
+  execFile?: typeof execFile;
 }): Promise<T> {
   const http = await import('node:http');
   const { state, buildAuthUrl, finalize, describeError, validate, onUrl } = options;
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
-  const execFile = options.execFile ?? (await import('node:child_process')).execFile;
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -441,9 +393,6 @@ export async function awaitBrowserCallback<T>(options: {
         return;
       }
 
-      // Reject-but-keep-listening: invalid request shapes (e.g. a stray
-      // `?token=`, or a redirect that arrived without a code). The server
-      // stays open so the genuine callback can still complete.
       const invalidMessage = validate?.(url.searchParams);
       if (invalidMessage) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -451,10 +400,7 @@ export async function awaitBrowserCallback<T>(options: {
         return;
       }
 
-      // Finalize INSIDE the request path so the browser only sees the success
-      // page once the underlying exchange/link succeeds. A finalize failure
-      // (expired code, API error, 409 conflict, etc.) renders the failure page
-      // and rejects. Guard against the timeout racing the in-flight finalize.
+      // The timeout may settle while finalize is in flight.
       let result: T;
       try {
         result = await finalize(url.searchParams);
@@ -504,7 +450,7 @@ export async function awaitBrowserCallback<T>(options: {
       }
 
       onUrl?.(authUrl);
-      openBrowser(authUrl, execFile);
+      openBrowser(authUrl, options.execFile);
     });
 
     const timeout = setTimeout(() => {
@@ -514,43 +460,22 @@ export async function awaitBrowserCallback<T>(options: {
   });
 }
 
-/**
- * Start a local HTTP server, open the browser to the platform login page,
- * and wait for the OAuth callback with a short-lived code. The CLI exchanges
- * the code itself so the localhost callback never accepts bearer tokens.
- *
- * `onUrl` is invoked with the login URL once the local server is listening,
- * so callers can show the URL to the user as a manual fallback when the
- * browser fails to open (common on WSL2, headless SSH, Docker, etc.).
- */
-export async function runLogin(
-  root: string = process.cwd(),
-  provider = 'github',
-  onUrl?: (url: string) => void,
-): Promise<string> {
-  return runPlatformLogin(getApiUrl(root), provider, onUrl);
-}
-
+/** The CLI exchanges the code itself, so the localhost callback never accepts bearer tokens. */
 export async function runPlatformLogin(
   origin: string,
   provider = 'github',
   onUrl?: (url: string) => void,
 ): Promise<string> {
-  const { execFile } = await import('node:child_process');
-
   const apiUrl = normalizePlatformApiUrl(origin);
   const state = randomBytes(32).toString('hex');
   const codeVerifier = createCodeVerifier();
   const codeChallenge = createCodeChallenge(codeVerifier);
 
-  // The exchange runs INSIDE the request handler (via finalize), so an exchange
-  // failure renders the failure page.
   return awaitBrowserCallback<string>({
     state,
-    execFile,
     onUrl,
     buildAuthUrl: (callback) => {
-      const loginUrl = new URL('auth/login', apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`);
+      const loginUrl = new URL(`${apiUrl}/auth/login`);
       loginUrl.searchParams.set('redirect', callback.href);
       loginUrl.searchParams.set('provider', provider);
       loginUrl.searchParams.set('code_challenge', codeChallenge);
@@ -561,8 +486,6 @@ export async function runPlatformLogin(
       p.get('error') === 'signup_restricted'
         ? 'Signup restricted: your email is not on the approved list for this environment.'
         : null,
-    // Keep listening but reject these request shapes: a stray `?token=` is never
-    // honored, and a callback without a `code` is ignored until the real one arrives.
     validate: (p) => {
       if (p.has('token')) {
         return 'Invalid login callback. Please try again.';

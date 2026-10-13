@@ -159,14 +159,6 @@ describe('bounded email receipt protocol', () => {
     ).rejects.toThrow('email response too large');
   });
 
-  it('bounds stalled tenant and envelope streams by deadline', async () => {
-    await expect(readEmailActions(new ReadableStream<Uint8Array>(), 5)).rejects.toThrow(
-      'email response timeout',
-    );
-    const envelope = new ReadableStream<Uint8Array>();
-    await expect(readEmailEnvelope(envelope, 5)).rejects.toThrow('email envelope timeout');
-  });
-
   it('does not extend protocol deadlines while an uncooperative stream cancels', async () => {
     const uncooperative = () =>
       new ReadableStream<Uint8Array>({

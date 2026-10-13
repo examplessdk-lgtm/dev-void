@@ -1,5 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { emailPayloadDigest } from '../../../proxy/src/email-admission.ts';
 import { deleteEmailDestination } from '../../src/db.ts';
 import {
   emailActionRecipients,
@@ -913,6 +914,45 @@ describe('authoritative email admission', () => {
     await expect(
       admitEmailAction(env.db, { ...input(project.id, 'same'), digest: 'b'.repeat(64) }),
     ).rejects.toMatchObject({ code: 'CONFLICT' } satisfies Partial<EmailAdmissionError>);
+  });
+
+  it('replays a multipart send whose SDK boundary was rebuilt without a second quota debit', async () => {
+    const project = await fixture();
+    const original = input(project.id, 'rebuilt-multipart');
+    const mime = (boundary: string) =>
+      new TextEncoder().encode(
+        [
+          'From: acme+news@mail.example.com',
+          'To: one@example.com',
+          'MIME-Version: 1.0',
+          'Content-Type: multipart/alternative;',
+          ` boundary="${boundary}"`,
+          '',
+          `--${boundary}`,
+          'Content-Type: text/plain; charset=UTF-8',
+          '',
+          'Plain text',
+          `--${boundary}`,
+          'Content-Type: text/html; charset=UTF-8',
+          '',
+          '<p>HTML</p>',
+          `--${boundary}--`,
+          '',
+        ].join('\r\n'),
+      );
+    const digest = (raw: Uint8Array) =>
+      emailPayloadDigest('direct', original.from, original.recipients, raw);
+    const first = await admitEmailAction(env.db, {
+      ...original,
+      digest: await digest(mime('=_void_alternative_1573725Jyj8yLCojOVRltQ')),
+    });
+    expect(
+      await admitEmailAction(env.db, {
+        ...original,
+        digest: await digest(mime('=_void_alternative_rebuilt')),
+      }),
+    ).toMatchObject({ operationId: first.operationId, replay: true });
+    expect((await getProjectEmailUsage(env.db, project.id)).attempts).toBe(1);
   });
 
   it('admits a partial batch under atomic recipient quotas and keeps charges after uncertain outcomes', async () => {

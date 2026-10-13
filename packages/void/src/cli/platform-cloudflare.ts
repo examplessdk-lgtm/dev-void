@@ -118,10 +118,6 @@ export type PlatformManagedWorkerTraffic = Readonly<{
   customDomains: ReadonlyArray<Readonly<{ hostname: string; service: string }>>;
   routes: ReadonlyArray<Readonly<{ pattern: string; script: string }>>;
 }>;
-export type PlatformTrackedWorkerTraffic = Readonly<{
-  customDomains: ReadonlyArray<CloudflareWorkerDomain>;
-  routes: ReadonlyArray<Readonly<{ id: string; pattern: string; script: string }>>;
-}>;
 
 export type PlatformRuntimeTokenPreflightClient = Pick<
   PlatformCloudflareClient,
@@ -374,7 +370,22 @@ export class PlatformCloudflareClient {
   }
 
   async listWorkerDomains(accountId: string): Promise<ReadonlyArray<CloudflareWorkerDomain>> {
-    const result = await this.#listWorkerDomainRecords(accountId);
+    const result: Array<Record<string, unknown>> = [];
+    const perPage = 100;
+    for (let page = 1; ; page++) {
+      const query = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+      const response = await this.#requestEnvelope<ReadonlyArray<Record<string, unknown>>>(
+        `/accounts/${encodeURIComponent(accountId)}/workers/domains?${query}`,
+      );
+      result.push(...response.result);
+      const totalPages = response.resultInfo?.total_pages;
+      if (
+        (typeof totalPages === 'number' && page >= totalPages) ||
+        (totalPages === undefined && response.result.length < perPage)
+      ) {
+        break;
+      }
+    }
     return result.map((entry) => ({
       hostname: requiredString(entry.hostname, 'Worker custom domain hostname'),
       id: requiredString(entry.id, 'Worker custom domain id'),
@@ -435,51 +446,17 @@ export class PlatformCloudflareClient {
       );
     }
 
-    const expected = [...origins].map((origin) => origin.hostname).sort();
     const inventory = await this.listWorkerDomains(accountId);
-    const actual = inventory
-      .filter((domain) => domain.service === workerName)
-      .map((domain) => domain.hostname)
-      .sort();
-    const everyExpectedDomainIsUniqueAndOwned = expected.every(
-      (hostname) =>
+    const everyExpectedDomainIsUniqueAndOwned = origins.every(
+      ({ hostname }) =>
         inventory.filter((domain) => domain.hostname === hostname && domain.service === workerName)
           .length === 1,
     );
-    if (
-      !everyExpectedDomainIsUniqueAndOwned ||
-      expected.some((hostname) => !actual.includes(hostname))
-    ) {
+    if (!everyExpectedDomainIsUniqueAndOwned) {
       throw new PlatformWorkerCustomDomainsChangedError(
         `platform: Worker ${JSON.stringify(workerName)} Custom Domains changed concurrently after publication; refusing to overwrite the newer traffic state.`,
       );
     }
-  }
-
-  async #listWorkerDomainRecords(
-    accountId: string,
-    service?: string,
-  ): Promise<ReadonlyArray<Record<string, unknown>>> {
-    const entries: Array<Record<string, unknown>> = [];
-    const perPage = 100;
-    for (let page = 1; ; page++) {
-      const query = new URLSearchParams({ page: String(page), per_page: String(perPage) });
-      if (service) {
-        query.set('service', service);
-      }
-      const response = await this.#requestEnvelope<ReadonlyArray<Record<string, unknown>>>(
-        `/accounts/${encodeURIComponent(accountId)}/workers/domains?${query}`,
-      );
-      entries.push(...response.result);
-      const totalPages = response.resultInfo?.total_pages;
-      if (
-        (typeof totalPages === 'number' && page >= totalPages) ||
-        (totalPages === undefined && response.result.length < perPage)
-      ) {
-        break;
-      }
-    }
-    return entries;
   }
 
   async listWorkerRoutes(zoneId: string): Promise<ReadonlyArray<CloudflareWorkerRoute>> {
@@ -1056,34 +1033,12 @@ export class PlatformCloudflareClient {
     if (kind === 'ai-gateway' && this.#aiGatewayClient) {
       return this.#aiGatewayClient.deleteResource(accountId, resource, zoneId);
     }
-    const account = encodeURIComponent(accountId);
     // Cloudflare addresses dispatch namespaces and Workers by name; every
     // other kind by id.
     const encoded = encodeURIComponent(
       kind === 'dispatch-namespace' || kind === 'worker' ? resource.name : resource.id,
     );
-    const path =
-      kind === 'kv-namespace'
-        ? `/accounts/${account}/storage/kv/namespaces/${encoded}`
-        : kind === 'dns-record'
-          ? zoneId
-            ? `/zones/${encodeURIComponent(zoneId)}/dns_records/${encoded}`
-            : null
-          : kind === 'ai-gateway'
-            ? `/accounts/${account}/ai-gateway/gateways/${encoded}`
-            : kind === 'r2-bucket'
-              ? `/accounts/${account}/r2/buckets/${encoded}`
-              : kind === 'queue'
-                ? `/accounts/${account}/queues/${encoded}`
-                : kind === 'dispatch-namespace'
-                  ? `/accounts/${account}/workers/dispatch/namespaces/${encoded}`
-                  : kind === 'hyperdrive'
-                    ? `/accounts/${account}/hyperdrive/configs/${encoded}`
-                    : kind === 'worker'
-                      ? `/accounts/${account}/workers/scripts/${encoded}`
-                      : kind === 'zone'
-                        ? `/zones/${encoded}`
-                        : null;
+    const path = deletionPath(kind, encodeURIComponent(accountId), encoded, zoneId);
     if (!path) {
       throw new Error(`platform: Unsupported Cloudflare deletion kind ${kind}.`);
     }
@@ -1312,18 +1267,6 @@ export class PlatformCloudflareClient {
       }),
     });
   }
-
-  async removeRoutes(
-    _accountId: string,
-    _zoneId: string | null,
-    tracked: PlatformTrackedWorkerTraffic,
-  ): Promise<void> {
-    if (tracked.routes.length > 0 || tracked.customDomains.length > 0) {
-      throw new Error(
-        'platform: Cloudflare does not support conditional Worker traffic deletion. Retaining routes and custom domains for explicit dashboard cleanup.',
-      );
-    }
-  }
 }
 
 function accessResourcePath(
@@ -1346,6 +1289,36 @@ function parseEmailRoutingTarget(rule: Record<string, unknown>): CloudflareEmail
         ? value[0]
         : null,
   };
+}
+
+function deletionPath(
+  kind: string,
+  account: string,
+  encoded: string,
+  zoneId: string | undefined,
+): string | null {
+  switch (kind) {
+    case 'kv-namespace':
+      return `/accounts/${account}/storage/kv/namespaces/${encoded}`;
+    case 'dns-record':
+      return zoneId ? `/zones/${encodeURIComponent(zoneId)}/dns_records/${encoded}` : null;
+    case 'ai-gateway':
+      return `/accounts/${account}/ai-gateway/gateways/${encoded}`;
+    case 'r2-bucket':
+      return `/accounts/${account}/r2/buckets/${encoded}`;
+    case 'queue':
+      return `/accounts/${account}/queues/${encoded}`;
+    case 'dispatch-namespace':
+      return `/accounts/${account}/workers/dispatch/namespaces/${encoded}`;
+    case 'hyperdrive':
+      return `/accounts/${account}/hyperdrive/configs/${encoded}`;
+    case 'worker':
+      return `/accounts/${account}/workers/scripts/${encoded}`;
+    case 'zone':
+      return `/zones/${encoded}`;
+    default:
+      return null;
+  }
 }
 
 function cloudflareErrorDetails(envelope: CloudflareEnvelope<unknown>, status: number): string {

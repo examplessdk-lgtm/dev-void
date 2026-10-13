@@ -1,10 +1,11 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { verifyJwt } from '../auth/jwt.ts';
+import { activeOAuthApproval, OAuthError } from '../auth/oauth.ts';
 import { validateHumanSession } from '../auth/sessions.ts';
 import { ACTIVE_BUILD_STATUSES, getBuild, getUser } from '../db.ts';
 import { type ApiEnv, isDevBypass } from '../env.ts';
-import { projectDeployCredentials, projects, users } from '../schema.ts';
+import { deploymentOperations, projectDeployCredentials, projects, users } from '../schema.ts';
 import { isAdminSuspended } from '../suspension.ts';
 
 /**
@@ -75,7 +76,7 @@ function isDeployTokenAllowed(method: string, path: string, projectScope: string
 }
 
 export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) => {
-  if (isDevBypass(context.env)) {
+  if (isDevBypass(context.env) && !context.req.header('Authorization')) {
     const first = await context
       .get('db')
       .select()
@@ -101,7 +102,10 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   // (minted for remote builds). Verify the signature/expiry without pinning the
   // audience, then accept only these two audiences.
   const payload = await verifyJwt(token, context.env.JWT_SECRET);
-  if (!payload || (payload.aud !== 'api' && payload.aud !== 'deploy')) {
+  if (
+    !payload ||
+    (payload.aud !== 'api' && payload.aud !== 'deploy' && payload.aud !== 'oauth-deploy')
+  ) {
     return context.json(
       {
         error: 'invalid or expired token',
@@ -148,6 +152,68 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   }
 
   context.set('user', user);
+  if (payload.aud === 'oauth-deploy') {
+    try {
+      if (!payload.oauthApproval || !payload.project) {
+        throw new OAuthError('invalid_token', 'A publish approval is required.', 401);
+      }
+      const { approval, user: actor } = await activeOAuthApproval(
+        context.get('db'),
+        payload.oauthApproval,
+        context.get('companyIdentity'),
+      );
+      if (actor.id !== payload.sub || approval.data.projectId !== payload.project) {
+        throw new OAuthError('invalid_token', 'Invalid publish approval.', 401);
+      }
+      const path = context.req.path;
+      const base = '/projects/' + payload.project;
+      const allowed =
+        (context.req.method === 'POST' &&
+          [base + '/deploy/upload-urls', base + '/deploy'].includes(path)) ||
+        (context.req.method === 'GET' &&
+          (path === base || (path.startsWith(base + '/deployments/') && path.endsWith('/events'))));
+      if (!allowed) {
+        throw new OAuthError(
+          'access_denied',
+          'This credential permits only the approved deployment.',
+          403,
+        );
+      }
+      if (context.req.method === 'GET' && path.endsWith('/events')) {
+        const deploymentId = path.slice((base + '/deployments/').length, -'/events'.length);
+        const [receipt] = await context
+          .get('db')
+          .select({ id: deploymentOperations.id })
+          .from(deploymentOperations)
+          .where(
+            and(
+              eq(deploymentOperations.id, deploymentId),
+              eq(deploymentOperations.project_id, payload.project),
+              eq(deploymentOperations.idempotency_key, approval.id),
+            ),
+          );
+        if (!receipt) {
+          throw new OAuthError(
+            'access_denied',
+            'This credential can read only its own deployment receipt.',
+            403,
+          );
+        }
+      }
+      context.set('deployScope', payload.project);
+      context.set('oauthApproval', approval.id);
+      context.set('deployTokenExpiresAt', payload.exp);
+    } catch (error) {
+      return context.json(
+        {
+          error: 'invalid_token',
+          message: error instanceof Error ? error.message : 'Invalid approval.',
+        },
+        error instanceof OAuthError ? error.status : 401,
+      );
+    }
+    return next();
+  }
   if (payload.aud === 'api' && payload.sid) {
     context.set('humanSession', { id: payload.sid, audience: 'api' });
   }

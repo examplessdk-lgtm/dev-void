@@ -163,3 +163,27 @@ Typed state works in local development and direct Cloudflare deploys of native V
 Custom Durable Object modules are not supported on Void platforms, in meta-frameworks, or on Node.js, Bun, and Deno.
 
 This is separate from [typed WebSocket routes](./websockets.md), which also use SQLite-backed Durable Objects and work on both direct Cloudflare and hosted Void deployments.
+
+## Native Durable Object classes
+
+Use `defineDurableObject` to keep a native Cloudflare class, including classes extending Cloudflare Agents. Void discovers its binding and exports the class without replacing its constructor, lifecycle, or RPC methods. Like Durable State, this supports direct Cloudflare deployments.
+
+```ts
+// durable-objects/workspace.ts
+import { DurableObject } from 'cloudflare:workers';
+import { defineDurableObject } from 'void/durable';
+
+class WorkspaceObject extends DurableObject {
+  async fetch() {
+    return new Response('Workspace');
+  }
+}
+
+export const Workspace = defineDurableObject({
+  name: 'workspace',
+  class: WorkspaceObject,
+});
+export default Workspace;
+```
+
+Call `Workspace.get('project-id')` from a server handler to obtain its typed stub. Keep the resource name and instance name stable across deployments to retain storage.

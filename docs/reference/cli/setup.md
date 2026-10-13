@@ -33,6 +33,8 @@ void init [--tsconfig] [--github] [--git | --no-git]
 
 Set up a new or existing Void project. In an empty directory, choose Vite+ or Vite, a framework, and a D1, PostgreSQL, MySQL, or Static Pages starter.
 
+Vite+ projects install dependencies through `vp install`; no global Vite+ installation is required. Void preserves existing package-manager versions and lockfiles. New Vite+ projects without a package-manager configuration use pnpm without pinning a version.
+
 In an existing app, Void adds missing dependencies and scripts and updates the Vite config. If it cannot edit your config, it prints the snippet to add.
 
 The wizard also sets up TypeScript, agent instructions, environment declarations, and a deployment target. Choose Cloudflare, a Void platform, or skip deployment setup. If you skip sign-in, run `void connect` when you're ready. See [Quick Start](../../guide/quickstart.md).

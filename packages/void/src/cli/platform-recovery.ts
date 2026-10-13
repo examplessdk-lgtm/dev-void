@@ -50,10 +50,6 @@ export async function recoverPlatformInstallations(
   ) => Promise<void> = verifyInstallationEndpoint,
   selector = '',
 ): Promise<ReadonlyArray<PlatformInstallationManifest>> {
-  const accounts = await client.listAccounts();
-  if (!accounts.some((account) => account.id === accountId)) {
-    throw new Error(`platform: Cloudflare account ${JSON.stringify(accountId)} is unavailable.`);
-  }
   // The routing namespace is the durable recovery root. Interrupted creates
   // can intentionally move it to a deterministic `-retry-*` name, and future
   // naming changes must not make an otherwise valid installation invisible.
@@ -150,18 +146,14 @@ export async function recoverPlatformInstallations(
         if (isPlatformManifestMonotonicExtension(manifest, collision)) {
           await verifyPlatformInstallationOwnership(client, collision);
           manifest = collision;
-        } else if (isPlatformManifestMonotonicExtension(collision, manifest)) {
-          writeInstallationManifest(manifest);
-        } else {
+        } else if (!isPlatformManifestMonotonicExtension(collision, manifest)) {
           throw new Error(
             `platform: Local installation ${manifest.id} differs from its remote checkpoint. Resolve or remove the local record before discovery; it was not overwritten.`,
           );
         }
       }
       manifest = reconcileRecoveredEndpoints(manifest, plan);
-      if (!collision) {
-        writeInstallationManifest(manifest);
-      } else if (JSON.stringify(collision) !== JSON.stringify(manifest)) {
+      if (!collision || JSON.stringify(collision) !== JSON.stringify(manifest)) {
         writeInstallationManifest(manifest);
       }
       if (manifest.endpoints.apiUrl !== null && manifest.endpoints.proxyUrl !== null) {

@@ -1,12 +1,6 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'pathslash';
+import { writeFileAtomic } from '../shared/atomic-write.ts';
 
 const CANDIDATE_FILE = '.void/cloudflare-candidate.json';
 const INVALID_CANDIDATE_MESSAGE =
@@ -101,20 +95,11 @@ export function recordCloudflareCandidateUpload(
     versionId,
   ];
   mkdirSync(join(root, '.void'), { recursive: true });
-  const path = join(root, CANDIDATE_FILE);
-  const temp = `${path}.${process.pid}.tmp`;
-  try {
-    writeFileSync(
-      temp,
-      `${JSON.stringify({ accountId, workerName, parentVersionId, versionIds })}\n`,
-      { mode: 0o600 },
-    );
-    renameSync(temp, path);
-  } finally {
-    if (existsSync(temp)) {
-      unlinkSync(temp);
-    }
-  }
+  writeFileAtomic(
+    join(root, CANDIDATE_FILE),
+    `${JSON.stringify({ accountId, workerName, parentVersionId, versionIds })}\n`,
+    0o600,
+  );
 }
 
 export function clearCloudflareCandidate(root: string): void {

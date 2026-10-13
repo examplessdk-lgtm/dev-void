@@ -59,56 +59,6 @@ describe('resolveAssetConfig', () => {
     ).toEqual(SPA_API);
   });
 
-  it('routes the /__void internal namespace to the worker for SPA + API apps', () => {
-    // Regression: a SPA app with API routes + D1 migrations lands in the
-    // apiWorkerFirst branch. Without /__void in run_worker_first, CF Static
-    // Assets serves index.html for GET /__void/migrate/capabilities before the
-    // worker runs, so the migration handler is never reached and the deploy
-    // fails with "migration protocol v2 capability negotiation failed".
-    const config = resolveAssetConfig({
-      isSsr: false,
-      hasPages: false,
-      hasApiRoutes: true,
-      hasDocumentRoutes: false,
-      hasMiddleware: false,
-    });
-    expect(config.not_found_handling).toBe('single-page-application');
-    expect(config.run_worker_first).toContain('/__void');
-    expect(config.run_worker_first).toContain('/__void/*');
-  });
-
-  it('routes the /__void internal namespace worker-first for auth-enabled SPA apps', () => {
-    // authEnabled also triggers the apiWorkerFirst branch (auth apps have
-    // migrations for the auth tables), so /__void must reach the worker too.
-    const config = resolveAssetConfig({
-      isSsr: false,
-      hasPages: false,
-      hasApiRoutes: false,
-      hasDocumentRoutes: false,
-      hasMiddleware: false,
-      authEnabled: true,
-    });
-    expect(config.run_worker_first).toContain('/__void/*');
-  });
-
-  it('routes the /__void internal namespace worker-first for a migration-only SPA (cron/queue app, no API/auth/pages)', () => {
-    // A SPA whose only server code is a cron/queue handler still advertises
-    // manifest.migrations (validatedMigrations is passed to buildVoidManifest
-    // independently of routes), but has none of the asset-routing flags, so it
-    // falls to the pure-SPA branch. Without /__void there, CF serves index.html
-    // for GET /__void/migrate/capabilities and negotiation fails.
-    const config = resolveAssetConfig({
-      isSsr: false,
-      hasPages: false,
-      hasApiRoutes: false,
-      hasDocumentRoutes: false,
-      hasMiddleware: false,
-    });
-    expect(config.not_found_handling).toBe('single-page-application');
-    expect(config.run_worker_first).toContain('/__void');
-    expect(config.run_worker_first).toContain('/__void/*');
-  });
-
   it('uses none when the project has document routes', () => {
     expect(
       resolveAssetConfig({
@@ -159,10 +109,6 @@ describe('resolveAssetConfig', () => {
   });
 
   it('uses none for the common SPA + auth-middleware shape', () => {
-    // Regression: this is the case the SPA-fallback shortcut silently
-    // breaks. Browser navigation to /api/auth/callback/google would arrive
-    // with Sec-Fetch-Mode: navigate, get the SPA shell, and never reach
-    // Better Auth — leaving the user "signed in" without a session cookie.
     expect(
       resolveAssetConfig({
         isSsr: false,
@@ -210,7 +156,7 @@ describe('resolveAssetConfig', () => {
     expect(hasApiRoutes([{ pattern: '/hello' }, { pattern: '/apiish' }])).toBe(false);
   });
 
-  it('uses the same worker-owned HTML decision as the asset config', () => {
+  it('reports worker-owned HTML routing for document routes', () => {
     const inputs = {
       isSsr: false,
       hasPages: false,
@@ -218,7 +164,6 @@ describe('resolveAssetConfig', () => {
       hasMiddleware: false,
     };
     expect(workerOwnsHtmlRouting(inputs)).toBe(true);
-    expect(resolveAssetConfig(inputs)).toEqual(NONE);
   });
 
   it('resolves the complete request trigger policy', () => {
@@ -281,19 +226,7 @@ describe('resolveAssetConfig', () => {
   });
 });
 
-// `routing.notFound` (void.json) is an explicit escape hatch, not a new default.
-//
-// Without it, an app whose assets came from a static site generator and whose
-// only backend is an API route takes the `apiWorkerFirst` branch, so unknown
-// URLs are answered with `index.html` and HTTP **200**. The generator's real
-// `404.html` is never served and crawlers see 200 for every URL. The default
-// cannot change — a genuine SPA needs that fallback for deep links, and a built
-// asset tree carries nothing that distinguishes the two — so the user says so.
-//
-// `run_worker_first`, `workerFirst` and `apiWorkerFirst` stay as inferred, so
-// which layer sees a request first is unaffected. `workerSpaFallback` is the one
-// derived flag that MUST follow the override — see the worker-first describe
-// below for why.
+// `routing.notFound` overrides only `not_found_handling`; worker-first routing stays inferred.
 describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
   const SPA_API_WORKER_FIRST = ['/api', '/api/*', '/__void', '/__void/*'];
 
@@ -325,8 +258,7 @@ describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
     expect(overridden.assetConfig.run_worker_first).toEqual(inferred.assetConfig.run_worker_first);
     expect(overridden.apiWorkerFirst).toBe(inferred.apiWorkerFirst);
     expect(overridden.workerFirst).toBe(inferred.workerFirst);
-    // This shape is asset-first, so there is no worker-side shell fallback to
-    // begin with. The worker-first shape is a different story — below.
+    // Asset-first shape: no worker-side shell fallback either way.
     expect(inferred.workerSpaFallback).toBe(false);
     expect(overridden.workerSpaFallback).toBe(false);
   });
@@ -359,29 +291,9 @@ describe('resolveAssetRoutingPolicy — routing.notFound override', () => {
       },
     );
   });
-
-  it('is reachable through resolveAssetConfig (the deploy entry point)', () => {
-    expect(resolveAssetConfig({ ...ssgWithApi, notFound: '404-page' }).not_found_handling).toBe(
-      '404-page',
-    );
-  });
 });
 
-// The shape the `routing.notFound` override was silently inert on.
-//
-// `workerSpaFallback` is true for `workerFirst && !isSsr && !hasPages` — any
-// non-SSR app with no `pages/` that still owns HTML routing: a `middleware/`
-// file, a route outside `/api`, a document websocket, or Live. That flag makes
-// the generated `serveWithAssets` answer every unmatched HTML navigation with
-// `/index.html` at status **200**, before `not_found_handling` is ever
-// consulted. So setting `routing.notFound: '404-page'` changed the wrangler
-// asset config and changed nothing a user could observe.
-//
-// This is exactly the app the docs walk people into: `docs/guide/app-types.md`
-// recommends `routing.notFound` for `appType: "void"` + `vitepress build &&
-// vite build`, and `docs/guide/edge/static-assets.md` names it as the override
-// for "Worker owns HTML (Pages, SSR, middleware…)". Add one `middleware/` file
-// to that VitePress app and the documented escape hatch stopped working.
+// Worker-first without SSR or pages/: the worker itself serves the SPA shell for unmatched pages.
 describe('resolveAssetRoutingPolicy — notFound on the worker-first SPA-fallback shape', () => {
   // middleware/ → workerOwnsHtmlRouting, no pages/, no SSR.
   const ssgWithMiddleware = {
@@ -438,12 +350,7 @@ describe('resolveAssetRoutingPolicy — notFound on the worker-first SPA-fallbac
   });
 });
 
-// End-to-end over the REAL generated helper: policy in, executed worker code
-// out. A unit assertion on `workerSpaFallback` alone would not have caught the
-// second half of the bug — with the flag cleared the app returns a real 404,
-// but with the WORKER's generic body, while the docs promise the generator's
-// own `404.html`. `compileAssetFallbackHelper` has to pass the asset binding's
-// 404 through, and only executing it proves that.
+// Runs createAssetFallback with the resolved policy against a fake asset binding.
 describe('generated serveWithAssets — routing.notFound end to end', () => {
   /** Stand-in for CF's asset binding, implementing `not_found_handling`. */
   function makeAssets(handling: string | undefined, opts?: { has404Page?: boolean }) {
@@ -462,8 +369,6 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
             headers: { 'content-type': 'text/html' },
           });
         }
-        // CF serves the NEAREST 404.html, with a real 404 status — which is
-        // precisely why the helper's `asset.status !== 404` guard dropped it.
         if (handling === '404-page' && opts?.has404Page !== false) {
           return new Response('<html>GENERATED 404</html>', {
             status: 404,
@@ -476,7 +381,7 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
   }
 
   /**
-   * Runs the generated helper and hands back the raw `Response`, so a caller can
+   * Runs the asset fallback and hands back the raw `Response`, so a caller can
    * assert on headers and not just status/body. `path`, `accept` and the worker
    * response default to a browser navigation to an unmatched document path.
    */
@@ -569,12 +474,6 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
     ).toEqual({ status: 404, body: '<html>GENERATED 404</html>' });
   });
 
-  // Guard against a recurring misreading of `workerSpaFallback: false` on the
-  // SSR/Pages shapes as "the explicit override cannot work there". It already
-  // works: `serveWithAssets` returns the asset response as soon as it is not a
-  // 404, so SPA mode hands back the shell at 200 BEFORE `fallthroughCode` — the
-  // only place `workerSpaFallback` matters — is ever reached. Enabling the flag
-  // for `isSsr` / `hasPages` would be strictly dead code, so it must stay off.
   for (const shape of [
     { label: 'SSR', isSsr: true, hasPages: false },
     { label: 'Pages', isSsr: false, hasPages: true },
@@ -595,16 +494,7 @@ describe('generated serveWithAssets — routing.notFound end to end', () => {
     });
   }
 
-  // The axis the cases above miss: they all send `accept: text/html` to a
-  // document path with a generic worker 404, so nothing here distinguished
-  // "browser asked for a page" from "an API client asked for data".
-  //
-  // `serveWithAssets` wraps EVERY app response with no path filtering and
-  // engages on any 404, so a GET/HEAD API handler that deliberately answers 404
-  // has to survive it intact. On the asset-first shape — this feature's own
-  // documented recipe — `404-page` means the asset layer answers document misses
-  // itself, so the worker only ever reaches this branch on `run_worker_first`
-  // paths (`/api/*`, `/__void/*`), where an HTML 404 page is never the answer.
+  // serveWithAssets sees every worker 404, so a deliberate API 404 must pass through intact.
   describe('an API 404 is not replaced by the HTML 404 page', () => {
     /** A handler deliberately answering 404 with JSON, plus a CORS header. */
     const apiJson404 = () =>

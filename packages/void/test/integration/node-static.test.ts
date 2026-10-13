@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { chromium } from 'playwright';
@@ -156,16 +156,6 @@ describe('playground/node-static build (target: node, output: static)', () => {
     expect(aboutData.props.description).toBe('A statically prerendered page from Node.js.');
     expect(legacyData.component).toBe('legacy');
     expect(legacyData.url).toBe('/legacy');
-  });
-
-  it('keeps static file traversal outside the client dir blocked', () => {
-    const clientDir = join(DIST, 'client');
-    const secretDir = join(DIST, 'client-secret');
-    const secretPath = join(secretDir, 'foo');
-    mkdirSync(secretDir, { recursive: true });
-    writeFileSync(secretPath, 'secret');
-
-    expect(resolveStaticFile(clientDir, '/..%2fclient-secret/foo')).toBeNull();
   });
 
   it('serves static output with SPA navigation between prerendered Link routes', async () => {

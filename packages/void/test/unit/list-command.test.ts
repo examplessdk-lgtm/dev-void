@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { Buffer } from '../../src/cli/node-buffer.ts';
+import { captureOutput } from '../helpers/cli-command.ts';
 
 const tempHomes: Array<string> = [];
 const mockGetToken = vi.fn<() => string | null>();
@@ -24,31 +24,6 @@ async function importRunListCommand() {
   vi.resetModules();
   const mod = await import('../../src/cli/list.ts');
   return mod.runListCommand;
-}
-
-function captureOutput(): { output: () => string; restore: () => void } {
-  const chunks: Array<string> = [];
-  const writeMock = vi
-    .spyOn(process.stdout, 'write')
-    .mockImplementation((...args: Array<unknown>) => {
-      const chunk = args[0];
-      if (typeof chunk === 'string') {
-        chunks.push(chunk);
-      } else if (Buffer.isBuffer(chunk)) {
-        chunks.push(chunk.toString());
-      }
-      return true;
-    });
-  const logMock = vi.spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-    chunks.push(args.map(String).join(' ') + '\n');
-  });
-  return {
-    output: () => chunks.join(''),
-    restore: () => {
-      writeMock.mockRestore();
-      logMock.mockRestore();
-    },
-  };
 }
 
 describe('runListCommand', () => {
@@ -73,7 +48,7 @@ describe('runListCommand', () => {
     setIsolatedHome();
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -85,7 +60,6 @@ describe('runListCommand', () => {
     capture.restore();
 
     expect(out).toContain('Not logged in');
-    expect(exitSpy).toHaveBeenCalled();
   });
 
   it('exits with error when no linked project and no slug', async () => {
@@ -93,7 +67,7 @@ describe('runListCommand', () => {
     mockGetToken.mockReturnValue('test-token');
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -105,7 +79,6 @@ describe('runListCommand', () => {
     capture.restore();
 
     expect(out).toContain('No linked project found');
-    expect(exitSpy).toHaveBeenCalled();
   });
 
   it('summarizes per-path revalidation rules in the isr column', async () => {

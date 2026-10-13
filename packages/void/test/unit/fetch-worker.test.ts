@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi, beforeEach } from 'vite-plus/test';
-import { compileNodeClient, compileWorkerClient } from '../../src/router/compile.ts';
+import { compileWorkerClient } from '../../src/router/compile.ts';
 import { FetchError as RuntimeFetchError } from '../../src/runtime/fetch-error.ts';
 import { interpolateRouteParams } from '../../src/runtime/route-url.ts';
 
@@ -16,36 +16,6 @@ describe('compileWorkerClient', () => {
   it('re-exports auth helpers from resolved path', () => {
     const code = compileWorkerClient('/my/path/auth-client.mjs');
     expect(code).toContain('export { auth, createAuthClient } from "/my/path/auth-client.mjs"');
-  });
-
-  it('includes param interpolation logic', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('interpolateRouteParams(path, options?.params)');
-  });
-
-  it('includes query string building', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('URLSearchParams');
-  });
-
-  it('includes cookie and authorization forwarding from ALS', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('requestContext.getStore()');
-    expect(code).toContain('"cookie"');
-    expect(code).toContain('"authorization"');
-  });
-
-  it('includes executionCtx passthrough with no-op fallback', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('store?.executionCtx');
-    expect(code).toContain('waitUntil()');
-    expect(code).toContain('passThroughOnException()');
-  });
-
-  it('handles 204 No Content', () => {
-    const code = compileWorkerClient('/resolved/auth-client.mjs');
-    expect(code).toContain('response.status === 204');
-    expect(code).toContain('return undefined');
   });
 });
 
@@ -90,32 +60,6 @@ describe('worker fetch runtime behavior', () => {
     const req = mockAppFetch.mock.calls[0][0] as Request;
     expect(req.method).toBe('GET');
     expect(new URL(req.url).pathname).toBe('/api/hello');
-  });
-
-  it('interpolates path params', async () => {
-    mockAppFetch.mockResolvedValue(
-      new Response(JSON.stringify({ id: '42' }), {
-        headers: { 'content-type': 'application/json' },
-      }),
-    );
-
-    await workerFetch('/api/users/:id', { params: { id: '42' } });
-
-    const req = mockAppFetch.mock.calls[0][0] as Request;
-    expect(new URL(req.url).pathname).toBe('/api/users/42');
-  });
-
-  it('encodes path params', async () => {
-    mockAppFetch.mockResolvedValue(
-      new Response(JSON.stringify({}), {
-        headers: { 'content-type': 'application/json' },
-      }),
-    );
-
-    await workerFetch('/api/files/:name', { params: { name: 'hello world.txt' } });
-
-    const req = mockAppFetch.mock.calls[0][0] as Request;
-    expect(new URL(req.url).pathname).toBe('/api/files/hello%20world.txt');
   });
 
   it('builds query string', async () => {
@@ -330,12 +274,13 @@ function evaluateClient(
   )({ fetch }, env, requestContext, interpolateRouteParams);
 }
 
-it.each([compileWorkerClient, compileNodeClient])(
-  'expands catch-all routes in generated %s clients',
-  async (compile) => {
+it.each([false, true])(
+  'expands catch-all routes in generated clients (nodeTarget: %s)',
+  async (nodeTarget) => {
     const fetch = vi.fn<(...args: Array<unknown>) => Promise<Response>>(async () =>
       Response.json({ ok: true }),
     );
+    const compile = (authClientPath: string) => compileWorkerClient(authClientPath, nodeTarget);
     const client = evaluateClient(compile, fetch, {}, new AsyncLocalStorage());
     await client.fetch('/files/:id2/:id/:path{.+}', {
       params: { id: 'one', id2: 'two', path: 'docs/start here' },

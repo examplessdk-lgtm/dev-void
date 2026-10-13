@@ -5925,6 +5925,34 @@ describe('POST /projects/:id/deploy/preflight', () => {
     expect((await getProject(env.db, project.id))?.active_deployment_id).toBeNull();
   });
 
+  it.each([undefined, 'installation-one'])(
+    'attributes platform app uploads for installation %s',
+    async (installationId) => {
+      const user = await createTestUser(env.db);
+      const project = await createTestProject(env.db, user.id, 'attributed-proj');
+      const capturedHeaders: Array<Headers> = [];
+      mockCfApi({
+        uploadWorker: async (_url: string, init?: RequestInit) => {
+          capturedHeaders.push(new Headers(init?.headers));
+          return new Response('ok', { status: 200 });
+        },
+      });
+      const res = await app.fetch(await buildDeployRequest(env, project.id, user.jwt), {
+        ...env,
+        PLATFORM_VERSION: '0.27.0',
+        PLATFORM_ENV: 'production',
+        PLATFORM_INSTALLATION_ID: installationId,
+      });
+      await res.text();
+      expect((await getProject(env.db, project.id))?.active_deployment_id).not.toBeNull();
+      expect(capturedHeaders).toHaveLength(1);
+      expect(capturedHeaders[0]?.get('User-Agent')).toBe(
+        `void-platform/0.27.0 void-installation/${installationId ?? 'hosted-production'}`,
+      );
+      expect(capturedHeaders[0]?.get('Authorization')).toBe(`Bearer ${env.CF_API_TOKEN}`);
+    },
+  );
+
   it('includes observability metadata in worker upload', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'obs-proj');

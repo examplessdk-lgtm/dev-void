@@ -173,7 +173,7 @@ describe('createCheckRun', () => {
     expect(reasons).not.toContain('exhausted');
   });
 
-  // Fix B: create: POST -> 500 => returns null WITHOUT retrying. The create POST is
+  // create: POST -> 500 => returns null WITHOUT retrying. The create POST is
   // SINGLE-SHOT (not idempotent — a retry on an ambiguous 5xx could duplicate the run
   // and orphan the first `in_progress`). Exactly ONE POST, one http-5xx warn, and NO
   // `exhausted` warn (the loop returns immediately, it does not run out of attempts).
@@ -204,7 +204,7 @@ describe('createCheckRun', () => {
     expect(reasons).not.toContain('exhausted'); // returns, never loops to exhaustion
   });
 
-  // Fix B: create: POST rejects (network error) => returns null WITHOUT retrying.
+  // create: POST rejects (network error) => returns null WITHOUT retrying.
   // A network failure on the POST is ambiguous (GitHub may have created the run), so
   // a retry risks a duplicate — single-shot. Exactly ONE POST attempt, one
   // network-error warn, no `exhausted`.

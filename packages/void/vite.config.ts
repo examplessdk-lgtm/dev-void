@@ -61,6 +61,7 @@ export default defineConfig({
     entry: [
       'src/index.ts',
       'src/config-entry.ts',
+      'src/deploy.ts',
       'src/prerender-render.ts',
       'src/database-provider.ts',
       'src/edge.ts',
@@ -94,7 +95,6 @@ export default defineConfig({
       'src/runtime/env.ts',
       'src/runtime/env-public.ts',
       'src/runtime/env-public-client.ts',
-      'src/runtime/env-helpers.ts',
       'src/runtime/db.ts',
       'src/runtime/db-pg.ts',
       'src/runtime/db-mysql.ts',
@@ -129,15 +129,12 @@ export default defineConfig({
       'src/pages/index.ts',
       'src/pages/protocol.ts',
       'src/pages/head.ts',
-      'src/pages/head-client.ts',
       'src/pages/prefetch.ts',
       'src/pages/client.ts',
       'src/pages/serialize.ts',
       'src/pages/islands-plugin.ts',
       'src/cli/cli.ts',
-      // Standalone entry so `void deploy --backend cloudflare` can self-spawn it as an isolated
-      // child (via import.meta.url) to derive the env-insensitive schema facts (server and
-      // required-secret names) under a scrubbed env — a stable dist filename for the spawn.
+      // Stable entry that deploy spawns as an isolated child.
       'src/cli/env-schema-probe.ts',
       // Private typed Cloudflare transport, spawned by deployment orchestrators.
       'src/cli/cloudflare-operation-process.ts',
@@ -180,8 +177,8 @@ export default defineConfig({
         'picocolors',
         'ofetch',
         'pathslash',
-        // Dependency-free; bundled like the other CLI-only helpers so the deploy's wrangler-compatible
-        // interactivity gate (`isWranglerNonInteractiveOrCI`) adds no runtime dependency.
+        // Dependency-free; bundled so the CLI interactivity gate (`isWranglerNonInteractiveOrCI`)
+        // adds no runtime dependency.
         'ci-info',
       ],
     },

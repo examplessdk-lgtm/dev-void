@@ -162,6 +162,10 @@ describe('Cloudflare metadata transport', () => {
     ['lower-case HTTPS proxy', { https_proxy: 'http://proxy.test:8080' }],
     ['upper-case HTTPS proxy', { HTTPS_PROXY: 'http://proxy.test:8080' }],
     ['HTTP proxy inherited for HTTPS', { HTTP_PROXY: 'http://proxy.test:8080' }],
+    [
+      'HTTPS proxy with a matching NO_PROXY',
+      { HTTPS_PROXY: 'http://proxy.test', NO_PROXY: 'api.example.com' },
+    ],
   ])('uses Wrangler before authentication with a configured %s', async (_name, env) => {
     const { run, runWrangler, getToken, verifyUploader, fetcher } = setup(
       vi.fn<typeof fetch>(),
@@ -187,21 +191,4 @@ describe('Cloudflare metadata transport', () => {
     expect(getToken).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled();
   });
-
-  it.each([
-    ['exact host', { HTTPS_PROXY: 'http://proxy.test', NO_PROXY: 'api.example.com' }],
-    ['leading wildcard', { https_proxy: 'http://proxy.test', no_proxy: '*.example.com' }],
-    ['explicit port', { HTTPS_PROXY: 'http://proxy.test', NO_PROXY: 'api.example.com:443' }],
-    ['wildcard', { HTTPS_PROXY: 'http://proxy.test', NO_PROXY: '*' }],
-    ['non-matching host', { HTTPS_PROXY: 'http://proxy.test', NO_PROXY: 'other.example.com' }],
-  ])(
-    'leaves NO_PROXY %s semantics to Wrangler without an auth or HTTP read',
-    async (_name, env) => {
-      const { run, runWrangler, getToken, fetcher } = setup(vi.fn<typeof fetch>(), env);
-      expect(await run(statusArgs, capture)).toBe(fallbackResult);
-      expect(runWrangler).toHaveBeenCalledOnce();
-      expect(getToken).not.toHaveBeenCalled();
-      expect(fetcher).not.toHaveBeenCalled();
-    },
-  );
 });

@@ -20,8 +20,6 @@ import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
 import type { DetectedFramework } from '../../src/plugin-inference.ts';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
-// @voidzero-dev/vite-plus-prompts + the output-spinner wrapper are TTY-bound; noop them (same as
-// direct-r2-deploy.test.ts) so runDeploy's interactive UI doesn't render here.
 const noopSpinner = {
   start: vi.fn(),
   stop: vi.fn(),
@@ -53,13 +51,7 @@ vi.mock('../../src/cli/output.ts', async () => {
   return { ...actual, createSpinner: () => noopSpinner };
 });
 
-// Prerender path discovery spins Miniflare/workerd in-process. It feeds
-// `manifest.prerender`, NOT `manifest.pages`, so it is orthogonal to the seam
-// under test. Stub it to [] to keep this test offline, fast and deterministic —
-// everything else in runFullDeploy (including assembleVoidManifest) runs for
-// real. (For a non-`output:static` Void app this is the only in-process CF
-// runtime the deploy path would otherwise start; all network I/O is mocked
-// below.)
+// Prerender discovery starts workerd and feeds only `manifest.prerender`; stub it to stay offline.
 const { mockCollectPrerenderPaths } = vi.hoisted(() => ({
   mockCollectPrerenderPaths: vi.fn(async () => [] as Array<string>),
 }));
@@ -72,12 +64,7 @@ vi.mock('../../src/prerender.ts', async () => {
   };
 });
 
-// detectFramework is mocked so the SAME pre-built fixture can be driven down
-// both deploy routes: the default (undefined → Void pages path, exercised by
-// the first test) and, per-test, a forced Class-A framework (→ runFullDeploy
-// with isFrameworkMode = true, which must suppress manifest.pages). The return
-// value is set in beforeEach (undefined) and overridden inside the framework
-// test — so the Void test always sees the real-world `undefined`.
+// Lets one pre-built fixture take both the Void pages and the framework deploy paths.
 const { mockDetectFramework } = vi.hoisted(() => ({
   mockDetectFramework: vi.fn<(root: string) => DetectedFramework | undefined>(),
 }));
@@ -101,11 +88,11 @@ let originalFetch: typeof globalThis.fetch | undefined;
 let savedToken: string | undefined;
 let savedProject: string | undefined;
 
-type Captured = { finalizeBody: { manifest?: { pages?: unknown } } | null };
+type Captured = {
+  finalizeBody: { manifest?: { pages?: unknown; bindings?: Record<string, unknown> } } | null;
+};
 
-// Minimal platform mock: report every asset as already-present so the
-// upload-urls + R2 PUT phase is skipped and runFullDeploy goes straight to the
-// finalize POST, whose JSON body we capture.
+// Every asset is reported as present, so the deploy skips uploads and goes straight to finalize.
 function installPlatformMocks(role: ProjectRole = 'owner'): Captured {
   const captured: Captured = { finalizeBody: null };
 
@@ -189,18 +176,12 @@ function ndjson(events: Array<unknown>): Response {
   });
 }
 
-// End-to-end guard for the `assembleVoidManifest` seam: drives the REAL exported
-// runDeploy → runDeployInner → runFullDeploy (Void/SSR path) against a
-// pre-built minimal Void pages fixture, with only network + prompts + prerender
-// stubbed, and asserts the finalize manifest carries `pages`.
 describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () => {
   beforeAll(() => {
     playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
     fixture = playground.root;
     projectJson = join(fixture, '.void', 'project.json');
 
-    // Real build of the minimal React pages fixture so runDeploy(skipBuild:true)
-    // finds dist/client/.vite/manifest.json + dist/ssr/{index.js,wrangler.json}.
     const result = spawn.sync('vp', ['build'], {
       cwd: fixture,
       encoding: 'utf8',
@@ -209,7 +190,6 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     });
     expect(result.status, `${result.stdout ?? ''}${result.stderr ?? ''}`).toBe(0);
 
-    // Link the fixture to a fake project.
     mkdirSync(join(fixture, '.void'), { recursive: true });
     writeFileSync(
       projectJson,
@@ -226,8 +206,6 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   });
 
   beforeEach(() => {
-    // Default: no framework detected → the Void pages path. The framework test
-    // overrides this to a Class-A framework before driving runDeploy.
     mockDetectFramework.mockReset().mockReturnValue(undefined);
 
     originalFetch = globalThis.fetch;
@@ -288,32 +266,16 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
       | Array<{ pattern: string; revalidate?: number }>
       | undefined;
 
-    // manifest.pages must be a non-empty array.
-    expect(Array.isArray(pages)).toBe(true);
-    expect(pages!.length).toBeGreaterThan(0);
-    // Every entry carries a string pattern (raw, route-shaped).
-    for (const p of pages!) {
-      expect(typeof p.pattern).toBe('string');
-    }
-    // The /isr page (pages/isr.server.ts → `export const revalidate = 60`) must
-    // survive into the real deploy manifest with its exact TTL.
     expect(pages).toContainEqual({ pattern: '/isr', revalidate: 60 });
 
-    // The object `routing.revalidate` in the fixture void.config.ts is NOT baked into
-    // per-page TTLs — a REAL build must emit the 3-state table + the RAW object
-    // config as `manifest.pathRevalidate` (this is the producer half of the
-    // contract platform dispatch consumes; a manually-constructed manifest
-    // would not prove the actual CLI emits it). `/docs` and `/docs/ref` have no
-    // per-page export, so they ship INHERIT-ELIGIBLE (no `revalidate` key) and
-    // dispatch resolves the per-path config against the real request path.
+    // The fixture's object `routing.revalidate` ships as `pathRevalidate`; pages without their own
+    // export carry no `revalidate`, so dispatch resolves it per request path.
     const manifest = captured.finalizeBody!.manifest as unknown as {
       pathRevalidate?: Record<string, number>;
     };
     expect(manifest.pathRevalidate).toEqual({ '/docs': 120, '/docs/ref': 0 });
     expect(pages).toContainEqual({ pattern: '/docs' });
     expect(pages).toContainEqual({ pattern: '/docs/ref' });
-    // Neither inherit-eligible page carries a baked `revalidate` (that would be
-    // the unsafe build-time collapse of a per-path config — incl. the `0` opt-out).
     const docsEntry = pages!.find((p) => p.pattern === '/docs');
     const docsRefEntry = pages!.find((p) => p.pattern === '/docs/ref');
     expect(docsEntry).not.toHaveProperty('revalidate');
@@ -321,21 +283,39 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
   });
 
   it('suppresses manifest.pages in framework mode (Class-A framework forced via detectFramework)', async () => {
-    // Force the SAME pre-built fixture down the Class-A framework route. The
-    // vinext-pages preset (workerDir dist/ssr, assetsDir dist/client,
-    // workerMain index.js) matches the Void React build layout exactly, so
-    // runDeployInner routes to runFullDeploy with isFrameworkMode = true.
+    // The vinext-pages preset uses the same dist layout as this Void build.
     mockDetectFramework.mockReturnValue({ name: 'vinext-pages', class: 'a' });
     const captured = installPlatformMocks();
 
     await runDeploy(fixture, { skipBuild: true });
 
-    // The deploy still finalizes (manifest present)...
     expect(captured.finalizeBody).not.toBeNull();
     expect(captured.finalizeBody!.manifest).toBeDefined();
-    // ...but `pages` (the Void pages-mode ISR table) is suppressed in framework
-    // mode even though the fixture has a pages/ dir with an ISR page.
     expect(captured.finalizeBody!.manifest?.pages).toBeUndefined();
+  });
+
+  it('sends custom inference.bindings names in the manifest bindings', async () => {
+    const configPath = join(fixture, 'void.config.ts');
+    const original = readFileSync(configPath, 'utf8');
+    writeFileSync(
+      configPath,
+      original.replace(
+        'export default defineConfig({',
+        "export default defineConfig({\n  inference: { bindings: { kv: 'MY_KV', storage: 'MY_BUCKET' } },",
+      ),
+    );
+    try {
+      const captured = installPlatformMocks();
+
+      await runDeploy(fixture, { skipBuild: true });
+
+      expect(captured.finalizeBody?.manifest?.bindings).toMatchObject({
+        kv: ['MY_KV'],
+        r2: ['MY_BUCKET'],
+      });
+    } finally {
+      writeFileSync(configPath, original);
+    }
   });
 
   it('uses the alternate project for Worker packaging and prerendering while retaining the saved link', async () => {

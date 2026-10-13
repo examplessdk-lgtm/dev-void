@@ -7,43 +7,23 @@
  */
 
 import { validate as isValidEmailSyntax } from 'email-validator';
+import { bytesToBase64 } from '../base64.ts';
 import type { Address, Attachment, NormalizedAttachment, NormalizedEmail } from './types.ts';
 
 /** Encoded outbound MIME ceiling, separate from the 10 MiB inbound limit. */
 export const MAX_MESSAGE_BYTES: number = 5 * 1024 * 1024;
 
 /**
- * Upper bound on the TOTAL attachment bytes `normalizeEmail` will materialize.
- *
- * Base64 expands by `ceil(n / 3) * 4`, so an attachment set larger than three
- * quarters of `MAX_MESSAGE_BYTES` cannot fit in a message that passes the
- * check at the end of `buildMime` no matter how small everything else is.
- * `buildMime` remains the authority on the final size — this bound only stops
- * `normalizeEmail` from materializing, and then expanding, bytes already known
- * not to fit.
- *
- * It has to be charged here because that final check comes far too late to
- * help. Measured peak live memory is about 10x the attachment bytes (8 MiB in
- * gives 83 MiB live) once the normalized copy, the base64 binary string, the
- * 76-column slices, the joins, `rawText` and its `TextEncoder.encode` are all
- * resident at once. Against a 128 MB isolate ceiling, a set over roughly
- * 12 MiB terminates the isolate rather than returning the `MIME_ERROR` the
- * docs promise for an oversize payload.
- *
- * This is a developer-experience guardrail, NOT the security boundary.
- * Attachments come from the app's own code, never from a remote sender, and
- * the platform proxy already caps the base64 length before decoding and the
- * raw length after. What this buys is a precise, catchable failure at the call
- * that went wrong, instead of a dead isolate with nothing a caller could act
- * on.
+ * Total attachment bytes `normalizeEmail` will materialize: base64 of more
+ * than 3/4 of `MAX_MESSAGE_BYTES` cannot fit. Charged before each copy so an
+ * oversize set fails with `MIME_ERROR` instead of exhausting the isolate;
+ * `buildMime`'s final size check stays authoritative.
  */
 const MAX_ATTACHMENT_BYTES_TOTAL: number = Math.floor((MAX_MESSAGE_BYTES * 3) / 4);
 
 /**
- * Bound raw `to`, `cc`, and `bcc` entries before parsing or rendering headers.
- * Counting before deduplication also bounds work for duplicate-heavy input.
- * The same SDK limit applies in development and on both deployment targets;
- * platform admission independently caps the unique recipients at 50.
+ * Cap on raw `to` + `cc` + `bcc` entries, counted before parsing or
+ * deduplication so it also bounds the work.
  */
 export const MAX_RECIPIENTS: number = 50;
 
@@ -51,15 +31,8 @@ export const MAX_RECIPIENTS: number = 50;
 const MAX_CUSTOM_HEADER_BYTES: number = 16 * 1024;
 
 /**
- * Pre-parse cap on one parsed address, in characters. RFC 5321 §4.5.3.1
- * allows a 64-octet local part and a 255-octet domain, so nothing over 320
- * characters can be delivered; the platform proxy applies the same
- * `MAX_RECIPIENT_LENGTH` to the same parsed address. This is the bound on
- * the WORK — it is checked before the address is scanned — not the
- * deliverability bound, which `email-validator` applies at 254 (see
- * `validateAddressParts`). A display name is not bounded — it is folded or
- * encoded into legal header lines at any length, and the tokenizers below
- * keep that cost linear.
+ * Pre-parse cap on one address. Nothing over 320 characters (RFC 5321
+ * §4.5.3.1) is deliverable; checked before the address is scanned.
  */
 export const MAX_ADDRESS_LENGTH: number = 320;
 
@@ -77,37 +50,29 @@ function rejectCRLF(field: string, value: string): void {
 }
 
 /**
- * Refuse any other C0 control or DEL in a value that is rendered VERBATIM
- * into a header — an attachment's filename, media type and Content-ID.
- * `rejectCRLF` is enough for a value `encodeWord` renders (the subject, a
- * custom header value, a display name): anything outside printable ASCII
- * sends the whole value into base64, so a control never reaches the wire.
- * These three go through `quoteParam` or straight into the line, so a
- * control would reach the wire for the receiving MTA to refuse.
- *
- * RFC 5322 §3.2.4 `qtext` is printable US-ASCII less `"` and `\`; a
- * control inside a quoted-string is `obs-qtext`, which §4 says MUST NOT be
- * generated. HTAB is deliberately NOT refused: `quoted-string` is
- * `DQUOTE *([FWS] qcontent) [FWS] DQUOTE` and `FWS` is built from `WSP`
- * (SP / HTAB), so a tab between characters is folding white space exactly
- * as a space is — and `obs-NO-WS-CTL`, the RFC's own list of the controls
- * that used to be `qtext`, leaves %d9 out. The same set is illegal in an
- * RFC 2045 §5.1 `token` (no CTLs) and an RFC 5322 §3.6.4 `msg-id`
- * (`dot-atom-text`), so one rule serves the media type and the Content-ID.
- *
- * The message names the code point and never echoes the value, as
- * `validateAddressParts` does. Runs AFTER the filename's length bound, so
- * the scan is over a value already known to fit a line.
+ * Index of the first C0 control other than HTAB, or DEL; -1 when there is
+ * none. HTAB is folding whitespace (RFC 5322 §3.2.2).
  */
-function rejectControls(field: string, value: string): void {
+export function indexOfControl(value: string): number {
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
     if ((c < 0x20 && c !== 0x09) || c === 0x7f) {
-      throw new MimeError(
-        'MIME_ERROR',
-        `${field} contains a control character (U+${c.toString(16).toUpperCase().padStart(4, '0')}).`,
-      );
+      return i;
     }
+  }
+  return -1;
+}
+
+/**
+ * Refuse a control in a value rendered verbatim into a header (an
+ * attachment's filename, media type and Content-ID). Names the code point,
+ * never the value.
+ */
+function rejectControls(field: string, value: string): void {
+  const i = indexOfControl(value);
+  if (i !== -1) {
+    const code = value.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0');
+    throw new MimeError('MIME_ERROR', `${field} contains a control character (U+${code}).`);
   }
 }
 
@@ -120,33 +85,10 @@ function isTokenChar(c: number): boolean {
 }
 
 /**
- * Refuse an attachment media type that does not parse as RFC 2045 §5.1
- * `type "/" subtype *(";" parameter)`.
- *
- * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
- * the value verbatim ahead of its own `; name="…"`, so an unterminated
- * quote such as `text/plain; x="` would swallow the builder's `name`
- * parameter as the value of `x`.
- *
- * The grammar is the RFC's, read as a generator: a `token` is printable
- * US-ASCII less SPACE and `tspecials`; a `value` is a `token` or a
- * quoted-string, whose content is anything but a bare `"` or `\` (the same
- * rule `quoteParam` renders `name="…"` by, so a caller's quoted value may
- * carry what the builder's own already does). Optional WSP is admitted on
- * either side of `;` — the RFC 822 implicit LWSP every parser accepts and
- * the form HTTP's `Content-Type` writes — and nowhere else: `text/ plain`,
- * a trailing `;`, and an RFC 822 comment are refused rather than repaired.
- * Two parameters are also refused on their meaning: a `name`, because the
- * builder appends `name="<filename>"` and RFC 6838 §4.3 makes it "an error
- * for a specific parameter to be specified more than once"; and by that
- * same sentence any attribute given twice, compared case-insensitively as
- * §5.1 says attributes match. Type and subtype are kept as given — matching
- * is case-insensitive, so `TEXT/PLAIN` is legal and renders unchanged.
- *
- * One pass, no backtracking, and the only allocation is one lower-cased
- * attribute per parameter for the duplicate check, which is why this runs
- * AFTER the value's length bound. The message names the rule and never
- * echoes the value.
+ * Refuse a media type that is not RFC 2045 §5.1 `type "/" subtype *(";"
+ * parameter)`: it is written verbatim before the builder's `name=`, so an
+ * unterminated quote would swallow it. WSP is allowed only around `;`. A
+ * `name` parameter or a repeated attribute is refused (RFC 6838 §4.3).
  */
 function validateMediaType(field: string, value: string): void {
   const syntax = () =>
@@ -240,34 +182,9 @@ function isAtext(c: number): boolean {
 }
 
 /**
- * Refuse an attachment Content-ID that would not render as one RFC 5322
- * §3.6.4 `msg-id`.
- *
- * `rejectControls` answers only for CTLs, and `buildAttachmentPart` writes
- * the value verbatim — adding `<` and `>` unless the value already starts
- * with `<` — so a malformed id would reach the receiver and break the
- * `cid:` reference.
- *
- * The grammar is the RFC's, read as a generator, with two deliberate
- * differences. An `msg-id` is `"<" id-left "@" id-right ">"`, each side a
- * `dot-atom-text` (§3.2.3: `1*atext *("." 1*atext)`, so no leading,
- * trailing or doubled dot — the strict form; `obs-id-left`/`obs-id-right`
- * are §4 obsolete syntax, which MUST NOT be generated); `no-fold-literal`
- * (`[…]` for `id-right`) is left out. First difference: the `@` and its
- * right side are OPTIONAL. RFC 2392 §2 resolves a `cid:` URL by wrapping
- * its body in `<` `>` and matching that against `Content-ID`, so an id
- * without `@` — the documented `contentId: 'logo'` + `cid:logo` — is what
- * every client already resolves, and the domain that would make it a
- * proper `msg-id` adds nothing a reference could use. Second: the angle
- * brackets are optional too, because the builder has always added them
- * around a bare id; given, they must be one pair around the whole value.
- *
- * Refused, then: whitespace of any kind, a second `@`, `<` or `>` anywhere
- * but as that one pair, `"`, `(`, `)`, `,`, `;`, `:`, `\`, `[`, `]`,
- * anything non-ASCII, and the empty string.
- *
- * One pass, no allocation, which is why this runs AFTER the value's length
- * bound. The message names the rule and never echoes the value.
+ * Refuse a Content-ID that would not render as an RFC 5322 §3.6.4 `msg-id`
+ * of strict `dot-atom-text`. Unlike `msg-id`, the `@` part and the angle
+ * brackets are optional: `cid:logo` resolves against `<logo>` (RFC 2392).
  */
 function validateContentId(field: string, value: string): void {
   const syntax = () =>
@@ -364,37 +281,10 @@ function fieldErrorCode(field: string): MimeErrorCode {
 }
 
 /**
- * Validate one parsed address (and its display name, when there is one),
- * throwing a `MimeError` for `field` on anything undeliverable. Exported so
- * the inbound proxy's `forward(to)` and hand-built `reply()` refuse a bare
- * address by the same rule `sendEmail` applies to its `to`.
- *
- * The address rule is `email-validator`, and nothing else. It is also the
- * platform router's rule (`isValidEmailAddress` in the proxy's
- * `email-router.ts`), so there is exactly ONE address syntax in the tree:
- * an action the framework records is never dropped by the router for its
- * shape, and a test harness never captures as a success what the managed
- * deployment would lose.
- *
- * What it enforces: at most 254 characters in total; an ASCII dot-atom
- * local part of at most 64 characters (RFC 5322 §3.2.3 `atext`, dots only
- * between atoms — no quoted local part, no whitespace, no control, no
- * special); a dotted domain of ASCII labels of at most 63 characters each,
- * with a TLD that starts with a letter and has at least two characters; so
- * `user@localhost`, `x@y` and a raw IDN or SMTPUTF8 address are refused
- * (an IDN domain is accepted as punycode, `xn--…`). ASCII-only makes
- * octets and characters the same thing, so the RFC 5321 §4.5.3.1 octet
- * limits are the package's length checks; the 64 is also what caps the
- * default `<slug>+noreply@` sender (`VALID_SLUG` in `runtime/email.ts`,
- * `MAX_SLUG_LENGTH` = `64 - 8` in `cli/project-slug.ts` and the API). One
- * known quirk, pinned in the tests rather than worked around: the FIRST
- * character of the local part may not be a backtick, while any later one
- * may.
- *
- * `MAX_ADDRESS_LENGTH` still runs first, on the raw string, so the scan is
- * bounded before anything reads the address; the package's own 254 check
- * runs before its regex for the same reason. The message never echoes the
- * address: it may hold a control character, and naming the rule is enough.
+ * Validate one parsed address and optional display name, throwing a
+ * `MimeError` for `field`. The address rule is `email-validator`, the one
+ * the platform router applies, so a recorded action is never dropped for its
+ * shape. The message never echoes the address.
  */
 export function validateAddressParts(field: string, email: string, name?: string): void {
   if (email.length > MAX_ADDRESS_LENGTH) {
@@ -412,14 +302,8 @@ export function validateAddressParts(field: string, email: string, name?: string
   }
   if (name !== undefined) {
     rejectCRLF(`${field} display name`, name);
-    // An ASCII name with specials is rendered as one quoted-string, which
-    // `foldHeader` never splits: ` "name"` is a line of at least 3 octets
-    // plus the name. Same reason as the filename guard in
-    // `normalizeAttachment` — the escaping
-    // in `formatAddress` costs heap per escaped character, and the line
-    // check that would refuse it runs only after everything is rendered.
-    // A non-ASCII name becomes encoded-words and folds; a plain name folds
-    // at its spaces; neither is bounded here.
+    // A quoted ASCII name never folds: refuse one too long for its line
+    // before `formatAddress` escapes it.
     if (
       ASCII_PRINTABLE.test(name) &&
       RFC5322_SPECIALS.test(name) &&
@@ -431,10 +315,7 @@ export function validateAddressParts(field: string, email: string, name?: string
           `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten it.`,
       );
     }
-    // `@` in a display name almost always means a typo like
-    // `a@x.dev<b@evil.dev>` got mis-parsed as `name=a@x.dev,
-    // email=b@evil.dev`. Reject so the caller sees a clear validation
-    // error rather than silently rerouting to a different address.
+    // An `@` in a name usually means a mis-parsed `a@x.dev<b@evil.dev>`.
     if (name.includes('@')) {
       throw new MimeError(
         fieldErrorCode(field),
@@ -445,25 +326,9 @@ export function validateAddressParts(field: string, email: string, name?: string
 }
 
 /**
- * Undo the quoted-pairs in the content of a quoted display name: `\x` →
- * `x` for any `x` (RFC 5322 §3.2.4 — `qtext` excludes `"` and `\`, so a
- * quoted-string carries either only as a quoted-pair). The parsed name is
- * the RAW text `formatAddress` will quote and escape again, so leaving the
- * pairs in place would escape them twice. Only the quoted branch
- * of `parseAddress` calls this; a backslash in an unquoted name is a
- * character like any other, as it is in the object form.
- *
- * NOT `text.replace(/\\(.)/g, '$1')`: a global-regex replacement holds one
- * part per match before it builds the result, about 60 bytes each, and
- * nothing bounds this name before it runs — the quoted-string line guard
- * in `validateAddressParts` needs the DECODED name, and a non-ASCII name is
- * never bounded at all. Measured, 10 MiB of `\"` pairs peaked at 307 MB of
- * heap that way and terminated a 128 MB isolate; this shape peaks at 49 MB.
- * Same discipline as `to7bitBody`: one counting pass, a buffer of exactly
- * the output size, one fill, and one chunked `codeUnitsToString`.
- * The common case — no backslash at all — is one scan and no allocation.
- * The regex that admits the text guarantees every backslash is followed by
- * a character, so the fill never reads past the end.
+ * Undo quoted-pairs (`\x` → `x`) in a quoted display name so `formatAddress`
+ * escapes it once. A counting pass and an exact buffer, not a global-regex
+ * replace, which allocates per match on an unbounded name.
  */
 function unquotePairs(text: string): string {
   const first = text.indexOf('\\');
@@ -477,8 +342,7 @@ function unquotePairs(text: string): string {
       i++;
     }
   }
-  // UTF-16 code units, not bytes: a quoted name may be non-ASCII, and a
-  // surrogate pair is two units that round-trip exactly.
+  // UTF-16 code units: a surrogate pair round-trips exactly.
   const out = new Uint16Array(text.length - pairs);
   let n = 0;
   for (let i = 0; i < text.length; i++) {
@@ -500,22 +364,14 @@ function unquotePairs(text: string): string {
 export function parseAddress(value: Address, field: string): { email: string; name?: string } {
   if (typeof value === 'string') {
     rejectCRLF(`${field} address`, value);
-    // Match `Display Name <email@domain>` with paired quotes around the
-    // name (both or neither).
-    //
-    // The unquoted name must start and end on a non-whitespace character so
-    // `[^"<\s]` cannot take a space from the surrounding `\s*`. Letting
-    // consecutive quantifiers compete for one whitespace run makes the
-    // backtracker cubic in its length (4,000 leading spaces cost 10 s).
+    // `Display Name <email@domain>`, quotes paired or absent. The unquoted
+    // name starts and ends on non-whitespace so adjacent quantifiers cannot
+    // compete for one whitespace run, which backtracks cubically.
     const quoted = value.match(/^\s*"((?:[^"\\]|\\.)*)"\s*<\s*([^>\s]+)\s*>\s*$/);
     const angle =
       quoted ?? value.match(/^\s*(?:([^"<\s](?:[^"<]*[^"<\s])?)\s*)?<\s*([^>\s]+)\s*>\s*$/);
     if (angle) {
-      // The quoted form's `\"` and `\\` are quoted-pairs, undone here so
-      // the parsed name is the raw text — the same thing the object form
-      // carries — and `formatAddress` escapes it exactly once. Decoded
-      // BEFORE `validateAddressParts`, whose quoted-string line guard has
-      // to see the name `formatAddress` will render.
+      // Undo quoted-pairs first: the name guard must see what renders.
       const name = (quoted ? unquotePairs(angle[1] ?? '') : angle[1])?.trim();
       const email = angle[2];
       validateAddressParts(field, email, name);
@@ -545,11 +401,7 @@ function countRecipients(value: Address | Array<Address> | undefined): number {
   return Array.isArray(value) ? value.length : 1;
 }
 
-/**
- * Keeps the `exceeds Cloudflare limit of <N> bytes` tail that `buildMime`'s
- * own size error already uses, so the documented shape — and any caller
- * matching on it — holds for both paths.
- */
+/** Same `exceeds Cloudflare limit of <N> bytes` tail as `buildMime`'s size error. */
 function attachmentsTooLargeError(bytes: number): MimeError {
   return new MimeError(
     'MIME_ERROR',
@@ -558,13 +410,9 @@ function attachmentsTooLargeError(bytes: number): MimeError {
 }
 
 /**
- * Size of `content` WITHOUT materializing it.
- *
- * A string reports its UTF-16 `length`, which is a sound LOWER bound on its
- * UTF-8 byte length — every code unit encodes to at least one byte — so this
- * can never reject a string that would have fit; the exact length is charged
- * after the encode. Anything else reports 0 and is left to `toBytes` to reject
- * by type.
+ * Size of `content` without materializing it. A string's `length` is a lower
+ * bound on its UTF-8 size; an unsupported type reports 0 for `toBytes` to
+ * reject.
  */
 function declaredSize(content: Attachment['content']): number {
   if (content instanceof Uint8Array) {
@@ -606,13 +454,8 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
     throw new MimeError('MIME_ERROR', 'attachment: missing filename.');
   }
   rejectCRLF('attachment filename', att.filename);
-  // A quoted parameter never folds — `foldHeader` keeps a quoted-string
-  // whole — so ` filename="…"` is one line of at least 12 octets plus the
-  // filename. Refuse here what the post-render line check would refuse
-  // anyway: `quoteParam` costs heap per escaped character, and a filename
-  // of ~1.7M quotes killed a 128 MB isolate before that check could run.
-  // `length` never exceeds the UTF-8 octet count, so this cannot reject a
-  // filename whose line would have fit.
+  // A quoted parameter never folds: refuse a filename too long for its line
+  // before `quoteParam` escapes it. Bound first, then scan.
   if (att.filename.length + QUOTED_FILENAME_LINE_OVERHEAD > MAX_LINE_OCTETS) {
     throw new MimeError(
       'MIME_ERROR',
@@ -620,15 +463,9 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
         `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the filename.`,
     );
   }
-  // After the bound: `rejectCRLF` above answers for the line delimiters on
-  // the raw string, and this scan is over a filename already known to fit.
   rejectControls('attachment filename', att.filename);
   if (att.contentType !== undefined) {
     rejectCRLF('attachment contentType', att.contentType);
-    // Same order as the filename: the bound, then the scans. `Content-Type:
-    // <contentType>; name="…"` puts the media type on the line ahead of the
-    // builder's own parameter, and `validateMediaType` keeps one string per
-    // parameter, so both run over a value already known to fit.
     if (att.contentType.length + CONTENT_TYPE_LINE_OVERHEAD > MAX_LINE_OCTETS) {
       throw new MimeError(
         'MIME_ERROR',
@@ -641,15 +478,7 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
   }
   if (att.contentId !== undefined) {
     rejectCRLF('attachment contentId', att.contentId);
-    // Same order again: the bound, then the scans. An id the grammar admits
-    // has no whitespace, so `Content-ID: <id>` is one token after the field
-    // name and `foldHeader` returns the line whole: exactly the field name
-    // plus the id plus the `<` `>` `buildAttachmentPart` adds around a bare
-    // one — an id that already starts with `<` renders as given, so it is
-    // allowed those 2 characters more. `length` never exceeds the UTF-8
-    // octet count, so this cannot reject an id whose line would have fit;
-    // an over-long id with whitespace in it is refused here rather than
-    // by the grammar, and refused either way.
+    // `Content-ID: <id>` never folds; the builder adds `<>` around a bare id.
     const brackets = att.contentId.startsWith('<') ? 0 : 2;
     if (att.contentId.length + brackets + CONTENT_ID_LINE_OVERHEAD > MAX_LINE_OCTETS) {
       throw new MimeError(
@@ -661,11 +490,8 @@ async function normalizeAttachment(att: Attachment): Promise<NormalizedAttachmen
     rejectControls('attachment contentId', att.contentId);
     validateContentId('attachment contentId', att.contentId);
   }
-  // The type admits only the two literals, but that binds nothing at
-  // runtime: a JS caller, or a JSON-parsed options object, can hand over any
-  // string, and `buildAttachmentPart` interpolates the value straight into
-  // `Content-Disposition`. An allow-list, not `rejectCRLF`: there is no
-  // third disposition this builder could render meaningfully.
+  // A JS caller can pass any string, and it is interpolated into
+  // `Content-Disposition`.
   if (
     att.disposition !== undefined &&
     att.disposition !== 'attachment' &&
@@ -717,17 +543,8 @@ export async function normalizeEmail(opts: {
           `headers: '${name}' is not a valid RFC 5322 header name.`,
         );
       }
-      // A field name never folds. The shortest line that can carry it is
-      // `Name:` on its own — what `foldHeader` emits when the value's
-      // first token does not fit beside a long name — so a name over
-      // `MAX_LINE_OCTETS - 1` characters has no legal rendering whatever
-      // its value, and the post-render line check would refuse it. Refuse
-      // it here instead, as `normalizeAttachment` does a filename: that
-      // check runs only after the name has been lowercased, joined into
-      // its line, the header block, `rawText` and `raw` — four copies of a
-      // name that can be the whole message. `HEADER_NAME` admits only
-      // ASCII, so `length` is the octet count exactly and this cannot
-      // reject a name whose line would have fit.
+      // A field name never folds: refuse one too long for any line before it
+      // is copied into the rendered message.
       if (name.length + HEADER_NAME_LINE_OVERHEAD > MAX_LINE_OCTETS) {
         throw new MimeError(
           'MIME_ERROR',
@@ -735,9 +552,7 @@ export async function normalizeEmail(opts: {
             `so its line would exceed the ${MAX_LINE_OCTETS}-octet limit in RFC 5322 §2.1.1. Shorten the name.`,
         );
       }
-      // Keep raw input work bounded even when folding later collapses a long
-      // whitespace run. The character check rejects huge values before the
-      // UTF-8 measurement allocates its byte copy.
+      // The character check refuses a huge value before UTF-8 encoding copies it.
       if (headerInputBytes + name.length + value.length + 4 > MAX_CUSTOM_HEADER_BYTES) {
         throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
       }
@@ -757,9 +572,8 @@ export async function normalizeEmail(opts: {
       ) {
         throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
       }
-      // Match the proxy's wire-level accounting exactly: RFC 2047 expansion,
-      // every folded continuation line, and the terminating CRLF. encodeWord
-      // always returns ASCII, so the rendered string length is its byte size.
+      // The proxy's wire-level accounting; `encodeWord` returns ASCII, so
+      // length is bytes.
       headerBytes += foldHeader(name, encodeWord(value)).length + CRLF.length;
       if (headerBytes > MAX_CUSTOM_HEADER_BYTES) {
         throw new MimeError('MIME_ERROR', 'email: custom headers exceed the 16 KiB limit.');
@@ -783,12 +597,8 @@ export async function normalizeEmail(opts: {
   const cc = opts.cc ? parseAddresses(opts.cc, 'cc') : [];
   const bcc = opts.bcc ? parseAddresses(opts.bcc, 'bcc') : [];
   const replyTo = opts.replyTo ? parseAddress(opts.replyTo, 'replyTo') : undefined;
-  // Before any entry is normalized: the count is what bounds the loop below
-  // for a zero-byte attachment, which the byte total never sees. The type
-  // admits only an array, but that binds nothing at runtime, and the count
-  // is only a bound on the loop if the loop walks the array it was read
-  // from — so anything else is refused, as `toBytes` refuses a content of
-  // a type outside the contract.
+  // The count bounds the loop below (zero-byte entries never advance the
+  // byte total), but only if the loop walks the array it was read from.
   const attachmentList = opts.attachments ?? [];
   if (!Array.isArray(attachmentList)) {
     throw new MimeError('MIME_ERROR', 'email: attachments must be an array.');
@@ -799,12 +609,7 @@ export async function normalizeEmail(opts: {
       `email: too many attachments (max ${MAX_ATTACHMENTS}, got ${attachmentList.length}).`,
     );
   }
-  // Sequential, not `Promise.all`: the running total has to be charged
-  // BEFORE each copy, or the entire set is already resident by the time
-  // anything looks at a size. Sequencing costs nothing measurable — every
-  // conversion in `toBytes` is synchronous except `Blob.arrayBuffer`, which
-  // is a memcpy of bytes the caller already holds, so there is no I/O here to
-  // overlap.
+  // Sequential so the running total is charged before each copy.
   const attachments: Array<NormalizedAttachment> = [];
   let attachmentBytes = 0;
   for (const att of attachmentList) {
@@ -821,9 +626,7 @@ export async function normalizeEmail(opts: {
     }
     attachments.push(normalized);
   }
-  // Threading headers are passed through as-is — they come from the
-  // trusted reply path (buildReplyMessage), not user input. We still
-  // reject CR/LF inside them, same as any other header value.
+  // Threading comes from the trusted reply path, but CR/LF are still refused.
   if (opts.threading?.inReplyTo) {
     rejectCRLF('threading.inReplyTo', opts.threading.inReplyTo);
   }
@@ -847,23 +650,14 @@ export async function normalizeEmail(opts: {
 }
 
 /**
- * RFC 2047 §2 caps an encoded-word at 75 characters *including* the
- * `=?UTF-8?B?` prefix (10) and the `?=` suffix (2). That leaves 63
- * characters of base64, and base64 spends 4 characters per 3 input
- * bytes, so 45 source bytes is the largest payload that fits — 48 would
- * need 64.
+ * RFC 2047 §2: a 75-character encoded-word less `=?UTF-8?B?` and `?=` leaves
+ * 63 characters of base64, so 45 source bytes.
  */
 const ENCODED_WORD_PAYLOAD_BYTES = 45;
 
 /**
- * RFC 2047 encoded-word for non-ASCII text in headers (UTF-8, base64).
- *
- * Text longer than one word's payload becomes several encoded-words
- * separated by a space, which `foldHeader` turns into CRLF + SPACE
- * wherever a line would otherwise overrun (RFC 2047 §6.2: whitespace
- * between adjacent encoded-words is dropped on decode either way). This
- * keeps each word under §2's 75-character ceiling and a long subject or
- * display name under RFC 5322 §2.1.1's 998-octet line limit.
+ * RFC 2047 B encoded-words for non-ASCII header text, space-separated so
+ * `foldHeader` can fold between them.
  */
 function encodeWord(text: string): string {
   if (ASCII_PRINTABLE.test(text)) {
@@ -877,18 +671,11 @@ function encodeWord(text: string): string {
   const words: Array<string> = [];
   const flush = () => {
     if (length > 0) {
-      words.push(`=?UTF-8?B?${base64(pending.subarray(0, length))}?=`);
+      words.push(`=?UTF-8?B?${bytesToBase64(pending.subarray(0, length))}?=`);
       length = 0;
     }
   };
-  // `for..of` iterates code points, so a surrogate pair is never split
-  // across two words — RFC 2047 §5 forbids splitting a multi-octet
-  // character between adjacent encoded-words, and half a pair would
-  // decode to U+FFFD. Each chunk is base64'd on its own for the same
-  // reason: encoding once and slicing the output would cut characters
-  // mid-sequence. Every character is measured and appended exactly once,
-  // so a character wider than the whole budget (impossible in UTF-8)
-  // lands alone in its own word instead of spinning.
+  // Code points, so no character is split across words (RFC 2047 §5).
   for (const char of text) {
     const bytes = encoder.encode(char);
     if (length > 0 && length + bytes.length > ENCODED_WORD_PAYLOAD_BYTES) {
@@ -902,17 +689,8 @@ function encodeWord(text: string): string {
 }
 
 /**
- * RFC 5322 §3.2.3, verbatim:
- *
- *     specials = "(" / ")" / "<" / ">" / "[" / "]" / ":" / ";" / "@" /
- *                "\" / "," / "." / DQUOTE
- *
- * A display name is a §3.2.5 `phrase = 1*word`, `word = atom /
- * quoted-string`, and `atext` is everything printable EXCEPT these, so an
- * ASCII name containing any of them must be rendered as one quoted-string.
- * The class below lists the thirteen in the RFC's order so it can be checked
- * against the production by eye. `.` matters: an unquoted `Dr. Smith` is
- * `obs-phrase` (§4.1), which §4 says MUST NOT be generated.
+ * RFC 5322 §3.2.3 `specials`, in the RFC's order: an ASCII display name with
+ * any of them must be quoted (an unquoted `Dr. Smith` is obsolete syntax).
  */
 const RFC5322_SPECIALS = /[()<>[\]:;@\\,."]/;
 
@@ -937,25 +715,10 @@ function formatAddressList(addrs: Array<{ email: string; name?: string }>): stri
 }
 
 /**
- * Soft-fold a long header line. Fold points, strongest first: address-list
- * separators (a `, ` outside any double-quoted string), then any remaining
- * unquoted whitespace inside a part. A naive `split(/, /)` would split
- * inside `"Smith, John"`, corrupting quoted display names, and folding only
- * between whole parts is not enough — one recipient carrying a long encoded
- * display name, or a `References:` run of message IDs, is a single part
- * that can blow past RFC 5322 §2.1.1's 998-octet hard limit on its own.
- *
- * RFC 2047 §2 limits any header line carrying an encoded-word to 76
- * characters; RFC 5322 §2.1.1 makes 78 a SHOULD and 998 a MUST. Folding at
- * 76 satisfies all three. A comma always stays on the line it terminates.
- * A token longer than the budget still gets its own line, which is the
- * best a WSP-only fold rule allows (§3.2.2 permits folding only at WSP).
- *
- * One pass, and the only thing kept per input character is the folded
- * output itself: each finished line is one flat string in `lines`. Any
- * per-token allocation (a slice array, token objects, `out +=`) costs about
- * 130 bytes of heap per token, so a legal 3 MB subject of one-letter words
- * would terminate a 128 MB isolate even though the message fits.
+ * Soft-fold a header at 76 columns (RFC 2047 §2): at `, ` outside quotes
+ * first, then at unquoted whitespace. A token longer than a line keeps its
+ * own line, since RFC 5322 folds only at WSP. One pass that keeps only the
+ * output; per-token allocation would exhaust the isolate on a large subject.
  */
 function foldHeader(name: string, value: string): string {
   const line = `${name}: ${value}`;
@@ -1063,22 +826,11 @@ const MAX_LINE_OCTETS = 998;
 /** ` filename="` + `"`: the shortest line a quoted filename parameter can fold onto. */
 const QUOTED_FILENAME_LINE_OVERHEAD = 12;
 /**
- * ` ` + `;`: the shortest line an attachment's media type can fold onto,
- * the whole value taken as one token. `foldHeader` would split a value
- * of several parameters at their spaces, so this bound is exact for the
- * one-token media type every attachment carries in practice and
- * conservative for a run of parameters that together pass the line
- * limit; that is accepted, because the alternative — find the fold points
- * first — is the scan this bound exists to run ahead of.
+ * ` ` + `;`: the shortest line the media type can fold onto as one token
+ * (conservative for several parameters).
  */
 const CONTENT_TYPE_LINE_OVERHEAD = 2;
-/**
- * `Content-ID: `: the only line an attachment's Content-ID can sit on. The
- * value is one token — `<id>` — so `foldHeader` cannot fold it onto a
- * continuation line the way it can a media type, and the field name is
- * part of what the id must fit beside. Exact, not conservative: the `<`
- * and `>` the builder adds around a bare id are charged at the call.
- */
+/** `Content-ID: `: the id is one token and cannot fold off this line. */
 const CONTENT_ID_LINE_OVERHEAD = 'Content-ID: '.length;
 /** ` "` + `"`: the shortest line a quoted display name can fold onto. */
 const QUOTED_NAME_LINE_OVERHEAD = 3;
@@ -1086,18 +838,9 @@ const QUOTED_NAME_LINE_OVERHEAD = 3;
 const HEADER_NAME_LINE_OVERHEAD = 1;
 
 /**
- * First line of `text` that exceeds the octet limit, if any.
- *
- * Every line is scanned, not just the top header block: a multipart part's
- * own headers (`Content-Disposition: …; filename="…"`) live inside the body
- * and are just as unfoldable. Body content cannot trip this — text is
- * quoted-printable re-encoded above 990 octets and base64 is emitted at a
- * fixed width — so a hit is always a header.
- *
- * One pass over the string, counting UTF-8 octets per CRLF-delimited line,
- * with NO allocation: a `split(CRLF)` would hold one substring per line, and
- * a legal body of pasted logs is millions of lines. Only a CRLF pair ends a
- * line; a bare CR or LF is content.
+ * First CRLF-delimited line over the octet limit, counted in UTF-8 without
+ * allocating. Every line is scanned because part headers live in the body;
+ * encoded body content never trips it.
  */
 function findOverlongLine(text: string): { index: number; octets: number } | undefined {
   let index = 0;
@@ -1130,26 +873,24 @@ function findOverlongLine(text: string): { index: number; octets: number } | und
   return octets > MAX_LINE_OCTETS ? { index, octets } : undefined;
 }
 
-/**
- * Escape a value for a quoted-string parameter (RFC 2045 §5.1 value, whose
- * quoted-string comes from RFC 5322 §3.2.4).
- *
- * `qtext` excludes both `\\` and `"`, so each may appear only as a
- * quoted-pair: a raw trailing backslash would escape the closing quote, and
- * a conformant parser drops every other raw backslash.
- *
- * Backslash first, then quote — the other order would double-escape.
- */
+/** Escape `\` and `"` as quoted-pairs (RFC 5322 §3.2.4), backslash first. */
 function quoteParam(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-function base64(bytes: Uint8Array): string {
-  return btoa(codeUnitsToString(bytes));
+/** `<prefix>_<base36 time><16 random hex>`. */
+export function newId(prefix: string): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let hex = '';
+  for (const b of bytes) {
+    hex += b.toString(16).padStart(2, '0');
+  }
+  return `${prefix}_${Date.now().toString(36)}${hex}`;
 }
 
 function base64Wrapped(bytes: Uint8Array): string {
-  const encoded = base64(bytes);
+  const encoded = bytesToBase64(bytes);
   const lines: Array<string> = [];
   for (let i = 0; i < encoded.length; i += 76) {
     lines.push(encoded.slice(i, i + 76));
@@ -1160,13 +901,9 @@ function base64Wrapped(bytes: Uint8Array): string {
 function quotedPrintable(text: string): string {
   // Encode as UTF-8 bytes then quote per RFC 2045.
   const bytes = new TextEncoder().encode(text);
-  // Emit into a byte buffer, not a string: `out += chunk` per byte builds a
-  // V8 cons-string tree whose nodes cost ~56 bytes per encoded byte and stay
-  // live until the message is flattened. Measured, 1 MiB of non-ASCII text
-  // held 57 MiB that way; a 1.9 MiB body killed a 128 MB isolate while its
-  // 5.9 MiB message was under the limit. Every input byte yields at most 3
-  // output bytes, a soft break (3) lands at most once per 73 content bytes,
-  // and a lone LF becomes CRLF, so this buffer never grows.
+  // A byte buffer, not `out +=`, whose cons-string nodes cost ~56 bytes per
+  // byte. At most 3 bytes per input byte plus a soft break per 73, so it
+  // never grows.
   const out = new Uint8Array(Math.ceil(bytes.length * 3 * (76 / 73)) + 8);
   let n = 0;
   let lineLen = 0;
@@ -1240,14 +977,9 @@ function codeUnitsToString(units: Uint8Array | Uint16Array): string {
 }
 
 /**
- * Whether a body must be quoted-printable encoded: anything outside
- * printable ASCII, or any line longer than 990 characters (RFC 5322 §2.1.1
- * makes 998 octets the hard limit). Only LF and CRLF end a line; a bare CR
- * is a control character like any other and forces the encoding.
- *
- * One pass over the string with NO allocation: a `replace`/`split` shape
- * holds a copy of the body plus one substring per line, and a legal 6 MB
- * body of millions of two-character lines needed about 100 MB that way.
+ * Whether a body needs quoted-printable: anything outside printable ASCII
+ * (a bare CR included) or a line over 990 characters. One pass without
+ * allocation.
  */
 function needsQuotedPrintable(text: string): boolean {
   let lineLen = 0;
@@ -1275,18 +1007,9 @@ function needsQuotedPrintable(text: string): boolean {
 }
 
 /**
- * The 7bit body: `text` with every bare LF widened to CRLF, and every CRLF
- * kept. Only called once `needsQuotedPrintable` has returned false, so every
- * character is printable ASCII, LF, or the CR of a CRLF — one byte each —
- * and a byte buffer is exact.
- *
- * NOT `text.replace(/\r?\n/g, CRLF)`: V8 builds a global-regex replacement
- * from a parts array that holds two or three slots per match, grown by
- * doubling, so that one line cost 144 MB of heap on a legal 6 MB body of
- * 3M lines and terminated a 128 MB isolate — the largest single allocation
- * in the whole build, for a body that renders to 9 MB. The buffer here is
- * the output size, known up front from one counting pass. A body that is
- * already CRLF-only (or has no line breaks) is returned as-is.
+ * `text` with each bare LF widened to CRLF. Called only when every character
+ * is one byte, so a counting pass sizes the buffer exactly; a global-regex
+ * replace would allocate per line.
  */
 function to7bitBody(text: string): string {
   let bare = 0;
@@ -1311,16 +1034,8 @@ function to7bitBody(text: string): string {
 }
 
 /**
- * Lower bound on the octets `text` will occupy in the rendered message, in
- * one pass over the string and with NO allocation. Every UTF-8 byte yields at
- * least one octet on either body path — the 7bit path copies bytes and only
- * ever widens a bare LF to CRLF; the quoted-printable path emits each
- * non-ASCII byte as `=XX` (3 octets) and every other byte as itself, and its
- * soft breaks only add. So `ascii + 3 * nonAscii` can never overshoot the
- * real size, which keeps a false rejection impossible; `buildMime`'s final
- * check remains the authority. `TextEncoder.encode` would give the same count
- * but at the price of a full copy, which is exactly the allocation this
- * bound exists to avoid.
+ * Lower bound on `text`'s rendered octets, without allocating: ASCII is at
+ * least 1 octet and each non-ASCII UTF-8 byte is `=XX`.
  */
 function minBodyOctets(text: string): number {
   let octets = 0;
@@ -1388,7 +1103,7 @@ function makeBoundary(prefix: string): string {
   // 16 random bytes → 24-char base64. Workers + browsers expose crypto.
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
-  return `=_void_${prefix}_${base64(bytes).replace(/[+/=]/g, '')}`;
+  return `=_void_${prefix}_${bytesToBase64(bytes).replace(/[+/=]/g, '')}`;
 }
 
 function wrapMultipart(
@@ -1426,29 +1141,10 @@ const RESERVED_HEADERS = new Set([
 ]);
 
 /**
- * Lower bound on the octets one header VALUE occupies once `encodeWord` (or
- * `formatAddress`, for a display name) and `foldHeader` have rendered it, in
- * one pass over the string and with NO allocation.
- *
- * `encodeWord` leaves a value alone when every character is printable ASCII
- * and otherwise B-encodes ALL of it, so the two paths need different terms:
- *
- * - Plain: every character is at least one octet, EXCEPT whitespace.
- *   `foldHeader` re-joins a long value from its non-WSP tokens, so a run of
- *   spaces or tabs collapses to one, and a bound that charged them could
- *   reject a message that fits. Only the non-WSP characters count.
- * - Encoded: each RFC 2047 word carries at most `ENCODED_WORD_PAYLOAD_BYTES`
- *   (45) UTF-8 bytes as base64 — `ceil(n / 3) * 4 >= 4n / 3` octets — inside
- *   12 octets of `=?UTF-8?B?` and `?=`, so there are at least `floor(n / 45)`
- *   words' worth of framing. Whitespace inside the value is base64 like any
- *   other byte; only the single separators between words fold.
- *
- * Folding (`foldHeader`) can only ADD octets beyond that — a `CRLF SP` per
- * line — and quoting a display name (`formatAddress`) adds the quotes and
- * escapes, so neither path can render fewer octets than this returns.
- * Measured, the encoded bound is 96% of the rendered size for CJK, where the
- * real cost is 5 octets per character; a UTF-16 `length` would have counted
- * 1 and let the isolate die on a header five times over the limit.
+ * Lower bound on one rendered header value, without allocating. Printable
+ * ASCII counts its non-WSP characters (folding may collapse WSP runs);
+ * anything else is B-encoded whole, at least 4/3 of its UTF-8 bytes plus 12
+ * octets of framing per 45-byte word.
  */
 function minHeaderValueOctets(value: string): number {
   let utf8 = 0;
@@ -1494,18 +1190,9 @@ function minAddressOctets(addr: { email: string; name?: string }): number {
 }
 
 /**
- * Lower bound on the octets of a value rendered VERBATIM — never through
- * `encodeWord` — into a header `foldHeader` may still fold: `In-Reply-To`,
- * `References`, and an attachment part's `Content-Type` media type and
- * `Content-ID`. Every non-WSP UTF-16 code unit is at least one octet of
- * UTF-8; a WSP run may collapse to a single space when the line folds, so
- * none is charged. The `<>` around a Content-ID and the fold's `CRLF SP`
- * only add.
- *
- * `minHeaderValueOctets` cannot stand in here: a non-ASCII value sends it
- * down the encoded-word formula (4.8 octets per CJK character) while these
- * values render as raw UTF-8 (3), so it would overshoot and could reject a
- * message that fits.
+ * Lower bound on a value rendered verbatim (threading ids, media type,
+ * Content-ID): one octet per non-WSP code unit. `minHeaderValueOctets` would
+ * overshoot, since these are raw UTF-8, not encoded-words.
  */
 function minVerbatimOctets(value: string): number {
   let octets = 0;
@@ -1519,16 +1206,8 @@ function minVerbatimOctets(value: string): number {
 }
 
 /**
- * Octets every attachment part costs before any of its values: what
- * `wrapMultipart`, `renderPart` and `buildAttachmentPart` emit for a part
- * whose filename, media type, disposition and content are all empty. Each
- * term is emitted verbatim on every path — `foldHeader` returns a short
- * line as-is and re-joins a long one from its tokens with at least one
- * space between them, so the space after `Name:` and the one after `;` are
- * floors, not counts — and a fold's `CRLF SP` only adds. The boundary's
- * random suffix is left out: `makeBoundary` strips `+`, `/` and `=`, so it
- * has no provable minimum, and `mixed` is the shortest prefix an attachment
- * part can sit under.
+ * Framing every attachment part costs with empty values. The random boundary
+ * suffix has no provable minimum, so it is not counted.
  */
 const ATTACHMENT_PART_MIN_OCTETS: number =
   CRLF.length + // the join between this part and the one before it
@@ -1539,85 +1218,23 @@ const ATTACHMENT_PART_MIN_OCTETS: number =
   CRLF.length; // the blank line before the body
 
 /**
- * Cap on the attachment COUNT, checked against the raw list in
- * `normalizeEmail` before a single entry is normalized.
- *
- * Every part costs at least `ATTACHMENT_PART_MIN_OCTETS` of framing plus
- * its filename twice, and `normalizeAttachment` refuses an empty filename,
- * so the size projection in `buildMime` charges a part at least 119 octets
- * and refuses one more part than this whatever else the message holds.
- * That projection runs only after `normalizeEmail` has normalized EVERY
- * entry, and `MAX_ATTACHMENT_BYTES_TOTAL` cannot bound that loop for a
- * zero-byte attachment — its running total never advances — while the
- * normalized copy (the object, a fresh `Uint8Array`, the `TextEncoder`
- * that made it) costs about 275 bytes of live heap per entry. Measured, 2M
- * empty attachments terminated a 128 MB isolate in 0.3 s instead of
- * returning `MIME_ERROR`; this many normalize in 24 MB and are then refused
- * by the post-render size check under the same ceiling.
- *
- * Derived, not chosen: it is exactly the largest count the projection can
- * admit, so this cannot reject a message that would have been accepted, and
- * `buildMime` remains the authority on the final size. Same class as
- * `MAX_ATTACHMENT_BYTES_TOTAL` — a developer-experience guardrail on the
- * app's own input, not the security boundary.
+ * Cap on the attachment count, checked before any entry is normalized:
+ * zero-byte entries never advance the byte total. It is the most parts
+ * `buildMime`'s size projection can admit, so it refuses nothing that fits.
  */
 export const MAX_ATTACHMENTS: number = Math.floor(
   MAX_MESSAGE_BYTES / (ATTACHMENT_PART_MIN_OCTETS + 2),
 );
 
-/**
- * Octets every custom header costs around its value: the `: ` after the
- * name and the CRLF that ends its line. Exact, not a floor, once the name
- * is counted: `buildMime` renders each non-reserved custom header through
- * `foldHeader`, which emits the name verbatim, then `: ` — or, when the
- * value's first token does not fit beside the name, `:` CRLF SP, which is
- * more — and `join(CRLF)` ends every header line, a custom header never
- * being the last of the block (the body part's own headers follow it).
- */
+/** `: ` and the CRLF around a custom header value; exact once the name is counted. */
 const CUSTOM_HEADER_FRAMING_OCTETS: number = ': '.length + CRLF.length;
 
 /**
- * Lower bound on the octets of every header `buildMime` renders from
- * caller-supplied values: `Subject`, the custom headers, the addresses in
- * `From`, `To`, `Cc` and `Reply-To`, the `In-Reply-To` / `References` pair
- * `replyEmail` threads through (remote-sender controlled, up to the whole
- * inbound message), and each attachment part's `Content-Type`, `Content-ID`
- * and — twice, once per header it is rendered into — filename. `Bcc` is
- * never rendered and a reserved custom header is dropped, so neither is
- * counted — charging either could reject a message that fits. The fixed
- * `Name: ` and `CRLF` of the headers `buildMime` itself names — `Subject`,
- * the address lists, the threading pair — are omitted for the same reason
- * a lower bound may omit any term. They are NOT omitted where the caller
- * controls the name or the count, because there they can be the whole
- * message:
- *
- * - A custom header's name is rendered verbatim, and `normalizeEmail`
- *   bounds ONE name at under a kilobyte, not the sum, nor the count. With
- *   empty values the names and the `: ` CRLF around each are the entire
- *   size, and the framing is exact once the name is counted (see
- *   `CUSTOM_HEADER_FRAMING_OCTETS`), so charging both cannot reject a
- *   message that fits. Uncharged, 60k empty headers with 500-character
- *   names (a 30 MB message) would project to zero.
- * - An attachment part: `normalizeAttachment` bounds ONE filename at under
- *   a kilobyte, not the sum, and a message is free to carry any number of
- *   parts, so the filename and the framing every part is wrapped in are
- *   the whole size of a message of empty attachments. Measured, 50k
- *   zero-byte attachments with legal 986-character filenames rendered to
- *   106 MB — held three to four times over between the parts, their join,
- *   `rawText` and `raw` — and terminated a 128 MB isolate before the final
- *   size check could return `MIME_ERROR`.
- *
- * The header COUNT is deliberately not bounded here. Each header costs
- * at least five octets (a one-character name, `: `, CRLF), so the count
- * the projection can admit is finite, and past a few hundred thousand keys
- * the caller's own object — measured at about 74 bytes per key, before
- * `sendEmail` is called — is the dominant cost, which no check inside this
- * module can pre-empt. Rendering does add live heap per header (about
- * 150 bytes: two `Object.entries`, the `topHeaders` pair, the folded line),
- * so a legal message of 500k four-character headers still does not fit a
- * 128 MB isolate while one of 400k does; a bound on that would be the
- * framework's own number — the platform proxy bounds bytes, not headers —
- * and is left as a product decision rather than invented here.
+ * Lower bound on every header rendered from caller values. Bcc and reserved
+ * custom headers never render, and the fixed framing of Void's own headers
+ * is omitted. A custom header's name and framing, and each attachment part's
+ * framing and filename (twice), are charged: a message of many empty headers
+ * or attachments is all framing.
  */
 function minHeaderOctets(email: NormalizedEmail): number {
   let octets = minHeaderValueOctets(email.subject);
@@ -1644,10 +1261,7 @@ function minHeaderOctets(email: NormalizedEmail): number {
     octets += minVerbatimOctets(email.threading.references);
   }
   for (const att of email.attachments) {
-    // The filename sits inside a quoted-string in both `name="…"` and
-    // `filename="…"`, and `foldHeader` never splits a quoted-string, so
-    // every code unit of it — whitespace included — is at least one octet
-    // on each line; `quoteParam`'s escapes only add.
+    // The filename is quoted twice and never folds, so whitespace counts too.
     octets += ATTACHMENT_PART_MIN_OCTETS + 2 * att.filename.length;
     octets += minVerbatimOctets(att.contentType);
     if (att.contentId) {
@@ -1661,7 +1275,7 @@ function generateMessageId(fromEmail: string): string {
   const domain = fromEmail.split('@')[1] ?? 'localhost';
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
-  const id = base64(bytes).replace(/[+/=]/g, '');
+  const id = bytesToBase64(bytes).replace(/[+/=]/g, '');
   return `<${id}@${domain}>`;
 }
 
@@ -1670,18 +1284,9 @@ function generateMessageId(fromEmail: string): string {
  * generated Message-ID header so callers can surface it in the result.
  */
 export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId: string } {
-  // Project the message size BEFORE rendering anything — headers included.
-  // The final check below sees the message only after every header has been
-  // encoded and folded and every body quoted-printable encoded, all of it
-  // rendered into `rawText` and encoded again. Measured, that peak is about
-  // 11x the UTF-8 bytes of a non-ASCII body, and `encodeWord` alone holds
-  // over 3x the UTF-8 bytes of a non-ASCII header (its array of encoded
-  // words plus their join) before the fold, the join, `rawText` and `raw`
-  // each add another copy of the rendered header. A body several times over the
-  // limit, or a 20 MB subject or display name, terminated a 128 MB isolate
-  // instead of returning the `MIME_ERROR` the guide promises. Each term is
-  // a lower bound on the rendered size, so this never rejects a message
-  // that would have fit; the final check stays the authority.
+  // Project the size before rendering, which holds several copies of the
+  // message: an oversize body or header must fail with `MIME_ERROR`, not
+  // exhaust the isolate. Each term is a lower bound; the final check rules.
   const projected =
     minHeaderOctets(email) +
     (email.text ? minBodyOctets(email.text) : 0) +
@@ -1770,23 +1375,9 @@ export function buildMime(email: NormalizedEmail): { raw: Uint8Array; messageId:
   const rawText = headerBlock + CRLF + CRLF + bodyPart.body;
   const raw = new TextEncoder().encode(rawText);
 
-  // RFC 5322 §2.1.1 makes 998 octets per line a MUST, and RFC 5321
-  // §4.5.3.1.6 caps an SMTP text line at 1000 including CRLF. `foldHeader`
-  // can only fold at whitespace (§3.2.2), so a long token with none —
-  // a JWT, a signed URL, a machine-generated Message-ID — cannot be folded
-  // at all and leaks through both its single-chunk early return AND its
-  // fold loop, which still gives an over-long chunk its own line.
-  //
-  // Checked here, after rendering, rather than per field: this is the only
-  // place that sees every header path at once, including the header NAME
-  // and the `filename=` / `name=` / `Content-ID` parameters that are built
-  // outside `foldHeader`. Encoding the value instead of rejecting is not a
-  // general remedy — RFC 2047 §5 permits encoded-words only in unstructured
-  // fields, comments and phrases, so it is illegal in `References`,
-  // `In-Reply-To`, `Content-ID` and parameter values, where a receiver
-  // would read `=?UTF-8?B?…?=` as a literal id or filename. Truncating
-  // silently corrupts: a clipped `References` breaks threading with no
-  // signal, a clipped `Content-ID` orphans a `cid:` reference.
+  // RFC 5322 §2.1.1: at most 998 octets per line, and a token without
+  // whitespace cannot fold. Checked after rendering, the only place that sees
+  // every header path; encoding or truncating would corrupt ids and names.
   const overlong = findOverlongLine(rawText);
   if (overlong !== undefined) {
     throw new MimeError(

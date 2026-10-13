@@ -63,6 +63,7 @@ const referenceItems = [
       { text: 'Authentication', link: '/reference/api/auth' },
       { text: 'Fetch Client', link: '/reference/api/client' },
       { text: 'Durable State and WebSockets', link: '/reference/api/durable' },
+      { text: 'Deployment artifacts', link: '/reference/api/deploy' },
       { text: 'Database and Seeding', link: '/reference/api/database' },
       { text: 'Resource Clients', link: '/reference/api/resources' },
       { text: 'Types', link: '/reference/api/types' },
@@ -128,6 +129,7 @@ const platformSidebar = [
     items: [
       { text: 'Overview', link: '/guide/platform-administration' },
       { text: 'Sign-in and Access', link: '/guide/platform/administration/access' },
+      { text: 'Connected apps', link: '/guide/platform/administration/connected-apps' },
       { text: 'Users and Projects', link: '/guide/platform/administration/projects' },
       { text: 'Plans and Limits', link: '/guide/platform/administration/plans' },
       { text: 'Project Zero Trust', link: '/guide/platform/administration/zero-trust' },

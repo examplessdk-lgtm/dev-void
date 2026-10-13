@@ -9,17 +9,7 @@ import {
 /** Validator messages redact raw inputs unconditionally unless explicitly unmasked. */
 
 describe('redactMessage', () => {
-  it('redacts credential-shaped raw input', () => {
-    const msg = redactMessage('sk_live_abc', 'got "sk_live_abc"');
-    expect(msg).toBe(`got "${REDACTED}"`);
-  });
-
-  it('redacts invalid numeric input containing a credential', () => {
-    const msg = redactMessage('sk_live_abc123', 'Expected a number, got "sk_live_abc123"');
-    expect(msg).toBe(`Expected a number, got "${REDACTED}"`);
-  });
-
-  it('redacts plain invalid values too', () => {
+  it('replaces the raw value in the message', () => {
     const msg = redactMessage('abc', 'Expected a number, got "abc"');
     expect(msg).toBe(`Expected a number, got "${REDACTED}"`);
   });

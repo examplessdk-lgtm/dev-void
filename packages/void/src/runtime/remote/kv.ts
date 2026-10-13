@@ -1,27 +1,11 @@
-import { bytesToBase64, type ProxyClient } from './client.ts';
+import { bytesToBase64 } from '../base64.ts';
+import type { ProxyClient } from './client.ts';
 
 /**
  * KVNamespace implementation backed by the remote proxy.
  * Used during local development when `remote: true` is set in void.config.ts.
  */
 export class ProxyKVNamespace {
-  private normalizeGetOptions(
-    options?: { type?: string } | string,
-  ): string | { type: 'json' | 'text' | 'arrayBuffer' | 'stream' } | undefined {
-    if (typeof options === 'string') {
-      return options;
-    }
-    if (
-      options?.type === 'json' ||
-      options?.type === 'text' ||
-      options?.type === 'arrayBuffer' ||
-      options?.type === 'stream'
-    ) {
-      return { type: options.type };
-    }
-    return undefined;
-  }
-
   constructor(
     private client: ProxyClient,
     private binding: string,
@@ -47,62 +31,26 @@ export class ProxyKVNamespace {
       type,
     });
 
-    // The proxy returns JSON `null` (200, application/json) for missing keys
-    // regardless of the requested type. Check for null before type conversion.
-    const ct = res.headers.get('content-type') ?? '';
-    if (type === 'arrayBuffer' || type === 'stream') {
-      // For binary types, the proxy returns application/octet-stream for real values
-      // but application/json for null. Check content-type to detect null responses.
-      if (ct.includes('application/json')) {
-        const data = await res.json();
-        if (data === null) {
-          return null;
-        }
-        // Non-null JSON response for binary type — shouldn't happen, but handle gracefully
-        const encoded = new TextEncoder().encode(JSON.stringify(data));
-        return type === 'arrayBuffer'
-          ? encoded.buffer
-          : new ReadableStream({
-              start(controller) {
-                controller.enqueue(encoded);
-                controller.close();
-              },
-            });
-      }
-      if (type === 'arrayBuffer') {
-        return res.arrayBuffer();
-      }
-      return res.body;
+    // A missing key is JSON `null` for every type; binary values arrive as octet-stream.
+    if (
+      (type !== 'arrayBuffer' && type !== 'stream') ||
+      res.headers.get('content-type')?.includes('application/json')
+    ) {
+      return res.json();
     }
-
-    // text and json are returned as JSON by the proxy
-    return res.json();
+    return type === 'arrayBuffer' ? res.arrayBuffer() : res.body;
   }
 
   async getWithMetadata<T = string, M = unknown>(
     key: string,
     options?: { type?: string } | string,
   ): Promise<{ value: T | null; metadata: M | null; cacheStatus: null }> {
-    const normalized = this.normalizeGetOptions(options);
-    let value: T | null;
-    switch (typeof normalized === 'string' ? normalized : normalized?.type) {
-      case 'json':
-        value = (await this.get(key, 'json')) as T | null;
-        break;
-      case 'text':
-        value = (await this.get(key, 'text')) as T | null;
-        break;
-      case 'arrayBuffer':
-        value = (await this.get(key, 'arrayBuffer')) as T | null;
-        break;
-      case 'stream':
-        value = (await this.get(key, 'stream')) as T | null;
-        break;
-      default:
-        value = (await this.get(key)) as T | null;
-        break;
-    }
-    // The proxy doesn't support metadata retrieval via REST API in V1
+    const requested = typeof options === 'string' ? options : options?.type;
+    const type =
+      requested === 'json' || requested === 'arrayBuffer' || requested === 'stream'
+        ? requested
+        : 'text';
+    const value = (await this.get(key, type as never)) as T | null;
     return { value, metadata: null, cacheStatus: null };
   }
 

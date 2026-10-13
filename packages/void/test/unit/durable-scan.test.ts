@@ -26,6 +26,18 @@ afterEach(() => {
 });
 
 describe('scanDurableObjectModules', () => {
+  it('discovers explicit native Durable Object identities through imported aliases', () => {
+    const root = createModule(
+      'agent.ts',
+      `import { defineDurableObject as durable } from 'void/durable';
+      class Agent {};
+      export default durable({ name: 'workspace-agent', class: Agent });`,
+    );
+    expect(scanDurableObjectModules(root)[0]).toMatchObject({
+      name: 'workspace-agent',
+      ...deriveDurableResourceIdentity('workspace-agent'),
+    });
+  });
   it('derives stable binding, class, and migration names from filenames', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-durable-scan-'));
     roots.push(root);

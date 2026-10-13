@@ -43,6 +43,7 @@ import {
   CF_RETRY,
   DEFAULT_WORKER_MAIN_MODULE,
 } from './shared.ts';
+import { platformAppUploadUserAgent } from './user-agent.ts';
 
 export async function uploadDeploymentWorker(input: {
   currentStep: string;
@@ -367,7 +368,10 @@ export async function uploadDeploymentWorker(input: {
       const attemptStart = Date.now();
       const cfResponse = await fetch(input.workerUploadUrl!, {
         method: 'PUT',
-        headers: { Authorization: `Bearer ${context.env.CF_API_TOKEN}` },
+        headers: {
+          Authorization: `Bearer ${context.env.CF_API_TOKEN}`,
+          'User-Agent': platformAppUploadUserAgent(context.env),
+        },
         body: workerFormData,
       });
 

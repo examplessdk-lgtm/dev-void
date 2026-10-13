@@ -81,6 +81,7 @@ describe('void info', () => {
       },
     ]);
     const output = formatProjectInfo(info);
+    expect(output).toContain('Inferred name: chat-room');
     expect(output).toContain(
       "To preserve this resource when moving its code, add this to 'defineRoom':",
     );

@@ -27,7 +27,6 @@ import {
 } from './plugin-framework-triggers.ts';
 import { migrationPlugin } from './plugin-migration.ts';
 import { createCloudflareBuiltinsExternalPlugin } from './plugin-worker-environment.ts';
-import { resolveSandboxConfig } from './sandbox/config.ts';
 import { injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
 
 export function createFrameworkPlugins(input: {
@@ -40,12 +39,10 @@ export function createFrameworkPlugins(input: {
   readonly application: ApplicationAnalysis;
   readonly bindingNames: ApplicationAnalysis['bindingNames'];
   readonly websocketRoutes: ApplicationAnalysis['allWebsockets'];
-  readonly sandboxConfig: ReturnType<typeof resolveSandboxConfig> | undefined;
   readonly liveConfig: ReturnType<typeof resolveLiveBindingConfig> | undefined;
   readonly detected: NonNullable<ApplicationAnalysis['framework']>;
   readonly clientStubsPlugin: Plugin;
   readonly serverRuntimeOptimizerPlugin: Plugin;
-  readonly authEnabled: boolean;
   readonly devTriggerToken: string;
   readonly implicitDeployGuard: Plugin;
 }): Array<Plugin> {
@@ -59,12 +56,10 @@ export function createFrameworkPlugins(input: {
     application,
     bindingNames,
     websocketRoutes,
-    sandboxConfig,
     liveConfig,
     detected,
     clientStubsPlugin,
     serverRuntimeOptimizerPlugin,
-    authEnabled,
     devTriggerToken,
     implicitDeployGuard,
   } = input;
@@ -120,7 +115,6 @@ export function createFrameworkPlugins(input: {
           ? { directCloudflareAi: { gateway: config.ai?.gateway } }
           : {}),
         websockets: websocketRoutes,
-        sandbox: sandboxConfig,
         live: liveConfig,
       },
     );
@@ -220,14 +214,14 @@ export function createFrameworkPlugins(input: {
     envClientFoldPlugin(),
     drizzlePlugin(root, false, dialect, {
       d1BindingName: bindingNames?.d1,
-      forceVirtualDb: authEnabled || bindingNames?.d1 !== undefined,
+      forceVirtualDb: bindingNames?.d1 !== undefined,
       localD1DatabaseId: localD1.databaseId,
       localD1PersistRoot: frameworkPersistRoot,
     }),
     migrationPlugin(root, dialect, localD1.databaseId, frameworkPersistRoot, {
       enabled: false,
     }),
-    devTriggersHintPlugin(root, { framework: true, devTriggerToken }),
+    devTriggersHintPlugin(root, devTriggerToken),
     frameworkTriggersPlugin(root, { devTriggerToken }),
     ...(detected.name === 'nuxt'
       ? [nitroDevTriggerInjectPlugin(root, { serverDir: 'server' })]

@@ -57,8 +57,8 @@ export type DbArgs =
   | { action: 'push' }
   | { action: 'generate' }
   | { action: 'status' }
-  | { action: 'reset' }
-  | { action: 'seed'; file?: string }
+  | { action: 'reset'; yes?: boolean }
+  | { action: 'seed'; file?: string; yes?: boolean }
   | { action: 'execute'; command?: string; file?: string; remote?: boolean }
   | { action: 'migrate'; remote?: boolean }
   | { action: 'studio'; remote?: boolean }
@@ -80,8 +80,28 @@ export type DbArgs =
     }
   | { action: 'rename-migrations' };
 
+// Positional arguments each action accepts after its name.
+const MAX_POSITIONALS: Record<DbArgs['action'], number> = {
+  push: 0,
+  generate: 0,
+  status: 0,
+  reset: 0,
+  seed: 0,
+  execute: 1,
+  migrate: 0,
+  studio: 0,
+  'set-url': 0,
+  connect: 1,
+  'rename-migrations': 0,
+  export: 0,
+};
+
+function isDbAction(value: string | undefined): value is DbArgs['action'] {
+  return value !== undefined && Object.hasOwn(MAX_POSITIONALS, value);
+}
+
 export function parseDbArgs(args: Array<string>): DbArgs {
-  const parsed = parseArgs({
+  const { values, positionals } = parseArgs({
     args,
     options: {
       file: { type: 'string' },
@@ -94,130 +114,67 @@ export function parseDbArgs(args: Array<string>): DbArgs {
       name: { type: 'string' },
       region: { type: 'string' },
       'local-only': { type: 'boolean' },
+      yes: { type: 'boolean' },
     },
     allowPositionals: true,
     strict: true,
   });
 
-  const [action, ...rest] = parsed.positionals;
-
-  if (action === 'push') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    return { action };
+  const [action, ...rest] = positionals;
+  if (!isDbAction(action)) {
+    throw new Error(
+      'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
+    );
+  }
+  if (action === 'export' && values.remote) {
+    throw new Error('`void db export --remote` is not yet supported. Local export only for now.');
+  }
+  const maxPositionals = MAX_POSITIONALS[action];
+  if (rest.length > maxPositionals) {
+    throw new Error(`db: Unexpected argument '${rest[maxPositionals]}'.`);
   }
 
-  if (action === 'generate') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
+  switch (action) {
+    case 'reset':
+      return { action, yes: values.yes };
+    case 'seed':
+      return { action, file: values.file, yes: values.yes };
+    case 'execute': {
+      const [command] = rest;
+      if (!command && !values.file) {
+        throw new Error('db: Usage: void db execute <sql> or void db execute --file <path>.');
+      }
+      if (command && values.file) {
+        throw new Error('db: Provide either SQL inline or --file, not both.');
+      }
+      return { action, command, file: values.file, remote: values.remote };
     }
-    return { action };
+    case 'migrate':
+    case 'studio':
+      return { action, remote: values.remote };
+    case 'connect': {
+      const [url] = rest;
+      if (url && values.provider) {
+        throw new Error('db: Provide either a connection string or --provider, not both.');
+      }
+      return {
+        action,
+        url,
+        provider: values.provider,
+        name: values.name,
+        region: values.region,
+        localOnly: values['local-only'],
+      };
+    }
+    case 'export':
+      return {
+        action,
+        output: values.output,
+        noData: values['no-data'],
+        noSchema: values['no-schema'],
+        table: values.table,
+      };
+    default:
+      return { action };
   }
-
-  if (action === 'status') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    return { action };
-  }
-
-  if (action === 'reset') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    return { action };
-  }
-
-  if (action === 'seed') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    const file = typeof parsed.values.file === 'string' ? parsed.values.file : undefined;
-    return { action, file };
-  }
-
-  if (action === 'execute') {
-    const command = rest[0];
-    if (rest.length > 1) {
-      throw new Error(`db: Unexpected argument '${rest[1]}'.`);
-    }
-    const file = typeof parsed.values.file === 'string' ? parsed.values.file : undefined;
-    if (!command && !file) {
-      throw new Error('db: Usage: void db execute <sql> or void db execute --file <path>.');
-    }
-    if (command && file) {
-      throw new Error('db: Provide either SQL inline or --file, not both.');
-    }
-    const remote = parsed.values.remote === true ? true : undefined;
-    return { action, command, file, remote };
-  }
-
-  if (action === 'migrate') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    const remote = parsed.values.remote === true ? true : undefined;
-    return { action, remote };
-  }
-
-  if (action === 'studio') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    const remote = parsed.values.remote === true ? true : undefined;
-    return { action, remote };
-  }
-
-  if (action === 'set-url') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    return { action };
-  }
-
-  if (action === 'connect') {
-    if (rest.length > 1) {
-      throw new Error(`db: Unexpected argument '${rest[1]}'.`);
-    }
-    const url = rest[0];
-    const provider =
-      typeof parsed.values.provider === 'string' ? parsed.values.provider : undefined;
-    if (url && provider) {
-      throw new Error('db: Provide either a connection string or --provider, not both.');
-    }
-    return {
-      action,
-      url,
-      provider,
-      name: typeof parsed.values.name === 'string' ? parsed.values.name : undefined,
-      region: typeof parsed.values.region === 'string' ? parsed.values.region : undefined,
-      localOnly: parsed.values['local-only'] === true ? true : undefined,
-    };
-  }
-
-  if (action === 'rename-migrations') {
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    return { action };
-  }
-
-  if (action === 'export') {
-    if (parsed.values.remote === true) {
-      throw new Error('`void db export --remote` is not yet supported. Local export only for now.');
-    }
-    if (rest.length > 0) {
-      throw new Error(`db: Unexpected argument '${rest[0]}'.`);
-    }
-    const output = typeof parsed.values.output === 'string' ? parsed.values.output : undefined;
-    const noData = parsed.values['no-data'] === true ? true : undefined;
-    const noSchema = parsed.values['no-schema'] === true ? true : undefined;
-    const table = typeof parsed.values.table === 'string' ? parsed.values.table : undefined;
-    return { action, output, noData, noSchema, table };
-  }
-
-  throw new Error(
-    'db: Usage: void db <push|generate|status|reset|seed|execute|migrate|studio|export|connect|set-url|rename-migrations>.',
-  );
 }

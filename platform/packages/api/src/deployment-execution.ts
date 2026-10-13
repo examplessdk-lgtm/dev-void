@@ -1,12 +1,13 @@
 import { and, eq, getTableColumns, lte, ne, or, sql } from 'drizzle-orm';
 import { paginatedR2Delete } from './assets.ts';
+import { activeOAuthApproval } from './auth/oauth.ts';
 import { R2_CONCURRENCY } from './concurrency.ts';
 import { createDb, type Db, type DbOrTx } from './db.ts';
 import type { DeploymentInput, DeploymentOperation } from './deployment-operation-types.ts';
 import type { ApiEnv } from './env.ts';
 import { deploymentOperations, projectDeployCredentials, projects, users } from './schema.ts';
 import { isAdminSuspended } from './suspension.ts';
-import type { DeployEvent } from './types.ts';
+import type { DeployEvent, DeployManifest } from './types.ts';
 export type {
   DeploymentInput,
   DeploymentOperation,
@@ -100,13 +101,19 @@ export async function prepareDeploymentInput(
   projectId: string,
   body: Record<string, unknown>,
   files: Array<{ name: string; content: Blob }>,
-  credentialId?: string,
+  options: {
+    appType: DeployManifest['type'];
+    credentialId?: string;
+    oauthApproval?: string;
+  },
 ) {
+  const { appType, credentialId, oauthApproval } = options;
   const prefix = `deployment-inputs/${projectId}/${crypto.randomUUID()}/`;
   const input: DeploymentInput = {
     body: { ...body },
     modules: [],
     ...(credentialId ? { credentialId } : {}),
+    ...(oauthApproval ? { oauthApproval } : {}),
   };
   delete input.body.workerFiles;
   try {
@@ -152,8 +159,14 @@ export async function prepareDeploymentInput(
       modules: input.modules.map(({ name, digest, type }) => ({ name, digest, type })),
     });
     const digest = await sha256Hex(new TextEncoder().encode(identity));
-    // A marker lets the orphan sweep recognize complete and partial staging.
-    await r2.put(`${prefix}receipt`, JSON.stringify({ createdAt: Date.now() }));
+    // Attribute the existing staging write without extra requests. This marks
+    // prepared input, including no-op redeploys and later failures, not a live
+    // publication. Keep the parent prefix unchanged for cleanup and recovery.
+    const kind = appType === 'spa' ? 'spa' : files.length > 0 ? 'worker' : 'static';
+    await r2.put(
+      `${prefix}receipt-void-platform-${kind}`,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
     return { input, prefix, digest };
   } catch (error) {
     await paginatedR2Delete(r2, prefix).catch(() => {});
@@ -165,6 +178,17 @@ export async function assertDeploymentExecutionAuthority(
   db: DbOrTx,
   operation: DeploymentOperation,
 ): Promise<void> {
+  if (operation.payload.oauthApproval) {
+    const { approval, user } = await activeOAuthApproval(
+      db,
+      operation.payload.oauthApproval,
+      undefined,
+      true,
+    );
+    if (approval.data.projectId !== operation.project_id || user.id !== operation.actor_id) {
+      throw new Error('Deployment approval is no longer active');
+    }
+  }
   const [actor] = await db
     .select({ reason: users.suspended_reason })
     .from(users)

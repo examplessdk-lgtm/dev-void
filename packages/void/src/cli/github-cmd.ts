@@ -16,14 +16,10 @@ import {
 } from './client.ts';
 import { collectGitDeployMetadata } from './git-metadata.ts';
 import type { GithubArgs } from './github-args.ts';
-import { printSuccess, pc } from './output.ts';
+import { printSuccess, formatUrl, pc } from './output.ts';
 import { platformErrorMessage } from './platform-errors.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
-
-// ---------------------------------------------------------------------------
-// Pure helpers (exported for unit tests)
-// ---------------------------------------------------------------------------
 
 /**
  * The workflow file `void init --github` scaffolds and the platform default for
@@ -70,11 +66,8 @@ export function describeConnectError(status: number, errorCode: string | undefin
 }
 
 /**
- * Like {@link describeConnectError}, but for `void github update`. The update
- * flow starts from an EXISTING connection, so a 404 "connection not found"
- * (the project has no GitHub connection, or it was disconnected between the
- * read and the write) is the common case and gets a "connect first" message.
- * Everything else defers to the shared connect mapping.
+ * Like {@link describeConnectError}, but maps a 404 "connection not found" to a
+ * "connect first" message.
  */
 export function describeUpdateError(status: number, errorCode: string | undefined): string | null {
   const code = errorCode ?? '';
@@ -144,10 +137,8 @@ export function formatInstallations(installations: Array<GithubInstallation>): s
 }
 
 /**
- * Render a GitHub connection as an aligned key/value block for `void github
- * status`. The workflow file is the OIDC deploy pin — it is only read for
- * github_actions builds (container builds never use it), so it is annotated as
- * unused when the executor is container to avoid implying it is active.
+ * Render a GitHub connection for `void github status`. Container builds never
+ * read the workflow file, so it is marked unused for them.
  */
 export function formatConnection(connection: GithubConnection): string {
   const row = (label: string, value: string): string => `  ${label.padEnd(16)}${value}`;
@@ -163,10 +154,6 @@ export function formatConnection(connection: GithubConnection): string {
   ];
   return rows.join('\n');
 }
-
-// ---------------------------------------------------------------------------
-// Main command
-// ---------------------------------------------------------------------------
 
 export async function runGithubCommand(root: string, args: GithubArgs): Promise<void> {
   const token = getToken(root);
@@ -196,20 +183,10 @@ export async function runGithubCommand(root: string, args: GithubArgs): Promise<
   }
 }
 
-// ---------------------------------------------------------------------------
-// install
-// ---------------------------------------------------------------------------
-
 /**
- * `void github install` — print the GitHub App install URL and open it.
- *
- * If the account has no linked GitHub identity, the server returns a 403 with
- * the stable code `github_identity_required`. Rather than telling the
- * user to `void account login` (which risks forking into a second account), we run
- * the link flow inline and retry the install URL exactly once.
- *
- * `linkIdentity` is injectable so tests can supply a fake linker instead of
- * starting a real localhost callback server / browser.
+ * `void github install`. Without a linked GitHub identity the server returns a
+ * 403 `github_identity_required`; link inline and retry once rather than send the
+ * user to `void account login`, which risks creating a second account.
  */
 export async function runInstall(
   client: PlatformClient,
@@ -249,23 +226,14 @@ export async function runInstall(
     }
   }
 
-  log.message(`Open this URL to install the Void GitHub App:\n${pc.blue(url)}`);
-  const { execFile } = await import('node:child_process');
-  openBrowser(url, execFile);
+  log.message(`Open this URL to install the Void GitHub App:\n${pc.blue(formatUrl(url))}`);
+  openBrowser(url);
   log.message('After installing, run `void github connect` to link a repository to your project.');
 }
 
-// ---------------------------------------------------------------------------
-// link
-// ---------------------------------------------------------------------------
-
 /**
- * Link the current Void account (the logged-in CLI token holder) to a GitHub
- * identity. Drives the platform's 3-endpoint link flow with a localhost +
- * PKCE handshake, mirroring `void account login`.
- *
- * The success path is non-exiting so a caller (`github install` after a 403
- * for a GitHub-less account) can continue; only error paths exit/throw.
+ * Link the logged-in Void account to a GitHub identity. Returns on success so
+ * `github install` can continue after linking.
  */
 export async function runGithubLink(client: PlatformClient): Promise<void> {
   const verifier = createCodeVerifier();
@@ -286,7 +254,8 @@ export async function runGithubLink(client: PlatformClient): Promise<void> {
         return url;
       },
       describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
-      onUrl: (url) => log.message(`Open this URL to link your GitHub account:\n${pc.blue(url)}`),
+      onUrl: (url) =>
+        log.message(`Open this URL to link your GitHub account:\n${pc.blue(formatUrl(url))}`),
       finalize: async (params) => {
         const linkCode = params.get('link_code');
         if (!linkCode) {
@@ -317,17 +286,9 @@ export async function runGithubLink(client: PlatformClient): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// join
-// ---------------------------------------------------------------------------
-
 /**
- * Browser round-trip (localhost + PKCE) that joins the caller to their
- * organization's shared GitHub App installations. Returns the number of
- * installations joined. Throws PlatformApiError — including the 503
- * `github_oauth_not_configured` — so callers own the user-facing handling
- * (`runGithubJoin` prints and exits; the connect auto-join fallback falls
- * through to its install-first error).
+ * Join the caller to their organization's shared GitHub App installations and
+ * return how many were joined. Errors are left to the caller.
  */
 export async function performGithubJoin(client: PlatformClient): Promise<number> {
   const verifier = createCodeVerifier();
@@ -347,7 +308,7 @@ export async function performGithubJoin(client: PlatformClient): Promise<number>
     describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
     onUrl: (url) =>
       log.message(
-        `Open this URL to join your organization's shared GitHub App installations:\n${pc.blue(url)}`,
+        `Open this URL to join your organization's shared GitHub App installations:\n${pc.blue(formatUrl(url))}`,
       ),
     finalize: async (params) => {
       const joinCode = params.get('join_code');
@@ -386,10 +347,6 @@ export async function runGithubJoin(client: PlatformClient): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// installations
-// ---------------------------------------------------------------------------
-
 async function runInstallations(client: PlatformClient): Promise<void> {
   const installations = await client.listGithubInstallations();
   if (installations.length === 0) {
@@ -399,25 +356,9 @@ async function runInstallations(client: PlatformClient): Promise<void> {
   log.message(formatInstallations(installations));
 }
 
-// ---------------------------------------------------------------------------
-// connect
-// ---------------------------------------------------------------------------
-
 /**
- * Per-repo connect authorization round-trip for a non-owner org member.
- *
- * When the connect route returns 403 `connect_authorization_required`,
- * the member has no proof they can access the specific repo under the shared
- * installation. This drives the same localhost + PKCE handshake as
- * {@link runGithubLink}/{@link runGithubJoin}, but against the platform's
- * connect-authorize route: the callback mints and returns the grant IN
- * the redirect URL (`?connect_grant=…`), so there is no separate `/complete`
- * POST — `finalize` just reads the grant out of the callback query. A
- * `?error=repo_not_accessible` callback is mapped to a friendly per-repo message
- * by `describeError`, which rejects out of the handshake (no grant, no retry).
- *
- * Returns the grant plus the PKCE verifier the caller must echo to the connect
- * route so the platform can bind the grant to this exchange.
+ * Per-repo authorization for an org member who cannot yet prove repo access.
+ * The grant arrives in the callback URL; the caller sends it with the verifier.
  */
 async function runGithubConnectAuthorize(
   client: PlatformClient,
@@ -449,7 +390,9 @@ async function runGithubConnectAuthorize(
       return e ? 'GitHub authorization failed.' : null;
     },
     onUrl: (url) =>
-      log.message(`Open this URL to authorize access to ${repoFullName}:\n${pc.blue(url)}`),
+      log.message(
+        `Open this URL to authorize access to ${repoFullName}:\n${pc.blue(formatUrl(url))}`,
+      ),
     finalize: async (params) => {
       const grant = params.get('connect_grant');
       if (!grant) {
@@ -540,14 +483,8 @@ export async function runConnect(
 ): Promise<void> {
   const isTTY = process.stdin.isTTY === true;
 
-  // -------------------------------------------------------------------------
-  // 1. Resolve project
-  // -------------------------------------------------------------------------
   const projectId = await resolveGithubProjectId(root, client, args.projectName, 'connect', isTTY);
 
-  // -------------------------------------------------------------------------
-  // 2. Resolve installation
-  // -------------------------------------------------------------------------
   const listActiveInstallations = async () =>
     (await client.listGithubInstallations()).filter((i) => i.status === 'active');
 
@@ -632,9 +569,6 @@ export async function runConnect(
     installation = installations.find((i) => i.installation_id === picked)!;
   }
 
-  // -------------------------------------------------------------------------
-  // 3. Resolve repo full name
-  // -------------------------------------------------------------------------
   let repoFullName: string;
 
   if (args.repo) {
@@ -682,9 +616,6 @@ export async function runConnect(
     repoFullName = await promptRepoFullName(root);
   }
 
-  // -------------------------------------------------------------------------
-  // 4. Resolve branch
-  // -------------------------------------------------------------------------
   const branchDefault = args.branch ?? collectGitDeployMetadata(root, null).gitRef ?? 'main';
 
   let branch: string;
@@ -706,10 +637,6 @@ export async function runConnect(
     branch = (input as string).trim() || branchDefault;
   }
 
-  // -------------------------------------------------------------------------
-  // 5. Executor (build backend). Non-interactive defaults to `container`;
-  //    TTY prompts so a first-time connect is explicit.
-  // -------------------------------------------------------------------------
   let executor: 'container' | 'github_actions';
   if (args.executor !== undefined) {
     executor = args.executor;
@@ -731,15 +658,8 @@ export async function runConnect(
     executor = picked as 'container' | 'github_actions';
   }
 
-  // -------------------------------------------------------------------------
-  // 6. Workflow file (github_actions only — this is the per-connection OIDC
-  //    deploy pin; container builds never read it). Flag wins; otherwise TTY
-  //    prompts, defaulting to the scaffolded workflow.
-  //
-  //    Only carry a prompted value forward when it DIFFERS from the default, so
-  //    accepting the default leaves `workflowPath` undefined → the field is not
-  //    sent → the server applies its own (identical) default.
-  // -------------------------------------------------------------------------
+  // Container builds never read the workflow file. A prompted value equal to the
+  // default stays unset, so the server applies its own default.
   let workflowPath = args.workflowPath;
   if (executor === 'github_actions' && args.workflowPath === undefined && isTTY) {
     const input = await text({
@@ -764,9 +684,6 @@ export async function runConnect(
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 7. Connect
-  // -------------------------------------------------------------------------
   const attemptConnect = (extra?: { connectGrant: string; codeVerifier: string }) =>
     client.connectGithub(projectId, {
       installationId: installation.installation_id,
@@ -785,18 +702,14 @@ export async function runConnect(
     }
     if (err.status === 403 && err.code === 'connect_authorization_required') {
       if (!isTTY) {
-        // The authorize round-trip opens a browser and blocks on a localhost callback
-        // (auth.ts, up to a 5-min timeout). A non-interactive shell (CI) has no browser,
-        // so fail closed immediately with an actionable message instead of hanging until
-        // the callback times out — same posture as the --branch / --repo guards above.
+        // Authorization waits for a browser callback, so fail now instead of
+        // hanging until it times out.
         log.error(
           'connect: this installation requires per-repo authorization, which needs an interactive browser sign-in. Run `void github connect` locally to authorize, then retry.',
         );
         process.exit(1);
       }
-      // Organization participant: prove per-repo access via an authorize round-trip,
-      // then retry the connect EXACTLY ONCE with the resulting grant. This MUST
-      // come before the generic error display so users can authorize the repository.
+      // Prove per-repo access, then retry the connect once with the grant.
       const grant = await runGithubConnectAuthorize(
         client,
         installation.installation_id,
@@ -813,9 +726,8 @@ export async function runConnect(
           retryErr.status === 403 &&
           retryErr.code === 'invalid connect grant'
         ) {
-          // A fresh grant should be accepted; this code means it was rejected
-          // (expired, or the browser identity differs from the linked one). Do
-          // NOT fall through to the generic 403 "no project access" message.
+          // The grant expired or the browser identity differs from the linked
+          // one; the generic 403 message would wrongly blame project access.
           log.error(
             'connect: GitHub authorization failed or expired. Run `void github connect` again.',
           );
@@ -836,10 +748,6 @@ export async function runConnect(
   printSuccess(`Connected ${repoFullName} (${branch}) → project. Push to ${branch} to deploy.`);
 }
 
-// ---------------------------------------------------------------------------
-// update
-// ---------------------------------------------------------------------------
-
 export async function runGithubUpdate(
   root: string,
   client: PlatformClient,
@@ -847,10 +755,7 @@ export async function runGithubUpdate(
 ): Promise<void> {
   const isTTY = process.stdin.isTTY === true;
 
-  // Non-TTY needs at least one flag to act on — there is nothing to prompt for.
-  // Guard BEFORE any project resolution or connection read so this usage error
-  // never depends on API state (e.g. a disconnected project must not surface the
-  // "connect first" 404 message in place of the missing-flags error).
+  // Check before any API call so this usage error never depends on API state.
   if (
     !isTTY &&
     args.branch === undefined &&
@@ -863,16 +768,8 @@ export async function runGithubUpdate(
     process.exit(1);
   }
 
-  // -------------------------------------------------------------------------
-  // 1. Resolve project
-  // -------------------------------------------------------------------------
   const projectId = await resolveGithubProjectId(root, client, args.projectName, 'update', isTTY);
 
-  // -------------------------------------------------------------------------
-  // 2. Fetch the current connection. A missing connection (404) means the
-  //    project was never connected — mirror the API's 404 semantics and point
-  //    the user at `connect` instead of a raw error.
-  // -------------------------------------------------------------------------
   let current: GithubConnection;
   try {
     current = await client.getGithubConnection(projectId);
@@ -887,14 +784,8 @@ export async function runGithubUpdate(
     throw err;
   }
 
-  // -------------------------------------------------------------------------
-  // 3. Resolve the new branch + executor. TTY defaults to the current value;
-  //    non-TTY requires at least one flag (nothing to prompt for).
-  // -------------------------------------------------------------------------
   let branch: string;
   let executor: 'container' | 'github_actions';
-  // Effective workflow path — the flag wins; a github_actions TTY prompt (below)
-  // can override it; otherwise it stays the current value (no change).
   let workflowPath = args.workflowPath ?? current.workflow_path;
 
   if (isTTY) {
@@ -931,9 +822,7 @@ export async function runGithubUpdate(
       executor = picked as 'container' | 'github_actions';
     }
 
-    // Prompt for the deploy workflow file when the resulting executor is
-    // github_actions and --workflow was not passed. Defaults to the current
-    // path; container builds never read workflow_path so there is nothing to ask.
+    // Container builds never read the workflow file, so there is nothing to ask.
     if (executor === 'github_actions' && args.workflowPath === undefined) {
       const input = await text({
         message: 'Deploy workflow file:',
@@ -954,15 +843,10 @@ export async function runGithubUpdate(
       workflowPath = (input as string).trim() || current.workflow_path;
     }
   } else {
-    // The missing-flags guard at the top of this function already guaranteed at
-    // least one of --branch / --executor / --workflow is present in non-TTY mode.
     branch = args.branch ?? current.branch;
     executor = args.executor ?? current.build_executor;
   }
 
-  // -------------------------------------------------------------------------
-  // 4. Build a patch carrying ONLY the fields that actually changed.
-  // -------------------------------------------------------------------------
   const patch: {
     branch?: string;
     buildExecutor?: 'container' | 'github_actions';
@@ -974,16 +858,10 @@ export async function runGithubUpdate(
   if (executor !== current.build_executor) {
     patch.buildExecutor = executor;
   }
-  // Change workflow_path only when the effective value (from --workflow or the
-  // github_actions prompt above) differs from the stored value. Accepting the
-  // current value at the prompt leaves it unchanged, so nothing is sent.
   if (workflowPath !== current.workflow_path) {
     patch.workflowPath = workflowPath;
   }
 
-  // -------------------------------------------------------------------------
-  // 5. No-op guard — never hit the API when nothing changed.
-  // -------------------------------------------------------------------------
   if (
     patch.branch === undefined &&
     patch.buildExecutor === undefined &&
@@ -995,9 +873,6 @@ export async function runGithubUpdate(
     return;
   }
 
-  // -------------------------------------------------------------------------
-  // 6. Update.
-  // -------------------------------------------------------------------------
   let updated: GithubConnection;
   try {
     updated = await client.updateGithubConnection(projectId, patch);
@@ -1008,7 +883,6 @@ export async function runGithubUpdate(
         log.error(`update: ${message}`);
         process.exit(1);
       }
-      throw err;
     }
     throw err;
   }
@@ -1018,16 +892,7 @@ export async function runGithubUpdate(
   );
 }
 
-// ---------------------------------------------------------------------------
-// status
-// ---------------------------------------------------------------------------
-
-/**
- * `void github status [project]` — print the current GitHub connection (repo,
- * branch, build executor, deploy workflow). Read-only; never mutates. Project
- * resolution mirrors connect/update; a 404 means the project was never
- * connected and points the user at `connect`.
- */
+/** `void github status [project]`: print the project's GitHub connection. */
 export async function runStatus(
   root: string,
   client: PlatformClient,
@@ -1035,16 +900,8 @@ export async function runStatus(
 ): Promise<void> {
   const isTTY = process.stdin.isTTY === true;
 
-  // -------------------------------------------------------------------------
-  // 1. Resolve project
-  // -------------------------------------------------------------------------
   const projectId = await resolveGithubProjectId(root, client, args.projectName, 'status', isTTY);
 
-  // -------------------------------------------------------------------------
-  // 2. Fetch and display the connection. A missing connection (404) means the
-  //    project was never connected — reuse the update 404 mapping to point the
-  //    user at `connect` instead of a raw error.
-  // -------------------------------------------------------------------------
   let connection: GithubConnection;
   try {
     connection = await client.getGithubConnection(projectId);
@@ -1062,17 +919,9 @@ export async function runStatus(
   log.message(formatConnection(connection));
 }
 
-// ---------------------------------------------------------------------------
-// disconnect
-// ---------------------------------------------------------------------------
-
 /**
- * `void github disconnect [project]` — remove a project's GitHub connection so
- * pushes no longer auto-deploy. The server (DELETE /projects/:id/github)
- * terminalizes any in-flight builds (revoking their deploy tokens) before
- * dropping the connection row. Destructive, so a TTY run confirms first; --yes
- * skips the prompt and is REQUIRED in a non-interactive shell. A project with no
- * connection is already in the goal state — report it and exit 0.
+ * `void github disconnect [project]`. The server cancels in-flight builds before
+ * it removes the connection, so a TTY run confirms first.
  */
 export async function runGithubDisconnect(
   root: string,
@@ -1081,9 +930,6 @@ export async function runGithubDisconnect(
 ): Promise<void> {
   const isTTY = process.stdin.isTTY === true;
 
-  // -------------------------------------------------------------------------
-  // 1. Resolve project
-  // -------------------------------------------------------------------------
   const projectId = await resolveGithubProjectId(
     root,
     client,
@@ -1092,20 +938,13 @@ export async function runGithubDisconnect(
     isTTY,
   );
 
-  // -------------------------------------------------------------------------
-  // 2. Fetch the current connection. A 404 "connection not found" means the
-  //    project already has no connection — disconnect's goal state — so report
-  //    success and stop. Other errors (403 forbidden, 404 project not found)
-  //    map through the shared connect error strings and exit 1.
-  // -------------------------------------------------------------------------
   let connection: GithubConnection;
   try {
     connection = await client.getGithubConnection(projectId);
   } catch (err) {
     if (err instanceof PlatformApiError) {
-      const body = parsePlatformErrorBody(err.body);
-      const code = body?.error ?? body?.message ?? '';
-      if (err.status === 404 && code.includes('connection not found')) {
+      // No connection is already the goal state.
+      if (err.status === 404 && err.code?.includes('connection not found')) {
         log.info('This project is not connected to a GitHub repository. Nothing to disconnect.');
         return;
       }
@@ -1118,11 +957,6 @@ export async function runGithubDisconnect(
     throw err;
   }
 
-  // -------------------------------------------------------------------------
-  // 3. Confirm — this cancels in-flight builds and drops the connection. --yes
-  //    skips the prompt; a non-interactive shell has nothing to prompt, so it
-  //    must pass --yes (fail closed, same posture as connect/update).
-  // -------------------------------------------------------------------------
   if (!args.yes) {
     if (!isTTY) {
       log.error(
@@ -1144,9 +978,6 @@ export async function runGithubDisconnect(
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 4. Disconnect.
-  // -------------------------------------------------------------------------
   try {
     await client.deleteGithubConnection(projectId);
   } catch (err) {

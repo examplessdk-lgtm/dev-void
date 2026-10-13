@@ -187,6 +187,9 @@ describe('generated trigger auth', () => {
       expect((await dev.fetch(trigger(kind, { 'x-void-internal': dev.buildKey }), {})).status).toBe(
         401,
       );
+      expect((await dev.fetch(trigger(kind, { 'x-void-dev-trigger': 'wrong' }), {})).status).toBe(
+        401,
+      );
     },
   );
 });

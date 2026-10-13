@@ -1,15 +1,16 @@
 <script lang="ts">
   import { getContext, onDestroy, onMount, type Snippet } from "svelte";
-  import { isModifiedEvent, mergeDataIntoHref, type VoidRouter } from "void/pages-client";
+  import {
+    isModifiedEvent,
+    mergeDataIntoHref,
+    type PrefetchOptions,
+    type VoidRouter,
+  } from "void/pages-client";
 
   type PrefetchStrategy = "hover" | "click" | "mount" | "visible";
   type LinkMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   type NavigateEvent = { preventDefault(): void };
   type EventHandler<T extends Event> = (event: T) => void;
-  type PrefetchOptions = {
-    cacheFor?: number | string | [string, string];
-    method?: LinkMethod;
-  };
 
   let {
     href,
@@ -57,12 +58,8 @@
 
   const router = getContext<VoidRouter>("__void_router");
 
-  function hasPrefetch(prefetch: boolean | PrefetchStrategy | Array<PrefetchStrategy>): boolean {
-    return prefetch !== false;
-  }
-
   function getStrategies(): Array<PrefetchStrategy> {
-    if (hasPrefetch(prefetchProp) && !isGet) {
+    if (prefetchProp !== false && !isGet) {
       throw new Error(
         'Link: prefetch only supports GET links. Remove `prefetch` or use method="GET".',
       );
@@ -90,12 +87,9 @@
     if (hrefWithData === current) {
       return;
     }
-    const options: PrefetchOptions = {};
+    const options: PrefetchOptions = { method: normalizedMethod };
     if (cacheFor !== undefined) {
       options.cacheFor = cacheFor;
-    }
-    if (normalizedMethod) {
-      options.method = normalizedMethod;
     }
     router.prefetch(hrefWithData, options);
   }

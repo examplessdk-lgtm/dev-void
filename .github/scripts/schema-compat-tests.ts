@@ -7,9 +7,9 @@ import { createRequire } from 'node:module';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const legacyZoneFixture = `      const second = await createTestProject(env.db, user.id, 'concurrent-zone-second');
+const legacyZoneFixture = `      const second = await createTestProject(env.db, user.id, 'concurrent-zone-second');
       stubCustomerCf({ zones });`;
-export const correctedZoneFixture = `      const second = await createTestProject(env.db, user.id, 'concurrent-zone-second');
+const correctedZoneFixture = `      const second = await createTestProject(env.db, user.id, 'concurrent-zone-second');
       const mx: Record<string, Array<string>> = {
         'concurrent-one.example.com': [],
         'concurrent-two.example.com': [],
@@ -32,13 +32,13 @@ export const correctedZoneFixture = `      const second = await createTestProjec
         },
       });`;
 
-export const legacyZoneProvision = `      await runEmailOperation(env.db, bindings(), accepted.value.operationId);`;
-export const correctedZoneProvision = `      provisionedDomain = (await env.db.select().from(emailDomainRoutes))[0]!.domain;
+const legacyZoneProvision = `      await runEmailOperation(env.db, bindings(), accepted.value.operationId);`;
+const correctedZoneProvision = `      provisionedDomain = (await env.db.select().from(emailDomainRoutes))[0]!.domain;
       await runEmailOperation(env.db, bindings(), accepted.value.operationId);`;
 
-export const legacyDeployBodyFixture = `    expect(res.status).not.toBe(413);
+const legacyDeployBodyFixture = `    expect(res.status).not.toBe(413);
   });`;
-export const correctedDeployBodyFixture = `    expect(res.status).not.toBe(413);
+const correctedDeployBodyFixture = `    expect(res.status).not.toBe(413);
     // Finish the deployment's database work before the next fixture resets its tables.
     await res.text();
   });`;
@@ -63,7 +63,7 @@ function correctKnownFixture(
 }
 
 /** Correct only the known deployed test fixture; runtime code and every assertion stay intact. */
-export function correctLegacyEmailFixture(source: string): string {
+function correctLegacyEmailFixture(source: string): string {
   return correctKnownFixture(
     source,
     'bf3ec4cd84c85a9e2cd01c7906ca6952dce5d7b957dc38487d6cfe99e9257eed',
@@ -74,7 +74,7 @@ export function correctLegacyEmailFixture(source: string): string {
   );
 }
 
-export function correctLegacyDeployFixture(source: string): string {
+function correctLegacyDeployFixture(source: string): string {
   return correctKnownFixture(
     source,
     'a62cdbc79573bba09da2212c441ebdcec74569d5ec4193d494f54fad98722f33',
@@ -83,7 +83,7 @@ export function correctLegacyDeployFixture(source: string): string {
 }
 
 /** Only the disposable CI database may be used as a template. */
-export function compatibilityTemplate(value: string): URL {
+function compatibilityTemplate(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -120,18 +120,14 @@ export function compatibilityTestFiles(root: string): Array<string> {
 }
 
 /** Keep the deployed runtime/tests intact, with one upgraded database snapshot per file. */
-export async function runIsolatedCompatibilityTests(options: {
+async function runIsolatedCompatibilityTests(options: {
   templateUrl: string;
   files: ReadonlyArray<string>;
   query: (statement: string) => Promise<unknown>;
   runTest: (file: string, databaseUrl: string) => Promise<number>;
-  concurrency?: number;
 }): Promise<Array<string>> {
   const template = compatibilityTemplate(options.templateUrl);
-  const concurrency = options.concurrency ?? 2;
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) {
-    throw new Error('Compatibility concurrency must be between 1 and 4.');
-  }
+  const concurrency = 2;
   if (!options.files.length || new Set(options.files).size !== options.files.length) {
     throw new Error('Compatibility tests must contain unique test files.');
   }

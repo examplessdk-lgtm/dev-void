@@ -1,5 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import * as output from '../../src/cli/output.ts';
 import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
@@ -145,6 +147,46 @@ export const messages = sqliteTable("messages", {
     ]);
     expect(output.printSuccess).toHaveBeenCalledWith('Seeded from db/seed.ts.');
   });
+
+  it('seeds when db/schema.ts re-exports an extensionless module', async () => {
+    const root = createProjectRoot({
+      schema: 'export * from "./schema/messages";\n',
+      seedFile: {
+        name: 'seed.ts',
+        content: `export default async function seed({ db, schema }) {
+  await db.insert(schema.messages).values({ text: "from barrel" });
+}
+`,
+      },
+    });
+    mkdirSync(join(root, 'db', 'schema'));
+    writeFileSync(
+      join(root, 'db', 'schema', 'messages.ts'),
+      `import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const messages = sqliteTable("messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  text: text("text").notNull(),
+});
+`,
+    );
+    const dbModule = pathToFileURL(join(import.meta.dirname, '../../src/cli/db.ts')).href;
+
+    // Plain Node, because Vitest's module runner resolves extensionless imports.
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `const { runDbCommand } = await import(${JSON.stringify(dbModule)});
+await runDbCommand(${JSON.stringify(root)}, { action: 'seed' });`,
+      ],
+      { encoding: 'utf8', timeout: 20_000 },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(await readMessages(root)).toEqual([{ id: 1, text: 'from barrel' }]);
+  }, 30_000);
 
   it('fails when multiple default seed files exist', async () => {
     const root = createProjectRoot({

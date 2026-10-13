@@ -1,17 +1,17 @@
 import {
   createPlatformWorkerConfigs,
   PLATFORM_DISABLED_KEY,
-  PLATFORM_DISABLED_VALUE,
   transitionInstallation,
   type PlatformInstallationManifest,
   type PlatformLifecycleOperation,
 } from '@void/platform';
+import type { PlatformRuntimeManifest } from '@void/platform/installer';
+import { platformWorkerAction, platformWorkerDeployCallbacks } from './platform-install-workers.ts';
 import { verifyPlatformHealth, bootstrapPlatformSharedEmail } from './platform-installer-health.ts';
 import {
   requireId,
   inventoryUnmanagedPlatformWorkerTraffic,
   mergePlatformWorkerTrafficConfig,
-  publishPlatformWorkerCustomDomains,
 } from './platform-installer-resources.ts';
 import {
   secretCheckpoint,
@@ -19,12 +19,12 @@ import {
   platformWorkerSecretPayload,
 } from './platform-installer-secrets.ts';
 import {
+  type InstallationCheckpointWriter,
+  type PlatformDatabaseLifecycleLock,
   type PlatformInstallerDependencies,
-  type PlatformWorkerRollback,
   type PlatformInstallationSecrets,
+  type PlatformInstallRunState,
   type PlatformWorkerKey,
-  type PlatformWorkerSecretUpdateIntent,
-  type InstallerClient,
   type PlatformHealthCheckContext,
 } from './platform-installer-types.ts';
 import {
@@ -34,36 +34,20 @@ import {
   nextWorkerCutoverGeneration,
   recordWorkerSecretUpdateState,
   deployPlatformWorker,
-  recordWorkerCutoverStage,
-  recordWorkerUnsafeTraffic,
-  inspectNewPlatformWorker,
   verifyPlatformWorkerCutoverVersions,
 } from './platform-installer-workers.ts';
-import { type PlatformInstallPlan, type PlatformInstallPlanAction } from './platform-plan.ts';
+import { platformWorkersDevUrl, type PlatformInstallPlanAction } from './platform-plan.ts';
 import { writeInstallationManifest, writePendingInstallationSecrets } from './platform-registry.ts';
-import {
-  platformManagedWorkerTraffic,
-  recordPlatformWorkerTraffic,
-  trackedPlatformWorkerTraffic,
-} from './platform-traffic.ts';
+import { platformManagedWorkerTraffic } from './platform-traffic.ts';
 
 export async function enableInstallationServices(input: {
+  readonly state: PlatformInstallRunState;
   readonly checkpointOperation: (phase: PlatformLifecycleOperation['phase']) => Promise<void>;
   readonly requiresStagedCommit: boolean;
   readonly authenticationCutoverCommitted: boolean;
-  manifest: PlatformInstallationManifest;
-  workerCutoverGeneration: number;
   readonly now: () => string;
-  readonly writeRemoteInstallationCheckpoint: (
-    client: InstallerClient,
-    checkpointPlan: PlatformInstallPlan,
-    checkpointManifest: PlatformInstallationManifest,
-  ) => Promise<void>;
+  readonly writeRemoteInstallationCheckpoint: InstallationCheckpointWriter;
   readonly dependencies: PlatformInstallerDependencies;
-  readonly plan: PlatformInstallPlan;
-  workerRollbacks: Array<PlatformWorkerRollback>;
-  workerSecretUpdateIntent: PlatformWorkerSecretUpdateIntent | null;
-  readonly secrets: PlatformInstallationSecrets;
   readonly workerKeys: ReadonlyArray<PlatformWorkerKey>;
   readonly workerActions: ReadonlyArray<PlatformInstallPlanAction>;
   readonly workerDeploymentSecrets: PlatformInstallationSecrets;
@@ -75,25 +59,21 @@ export async function enableInstallationServices(input: {
   readonly ids: { [k: string]: string };
   readonly runPinnedPlatformWrangler: typeof runPlatformWrangler;
   readonly shouldBootstrapSharedEmail: boolean;
-  workerDeploymentCommitted: boolean;
-  readonly releaseDatabaseLock: import('./platform-installer-types.ts').PlatformDatabaseLifecycleLock;
-  readonly wasDisabled: boolean;
-  readonly previousPublicEndpoints: boolean;
+  readonly releaseDatabaseLock: PlatformDatabaseLifecycleLock;
   readonly version: string;
   readonly targetUsageProtocolVersion: 0 | 1 | 2;
   readonly healthCheckContext: PlatformHealthCheckContext;
-  readonly runtime: import('@void/platform/installer').PlatformRuntimeManifest;
+  readonly runtime: PlatformRuntimeManifest;
   readonly runtimeProvenance: NonNullable<PlatformInstallationManifest['runtime']>;
 }): Promise<{ emailOperationId: string | undefined }> {
   const {
+    state,
     checkpointOperation,
     requiresStagedCommit,
     authenticationCutoverCommitted,
     now,
     writeRemoteInstallationCheckpoint,
     dependencies,
-    plan,
-    secrets,
     workerKeys,
     workerActions,
     workerDeploymentSecrets,
@@ -106,61 +86,62 @@ export async function enableInstallationServices(input: {
     runPinnedPlatformWrangler,
     shouldBootstrapSharedEmail,
     releaseDatabaseLock,
-    wasDisabled,
-    previousPublicEndpoints,
     version,
     targetUsageProtocolVersion,
     healthCheckContext,
     runtime,
     runtimeProvenance,
   } = input;
+  const { plan, secrets } = state;
 
   await checkpointOperation('enabling');
   if (requiresStagedCommit) {
     if (!authenticationCutoverCommitted) {
-      input.manifest = recordWorkerCutoverResolution(
-        input.manifest,
-        input.workerCutoverGeneration,
+      state.manifest = recordWorkerCutoverResolution(
+        state.manifest,
+        state.workerCutoverGeneration,
         'committed',
         now(),
       );
-      input.manifest = recordWorkerTrafficState(
-        input.manifest,
-        input.workerCutoverGeneration,
+      state.manifest = recordWorkerTrafficState(
+        state.manifest,
+        state.workerCutoverGeneration,
         false,
         now(),
       );
-      writeInstallationManifest(input.manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-      input.workerRollbacks = [];
+      writeInstallationManifest(state.manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
+      state.workerRollbacks = [];
     }
 
-    input.workerCutoverGeneration = nextWorkerCutoverGeneration(input.manifest);
-    if (input.workerSecretUpdateIntent) {
-      input.manifest = recordWorkerSecretUpdateState(
-        input.manifest,
-        input.workerCutoverGeneration,
+    state.workerCutoverGeneration = nextWorkerCutoverGeneration(state.manifest);
+    if (state.workerSecretUpdateIntent) {
+      state.manifest = recordWorkerSecretUpdateState(
+        state.manifest,
+        state.workerCutoverGeneration,
         'pending',
-        input.workerSecretUpdateIntent.id,
+        state.workerSecretUpdateIntent.id,
         now(),
       );
-      writeInstallationManifest(input.manifest);
-      await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-      input.workerSecretUpdateIntent = {
-        ...input.workerSecretUpdateIntent,
-        generation: input.workerCutoverGeneration,
+      writeInstallationManifest(state.manifest);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
+      state.workerSecretUpdateIntent = {
+        ...state.workerSecretUpdateIntent,
+        generation: state.workerCutoverGeneration,
       };
       writePendingInstallationSecrets(
-        input.manifest,
-        secretCheckpoint(secrets, input.workerSecretUpdateIntent),
+        state.manifest,
+        secretCheckpoint(secrets, state.workerSecretUpdateIntent),
       );
     }
+    const writeManifest = async (next: PlatformInstallationManifest): Promise<void> => {
+      state.manifest = next;
+      writeInstallationManifest(next);
+      await writeRemoteInstallationCheckpoint(dependencies.client, plan, next);
+    };
     for (const key of workerKeys) {
       dependencies.onProgress?.(`Enabling the ${key} service`);
-      const action = workerActions.find(
-        (entry) =>
-          entry.key === (key === 'emailGateway' ? 'email-gateway-worker' : `${key}-worker`),
-      )!;
+      const action = platformWorkerAction(workerActions, key);
       const workerSecrets = platformWorkerSecretPayload(
         key,
         workerDeploymentSecrets,
@@ -176,106 +157,26 @@ export async function enableInstallationServices(input: {
       const rollback = dependencies.deployWorker
         ? await dependencies.deployWorker(workerConfig, workerSecrets, previousWorkerConfig)
         : await deployPlatformWorker(workerConfig, workerSecrets, {
+            ...platformWorkerDeployCallbacks({
+              client: dependencies.client,
+              plan,
+              zoneId,
+              ids,
+              key,
+              action,
+              generation: state.workerCutoverGeneration,
+              now,
+              readManifest: () => state.manifest,
+              writeManifest,
+              checkpoint: (update) => update(),
+            }),
             apiBaseUrl: cloudflareApiBaseUrl,
-            ...(dependencies.client.request
-              ? { readCloudflare: (path) => dependencies.client.request!(path) }
-              : {}),
-            onStaged: async (previousVersionId, stagedVersionId, previousTriggers) => {
-              input.manifest = recordWorkerCutoverStage(
-                input.manifest!,
-                input.workerCutoverGeneration,
-                key,
-                previousVersionId,
-                stagedVersionId,
-                action.name,
-                previousTriggers,
-                now(),
-              );
-              writeInstallationManifest(input.manifest);
-              await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-            },
-            onTrafficPublished: async () => {
-              if (!dependencies.client.listWorkerDomains || !dependencies.client.listWorkerRoutes) {
-                throw new Error('platform: Cloudflare traffic inventory is unavailable.');
-              }
-              const [customDomains, routes] = await Promise.all([
-                dependencies.client.listWorkerDomains(plan.account.id),
-                zoneId ? dependencies.client.listWorkerRoutes(zoneId) : Promise.resolve([]),
-              ]);
-              const next = recordPlatformWorkerTraffic(
-                input.manifest!,
-                action.name,
-                { customDomains, routes },
-                now(),
-              );
-              if (JSON.stringify(next.resources) !== JSON.stringify(input.manifest!.resources)) {
-                input.manifest = next;
-                writeInstallationManifest(input.manifest);
-                await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-              }
-            },
-            onUnsafeTraffic: async () => {
-              input.manifest = recordWorkerUnsafeTraffic(
-                input.manifest!,
-                input.workerCutoverGeneration,
-                key,
-                action.name,
-                now(),
-              );
-              writeInstallationManifest(input.manifest);
-              await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-            },
             managedRoutes: managedRoutes
               .filter((route) => route.script === action.name)
               .map((route) => route.pattern),
             preservedRoutes,
-            publishCustomDomains: (workerName, origins) =>
-              publishPlatformWorkerCustomDomains(
-                dependencies.client,
-                plan.account.id,
-                workerName,
-                origins,
-              ),
-            publishRoutes: async (workerName, patterns) => {
-              if (!dependencies.client.publishWorkerRoutesSafely) {
-                throw new Error(
-                  'platform: Safe Cloudflare Worker route publication is unavailable.',
-                );
-              }
-              if (zoneId) {
-                await dependencies.client.publishWorkerRoutesSafely(zoneId, workerName, patterns);
-              } else if (patterns.length > 0) {
-                throw new Error('platform: Cannot publish zone routes in workers.dev mode.');
-              }
-            },
             previousConfig: previousWorkerConfig,
             previousPublicEndpoints: true,
-            inspectNewWorker: () =>
-              inspectNewPlatformWorker(
-                dependencies.client,
-                plan.account.id,
-                input.manifest!,
-                action.key,
-                action.name,
-              ),
-            removeCustomDomains: async () => {
-              if (!dependencies.client.removeRoutes) {
-                throw new Error('platform: Cloudflare route removal is unavailable.');
-              }
-              await dependencies.client.removeRoutes(
-                plan.account.id,
-                zoneId,
-                trackedPlatformWorkerTraffic(input.manifest!, new Set([action.name])),
-              );
-            },
-            retainNewWorker: async () => {
-              await dependencies.client.putKvValue(
-                plan.account.id,
-                requireId(ids, 'routing-kv'),
-                PLATFORM_DISABLED_KEY,
-                PLATFORM_DISABLED_VALUE,
-              );
-            },
             // Traffic opens only after every Worker in this generation is
             // verified against its own staged checkpoint, so none may be reused.
             reuseMatchingVersion: false,
@@ -283,7 +184,7 @@ export async function enableInstallationServices(input: {
             workerExisted: true,
           });
       if (rollback) {
-        input.workerRollbacks.push(rollback);
+        state.workerRollbacks.push(rollback);
       }
     }
   }
@@ -292,11 +193,11 @@ export async function enableInstallationServices(input: {
       return;
     }
     if (dependencies.verifyWorkerCutover) {
-      await dependencies.verifyWorkerCutover(input.manifest!, input.workerCutoverGeneration);
+      await dependencies.verifyWorkerCutover(state.manifest, state.workerCutoverGeneration);
     } else if (!dependencies.deployWorker) {
       await verifyPlatformWorkerCutoverVersions(
-        input.manifest!,
-        input.workerCutoverGeneration,
+        state.manifest,
+        state.workerCutoverGeneration,
         enabledConfigs,
         plan.account.id,
         runPinnedPlatformWrangler,
@@ -310,93 +211,89 @@ export async function enableInstallationServices(input: {
     // Shared-zone setup mutates provider routing. Once it begins, retain the
     // verified Worker set and keep the installation's routing gate closed on
     // failure so a retry can resume the durable email operation safely.
-    input.workerDeploymentCommitted = true;
-    input.manifest = recordWorkerCutoverResolution(
-      input.manifest,
-      input.workerCutoverGeneration,
+    state.workerDeploymentCommitted = true;
+    state.manifest = recordWorkerCutoverResolution(
+      state.manifest,
+      state.workerCutoverGeneration,
       'committed',
       now(),
     );
-    if (input.workerSecretUpdateIntent) {
-      input.manifest = recordWorkerSecretUpdateState(
-        input.manifest,
-        input.workerCutoverGeneration,
+    if (state.workerSecretUpdateIntent) {
+      state.manifest = recordWorkerSecretUpdateState(
+        state.manifest,
+        state.workerCutoverGeneration,
         'committed',
-        input.workerSecretUpdateIntent.id,
+        state.workerSecretUpdateIntent.id,
         now(),
       );
     }
-    writeInstallationManifest(input.manifest);
-    await writeRemoteInstallationCheckpoint(dependencies.client, plan, input.manifest);
-    input.workerRollbacks = [];
+    writeInstallationManifest(state.manifest);
+    await writeRemoteInstallationCheckpoint(dependencies.client, plan, state.manifest);
+    state.workerRollbacks = [];
     dependencies.onProgress?.('Preparing shared email routing');
     emailOperationId = await (dependencies.bootstrapEmail ?? bootstrapPlatformSharedEmail)(
       plan.apiUrl,
-      createPlatformHealthProbeToken(input.manifest.ownershipNonce),
+      createPlatformHealthProbeToken(state.manifest.ownershipNonce),
     );
   }
   // A failed uninstall, or one whose database is reused, leaves its record
   // behind. Remove it before traffic opens so Zero Trust writers run again.
   await releaseDatabaseLock.liftProjectZeroTrustFence?.();
-  if (dependencies.client.deleteKvValue) {
-    await dependencies.client.deleteKvValue(
-      plan.account.id,
-      requireId(ids, 'routing-kv'),
-      PLATFORM_DISABLED_KEY,
-    );
-  } else if (wasDisabled || !previousPublicEndpoints) {
-    throw new Error('platform: Routing disablement removal is unavailable.');
-  }
+  await dependencies.client.deleteKvValue(
+    plan.account.id,
+    requireId(ids, 'routing-kv'),
+    PLATFORM_DISABLED_KEY,
+  );
   if (requiresStagedCommit) {
     dependencies.onProgress?.('Verifying the enabled platform');
     await (dependencies.verifyHealth ?? verifyPlatformHealth)(
       plan.apiUrl,
-      input.manifest.id,
+      state.manifest.id,
       plan.proxyUrl,
       plan.deployment.application.baseDomain,
       version,
       targetUsageProtocolVersion,
-      createPlatformHealthProbeToken(input.manifest.ownershipNonce),
+      createPlatformHealthProbeToken(state.manifest.ownershipNonce),
       undefined,
       !plan.deployment.application.zoneName
-        ? `https://${plan.deployment.resources.dispatchWorker}.${plan.workersSubdomain}.workers.dev`
+        ? platformWorkersDevUrl(plan, plan.deployment.resources.dispatchWorker)
         : undefined,
       healthCheckContext,
     );
     await verifyCurrentWorkerCutover();
   }
-  input.workerDeploymentCommitted = true;
-  input.manifest = recordWorkerCutoverResolution(
-    input.manifest,
-    input.workerCutoverGeneration,
+  state.workerDeploymentCommitted = true;
+  state.manifest = recordWorkerCutoverResolution(
+    state.manifest,
+    state.workerCutoverGeneration,
     'committed',
     now(),
   );
-  input.manifest = recordWorkerTrafficState(
-    input.manifest,
-    input.workerCutoverGeneration,
+  state.manifest = recordWorkerTrafficState(
+    state.manifest,
+    state.workerCutoverGeneration,
     true,
     now(),
   );
-  if (input.workerSecretUpdateIntent) {
-    input.manifest = recordWorkerSecretUpdateState(
-      input.manifest,
-      input.workerCutoverGeneration,
+  if (state.workerSecretUpdateIntent) {
+    state.manifest = recordWorkerSecretUpdateState(
+      state.manifest,
+      state.workerCutoverGeneration,
       'committed',
-      input.workerSecretUpdateIntent.id,
+      state.workerSecretUpdateIntent.id,
       now(),
     );
   }
-  input.manifest = {
-    ...input.manifest,
+  state.manifest = {
+    ...state.manifest,
     deployment: plan.deployment,
     deploymentExecution: runtime.deploymentExecution,
     platformVersion: version,
     runtime: runtimeProvenance,
-    safetyProtocols: runtime.safetyProtocols ?? { sandboxDrain: 0 },
+    safetyProtocols: runtime.safetyProtocols,
     updatedAt: now(),
     usageProtocolVersion: targetUsageProtocolVersion,
   };
-  input.manifest = transitionInstallation(input.manifest, 'installed', now());
+  state.manifest = transitionInstallation(state.manifest, 'installed', now());
   return { emailOperationId };
 }

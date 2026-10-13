@@ -8,6 +8,7 @@ import {
   parseCloudflareAuthSession,
   type CloudflareAuthSession,
 } from './cloudflare-auth.ts';
+import { isCleanCloudflareExit } from './cloudflare-process.ts';
 import { printSuccess } from './output.ts';
 import { readRootWranglerConfig } from './wrangler.ts';
 
@@ -21,10 +22,9 @@ export async function runCloudflareCommand(root: string, args: CloudflareArgs): 
     }
     case 'status': {
       const result = await runWrangler({ type: 'auth.whoami' }, true);
-      const session =
-        result.status === 0 && !result.signal && !result.error
-          ? parseCloudflareAuthSession(result.data)
-          : null;
+      const session = isCleanCloudflareExit(result)
+        ? parseCloudflareAuthSession(result.data)
+        : null;
       if (!session) {
         throw new Error('Not signed in to Cloudflare. Run `void cloudflare login`.');
       }

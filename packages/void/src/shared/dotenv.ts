@@ -29,40 +29,25 @@ import { parseEnv } from 'node:util';
 const VALID_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type ParseDotenvOptions = {
-  /** When true, run `${VAR}` / `$VAR` expansion after parsing. Default: true. */
-  expand?: boolean;
-  /**
-   * When true (default), silently skip lines whose key doesn't match the
-   * standard dotenv key regex. Set to false to throw instead.
-   */
-  skipInvalidKeys?: boolean;
   /** Callback for expansion warnings (cycles). Caller routes to `voidWarn`. */
   onWarn?: (message: string) => void;
 };
 
 /**
- * Parse the raw contents of a dotenv file into a record, optionally
- * expanding `${VAR}` / `$VAR` references against earlier entries.
+ * Parse the raw contents of a dotenv file into a record, skipping invalid
+ * keys and expanding `${VAR}` / `$VAR` references against earlier entries.
  */
 export function parseDotenv(
   content: string,
   options: ParseDotenvOptions = {},
 ): Record<string, string> {
-  const { expand: shouldExpand = true, skipInvalidKeys = true, onWarn } = options;
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(parseEnv(content))) {
-    if (value === undefined) {
-      continue;
+    if (value !== undefined && VALID_KEY.test(key)) {
+      env[key] = value;
     }
-    if (!VALID_KEY.test(key)) {
-      if (skipInvalidKeys) {
-        continue;
-      }
-      throw new Error(`dotenv: Invalid key '${key}'.`);
-    }
-    env[key] = value;
   }
-  return shouldExpand ? expandDotenv(env, { onWarn }) : env;
+  return expandDotenv(env, options);
 }
 
 /**
@@ -202,10 +187,6 @@ const WRANGLER_DOTENV_LINE =
 
 /**
  * The set of declared dotenv KEYS in `filePath`, parsed the way wrangler does.
- * Lives in this leaf module (no `proper-lockfile` / lifecycle side effects) so both
- * the provisioner's transport fence and the deploy orchestrator's config-override
- * fence can read keys exactly as wrangler's per-command reload would, without either
- * caller pulling in the provision lifecycle just to parse dotenv keys.
  */
 export function scanWranglerDotenvKeys(filePath: string): Set<string> {
   const keys = new Set<string>();

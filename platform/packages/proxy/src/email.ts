@@ -185,17 +185,18 @@ export function sanitizeForLog(value: string, maxLen = 200): string {
 }
 
 /**
- * Cap the caller-supplied log correlation id. The framework sends 16 hex
- * chars (`newRequestId` in `void/email`), but a hand-built tenant worker can
- * send any string the request body carries, and the only consumer is the
- * `[email-log]` line — one per delivery, so up to `MAX_RECIPIENTS` copies of
- * it per request — in the shared proxy log stream. It is diagnostic, so it
- * is bounded and sanitized ONCE at intake rather than refused with a 400:
- * a missing or non-string id already logs as `unknown` instead of failing
- * the send, and a truncated id is no less useful to correlate on. The
- * control-char strip is what stops a `\n` in the id from forging a second
- * `[email-log]` line under another project's id. 128 leaves room for a
- * UUID or a prefixed id without inviting anything longer.
+ * Cap the caller-supplied log correlation id. The framework sends
+ * `req_<base36 time><16 hex>` (`newId('req')` in `void/email`), but a
+ * hand-built tenant worker can send any string the request body carries,
+ * and the only consumer is the `[email-log]` line — one per delivery, so up
+ * to `MAX_RECIPIENTS` copies of it per request — in the shared proxy log
+ * stream. It is diagnostic, so it is bounded and sanitized ONCE at intake
+ * rather than refused with a 400: a missing or non-string id already logs as
+ * `unknown` instead of failing the send, and a truncated id is no less
+ * useful to correlate on. The control-char strip is what stops a `\n` in
+ * the id from forging a second `[email-log]` line under another project's
+ * id. 128 leaves room for a UUID or a prefixed id without inviting anything
+ * longer.
  */
 const MAX_REQUEST_ID_LENGTH = 128;
 

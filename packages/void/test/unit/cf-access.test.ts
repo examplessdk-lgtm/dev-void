@@ -345,7 +345,7 @@ describe('origin-scoped self-hosted Access login', () => {
   });
 });
 
-describe('ensureCloudflaredToken', () => {
+describe('ensurePlatformAccessToken defaults', () => {
   it.each([
     'https://api.void.cloud',
     'https://api.staging.void.cloud',
@@ -357,8 +357,8 @@ describe('ensureCloudflaredToken', () => {
     vi.stubEnv('CF_ACCESS_TOKEN', 'unscoped-token');
     vi.stubEnv('VOID_ACCESS_ORIGIN', '');
     vi.stubEnv('VOID_ACCESS_CREDENTIALS', '');
-    const { ensureCloudflaredToken } = await import('../../src/cli/cf-access.ts');
-    ensureCloudflaredToken(origin);
+    const { ensurePlatformAccessToken } = await import('../../src/cli/cf-access.ts');
+    ensurePlatformAccessToken(origin);
     expect(spawnSyncMock).not.toHaveBeenCalled();
     expect(cfAccessHeaders(process.env, origin)).toEqual({});
     vi.unstubAllEnvs();

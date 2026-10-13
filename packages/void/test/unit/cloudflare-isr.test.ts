@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { approvedCloudflareIsrBinding, chooseCloudflareIsr } from '../../src/cli/cloudflare-isr.ts';
+import { renderVoidConfig } from '../../src/config-write.ts';
 import { readConfig } from '../../src/config.ts';
 
 const roots: Array<string> = [];
@@ -10,8 +11,8 @@ function project() {
   const root = mkdtempSync(join(tmpdir(), 'void-isr-choice-'));
   roots.push(root);
   writeFileSync(
-    join(root, 'void.json'),
-    JSON.stringify({
+    join(root, 'void.config.ts'),
+    renderVoidConfig({
       head: { title: 'Blog' },
       routing: { headers: { '/posts/*.md': ['Content-Type: text/markdown'] } },
     }),
@@ -42,13 +43,13 @@ describe('Cloudflare migration ISR choice', () => {
   });
   it('does not save a choice or prompt in CI', async () => {
     const root = project();
-    const before = readFileSync(join(root, 'void.json'), 'utf8');
+    const before = readFileSync(join(root, 'void.config.ts'), 'utf8');
     const confirm = vi.fn();
     await expect(
       chooseCloudflareIsr(root, readConfig(root), { interactive: false, confirm }),
     ).rejects.toThrow('Set routing.isr to true');
     expect(confirm).not.toHaveBeenCalled();
-    expect(readFileSync(join(root, 'void.json'), 'utf8')).toBe(before);
+    expect(readFileSync(join(root, 'void.config.ts'), 'utf8')).toBe(before);
   });
   it('authorizes only a valid configured cache and never an application KV alias', () => {
     const id = '0123456789abcdef0123456789abcdef';

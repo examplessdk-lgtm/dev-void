@@ -7,7 +7,7 @@ export default defineConfig({
     format: 'esm',
     dts: true,
     clean: true,
-    deps: { resolveDepSubpath: true, neverBundle: ['vite', 'void', 'vue'] },
+    deps: { resolveDepSubpath: true, neverBundle: ['vite', 'void'] },
     onSuccess() {
       cpSync('src/theme', 'dist/theme', { recursive: true });
     },

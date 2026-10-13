@@ -8,12 +8,7 @@ export function generateQueueResolverSource(queueNames: ReadonlyArray<string>): 
   return `const __queueNames = ${JSON.stringify(queueNames)};
 function __resolveQueueIndex(queueName) {
   if (typeof queueName !== "string") return -1;
-  let exact = -1;
-  for (let i = 0; i < __queueNames.length; i++) {
-    if (__queueNames[i] !== queueName) continue;
-    if (exact !== -1) return -1;
-    exact = i;
-  }
+  const exact = __queueNames.indexOf(queueName);
   if (exact !== -1) return exact;
   let match = -1;
   let matchLength = -1;

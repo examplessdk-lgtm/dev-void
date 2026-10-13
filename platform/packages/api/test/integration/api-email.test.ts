@@ -2345,19 +2345,13 @@ describe('GET /projects/:id/email/logs', () => {
 // ---------------------------------------------------------------------------
 
 describe('email platform capability', () => {
-  /**
-   * Hosted Void Cloud's capability set with ONE switch flipped. Only `email`
-   * is under test here: `domains.ts` registers its gate as `use('*')`, which
-   * Hono re-homes to `ALL /projects/*` and runs for every sibling mounted
-   * after it, so turning `customDomains` off as well would make these routes
-   * answer 501 `customDomains` before the email gate is reached.
-   */
+  /** Email must remain independent of optional application custom domains. */
   function capabilityEnv(email: boolean, bindings: TestEnv = env): TestEnv {
     return {
       ...bindings,
       PLATFORM_CAPABILITIES: JSON.stringify({
         ai: true,
-        customDomains: true,
+        customDomains: false,
         email,
         githubActions: true,
         githubOAuth: true,
@@ -2497,6 +2491,38 @@ describe('email platform capability', () => {
     const list = await listDestinations(project.id, user.jwt, capabilityEnv(true));
     expect(list.status).toBe(200);
     expect(await list.json()).toEqual([]);
+  });
+
+  it('allows owner email destinations while custom-domain routes remain disabled', async () => {
+    const user = await createTestUser(env.db);
+    await setUserEmail(user.id, 'owner@example.com');
+    const project = await createTestProject(env.db, user.id);
+    mockCfWithEmail(cfAlreadyVerified('cf-owner', 'owner@example.com'));
+    const bindings = capabilityEnv(true, emailEnv());
+
+    const destination = await addDestination(project.id, user.jwt, 'owner@example.com', bindings);
+    expect(destination.status).toBe(201);
+    expect(await destination.json()).toMatchObject({
+      address: 'owner@example.com',
+      status: 'verified',
+    });
+
+    for (const [method, path] of [
+      ['GET', `/projects/${project.id}/domains`],
+      ['POST', `/projects/${project.id}/domains`],
+      ['GET', `/projects/${project.id}/domains/missing`],
+      ['DELETE', `/projects/${project.id}/domains/missing`],
+    ]) {
+      const response = await app.fetch(
+        new Request(`http://localhost${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${user.jwt}` },
+        }),
+        bindings,
+      );
+      expect(response.status).toBe(501);
+      expect(await response.json()).toMatchObject({ capability: 'customDomains' });
+    }
   });
 
   it('registers no owner destination on project creation, even with a mail domain configured', async () => {

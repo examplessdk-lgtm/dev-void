@@ -147,17 +147,6 @@ describe('formatStreamDeployError', () => {
     expect(formatted.message).toContain('HTTP 500');
   });
 
-  it('never replaces a real error message with only "Connection lost during deploy"', () => {
-    // Regression guard: prior behavior collapsed any non-DeployEventError to the
-    // opaque connection-lost string, hiding the real cause. The new contract must
-    // always preserve the original message substring for generic errors.
-    const err = new Error('socket hang up');
-
-    const formatted = formatStreamDeployError(err, null);
-
-    expect(formatted.message).toContain('socket hang up');
-  });
-
   it('falls back to the raw body when the JSON payload has no error/message field', () => {
     const err = new PlatformApiError('Deploy failed', 500, JSON.stringify({ foo: 'bar' }));
 

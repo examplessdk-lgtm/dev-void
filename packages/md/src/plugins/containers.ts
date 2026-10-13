@@ -2,14 +2,6 @@ import type MarkdownExit from 'markdown-exit';
 import type { Token } from 'markdown-exit';
 import container from 'markdown-it-container';
 
-export type ContainerOptions = Readonly<{
-  tipLabel?: string;
-  infoLabel?: string;
-  warningLabel?: string;
-  dangerLabel?: string;
-  detailsLabel?: string;
-}>;
-
 type MarkdownEnv = {
   references?: Record<string, { title: string; href: string }>;
   [key: string]: unknown;
@@ -49,10 +41,10 @@ function createContainer(
  * Custom container blocks: :::tip, :::info, :::warning, :::danger, :::details
  * Ported from VitePress.
  */
-export function containerPlugin(md: MarkdownExit, options?: ContainerOptions): void {
-  md.use(...createContainer(md, 'tip', options?.tipLabel ?? 'TIP'))
-    .use(...createContainer(md, 'info', options?.infoLabel ?? 'INFO'))
-    .use(...createContainer(md, 'warning', options?.warningLabel ?? 'WARNING'))
-    .use(...createContainer(md, 'danger', options?.dangerLabel ?? 'DANGER'))
-    .use(...createContainer(md, 'details', options?.detailsLabel ?? 'Details'));
+export function containerPlugin(md: MarkdownExit): void {
+  md.use(...createContainer(md, 'tip', 'TIP'))
+    .use(...createContainer(md, 'info', 'INFO'))
+    .use(...createContainer(md, 'warning', 'WARNING'))
+    .use(...createContainer(md, 'danger', 'DANGER'))
+    .use(...createContainer(md, 'details', 'Details'));
 }

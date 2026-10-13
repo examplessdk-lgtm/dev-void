@@ -1,12 +1,9 @@
 import { confirm, log } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import {
-  PlatformApiError,
-  type GithubConnection,
-  type PlatformClient,
-} from '../../src/cli/client.ts';
+import { PlatformApiError, type PlatformClient } from '../../src/cli/client.ts';
 import { runGithubDisconnect } from '../../src/cli/github-cmd.ts';
 import * as output from '../../src/cli/output.ts';
+import { makeConnection, makeProject, projectId, slug } from '../helpers/github-cli.ts';
 
 // `vi.spyOn(clack, 'confirm')` cannot intercept the handler's named `confirm`
 // import under this project's ESM Vitest config ("Module namespace is not
@@ -17,30 +14,6 @@ vi.mock('@voidzero-dev/vite-plus-prompts', async (imp) => ({
   ...(await imp<typeof import('@voidzero-dev/vite-plus-prompts')>()),
   confirm: vi.fn(),
 }));
-
-const projectId = 'proj_1';
-const slug = 'my-app';
-
-function makeProject() {
-  return { id: projectId, slug } as unknown as Awaited<
-    ReturnType<PlatformClient['listProjects']>
-  >[number];
-}
-
-function makeConnection(overrides: Partial<GithubConnection> = {}): GithubConnection {
-  return {
-    id: 'conn_1',
-    project_id: projectId,
-    installation_id: '123456',
-    repo_full_name: 'octocat/hello-world',
-    branch: 'main',
-    build_executor: 'container',
-    workflow_path: '.github/workflows/void-deploy.yml',
-    created_at: '2024-01-01T00:00:00Z',
-    updated_at: '2024-01-02T00:00:00Z',
-    ...overrides,
-  };
-}
 
 type FakeClient = Pick<
   PlatformClient,

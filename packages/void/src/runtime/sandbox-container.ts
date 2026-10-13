@@ -14,6 +14,7 @@ export type SandboxExecOptions = ContainerExecOptions & {
 export type SandboxCapability = {
   invoke(operation: string, args: Array<unknown>): Promise<unknown>;
 };
+export const SANDBOX_PORT_HEADER = 'x-void-sandbox-port';
 export type SandboxProcessWire = {
   capability: SandboxCapability;
   pid: number;
@@ -164,6 +165,22 @@ export class SandboxContainer<Env = unknown> extends DurableObject<Env> {
   #ready: Promise<void>;
   protected starting = false;
   #epoch = 0;
+
+  // WebSockets must travel through DO fetch, since RPC cannot serialize them.
+  async fetch(request: Request): Promise<Response> {
+    const value = request.headers.get(SANDBOX_PORT_HEADER);
+    if (!value || !/^\d+$/.test(value)) {
+      return new Response('Invalid Sandbox TCP port.', { status: 400 });
+    }
+    const port = Number(value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return new Response('Invalid Sandbox TCP port.', { status: 400 });
+    }
+    const headers = new Headers(request.headers);
+    headers.delete(SANDBOX_PORT_HEADER);
+    await this.ensureRunning();
+    return this.container.getTcpPort(port).fetch(new Request(request, { headers }));
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

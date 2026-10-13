@@ -185,6 +185,34 @@ function probe(headers: Record<string, string> = {}, bindings = queuedEnv) {
 }
 
 describe('durable deployment admission and observation', () => {
+  it.each([
+    ['static', 'static'],
+    ['spa', 'spa'],
+    ['void', 'static'],
+    ['framework', 'static'],
+    ['void', 'worker'],
+    ['framework', 'worker'],
+  ] as const)(
+    'stages one attributed receipt for a %s app before queue delivery',
+    async (type, kind) => {
+      const body = payload();
+      const response = await post(crypto.randomUUID(), {
+        ...body,
+        manifest: { ...body.manifest, type },
+        ...(kind === 'worker' && { workerFiles: { 'index.js': btoa('export default {};') } }),
+      });
+      expect(response.status).toBe(200);
+      const operation = await getDeploymentOperation(
+        env.db,
+        response.headers.get('x-void-deployment-id')!,
+      );
+      const staged = await env.STATIC_ASSETS_R2.list({ prefix: operation!.input_prefix });
+      expect(
+        staged.objects.filter(({ key }) => key.includes('/receipt')).map(({ key }) => key),
+      ).toEqual([`${operation!.input_prefix}receipt-void-platform-${kind}`]);
+    },
+  );
+
   it('acknowledges queued work without running it, then publishes the original placeholder after observer disconnect', async () => {
     const id = await admit();
     expect(send).toHaveBeenCalledExactlyOnceWith({ deploymentId: id });
@@ -586,6 +614,7 @@ describe('durable deployment admission and observation', () => {
   );
 
   it('keeps the no-op operation receipt after deleting its placeholder, returning the existing active result', async () => {
+    const put = vi.spyOn(env.STATIC_ASSETS_R2, 'put');
     const activeId = await admit();
     await run(activeId);
     const noOpId = await admit();
@@ -604,6 +633,14 @@ describe('durable deployment admission and observation', () => {
     expect(page.deploymentId).toBe(noOpId);
     expect(page.events.at(-1)?.event).toMatchObject({ event: 'done', deployment: activeId });
     expect(await countUserDeploymentsToday(env.db, user.id)).toBe(1);
+    const receiptKeys = put.mock.calls
+      .map(([key]) => key)
+      .filter((key) => key.endsWith('/receipt-void-platform-spa'));
+    expect(receiptKeys).toHaveLength(2);
+    expect(new Set(receiptKeys).size).toBe(2);
+    for (const key of receiptKeys) {
+      expect(await env.STATIC_ASSETS_R2.get(key)).toBeNull();
+    }
   });
 });
 
@@ -617,6 +654,9 @@ describe('durable execution claim and revocation', () => {
       added_by_user_id: user.id,
     });
     const id = await admit(crypto.randomUUID(), collaborator.jwt);
+    const stagedOperation = await getDeploymentOperation(env.db, id);
+    const receiptKey = `${stagedOperation!.input_prefix}receipt-void-platform-spa`;
+    expect(await env.STATIC_ASSETS_R2.get(receiptKey)).not.toBeNull();
     expect(await getDeploymentOperation(env.db, id)).toMatchObject({ actor_id: collaborator.id });
     await env.db
       .update(users)
@@ -633,6 +673,7 @@ describe('durable execution claim and revocation', () => {
       event: 'error',
       step: 'authorization',
     });
+    expect(await env.STATIC_ASSETS_R2.get(receiptKey)).toBeNull();
   });
 
   it('reconciles a live deployment after terminal journal persistence fails without rerunning execution', async () => {

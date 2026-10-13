@@ -71,16 +71,16 @@ describe('generated queue dispatch', () => {
       middleware: [],
       jobs: [],
       queues: [
+        {
+          filePath: 'order-emails.ts',
+          name: 'order-emails',
+          bindingName: 'QUEUE_ORDER_EMAILS',
+        },
         { filePath: 'emails.ts', name: 'emails', bindingName: 'QUEUE_EMAILS' },
         {
           filePath: 'nested/daily.ts',
           name: 'nested/daily',
           bindingName: 'CUSTOM_NESTED_QUEUE',
-        },
-        {
-          filePath: 'order-emails.ts',
-          name: 'order-emails',
-          bindingName: 'QUEUE_ORDER_EMAILS',
         },
       ],
       pages: { pages: [], layouts: [], namedLayouts: [] },

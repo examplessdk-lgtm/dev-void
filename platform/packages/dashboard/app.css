@@ -1,6 +1,6 @@
-@import './ui/styles/index.css';
-
-@source './ui/**/*.{ts,tsx}';
+body {
+  margin: 0;
+}
 
 /* Navigation progress bar */
 .nav-progress {
@@ -10,10 +10,16 @@
   height: 2px;
   width: 100%;
   z-index: 50;
-  background: var(--color-brand);
+  background: #6c3bff;
   transform-origin: left;
   pointer-events: none;
   opacity: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .nav-progress {
+    background: #b39aff;
+  }
 }
 
 .nav-progress.loading {

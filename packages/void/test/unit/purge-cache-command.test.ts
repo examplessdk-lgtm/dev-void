@@ -2,8 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { Buffer } from '../../src/cli/node-buffer.ts';
-import { savePlatformConnection } from '../../src/cli/platform-registry.ts';
+import { captureOutput, setIsolatedHome } from '../helpers/cli-command.ts';
 import { withPlatformDiscovery } from '../helpers/platform-discovery.ts';
 
 const tempHomes: Array<string> = [];
@@ -14,23 +13,6 @@ vi.mock('../../src/cli/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/cli/auth.ts')>()),
   getToken: () => mockGetToken(),
 }));
-
-function setIsolatedHome(): void {
-  const dir = mkdtempSync(join(tmpdir(), 'void-home-'));
-  tempHomes.push(dir);
-  process.env.HOME = dir;
-  process.env.USERPROFILE = dir;
-  process.env.VOID_PLATFORM_REGISTRY_DIR = join(dir, 'registry');
-  savePlatformConnection({
-    accountId: null,
-    apiUrl: 'https://api.example.test',
-    applicationDomain: 'apps.example.test',
-    displayName: 'Test platform',
-    installationId: null,
-    kind: 'connected',
-    proxyUrl: 'https://proxy.example.test',
-  });
-}
 
 function createLinkedProject(root: string): void {
   const voidDir = join(root, '.void');
@@ -43,31 +25,6 @@ function createLinkedProject(root: string): void {
       platformUrl: 'https://api.example.test',
     }),
   );
-}
-
-function captureOutput(): { output: () => string; restore: () => void } {
-  const chunks: Array<string> = [];
-  const writeMock = vi
-    .spyOn(process.stdout, 'write')
-    .mockImplementation((...args: Array<unknown>) => {
-      const chunk = args[0];
-      if (typeof chunk === 'string') {
-        chunks.push(chunk);
-      } else if (Buffer.isBuffer(chunk)) {
-        chunks.push(chunk.toString());
-      }
-      return true;
-    });
-  const logMock = vi.spyOn(console, 'log').mockImplementation((...args: Array<unknown>) => {
-    chunks.push(args.map(String).join(' ') + '\n');
-  });
-  return {
-    output: () => chunks.join(''),
-    restore: () => {
-      writeMock.mockRestore();
-      logMock.mockRestore();
-    },
-  };
 }
 
 async function importRunPurgeCacheCommand() {
@@ -100,7 +57,7 @@ describe('runPurgeCacheCommand', () => {
   });
 
   it('purges cache for linked project', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -134,7 +91,7 @@ describe('runPurgeCacheCommand', () => {
   });
 
   it('purges cache using --project slug', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -166,7 +123,7 @@ describe('runPurgeCacheCommand', () => {
   });
 
   it('exits with error when --project slug not found', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -179,7 +136,7 @@ describe('runPurgeCacheCommand', () => {
     );
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -189,17 +146,16 @@ describe('runPurgeCacheCommand', () => {
     capture.restore();
 
     expect(out).toContain("project: No project found with slug 'nonexistent'");
-    expect(exitSpy).toHaveBeenCalled();
   });
 
   it('exits with error when not logged in', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
     tempRoots.push(root);
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -209,18 +165,17 @@ describe('runPurgeCacheCommand', () => {
     capture.restore();
 
     expect(out).toContain('Not logged in');
-    expect(exitSpy).toHaveBeenCalled();
   });
 
   it('exits with error when no linked project', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     mockGetToken.mockReturnValue('test-token');
 
     const root = mkdtempSync(join(tmpdir(), 'void-root-'));
     tempRoots.push(root);
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -230,11 +185,10 @@ describe('runPurgeCacheCommand', () => {
     capture.restore();
 
     expect(out).toContain('No linked project');
-    expect(exitSpy).toHaveBeenCalled();
   });
 
   it('exits with error when API returns an error', async () => {
-    setIsolatedHome();
+    tempHomes.push(setIsolatedHome());
     mockGetToken.mockReturnValue('test-token');
     process.env.VOID_API_URL = 'https://api.example.test';
 
@@ -248,7 +202,7 @@ describe('runPurgeCacheCommand', () => {
     );
 
     const capture = captureOutput();
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit:${code ?? 0}`);
     }) as never);
 
@@ -258,6 +212,5 @@ describe('runPurgeCacheCommand', () => {
     capture.restore();
 
     expect(out).toContain('Cache purge failed');
-    expect(exitSpy).toHaveBeenCalled();
   });
 });

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build, type Manifest } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
+import { analyzeApplicationSync } from '../../src/application-analysis.ts';
 import { routingPlugin } from '../../src/plugin-routing.ts';
 
 const runtimeSource = (file: string) => join(import.meta.dirname, '../../src/runtime', file);
@@ -21,6 +22,11 @@ beforeAll(async () => {
   const assets = join(directory, 'client');
   const output = join(directory, 'output');
   const clientRoot = join(directory, 'app');
+  const routingOptions = {
+    getApplicationAnalysis: (environment: 'dev' | 'prod') =>
+      analyzeApplicationSync(clientRoot, { config: {}, environment }),
+    isAuthEnabled: () => false,
+  };
   mkdirSync(clientRoot);
   writeFileSync(join(clientRoot, 'package.json'), '{"type":"module"}');
   writeFileSync(join(clientRoot, 'client.js'), 'import "./client.css"; window.value = 1;');
@@ -38,7 +44,7 @@ beforeAll(async () => {
     configFile: false,
     logLevel: 'silent',
     plugins: [
-      routingPlugin(clientRoot, { isAuthEnabled: () => false }),
+      routingPlugin(clientRoot, routingOptions),
       {
         name: 'explicit-stable-css',
         buildStart() {
@@ -88,7 +94,7 @@ beforeAll(async () => {
     root: clientRoot,
     configFile: false,
     logLevel: 'silent',
-    plugins: [routingPlugin(clientRoot, { isAuthEnabled: () => false })],
+    plugins: [routingPlugin(clientRoot, routingOptions)],
     build: {
       outDir: stableOutput,
       assetsDir: 'static',

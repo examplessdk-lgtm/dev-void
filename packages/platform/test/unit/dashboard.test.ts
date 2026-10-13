@@ -14,43 +14,14 @@ import {
   parsePlatformDeploymentManifest,
   platformDashboardUrl,
 } from '../../src/manifest.ts';
-import { createPlatformWorkerConfigs } from '../../src/worker-config.ts';
-
-const deploymentInput = {
-  application: { baseDomain: 'apps.example.com', zoneName: 'example.com' },
-  displayName: 'Example',
-  installationSlug: 'example',
-};
+import { deploymentInput, workerConfigs } from '../worker-config-fixture.ts';
 
 function configs(dashboardUrl?: string) {
-  const deployment = createPlatformDeploymentManifest({
-    ...deploymentInput,
-    ...(dashboardUrl ? { controlPlane: { dashboardUrl } } : {}),
-  });
-  return createPlatformWorkerConfigs({
-    accountId: 'account',
-    apiUrl: 'https://api.example.com',
-    proxyUrl: 'https://proxy.example.com',
-    emailGatewayUrl: 'https://email.account.workers.dev',
-    deployment,
-    healthProbeToken: 'probe',
-    installationId: 'example-installation',
-    ownershipNonce: 'ownership',
-    platformVersion: '1.0.0',
-    resources: {
-      hyperdrive: 'db',
-      isrCacheKv: 'isr',
-      legacyAssetsKv: 'assets',
-      routingKv: 'routing',
-      zone: 'zone',
-    },
-    runtimeEntrypoints: {
-      api: 'api.mjs',
-      proxy: 'proxy.mjs',
-      emailGateway: 'email.mjs',
-      tail: 'tail.mjs',
-      dispatch: 'dispatch.mjs',
-    },
+  return workerConfigs({
+    deployment: createPlatformDeploymentManifest({
+      ...deploymentInput,
+      ...(dashboardUrl ? { controlPlane: { dashboardUrl } } : {}),
+    }),
   });
 }
 

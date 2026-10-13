@@ -1,4 +1,5 @@
 import type { Connection } from 'mysql2/promise';
+import { splitMigrationSql } from '../runtime/migration-handler.ts';
 import { collectMigrations } from './collect.ts';
 
 export type MySqlClient = {
@@ -24,7 +25,7 @@ export async function readMySqlAppliedMigrations(client: MySqlClient): Promise<A
   }
 }
 
-function toMySqlClient(connection: Connection): MySqlClient {
+export function toMySqlClient(connection: Connection): MySqlClient {
   return {
     async query<T extends Array<Record<string, unknown>> = Array<Record<string, unknown>>>(
       sql: string,
@@ -64,7 +65,10 @@ export async function applyMySqlMigrations(
   const pending = migrations.filter((migration) => !appliedSet.has(migration.name));
 
   for (const migration of pending) {
-    await client.query(migration.sql);
+    // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
+    for (const statement of splitMigrationSql(migration.sql)) {
+      await client.query(statement);
+    }
     await client.query('INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)', [
       migration.name,
       new Date().toISOString(),

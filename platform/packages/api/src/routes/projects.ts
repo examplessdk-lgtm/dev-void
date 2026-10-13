@@ -722,141 +722,9 @@ const app = new Hono<ApiEnv>()
   })
 
   // Create a new project
-  .post('/', async (context) => {
-    const body = await context.req.json<{ slug: string }>();
-
-    if (!body.slug) {
-      return context.json({ error: 'slug is required' }, 400);
-    }
-
-    // Validate slug format: lowercase alphanumeric + dashes, no leading/trailing dashes
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(body.slug)) {
-      return context.json({ error: 'slug must be lowercase alphanumeric with dashes' }, 400);
-    }
-
-    // See MAX_SLUG_LENGTH: the slug has to fit in front of `+noreply@` in a
-    // 64-octet SMTP local-part. The CLI treats this 400 as re-promptable.
-    if (body.slug.length > MAX_SLUG_LENGTH) {
-      return context.json({ error: `slug must be at most ${MAX_SLUG_LENGTH} characters` }, 400);
-    }
-
-    if (RESERVED_SLUGS.has(body.slug)) {
-      return context.json({ error: 'this name is reserved' }, 400);
-    }
-
-    // Preserve short-slug eligibility when an administrator copies or renames a plan.
-    if (body.slug.length <= 5) {
-      if (!(await resolvePlan(context.get('db'), context.get('user').plan)).allowShortSlugs) {
-        return context.json(
-          { error: 'the selected plan does not permit short slugs (5 characters or fewer)' },
-          403,
-        );
-      }
-    }
-
-    // Check for slug uniqueness
-    const existing = await getProjectBySlug(context.get('db'), body.slug);
-    if (existing) {
-      return context.json({ error: 'slug already taken' }, 409);
-    }
-
-    const userId = context.get('user').id;
-    try {
-      // `void platform uninstall --purge-resources` holds this lock across its last
-      // check for projects and records the uninstall before releasing it, so a
-      // project either commits before that check or is refused here.
-      const project = await context.get('db').transaction(async (tx) => {
-        await lockZeroTrustConfiguration(tx, 'shared');
-        return createProject(tx, userId, body.slug);
-      });
-      let zeroTrust: Awaited<ReturnType<typeof initializeNewProjectZeroTrust>> = null;
-      let zeroTrustWarning: string | undefined;
-      try {
-        zeroTrust = await initializeNewProjectZeroTrust(context.env, context.get('db'), project.id);
-      } catch (error) {
-        zeroTrustWarning =
-          'Project created, but its Zero Trust protection is not set up yet, so deploys will wait. Void retries within an hour. To retry now, a project owner or admin can run `void project zero-trust reconcile`; if that reports the platform is not ready, ask a platform administrator.';
-        console.error('[zero-trust] new project initialization failed', {
-          projectId: project.id,
-          error,
-        });
-      }
-      // Pre-seed the owner's own address as a destination so mail to
-      // themselves works from the first deploy. CF sends them a verification
-      // link; the row stays `pending` until they click it.
-      //
-      // Gated on the `email` platform capability AND EMAIL_SENDER_DOMAIN:
-      // the row's only purpose is to allow-list a recipient for sends from
-      // `<slug>[+tag]@<domain>`, so on a platform that does not enable email
-      // (its `/email/*` routes answer 501) or in an environment with no
-      // platform mail domain there is nothing it could ever authorize — and
-      // registering it would still cost CF a verification email to the owner.
-      const ownerEmail = context.get('user').email;
-      if (
-        getPlatformCapabilities(context.env).email &&
-        context.env.EMAIL_SENDER_DOMAIN &&
-        ownerEmail &&
-        !isSyntheticProviderEmail(ownerEmail)
-      ) {
-        const address = ownerEmail.toLowerCase();
-        // Off the response path: CF Email Routing has no timeout in
-        // `cfFetch`, and project creation must not wait on it. Nothing
-        // downstream depends on the row existing yet — a pending row emits
-        // no allowlist entry either way.
-        await scheduleAfterResponse(
-          context,
-          autoAddOwnerDestination(
-            context.env.CF_ACCOUNT_ID,
-            context.env.CF_API_TOKEN,
-            context.get('db'),
-            project.id,
-            address,
-            userId,
-          ),
-        );
-        // Tell the caller WHICH address is being registered, and nothing
-        // more: whether CF mails a verification link (fresh address) or
-        // adopts one the owner already verified is decided by the add above,
-        // which has not run yet. The CLI prints this so the verification
-        // email that may follow is explained; `void email destinations`
-        // shows the outcome.
-        return context.json(
-          {
-            ...project,
-            owner_email_destination: { address },
-            ...(zeroTrust ? { zero_trust: publicProjectZeroTrustState(zeroTrust) } : {}),
-            ...(zeroTrustWarning ? { warnings: [zeroTrustWarning] } : {}),
-          },
-          201,
-        );
-      }
-      return context.json(
-        {
-          ...projectWithUrl(project, context.env),
-          ...(zeroTrust ? { zero_trust: publicProjectZeroTrustState(zeroTrust) } : {}),
-          ...(zeroTrustWarning ? { warnings: [zeroTrustWarning] } : {}),
-        },
-        201,
-      );
-    } catch (err) {
-      // Only the configuration lock above throws this here: the uninstall
-      // record exists.
-      if (err instanceof ZeroTrustUnavailableError) {
-        return context.json(
-          { error: 'The platform is being uninstalled, so new projects cannot be created.' },
-          err.status,
-        );
-      }
-      // Unique constraint violation — slug was taken between check and insert
-      if (
-        err instanceof Error &&
-        err.message.includes('duplicate key value violates unique constraint')
-      ) {
-        return context.json({ error: 'slug already taken' }, 409);
-      }
-      throw err;
-    }
-  })
+  .post('/', async (context) =>
+    createUserProject(context, await context.req.json<{ slug: string }>()),
+  )
 
   // Get project by ID
   .get('/:id', async (context) => {
@@ -3533,3 +3401,140 @@ function isSyntheticProviderEmail(email: string): boolean {
 }
 
 export default app;
+
+export async function createUserProject(
+  context: Context<ApiEnv>,
+  body: { slug: string },
+): Promise<Response> {
+  if (!body.slug) {
+    return context.json({ error: 'slug is required' }, 400);
+  }
+
+  // Validate slug format: lowercase alphanumeric + dashes, no leading/trailing dashes
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(body.slug)) {
+    return context.json({ error: 'slug must be lowercase alphanumeric with dashes' }, 400);
+  }
+
+  // See MAX_SLUG_LENGTH: the slug has to fit in front of `+noreply@` in a
+  // 64-octet SMTP local-part. The CLI treats this 400 as re-promptable.
+  if (body.slug.length > MAX_SLUG_LENGTH) {
+    return context.json({ error: `slug must be at most ${MAX_SLUG_LENGTH} characters` }, 400);
+  }
+
+  if (RESERVED_SLUGS.has(body.slug)) {
+    return context.json({ error: 'this name is reserved' }, 400);
+  }
+
+  // Preserve short-slug eligibility when an administrator copies or renames a plan.
+  if (body.slug.length <= 5) {
+    if (!(await resolvePlan(context.get('db'), context.get('user').plan)).allowShortSlugs) {
+      return context.json(
+        { error: 'the selected plan does not permit short slugs (5 characters or fewer)' },
+        403,
+      );
+    }
+  }
+
+  // Check for slug uniqueness
+  const existing = await getProjectBySlug(context.get('db'), body.slug);
+  if (existing) {
+    return context.json({ error: 'slug already taken' }, 409);
+  }
+
+  const userId = context.get('user').id;
+  try {
+    // `void platform uninstall --purge-resources` holds this lock across its last
+    // check for projects and records the uninstall before releasing it, so a
+    // project either commits before that check or is refused here.
+    const project = await context.get('db').transaction(async (tx) => {
+      await lockZeroTrustConfiguration(tx, 'shared');
+      return createProject(tx, userId, body.slug);
+    });
+    let zeroTrust: Awaited<ReturnType<typeof initializeNewProjectZeroTrust>> = null;
+    let zeroTrustWarning: string | undefined;
+    try {
+      zeroTrust = await initializeNewProjectZeroTrust(context.env, context.get('db'), project.id);
+    } catch (error) {
+      zeroTrustWarning =
+        'Project created, but its Zero Trust protection is not set up yet, so deploys will wait. Void retries within an hour. To retry now, a project owner or admin can run `void project zero-trust reconcile`; if that reports the platform is not ready, ask a platform administrator.';
+      console.error('[zero-trust] new project initialization failed', {
+        projectId: project.id,
+        error,
+      });
+    }
+    // Pre-seed the owner's own address as a destination so mail to
+    // themselves works from the first deploy. CF sends them a verification
+    // link; the row stays `pending` until they click it.
+    //
+    // Gated on the `email` platform capability AND EMAIL_SENDER_DOMAIN:
+    // the row's only purpose is to allow-list a recipient for sends from
+    // `<slug>[+tag]@<domain>`, so on a platform that does not enable email
+    // (its `/email/*` routes answer 501) or in an environment with no
+    // platform mail domain there is nothing it could ever authorize — and
+    // registering it would still cost CF a verification email to the owner.
+    const ownerEmail = context.get('user').email;
+    if (
+      getPlatformCapabilities(context.env).email &&
+      context.env.EMAIL_SENDER_DOMAIN &&
+      ownerEmail &&
+      !isSyntheticProviderEmail(ownerEmail)
+    ) {
+      const address = ownerEmail.toLowerCase();
+      // Off the response path: CF Email Routing has no timeout in
+      // `cfFetch`, and project creation must not wait on it. Nothing
+      // downstream depends on the row existing yet — a pending row emits
+      // no allowlist entry either way.
+      await scheduleAfterResponse(
+        context,
+        autoAddOwnerDestination(
+          context.env.CF_ACCOUNT_ID,
+          context.env.CF_API_TOKEN,
+          context.get('db'),
+          project.id,
+          address,
+          userId,
+        ),
+      );
+      // Tell the caller WHICH address is being registered, and nothing
+      // more: whether CF mails a verification link (fresh address) or
+      // adopts one the owner already verified is decided by the add above,
+      // which has not run yet. The CLI prints this so the verification
+      // email that may follow is explained; `void email destinations`
+      // shows the outcome.
+      return context.json(
+        {
+          ...project,
+          owner_email_destination: { address },
+          ...(zeroTrust ? { zero_trust: publicProjectZeroTrustState(zeroTrust) } : {}),
+          ...(zeroTrustWarning ? { warnings: [zeroTrustWarning] } : {}),
+        },
+        201,
+      );
+    }
+    return context.json(
+      {
+        ...projectWithUrl(project, context.env),
+        ...(zeroTrust ? { zero_trust: publicProjectZeroTrustState(zeroTrust) } : {}),
+        ...(zeroTrustWarning ? { warnings: [zeroTrustWarning] } : {}),
+      },
+      201,
+    );
+  } catch (err) {
+    // Only the configuration lock above throws this here: the uninstall
+    // record exists.
+    if (err instanceof ZeroTrustUnavailableError) {
+      return context.json(
+        { error: 'The platform is being uninstalled, so new projects cannot be created.' },
+        err.status,
+      );
+    }
+    // Unique constraint violation — slug was taken between check and insert
+    if (
+      err instanceof Error &&
+      err.message.includes('duplicate key value violates unique constraint')
+    ) {
+      return context.json({ error: 'slug already taken' }, 409);
+    }
+    throw err;
+  }
+}

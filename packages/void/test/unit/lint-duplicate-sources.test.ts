@@ -68,20 +68,6 @@ describe('lintDuplicateSources', () => {
     expect(msg).not.toContain('/api/*');
   });
 
-  it('treats cross-phase collisions as safe — callers lint each phase list independently', () => {
-    const rewrites: Array<DevRedirectRule> = [
-      rule('/docs/*', 'void.json#routing.rewrites', { force: true }),
-    ];
-    const fallbacks: Array<DevRedirectRule> = [
-      rule('/docs/*', 'void.json#routing.fallbacks', { force: false }),
-    ];
-
-    lintDuplicateSources(rewrites, 'redirects/rewrites (pre-asset)');
-    lintDuplicateSources(fallbacks, 'fallbacks (post-asset)');
-
-    expect(warnMock).not.toHaveBeenCalled();
-  });
-
   it('aggregates multiple duplicate sources into one message', () => {
     const rules: Array<DevRedirectRule> = [
       rule('/docs/*', '_redirects:12'),

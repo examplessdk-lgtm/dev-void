@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'pathslash';
 import { analyzeApplication } from '../application-routing.ts';
@@ -8,7 +8,7 @@ import { readConfig } from '../config.ts';
 import { discoverSchema } from '../drizzle/discover.ts';
 import { loadLocalEnv } from '../shared/env.ts';
 import { generateDbDts } from './db-types.ts';
-import { findEnvFile, generateEnvTypes } from './env-types.ts';
+import { findEnvFileForPaths, generateEnvTypes } from './env-types.ts';
 import { ensureProjectTsconfig } from './project-tsconfig.ts';
 import { generateQueueTypes } from './queue-types.ts';
 import { generateRouteTypes } from './route-types.ts';
@@ -25,7 +25,6 @@ function writeGeneratedFile(
   content: string,
   written: Array<string>,
 ): void {
-  mkdirSync(outDir, { recursive: true });
   if (writeFileIfChanged(join(outDir, fileName), content)) {
     written.push(join('.void', fileName));
   }
@@ -48,9 +47,7 @@ export async function prepareProject(root: string): Promise<PrepareProjectResult
   const written: Array<string> = [];
   const removed: Array<string> = [];
 
-  mkdirSync(outDir, { recursive: true });
-
-  const envFile = findEnvFile(root);
+  const envFile = findEnvFileForPaths(root, paths);
   if (envFile) {
     const { dts } = generateEnvTypes(envFile, outDir);
     writeGeneratedFile(outDir, 'env.d.ts', dts, written);

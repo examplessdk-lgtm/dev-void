@@ -206,6 +206,35 @@ describe('SPA app — user fallbacks with not_found_handling: none', () => {
 });
 
 describe('static app — fallbackRules only, no SPA setting', () => {
+  it.each([
+    ['/proxy/missing', 200, '<html>proxied</html>'],
+    ['/other/missing', 404, '<html>not found</html>'],
+    ['/proxy/existing.html', 200, '<html>existing</html>'],
+  ] as const)('applies fallbacks before a custom 404 page for %s', async (path, status, body) => {
+    const { env } = createStaticEnv({
+      routing: {
+        staticDeploymentId: 'dep_1',
+        projectId: 'proj_1',
+        assetConfig: { not_found_handling: '404-page', html_handling: 'none' },
+        fallbackRules: [{ source: '/proxy/*', destination: '/proxied.html', status: 200 }],
+      },
+      manifest: {
+        '/proxied.html': 'h_proxied',
+        '/404.html': 'h_404',
+        '/proxy/existing.html': 'h_existing',
+      },
+      assetBodies: {
+        '/proxied.html': '<html>proxied</html>',
+        '/404.html': '<html>not found</html>',
+        '/proxy/existing.html': '<html>existing</html>',
+      },
+    });
+
+    const res = await app.fetch(new Request(`https://test.void.app${path}`), env, createCtx());
+    expect(res.status).toBe(status);
+    expect(await res.text()).toBe(body);
+  });
+
   it('fires fallbackRules on asset miss', async () => {
     const { env } = createStaticEnv({
       routing: {

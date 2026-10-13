@@ -130,13 +130,26 @@ export function createWranglerCompatPersistPlugin(
   };
 }
 
-export function createServerRuntimeOptimizerPlugin(): Plugin {
+export function createServerRuntimeOptimizerPlugin(voidOwnsWorkerRuntime: boolean): Plugin {
   const serverRuntimeOptimizerPlugin: Plugin = {
     name: 'void:server-runtime-optimizer',
     configEnvironment(name) {
-      if (name !== 'client') {
+      if (name === 'client') {
+        return;
+      }
+      if (!voidOwnsWorkerRuntime) {
         return { optimizeDeps: { exclude: ['void'] } };
       }
+      return {
+        optimizeDeps: {
+          exclude: ['void'],
+          // Excluding void also skips converting its CommonJS dependencies, which workerd cannot
+          // evaluate: an installed void/email fails with "exports is not defined". Runtimes a
+          // framework owns stay untouched; Node loads CommonJS itself, and forcing an include
+          // there turns on SSR prebundling the framework did not ask for.
+          include: ['void > email-validator'],
+        },
+      };
     },
   };
 

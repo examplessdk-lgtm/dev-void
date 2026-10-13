@@ -11,7 +11,7 @@ import { expect, it, vi } from 'vite-plus/test';
 import {
   deployPlatformWorker,
   platformWorkerUploadFingerprint,
-} from '../../src/cli/platform-installer.ts';
+} from '../../src/cli/platform-installer-workers.ts';
 
 const VERSION = '11111111-1111-4111-8111-111111111111';
 
@@ -200,7 +200,6 @@ async function attemptReuse(input: {
       previousPublicEndpoints: true,
       publishCustomDomains: async () => {},
       publishRoutes: async () => {},
-      removeCustomDomains: async () => {},
       retainNewWorker,
       runner,
       workerExisted: true,

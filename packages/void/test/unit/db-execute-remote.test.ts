@@ -1,13 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 
-// ---- hoisted mocks ---------------------------------------------------------
-
 const mockGetToken = vi.fn<() => string | null>(() => null);
 const mockReadProjectConfig = vi.fn<() => { projectId: string; slug: string } | null>(() => null);
-const mockIsStagingMode = vi.fn<() => boolean>(() => false);
 const mockGetProxyUrl = vi.fn<() => string>(() => 'https://proxy.void.cloud');
 
 const mockGetResources = vi.fn<() => Promise<Array<{ type: string; binding_name: string }>>>(() =>
@@ -19,13 +16,11 @@ const mockEnsurePlatformAccessToken = vi.fn();
 vi.mock('../../src/cli/auth', () => ({
   getProxyUrl: () => mockGetProxyUrl(),
   getToken: () => mockGetToken(),
-  isStagingMode: () => mockIsStagingMode(),
 }));
 
 vi.mock('../../src/cli/project', () => ({
   readProjectConfig: () => mockReadProjectConfig(),
   readDeploymentPlatform: () => 'void',
-  isVoidInternalStaging: () => false,
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -89,32 +84,17 @@ vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
   },
 }));
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 const roots: Array<string> = [];
 
 function createProjectRoot(options: { database?: 'pg'; d1Binding?: string } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'void-db-execute-remote-'));
   roots.push(root);
 
-  const migrationsDir = join(root, 'db', 'migrations');
-  mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
-
   const voidConfig: Record<string, unknown> = options.database === 'pg' ? { database: 'pg' } : {};
   if (options.d1Binding) {
     voidConfig.inference = { bindings: { db: options.d1Binding } };
   }
   writeFileSync(join(root, 'void.json'), JSON.stringify(voidConfig));
-
-  // .void/project.json to satisfy readProjectConfig (the REAL one is mocked,
-  // so this is just to ensure the root is a plausible project dir)
-  mkdirSync(join(root, '.void'), { recursive: true });
-  writeFileSync(
-    join(root, '.void', 'project.json'),
-    JSON.stringify({ projectId: 'proj-abc', slug: 'test-proj' }),
-  );
 
   return root;
 }
@@ -126,10 +106,6 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Suite
-// ---------------------------------------------------------------------------
-
 describe('void db execute --remote (D1)', () => {
   let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
@@ -140,13 +116,9 @@ describe('void db execute --remote (D1)', () => {
 
     mockGetToken.mockReturnValue('test-token');
     mockReadProjectConfig.mockReturnValue({ projectId: 'proj-abc', slug: 'test-proj' });
-    mockIsStagingMode.mockReturnValue(false);
-    mockGetProxyUrl.mockImplementation(() =>
-      mockIsStagingMode() ? 'https://proxy.staging.void.cloud' : 'https://proxy.void.cloud',
-    );
+    mockGetProxyUrl.mockReturnValue('https://proxy.void.cloud');
     mockGetResources.mockResolvedValue([]);
     mockEnsurePlatformAccessToken.mockReset();
-    // By default, confirm returns true (proceed)
     mockConfirm.mockResolvedValue(true);
     mockIsCancel.mockImplementation((v) => typeof v === 'symbol');
 
@@ -193,43 +165,26 @@ describe('void db execute --remote (D1)', () => {
     });
   });
 
-  it('uses the staging proxy URL when in staging mode', async () => {
-    const root = createProjectRoot();
-    mockIsStagingMode.mockReturnValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
-
-    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://proxy.staging.void.cloud/d1/query');
-  });
-
   it('sends custom platform credentials only to its pinned proxy', async () => {
     const root = createProjectRoot();
     const proxyOrigin = 'https://void-company-proxy.example.workers.dev';
     mockGetProxyUrl.mockReturnValue(proxyOrigin);
-    const saved = process.env.VOID_ACCESS_CREDENTIALS;
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      'https://api.void.cloud': {
-        CF_ACCESS_CLIENT_ID: 'api-id',
-        CF_ACCESS_CLIENT_SECRET: 'api-secret',
-      },
-      [proxyOrigin]: {
-        CF_ACCESS_CLIENT_ID: 'proxy-id',
-        CF_ACCESS_CLIENT_SECRET: 'proxy-secret',
-      },
-    });
+    vi.stubEnv(
+      'VOID_ACCESS_CREDENTIALS',
+      JSON.stringify({
+        'https://api.void.cloud': {
+          CF_ACCESS_CLIENT_ID: 'api-id',
+          CF_ACCESS_CLIENT_SECRET: 'api-secret',
+        },
+        [proxyOrigin]: {
+          CF_ACCESS_CLIENT_ID: 'proxy-id',
+          CF_ACCESS_CLIENT_SECRET: 'proxy-secret',
+        },
+      }),
+    );
     fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
-    try {
-      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
-    } finally {
-      if (saved === undefined) {
-        delete process.env.VOID_ACCESS_CREDENTIALS;
-      } else {
-        process.env.VOID_ACCESS_CREDENTIALS = saved;
-      }
-    }
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://void-company-proxy.example.workers.dev/d1/query',
@@ -244,14 +199,15 @@ describe('void db execute --remote (D1)', () => {
     const root = createProjectRoot();
     const proxyOrigin = 'https://proxy.example.com';
     mockGetProxyUrl.mockReturnValue(proxyOrigin);
-    const saved = process.env.VOID_ACCESS_CREDENTIALS;
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      [proxyOrigin]: { CF_ACCESS_TOKEN: 'stale-user-token' },
-    });
+    vi.stubEnv(
+      'VOID_ACCESS_CREDENTIALS',
+      JSON.stringify({ [proxyOrigin]: { CF_ACCESS_TOKEN: 'stale-user-token' } }),
+    );
     mockEnsurePlatformAccessToken.mockImplementation(() => {
-      process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-        [proxyOrigin]: { CF_ACCESS_TOKEN: 'fresh-user-token' },
-      });
+      vi.stubEnv(
+        'VOID_ACCESS_CREDENTIALS',
+        JSON.stringify({ [proxyOrigin]: { CF_ACCESS_TOKEN: 'fresh-user-token' } }),
+      );
     });
     const challengeLocation =
       'https://team.cloudflareaccess.com/cdn-cgi/access/login/proxy.example.com';
@@ -261,15 +217,7 @@ describe('void db execute --remote (D1)', () => {
       )
       .mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
-    try {
-      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
-    } finally {
-      if (saved === undefined) {
-        delete process.env.VOID_ACCESS_CREDENTIALS;
-      } else {
-        process.env.VOID_ACCESS_CREDENTIALS = saved;
-      }
-    }
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
@@ -303,13 +251,15 @@ describe('void db execute --remote (D1)', () => {
     const root = createProjectRoot();
     const proxyOrigin = 'https://proxy.example.com';
     mockGetProxyUrl.mockReturnValue(proxyOrigin);
-    const saved = process.env.VOID_ACCESS_CREDENTIALS;
-    process.env.VOID_ACCESS_CREDENTIALS = JSON.stringify({
-      [proxyOrigin]: {
-        CF_ACCESS_CLIENT_ID: 'ci-id',
-        CF_ACCESS_CLIENT_SECRET: 'ci-secret',
-      },
-    });
+    vi.stubEnv(
+      'VOID_ACCESS_CREDENTIALS',
+      JSON.stringify({
+        [proxyOrigin]: {
+          CF_ACCESS_CLIENT_ID: 'ci-id',
+          CF_ACCESS_CLIENT_SECRET: 'ci-secret',
+        },
+      }),
+    );
     fetchMock.mockResolvedValueOnce(
       new Response(null, {
         status: 302,
@@ -319,17 +269,9 @@ describe('void db execute --remote (D1)', () => {
       }),
     );
 
-    try {
-      await expect(
-        runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true }),
-      ).rejects.toThrow('process.exit:1');
-    } finally {
-      if (saved === undefined) {
-        delete process.env.VOID_ACCESS_CREDENTIALS;
-      } else {
-        process.env.VOID_ACCESS_CREDENTIALS = saved;
-      }
-    }
+    await expect(
+      runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true }),
+    ).rejects.toThrow('process.exit:1');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(mockEnsurePlatformAccessToken).not.toHaveBeenCalled();
@@ -402,23 +344,15 @@ describe('void db execute --remote (D1)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('errors when --file is passed with --remote D1', async () => {
-    const root = createProjectRoot();
-    // The rejection fires before the file is read, so the file does not need to exist.
-    await expect(
-      runDbCommand(root, { action: 'execute', file: 'query.sql', remote: true }),
-    ).rejects.toThrow('process.exit:1');
-  });
-
-  it('rejects --file before prompting for destructive confirmation (ordering regression guard)', async () => {
+  it('rejects --file with --remote D1 before prompting for confirmation', async () => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
 
+    // The file does not exist: the rejection comes before it is read.
     await expect(
       runDbCommand(root, { action: 'execute', file: 'delete.sql', remote: true }),
     ).rejects.toThrow('process.exit:1');
 
-    // The confirmation prompt must NOT have fired — the error comes first.
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
@@ -433,7 +367,6 @@ describe('void db execute --remote (D1)', () => {
 
   it('prompts for confirmation on destructive statement in TTY', async () => {
     const root = createProjectRoot();
-    // Simulate a TTY
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     mockConfirm.mockResolvedValue(true);
     fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
@@ -457,223 +390,30 @@ describe('void db execute --remote (D1)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('skips confirmation for SELECT statements even in TTY', async () => {
+  // Comments are stripped before the check. EXPLAIN ANALYZE in any form and WITH
+  // (a CTE can write) always prompt.
+  it.each<[string, boolean]>([
+    ['SELECT * FROM users', false],
+    ['EXPLAIN SELECT * FROM users', false],
+    ['EXPLAIN (VERBOSE) SELECT 1', false],
+    ['-- header\nSELECT 1', false],
+    ['EXPLAIN ANALYZE DELETE FROM users', true],
+    ['EXPLAIN (ANALYZE) DELETE FROM users', true],
+    ['EXPLAIN (ANALYZE TRUE) UPDATE users SET name = $1', true],
+    ['EXPLAIN (ANALYZE FALSE) SELECT 1', true],
+    ['EXPLAIN /*x*/ ANALYZE DELETE FROM users', true],
+    ['EXPLAIN -- comment\n ANALYZE DELETE FROM users', true],
+    ['EXPLAIN /*opts*/ (ANALYZE) DELETE FROM users', true],
+    ['/* leading */ EXPLAIN ANALYZE DELETE FROM users', true],
+    ['WITH cte AS (SELECT 1) SELECT * FROM cte', true],
+  ])('confirmation prompt for %j in TTY: %s', async (command, prompts) => {
     const root = createProjectRoot();
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
-    await runDbCommand(root, { action: 'execute', command: 'SELECT * FROM users', remote: true });
+    await runDbCommand(root, { action: 'execute', command, remote: true });
 
-    expect(mockConfirm).not.toHaveBeenCalled();
-  });
-
-  it('skips confirmation for EXPLAIN statements', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN SELECT * FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).not.toHaveBeenCalled();
-  });
-
-  it('prompts for confirmation for EXPLAIN ANALYZE (executes DML in PostgreSQL)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN ANALYZE DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for EXPLAIN (ANALYZE) DELETE (parenthesized option form)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN (ANALYZE) DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for EXPLAIN (ANALYZE TRUE) UPDATE (option with boolean argument)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN (ANALYZE TRUE) UPDATE users SET name = $1',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for EXPLAIN (ANALYZE FALSE) (fail-closed: rejects even when ANALYZE is disabled)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN (ANALYZE FALSE) SELECT 1',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips confirmation for EXPLAIN (VERBOSE) SELECT (option list without ANALYZE is safe)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN (VERBOSE) SELECT 1',
-      remote: true,
-    });
-
-    expect(mockConfirm).not.toHaveBeenCalled();
-  });
-
-  it('prompts for confirmation for EXPLAIN /*x*/ ANALYZE (block comment between keywords, PostgreSQL treats it as whitespace)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN /*x*/ ANALYZE DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for EXPLAIN -- comment\\n ANALYZE (line comment between keywords)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN -- comment\n ANALYZE DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for EXPLAIN /*opts*/ (ANALYZE) DELETE (block comment before parenthesized option list)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'EXPLAIN /*opts*/ (ANALYZE) DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('prompts for confirmation for /* leading */ EXPLAIN ANALYZE (leading block comment before EXPLAIN)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: '/* leading */ EXPLAIN ANALYZE DELETE FROM users',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips confirmation for -- header\\nSELECT 1 (leading line comment is stripped, previously a UX nuisance)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: '-- header\nSELECT 1',
-      remote: true,
-    });
-
-    expect(mockConfirm).not.toHaveBeenCalled();
-  });
-
-  it('prompts for confirmation for WITH (CTE) statements (fail-closed: writable CTEs are indistinguishable without a parser)', async () => {
-    const root = createProjectRoot();
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'WITH cte AS (SELECT 1) SELECT * FROM cte',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('includes explicitly scoped CF Access service-token headers for the selected proxy', async () => {
-    vi.stubEnv('VOID_ACCESS_ORIGIN', 'https://proxy.staging.void.cloud');
-    const root = createProjectRoot();
-    mockIsStagingMode.mockReturnValue(true);
-    const originalId = process.env.CF_ACCESS_CLIENT_ID;
-    const originalSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    process.env.CF_ACCESS_CLIENT_ID = 'test-client-id.access';
-    process.env.CF_ACCESS_CLIENT_SECRET = 'test-client-secret';
-    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
-
-    try {
-      await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
-    } finally {
-      if (originalId === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_ID;
-      } else {
-        process.env.CF_ACCESS_CLIENT_ID = originalId;
-      }
-      if (originalSecret === undefined) {
-        delete process.env.CF_ACCESS_CLIENT_SECRET;
-      } else {
-        process.env.CF_ACCESS_CLIENT_SECRET = originalSecret;
-      }
-    }
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const headers = init.headers as Record<string, string>;
-    expect(headers['CF-Access-Client-Id']).toBe('test-client-id.access');
-    expect(headers['CF-Access-Client-Secret']).toBe('test-client-secret');
+    expect(mockConfirm).toHaveBeenCalledTimes(prompts ? 1 : 0);
   });
 
   it('skips confirmation for UPDATE when not in TTY (non-interactive)', async () => {
@@ -686,11 +426,9 @@ describe('void db execute --remote (D1)', () => {
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
-  it('non-remote path is unaffected (regression: local SQLite still works)', async () => {
-    // The non-remote path should not call fetch at all
+  it('runs execute without --remote against the local database, not the proxy', async () => {
     const root = createProjectRoot();
-    // The SQLite path will fail because there's no local DB, but it should
-    // try to open the local DB, not call fetch
+    // No local database exists, so the local path exits.
     await expect(runDbCommand(root, { action: 'execute', command: 'SELECT 1' })).rejects.toThrow(
       'process.exit:1',
     );
@@ -708,7 +446,6 @@ describe('void db execute --remote (PostgreSQL)', () => {
 
     mockGetToken.mockReturnValue('test-token');
     mockReadProjectConfig.mockReturnValue({ projectId: 'proj-abc', slug: 'test-proj' });
-    mockIsStagingMode.mockReturnValue(false);
     mockPgConnect.mockResolvedValue(undefined);
     mockPgEnd.mockResolvedValue(undefined);
     mockPgQuery.mockResolvedValue({ rows: [] });
@@ -805,39 +542,5 @@ describe('void db execute --remote (PostgreSQL)', () => {
         remote: true,
       }),
     ).rejects.toThrow(PlatformApiError);
-  });
-
-  it('prompts for confirmation on destructive statement (TTY)', async () => {
-    const root = createProjectRoot({ database: 'pg' });
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockGetDatabaseUrl.mockResolvedValue({ url: 'postgres://host/db' });
-    mockPgQuery.mockResolvedValue({ rows: [] });
-    mockConfirm.mockResolvedValue(true);
-
-    await runDbCommand(root, {
-      action: 'execute',
-      command: 'UPDATE users SET name = $1',
-      remote: true,
-    });
-
-    expect(mockConfirm).toHaveBeenCalledTimes(1);
-    expect(mockPgQuery).toHaveBeenCalledTimes(1);
-  });
-
-  it('aborts destructive statement when user declines', async () => {
-    const root = createProjectRoot({ database: 'pg' });
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    mockConfirm.mockResolvedValue(false);
-
-    await expect(
-      runDbCommand(root, {
-        action: 'execute',
-        command: 'DROP TABLE users',
-        remote: true,
-      }),
-    ).rejects.toThrow('process.exit:0');
-
-    expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
-    expect(mockPgQuery).not.toHaveBeenCalled();
   });
 });

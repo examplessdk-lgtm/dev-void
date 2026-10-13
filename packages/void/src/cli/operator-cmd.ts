@@ -346,7 +346,7 @@ async function runAuth(origin: string, args: OperatorArgs): Promise<void> {
           const { runPlatformLogin } = await import('./auth.ts');
           const method = await selectPlatformLoginMethod(
             await discoverPlatform(origin),
-            args.providerExplicit ? args.provider : undefined,
+            args.provider,
           );
           return runPlatformLogin(origin, method.id, (url) =>
             process.stderr.write(`Sign in at ${url}\n`),

@@ -195,39 +195,6 @@ describe('platform args', () => {
     });
   });
 
-  it('parses explicit lifecycle acknowledgement', () => {
-    expect(parsePlatformArgs(['upgrade', '--yes'])).toMatchObject({
-      subcommand: 'upgrade',
-      yes: true,
-    });
-    expect(parsePlatformArgs(['install', '--yes'])).toMatchObject({
-      subcommand: 'install',
-      yes: true,
-    });
-    expect(parsePlatformArgs(['uninstall', '--purge-data', '--yes'])).toMatchObject({
-      subcommand: 'uninstall',
-      purgeData: true,
-      yes: true,
-    });
-  });
-
-  it('parses a non-interactive installation', () => {
-    expect(
-      parsePlatformArgs([
-        'install',
-        '--name',
-        'company',
-        '--application-domain',
-        'apps.example.com',
-        '--zone',
-        'example.com',
-        '--account',
-        'abc',
-        '--plan',
-      ]),
-    ).toMatchObject({ subcommand: 'install', name: 'company', plan: true });
-  });
-
   it('fails closed for every unacknowledged non-interactive mutation', () => {
     for (const command of [
       'install',

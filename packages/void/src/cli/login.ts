@@ -5,13 +5,11 @@ import {
   getApiUrl,
   getTokenSource,
   removeToken,
-  runLogin,
   runPlatformLogin,
   savePlatformToken,
-  saveToken,
 } from './auth.ts';
 import { isExpiredTokenError, PlatformClient } from './client.ts';
-import { printSuccess, createSpinner, pc } from './output.ts';
+import { printSuccess, createSpinner, formatUrl, pc } from './output.ts';
 
 export type LoginPlatform = {
   apiUrl: string;
@@ -20,19 +18,19 @@ export type LoginPlatform = {
 };
 
 export async function selectPlatformLoginMethod(
-  platform?: LoginPlatform,
+  platform: LoginPlatform,
   requestedId?: string,
 ): Promise<{ id: string; label: string }> {
-  const providers = platform?.authenticationProviders ?? ['github', 'google'];
+  const providers = platform.authenticationProviders;
   const methods =
-    platform?.authentication?.methods ??
+    platform.authentication?.methods ??
     providers.map((id) => ({
       id,
       label: id === 'github' ? 'GitHub' : id === 'google' ? 'Google' : id,
     }));
   if (providers.length === 0) {
     throw new Error(
-      platform?.authentication?.setupPending
+      platform.authentication?.setupPending
         ? 'auth: The platform administrator must finish initial setup.'
         : 'auth: This platform has no login providers.',
     );
@@ -66,11 +64,9 @@ export async function promptForLoginToken(
   root: string = process.cwd(),
   platform?: LoginPlatform,
 ): Promise<string> {
+  const apiUrl = platform?.apiUrl ?? getApiUrl(root);
   const discovery =
-    platform ??
-    (await import('./platform-cmd.ts').then(({ discoverPlatform }) =>
-      discoverPlatform(getApiUrl(root)),
-    ));
+    platform ?? (await (await import('./platform-cmd.ts')).discoverPlatform(apiUrl));
   const { id: provider, label: providerName } = await selectPlatformLoginMethod(discovery);
   const s = createSpinner();
   s.start(`Opening browser for ${providerName} login...`);
@@ -78,17 +74,11 @@ export async function promptForLoginToken(
   try {
     const onUrl = (url: string) => {
       s.message(
-        `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.blue(url)}`,
+        `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.blue(formatUrl(url))}`,
       );
     };
-    const token = platform
-      ? await runPlatformLogin(platform.apiUrl, provider, onUrl)
-      : await runLogin(root, provider, onUrl);
-    if (platform) {
-      savePlatformToken(token, platform.apiUrl);
-    } else {
-      saveToken(token, root);
-    }
+    const token = await runPlatformLogin(apiUrl, provider, onUrl);
+    savePlatformToken(token, apiUrl);
     s.stop('Logged in!');
     return token;
   } catch (err) {

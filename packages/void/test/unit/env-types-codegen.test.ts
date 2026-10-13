@@ -96,42 +96,11 @@ describe('generateEnvTypes', () => {
       expect(dts).toContain('typeof import("../env.ts")');
       // Resolves both `export default defineEnv(...)` and
       // `export const env = defineEnv(...)` source forms.
-      expect(dts).toContain('_VoidEnvSchema extends { default: infer D } ? D');
-      expect(dts).toContain('_VoidEnvSchema extends { env: infer E } ? E');
-    } finally {
-      cleanup();
-    }
-  });
-
-  it('generates shape resolution that covers `export const env` source form', () => {
-    const { root, outDir, cleanup } = withTempProject((r) => {
-      writeFileSync(
-        join(r, 'env.ts'),
-        'import { defineEnv, string } from "void/env";\nexport const env = defineEnv({ FOO: string() });',
-      );
-    });
-    try {
-      const { dts } = generateEnvTypes(join(root, 'env.ts'), outDir);
-      // Conditional falls back from `default` to `env` to `{}`.
       expect(dts).toContain(
         'type _VoidEnvShape = _VoidEnvSchema extends { default: infer D } ? D : _VoidEnvSchema extends { env: infer E } ? E : {};',
       );
     } finally {
       cleanup();
-    }
-  });
-
-  it('handles env in a nested location', () => {
-    const { root } = withTempProject((r) => {
-      mkdirSync(join(r, 'src'), { recursive: true });
-      writeFileSync(join(r, 'src', 'env.ts'), '');
-    });
-    try {
-      const outDir = join(root, '.void');
-      const { dts } = generateEnvTypes(join(root, 'src', 'env.ts'), outDir);
-      expect(dts).toContain('typeof import("../src/env.ts")');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -75,8 +75,10 @@ describe('ProxyR2Bucket', () => {
 
       expect(obj).not.toBeNull();
       expect(obj!.key).toBe('file.txt');
+      expect(obj!.size).toBe(body.length);
       const text = await obj!.text();
       expect(text).toBe('file contents here');
+      expect(fetchMock).toHaveBeenCalledWith('https://proxy.void.cloud/r2/get', expect.anything());
     });
 
     it('returns null for missing key', async () => {
@@ -192,6 +194,7 @@ describe('ProxyR2Bucket', () => {
       expect(body.key).toBe('file.txt');
       expect(body.value).toBe('hello world');
       expect(body.binding).toBe('STORAGE');
+      expect(call[0]).toBe('https://proxy.void.cloud/r2/put');
     });
 
     it('sends ArrayBuffer value as base64', async () => {
@@ -230,6 +233,7 @@ describe('ProxyR2Bucket', () => {
       const call = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
       const body = JSON.parse(String(call[1].body));
       expect(body.key).toBe('file.txt');
+      expect(call[0]).toBe('https://proxy.void.cloud/r2/delete');
     });
 
     it('deletes multiple keys', async () => {
@@ -262,6 +266,10 @@ describe('ProxyR2Bucket', () => {
       expect(result.objects[0].key).toBe('file1.txt');
       expect(result.objects[1].key).toBe('file2.txt');
       expect(result.truncated).toBe(false);
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        'https://proxy.void.cloud/r2/list',
+        expect.anything(),
+      );
     });
 
     it('returns cursor when truncated', async () => {

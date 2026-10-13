@@ -6,6 +6,8 @@ User-facing CLI output and documentation describe Cloudflare operations through 
 
 Completed CLI actions use `printSuccess` from `src/cli/output.ts`: a blank line, a green checkmark, and green text. Use `log.step` for intermediate work. Keep listings, no-op notices, cancellations, warnings, and checkpointed or pending operations out of the success renderer. Preserve JSON, token, and SQL stdout contracts.
 
+Human-facing URLs use `formatUrl` or `formatLink` from `src/cli/output.ts` for terminal hyperlinks with readable plain-text fallbacks. Use the shared `note` renderer for URL box titles; it pads the URL with spaces and adds the hyperlink after layout. Keep machine-readable output and copyable commands free of terminal links.
+
 ## Architecture
 
 `application-analysis.ts` owns source feature enablement and handler inventories;
@@ -98,6 +100,7 @@ generated entries must preserve the module-boundary rules below.
 
 - **Installed runtime module identity**: Keep `void` server runtime subpaths out of Vite dependency optimization. Generated entries import runtime modules by resolved file path; prebundling a bare `void/kv` creates a second `envContext` and loses request bindings. Workspace symlinks can hide this defect. The shared runtime-optimizer plugin excludes the package in server environments on every target while preserving client optimization; packed-consumer checks exercise actual npm/pnpm installations.
 - **pnpm scaffold build policy**: Keep `create-void` and `void init` aligned with the repository: `better-sqlite3: false` uses version 13's bundled Node-API binaries; `esbuild`, `sharp`, and `workerd` have approved builds. Do not require an unnecessary node-gyp rebuild in fresh applications.
+- **Scaffold dependency installation**: Vite+ projects install through local/global `vp`, bootstrapping with `npx` when neither is available. Preserve existing package-manager pins and lockfiles; fresh Vite+ projects select pnpm through the build-policy YAML without adding a version pin. Plain Vite projects use their selected package manager. Do not run a global package manager directly for Vite+ installs.
 - **Prerender discovery and environment validation**: Only `POST /__void/prerender-paths` bypasses whole-schema boot validation, because path discovery runs without remote production secrets. Discovery answers only when the build-time runner marks the request (the `__VOID_PRERENDER` Miniflare binding on Cloudflare, the Hono env argument on Node/Bun/Deno), never on a deployed app or dev server. Keep validation on readiness, application requests, page rendering, and event handlers.
 - **Pre-resolved paths in codegen**: Generated virtual module code uses absolute paths for `hono` and `void/response` (resolved via `import.meta.resolve()`). Virtual modules have no filesystem location, so bare specifiers can't resolve from them.
 - **CF plugin API**: Worker config (`main`, `d1_databases`, `kv_namespaces`, `r2_buckets`) goes inside the `config` option of `cloudflare()`, NOT as top-level properties. `persistState` takes `{ path: string }`, not a raw string. The `config` option uses a **function form** `(resolved: WorkerConfig) => Partial<WorkerConfig>` so that bindings from the user's `wrangler.json` (if present) take precedence over inferred placeholder bindings.

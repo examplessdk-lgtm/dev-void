@@ -4,12 +4,14 @@ import { type Context } from 'hono';
 import { findR2Assets, persistedR2AssetSizes } from '../asset-inventory.ts';
 import {
   computeAssetHash,
+  computeAssetStreamHashes,
   deleteWorkerBundle,
   scanProjectAssetOrphanCandidates,
   deleteUnreferencedAssets,
   type AssetEntry,
   type AssetManifestEntry,
 } from '../assets.ts';
+import { activeOAuthApproval } from '../auth/oauth.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import {
   restoreCronScheduler,
@@ -234,6 +236,16 @@ export async function runDeploymentPipeline(input: {
         const currentAccess = await requireActiveDeployAccess(tx, projectId, actor.id);
         if (execution) {
           await assertDeploymentExecutionAuthority(tx, execution.operation);
+        } else if (context.get('oauthApproval')) {
+          const { approval, user } = await activeOAuthApproval(
+            tx,
+            context.get('oauthApproval')!,
+            context.get('companyIdentity'),
+            true,
+          );
+          if (approval.data.projectId !== projectId || user.id !== actor.id) {
+            throw new Error('Deployment approval is no longer active');
+          }
         }
         await assertDeploymentNotCanceled(tx, deploymentId);
         if (cutoverProtected) {
@@ -624,6 +636,34 @@ export async function runDeploymentPipeline(input: {
           step: currentStep,
         });
         return;
+      }
+
+      if (context.get('oauthApproval')) {
+        // An app's declared digest is a commitment, not proof of the uploaded
+        // bytes. Verify BLAKE3 rather than trusting MD5 or object metadata.
+        // Its signed PUTs are conditional, so it cannot change verified bytes.
+        for (const hash of declaredHashes) {
+          const paths = Object.entries(incomingAssetManifest)
+            .filter(([, entry]) => entry.hash === hash)
+            .map(([path]) => path);
+          const object = await context.env.STATIC_ASSETS_R2.get(`assets/${projectId}/${hash}`);
+          if (!object) {
+            throw new Error('Approved asset is missing.');
+          }
+          const size = declaredSizeByHash.get(hash);
+          if (size == null) {
+            throw new Error('Approved asset has conflicting sizes.');
+          }
+          const verified = await computeAssetStreamHashes(object.body, paths, size);
+          if (verified.size !== size || verified.hashes.some((value) => value !== hash)) {
+            emit({
+              event: 'error',
+              message: 'Uploaded asset differs from the artifact approved on Void.',
+              step: currentStep,
+            });
+            return;
+          }
+        }
       }
 
       await ensureProjectIngress(context.env, project);

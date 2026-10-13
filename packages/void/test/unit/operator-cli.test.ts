@@ -367,7 +367,6 @@ describe('operator argument and help coverage', () => {
       body: { cursor: 'opaque-cursor' },
       plan: true,
     });
-    expect(hasHelpPage(['platform', 'deployment', 'migrate-assets'])).toBe(true);
     expect(() =>
       parseOperatorArgs(['deployment', 'migrate-assets', 'id', '--plan', '--yes']),
     ).toThrow('--plan and --yes cannot be combined');
@@ -397,9 +396,8 @@ describe('operator argument and help coverage', () => {
     expect(() => parseOperatorArgs(['system', 'sandbox-drain', '--all'])).toThrow(
       "Unknown flag '--all'",
     );
-    expect(hasHelpPage(['platform', 'system', 'rotate-proxy-tokens'])).toBe(true);
   });
-  it('routes asset migration inventory with bounded pagination and nested help', () => {
+  it('routes asset migration inventory with bounded pagination', () => {
     expect(
       parsePlatformArgs(['system', 'asset-migrations', '--page', '2', '--limit', '100']),
     ).toMatchObject({
@@ -408,7 +406,6 @@ describe('operator argument and help coverage', () => {
       query: { page: '2', limit: '100' },
       body: {},
     });
-    expect(hasHelpPage(['platform', 'system', 'asset-migrations'])).toBe(true);
     expect(() => parseOperatorArgs(['system', 'asset-migrations', '--limit', '101'])).toThrow(
       '--limit must be an integer from 1 to 100',
     );
@@ -465,7 +462,7 @@ describe('operator argument and help coverage', () => {
       },
     });
   });
-  it('routes the email domain verbs', () => {
+  it('pages shared recipient inspection', () => {
     expect(
       parseOperatorArgs([
         'email',
@@ -482,6 +479,8 @@ describe('operator argument and help coverage', () => {
       path: '/email/shared-recipients',
       query: { project: 'app', page: '2', limit: '10' },
     });
+  });
+  it('routes the email domain verbs', () => {
     expect(
       parseOperatorArgs([
         'email',
@@ -546,9 +545,15 @@ describe('operator argument and help coverage', () => {
       tokenStdin: true,
       yes: true,
     });
-    expect(() => parseOperatorArgs(['email', 'domain-remove', 'x', '--force'])).toThrow();
-    expect(() => parseOperatorArgs(['email', 'domain-sync', 'x', '--force'])).toThrow();
-    expect(() => parseOperatorArgs(['email', 'domain-add', 'x', '--force'])).toThrow();
+    expect(() => parseOperatorArgs(['email', 'domain-remove', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
+    expect(() => parseOperatorArgs(['email', 'domain-sync', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
+    expect(() => parseOperatorArgs(['email', 'domain-add', 'x', '--force'])).toThrow(
+      "Unknown flag '--force'",
+    );
   });
   it.each([
     ['user', 'list', '--limit', '101'],

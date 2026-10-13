@@ -25,6 +25,17 @@ export function cloudflareCommandDiagnostic(result: CloudflareCommandResult): st
       );
     if (box) {
       message = box[0].trim();
+    } else {
+      const lines = stdout.split('\n');
+      const abort = lines.find((line) =>
+        line.startsWith('■  Aborting the upload operation because of conflicts.'),
+      );
+      if (abort) {
+        const reason = 'You are about to upload a Worker that was last updated via the script API.';
+        message = [lines.includes(`▲  ${reason}`) ? reason : '', abort.slice('■  '.length)]
+          .filter(Boolean)
+          .join('\n');
+      }
     }
   }
   // Upload progress and bindings are printed on stdout. Never echo that whole stream

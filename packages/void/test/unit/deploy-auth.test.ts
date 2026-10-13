@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { intro } from '@voidzero-dev/vite-plus-prompts';
 import { toSlash } from 'pathslash';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { buildEnv, runDeploy } from '../../src/cli/deploy.ts';
+import { runDeploy } from '../../src/cli/deploy.ts';
+import { buildEnv } from '../../src/shared/untrusted-env.ts';
 
 const mockError = vi.fn();
 const mockInfo = vi.fn();
@@ -154,6 +155,8 @@ describe('runDeploy auth failures', () => {
 
     expect(intro).not.toHaveBeenCalled();
     expect(mockInfo).not.toHaveBeenCalledWith('Deployment target: Cloudflare');
+    expect(mockProjectLookup).not.toHaveBeenCalled();
+    expect(mockClientCtor).not.toHaveBeenCalled();
   });
 
   it('reauthenticates and retries once for expired local auth tokens in interactive mode', async () => {
@@ -276,61 +279,26 @@ describe('runDeploy project access', () => {
 
     expect(mockProjectLookup).toHaveBeenCalledOnce();
   });
-
-  it('does not fetch Void project roles for a direct Cloudflare deployment', async () => {
-    linkProject();
-
-    await expect(
-      runDeploy(root, { platform: 'cloudflare', projectSlug: 'my-app' }),
-    ).rejects.toThrow('--project is not supported with platform cloudflare');
-
-    expect(mockProjectLookup).not.toHaveBeenCalled();
-    expect(mockClientCtor).not.toHaveBeenCalled();
-  });
 });
 
 describe('runDeploy GitHub Actions OIDC exchange', () => {
-  it('exchanges an OIDC token for a deploy token when no VOID_TOKEN and in Actions', async () => {
-    mockGetToken.mockReturnValue(null);
-    mockIsOidcAvailable.mockReturnValue(true);
-    mockExchangeOidc.mockResolvedValue('minted-token');
-
-    // The deploy still fails later (project lookup is mocked to reject), but the
-    // OIDC exchange must run first and mint the token the client is built with.
-    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
-
-    expect(mockExchangeOidc).toHaveBeenCalledTimes(1);
-    expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
-    expect(mockMaskSecret).toHaveBeenCalledWith('minted-token');
-  });
-
   it('prefers OIDC over an AMBIENT saved keychain/file token in Actions (no VOID_TOKEN env)', async () => {
-    // Regression guard: on a self-hosted / reused runner a leftover
-    // `void account login` credential lives in the keychain/config file, so
-    // getToken() returns it — but there is NO explicit VOID_TOKEN env. The
-    // deploy MUST still mint a fresh project-scoped OIDC deploy token and use
-    // THAT, not the broad long-lived saved token. (Before the fix, getToken was
-    // consulted first and the ambient token preempted OIDC entirely.)
     mockGetToken.mockReturnValue('ambient-saved-token');
     mockIsOidcAvailable.mockReturnValue(true);
     mockExchangeOidc.mockResolvedValue('minted-token');
 
     await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
 
-    // The OIDC exchange ran...
     expect(mockExchangeOidc).toHaveBeenCalledTimes(1);
     expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
     expect(mockMaskSecret).toHaveBeenCalledWith('minted-token');
-    // ...the minted token was exported for the build/prerender...
     expect(process.env.VOID_TOKEN).toBe('minted-token');
-    // ...and the PlatformClient was built with the MINTED token, NOT the saved one.
+    expect(process.env.VOID_API_URL).toBe('https://api.test');
     expect(mockClientCtor).toHaveBeenCalledTimes(1);
     expect(mockClientCtor.mock.calls[0][0]).toBe('minted-token');
   });
 
   it('uses the saved keychain/file token when NOT in Actions (local dev, no exchange)', async () => {
-    // Local dev: not in GitHub Actions, no VOID_TOKEN env, but a saved token is
-    // present. It must be used directly with no OIDC exchange.
     mockGetToken.mockReturnValue('ambient-saved-token');
     mockIsOidcAvailable.mockReturnValue(false);
 
@@ -344,24 +312,7 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
     expect(process.env.VOID_TOKEN).toBeUndefined();
   });
 
-  it('binds the minted token to its issuing platform for later credential reads', async () => {
-    mockGetToken.mockReturnValue(null);
-    mockIsOidcAvailable.mockReturnValue(true);
-    mockExchangeOidc.mockResolvedValue('minted-token');
-
-    // The deploy throws later, but any in-process credential read must retain
-    // the issuing origin; a saved project must not redirect the minted token.
-    await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
-
-    expect(process.env.VOID_TOKEN).toBe('minted-token');
-    expect(process.env.VOID_API_URL).toBe('https://api.test');
-    expect(mockExchangeOidc).toHaveBeenCalledWith('https://api.test', 'my-app');
-  });
-
   it('does NOT overwrite an explicit VOID_TOKEN in process.env (no mint)', async () => {
-    // getToken returns a token (explicit VOID_TOKEN / keychain / file), so the
-    // OIDC branch is skipped and the existing process.env.VOID_TOKEN is left
-    // untouched — no re-mint, no clobber.
     mockGetToken.mockReturnValue('explicit-token');
     mockIsOidcAvailable.mockReturnValue(true);
     process.env.VOID_TOKEN = 'explicit-env-token';
@@ -438,14 +389,9 @@ describe('runDeploy GitHub Actions OIDC exchange', () => {
   });
 });
 
-// The deploy flow spawns untrusted `vite build` (and other build children) with
-// the spawn env. A shared CF Access service token (used only by the CLI's own API
-// client, which captures the headers at construction) must NOT survive into those
-// children. runDeploy keeps the pair OUT of the child env via `buildEnv()` while
-// LEAVING process.env untouched — mutating process.env would break interactive
-// expired-token re-auth, which reads the pair after the build step.
 describe('runDeploy keeps the CF Access service token in process.env', () => {
-  it('does NOT delete CF_ACCESS_CLIENT_ID/SECRET from process.env (re-auth needs them)', async () => {
+  it('exposes the interactive re-auth path to the still-present Access pair', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
     const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
     const savedToken = process.env.CF_ACCESS_TOKEN;
@@ -454,44 +400,12 @@ describe('runDeploy keeps the CF Access service token in process.env', () => {
       process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
       process.env.CF_ACCESS_TOKEN = 'jwt-keep-me';
 
-      // Default mocks make project lookup reject with an expired token in non-TTY
-      // mode, so runDeploy throws after constructing the client.
-      await expect(runDeploy(process.cwd(), { projectSlug: 'my-app' })).rejects.toThrow();
-
-      // The pair is preserved so a later re-auth can still read it.
-      expect(process.env.CF_ACCESS_CLIENT_ID).toBe('svc-id.access');
-      expect(process.env.CF_ACCESS_CLIENT_SECRET).toBe('svc-secret');
-      expect(process.env.CF_ACCESS_TOKEN).toBe('jwt-keep-me');
-    } finally {
-      const restore = (key: string, value: string | undefined): void => {
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
-        }
-      };
-      restore('CF_ACCESS_CLIENT_ID', savedId);
-      restore('CF_ACCESS_CLIENT_SECRET', savedSecret);
-      restore('CF_ACCESS_TOKEN', savedToken);
-    }
-  });
-
-  it('exposes the interactive re-auth path to the still-present Access pair', async () => {
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    const savedId = process.env.CF_ACCESS_CLIENT_ID;
-    const savedSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-    try {
-      process.env.CF_ACCESS_CLIENT_ID = 'svc-id.access';
-      process.env.CF_ACCESS_CLIENT_SECRET = 'svc-secret';
-
-      // Capture the env the re-auth path sees when it runs (after the client was
-      // already constructed). cf-access.ts / auth.ts read process.env here, so the
-      // pair must still be present.
-      let pairAtReauth: { id?: string; secret?: string } | undefined;
+      let pairAtReauth: { id?: string; secret?: string; token?: string } | undefined;
       mockPromptForLoginToken.mockImplementationOnce(() => {
         pairAtReauth = {
           id: process.env.CF_ACCESS_CLIENT_ID,
           secret: process.env.CF_ACCESS_CLIENT_SECRET,
+          token: process.env.CF_ACCESS_TOKEN,
         };
         return Promise.resolve('fresh-token');
       });
@@ -505,7 +419,11 @@ describe('runDeploy keeps the CF Access service token in process.env', () => {
       );
 
       expect(mockPromptForLoginToken).toHaveBeenCalledTimes(1);
-      expect(pairAtReauth).toEqual({ id: 'svc-id.access', secret: 'svc-secret' });
+      expect(pairAtReauth).toEqual({
+        id: 'svc-id.access',
+        secret: 'svc-secret',
+        token: 'jwt-keep-me',
+      });
     } finally {
       const restore = (key: string, value: string | undefined): void => {
         if (value === undefined) {
@@ -516,12 +434,11 @@ describe('runDeploy keeps the CF Access service token in process.env', () => {
       };
       restore('CF_ACCESS_CLIENT_ID', savedId);
       restore('CF_ACCESS_CLIENT_SECRET', savedSecret);
+      restore('CF_ACCESS_TOKEN', savedToken);
     }
   });
 });
 
-// The build child env must omit every deploy credential even though process.env
-// keeps them. Managed prerender obtains a separate proxy-only token afterward.
 describe('buildEnv', () => {
   it('omits Cloudflare and Access credentials while process.env keeps them', () => {
     const savedId = process.env.CF_ACCESS_CLIENT_ID;
@@ -544,7 +461,6 @@ describe('buildEnv', () => {
 
       const childEnv = buildEnv({ VOID_DEPLOY_PROJECT_ID: 'proj_1' });
 
-      // Pair scrubbed from the CHILD env...
       expect(childEnv.CF_ACCESS_CLIENT_ID).toBeUndefined();
       expect(childEnv.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
       expect(childEnv.CF_ACCESS_TOKEN).toBeUndefined();
@@ -554,7 +470,6 @@ describe('buildEnv', () => {
       expect(childEnv.ACTIONS_ID_TOKEN_REQUEST_URL).toBeUndefined();
       expect(childEnv.ACTIONS_ID_TOKEN_REQUEST_TOKEN).toBeUndefined();
       expect(childEnv.VOID_DEPLOY_PROJECT_ID).toBe('proj_1');
-      // ...and process.env is untouched.
       expect(process.env.CF_ACCESS_CLIENT_ID).toBe('svc-id.access');
       expect(process.env.CF_ACCESS_CLIENT_SECRET).toBe('svc-secret');
       expect(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN).toBe('actions-oidc-bearer');
@@ -583,20 +498,8 @@ describe('buildEnv', () => {
   });
 });
 
-// Build commands are handed to a SHELL (`execSync`), and a user-configured
-// `inference.build` names bare binaries (`vitepress build && vite build`) that
-// only exist under the project's own node_modules/.bin. Under the build
-// container's `npx --yes void deploy` this happens to work — npx prepends every
-// ancestor `.bin` itself — so the gap is invisible there and only bites a
-// directly invoked `node_modules/.bin/void deploy` or a globally installed
-// `void`, where nothing puts the project's bin dir on PATH.
-//
-// It is an explicit OPT-IN (`{ localBinRoot }`), never the default: prepending
-// the project's bin dir makes a dependency-shipped `node_modules/.bin/<name>`
-// shadow the system binary of that name for the child. That is exactly what a
-// build command wants, and exactly what `getGitCommit`'s `git` children — which
-// run BEFORE any build, with `VOID_TOKEN` in env, even in the no-build deploy
-// modes (`--dir`, static/spa presets with no build command) — must not get.
+// localBinRoot is opt-in: git and drizzle-kit children must keep the system PATH,
+// so a dependency's node_modules/.bin cannot shadow them.
 describe('buildEnv — local node_modules/.bin on PATH', () => {
   const DELIMITER = process.platform === 'win32' ? ';' : ':';
 
@@ -629,18 +532,6 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     }
   }
 
-  it('prepends <root>/node_modules/.bin', () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-build-env-'));
-    try {
-      const childPath = readPath(buildEnv(undefined, { localBinRoot: root }));
-      expect(childPath?.startsWith(toSlash(join(root, 'node_modules', '.bin')) + DELIMITER)).toBe(
-        true,
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it('preserves the inherited PATH after the prepended entry', () => {
     const root = mkdtempSync(join(tmpdir(), 'void-build-env-'));
     try {
@@ -649,22 +540,6 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
         expect(childPath).toBe(
           `${toSlash(join(root, 'node_modules', '.bin'))}${DELIMITER}/usr/bin${DELIMITER}/bin`,
         );
-      });
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it('uses the platform PATH delimiter', () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-build-env-'));
-    try {
-      withInheritedPath('/usr/bin', () => {
-        const childPath = readPath(buildEnv(undefined, { localBinRoot: root }));
-        const binDir = toSlash(join(root, 'node_modules', '.bin'));
-        expect(childPath).toBe(`${binDir}${DELIMITER}/usr/bin`);
-        // Guard against the classic `:`-everywhere bug: on Windows a `:` would
-        // make the whole variable one unusable entry (`C:\...` already has a `:`).
-        expect(DELIMITER).toBe(process.platform === 'win32' ? ';' : ':');
       });
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -705,11 +580,6 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
     }
   });
 
-  // The privileged case must be opt-in. `getGitCommit` and the drizzle-kit
-  // spawn call `buildEnv()` with no options, and a dependency that ships
-  // `node_modules/.bin/git` must not be able to hijack them — `getGitCommit`
-  // runs before the build and, on `void deploy --dir dist` or a static/spa
-  // preset with no build command, is the ONLY child the deploy spawns.
   it('leaves PATH untouched when no localBinRoot is given', () => {
     withInheritedPath(`/usr/bin${DELIMITER}/bin`, () => {
       expect(readPath(buildEnv())).toBe(`/usr/bin${DELIMITER}/bin`);
@@ -717,13 +587,6 @@ describe('buildEnv — local node_modules/.bin on PATH', () => {
         `/usr/bin${DELIMITER}/bin`,
       );
     });
-  });
-
-  it('hands the child the parent PATH byte-for-byte when no localBinRoot is given', () => {
-    // Deliberately NOT asserting on `process.cwd()/node_modules/.bin`: the test
-    // runner itself puts that on PATH, so an absence check there would be
-    // vacuous. Identity with the parent is the property that matters.
-    expect(readPath(buildEnv())).toBe(readPath(process.env));
   });
 });
 

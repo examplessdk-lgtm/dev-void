@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -6,7 +5,7 @@ import { platformAuthenticationRecoveryMessage } from '@void/platform';
 import { confirm, isCancel } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
 import { resolveOperatorOrigin } from './operator-auth.ts';
-import { printSuccess } from './output.ts';
+import { printSuccess, formatUrl } from './output.ts';
 import {
   commitAuthenticationRecovery,
   encryptCredential,
@@ -244,9 +243,9 @@ export async function runPlatformAuthRecovery(args: PlatformConfigArgs): Promise
         const url = new URL('/auth/test', manifest.endpoints.apiUrl);
         url.searchParams.set('id', testId);
         url.searchParams.set('proof', proof);
-        console.log(`Complete the recovery login in your browser: ${url.href}`);
+        console.log(`Complete the recovery login in your browser: ${formatUrl(url.href)}`);
         if (process.stdin.isTTY) {
-          openBrowser(url.href, execFile);
+          openBrowser(url.href);
         }
         let tested: { issuer: string; subject: string; login: string } | undefined;
         while (Date.now() < Date.parse(expiresAt)) {

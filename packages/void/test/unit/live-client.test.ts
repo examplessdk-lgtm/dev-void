@@ -1,39 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
-import { connectLiveStream } from '../../src/runtime/live-client.ts';
-
-class MockEventSource {
-  static instances: Array<MockEventSource> = [];
-
-  readonly listeners = new Map<string, Set<(event: Event) => void>>();
-  closed = false;
-
-  constructor(
-    readonly url: string,
-    readonly options?: { withCredentials?: boolean },
-  ) {
-    MockEventSource.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: (event: Event) => void): void {
-    const listeners = this.listeners.get(type) ?? new Set();
-    listeners.add(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  removeEventListener(type: string, listener: (event: Event) => void): void {
-    this.listeners.get(type)?.delete(listener);
-  }
-
-  emit(type: string, event: Event): void {
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener(event);
-    }
-  }
-
-  close(): void {
-    this.closed = true;
-  }
-}
+import { connectLiveStream, type ConnectLiveStreamOptions } from '../../src/runtime/live-client.ts';
+import { MockEventSource } from '../helpers/mock-event-source.ts';
 
 const originalLocation = (globalThis as { location?: unknown }).location;
 
@@ -57,11 +24,7 @@ describe('connectLiveStream', () => {
         results: [{ ok: true, kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
       }),
     );
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-      withCredentials: true,
-    });
+    const live = openLive(fetchMock, { withCredentials: true });
 
     const pending = live.subscribe({ id: 'post-card', topic: 'post:12' });
     await Promise.resolve();
@@ -82,17 +45,8 @@ describe('connectLiveStream', () => {
   });
 
   it('rejects a subscribe waiting for the initial open when closed', async () => {
-    const fetchMock = vi.fn(async () =>
-      Response.json({
-        accepted: true,
-        connectionId: 'connection',
-        results: [{ ok: true, kind: 'subscribe', id: 'post-card', topic: 'post:12' }],
-      }),
-    );
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ackAll(init));
+    const live = openLive(fetchMock);
 
     const pending = live.subscribe({ id: 'post-card', topic: 'post:12' });
     await Promise.resolve();
@@ -106,37 +60,17 @@ describe('connectLiveStream', () => {
   });
 
   it('routes message envelopes by subscription id and unsubscribes individually', async () => {
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
-    });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ackAll(init));
     const handler = vi.fn();
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
     const unsubscribe = live.subscribe({ id: 'comments', topic: 'comment:2323', onEvent: handler });
-    await Promise.resolve();
-    const source = MockEventSource.instances[0]!;
-    source.emit('open', new Event('open'));
+    const source = await emitOpen();
     await unsubscribe;
 
-    source.emit('message', {
-      data: JSON.stringify({
-        subscriptionId: 'comments',
-        topic: 'comment:2323',
-        data: { ok: true },
-      }),
-    } as MessageEvent);
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'comments', topic: 'comment:2323', data: { ok: true } }),
+    );
     expect(handler).toHaveBeenCalledWith({
       subscriptionId: 'comments',
       topic: 'comment:2323',
@@ -156,29 +90,21 @@ describe('connectLiveStream', () => {
 
   it('routes events that arrive before the subscribe control ack resolves', async () => {
     const handler = vi.fn();
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      MockEventSource.instances[0]!.emit('message', {
-        data: JSON.stringify({
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      MockEventSource.instances[0]!.emit(
+        'message',
+        JSON.stringify({
           subscriptionId: 'comments',
           topic: 'comment:2323',
           data: { early: true },
         }),
-      } as MessageEvent);
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: [{ ok: true, kind: 'subscribe', id: 'comments', topic: 'comment:2323' }],
-      });
+      );
+      return ackAll(init);
     });
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const unsubscribe = live.subscribe({ id: 'comments', topic: 'comment:2323', onEvent: handler });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    await emitOpen();
     await unsubscribe;
 
     expect(handler).toHaveBeenCalledWith({
@@ -191,36 +117,19 @@ describe('connectLiveStream', () => {
   it('routes replacement events to the replacement handler before the control ack resolves', async () => {
     const oldHandler = vi.fn();
     const newHandler = vi.fn();
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      if (body.operations[0]?.topic === 'post:13') {
-        MockEventSource.instances[0]!.emit('message', {
-          data: JSON.stringify({
-            subscriptionId: 'card',
-            topic: 'post:13',
-            data: { early: true },
-          }),
-        } as MessageEvent);
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (controlBody(init).operations[0]?.topic === 'post:13') {
+        MockEventSource.instances[0]!.emit(
+          'message',
+          JSON.stringify({ subscriptionId: 'card', topic: 'post:13', data: { early: true } }),
+        );
       }
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
+      return ackAll(init);
     });
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const first = live.subscribe({ id: 'card', topic: 'post:12', onEvent: oldHandler });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    await emitOpen();
     await first;
 
     const second = live.subscribe({ id: 'card', topic: 'post:13', onEvent: newHandler });
@@ -235,11 +144,10 @@ describe('connectLiveStream', () => {
   });
 
   it('keeps per-operation subscribe failures isolated in one control batch', async () => {
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      return Response.json({
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      Response.json({
         accepted: true,
-        connectionId: body.connectionId,
+        connectionId: controlBody(init).connectionId,
         results: [
           { ok: true, kind: 'subscribe', id: 'post-card', topic: 'post:12' },
           {
@@ -249,14 +157,11 @@ describe('connectLiveStream', () => {
             error: { code: 'FORBIDDEN', message: 'Forbidden' },
           },
         ],
-      });
-    });
+      }),
+    );
     const postHandler = vi.fn();
     const privateHandler = vi.fn();
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const post = live.subscribe({ id: 'post-card', topic: 'post:12', onEvent: postHandler });
     const privatePost = live.subscribe({
@@ -264,95 +169,77 @@ describe('connectLiveStream', () => {
       topic: 'post:private',
       onEvent: privateHandler,
     });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    const source = await emitOpen();
 
     await expect(post).resolves.toEqual(expect.any(Function));
     await expect(privatePost).rejects.toThrow('Forbidden');
 
-    MockEventSource.instances[0]!.emit('message', {
-      data: JSON.stringify({ subscriptionId: 'post-card', topic: 'post:12', data: { ok: true } }),
-    } as MessageEvent);
-    MockEventSource.instances[0]!.emit('message', {
-      data: JSON.stringify({ subscriptionId: 'private-card', topic: 'post:private', data: {} }),
-    } as MessageEvent);
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'post-card', topic: 'post:12', data: { ok: true } }),
+    );
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'private-card', topic: 'post:private', data: {} }),
+    );
 
     expect(postHandler).toHaveBeenCalledTimes(1);
     expect(privateHandler).not.toHaveBeenCalled();
   });
 
   it('keeps the previous subscription handler when replacement fails', async () => {
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      const operation = body.operations[0];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = controlBody(init);
+      const operation = body.operations[0]!;
+      if (operation.topic !== 'post:blocked') {
+        return ackAll(init);
+      }
       return Response.json({
         accepted: true,
         connectionId: body.connectionId,
-        results:
-          operation.topic === 'post:blocked'
-            ? [
-                {
-                  ok: false,
-                  kind: 'subscribe',
-                  id: operation.id,
-                  error: { code: 'FORBIDDEN', message: 'Forbidden' },
-                },
-              ]
-            : [{ ok: true, kind: operation.kind, id: operation.id, topic: operation.topic }],
+        results: [
+          {
+            ok: false,
+            kind: 'subscribe',
+            id: operation.id,
+            error: { code: 'FORBIDDEN', message: 'Forbidden' },
+          },
+        ],
       });
     });
     const oldHandler = vi.fn();
     const newHandler = vi.fn();
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const first = live.subscribe({ id: 'card', topic: 'post:12', onEvent: oldHandler });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    const source = await emitOpen();
     await first;
 
     await expect(
       live.subscribe({ id: 'card', topic: 'post:blocked', onEvent: newHandler }),
     ).rejects.toThrow('Forbidden');
 
-    MockEventSource.instances[0]!.emit('message', {
-      data: JSON.stringify({ subscriptionId: 'card', topic: 'post:12', data: { ok: true } }),
-    } as MessageEvent);
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'card', topic: 'post:12', data: { ok: true } }),
+    );
 
     expect(oldHandler).toHaveBeenCalledTimes(1);
     expect(newHandler).not.toHaveBeenCalled();
   });
 
   it('does not let stale unsubscribe functions remove replacement subscriptions', async () => {
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
-    });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ackAll(init));
     const oldHandler = vi.fn();
     const newHandler = vi.fn();
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const firstUnsubscribe = live.subscribe({
       id: 'card',
       topic: 'post:12',
       onEvent: oldHandler,
     });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    const source = await emitOpen();
     const unsubscribeOld = await firstUnsubscribe;
     await flushMicrotasks();
 
@@ -367,9 +254,10 @@ describe('connectLiveStream', () => {
     await unsubscribeOld();
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    MockEventSource.instances[0]!.emit('message', {
-      data: JSON.stringify({ subscriptionId: 'card', topic: 'post:13', data: { ok: true } }),
-    } as MessageEvent);
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'card', topic: 'post:13', data: { ok: true } }),
+    );
     expect(oldHandler).not.toHaveBeenCalled();
     expect(newHandler).toHaveBeenCalledTimes(1);
 
@@ -379,38 +267,24 @@ describe('connectLiveStream', () => {
 
   it('does not let stale unsubscribe functions race in-flight replacements', async () => {
     let resolveReplacement: ((value: Response | PromiseLike<Response>) => void) | undefined;
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      if (body.operations[0]?.topic === 'post:13') {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (controlBody(init).operations[0]?.topic === 'post:13') {
         return await new Promise<Response>((resolve) => {
           resolveReplacement = resolve;
         });
       }
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
+      return ackAll(init);
     });
     const oldHandler = vi.fn();
     const newHandler = vi.fn();
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const firstUnsubscribe = live.subscribe({
       id: 'card',
       topic: 'post:12',
       onEvent: oldHandler,
     });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    const source = await emitOpen();
     const unsubscribeOld = await firstUnsubscribe;
 
     const secondUnsubscribe = live.subscribe({
@@ -433,9 +307,10 @@ describe('connectLiveStream', () => {
     );
     const unsubscribeNew = await secondUnsubscribe;
 
-    MockEventSource.instances[0]!.emit('message', {
-      data: JSON.stringify({ subscriptionId: 'card', topic: 'post:13', data: { ok: true } }),
-    } as MessageEvent);
+    source.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'card', topic: 'post:13', data: { ok: true } }),
+    );
     expect(oldHandler).not.toHaveBeenCalled();
     expect(newHandler).toHaveBeenCalledTimes(1);
 
@@ -445,32 +320,18 @@ describe('connectLiveStream', () => {
 
   it('serializes control requests while a previous flush is in flight', async () => {
     let resolveReplacement: ((value: Response | PromiseLike<Response>) => void) | undefined;
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      if (body.operations[0]?.topic === 'post:13') {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (controlBody(init).operations[0]?.topic === 'post:13') {
         return await new Promise<Response>((resolve) => {
           resolveReplacement = resolve;
         });
       }
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
+      return ackAll(init);
     });
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-    });
+    const live = openLive(fetchMock);
 
     const first = live.subscribe({ id: 'card', topic: 'post:12' });
-    await Promise.resolve();
-    MockEventSource.instances[0]!.emit('open', new Event('open'));
+    await emitOpen();
     await first;
     await flushMicrotasks();
 
@@ -501,38 +362,16 @@ describe('connectLiveStream', () => {
 
   it('reconnects and resubscribes active subscriptions with lastEventId', async () => {
     vi.useFakeTimers();
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
-    });
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-      retryDelay: 25,
-    });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ackAll(init));
+    const live = openLive(fetchMock, { retryDelay: 25 });
     const unsubscribe = live.subscribe({ id: 'post-card', topic: 'post:12', lastEventId: 'v1' });
-    await Promise.resolve();
-    const firstSource = MockEventSource.instances[0]!;
-    firstSource.emit('open', new Event('open'));
+    const firstSource = await emitOpen();
     await unsubscribe;
 
-    firstSource.emit('message', {
-      data: JSON.stringify({
-        subscriptionId: 'post-card',
-        topic: 'post:12',
-        eventId: 'v2',
-        data: {},
-      }),
-    } as MessageEvent);
+    firstSource.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'post-card', topic: 'post:12', eventId: 'v2', data: {} }),
+    );
     firstSource.emit('error', new Event('error'));
     expect(firstSource.closed).toBe(true);
 
@@ -552,39 +391,17 @@ describe('connectLiveStream', () => {
 
   it('preserves resubscribe when a control operation interrupts a reconnect timer', async () => {
     vi.useFakeTimers();
-    const fetchMock = vi.fn(async (_url, init) => {
-      const body = JSON.parse(String((init as RequestInit).body));
-      return Response.json({
-        accepted: true,
-        connectionId: body.connectionId,
-        results: body.operations.map((op: { kind: string; id: string; topic?: string }) => ({
-          ok: true,
-          kind: op.kind,
-          id: op.id,
-          topic: op.topic,
-        })),
-      });
-    });
-    const live = connectLiveStream('/live', {
-      eventSource: MockEventSource,
-      fetch: fetchMock as unknown as typeof fetch,
-      retryDelay: 25,
-    });
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ackAll(init));
+    const live = openLive(fetchMock, { retryDelay: 25 });
     const first = live.subscribe({ id: 'post-card', topic: 'post:12', lastEventId: 'v1' });
-    await Promise.resolve();
-    const firstSource = MockEventSource.instances[0]!;
-    firstSource.emit('open', new Event('open'));
+    const firstSource = await emitOpen();
     await first;
     await flushMicrotasks();
 
-    firstSource.emit('message', {
-      data: JSON.stringify({
-        subscriptionId: 'post-card',
-        topic: 'post:12',
-        eventId: 'v2',
-        data: {},
-      }),
-    } as MessageEvent);
+    firstSource.emit(
+      'message',
+      JSON.stringify({ subscriptionId: 'post-card', topic: 'post:12', eventId: 'v2', data: {} }),
+    );
     firstSource.emit('error', new Event('error'));
 
     const second = live.subscribe({ id: 'comments', topic: 'comment:2323' });
@@ -606,6 +423,46 @@ describe('connectLiveStream', () => {
     expect(MockEventSource.instances).toHaveLength(2);
   });
 });
+
+type ControlBody = {
+  connectionId: string;
+  operations: Array<{ kind: string; id: string; topic?: string }>;
+};
+
+function controlBody(init: RequestInit | undefined): ControlBody {
+  return JSON.parse(String(init?.body)) as ControlBody;
+}
+
+/** Answers a control request by accepting every operation in it. */
+function ackAll(init: RequestInit | undefined): Response {
+  const body = controlBody(init);
+  return Response.json({
+    accepted: true,
+    connectionId: body.connectionId,
+    results: body.operations.map((op) => ({
+      ok: true,
+      kind: op.kind,
+      id: op.id,
+      topic: op.topic,
+    })),
+  });
+}
+
+function openLive(fetchMock: unknown, options: ConnectLiveStreamOptions = {}) {
+  return connectLiveStream('/live', {
+    eventSource: MockEventSource,
+    fetch: fetchMock as typeof fetch,
+    ...options,
+  });
+}
+
+/** Lets the client create its EventSource, then opens it. */
+async function emitOpen(): Promise<MockEventSource> {
+  await Promise.resolve();
+  const source = MockEventSource.instances[0]!;
+  source.emit('open', new Event('open'));
+  return source;
+}
 
 async function flushMicrotasks(count = 5): Promise<void> {
   for (let i = 0; i < count; i++) {

@@ -10,7 +10,7 @@ export type FooterColumn = Readonly<{
 
 export type FooterSocialLink = Readonly<{
   icon: string;
-  label?: string;
+  label: string;
   link: string;
 }>;
 

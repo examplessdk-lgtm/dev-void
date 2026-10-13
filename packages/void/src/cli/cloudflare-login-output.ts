@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from 'node:util';
 import pc from 'picocolors';
+import { formatUrl } from './output.ts';
 
 /** The bundled cf login prints the device code before opening the browser. */
 export function cloudflareDeviceCode(output: string): string | null {
@@ -23,7 +24,7 @@ export function cloudflareVerificationUrl(output: string): string | null {
 }
 
 export function printCloudflareLoginLink(url: string): void {
-  console.log(`Open this link if your browser did not open: ${url}`);
+  console.log(`Open this link if your browser did not open: ${formatUrl(url)}`);
 }
 
 export function printCloudflareLoginPrompt(code: string | null): void {

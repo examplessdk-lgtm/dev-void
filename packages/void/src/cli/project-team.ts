@@ -6,7 +6,7 @@ import {
   type ProjectInvitationResponse,
   type ProjectMemberResponse,
 } from './client.ts';
-import { printSuccess, formatCount, note, sanitizeTerminalText } from './output.ts';
+import { printSuccess, formatCount, formatUrl, note, sanitizeTerminalText } from './output.ts';
 import { parsePlatformErrorBody, platformErrorMessage } from './platform-errors.ts';
 import type { ProjectArgs } from './project-args.ts';
 import { readProjectConfig } from './project.ts';
@@ -106,7 +106,7 @@ export async function runProjectTeamCommand(root: string, args: ProjectTeamArgs)
     ? getAccountCredential()
     : { apiUrl: undefined, token: getToken(root) };
   if (apiUrl) {
-    log.info(`Platform: ${apiUrl}`);
+    log.info(`Platform: ${formatUrl(apiUrl)}`);
   }
   if (!token) {
     log.error(
