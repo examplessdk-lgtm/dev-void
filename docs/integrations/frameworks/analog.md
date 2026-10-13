@@ -26,7 +26,6 @@ Void provides the local Cloudflare binding runtime. `nitro-cloudflare-dev` creat
 ### 3. Configure `vite.config.ts`
 
 ```ts
-import { resolve } from 'node:path';
 import analog from '@analogjs/platform';
 import { defineConfig } from 'vite';
 import { voidPlugin } from 'void';
@@ -41,18 +40,15 @@ export default defineConfig({
       nitro: {
         preset: 'cloudflare-module',
         cloudflareDev: { configPath: './.void-wrangler.jsonc' },
-        modules: ['nitro-cloudflare-dev'],
-        alias: {
-          // Nitro has its own bundler that doesn't use Vite aliases.
-          // Duplicate @schema here so Nitro can resolve it.
-          '@schema': resolve(__dirname, 'db/schema.ts'),
-        },
+        modules: ['nitro-cloudflare-dev', 'void/nitro'],
       },
     }),
     voidPlugin(),
   ],
 });
 ```
+
+The `void/nitro` module gives Analog API routes and page server loads your app's `void/db` and `@schema`.
 
 ### 4. Create `void.config.ts`
 
@@ -97,10 +93,6 @@ export const load = async ({ event }: PageServerLoad) => {
   return { users: await db.select().from(users) };
 };
 ```
-
-::: warning ⚠️ Analog limitation
-Use `db.select().from(table)` for database queries in Analog. The `db.query.*` relational API is not available.
-:::
 
 ### Other resources
 

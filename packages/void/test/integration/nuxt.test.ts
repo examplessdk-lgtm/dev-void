@@ -105,6 +105,12 @@ describe(
       expect(await bundle.text()).not.toContain(token);
     });
 
+    it("serves void/db with the app's schema to server routes", async () => {
+      const response = await fetch(`${DEV_BASE}/api/smoke`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ firstUser: { name: 'Alice' } });
+    });
+
     it('navigates to smoke route via SPA from home page', async () => {
       const { chromium } = await import('playwright');
       const browser = await chromium.launch();

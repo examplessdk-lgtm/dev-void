@@ -1,5 +1,4 @@
 import analog from '@analogjs/platform';
-import { resolve } from 'pathslash';
 import { defineConfig } from 'vite-plus';
 import { voidPlugin } from 'void';
 
@@ -12,13 +11,8 @@ export default defineConfig({
       ssr: true,
       nitro: {
         preset: 'cloudflare-module',
-        modules: ['nitro-cloudflare-dev'],
+        modules: ['nitro-cloudflare-dev', 'void/nitro'],
         cloudflareDev: { configPath: './.void-wrangler.jsonc' },
-        alias: {
-          // Nitro has its own bundler that doesn't use Vite aliases.
-          // Duplicate @schema here so Nitro can resolve it.
-          '@schema': resolve(__dirname, 'db/schema.ts'),
-        },
       },
     }),
     voidPlugin(),

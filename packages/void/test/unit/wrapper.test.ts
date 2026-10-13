@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
@@ -599,7 +600,11 @@ describe('generateWrapper with migrations', () => {
   async function fetchWrappedWorker(
     workerDir: string,
     request: { path: string; body?: unknown },
-    options: { bindings?: Record<string, unknown>; d1Databases?: Array<string> } = {},
+    options: {
+      bindings?: Record<string, unknown>;
+      d1Databases?: Array<string>;
+      compatibilityDate?: string;
+    } = {},
   ): Promise<unknown> {
     // Upload every module, as the platform does; the wrapper imports the handler statically.
     const modules = readdirSync(workerDir)
@@ -612,7 +617,7 @@ describe('generateWrapper with migrations', () => {
         convertV4MiniflareOptions({
           modulesRoot: workerDir,
           modules,
-          compatibilityDate: '2026-02-24',
+          compatibilityDate: options.compatibilityDate ?? '2026-02-24',
           compatibilityFlags: ['nodejs_compat'],
           bindings: { __VOID_PROXY_TOKEN: 'proxy-token', ...options.bindings },
           d1Databases: options.d1Databases,
@@ -800,6 +805,206 @@ describe('generateWrapper with migrations', () => {
       ),
     ).toMatchObject({ ok: true, confirmedApplied: ['001_users.sql'] });
     expectSelfContainedHandler(workerDir);
+  });
+
+  /**
+   * An app whose cron, and with `queue` a queue consumer, reads its users through `void/db`.
+   * The job throws unless each select and relational query, which needs the app's schema, returns
+   * `users`. The last two run in parallel.
+   */
+  async function wrapUsersCron(
+    database: 'pg' | 'mysql',
+    users: Array<{ id: number; name: string }>,
+    options: { schemaImport: string; schemaFolder?: boolean; queue?: boolean },
+  ): Promise<string> {
+    const { workerDir, projectRoot } = createMigrationFixture();
+    writeFileSync(join(projectRoot, 'void.json'), JSON.stringify({ database }));
+    const [table, id] = database === 'pg' ? ['pgTable', 'serial'] : ['mysqlTable', 'int'];
+    const schema = `import { ${table}, ${id}, text } from 'void/schema-${database}';
+export const users = ${table}('users', { id: ${id}('id').primaryKey(), name: text('name').notNull() });
+`;
+    // A schema folder's files are also importable one by one, as `@schema/<file>`.
+    let fileImport = '';
+    if (options.schemaFolder) {
+      mkdirSync(join(projectRoot, 'db', 'schema'));
+      writeFileSync(join(projectRoot, 'db', 'schema', 'users.ts'), schema);
+      writeFileSync(join(projectRoot, 'db', 'schema', 'index.ts'), "export * from './users';\n");
+      fileImport = `import { users as usersFile } from '@schema/users';
+if (usersFile !== users) throw new Error('@schema/users is another module');
+`;
+    } else {
+      writeFileSync(join(projectRoot, 'db', 'schema.ts'), schema);
+    }
+    const job = `import { users } from ${JSON.stringify(options.schemaImport)};
+import { db } from 'void/db';
+${fileImport}
+export default async function () {
+  const found = JSON.stringify([
+    await db.select().from(users),
+    ...(await Promise.all([db.select().from(users), db.query.users.findMany()])),
+  ]);
+  if (found !== ${JSON.stringify(JSON.stringify([users, users, users]))}) throw new Error(found);
+}
+`;
+    mkdirSync(join(projectRoot, 'crons'));
+    writeFileSync(join(projectRoot, 'crons', 'users.ts'), job);
+    if (options.queue) {
+      mkdirSync(join(projectRoot, 'queues'));
+      writeFileSync(join(projectRoot, 'queues', 'users.ts'), job);
+    }
+    // The schema imports Void's SQL helpers by package name, as an app does.
+    mkdirSync(join(projectRoot, 'node_modules'));
+    symlinkSync(
+      join(import.meta.dirname, '..', '..'),
+      join(projectRoot, 'node_modules', 'void'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      crons: [{ name: 'users', filePath: 'users.ts', crons: ['0 * * * *'] }],
+      ...(options.queue && {
+        queues: [{ name: 'users', filePath: 'users.ts', bindingName: 'QUEUE_USERS' }],
+      }),
+    });
+    return workerDir;
+  }
+
+  const runCron = (workerDir: string, connectionString: string, compatibilityDate?: string) =>
+    fetchWrappedWorker(
+      workerDir,
+      { path: '/__void/scheduled', body: { cron: '0 * * * *', scheduledTime: Date.now() } },
+      { bindings: { HYPERDRIVE: { connectionString } }, compatibilityDate },
+    );
+
+  /** Deliver one message to the wrapped `users` queue consumer through the relay endpoint. */
+  const runQueue = (workerDir: string, connectionString: string) =>
+    fetchWrappedWorker(
+      workerDir,
+      {
+        path: '/__void/queue',
+        body: {
+          queue: 'users',
+          messages: [{ id: 'one', timestamp: new Date().toISOString(), body: {}, attempts: 1 }],
+        },
+      },
+      { bindings: { HYPERDRIVE: { connectionString } } },
+    );
+
+  /** Serve PGlite with one user to `run`, which can read how many connections the server took. */
+  async function withPgUsers<T>(
+    run: (connectionString: string, connections: () => number) => Promise<T>,
+  ): Promise<T> {
+    const pglite = new PGlite();
+    await pglite.waitReady;
+    await pglite.exec(
+      "CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL); INSERT INTO users (name) VALUES ('alice');",
+    );
+    const server = createPgServer(pglite);
+    let connections = 0;
+    server.on('connection', () => connections++);
+    try {
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const { port } = server.address() as AddressInfo;
+      return await run(`postgresql://postgres@127.0.0.1:${port}/postgres`, () => connections);
+    } finally {
+      server.close();
+      await pglite.close();
+    }
+  }
+
+  /** Run the wrapped PostgreSQL cron in workerd against PGlite with one user. */
+  const runPgUsersCron = (workerDir: string, compatibilityDate?: string) =>
+    withPgUsers((connectionString) => runCron(workerDir, connectionString, compatibilityDate));
+
+  it('gives a PostgreSQL cron the app database and schema in workerd', async () => {
+    const workerDir = await wrapUsersCron('pg', [{ id: 1, name: 'alice' }], {
+      schemaImport: '@schema',
+    });
+    expect(await runPgUsersCron(workerDir)).toEqual({ ok: true });
+  });
+
+  // workerd provides node:fs only from compatibility date 2025-09-15, and apps keep older dates.
+  it('starts a PostgreSQL cron Worker at a compatibility date without node:fs', async () => {
+    const workerDir = await wrapUsersCron('pg', [{ id: 1, name: 'alice' }], {
+      schemaImport: '@schema',
+    });
+    expect(await runPgUsersCron(workerDir, '2024-09-23')).toEqual({ ok: true });
+  });
+
+  it('gives a cron a schema folder through @schema', async () => {
+    const workerDir = await wrapUsersCron('pg', [{ id: 1, name: 'alice' }], {
+      schemaImport: '@schema',
+      schemaFolder: true,
+    });
+    expect(await runPgUsersCron(workerDir)).toEqual({ ok: true });
+  });
+
+  it('gives a MySQL cron the app database and schema in workerd', async () => {
+    const users = [{ id: 1, name: 'alice' }];
+    // A relative import: the cron must get the app's database even without @schema.
+    const workerDir = await wrapUsersCron('mysql', users, { schemaImport: '../db/schema.ts' });
+
+    const mysql = await startFakeMySqlServer(users);
+    try {
+      expect(await runCron(workerDir, `mysql://void@127.0.0.1:${mysql.port}/app`)).toEqual({
+        ok: true,
+      });
+    } finally {
+      await mysql.close();
+    }
+  });
+
+  // As in a Void app, each event runs in one request scope, so void/db opens one connection for
+  // all of its queries, parallel ones included, instead of a pool for each query.
+  it('runs a PostgreSQL cron event and queue batch on one connection each', async () => {
+    const workerDir = await wrapUsersCron('pg', [{ id: 1, name: 'alice' }], {
+      schemaImport: '@schema',
+      queue: true,
+    });
+    await withPgUsers(async (connectionString, connections) => {
+      expect(await runCron(workerDir, connectionString)).toEqual({ ok: true });
+      expect(connections()).toBe(1);
+      expect(await runQueue(workerDir, connectionString)).toEqual({ ok: true });
+      expect(connections()).toBe(2);
+    });
+  });
+
+  it('runs a MySQL cron event and queue batch on one connection each', async () => {
+    const users = [{ id: 1, name: 'alice' }];
+    const workerDir = await wrapUsersCron('mysql', users, { schemaImport: '@schema', queue: true });
+
+    const mysql = await startFakeMySqlServer(users);
+    try {
+      const connectionString = `mysql://void@127.0.0.1:${mysql.port}/app`;
+      expect(await runCron(workerDir, connectionString)).toEqual({ ok: true });
+      expect(mysql.acceptedConnections()).toBe(1);
+      expect(await runQueue(workerDir, connectionString)).toEqual({ ok: true });
+      expect(mysql.acceptedConnections()).toBe(2);
+    } finally {
+      await mysql.close();
+    }
+  });
+
+  // In a request scope, void/db reads D1 through a replica-capable session instead of the primary.
+  it('keeps D1 cron and queue jobs outside the request scope', async () => {
+    const { workerDir, projectRoot } = createMigrationFixture();
+    writeFileSync(join(projectRoot, 'db', 'schema.ts'), 'export {};\n');
+    mkdirSync(join(projectRoot, 'crons'));
+    writeFileSync(join(projectRoot, 'crons', 'daily.ts'), 'export default async () => {};');
+    mkdirSync(join(projectRoot, 'queues'));
+    writeFileSync(join(projectRoot, 'queues', 'emails.ts'), 'export default async () => {};');
+
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      crons: [{ name: 'daily', filePath: 'daily.ts', crons: ['0 0 * * *'] }],
+      queues: [{ name: 'emails', filePath: 'emails.ts', bindingName: 'QUEUE_EMAILS' }],
+    });
+
+    const handlers = readFileSync(join(projectRoot, '.void', 'handlers', 'handlers.ts'), 'utf8');
+    expect(handlers).toContain('export async function handleScheduled(controller, env, ctx) {');
+    expect(handlers).toContain('export async function handleQueue(batch, env, ctx) {');
+    expect(handlers).not.toContain('withRuntimeEnv');
   });
 
   it('does not generate migration handler when hasMigrations is false', async () => {

@@ -6,7 +6,7 @@
  * This stub exists for the published npm package and type declarations.
  */
 import { drizzle as _drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
-import { getRuntimeRequestResource, requireRuntimeBinding } from './env.ts';
+import { getRuntimeBinding, getRuntimeRequestResource, requireRuntimeBinding } from './env.ts';
 
 // Re-export commonly used Drizzle utilities so consumers never need
 // to depend on drizzle-orm directly.
@@ -56,6 +56,20 @@ function createPrimaryDb(d1: D1Database): DrizzleD1Database {
 
 const requestDbKey = {};
 
+function requireD1(): D1Database {
+  // Bundlers that skip Void's plugins load this D1 client for every app. Nitro needs the
+  // `void/nitro` module to serve a PostgreSQL or MySQL app's own `void/db`.
+  if (
+    getRuntimeBinding('DB') == null &&
+    (getRuntimeBinding('HYPERDRIVE') != null || getRuntimeBinding('DATABASE_URL') != null)
+  ) {
+    throw new Error(
+      "db: Missing Cloudflare binding 'DB'. This app connects through HYPERDRIVE or DATABASE_URL, but its server bundle loaded the D1 client. In Nuxt or Analog, add 'void/nitro' to the Nitro modules.",
+    );
+  }
+  return requireRuntimeBinding<D1Database>('DB');
+}
+
 /**
  * Default Drizzle D1 instance — resolves the `DB` binding from the runtime
  * environment. When the Void plugin is active, this is replaced with a
@@ -65,10 +79,10 @@ export const db: DrizzleD1Database = new Proxy({} as DrizzleD1Database, {
   get(_, prop) {
     const instance = getRuntimeRequestResource(
       requestDbKey,
-      () => createDb(requireRuntimeBinding<D1Database>('DB')),
+      () => createDb(requireD1()),
       // Framework adapters do not always enter Void's request scope. Without a
       // shared session, each operation starts on primary to preserve fresh reads.
-      () => createPrimaryDb(requireRuntimeBinding<D1Database>('DB')),
+      () => createPrimaryDb(requireD1()),
     );
     return Reflect.get(instance, prop);
   },

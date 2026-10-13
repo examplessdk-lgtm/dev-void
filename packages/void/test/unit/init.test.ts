@@ -1868,11 +1868,47 @@ jobs:
           expect.stringContaining('export default defineNuxtConfig'),
           'Manual Nuxt config step',
         );
+        expect(mockNote).toHaveBeenCalledWith(
+          expect.stringContaining('nitro: { modules: ["void/nitro"] }'),
+          'Manual Nuxt config step',
+        );
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
     },
   );
+
+  it('prints an Analog-specific manual config step with the Nitro module', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+    try {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'existing-analog-app',
+            private: true,
+            devDependencies: { '@analogjs/platform': '^2.8.0' },
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+      mockSelect.mockResolvedValueOnce('none');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+      await runInitCommand(root);
+
+      expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
+      expect(mockNote).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'analog({ nitro: { modules: ["nitro-cloudflare-dev", "void/nitro"] } })',
+        ),
+        'Manual Analog config step',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it('adds voidPlugin to an existing Vite plugins array without replacing scripts', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));

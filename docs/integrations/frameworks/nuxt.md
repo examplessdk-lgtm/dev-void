@@ -32,20 +32,22 @@ import { voidPlugin } from 'void';
 export default defineNuxtConfig({
   nitro: {
     preset: 'cloudflare-module',
+    modules: ['void/nitro'],
     cloudflareDev: { configPath: './.void-wrangler.jsonc' },
     // Required for Nuxt 4.6.0 on Windows.
     externals: {
       inline: [/[\\/]node_modules[\\/]nuxt[\\/]dist[\\/]/],
     },
     alias: {
-      // Nitro has its own bundler that doesn't use Vite aliases.
-      // Duplicate @schema here so Nitro can resolve it.
+      // Nuxt types server routes from Nitro's aliases.
       '@schema': resolve(import.meta.dirname, 'db/schema.ts'),
     },
   },
   vite: { plugins: [voidPlugin()] },
 });
 ```
+
+The `void/nitro` module gives Nuxt server routes your app's `void/db` and `@schema`.
 
 ### 4. Create `void.config.ts`
 
@@ -87,10 +89,6 @@ export default defineEventHandler(async () => {
   return db.select().from(users);
 });
 ```
-
-::: warning ⚠️ Nuxt limitation
-Use `db.select().from(table)` for database queries in Nuxt. The `db.query.*` relational API is not available.
-:::
 
 ### Other resources
 

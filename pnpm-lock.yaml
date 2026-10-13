@@ -1157,9 +1157,6 @@ importers:
       nitro-cloudflare-dev:
         specifier: ^0.2.2
         version: 0.2.2
-      pathslash:
-        specifier: 'catalog:'
-        version: 0.1.0
       typescript:
         specifier: catalog:angular
         version: 6.0.3

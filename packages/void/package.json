@@ -90,6 +90,11 @@
     "./routes": {
       "types": "./dist/routes-stub.d.mts"
     },
+    "./nitro": {
+      "types": "./dist/nitro.d.mts",
+      "import": "./dist/nitro.mjs",
+      "require": "./dist/nitro.mjs"
+    },
     "./sveltekit": {
       "types": "./dist/sveltekit.d.mts",
       "import": "./dist/sveltekit.mjs",

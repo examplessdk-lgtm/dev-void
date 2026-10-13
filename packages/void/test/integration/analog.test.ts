@@ -104,6 +104,12 @@ describe('playground/analog dev', () => {
     expect(existsSync(join(ROOT, `${PLAYGROUND}/wrangler.jsonc`))).toBe(false);
   });
 
+  it("serves void/db with the app's schema to server routes", async () => {
+    const response = await fetch(`${DEV_BASE}/api/smoke`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ firstUser: { name: 'Alice' } });
+  });
+
   it('does not serve the dev-trigger token', async () => {
     const token = readFileSync(join(PLAYGROUND_ROOT, '.void/dev-trigger-token'), 'utf8').trim();
     // Nitro's dev bundle inlines the trigger dispatch module. Analog builds it before listening.

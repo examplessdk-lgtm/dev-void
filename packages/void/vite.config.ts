@@ -126,6 +126,7 @@ export default defineConfig({
       'src/runtime/ws-server.ts',
       'src/runtime/live-server.ts',
       'src/sveltekit.ts',
+      'src/nitro.ts',
       'src/pages/index.ts',
       'src/pages/protocol.ts',
       'src/pages/head.ts',

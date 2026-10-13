@@ -234,10 +234,6 @@ const usersWithPosts = await db.query.users.findMany({
 });
 ```
 
-::: warning ⚠️ Nuxt and Analog limitations
-In Nuxt and Analog, use the query builder (`db.select().from(table)`). The `db.query.*` relational API is not available in these frameworks.
-:::
-
 ## Seeding
 
 Use `void db seed` to reset your local database, re-apply migrations, and then run a seed file.

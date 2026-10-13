@@ -779,6 +779,23 @@ export const requestPoolOptions = (env) =>
     expect(code).not.toMatch(/\bschema\b/);
   });
 
+  // The package's own void/db is a D1 client, which never fits these dialects.
+  it.each(['postgresql', 'mysql'] as const)('serves the %s void/db without a schema', (dialect) => {
+    const root = createProjectRoot({ schema: false });
+    const plugin = drizzlePlugin(root, false, dialect);
+    const resolveId = getHookHandler(plugin.resolveId) as (
+      this: { environment: { name: string } },
+      source: string,
+      importer: string | undefined,
+      options: { isEntry: boolean },
+    ) => string | undefined;
+
+    expect(
+      resolveId.call({ environment: { name: 'ssr' } }, 'void/db', undefined, { isEntry: false }),
+    ).toBe('\0virtual:void-db');
+    expect(readFileSync(join(root, '.void', 'db.d.ts'), 'utf8')).toContain('Record<string, never>');
+  });
+
   it('uses a custom D1 binding name in the sqlite virtual module', () => {
     const root = createProjectRoot({ schema: false });
     const plugin = drizzlePlugin(root, false, 'sqlite', {

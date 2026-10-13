@@ -1,12 +1,13 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'pathslash';
+import { dirname, join } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
 import { DRIZZLE_OPERATORS, generateDbDts } from './codegen/db-types.ts';
 import { ensureProjectTsconfig } from './codegen/project-tsconfig.ts';
+import { getDatabaseDialect, readConfig, resolveBindingNames, type VoidConfig } from './config.ts';
 import { discoverSchema } from './drizzle/discover.ts';
 import { voidWarn } from './log.ts';
-import { readProjectPaths } from './project-paths.ts';
+import { readProjectPaths, resolveProjectPaths, type ProjectPaths } from './project-paths.ts';
 
 // Resolve drizzle-orm paths from void's own deps so they work in any project
 // (including metaframeworks where drizzle-orm isn't a direct dependency).
@@ -45,110 +46,73 @@ function requestPool(resolve, own = {}) {
   });
 }
 `;
-type DrizzlePluginOptions = {
+type VoidDbModuleOptions = {
   d1BindingName?: string;
   forceVirtualDb?: boolean;
+};
+type DrizzlePluginOptions = VoidDbModuleOptions & {
   localD1DatabaseId?: string;
   localD1PersistRoot?: string;
   redirectDbTypePaths?: boolean;
 };
 
 /**
- * Vite plugin for Drizzle integration.
- *
- * - Intercepts `void/db` imports in SSR/worker environments and serves
- *   a virtual module that creates a Drizzle DB instance, using the user's
- *   schema when present.
- * - Generates `.void/db.d.ts` with proper Drizzle types.
- * - Sets up `@schema` Vite alias for convenient imports when a schema exists.
- * - Updates `.void/tsconfig.json` with TypeScript paths.
+ * The app's `void/db` module for its dialect, schema and D1 binding. Resolving and loading
+ * have no side effects, so the Vite plugin and `voidDbBundlerPlugin` share them.
  */
-export function drizzlePlugin(
+function createVoidDbModule(
   root: string,
-  hasRouteTypes: boolean,
-  dialect: 'sqlite' | 'postgresql' | 'mysql' = 'sqlite',
-  options: DrizzlePluginOptions = {},
-): Plugin {
-  const outDir = join(root, '.void');
-  const paths = readProjectPaths(root);
+  dialect: 'sqlite' | 'postgresql' | 'mysql',
+  options: VoidDbModuleOptions,
+  paths: ProjectPaths = readProjectPaths(root),
+) {
   const schema = discoverSchema(root, paths);
-  const hasDbRuntime = schema != null || options.forceVirtualDb === true;
+  // The package's own `void/db` is a D1 client, so PostgreSQL and MySQL always need this one.
+  const hasDbRuntime = schema != null || options.forceVirtualDb === true || dialect !== 'sqlite';
   const d1BindingName = options.d1BindingName ?? 'DB';
 
-  // Always write tsconfig (for routes.d.ts, queues.d.ts, etc.)
-  ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, {
-    redirectDbModule: options.redirectDbTypePaths,
-    paths,
-  });
-
-  // Generate db.d.ts when void/db is available, even without a user schema.
-  if (hasDbRuntime) {
-    generateDbDts(outDir, schema ?? null, dialect);
-  }
-
   return {
-    name: 'void:drizzle',
-    enforce: 'pre',
+    schema,
+    hasDbRuntime,
 
-    config() {
-      if (!schema) {
-        return;
+    resolveId(id: string, importer: string | undefined): string | undefined {
+      if (id === 'void/db') {
+        if (!hasDbRuntime) {
+          return;
+        } // Fall through to the real module (stub)
+        // Don't redirect schema files to avoid circular dependency
+        // (virtual:void-db imports the schema, which imports void/db).
+        // Schema files only need SQL helpers, not the runtime DB instance.
+        if (schema && importer) {
+          // Normalize separators for Windows — Vite uses forward slashes,
+          // but schema.path from Node's path.join uses backslashes on Windows.
+          const normalizedImporter = normalizePath(importer);
+          const normalizedSchemaPath = normalizePath(schema.path);
+          if (schema.type === 'file' && normalizedImporter === normalizedSchemaPath) {
+            return VIRTUAL_SCHEMA_DB_ID;
+          }
+          if (schema.type === 'directory' && normalizedImporter.startsWith(normalizedSchemaPath)) {
+            return VIRTUAL_SCHEMA_DB_ID;
+          }
+        }
+        return VIRTUAL_DB_ID;
       }
 
-      return {
-        resolve: {
-          alias: {
-            '@schema': schema.path,
-          },
-        },
-      };
-    },
-
-    resolveId: {
-      filter: { id: /^(void\/db|@schema)/ },
-      handler(id, importer) {
-        // Only intercept void/db in server/worker environments (not client)
-        if (id === 'void/db' && this.environment?.name !== 'client') {
-          if (!hasDbRuntime) {
-            return;
-          } // Fall through to the real module (stub)
-          // Don't redirect schema files to avoid circular dependency
-          // (virtual:void-db imports the schema, which imports void/db).
-          // Schema files only need SQL helpers, not the runtime DB instance.
-          if (schema && importer) {
-            // Normalize separators for Windows — Vite uses forward slashes,
-            // but schema.path from Node's path.join uses backslashes on Windows.
-            const normalizedImporter = normalizePath(importer);
-            const normalizedSchemaPath = normalizePath(schema.path);
-            if (schema.type === 'file' && normalizedImporter === normalizedSchemaPath) {
-              return VIRTUAL_SCHEMA_DB_ID;
-            }
-            if (
-              schema.type === 'directory' &&
-              normalizedImporter.startsWith(normalizedSchemaPath)
-            ) {
-              return VIRTUAL_SCHEMA_DB_ID;
-            }
-          }
-          return VIRTUAL_DB_ID;
+      // Resolve @schema alias explicitly via resolveId so it works in
+      // meta-framework SSR environments (Astro's workerd runner, etc.)
+      // where Vite's config-level resolve.alias may not be applied.
+      if (schema && (id === '@schema' || id.startsWith('@schema/'))) {
+        if (id === '@schema') {
+          return schema.path;
         }
-
-        // Resolve @schema alias explicitly via resolveId so it works in
-        // meta-framework SSR environments (Astro's workerd runner, etc.)
-        // where Vite's config-level resolve.alias may not be applied.
-        if (schema && (id === '@schema' || id.startsWith('@schema/'))) {
-          if (id === '@schema') {
-            return schema.path;
-          }
-          return join(schema.path, id.slice('@schema/'.length));
-        }
-      },
+        return join(schema.path, id.slice('@schema/'.length));
+      }
     },
 
     load: {
       // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
       filter: { id: /^\0virtual:void-db(?:-schema)?$/ },
-      handler(id) {
+      handler(id: string): string {
         if (id === VIRTUAL_SCHEMA_DB_ID) {
           return `
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
@@ -332,6 +296,71 @@ function createPrimaryDb(d1) {
 `;
       },
     },
+  };
+}
+
+/**
+ * Vite plugin for Drizzle integration.
+ *
+ * - Intercepts `void/db` imports in SSR/worker environments and serves
+ *   a virtual module that creates a Drizzle DB instance, using the user's
+ *   schema when present.
+ * - Generates `.void/db.d.ts` with proper Drizzle types.
+ * - Sets up `@schema` Vite alias for convenient imports when a schema exists.
+ * - Updates `.void/tsconfig.json` with TypeScript paths.
+ */
+export function drizzlePlugin(
+  root: string,
+  hasRouteTypes: boolean,
+  dialect: 'sqlite' | 'postgresql' | 'mysql' = 'sqlite',
+  options: DrizzlePluginOptions = {},
+): Plugin {
+  const outDir = join(root, '.void');
+  const paths = readProjectPaths(root);
+  const dbModule = createVoidDbModule(root, dialect, options, paths);
+  const { schema, hasDbRuntime } = dbModule;
+
+  // Always write tsconfig (for routes.d.ts, queues.d.ts, etc.)
+  ensureProjectTsconfig(root, hasRouteTypes, hasDbRuntime, schema != null, {
+    redirectDbModule: options.redirectDbTypePaths,
+    paths,
+  });
+
+  // Generate db.d.ts when void/db is available, even without a user schema.
+  if (hasDbRuntime) {
+    generateDbDts(outDir, schema ?? null, dialect);
+  }
+
+  return {
+    name: 'void:drizzle',
+    enforce: 'pre',
+
+    config() {
+      if (!schema) {
+        return;
+      }
+
+      return {
+        resolve: {
+          alias: {
+            '@schema': schema.path,
+          },
+        },
+      };
+    },
+
+    resolveId: {
+      filter: { id: /^(void\/db|@schema)/ },
+      handler(id, importer) {
+        // Only intercept void/db in server/worker environments (not client)
+        if (id === 'void/db' && this.environment?.name === 'client') {
+          return;
+        }
+        return dbModule.resolveId(id, importer);
+      },
+    },
+
+    load: dbModule.load,
 
     async configureServer() {
       if (!schema) {
@@ -363,6 +392,75 @@ function createPrimaryDb(d1) {
             '         Run `void db generate` to create migration files for dev startup and deploy.',
         );
       }
+    },
+  };
+}
+
+/**
+ * `void/db` and `@schema` for bundles that do not run Void's Vite plugins: Nitro's (Nuxt and
+ * Analog server routes, through `void/nitro`) and the cron and queue handler bundle that deploys
+ * build. Without it they load the package's static `void/db`, a D1 client without the app's
+ * schema. It reads the dialect, schema and D1 binding from the project, as the Vite plugin does.
+ * Its hooks are plain Rollup hooks; Vite also needs `enforce` to run them before its resolver.
+ *
+ * For a bundle that runs in workerd, `sqlDriver` builds the PostgreSQL or MySQL driver, and the
+ * plugin serves that module for `pg` or `mysql2`.
+ */
+export function voidDbBundlerPlugin(
+  root: string,
+  options: {
+    config?: VoidConfig;
+    sqlDriver?: (dialect: 'postgresql' | 'mysql') => Promise<string>;
+  } = {},
+): Plugin {
+  const config = options.config ?? readConfig(root);
+  const dialect = getDatabaseDialect(config);
+  const d1BindingName = resolveBindingNames(config.inference?.bindings)?.d1;
+  const dbModule = createVoidDbModule(
+    root,
+    dialect,
+    // The package's own `void/db` reads D1 from the `DB` binding.
+    { d1BindingName, forceVirtualDb: d1BindingName !== undefined },
+    resolveProjectPaths(root, config),
+  );
+  const driverPackage =
+    dialect === 'postgresql' ? 'pg' : dialect === 'mysql' ? 'mysql2' : undefined;
+  let driver: Promise<string> | undefined;
+  let driverDir: string | undefined;
+  return {
+    name: 'void:db',
+    enforce: 'pre',
+    async resolveId(id, importer) {
+      if (id === driverPackage && options.sqlDriver && dialect !== 'sqlite') {
+        driver ??= options.sqlDriver(dialect).then((path) => {
+          driverDir = `${normalizePath(dirname(path))}/`;
+          return path;
+        });
+        return driver;
+      }
+      // The driver needs workerd's own Node modules: Nitro replaces them with stubs unless it
+      // finds nodejs_compat in a Wrangler config, and Void's is not one it reads.
+      if (
+        driverDir &&
+        id.startsWith('node:') &&
+        importer &&
+        normalizePath(importer).startsWith(driverDir)
+      ) {
+        return { id, external: true };
+      }
+      const resolved = dbModule.resolveId(id, importer);
+      if (resolved !== undefined && id !== 'void/db') {
+        // `@schema` can name a schema folder or a file without its extension. Only Vite's
+        // config alias hands those to a resolver, so apply the bundler's own rules here.
+        return this.resolve(resolved, importer, { skipSelf: true });
+      }
+      return resolved ?? null;
+    },
+    load(id) {
+      if (id !== VIRTUAL_DB_ID && id !== VIRTUAL_SCHEMA_DB_ID) {
+        return null;
+      }
+      return dbModule.load.handler(id);
     },
   };
 }

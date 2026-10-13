@@ -2373,12 +2373,30 @@ function noteManualFrameworkConfigSetup(framework: DetectedFramework): void {
   if (framework.name === 'nuxt') {
     note(
       `Detected Nuxt. Void init does not patch nuxt.config.* automatically.\n\n` +
-        `Add \`voidPlugin()\` to the Nuxt Vite plugins option:\n\n` +
+        `Add \`voidPlugin()\` to the Nuxt Vite plugins option and \`void/nitro\` to the Nitro modules:\n\n` +
         `import { voidPlugin } from "void";\n\n` +
         `export default defineNuxtConfig({\n` +
+        `  nitro: { modules: ["void/nitro"] },\n` +
         `  vite: { plugins: [voidPlugin()] },\n` +
         `});`,
       'Manual Nuxt config step',
+    );
+    return;
+  }
+
+  if (framework.name === 'analog') {
+    note(
+      `Detected Analog. Void init does not patch vite.config.* automatically.\n\n` +
+        `Add \`voidPlugin()\` to the Vite plugins and \`void/nitro\` to Analog's Nitro modules:\n\n` +
+        `import analog from "@analogjs/platform";\n` +
+        `import { voidPlugin } from "void";\n\n` +
+        `export default defineConfig({\n` +
+        `  plugins: [\n` +
+        `    analog({ nitro: { modules: ["nitro-cloudflare-dev", "void/nitro"] } }),\n` +
+        `    voidPlugin(),\n` +
+        `  ],\n` +
+        `});`,
+      'Manual Analog config step',
     );
     return;
   }
