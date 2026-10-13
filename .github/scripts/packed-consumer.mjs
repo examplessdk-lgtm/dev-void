@@ -275,7 +275,7 @@ try {
         // void/email pulls a CommonJS dependency into the Worker; only an installed package shows whether dev serves it.
         writeFileSync(
           join(fixture, 'routes/api/packed-email.ts'),
-          `import { defineHandler } from 'void';\nimport { sendEmail } from 'void/email';\nexport const GET = defineHandler(async () => { const result = await sendEmail({ from: 'packed@example.com', to: 'inbox@example.com', subject: 'Packed', text: 'ok' }); return { ok: result.ok }; });\n`,
+          `import { defineHandler } from 'void';\nimport { sendEmail } from 'void/email';\nexport const GET = defineHandler(async () => { return sendEmail({ from: 'packed@example.com', to: 'inbox@example.com', subject: 'Packed', text: 'ok' }); });\n`,
         );
         mkdirSync(join(fixture, 'public'), { recursive: true });
         writeFileSync(join(fixture, 'public/packed.txt'), label);
@@ -343,7 +343,13 @@ if (runtime.manifest.platformVersion !== ${JSON.stringify(version)}) throw new E
             const emailResponse = await fetch(`${base}/api/packed-email`);
             const emailBody = await emailResponse.text();
             assert.equal(emailResponse.status, 200, `${emailBody}\n${task.failure()}`);
-            assert.deepEqual(JSON.parse(emailBody), { ok: true });
+            // Preview runs the built Worker: no dev inbox and no send binding.
+            const email = JSON.parse(emailBody);
+            if (mode === 'dev') {
+              assert.equal(email.ok, true, emailBody);
+            } else {
+              assert.equal(email.error?.code, 'BINDING_MISSING', emailBody);
+            }
             if (full && framework === 'react') {
               const markdown = await fetch(`${base}/markdown`);
               assert.equal(markdown.status, 200, task.failure());
