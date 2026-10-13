@@ -1,0 +1,21 @@
+platform/packages/api/src/admin/react/styles.css
+  s_4d3516639a82a0::t_f616d33c9901a4 848-850,852
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_4d3516639a82a0::t_c323d5e9c778a6 1175-1199,1269-1277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a7c87714cafcaef96c57a4d4b5dbe4edd434bf33",
+  "prompts": {},
+  "sessions": {
+    "s_4d3516639a82a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-3dd2-78a3-a43a-6056301747d9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
