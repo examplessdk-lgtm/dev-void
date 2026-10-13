@@ -283,6 +283,44 @@ describe('voidPlugin Vite environments', () => {
     }
   });
 
+  it('rejects Cloudflare-only imports from an installed void on the Node target dev server', async () => {
+    const root = realpathSync.native(createProjectRoot());
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', devDependencies: { void: '*' } }),
+    );
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
+    const installed = join(root, 'node_modules/void');
+    mkdirSync(installed, { recursive: true });
+    writeFileSync(
+      join(installed, 'package.json'),
+      JSON.stringify({ name: 'void', type: 'module', exports: { './kv': './kv.mjs' } }),
+    );
+    writeFileSync(join(installed, 'kv.mjs'), 'export const kv = {};\n');
+    mkdirSync(join(root, 'routes/api'), { recursive: true });
+    writeFileSync(
+      join(root, 'routes/api/cache.ts'),
+      "import { kv } from 'void/kv';\nexport const GET = () => Response.json({ kv: typeof kv });\n",
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [voidPlugin()],
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true, ws: false, preTransformRequests: false },
+    });
+    try {
+      await expect(
+        server.environments.ssr.transformRequest('/routes/api/cache.ts'),
+      ).rejects.toThrow("target: 'void/kv' is not available with target 'node'.");
+    } finally {
+      await server.close();
+    }
+  });
+
   // The package entry is the whole Vite plugin; server code needs only its handler helpers.
   it.each([
     ['sveltekit', '@sveltejs/kit', 'ssr', true],

@@ -22,7 +22,18 @@ export function isIsrActive(rawEnv: RuntimeEnv): boolean {
   return rawEnv.__VOID_ISR_DEPLOYMENT_ID != null;
 }
 
-export const envContext: AsyncLocalStorage<RuntimeEnv> = new AsyncLocalStorage<RuntimeEnv>();
+/**
+ * One process or isolate can evaluate this module more than once: Vite's SSR module
+ * runner keeps its own copy beside a package it leaves external, and a dependency
+ * optimizer reload re-evaluates it while a request is in flight. Every copy must read
+ * the env of the current request, so the store lives on `globalThis`, like
+ * `authContext`. Two Void versions in one process share it: change the key when the
+ * store shape changes.
+ */
+const ENV_CONTEXT_SYMBOL: unique symbol = Symbol.for('void.envContext.v1');
+const shared = globalThis as { [ENV_CONTEXT_SYMBOL]?: AsyncLocalStorage<RuntimeEnv> };
+shared[ENV_CONTEXT_SYMBOL] ??= new AsyncLocalStorage<RuntimeEnv>();
+export const envContext: AsyncLocalStorage<RuntimeEnv> = shared[ENV_CONTEXT_SYMBOL];
 
 let cloudflareEnv: RuntimeEnv | undefined;
 

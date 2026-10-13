@@ -22,7 +22,11 @@ type RuntimeRequestScope = {
   resources: Map<object, unknown>;
 };
 
-const runtimeRequestContext = new AsyncLocalStorage<RuntimeRequestScope>();
+// Shared across copies of this module for the reason given at `envContext`.
+const REQUEST_SCOPE_SYMBOL: unique symbol = Symbol.for('void.runtimeRequestScope.v1');
+const shared = globalThis as { [REQUEST_SCOPE_SYMBOL]?: AsyncLocalStorage<RuntimeRequestScope> };
+shared[REQUEST_SCOPE_SYMBOL] ??= new AsyncLocalStorage<RuntimeRequestScope>();
+const runtimeRequestContext = shared[REQUEST_SCOPE_SYMBOL];
 
 /** @internal Reuse a resource only within the current runtime request. */
 export function getRuntimeRequestResource<T>(

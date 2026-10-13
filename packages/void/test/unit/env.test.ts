@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vite-plus/test';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { getRuntimeBinding, getRuntimeEnv, withRuntimeEnv } from '../../src/runtime/env.ts';
 
 const globalScope = globalThis as {
@@ -35,6 +35,31 @@ describe('runtime env resolution', () => {
 
     const value = withRuntimeEnv({ DB: { tag: 'scoped-db' } }, () => getRuntimeBinding('DB'));
     expect(value).toEqual({ tag: 'scoped-db' });
+  });
+
+  // A package that Vite leaves external loads its own copy of these modules, and a
+  // dependency optimizer reload evaluates them again while a request is in flight.
+  it('shares the request env and scope with another copy of the env module', async () => {
+    vi.resetModules();
+    const first = await import('../../src/runtime/env.ts');
+    vi.resetModules();
+    const second = await import('../../src/runtime/env.ts');
+    expect(second.withRuntimeEnv).not.toBe(first.withRuntimeEnv);
+
+    const key = {};
+    const seen = await first.withRuntimeEnv({ KV: { tag: 'scoped-kv' } }, async () => {
+      await Promise.resolve();
+      return {
+        binding: second.getRuntimeBinding('KV'),
+        resource: second.getRuntimeRequestResource(
+          key,
+          () => 'request',
+          () => 'outside',
+        ),
+      };
+    });
+
+    expect(seen).toEqual({ binding: { tag: 'scoped-kv' }, resource: 'request' });
   });
 
   it('throws when no runtime env is available', () => {

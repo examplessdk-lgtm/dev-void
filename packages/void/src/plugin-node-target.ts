@@ -143,7 +143,11 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
 
     config(_, { command }) {
       if (command !== 'build') {
-        return;
+        // The dev server (and Vitest) run routes in Vite's Node SSR graph, which
+        // externalizes a bare import resolving into node_modules before any plugin sees
+        // it. An installed void/kv would then skip the guard above. Inlining void keeps
+        // every void import on the plugin path, as with a workspace link.
+        return { ssr: { noExternal: ['void'] } };
       }
 
       const root = process.cwd();
