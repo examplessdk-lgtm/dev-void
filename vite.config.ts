@@ -27,6 +27,7 @@ const sdkPgliteUnitTests = [
   'packages/void/test/unit/platform-database-lock.test.ts',
   'packages/void/test/unit/platform-database-migrations.test.ts',
   'packages/void/test/unit/runner-pg.test.ts',
+  'packages/void/test/unit/wrapper.test.ts',
 ];
 
 // Vitest forwards a FILTERED env to test workers — in CI only VOID_E2E_CF_TOKEN survives, while

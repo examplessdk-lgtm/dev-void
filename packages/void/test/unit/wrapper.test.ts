@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import {
   cpSync,
   existsSync,
@@ -10,10 +11,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { PGlite } from '@electric-sql/pglite';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { createServer as createPgServer } from 'pglite-server';
 import { parseSync } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
@@ -591,10 +595,12 @@ describe('generateWrapper with migrations', () => {
     expect(bundled).toContain('__voidPgpassNoop');
   });
 
-  /** Run the wrapped MySQL Worker in workerd and return its `/__void/migrate` response body. */
-  async function migrateMySqlInWorkerd(workerDir: string): Promise<unknown> {
-    // The applied-migrations SELECT returns a row, so mysql2 also parses a result set.
-    const mysql = await startFakeMySqlServer([{ name: '000_applied_elsewhere.sql' }]);
+  /** Start the wrapped Worker in workerd, send one internal request and return its JSON body. */
+  async function fetchWrappedWorker(
+    workerDir: string,
+    request: { path: string; body?: unknown },
+    options: { bindings?: Record<string, unknown>; d1Databases?: Array<string> } = {},
+  ): Promise<unknown> {
     // Upload every module, as the platform does; the wrapper imports the handler statically.
     const modules = readdirSync(workerDir)
       .filter((file) => file.endsWith('.mjs'))
@@ -608,20 +614,84 @@ describe('generateWrapper with migrations', () => {
           modules,
           compatibilityDate: '2026-02-24',
           compatibilityFlags: ['nodejs_compat'],
-          bindings: {
-            __VOID_PROXY_TOKEN: 'proxy-token',
-            HYPERDRIVE: { connectionString: `mysql://void@127.0.0.1:${mysql.port}/app` },
-          },
+          bindings: { __VOID_PROXY_TOKEN: 'proxy-token', ...options.bindings },
+          d1Databases: options.d1Databases,
         }),
       );
-      const response = await miniflare.dispatchFetch('http://localhost/__void/migrate', {
+      const response = await miniflare.dispatchFetch(`http://localhost${request.path}`, {
         method: 'POST',
-        headers: { 'x-void-internal': 'proxy-token' },
+        headers: { 'x-void-internal': 'proxy-token', 'content-type': 'application/json' },
+        body: request.body === undefined ? undefined : JSON.stringify(request.body),
       });
       return await response.json();
     } finally {
       await miniflare?.dispose();
+    }
+  }
+
+  /** Run the wrapped MySQL Worker in workerd and return its `/__void/migrate` response body. */
+  async function migrateMySqlInWorkerd(workerDir: string): Promise<unknown> {
+    // The applied-migrations SELECT returns a row, so mysql2 also parses a result set.
+    const mysql = await startFakeMySqlServer([{ name: '000_applied_elsewhere.sql' }]);
+    try {
+      return await fetchWrappedWorker(
+        workerDir,
+        { path: '/__void/migrate' },
+        {
+          bindings: {
+            HYPERDRIVE: { connectionString: `mysql://void@127.0.0.1:${mysql.port}/app` },
+          },
+        },
+      );
+    } finally {
       await mysql.close();
+    }
+  }
+
+  /**
+   * npm, Yarn and Bun hoist dependencies into the app's node_modules, where the build finds them.
+   * Copy each package there (copies, not symlinks, so this also runs on Windows).
+   */
+  function hoistIntoApp(projectRoot: string, packages: Record<string, string>): void {
+    for (const [name, source] of Object.entries(packages)) {
+      cpSync(realpathSync(source), join(projectRoot, 'node_modules', name), {
+        recursive: true,
+        filter: (path) => !path.endsWith(`${sep}node_modules`),
+      });
+    }
+  }
+
+  /** The dependencies of `packageName`, as they sit next to its installed copy. */
+  function dependencyDirs(packageName: string): Record<string, string> {
+    const packageJson = createRequire(import.meta.url).resolve(`${packageName}/package.json`);
+    const { dependencies } = JSON.parse(readFileSync(packageJson, 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    const installDir = dirname(dirname(realpathSync(packageJson)));
+    return Object.fromEntries(
+      Object.keys(dependencies).map((name) => [name, join(installDir, name)]),
+    );
+  }
+
+  /** workerd loads only relative, `node:` and `cloudflare:` imports, and the shims serve built-ins. */
+  function expectSelfContainedHandler(workerDir: string, optionalRequires: Array<string> = []) {
+    for (const file of readdirSync(workerDir).filter((name) =>
+      name.startsWith('__void_migration_handler'),
+    )) {
+      const code = readFileSync(join(workerDir, file), 'utf8');
+      const { module } = parseSync(file, code);
+      const imports = [
+        ...module.staticImports.map((entry) => entry.moduleRequest.value),
+        ...module.staticExports.flatMap((entry) =>
+          entry.entries.flatMap((item) => (item.moduleRequest ? [item.moduleRequest.value] : [])),
+        ),
+      ];
+      expect(imports.filter((id) => !/^(node:|cloudflare:|\.\/)/.test(id))).toEqual([]);
+      const required = Array.from(
+        code.matchAll(/\b__require\(\s*["']([^"']+)["']\s*\)/g),
+        (match) => match[1]!,
+      );
+      expect(required.filter((id) => !isBuiltin(id) && !optionalRequires.includes(id))).toEqual([]);
     }
   }
 
@@ -649,17 +719,7 @@ describe('generateWrapper with migrations', () => {
       name: '001_test.sql',
       sql: 'CREATE TABLE test (id INT);',
     });
-    const mysql2PackageJson = createRequire(import.meta.url).resolve('mysql2/package.json');
-    const { dependencies } = JSON.parse(readFileSync(mysql2PackageJson, 'utf8')) as {
-      dependencies: Record<string, string>;
-    };
-    const installDir = dirname(dirname(realpathSync(mysql2PackageJson)));
-    for (const name of Object.keys(dependencies)) {
-      // Copies, not symlinks, so this also runs on Windows.
-      cpSync(realpathSync(join(installDir, name)), join(projectRoot, 'node_modules', name), {
-        recursive: true,
-      });
-    }
+    hoistIntoApp(projectRoot, dependencyDirs('mysql2'));
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
       hasMigrations: true,
@@ -670,26 +730,73 @@ describe('generateWrapper with migrations', () => {
       ok: true,
       migrations: [{ name: '001_test.sql', applied: true, durationMs: expect.any(Number) }],
     });
-    // workerd serves only Node built-ins to the require shim. mysql2 requires its optional
-    // `cardinal` inside try/catch.
-    for (const file of readdirSync(workerDir).filter((name) =>
-      name.startsWith('__void_migration_handler'),
-    )) {
-      const code = readFileSync(join(workerDir, file), 'utf8');
-      const { module } = parseSync(file, code);
-      const imports = [
-        ...module.staticImports.map((entry) => entry.moduleRequest.value),
-        ...module.staticExports.flatMap((entry) =>
-          entry.entries.flatMap((item) => (item.moduleRequest ? [item.moduleRequest.value] : [])),
+    // mysql2 requires its optional `cardinal` inside try/catch.
+    expectSelfContainedHandler(workerDir, ['cardinal']);
+  });
+
+  it('bundles the pg dependencies that sit in the app node_modules', async () => {
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_test.sql',
+      sql: 'CREATE TABLE test (id SERIAL PRIMARY KEY);',
+    });
+    hoistIntoApp(projectRoot, dependencyDirs('pg'));
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      hasMigrations: true,
+      migrationDialect: 'postgresql',
+    });
+
+    const pglite = new PGlite();
+    // pglite-server does not wait for PGlite: a query that arrives during startup spins forever.
+    await pglite.waitReady;
+    const server = createPgServer(pglite);
+    try {
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const { port } = server.address() as AddressInfo;
+      expect(
+        await fetchWrappedWorker(
+          workerDir,
+          { path: '/__void/migrate' },
+          {
+            bindings: {
+              HYPERDRIVE: { connectionString: `postgresql://postgres@127.0.0.1:${port}/postgres` },
+            },
+          },
         ),
-      ];
-      expect(imports.filter((id) => !/^(node:|cloudflare:|\.\/)/.test(id))).toEqual([]);
-      const required = Array.from(
-        code.matchAll(/\b__require\(\s*["']([^"']+)["']\s*\)/g),
-        (match) => match[1]!,
-      );
-      expect(required.filter((id) => !isBuiltin(id) && id !== 'cardinal')).toEqual([]);
+      ).toEqual({
+        ok: true,
+        migrations: [{ name: '001_test.sql', applied: true, durationMs: expect.any(Number) }],
+      });
+    } finally {
+      server.close();
+      await pglite.close();
     }
+    expectSelfContainedHandler(workerDir);
+  });
+
+  it('bundles @void/deploy-core when it sits in the app node_modules', async () => {
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_users.sql',
+      sql: 'CREATE TABLE users (id INTEGER PRIMARY KEY);',
+    });
+    hoistIntoApp(projectRoot, {
+      '@void/deploy-core': join(import.meta.dirname, '..', '..', '..', 'deploy-core'),
+    });
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      hasMigrations: true,
+      migrationDialect: 'sqlite',
+    });
+
+    expect(
+      await fetchWrappedWorker(
+        workerDir,
+        { path: '/__void/migrate/app', body: { attemptId: 'attempt-1', deploymentId: 'dep-1' } },
+        { d1Databases: ['DB'] },
+      ),
+    ).toMatchObject({ ok: true, confirmedApplied: ['001_users.sql'] });
+    expectSelfContainedHandler(workerDir);
   });
 
   it('does not generate migration handler when hasMigrations is false', async () => {

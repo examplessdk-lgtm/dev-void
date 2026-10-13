@@ -271,16 +271,17 @@ async function bundleMigrationHandler(
           conditions: ['workerd', 'worker', 'browser', 'module', 'import', 'default'],
         }
       : undefined,
-    ssr: isPostgresql
-      ? {
-          noExternal: ['pg', 'pg-cloudflare'],
-          resolve: {
-            conditions: ['workerd', 'worker', 'browser', 'module', 'import', 'default'],
-          },
-        }
-      : isMysql
-        ? { noExternal: true }
-        : undefined,
+    // A build decides what is external by resolving from `root`, which sits in the app. npm,
+    // Yarn and Bun hoist dependencies there, and workerd cannot load a bare import, so bundle
+    // every package. Node built-ins stay external for the require shims below.
+    ssr: {
+      noExternal: true,
+      ...(isPostgresql && {
+        resolve: {
+          conditions: ['workerd', 'worker', 'browser', 'module', 'import', 'default'],
+        },
+      }),
+    },
     build: {
       outDir,
       emptyOutDir: true,
