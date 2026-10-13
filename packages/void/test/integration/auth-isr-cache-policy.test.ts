@@ -1,6 +1,7 @@
 import { handleIsr, type IsrCacheEnv } from '@void/isr/runtime';
 import { memoryAdapter } from 'better-auth/adapters/memory';
 import { Hono } from 'hono';
+import { etag } from 'hono/etag';
 import { describe, expect, it } from 'vite-plus/test';
 import { createVoidAuthRuntime } from '../../src/runtime/better-auth-shared.ts';
 
@@ -93,7 +94,7 @@ describe('real anonymous Better Auth lookup cache policy', () => {
 });
 
 describe('real authenticated Better Auth session cache policy', () => {
-  async function signedInApp(routeHeaders: Record<string, string>) {
+  async function signedInApp(routeHeaders: Record<string, string>, { withEtag = false } = {}) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [] });
     const runtime = createVoidAuthRuntime('sqlite', async () => {});
     const app = new Hono();
@@ -101,6 +102,9 @@ describe('real authenticated Better Auth session cache policy', () => {
     app.on(['GET', 'POST'], '/api/auth/*', (c) =>
       runtime.handleVoidAuthRequest(c, options, database),
     );
+    if (withEtag) {
+      app.use('/api/report', etag());
+    }
     app.get('/api/report', (c) => c.text('report', 200, routeHeaders));
     const signUp = await app.request(
       'https://app.test/api/auth/sign-up/email',
@@ -131,8 +135,8 @@ describe('real authenticated Better Auth session cache policy', () => {
     return { app, cookie };
   }
 
-  it.each(['private, no-cache', 'private, max-age=60', 'no-store'])(
-    'keeps a route policy that already stays out of shared caches: %s',
+  it.each(['private, no-cache', 'no-store', 'Private, No-Cache, max-age=60', 'private,\tno-cache'])(
+    'keeps a no-store or private, no-cache route policy: %s',
     async (policy) => {
       const { app, cookie } = await signedInApp({ 'cache-control': policy, etag: 'W/"report-1"' });
       const response = await app.request(
@@ -147,17 +151,41 @@ describe('real authenticated Better Auth session cache policy', () => {
     },
   );
 
-  it.each([null, 'public, max-age=60', 'no-cache', 'private="set-cookie", max-age=60'])(
-    'applies the session lookup no-store to a route policy of %s',
-    async (policy) => {
-      const { app, cookie } = await signedInApp(policy ? { 'cache-control': policy } : {});
-      const response = await app.request(
-        'https://app.test/api/report',
-        { headers: { cookie } },
-        env,
-      );
-      expect(response.headers.get('cache-control')).toBe('no-store');
-      expect(response.headers.get('pragma')).toBe('no-cache');
-    },
-  );
+  it.each([
+    null,
+    'public, max-age=60',
+    'no-cache',
+    'private="set-cookie", max-age=60',
+    'private',
+    'private, max-age=60',
+    'private, no-cache="set-cookie"',
+    'no-cache="x,private,y", public, max-age=600',
+    'no-cache="x,no-store,y", public, max-age=600',
+    'no-cache="a\\",no-store,b", public, max-age=600',
+  ])('applies the session lookup no-store to a route policy of %s', async (policy) => {
+    const { app, cookie } = await signedInApp(policy ? { 'cache-control': policy } : {});
+    const response = await app.request('https://app.test/api/report', { headers: { cookie } }, env);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('pragma')).toBe('no-cache');
+  });
+
+  it('answers a signed-in repeat request with 304 through etag()', async () => {
+    const { app, cookie } = await signedInApp(
+      { 'cache-control': 'private, no-cache' },
+      { withEtag: true },
+    );
+    const first = await app.request('https://app.test/api/report', { headers: { cookie } }, env);
+    expect(first.status).toBe(200);
+    const tag = first.headers.get('etag');
+    expect(tag).toBeTruthy();
+    const repeat = await app.request(
+      'https://app.test/api/report',
+      { headers: { cookie, 'if-none-match': tag! } },
+      env,
+    );
+    expect(repeat.status).toBe(304);
+    expect(repeat.headers.get('cache-control')).toBe('private, no-cache');
+    expect(repeat.headers.has('pragma')).toBe(false);
+    expect(repeat.headers.get('etag')).toBe(tag);
+  });
 });

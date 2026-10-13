@@ -177,19 +177,37 @@ describe('runVoidAuthMiddleware response headers', () => {
   it.each([
     ['without its own cache policy', new Headers()],
     ['with a no-store policy', new Headers({ 'cache-control': 'no-store', pragma: 'no-cache' })],
-  ])('keeps a private route policy through a cookie rotation %s', async (_label, authHeaders) => {
-    authHeaders.append('set-cookie', 'session=rotated; Path=/; HttpOnly');
-    const app = createApp({ response: null, headers: authHeaders });
-    app.get('/refresh', (c) =>
-      c.text('content', 200, { 'cache-control': 'private, no-cache', etag: 'W/"v1"' }),
-    );
+  ])(
+    'keeps a private, no-cache route policy through a cookie rotation %s',
+    async (_label, authHeaders) => {
+      authHeaders.append('set-cookie', 'session=rotated; Path=/; HttpOnly');
+      const app = createApp({ response: null, headers: authHeaders });
+      app.get('/refresh', (c) =>
+        c.text('content', 200, { 'cache-control': 'private, no-cache', etag: 'W/"v1"' }),
+      );
+      const response = await app.request(
+        'http://localhost/refresh',
+        { headers: { cookie: 'session=current' } },
+        { BETTER_AUTH_SECRET: 'test-secret' },
+      );
+      expect(response.headers.get('cache-control')).toBe('private, no-cache');
+      expect(response.headers.has('pragma')).toBe(false);
+      expect(response.headers.getSetCookie()).toEqual(['session=rotated; Path=/; HttpOnly']);
+    },
+  );
+
+  it('does not let a cookie rotation keep a private route policy the browser may reuse', async () => {
+    const app = createApp({
+      response: null,
+      headers: new Headers({ 'set-cookie': 'session=rotated; Path=/; HttpOnly' }),
+    });
+    app.get('/refresh', (c) => c.text('content', 200, { 'cache-control': 'private, max-age=60' }));
     const response = await app.request(
       'http://localhost/refresh',
       { headers: { cookie: 'session=current' } },
       { BETTER_AUTH_SECRET: 'test-secret' },
     );
-    expect(response.headers.get('cache-control')).toBe('private, no-cache');
-    expect(response.headers.has('pragma')).toBe(false);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(response.headers.getSetCookie()).toEqual(['session=rotated; Path=/; HttpOnly']);
   });
 });
