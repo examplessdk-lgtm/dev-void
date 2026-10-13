@@ -240,6 +240,19 @@ describe('runMigrations (local SQLite)', () => {
     }
   });
 
+  it('names the failed file and keeps the SQLite error as the cause', async () => {
+    const root = createDir();
+    const migDir = join(root, 'migrations');
+    const dbPath = join(root, 'test.sqlite');
+    writeMigration(migDir, '001_ok.sql', 'CREATE TABLE a (id TEXT PRIMARY KEY)');
+    writeMigration(migDir, '002_bad.sql', 'INSERT INTO nope VALUES (1);');
+
+    const error = await runMigrations(migDir, dbPath).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe('migration 002_bad.sql failed: no such table: nope');
+    expect((error as Error).cause).toMatchObject({ code: 'SQLITE_ERROR' });
+  });
+
   it('upgrades a legacy _migrations table into _void_migrations on first run', async () => {
     const root = createDir();
     const migDir = join(root, 'migrations');

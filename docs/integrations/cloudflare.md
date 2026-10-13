@@ -154,7 +154,7 @@ Void uses Access credentials for readiness checks without saving them. If checks
 
 ### Databases and secrets
 
-For PostgreSQL and MySQL, supply `DATABASE_URL` to the deploy process. Void uses it for Hyperdrive and migrations without writing it to config. MySQL schema changes can partially apply before an error.
+For PostgreSQL and MySQL, supply `DATABASE_URL` to the deploy process. Void uses it for Hyperdrive and migrations without writing it to config. MySQL schema changes can partially apply before an error; see [failed MySQL migrations](../guide/database/mysql.md#failed-migrations).
 
 Creating Hyperdrive requires an API token with Hyperdrive edit permission. Alternatively, create it in Cloudflare and add its ID to `cloudflare.hyperdrive`; an existing binding works with browser login.
 

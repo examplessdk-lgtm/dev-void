@@ -53,6 +53,9 @@ vi.mock('mysql2/promise', () => ({
         const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
         return [dropped ? [] : [{ name: '0000_init.sql' }], []];
       }
+      if (sql.startsWith('SELECT GET_LOCK')) {
+        return [[{ acquired: 1 }], []];
+      }
       return [[], []];
     },
   }),

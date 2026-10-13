@@ -270,7 +270,17 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
         return true;
       });
 
-      if (tx.immediate()) {
+      // A throw inside the transaction rolls the whole file back.
+      let applied: boolean;
+      try {
+        applied = tx.immediate();
+      } catch (err) {
+        throw new Error(
+          `migration ${migration.name} failed: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      if (applied) {
         appliedNames.push(migration.name);
       }
     }

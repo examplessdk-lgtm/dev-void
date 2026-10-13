@@ -68,6 +68,12 @@ async function runMySqlMigrations(
       }
       const start = Date.now();
       try {
+        // Data changes commit with the tracking row. MySQL commits DDL, and anything before it,
+        // on its own. Hyperdrive keeps one connection for the open transaction. Unlike the CLI
+        // runner, this takes no named lock: Hyperdrive pools connections per transaction, so a
+        // session lock could stay on a pooled connection. The platform migrates one deploy per
+        // project at a time.
+        await connection.query('BEGIN');
         // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
         for (const statement of splitMigrationSql(migration.sql)) {
           await connection.query(statement);
@@ -76,8 +82,10 @@ async function runMySqlMigrations(
           'INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)',
           [migration.name, new Date().toISOString()],
         );
+        await connection.query('COMMIT');
         results.push({ name: migration.name, applied: true, durationMs: Date.now() - start });
       } catch (error) {
+        await connection.query('ROLLBACK').catch(() => {});
         results.push({
           name: migration.name,
           applied: false,

@@ -135,6 +135,38 @@ describe('applyPgMigrations', () => {
     const tracking = await pglite.query('SELECT name FROM _void_migrations');
     expect(tracking.rows).toHaveLength(0);
   });
+
+  it('names the failed file and keeps the database error as the cause', async () => {
+    const migrations = [
+      { name: '001_create_users.sql', sql: 'CREATE TABLE users (id SERIAL PRIMARY KEY)' },
+      { name: '002_bad.sql', sql: 'INVALID SQL THAT WILL FAIL' },
+    ];
+
+    const error = await applyPgMigrations(client, migrations).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe(
+      'migration 002_bad.sql failed: syntax error at or near "INVALID"',
+    );
+    expect((error as Error).cause).toMatchObject({ code: '42601' });
+  });
+
+  it('names the failed file when the rollback fails too', async () => {
+    const failing: PgClient = {
+      async query<T extends Record<string, unknown> = Record<string, unknown>>(text: string) {
+        if (text === 'SELECT 1 FROM missing') {
+          throw new Error('connection lost');
+        }
+        if (text === 'ROLLBACK') {
+          throw new Error('Client was closed and is not queryable');
+        }
+        return { rows: [] as Array<T> };
+      },
+    };
+
+    await expect(
+      applyPgMigrations(failing, [{ name: '001_x.sql', sql: 'SELECT 1 FROM missing' }]),
+    ).rejects.toThrow('migration 001_x.sql failed: connection lost');
+  });
 });
 
 describe('readPgAppliedMigrations', () => {

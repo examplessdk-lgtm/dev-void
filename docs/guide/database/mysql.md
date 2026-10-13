@@ -51,9 +51,18 @@ void deploy
 
 For direct Cloudflare deploys, export the production `DATABASE_URL` in the shell running `void deploy --platform cloudflare`. Void uses it to provision Hyperdrive and apply pending checked-in migrations before uploading the Worker; it is not written to the Worker config.
 
-::: warning MySQL DDL is not transactional
-MySQL may implicitly commit schema changes. If a multi-statement migration fails partway through, earlier statements can remain applied even though Void does not record the migration as complete. Keep migrations small, review them before deploy, and make failed migrations safe to rerun after repairing the database.
-:::
+### Failed migrations {#failed-migrations}
+
+Each migration file runs in a transaction, so a failed file that only changes data leaves the database unchanged. MySQL commits schema changes such as `CREATE TABLE` and `ALTER TABLE` immediately, so when a file with schema changes fails partway through, its earlier statements stay applied. The error names the file that failed.
+
+To recover, undo the applied statements, fix the file, then run `void db migrate` or `void deploy` again:
+
+```sh
+void db execute "DROP TABLE comments"
+void db execute --remote "DROP TABLE comments" # deployed database
+```
+
+MySQL rejects `IF NOT EXISTS` on `ADD COLUMN` and `CREATE INDEX`, so undoing a statement is usually simpler than making it safe to rerun. Small migrations leave less to undo.
 
 ## Database commands
 
