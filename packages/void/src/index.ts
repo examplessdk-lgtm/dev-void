@@ -208,9 +208,8 @@ export function voidPlugin(options?: {
   // graph and therefore another envContext, so request bindings disappear for
   // the prebundled copy. Every return path includes this plugin, including
   // framework and Node targets that do not all use bindingRuntimePlugin.
-  const serverRuntimeOptimizerPlugin = createServerRuntimeOptimizerPlugin(
-    !isNodeTarget(config.target) && !frameworkOwnsCloudflareRuntime,
-    dialect,
+  const serverRuntimeOptimizerPlugin = createServerRuntimeOptimizerPlugin(dialect, () =>
+    readWranglerCompat(root, config),
   );
   // Scan queues/websocket routes early so both framework-mode and default-mode
   // branches can safely close over these bindings.

@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { cloudflare } from '@cloudflare/vite-plugin';
 import { resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { voidPlugin } from '../../src/index.ts';
@@ -145,4 +146,60 @@ describe('voidPlugin Vite environments', () => {
     expect(config.environments.ssr.resolve.external).toEqual([]);
     expect(config.environments.ssr.resolve.conditions).toContain('workerd');
   });
+
+  it('prebundles void CommonJS dependencies only in the worker environment', async () => {
+    const root = createProjectRoot();
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ database: 'pg', worker: { compatibility_date: '2026-02-24' } }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const config = await resolveConfig({ root, plugins: [voidPlugin()] }, 'serve', 'development');
+
+    expect(config.environments.void_worker.optimizeDeps.include).toEqual(
+      expect.arrayContaining(['void > email-validator', 'void > pg']),
+    );
+    expect(config.environments.ssr.optimizeDeps.include).toEqual([]);
+  });
+
+  it.each(['before', 'after'])(
+    'prebundles them in an adapter-owned workerd environment with Void listed %s it',
+    async (order) => {
+      const root = createProjectRoot();
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', dependencies: { astro: '^7.0.0' } }),
+      );
+      writeFileSync(
+        join(root, 'void.json'),
+        JSON.stringify({ database: 'mysql', worker: { compatibility_date: '2026-02-24' } }),
+      );
+      writeFileSync(join(root, 'worker.ts'), 'export default {};\n');
+      writeFileSync(
+        join(root, 'wrangler.jsonc'),
+        JSON.stringify({
+          name: 'adapter-app',
+          main: './worker.ts',
+          compatibility_date: '2026-02-24',
+        }),
+      );
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      // @astrojs/cloudflare runs Astro's ssr environment in workerd this way.
+      const adapter = cloudflare({
+        configPath: join(root, 'wrangler.jsonc'),
+        viteEnvironment: { name: 'ssr' },
+      });
+
+      const config = await resolveConfig(
+        { root, plugins: order === 'before' ? [voidPlugin(), adapter] : [adapter, voidPlugin()] },
+        'serve',
+        'development',
+      );
+
+      expect(config.environments.ssr.optimizeDeps.include).toEqual(
+        expect.arrayContaining(['void > email-validator', 'void > mysql2']),
+      );
+    },
+  );
 });

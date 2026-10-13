@@ -64,7 +64,6 @@ async function loadExecutableDbModule(
   fakeStateKeys.push(stateKey);
 
   const fakeDriverPath = join(root, 'fake-driver.mjs');
-  const fakePgPath = join(root, 'fake-pg.mjs');
   const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
   const stateExpression = `globalThis[${JSON.stringify(stateKey)}]`;
   const createDatabaseSource = `
@@ -104,30 +103,25 @@ export function drizzle(client) {
     );
   } else if (dialect === 'postgresql') {
     writeFileSync(
-      fakePgPath,
-      `const state = ${stateExpression};
-export class Pool {
-  constructor(options) {
-    this.options = options;
-    state.pools.push({ dialect: "postgresql", options });
-  }
-}
-export default { Pool };
-`,
-    );
-    writeFileSync(
       fakeDriverPath,
       `import { getRuntimeBinding as getTestRuntimeBinding } from ${JSON.stringify(envUrl)};
+const state = ${stateExpression};
 ${createDatabaseSource}
-export function drizzle(pool) {
-  if (typeof pool === "string") pool = { options: { connectionString: pool } };
-  return createDatabase("postgresql", pool);
+export function drizzle(config) {
+  if (typeof config === "string") return createDatabase("postgresql", { options: { connectionString: config } });
+  if (typeof config?.connection !== "object" || config.connection === null) {
+    throw new Error("void/db must let drizzle build the pg pool from a connection object");
+  }
+  const { connection, ...drizzleConfig } = config;
+  state.pools.push({ dialect: "postgresql", options: connection, drizzleConfig });
+  return createDatabase("postgresql", { options: connection });
 }
 `,
     );
-    code = code
-      .replace(/^import \{ drizzle \} from .*;$/m, `import { drizzle } from "./fake-driver.mjs";`)
-      .replace('import pg from "pg";', 'import pg from "./fake-pg.mjs";');
+    code = code.replace(
+      /^import \{ drizzle \} from .*;$/m,
+      `import { drizzle } from "./fake-driver.mjs";`,
+    );
   } else {
     writeFileSync(
       fakeDriverPath,
@@ -375,6 +369,7 @@ describe('drizzlePlugin db typing generation', () => {
       for (const pool of requestPools) {
         if (dialect === 'postgresql') {
           expect(pool.options).toMatchObject({ max: 1, idleTimeoutMillis: 1000 });
+          expect(pool.drizzleConfig).toEqual({ schema: expect.anything() });
         } else {
           expect(pool.options).toMatchObject({ connectionLimit: 1, maxIdle: 1, idleTimeout: 1000 });
         }
@@ -393,9 +388,12 @@ describe('drizzlePlugin db typing generation', () => {
     },
   );
 
-  it('leaves the MySQL driver import to drizzle', () => {
+  it.each([
+    ['mysql', 'mysql2'],
+    ['postgresql', 'pg'],
+  ] as const)('leaves the %s driver import to drizzle', (dialect, driver) => {
     const root = createProjectRoot();
-    const plugin = drizzlePlugin(root, false, 'mysql');
+    const plugin = drizzlePlugin(root, false, dialect);
     const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
 
     const code = load.call({}, '\0virtual:void-db');
@@ -404,11 +402,14 @@ describe('drizzlePlugin db typing generation', () => {
       (match) => JSON.parse(match[1]!) as string,
     );
 
-    // The worker optimizer serves drizzle's bare mysql2 import from a prebundle; a direct import
-    // by file path would reach workerd as raw CommonJS.
-    expect(specifiers.filter((specifier) => specifier.includes('mysql2'))).toEqual([
-      expect.stringMatching(/drizzle-orm[\\/]mysql2[\\/]/),
-    ]);
+    // The worker optimizer serves drizzle's bare driver import from a prebundle. A bare import
+    // here resolves from the app root, and an import by file path reaches workerd as CommonJS.
+    const driverPath = new RegExp(`(^|[\\\\/])${driver}([\\\\/]|$)`);
+    expect(
+      specifiers.filter(
+        (specifier) => driverPath.test(specifier) && !specifier.includes('drizzle-orm'),
+      ),
+    ).toEqual([]);
   });
 
   it.each([true, false])(
@@ -453,6 +454,46 @@ export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
         for (const pool of pools) {
           pool.end?.();
         }
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'gives drizzle a pg pool with the request options (schema: %s)',
+    async (hasSchema) => {
+      const root = createProjectRoot({ schema: hasSchema });
+      const plugin = drizzlePlugin(root, false, 'postgresql', { forceVirtualDb: true });
+      const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+      const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+      const code = load
+        .call({}, '\0virtual:void-db')
+        .replace(
+          /^import \{ (getRuntimeBinding, getRuntimeRequestResource) \} from .*;$/m,
+          (_match, imports: string) => `import { ${imports} } from ${JSON.stringify(envUrl)};`,
+        );
+      writeFileSync(join(root, 'virtual-db.mjs'), code);
+      writeFileSync(
+        join(root, 'harness.mjs'),
+        `import { db } from "./virtual-db.mjs";
+import { withRuntimeEnv } from ${JSON.stringify(envUrl)};
+export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
+`,
+      );
+      type PgPool = { options: Record<string, unknown>; end(): Promise<void> };
+      const harness = (await import(
+        `${pathToFileURL(join(root, 'harness.mjs')).href}?test=${crypto.randomUUID()}`
+      )) as { requestClient(env: Record<string, unknown>): PgPool };
+
+      const url = 'postgres://void@127.0.0.1:9/app';
+      const pool = harness.requestClient({ DATABASE_URL: url });
+      try {
+        expect(pool.options).toMatchObject({
+          connectionString: url,
+          max: 1,
+          idleTimeoutMillis: 1000,
+        });
+      } finally {
+        await pool.end?.();
       }
     },
   );
@@ -508,8 +549,7 @@ export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
 
     const code = load.call({}, '\0virtual:void-db');
     expect(code).toContain('import { drizzle } from "');
-    expect(code).not.toContain('import * as schema');
-    expect(code).toContain('return drizzle(pool)');
+    expect(code).not.toMatch(/\bschema\b/);
   });
 
   it('uses a custom D1 binding name in the sqlite virtual module', () => {

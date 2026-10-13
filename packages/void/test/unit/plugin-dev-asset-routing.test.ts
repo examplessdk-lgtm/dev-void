@@ -81,6 +81,15 @@ function createFrameworkOwnedRuntimeProjectRoot(): string {
   return root;
 }
 
+function createAstroProjectRoot(): string {
+  const root = createProjectRoot();
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ type: 'module', dependencies: { astro: '^7.0.0' } }),
+  );
+  return root;
+}
+
 function createNodeProjectRoot(): string {
   const root = createProjectRoot();
   writeFileSync(
@@ -216,17 +225,23 @@ describe('voidPlugin dev asset routing', () => {
     config({}, { command: 'build', mode: 'production' });
   }
 
+  // The Cloudflare plugin gives each environment it runs in workerd these conditions.
+  const workerd = { resolve: { conditions: ['workerd', 'worker', 'module', 'browser'] } };
+  const node = { resolve: { conditions: ['module', 'node'] } };
+
   async function resolveRuntimeOptimizerConfig(
     root: string,
     environmentName: string,
+    environment: import('vite').EnvironmentOptions = {},
   ): Promise<unknown> {
     vi.spyOn(process, 'cwd').mockReturnValue(root);
     const { voidPlugin } = await import('../../src/index.ts');
     const plugin = voidPlugin().find((entry) => entry.name === 'void:server-runtime-optimizer');
     const configEnvironment = getHookHandler(plugin?.configEnvironment) as (
       name: string,
+      environment: import('vite').EnvironmentOptions,
     ) => unknown;
-    return configEnvironment(environmentName);
+    return configEnvironment(environmentName, environment);
   }
 
   it('runs the env config hook for framework and Node early-return plugin paths', async () => {
@@ -235,53 +250,50 @@ describe('voidPlugin dev asset routing', () => {
     await expect(runEnvConfig(createNodeProjectRoot())).resolves.toBeUndefined();
   });
 
-  it('keeps one Void runtime module graph in core, framework, and Node servers', async () => {
+  it('converts void CommonJS dependencies only in environments that run in workerd', async () => {
     const workerdOptimizer = {
       optimizeDeps: { exclude: ['void'], include: ['void > email-validator'] },
     };
-    await expect(
-      resolveRuntimeOptimizerConfig(createApiOnlyProjectRoot(), 'void_worker'),
-    ).resolves.toEqual(workerdOptimizer);
-    vi.restoreAllMocks();
-    await expect(
-      resolveRuntimeOptimizerConfig(createFrameworkProjectRoot(), 'ssr'),
-    ).resolves.toEqual(workerdOptimizer);
-    vi.restoreAllMocks();
-    await expect(
-      resolveRuntimeOptimizerConfig(createFrameworkOwnedRuntimeProjectRoot(), 'ssr'),
-    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
-    vi.restoreAllMocks();
-    await expect(resolveRuntimeOptimizerConfig(createNodeProjectRoot(), 'ssr')).resolves.toEqual({
-      optimizeDeps: { exclude: ['void'] },
-    });
+    const nodeOptimizer = { optimizeDeps: { exclude: ['void'] } };
+    const cases = [
+      [createApiOnlyProjectRoot, 'void_worker', workerd, workerdOptimizer],
+      // Default mode never runs Vite's own ssr environment.
+      [createApiOnlyProjectRoot, 'ssr', node, nodeOptimizer],
+      [createFrameworkProjectRoot, 'ssr', workerd, workerdOptimizer],
+      // @astrojs/cloudflare runs Astro's ssr environment in workerd.
+      [createAstroProjectRoot, 'ssr', workerd, workerdOptimizer],
+      [createFrameworkOwnedRuntimeProjectRoot, 'ssr', node, nodeOptimizer],
+      [createNodeProjectRoot, 'ssr', {}, nodeOptimizer],
+    ] as const;
+    for (const [createRoot, name, environment, expected] of cases) {
+      vi.restoreAllMocks();
+      await expect(
+        resolveRuntimeOptimizerConfig(createRoot(), name, environment),
+        `${createRoot.name} ${name}`,
+      ).resolves.toEqual(expected);
+    }
   });
 
-  it('prebundles mysql2 for void/db only in worker runtimes Void owns', async () => {
-    await expect(
-      resolveRuntimeOptimizerConfig(
-        useDatabase(createApiOnlyProjectRoot(), 'mysql'),
-        'void_worker',
-      ),
-    ).resolves.toEqual({
-      optimizeDeps: { exclude: ['void'], include: ['void > email-validator', 'void > mysql2'] },
-    });
-    vi.restoreAllMocks();
-    await expect(
-      resolveRuntimeOptimizerConfig(useDatabase(createApiOnlyProjectRoot(), 'pg'), 'void_worker'),
-    ).resolves.toEqual({
-      optimizeDeps: { exclude: ['void'], include: ['void > email-validator'] },
-    });
-    vi.restoreAllMocks();
-    await expect(
-      resolveRuntimeOptimizerConfig(
-        useDatabase(createFrameworkOwnedRuntimeProjectRoot(), 'mysql'),
-        'ssr',
-      ),
-    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
-    vi.restoreAllMocks();
-    await expect(
-      resolveRuntimeOptimizerConfig(useDatabase(createNodeProjectRoot(), 'mysql'), 'ssr'),
-    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
+  it('prebundles the void/db driver wherever workerd runs it', async () => {
+    const cases = [
+      [createApiOnlyProjectRoot, 'mysql', workerd, ['void > mysql2']],
+      [createApiOnlyProjectRoot, 'pg', workerd, ['void > pg']],
+      [createAstroProjectRoot, 'mysql', workerd, ['void > mysql2']],
+      [createAstroProjectRoot, 'pg', workerd, ['void > pg']],
+      [createFrameworkOwnedRuntimeProjectRoot, 'mysql', node, undefined],
+      [createNodeProjectRoot, 'pg', {}, undefined],
+    ] as const;
+    for (const [createRoot, database, environment, drivers] of cases) {
+      vi.restoreAllMocks();
+      await expect(
+        resolveRuntimeOptimizerConfig(useDatabase(createRoot(), database), 'ssr', environment),
+        `${createRoot.name} ${database}`,
+      ).resolves.toEqual({
+        optimizeDeps: drivers
+          ? { exclude: ['void'], include: ['void > email-validator', ...drivers] }
+          : { exclude: ['void'] },
+      });
+    }
   });
 
   it('leaves client dependency optimization unchanged', async () => {

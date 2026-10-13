@@ -1,6 +1,9 @@
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+import { builtinModules, createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join } from 'pathslash';
 import { type Plugin } from 'vite';
-import { ensureWranglerCompat } from './cli/wrangler.ts';
+import { ensureWranglerCompat, type WranglerCompat } from './cli/wrangler.ts';
 import { readConfig, isNodeTarget, type DatabaseDialect } from './config.ts';
 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
@@ -130,30 +133,105 @@ export function createWranglerCompatPersistPlugin(
   };
 }
 
+// void/db leaves its driver import to drizzle, so these nested prebundles serve it.
+const DATABASE_DRIVER_DEPS: Record<DatabaseDialect, Array<string>> = {
+  sqlite: [],
+  postgresql: ['void > pg'],
+  mysql: ['void > mysql2'],
+};
+
+const NODE_BUILTIN = new RegExp(`^(?:node:)?(?:${builtinModules.join('|')})$`);
+const NODE_BUILTIN_REQUIRE_PREFIX = '\0void:node-require:';
+
+/**
+ * The Node built-ins that workerd provides for the given compatibility settings, from the preset
+ * the Cloudflare plugin builds Workers with (a dependency of `@cloudflare/vite-plugin`). Before
+ * 2025-09-15 the preset fills in parts of `node:process` instead of listing it, but workerd
+ * provides that module at every date.
+ */
+async function readWorkerdNodeBuiltins(compat: WranglerCompat): Promise<Set<string>> {
+  const vitePlugin = fileURLToPath(import.meta.resolve('@cloudflare/vite-plugin'));
+  const manifestPath = createRequire(vitePlugin).resolve('@cloudflare/unenv-preset/package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    exports: { '.': { import: string } };
+  };
+  const { getCloudflarePreset } = (await import(
+    pathToFileURL(join(dirname(manifestPath), manifest.exports['.'].import)).href
+  )) as {
+    getCloudflarePreset(compat: { compatibilityDate: string; compatibilityFlags: Array<string> }): {
+      external: Array<string>;
+    };
+  };
+  const { external } = getCloudflarePreset({
+    compatibilityDate: compat.compatibilityDate,
+    compatibilityFlags: compat.compatibilityFlags ?? [],
+  });
+  return new Set([...external.map((name) => name.replace(/^node:/, '')), 'process']);
+}
+
 export function createServerRuntimeOptimizerPlugin(
-  voidOwnsWorkerRuntime: boolean,
   dialect: DatabaseDialect,
+  readCompat: () => WranglerCompat,
 ): Plugin {
+  let workerdNodeBuiltins: Promise<Set<string>> | undefined;
   const serverRuntimeOptimizerPlugin: Plugin = {
     name: 'void:server-runtime-optimizer',
-    configEnvironment(name) {
+    configEnvironment(name, environment) {
       if (name === 'client') {
         return;
       }
-      if (!voidOwnsWorkerRuntime) {
+      // The Cloudflare plugin gives every environment it runs in workerd these conditions from
+      // its config hook, which runs before any configEnvironment hook. That covers Void's own
+      // worker, class A frameworks and adapters such as @astrojs/cloudflare. Node runtimes load
+      // CommonJS themselves, and an include there turns on SSR prebundling nobody asked for.
+      if (!environment.resolve?.conditions?.includes('workerd')) {
         return { optimizeDeps: { exclude: ['void'] } };
       }
       return {
         optimizeDeps: {
           exclude: ['void'],
           // Excluding void also skips converting its CommonJS dependencies, which workerd cannot
-          // evaluate: an installed void/email fails with "exports is not defined". Runtimes a
-          // framework owns stay untouched; Node loads CommonJS itself, and forcing an include
-          // there turns on SSR prebundling the framework did not ask for. mysql2 is CommonJS too:
-          // void/db leaves its import to drizzle, so this nested prebundle serves it.
-          include: ['void > email-validator', ...(dialect === 'mysql' ? ['void > mysql2'] : [])],
+          // evaluate: an installed void/email fails with "exports is not defined".
+          include: ['void > email-validator', ...DATABASE_DRIVER_DEPS[dialect]],
         },
       };
+    },
+    // A build bundles void/db's driver, which is CommonJS. The Cloudflare plugin turns its requires
+    // of Node built-ins that workerd provides into imports with rolldown's esmExternalRequirePlugin,
+    // but rolldown skips that plugin unless the Vite copy running the build made it. pnpm installs
+    // Vite once per set of peers, so the app's Vite can differ from the one the Cloudflare plugin
+    // imports, and each require then throws in workerd. Serve those built-ins from an import here.
+    // A require of any other built-in stays as it is and throws only if it runs.
+    resolveId: {
+      // Before Vite's resolver, which makes a required built-in external.
+      order: 'pre',
+      filter: { id: NODE_BUILTIN },
+      async handler(id, _importer, options) {
+        if (
+          dialect === 'sqlite' ||
+          options.kind !== 'require-call' ||
+          this.environment?.mode !== 'build' ||
+          !this.environment.config.resolve.conditions.includes('workerd')
+        ) {
+          return;
+        }
+        const name = id.replace(/^node:/, '');
+        workerdNodeBuiltins ??= readWorkerdNodeBuiltins(readCompat());
+        if (!(await workerdNodeBuiltins).has(name)) {
+          return;
+        }
+        return `${NODE_BUILTIN_REQUIRE_PREFIX}${name}`;
+      },
+    },
+    load: {
+      // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
+      filter: { id: /^\0void:node-require:/ },
+      handler(id) {
+        // A built-in's default export is its CommonJS exports, and `require` returns an ES
+        // module's "module.exports" export.
+        const name = id.slice(NODE_BUILTIN_REQUIRE_PREFIX.length);
+        return `import builtin from "node:${name}";\nexport { builtin as "module.exports" };\n`;
+      },
     },
   };
 

@@ -15,7 +15,6 @@ const drizzleOrmResolved = fileURLToPath(import.meta.resolve('drizzle-orm'));
 const envModuleResolved = fileURLToPath(import.meta.resolve('#self/_env'));
 const drizzleNodePgResolved = fileURLToPath(import.meta.resolve('drizzle-orm/node-postgres'));
 const drizzleMysql2Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/mysql2'));
-const pgResolved = fileURLToPath(import.meta.resolve('pg'));
 
 const VIRTUAL_DB_ID = '\0virtual:void-db';
 const VIRTUAL_SCHEMA_DB_ID = '\0virtual:void-db-schema';
@@ -60,14 +59,11 @@ export function drizzlePlugin(
     generateDbDts(outDir, schema ?? null, dialect);
   }
 
-  let isBuild = false;
-
   return {
     name: 'void:drizzle',
     enforce: 'pre',
 
-    config(_, env) {
-      isBuild = env.command === 'build';
+    config() {
       if (!schema) {
         return;
       }
@@ -82,14 +78,8 @@ export function drizzlePlugin(
     },
 
     resolveId: {
-      filter: { id: /^(void\/db|@schema|pg$)/ },
+      filter: { id: /^(void\/db|@schema)/ },
       handler(id, importer) {
-        // Resolve pg from void's own deps during build so PG projects
-        // don't need pg as a direct dependency.
-        if (id === 'pg' && isBuild && dialect === 'postgresql' && importer === VIRTUAL_DB_ID) {
-          return pgResolved;
-        }
-
         // Only intercept void/db in server/worker environments (not client)
         if (id === 'void/db' && this.environment?.name !== 'client') {
           if (!hasDbRuntime) {
@@ -196,9 +186,9 @@ export function createDb(connectionString) {
         }
 
         if (dialect === 'postgresql') {
+          // Like MySQL: drizzle builds the pool, so its bare pg import is the only one.
           return `
 import { drizzle } from ${JSON.stringify(drizzleNodePgResolved)};
-import pg from "pg";
 import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envModuleResolved)};
 ${schemaImport}
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
@@ -215,12 +205,13 @@ function getConnectionString() {
 
 function getInstance() {
   return getRuntimeRequestResource(_requestResourceKey, () => {
-    const pool = new pg.Pool({
-      connectionString: getConnectionString(),
-      max: 1,
-      idleTimeoutMillis: 1000,
+    return drizzle({
+      connection: {
+        connectionString: getConnectionString(),
+        max: 1,
+        idleTimeoutMillis: 1000,
+      }${schema ? ', schema' : ''},
     });
-    return drizzle(pool${drizzleConfig});
   });
 }
 
