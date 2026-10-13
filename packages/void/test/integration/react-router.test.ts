@@ -115,12 +115,25 @@ export async function loader() {
 }
 `,
     );
+    writeFileSync(
+      join(root, 'app/routes/api.user-count.ts'),
+      `import { users } from '@schema';
+import { db } from 'void/db';
+
+// Built when the module loads, run by every request.
+const allUsers = db.select().from(users);
+
+export async function loader() {
+  return Response.json((await allUsers).length);
+}
+`,
+    );
     const routesPath = join(root, 'app/routes.ts');
     writeFileSync(
       routesPath,
       readFileSync(routesPath, 'utf8').replace(
         "route('smoke', 'routes/smoke.tsx'),",
-        "route('smoke', 'routes/smoke.tsx'),\n  route('api/users', 'routes/api.users.ts'),",
+        "route('smoke', 'routes/smoke.tsx'),\n  route('api/users', 'routes/api.users.ts'),\n  route('api/user-count', 'routes/api.user-count.ts'),",
       ),
     );
     writeFileSync(
@@ -152,6 +165,14 @@ export async function loader() {
     const response = await fetch(`${base}/api/users`);
     const result = { status: response.status, body: await response.text() };
     expect(result, output().slice(-4000)).toEqual({ status: 200, body: JSON.stringify(USERS) });
+    // Each request runs the module-level query on its own connection.
+    for (const _request of [1, 2]) {
+      const count = await fetch(`${base}/api/user-count`);
+      expect({ status: count.status, body: await count.text() }, output().slice(-4000)).toEqual({
+        status: 200,
+        body: String(USERS.length),
+      });
+    }
   }
 
   it('queries MySQL through void/db in dev', async () => {

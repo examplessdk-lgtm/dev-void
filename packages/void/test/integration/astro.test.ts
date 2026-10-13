@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
@@ -11,6 +12,7 @@ import {
   killChild,
   startServer,
   type IsolatedPlayground,
+  type StartedServer,
 } from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
@@ -106,7 +108,7 @@ describe('playground/astro dev', () => {
   });
 });
 
-// Astro owns its Worker entry, so void/db runs without Void's request scope.
+// Astro owns its Worker entry; Void runs it in a request scope for PostgreSQL.
 describe('playground/astro with PostgreSQL', () => {
   const USERS = [
     { id: 1, name: 'Ada', email: 'ada@example.com' },
@@ -116,8 +118,55 @@ describe('playground/astro with PostgreSQL', () => {
   let pgServer: ReturnType<typeof createServer>;
   let playground: IsolatedPlayground;
   let child: ReturnType<typeof spawn> | undefined;
-  let base: string;
-  let output = () => '';
+  let dev: StartedServer;
+  let connections = 0;
+
+  function start(script: 'dev' | 'preview'): Promise<StartedServer> {
+    const root = playground.root;
+    return startServer((port) => {
+      child = spawn(
+        process.execPath,
+        [
+          join(root, 'node_modules/astro/bin/astro.mjs'),
+          script,
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+        ],
+        {
+          cwd: root,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            ASTRO_DEV_BACKGROUND: 'false',
+            ASTRO_PREVIEW_BACKGROUND: 'false',
+            // Astro's update check writes .astro/settings.json in a fresh project, and the watcher
+            // can report that one write twice; the second restarts the dev server mid-request.
+            ASTRO_DISABLE_UPDATE_CHECK: 'true',
+            VOID_INSPECTOR_PORT: 'false',
+          },
+        },
+      );
+      return child;
+    }, 30_000);
+  }
+
+  // Runs every query of a request on one connection, a query built at module load included.
+  async function expectOneConnectionPerRequest({ base, output }: StartedServer): Promise<void> {
+    const before = connections;
+    const response = await fetch(`${base}/api/user-counts`);
+    const result = {
+      status: response.status,
+      body: await response.text(),
+      connections: connections - before,
+    };
+    expect(result, output().slice(-4000)).toEqual({
+      status: 200,
+      body: '[2,2,2,2]',
+      connections: 1,
+    });
+  }
 
   beforeAll(async () => {
     pglite = new PGlite();
@@ -131,6 +180,7 @@ describe('playground/astro with PostgreSQL', () => {
       ]);
     }
     pgServer = createServer(pglite);
+    pgServer.on('connection', () => connections++);
     pgServer.listen(0, '127.0.0.1');
     await once(pgServer, 'listening');
     const { port } = pgServer.address() as AddressInfo;
@@ -173,25 +223,27 @@ export async function GET() {
 `,
     );
     writeFileSync(
+      join(root, 'src/pages/api/user-counts.ts'),
+      `import { users } from '@schema';
+import { db } from 'void/db';
+
+export const prerender = false;
+
+// Built when the module loads, run by every request.
+const allUsers = db.select().from(users);
+
+export async function GET() {
+  const results = await Promise.all([allUsers, allUsers, allUsers, allUsers]);
+  return Response.json(results.map((rows) => rows.length));
+}
+`,
+    );
+    writeFileSync(
       join(root, '.env'),
       `DATABASE_URL=postgresql://postgres@127.0.0.1:${port}/postgres\n`,
     );
 
-    const server = await startServer((serverPort) => {
-      const astro = join(root, 'node_modules/astro/bin/astro.mjs');
-      child = spawn(
-        process.execPath,
-        [astro, 'dev', '--host', '127.0.0.1', '--port', String(serverPort)],
-        {
-          cwd: root,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, ASTRO_DEV_BACKGROUND: 'false', VOID_INSPECTOR_PORT: 'false' },
-        },
-      );
-      return child;
-    }, 30_000);
-    base = server.base;
-    output = server.output;
+    dev = await start('dev');
   });
 
   afterAll(async () => {
@@ -207,8 +259,42 @@ export async function GET() {
   });
 
   it('queries PostgreSQL through void/db from an API route in dev', async () => {
-    const response = await fetch(`${base}/api/users`);
+    const response = await fetch(`${dev.base}/api/users`);
     const result = { status: response.status, body: await response.text() };
-    expect(result, output().slice(-4000)).toEqual({ status: 200, body: JSON.stringify(USERS) });
+    expect(result, dev.output().slice(-4000)).toEqual({
+      status: 200,
+      body: JSON.stringify(USERS),
+    });
+  });
+
+  it('runs every query of a request on one connection in dev', async () => {
+    for (const _request of [1, 2]) {
+      await expectOneConnectionPerRequest(dev);
+    }
+  });
+
+  it('runs every query of a request on one connection in the built Worker', async () => {
+    // The dev server writes Void's dev-only middleware into src/ until it stops.
+    await killChild(dev.child);
+    child = undefined;
+    execFileSync(
+      process.execPath,
+      [join(playground.root, 'node_modules/astro/bin/astro.mjs'), 'build'],
+      {
+        cwd: playground.root,
+        stdio: 'pipe',
+        // Build as `void deploy` does: it keeps the Wrangler deploy config `astro preview` reads.
+        env: { ...process.env, VOID_CLOUDFLARE_DEPLOY_BUILD: '1', VOID_INSPECTOR_PORT: 'false' },
+      },
+    );
+    const server = await start('preview');
+    try {
+      for (const _request of [1, 2]) {
+        await expectOneConnectionPerRequest(server);
+      }
+    } finally {
+      await killChild(server.child);
+      child = undefined;
+    }
   });
 });

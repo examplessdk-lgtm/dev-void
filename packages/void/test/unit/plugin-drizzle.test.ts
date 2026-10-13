@@ -16,6 +16,7 @@ vi.mock('../../src/log', () => ({
 import { voidWarn } from '../../src/log.ts';
 import { getMiniflareDatabasePath, openSqliteDatabase } from '../../src/migrations/runner.ts';
 import { drizzlePlugin } from '../../src/plugin-drizzle.ts';
+import { withRuntimeEnv } from '../../src/runtime/env.ts';
 
 const roots: Array<string> = [];
 const fakeStateKeys: Array<string> = [];
@@ -40,6 +41,8 @@ type FakePoolRecord = {
 type FakeDatabaseState = {
   nextId: number;
   pools: Array<FakePoolRecord>;
+  // drizzle configs of the databases built on a client that void/db passes in.
+  instances: Array<Record<string, unknown>>;
   clients: Array<unknown>;
 };
 
@@ -61,7 +64,7 @@ async function loadExecutableDbModule(
   const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
   let code = load.call({}, '\0virtual:void-db');
   const stateKey = `__void_db_scope_${dialect}_${crypto.randomUUID().replaceAll('-', '')}`;
-  const state: FakeDatabaseState = { nextId: 0, pools: [], clients: [] };
+  const state: FakeDatabaseState = { nextId: 0, pools: [], instances: [], clients: [] };
   (globalThis as Record<string, unknown>)[stateKey] = state;
   fakeStateKeys.push(stateKey);
 
@@ -69,21 +72,36 @@ async function loadExecutableDbModule(
   const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
   const stateExpression = `globalThis[${JSON.stringify(stateKey)}]`;
   const createDatabaseSource = `
-function createDatabase(dialect, pool) {
+function createPool(dialect, options) {
   const state = ${stateExpression};
-  const instanceId = ++state.nextId;
-  const connectionOwner = dialect === "postgresql" ? pool.options.connectionString : pool.options.uri;
+  const id = ++state.nextId;
+  const connectionOwner = dialect === "postgresql" ? options.connectionString : options.uri;
   let owner = connectionOwner;
   try { owner = getTestRuntimeBinding("REQUEST_ID") ?? connectionOwner; } catch {}
-  const database = {
-    instanceId,
+  const pool = {
+    id,
+    options,
     async query(expectedOwner) {
-      if (owner !== expectedOwner) throw new Error("database instance crossed request ownership");
-      return instanceId;
+      if (owner !== expectedOwner) throw new Error("database pool crossed request ownership");
+      return id;
     },
+    promise: () => pool,
+  };
+  return pool;
+}
+
+// Like drizzle, the database runs every query on its client; instanceId names the pool that
+// serves the current call.
+function createDatabase(client) {
+  const database = {
+    get instanceId() {
+      return client.id;
+    },
+    query: (expectedOwner) => client.query(expectedOwner),
     async transaction(callback) {
       return callback(database);
     },
+    $client: client,
   };
   return database;
 }
@@ -110,13 +128,17 @@ export function drizzle(client) {
 const state = ${stateExpression};
 ${createDatabaseSource}
 export function drizzle(config) {
-  if (typeof config === "string") return createDatabase("postgresql", { options: { connectionString: config } });
-  if (typeof config?.connection !== "object" || config.connection === null) {
+  if (typeof config === "string") return createDatabase(createPool("postgresql", { connectionString: config }));
+  const { connection, client, ...drizzleConfig } = config;
+  if (client) {
+    state.instances.push(drizzleConfig);
+    return createDatabase(client);
+  }
+  if (typeof connection !== "object" || connection === null) {
     throw new Error("void/db must let drizzle build the pg pool from a connection object");
   }
-  const { connection, ...drizzleConfig } = config;
   state.pools.push({ dialect: "postgresql", options: connection, drizzleConfig });
-  return createDatabase("postgresql", { options: connection });
+  return createDatabase(createPool("postgresql", connection));
 }
 `,
     );
@@ -131,12 +153,17 @@ export function drizzle(config) {
 const state = ${stateExpression};
 ${createDatabaseSource}
 export function drizzle(config) {
-  if (typeof config?.connection !== "object" || config.connection === null) {
+  const { connection, client, ...drizzleConfig } = config;
+  if (client) {
+    state.instances.push(drizzleConfig);
+    // Like drizzle, query through the promise API of a callback pool.
+    return createDatabase(typeof client.promise === "function" ? client.promise() : client);
+  }
+  if (typeof connection !== "object" || connection === null) {
     throw new Error("void/db must let drizzle build the mysql2 pool from a connection object");
   }
-  const { connection, ...drizzleConfig } = config;
   state.pools.push({ dialect: "mysql", options: connection, drizzleConfig });
-  return createDatabase("mysql", { options: connection });
+  return createDatabase(createPool("mysql", connection));
 }
 `,
     );
@@ -168,7 +195,7 @@ export const withEnv = (env, callback) => withRuntimeEnv(env, callback);
 
 type DriverQuery = { toSQL(): { sql: string } };
 
-/** Load void/db with drizzle's own driver and record each client it builds. */
+/** Load void/db with drizzle's own driver and record each pool it builds. */
 async function loadDriverDbModule(dialect: 'postgresql' | 'mysql'): Promise<{
   db: { select(): { from(table: unknown): DriverQuery } };
   clients: Array<{ end(): unknown }>;
@@ -188,7 +215,7 @@ async function loadDriverDbModule(dialect: 'postgresql' | 'mysql'): Promise<{
       (_match, driver: string) => `import { drizzle as createDrizzle } from ${driver};
 function drizzle(config) {
   const database = createDrizzle(config);
-  globalThis[${JSON.stringify(clientsKey)}].push(database.$client);
+  if (config.connection) globalThis[${JSON.stringify(clientsKey)}].push(database.$client);
   return database;
 }`,
     )
@@ -315,33 +342,39 @@ describe('drizzlePlugin db typing generation', () => {
   );
 
   it.each(['postgresql', 'mysql'] as const)(
-    'builds one %s client for a query outside a Void request scope',
+    'builds no %s client for a query until it runs',
     async (dialect) => {
       const { db, clients } = await loadDriverDbModule(dialect);
       const users =
         dialect === 'postgresql'
           ? pgTable('users', { id: serial('id') })
           : mysqlTable('users', { id: int('id') });
-      const previousEnv = (globalThis as Record<string, unknown>).__env__;
-      (globalThis as Record<string, unknown>).__env__ = {
-        DATABASE_URL: `${dialect === 'postgresql' ? 'postgres' : 'mysql'}://void@127.0.0.1:9/app`,
-      };
-      try {
-        // drizzle's select() reads `this.session` and `this.dialect`.
-        const query = db.select().from(users);
 
-        expect(query.toSQL().sql).toMatch(/^select .id. from .users.$/);
-        expect(clients).toHaveLength(1);
-      } finally {
-        if (previousEnv === undefined) {
-          delete (globalThis as Record<string, unknown>).__env__;
-        } else {
-          (globalThis as Record<string, unknown>).__env__ = previousEnv;
-        }
-        await Promise.all(clients.map((client) => client.end()));
-      }
+      // A module-level query is built in global scope: no env exists there, and workerd
+      // rejects the timer a mysql2 pool may start.
+      const query = db.select().from(users);
+
+      expect(query.toSQL().sql).toMatch(/^select .id. from .users.$/);
+      expect(clients).toEqual([]);
     },
   );
+
+  it.each([
+    ['postgresql', 'PostgreSQL'],
+    ['mysql', 'MySQL'],
+  ] as const)('reports a missing %s connection string in a request', async (dialect, name) => {
+    const { db, clients } = await loadDriverDbModule(dialect);
+    const users =
+      dialect === 'postgresql'
+        ? pgTable('users', { id: serial('id') })
+        : mysqlTable('users', { id: int('id') });
+
+    // drizzle reports an error from a running query as "Failed query: ...".
+    await expect(withRuntimeEnv({}, async () => await db.select().from(users))).rejects.toThrow(
+      `db: ${name} is not configured.`,
+    );
+    expect(clients).toEqual([]);
+  });
 
   it('keeps sqlite projects on the D1 internal db entry', () => {
     const root = createProjectRoot();
@@ -472,22 +505,26 @@ describe('drizzlePlugin db typing generation', () => {
       const requestPools = state.pools.filter((pool) => pool.options.uri !== explicitOwner);
       expect(requestPools).toHaveLength(6);
       for (const pool of requestPools) {
+        expect(pool.drizzleConfig).toEqual({});
         if (dialect === 'postgresql') {
           expect(pool.options).toMatchObject({ max: 1, idleTimeoutMillis: 1000 });
-          expect(pool.drizzleConfig).toEqual({ schema: expect.anything() });
         } else {
           expect(pool.options).toMatchObject({ connectionLimit: 1, maxIdle: 1, idleTimeout: 1000 });
         }
       }
+      // Every request shares one drizzle database, which carries the schema.
+      expect(state.instances).toEqual([
+        dialect === 'postgresql'
+          ? { schema: expect.anything() }
+          : { schema: expect.anything(), mode: 'default' },
+      ]);
       if (dialect === 'mysql') {
         expect(state.pools).toHaveLength(7);
-        expect(state.pools.find((pool) => pool.options.uri === explicitOwner)?.options).toEqual({
-          uri: explicitOwner,
-          disableEval: true,
-        });
+        const explicitPool = state.pools.find((pool) => pool.options.uri === explicitOwner);
+        expect(explicitPool?.options).toEqual({ uri: explicitOwner, disableEval: true });
+        expect(explicitPool?.drizzleConfig).toEqual({ schema: expect.anything(), mode: 'default' });
         for (const pool of state.pools) {
           expect(pool.options).toMatchObject({ disableEval: true });
-          expect(pool.drizzleConfig).toEqual({ schema: expect.anything(), mode: 'default' });
         }
       }
     },
@@ -536,30 +573,31 @@ describe('drizzlePlugin db typing generation', () => {
         `import { db, createDb } from "./virtual-db.mjs";
 import { withRuntimeEnv } from ${JSON.stringify(envUrl)};
 export { createDb };
-export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
+export const requestPoolConfig = (env) =>
+  withRuntimeEnv(env, () => {
+    const pool = db.$client;
+    const config = pool.config;
+    pool.end();
+    return config;
+  });
 `,
       );
-      type MySqlPool = { config: { connectionConfig: { disableEval: boolean } }; end(): void };
+      type MySqlPoolConfig = { connectionConfig: { disableEval: boolean } };
       const harness = (await import(
         `${pathToFileURL(join(root, 'harness.mjs')).href}?test=${crypto.randomUUID()}`
       )) as {
-        createDb(url: string): { $client: MySqlPool };
-        requestClient(env: Record<string, unknown>): MySqlPool;
+        createDb(url: string): { $client: { config: MySqlPoolConfig; end(): void } };
+        requestPoolConfig(env: Record<string, unknown>): MySqlPoolConfig;
       };
 
-      const pools = [
-        harness.createDb('mysql://void@127.0.0.1:9/app').$client,
-        harness.requestClient({ DATABASE_URL: 'mysql://void@127.0.0.1:9/app' }),
-      ];
+      const explicit = harness.createDb('mysql://void@127.0.0.1:9/app').$client;
       try {
-        for (const pool of pools) {
-          expect(pool.config.connectionConfig.disableEval).toBe(true);
-        }
+        expect(explicit.config.connectionConfig.disableEval).toBe(true);
       } finally {
-        for (const pool of pools) {
-          pool.end?.();
-        }
+        explicit.end();
       }
+      const request = harness.requestPoolConfig({ DATABASE_URL: 'mysql://void@127.0.0.1:9/app' });
+      expect(request.connectionConfig.disableEval).toBe(true);
     },
   );
 
@@ -581,25 +619,27 @@ export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
         join(root, 'harness.mjs'),
         `import { db } from "./virtual-db.mjs";
 import { withRuntimeEnv } from ${JSON.stringify(envUrl)};
-export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
+export const requestPoolOptions = (env) =>
+  withRuntimeEnv(env, async () => {
+    const pool = db.$client;
+    const options = pool.options;
+    await pool.end();
+    return options;
+  });
 `,
       );
-      type PgPool = { options: Record<string, unknown>; end(): Promise<void> };
       const harness = (await import(
         `${pathToFileURL(join(root, 'harness.mjs')).href}?test=${crypto.randomUUID()}`
-      )) as { requestClient(env: Record<string, unknown>): PgPool };
+      )) as {
+        requestPoolOptions(env: Record<string, unknown>): Promise<Record<string, unknown>>;
+      };
 
       const url = 'postgres://void@127.0.0.1:9/app';
-      const pool = harness.requestClient({ DATABASE_URL: url });
-      try {
-        expect(pool.options).toMatchObject({
-          connectionString: url,
-          max: 1,
-          idleTimeoutMillis: 1000,
-        });
-      } finally {
-        await pool.end?.();
-      }
+      await expect(harness.requestPoolOptions({ DATABASE_URL: url })).resolves.toMatchObject({
+        connectionString: url,
+        max: 1,
+        idleTimeoutMillis: 1000,
+      });
     },
   );
 

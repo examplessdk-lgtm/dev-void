@@ -31,6 +31,10 @@ import { createCloudflareBuiltinsExternalPlugin } from './plugin-worker-environm
 import { injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
 
 const handlerFile = fileURLToPath(import.meta.resolve('#self/handler'));
+const envModuleFile = fileURLToPath(import.meta.resolve('#self/_env'));
+
+const ASTRO_SERVER_ENTRY = '@astrojs/cloudflare/entrypoints/server';
+const ASTRO_SCOPED_SERVER_ENTRY = '\0void:astro-server-entry';
 
 export function createFrameworkPlugins(input: {
   readonly localD1: ReturnType<typeof resolveLocalD1Target>;
@@ -220,12 +224,52 @@ export function createFrameworkPlugins(input: {
     },
   };
 
+  // Astro's Cloudflare adapter owns the Worker entry. For PostgreSQL and MySQL, its default
+  // entry runs each request inside Void's request scope (`withRuntimeEnv`), as the Class A
+  // wrapper does, so void/db keeps one client per request instead of one per query. D1 apps
+  // keep Astro's own entry: in a request scope, void/db reads D1 through a replica-capable
+  // session instead of the primary.
+  const astroRequestScopePlugin: Plugin | undefined =
+    detected.name === 'astro' && dialect !== 'sqlite'
+      ? {
+          name: 'void:astro-request-scope',
+          enforce: 'pre',
+          resolveId: {
+            filter: { id: /^@astrojs\/cloudflare\/entrypoints\/server(?:\.js)?$/ },
+            handler(_id, importer) {
+              if (importer === ASTRO_SCOPED_SERVER_ENTRY || this.environment?.name === 'client') {
+                return;
+              }
+              return ASTRO_SCOPED_SERVER_ENTRY;
+            },
+          },
+          load: {
+            // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
+            filter: { id: /^\0void:astro-server-entry$/ },
+            handler() {
+              return `import original from ${JSON.stringify(ASTRO_SERVER_ENTRY)};
+import { withRuntimeEnv } from ${JSON.stringify(envModuleFile)};
+export * from ${JSON.stringify(ASTRO_SERVER_ENTRY)};
+
+export default {
+  ...original,
+  fetch(request, env, ctx) {
+    return withRuntimeEnv(env, () => original.fetch(request, env, ctx));
+  },
+};
+`;
+            },
+          },
+        }
+      : undefined;
+
   return [
     devTriggerSecretGuardPlugin(),
     createCloudflareBuiltinsExternalPlugin(),
     wranglerCompatPlugin,
     wranglerSyncPlugin,
     ...(nuxtVite8WebSocketCompatPlugin ? [nuxtVite8WebSocketCompatPlugin] : []),
+    ...(astroRequestScopePlugin ? [astroRequestScopePlugin] : []),
     svelteKitHooksInjectPlugin,
     clientStubsPlugin,
     serverRuntimeOptimizerPlugin,

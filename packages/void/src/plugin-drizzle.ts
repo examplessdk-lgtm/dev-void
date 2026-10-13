@@ -18,6 +18,33 @@ const drizzleMysql2Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/mys
 
 const VIRTUAL_DB_ID = '\0virtual:void-db';
 const VIRTUAL_SCHEMA_DB_ID = '\0virtual:void-db-schema';
+
+// Workers tie a connection to the request that opened it. void/db's PostgreSQL and MySQL
+// templates share one drizzle instance whose client looks up the current request's pool on
+// every call, so a query built or prepared in one request runs on the pool of the request that
+// executes it. `has` and `getPrototypeOf` answer drizzle's pool checks before a transaction.
+// Every pool has the same shape, so those answers are kept: outside a request scope, where each
+// lookup builds a pool, a check would otherwise build one that never runs a query.
+const REQUEST_POOL_PROXY = `
+function requestPool(resolve, own = {}) {
+  const has = new Map();
+  let prototype;
+  return new Proxy({}, {
+    get(_, prop) {
+      if (Object.hasOwn(own, prop)) return own[prop];
+      const pool = resolve();
+      const value = Reflect.get(pool, prop);
+      return typeof value === "function" ? value.bind(pool) : value;
+    },
+    has(_, prop) {
+      if (Object.hasOwn(own, prop)) return true;
+      if (!has.has(prop)) has.set(prop, Reflect.has(resolve(), prop));
+      return has.get(prop);
+    },
+    getPrototypeOf: () => (prototype ??= Object.getPrototypeOf(resolve())),
+  });
+}
+`;
 type DrizzlePluginOptions = {
   d1BindingName?: string;
   forceVirtualDb?: boolean;
@@ -158,8 +185,8 @@ function getConnectionString() {
   throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
-function createInstance(maxIdle) {
-  return drizzle({
+function createPools(maxIdle) {
+  const pool = drizzle({
     connection: {
       uri: getConnectionString(),
       connectionLimit: 1,
@@ -167,29 +194,37 @@ function createInstance(maxIdle) {
       idleTimeout: 1000,
       // Workers forbid eval, which mysql2 uses to build its row parsers.
       disableEval: true,
-    }${mysqlDrizzleConfig},
-  });
+    },
+  }).$client;
+  return { pool, promisePool: pool.promise() };
 }
 
-function getInstance() {
+function getPools() {
   return getRuntimeRequestResource(
     _requestResourceKey,
-    // maxIdle below connectionLimit starts mysql2's idle timer when the pool is built, and
-    // workerd rejects timers in global scope, where a module-level query builds its pool.
-    () => createInstance(1),
+    // maxIdle below connectionLimit starts mysql2's idle timer when the pool is built.
+    () => createPools(1),
     // Framework entries that Void does not own run outside its request scope:
     // they get a client for each use, never one shared across requests. Nothing
     // ends that pool, so mysql2 closes its idle connection.
-    () => createInstance(0),
+    () => createPools(0),
   );
 }
+${REQUEST_POOL_PROXY}
+const promiseClient = requestPool(() => getPools().promisePool);
+// drizzle asks for the promise API while it builds the database, which can run in global
+// scope. workerd rejects the timer a mysql2 pool may start there, so answer without one.
+const client = requestPool(() => getPools().pool, { promise: () => promiseClient });
+
+let instance;
 
 export const db = new Proxy({}, {
   get(_, prop) {
-    const instance = getInstance();
+    // drizzle reports a query's errors as "Failed query", so build the request's pool here:
+    // a missing connection string then throws its own message. Outside a request, build none.
+    getRuntimeRequestResource(_requestResourceKey, () => createPools(1), () => undefined);
+    instance ??= drizzle({ client${mysqlDrizzleConfig} });
     const value = Reflect.get(instance, prop);
-    // drizzle's methods read this.session. Outside a request scope each lookup builds a
-    // client, so bind them to this one: a query chain then uses one client.
     return typeof value === "function" ? value.bind(instance) : value;
   },
 });
@@ -218,28 +253,31 @@ function getConnectionString() {
   throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
-function createInstance() {
+function createPool() {
   return drizzle({
     connection: {
       connectionString: getConnectionString(),
       max: 1,
       idleTimeoutMillis: 1000,
-    }${schema ? ', schema' : ''},
-  });
+    },
+  }).$client;
 }
 
-function getInstance() {
+function getPool() {
   // Framework entries that Void does not own run outside its request scope:
   // they get a client for each use, never one shared across requests.
-  return getRuntimeRequestResource(_requestResourceKey, createInstance, createInstance);
+  return getRuntimeRequestResource(_requestResourceKey, createPool, createPool);
 }
+${REQUEST_POOL_PROXY}
+let instance;
 
 export const db = new Proxy({}, {
   get(_, prop) {
-    const instance = getInstance();
+    // drizzle reports a query's errors as "Failed query", so build the request's pool here:
+    // a missing connection string then throws its own message. Outside a request, build none.
+    getRuntimeRequestResource(_requestResourceKey, createPool, () => undefined);
+    instance ??= drizzle({ client: requestPool(getPool)${schema ? ', schema' : ''} });
     const value = Reflect.get(instance, prop);
-    // drizzle's methods read this.session. Outside a request scope each lookup builds a
-    // client, so bind them to this one: a query chain then uses one client.
     return typeof value === "function" ? value.bind(instance) : value;
   },
 });

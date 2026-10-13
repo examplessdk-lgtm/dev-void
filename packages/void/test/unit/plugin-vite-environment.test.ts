@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { cloudflare } from '@cloudflare/vite-plugin';
 import { createServer, normalizePath, resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -364,6 +365,95 @@ describe('voidPlugin Vite environments', () => {
               : join(installed, 'index.mjs'),
           ),
         );
+      } finally {
+        await server.close();
+      }
+    },
+  );
+});
+
+describe('Astro request scope', () => {
+  const entry = '@astrojs/cloudflare/entrypoints/server';
+  const scopedEntry = '\0void:astro-server-entry';
+
+  it.each([
+    ['pg', true],
+    ['mysql', true],
+    [undefined, false],
+  ] as const)(
+    'runs the Cloudflare adapter entry in a Void request scope (database: %s): %s',
+    async (database, scoped) => {
+      const root = realpathSync.native(createProjectRoot());
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', dependencies: { astro: '*' } }),
+      );
+      writeFileSync(
+        join(root, 'void.json'),
+        JSON.stringify({ database, worker: { compatibility_date: '2026-02-24' } }),
+      );
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [voidPlugin()],
+        optimizeDeps: { noDiscovery: true },
+        server: { middlewareMode: true, ws: false, preTransformRequests: false },
+      });
+      try {
+        const container = server.environments.ssr!.pluginContainer;
+        const resolved = await container.resolveId(entry);
+        expect(resolved?.id === scopedEntry).toBe(scoped);
+        if (!scoped) {
+          return;
+        }
+        // The wrapper imports the adapter's own entry.
+        expect((await container.resolveId(entry, scopedEntry))?.id).not.toBe(scopedEntry);
+
+        const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+        writeFileSync(
+          join(root, 'adapter-entry.mjs'),
+          `import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envUrl)};
+export const named = "kept";
+export default {
+  marker: "kept",
+  fetch(request, env, ctx) {
+    // Throws outside a request scope.
+    getRuntimeRequestResource({}, () => ({}));
+    return Response.json({ url: request.url, database: getRuntimeBinding("DATABASE_URL"), ctx });
+  },
+};
+`,
+        );
+        const loaded = await container.load(scopedEntry);
+        const code = (typeof loaded === 'string' ? loaded : (loaded?.code ?? ''))
+          .replaceAll(JSON.stringify(entry), '"./adapter-entry.mjs"')
+          .replace(
+            /^import \{ withRuntimeEnv \} from .*;$/m,
+            `import { withRuntimeEnv } from ${JSON.stringify(envUrl)};`,
+          );
+        writeFileSync(join(root, 'entry.mjs'), code);
+        const wrapper = (await import(pathToFileURL(join(root, 'entry.mjs')).href)) as {
+          named: string;
+          default: {
+            marker: string;
+            fetch(request: Request, env: unknown, ctx: unknown): Promise<Response>;
+          };
+        };
+
+        expect([wrapper.named, wrapper.default.marker]).toEqual(['kept', 'kept']);
+        const response = await wrapper.default.fetch(
+          new Request('http://localhost/api'),
+          { DATABASE_URL: 'postgres://request' },
+          { id: 'ctx' },
+        );
+        expect(await response.json()).toEqual({
+          url: 'http://localhost/api',
+          database: 'postgres://request',
+          ctx: { id: 'ctx' },
+        });
       } finally {
         await server.close();
       }
