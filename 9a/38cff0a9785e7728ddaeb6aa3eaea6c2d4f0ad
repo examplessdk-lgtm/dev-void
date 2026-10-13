@@ -1,0 +1,45 @@
+packages/create-void/package.json
+  s_4b89afee3ebd58::t_93e8db08df1b50 3
+packages/deploy-cloudflare/package.json
+  s_4b89afee3ebd58::t_42e318b2454bec 3
+packages/deploy-core/package.json
+  s_4b89afee3ebd58::t_5f36ea131d164c 3
+packages/edge/package.json
+  s_4b89afee3ebd58::t_c2f5a3f63be06f 3
+packages/isr/package.json
+  s_4b89afee3ebd58::t_9830082be91a5a 3
+packages/md/package.json
+  s_4b89afee3ebd58::t_9b66abec141b21 3
+packages/platform/package.json
+  s_4b89afee3ebd58::t_a7f8220c521b05 3
+packages/react/package.json
+  s_4b89afee3ebd58::t_f8334f3b86dd14 3
+packages/solid/package.json
+  s_4b89afee3ebd58::t_59aa86788e3afe 3
+packages/svelte/package.json
+  s_4b89afee3ebd58::t_93cf409301964d 3
+packages/void/package.json
+  s_4b89afee3ebd58::t_fe289037a188e0 3
+packages/void/src/cli/client.ts
+  s_4b89afee3ebd58::t_bab519215bf3c5 32
+packages/void/test/unit/client-platform-version.test.ts
+  s_4b89afee3ebd58::t_4ee3ea96c0a7f2 56,66,72,75,81,112
+packages/vue/package.json
+  s_4b89afee3ebd58::t_cc8f64fa0f8348 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "9a38cff0a9785e7728ddaeb6aa3eaea6c2d4f0ad",
+  "prompts": {},
+  "sessions": {
+    "s_4b89afee3ebd58": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1340a-0a83-75a2-9d6d-03fe2e6bc152",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
