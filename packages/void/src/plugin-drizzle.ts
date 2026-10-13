@@ -185,35 +185,46 @@ function getConnectionString() {
   throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
-function createPools(maxIdle) {
-  const pool = drizzle({
-    connection: {
-      uri: getConnectionString(),
-      connectionLimit: 1,
-      maxIdle,
-      idleTimeout: 1000,
-      // Workers forbid eval, which mysql2 uses to build its row parsers.
-      disableEval: true,
-    },
-  }).$client;
+// mysql2 closes idle connections only from a timer that it starts when it builds a pool with
+// maxIdle below connectionLimit, and that timer runs until the pool ends: workerd rejects it in
+// global scope, and nothing ends Void's pools. Time each connection from its release instead,
+// which runs in the request that ran the query.
+function closeIdleConnections(pool, idleTimeout) {
+  const timers = new WeakMap();
+  pool.on("release", (connection) => {
+    const timer = setTimeout(() => connection.destroy(), idleTimeout);
+    // A Node script that ends its pool exits without waiting for this timer.
+    timer.unref?.();
+    timers.set(connection, timer);
+  });
+  pool.on("acquire", (connection) => clearTimeout(timers.get(connection)));
+  return pool;
+}
+
+function createPools() {
+  const pool = closeIdleConnections(
+    drizzle({
+      connection: {
+        uri: getConnectionString(),
+        connectionLimit: 1,
+        // Workers forbid eval, which mysql2 uses to build its row parsers.
+        disableEval: true,
+      },
+    }).$client,
+    1000,
+  );
   return { pool, promisePool: pool.promise() };
 }
 
 function getPools() {
-  return getRuntimeRequestResource(
-    _requestResourceKey,
-    // maxIdle below connectionLimit starts mysql2's idle timer when the pool is built.
-    () => createPools(1),
-    // Framework entries that Void does not own run outside its request scope:
-    // they get a client for each use, never one shared across requests. Nothing
-    // ends that pool, so mysql2 closes its idle connection.
-    () => createPools(0),
-  );
+  // Framework entries that Void does not own run outside its request scope:
+  // they get a client for each use, never one shared across requests.
+  return getRuntimeRequestResource(_requestResourceKey, createPools, createPools);
 }
 ${REQUEST_POOL_PROXY}
 const promiseClient = requestPool(() => getPools().promisePool);
 // drizzle asks for the promise API while it builds the database, which can run in global
-// scope. workerd rejects the timer a mysql2 pool may start there, so answer without one.
+// scope. No request exists there to own a pool, so answer without one.
 const client = requestPool(() => getPools().pool, { promise: () => promiseClient });
 
 let instance;
@@ -222,7 +233,7 @@ export const db = new Proxy({}, {
   get(_, prop) {
     // drizzle reports a query's errors as "Failed query", so build the request's pool here:
     // a missing connection string then throws its own message. Outside a request, build none.
-    getRuntimeRequestResource(_requestResourceKey, () => createPools(1), () => undefined);
+    getRuntimeRequestResource(_requestResourceKey, createPools, () => undefined);
     instance ??= drizzle({ client${mysqlDrizzleConfig} });
     const value = Reflect.get(instance, prop);
     return typeof value === "function" ? value.bind(instance) : value;
@@ -230,7 +241,10 @@ export const db = new Proxy({}, {
 });
 
 export function createDb(connectionString) {
-  return drizzle({ connection: { uri: connectionString, disableEval: true }${mysqlDrizzleConfig} });
+  const db = drizzle({ connection: { uri: connectionString, disableEval: true }${mysqlDrizzleConfig} });
+  // 60 seconds is mysql2's own idleTimeout default.
+  closeIdleConnections(db.$client, 60000);
+  return db;
 }
 `;
         }

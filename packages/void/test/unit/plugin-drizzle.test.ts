@@ -17,6 +17,7 @@ import { voidWarn } from '../../src/log.ts';
 import { getMiniflareDatabasePath, openSqliteDatabase } from '../../src/migrations/runner.ts';
 import { drizzlePlugin } from '../../src/plugin-drizzle.ts';
 import { withRuntimeEnv } from '../../src/runtime/env.ts';
+import { startFakeMySqlServer } from '../helpers/fake-mysql-server.ts';
 
 const roots: Array<string> = [];
 const fakeStateKeys: Array<string> = [];
@@ -86,6 +87,8 @@ function createPool(dialect, options) {
       return id;
     },
     promise: () => pool,
+    // void/db listens to a MySQL pool to close idle connections.
+    on() {},
   };
   return pool;
 }
@@ -230,6 +233,31 @@ function drizzle(config) {
   return { db: module.db, clients };
 }
 
+type MySqlDb = {
+  $client: { config: unknown; end(callback: () => void): void };
+  execute(query: unknown): Promise<unknown>;
+};
+
+/** Load the MySQL void/db module with drizzle's own driver and mysql2. */
+async function loadMySqlDbModule(): Promise<{
+  db: MySqlDb;
+  createDb(connectionString: string): MySqlDb;
+  sql(strings: TemplateStringsArray): unknown;
+}> {
+  const root = createProjectRoot();
+  const plugin = drizzlePlugin(root, false, 'mysql', { forceVirtualDb: true });
+  const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+  const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+  const code = load
+    .call({}, '\0virtual:void-db')
+    .replace(
+      /^import \{ (getRuntimeBinding, getRuntimeRequestResource) \} from .*;$/m,
+      (_match, imports: string) => `import { ${imports} } from ${JSON.stringify(envUrl)};`,
+    );
+  writeFileSync(join(root, 'virtual-db.mjs'), code);
+  return import(`${pathToFileURL(join(root, 'virtual-db.mjs')).href}?test=${crypto.randomUUID()}`);
+}
+
 afterEach(() => {
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
@@ -318,18 +346,14 @@ describe('drizzlePlugin db typing generation', () => {
         expect(second).not.toBe(first);
         expect(state.pools).toHaveLength(2);
         for (const pool of state.pools) {
-          // Nothing ends these MySQL pools, so mysql2 must close their idle connections.
           expect(pool.options).toMatchObject(
             dialect === 'postgresql'
               ? { connectionString: 'postgresql://hyperdrive', max: 1, idleTimeoutMillis: 1000 }
-              : {
-                  uri: 'mysql://hyperdrive',
-                  connectionLimit: 1,
-                  maxIdle: 0,
-                  idleTimeout: 1000,
-                  disableEval: true,
-                },
+              : { uri: 'mysql://hyperdrive', connectionLimit: 1, disableEval: true },
           );
+          // mysql2 would start a timer when it builds a pool with these.
+          expect(pool.options).not.toHaveProperty('maxIdle');
+          expect(pool.options).not.toHaveProperty('idleTimeout');
         }
       } finally {
         if (previousEnv === undefined) {
@@ -509,7 +533,9 @@ describe('drizzlePlugin db typing generation', () => {
         if (dialect === 'postgresql') {
           expect(pool.options).toMatchObject({ max: 1, idleTimeoutMillis: 1000 });
         } else {
-          expect(pool.options).toMatchObject({ connectionLimit: 1, maxIdle: 1, idleTimeout: 1000 });
+          expect(pool.options).toMatchObject({ connectionLimit: 1, disableEval: true });
+          expect(pool.options).not.toHaveProperty('maxIdle');
+          expect(pool.options).not.toHaveProperty('idleTimeout');
         }
       }
       // Every request shares one drizzle database, which carries the schema.
@@ -600,6 +626,62 @@ export const requestPoolConfig = (env) =>
       expect(request.connectionConfig.disableEval).toBe(true);
     },
   );
+
+  it('closes idle MySQL connections without a timer when it builds a pool', async () => {
+    const server = await startFakeMySqlServer([{ one: 1 }]);
+    const url = `mysql://void@127.0.0.1:${server.port}/app`;
+    const { db, createDb, sql } = await loadMySqlDbModule();
+    const previousEnv = (globalThis as Record<string, unknown>).__env__;
+    /** Run queries, then expect their connection to close once idle for `idleTimeout`. */
+    const expectClosedWhenIdle = async (queries: () => Promise<unknown>, idleTimeout: number) => {
+      await queries();
+      expect(server.openConnections()).toBe(1);
+      // The pool releases a connection before the query resolves.
+      expect(vi.getTimerCount()).toBe(1);
+      vi.advanceTimersByTime(idleTimeout - 1);
+      expect(server.openConnections()).toBe(1);
+      vi.advanceTimersByTime(1);
+      await vi.waitFor(() => expect(server.openConnections()).toBe(0));
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // workerd rejects a timer started outside a request, and a pool can be built there.
+      await withRuntimeEnv({ DATABASE_URL: url }, async () => {
+        void db.$client;
+        expect(vi.getTimerCount()).toBe(0);
+        await expectClosedWhenIdle(async () => {
+          await db.execute(sql`select 1`);
+          await db.execute(sql`select 1`);
+        }, 1000);
+      });
+
+      // A framework entry that Void does not wrap runs outside its request scope, where each
+      // use builds a pool.
+      (globalThis as Record<string, unknown>).__env__ = { DATABASE_URL: url };
+      void db.$client.config;
+      expect(vi.getTimerCount()).toBe(0);
+      await expectClosedWhenIdle(() => db.execute(sql`select 1`), 1000);
+
+      const own = createDb(url);
+      try {
+        expect(vi.getTimerCount()).toBe(0);
+        await expectClosedWhenIdle(() => own.execute(sql`select 1`), 60_000);
+        // The pool connects again for the next query.
+        await own.execute(sql`select 1`);
+        expect(server.openConnections()).toBe(1);
+      } finally {
+        await new Promise<void>((resolve) => own.$client.end(() => resolve()));
+      }
+    } finally {
+      vi.useRealTimers();
+      if (previousEnv === undefined) {
+        delete (globalThis as Record<string, unknown>).__env__;
+      } else {
+        (globalThis as Record<string, unknown>).__env__ = previousEnv;
+      }
+      await server.close();
+    }
+  });
 
   it.each([true, false])(
     'gives drizzle a pg pool with the request options (schema: %s)',

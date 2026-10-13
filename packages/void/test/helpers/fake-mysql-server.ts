@@ -27,6 +27,8 @@ export type FakeMySqlRow = Record<string, number | string | null>;
 
 export type FakeMySqlServer = {
   port: number;
+  /** The client connections the server holds open. */
+  openConnections(): number;
   close(): Promise<void>;
 };
 
@@ -98,6 +100,7 @@ export async function startFakeMySqlServer(
 
   return {
     port: (server.address() as AddressInfo).port,
+    openConnections: () => sockets.size,
     async close() {
       for (const socket of sockets) {
         socket.destroy();
