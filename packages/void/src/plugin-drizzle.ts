@@ -158,24 +158,39 @@ function getConnectionString() {
   throw new Error("db: MySQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
-function getInstance() {
-  return getRuntimeRequestResource(_requestResourceKey, () => {
-    return drizzle({
-      connection: {
-        uri: getConnectionString(),
-        connectionLimit: 1,
-        maxIdle: 1,
-        idleTimeout: 1000,
-        // Workers forbid eval, which mysql2 uses to build its row parsers.
-        disableEval: true,
-      }${mysqlDrizzleConfig},
-    });
+function createInstance(maxIdle) {
+  return drizzle({
+    connection: {
+      uri: getConnectionString(),
+      connectionLimit: 1,
+      maxIdle,
+      idleTimeout: 1000,
+      // Workers forbid eval, which mysql2 uses to build its row parsers.
+      disableEval: true,
+    }${mysqlDrizzleConfig},
   });
+}
+
+function getInstance() {
+  return getRuntimeRequestResource(
+    _requestResourceKey,
+    // maxIdle below connectionLimit starts mysql2's idle timer when the pool is built, and
+    // workerd rejects timers in global scope, where a module-level query builds its pool.
+    () => createInstance(1),
+    // Framework entries that Void does not own run outside its request scope:
+    // they get a client for each use, never one shared across requests. Nothing
+    // ends that pool, so mysql2 closes its idle connection.
+    () => createInstance(0),
+  );
 }
 
 export const db = new Proxy({}, {
   get(_, prop) {
-    return Reflect.get(getInstance(), prop);
+    const instance = getInstance();
+    const value = Reflect.get(instance, prop);
+    // drizzle's methods read this.session. Outside a request scope each lookup builds a
+    // client, so bind them to this one: a query chain then uses one client.
+    return typeof value === "function" ? value.bind(instance) : value;
   },
 });
 
@@ -203,21 +218,29 @@ function getConnectionString() {
   throw new Error("db: PostgreSQL is not configured. Add DATABASE_URL to .env for local dev, or configure Hyperdrive for production.");
 }
 
-function getInstance() {
-  return getRuntimeRequestResource(_requestResourceKey, () => {
-    return drizzle({
-      connection: {
-        connectionString: getConnectionString(),
-        max: 1,
-        idleTimeoutMillis: 1000,
-      }${schema ? ', schema' : ''},
-    });
+function createInstance() {
+  return drizzle({
+    connection: {
+      connectionString: getConnectionString(),
+      max: 1,
+      idleTimeoutMillis: 1000,
+    }${schema ? ', schema' : ''},
   });
+}
+
+function getInstance() {
+  // Framework entries that Void does not own run outside its request scope:
+  // they get a client for each use, never one shared across requests.
+  return getRuntimeRequestResource(_requestResourceKey, createInstance, createInstance);
 }
 
 export const db = new Proxy({}, {
   get(_, prop) {
-    return Reflect.get(getInstance(), prop);
+    const instance = getInstance();
+    const value = Reflect.get(instance, prop);
+    // drizzle's methods read this.session. Outside a request scope each lookup builds a
+    // client, so bind them to this one: a query chain then uses one client.
+    return typeof value === "function" ? value.bind(instance) : value;
   },
 });
 

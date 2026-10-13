@@ -1,8 +1,17 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { PGlite } from '@electric-sql/pglite';
 import spawn from 'cross-spawn';
+import { createServer } from 'pglite-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
-import { killChild, startServer } from '../../../../test/integration-helpers.ts';
+import {
+  createIsolatedPlayground,
+  killChild,
+  startServer,
+  type IsolatedPlayground,
+} from '../../../../test/integration-helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const PLAYGROUND = 'playground/astro';
@@ -94,5 +103,112 @@ describe('playground/astro dev', () => {
     } finally {
       await browser.close();
     }
+  });
+});
+
+// Astro owns its Worker entry, so void/db runs without Void's request scope.
+describe('playground/astro with PostgreSQL', () => {
+  const USERS = [
+    { id: 1, name: 'Ada', email: 'ada@example.com' },
+    { id: 2, name: 'Linus', email: 'linus@example.com' },
+  ];
+  let pglite: PGlite;
+  let pgServer: ReturnType<typeof createServer>;
+  let playground: IsolatedPlayground;
+  let child: ReturnType<typeof spawn> | undefined;
+  let base: string;
+  let output = () => '';
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    await pglite.exec(
+      'CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL);',
+    );
+    for (const user of USERS) {
+      await pglite.query('INSERT INTO users (name, email) VALUES ($1, $2)', [
+        user.name,
+        user.email,
+      ]);
+    }
+    pgServer = createServer(pglite);
+    pgServer.listen(0, '127.0.0.1');
+    await once(pgServer, 'listening');
+    const { port } = pgServer.address() as AddressInfo;
+
+    playground = createIsolatedPlayground(ROOT, PLAYGROUND);
+    const root = playground.root;
+    const configPath = join(root, 'void.config.ts');
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, 'utf8')
+        .replace('defineConfig({', "defineConfig({\n  database: 'pg',")
+        .replace(
+          "compatibility_flags: ['nodejs_als']",
+          "compatibility_flags: ['nodejs_compat', 'nodejs_als']",
+        ),
+    );
+    rmSync(join(root, 'db/migrations'), { recursive: true, force: true });
+    writeFileSync(
+      join(root, 'db/schema.ts'),
+      `import { pgTable, serial, text } from 'void/schema-pg';
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  email: text('email').notNull(),
+});
+`,
+    );
+    mkdirSync(join(root, 'src/pages/api'), { recursive: true });
+    writeFileSync(
+      join(root, 'src/pages/api/users.ts'),
+      `import { users } from '@schema';
+import { db } from 'void/db';
+
+export const prerender = false;
+
+export async function GET() {
+  return Response.json(await db.select().from(users));
+}
+`,
+    );
+    writeFileSync(
+      join(root, '.env'),
+      `DATABASE_URL=postgresql://postgres@127.0.0.1:${port}/postgres\n`,
+    );
+
+    const server = await startServer((serverPort) => {
+      const astro = join(root, 'node_modules/astro/bin/astro.mjs');
+      child = spawn(
+        process.execPath,
+        [astro, 'dev', '--host', '127.0.0.1', '--port', String(serverPort)],
+        {
+          cwd: root,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, ASTRO_DEV_BACKGROUND: 'false', VOID_INSPECTOR_PORT: 'false' },
+        },
+      );
+      return child;
+    }, 30_000);
+    base = server.base;
+    output = server.output;
+  });
+
+  afterAll(async () => {
+    if (child) {
+      await killChild(child);
+    }
+    if (pgServer) {
+      pgServer.close();
+      await once(pgServer, 'close');
+    }
+    await pglite?.close();
+    playground?.cleanup();
+  });
+
+  it('queries PostgreSQL through void/db from an API route in dev', async () => {
+    const response = await fetch(`${base}/api/users`);
+    const result = { status: response.status, body: await response.text() };
+    expect(result, output().slice(-4000)).toEqual({ status: 200, body: JSON.stringify(USERS) });
   });
 });

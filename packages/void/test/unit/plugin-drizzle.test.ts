@@ -2,6 +2,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { int, mysqlTable } from 'drizzle-orm/mysql-core';
+import { pgTable, serial } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import { getHookHandler } from '../helpers/vite-hooks.ts';
 
@@ -164,6 +166,43 @@ export const withEnv = (env, callback) => withRuntimeEnv(env, callback);
   return { module, state };
 }
 
+type DriverQuery = { toSQL(): { sql: string } };
+
+/** Load void/db with drizzle's own driver and record each client it builds. */
+async function loadDriverDbModule(dialect: 'postgresql' | 'mysql'): Promise<{
+  db: { select(): { from(table: unknown): DriverQuery } };
+  clients: Array<{ end(): unknown }>;
+}> {
+  const root = createProjectRoot({ schema: false });
+  const plugin = drizzlePlugin(root, false, dialect, { forceVirtualDb: true });
+  const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+  const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+  const clientsKey = `__void_db_clients_${dialect}_${crypto.randomUUID().replaceAll('-', '')}`;
+  const clients: Array<{ end(): unknown }> = [];
+  (globalThis as Record<string, unknown>)[clientsKey] = clients;
+  fakeStateKeys.push(clientsKey);
+  const code = load
+    .call({}, '\0virtual:void-db')
+    .replace(
+      /^import \{ drizzle \} from (.*);$/m,
+      (_match, driver: string) => `import { drizzle as createDrizzle } from ${driver};
+function drizzle(config) {
+  const database = createDrizzle(config);
+  globalThis[${JSON.stringify(clientsKey)}].push(database.$client);
+  return database;
+}`,
+    )
+    .replace(
+      /^import \{ (getRuntimeBinding, getRuntimeRequestResource) \} from .*;$/m,
+      (_match, imports: string) => `import { ${imports} } from ${JSON.stringify(envUrl)};`,
+    );
+  writeFileSync(join(root, 'virtual-db.mjs'), code);
+  const module = (await import(
+    `${pathToFileURL(join(root, 'virtual-db.mjs')).href}?test=${crypto.randomUUID()}`
+  )) as { db: Awaited<ReturnType<typeof loadDriverDbModule>>['db'] };
+  return { db: module.db, clients };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
@@ -237,6 +276,72 @@ describe('drizzlePlugin db typing generation', () => {
       }
     }
   });
+
+  it.each(['postgresql', 'mysql'] as const)(
+    'builds a %s client for each use when a framework handler has no Void request scope',
+    async (dialect) => {
+      const { module, state } = await loadExecutableDbModule(dialect);
+      const previousEnv = (globalThis as Record<string, unknown>).__env__;
+      (globalThis as Record<string, unknown>).__env__ = {
+        HYPERDRIVE: { connectionString: `${dialect}://hyperdrive` },
+      };
+      try {
+        const first = module.db.instanceId;
+        const second = module.db.instanceId;
+        expect(second).not.toBe(first);
+        expect(state.pools).toHaveLength(2);
+        for (const pool of state.pools) {
+          // Nothing ends these MySQL pools, so mysql2 must close their idle connections.
+          expect(pool.options).toMatchObject(
+            dialect === 'postgresql'
+              ? { connectionString: 'postgresql://hyperdrive', max: 1, idleTimeoutMillis: 1000 }
+              : {
+                  uri: 'mysql://hyperdrive',
+                  connectionLimit: 1,
+                  maxIdle: 0,
+                  idleTimeout: 1000,
+                  disableEval: true,
+                },
+          );
+        }
+      } finally {
+        if (previousEnv === undefined) {
+          delete (globalThis as Record<string, unknown>).__env__;
+        } else {
+          (globalThis as Record<string, unknown>).__env__ = previousEnv;
+        }
+      }
+    },
+  );
+
+  it.each(['postgresql', 'mysql'] as const)(
+    'builds one %s client for a query outside a Void request scope',
+    async (dialect) => {
+      const { db, clients } = await loadDriverDbModule(dialect);
+      const users =
+        dialect === 'postgresql'
+          ? pgTable('users', { id: serial('id') })
+          : mysqlTable('users', { id: int('id') });
+      const previousEnv = (globalThis as Record<string, unknown>).__env__;
+      (globalThis as Record<string, unknown>).__env__ = {
+        DATABASE_URL: `${dialect === 'postgresql' ? 'postgres' : 'mysql'}://void@127.0.0.1:9/app`,
+      };
+      try {
+        // drizzle's select() reads `this.session` and `this.dialect`.
+        const query = db.select().from(users);
+
+        expect(query.toSQL().sql).toMatch(/^select .id. from .users.$/);
+        expect(clients).toHaveLength(1);
+      } finally {
+        if (previousEnv === undefined) {
+          delete (globalThis as Record<string, unknown>).__env__;
+        } else {
+          (globalThis as Record<string, unknown>).__env__ = previousEnv;
+        }
+        await Promise.all(clients.map((client) => client.end()));
+      }
+    },
+  );
 
   it('keeps sqlite projects on the D1 internal db entry', () => {
     const root = createProjectRoot();

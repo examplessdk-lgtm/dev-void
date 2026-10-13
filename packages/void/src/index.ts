@@ -619,6 +619,7 @@ export function voidPlugin(options?: {
       framework,
       root,
       devTriggerToken,
+      dialect,
       config.routing?.notFound,
     );
     // Class A builds write no `assets` config, and `not_found_handling` alone would keep
@@ -649,6 +650,7 @@ export function voidPlugin(options?: {
           framework,
           getOriginalFrameworkEntry(framework, root),
           true,
+          dialect,
           resolved.build.assetsDir,
           config.routing?.notFound,
         );
