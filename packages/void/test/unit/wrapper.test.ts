@@ -1,15 +1,20 @@
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire, isBuiltin } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { parseSync } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   cleanupWrapper,
@@ -18,6 +23,7 @@ import {
   selectBundledEntryFilename,
 } from '../../src/cli/wrapper.ts';
 import type { WrapperFeatures } from '../../src/cli/wrapper.ts';
+import { startFakeMySqlServer } from '../helpers/fake-mysql-server.ts';
 
 const base: WrapperFeatures = {
   crons: [],
@@ -585,20 +591,105 @@ describe('generateWrapper with migrations', () => {
     expect(bundled).toContain('__voidPgpassNoop');
   });
 
-  it('uses the MySQL migration handler when dialect is mysql', async () => {
+  /** Run the wrapped MySQL Worker in workerd and return its `/__void/migrate` response body. */
+  async function migrateMySqlInWorkerd(workerDir: string): Promise<unknown> {
+    // The applied-migrations SELECT returns a row, so mysql2 also parses a result set.
+    const mysql = await startFakeMySqlServer([{ name: '000_applied_elsewhere.sql' }]);
+    // Upload every module, as the platform does; the wrapper imports the handler statically.
+    const modules = readdirSync(workerDir)
+      .filter((file) => file.endsWith('.mjs'))
+      .sort((a, b) => Number(b === 'index.mjs') - Number(a === 'index.mjs'))
+      .map((file) => ({ type: 'ESModule' as const, path: join(workerDir, file) }));
+    let miniflare: Miniflare | undefined;
+    try {
+      miniflare = new Miniflare(
+        convertV4MiniflareOptions({
+          modulesRoot: workerDir,
+          modules,
+          compatibilityDate: '2026-02-24',
+          compatibilityFlags: ['nodejs_compat'],
+          bindings: {
+            __VOID_PROXY_TOKEN: 'proxy-token',
+            HYPERDRIVE: { connectionString: `mysql://void@127.0.0.1:${mysql.port}/app` },
+          },
+        }),
+      );
+      const response = await miniflare.dispatchFetch('http://localhost/__void/migrate', {
+        method: 'POST',
+        headers: { 'x-void-internal': 'proxy-token' },
+      });
+      return await response.json();
+    } finally {
+      await miniflare?.dispose();
+      await mysql.close();
+    }
+  }
+
+  it('runs MySQL migrations from the wrapped Worker in workerd', async () => {
     const { workerDir, projectRoot } = createMigrationFixture({
       name: '001_test.sql',
       sql: 'CREATE TABLE test (id INT);',
     });
-
     await generateWrapper(workerDir, 'index.mjs', projectRoot, {
       ...base,
       hasMigrations: true,
       migrationDialect: 'mysql',
     });
 
-    const handler = readFileSync(join(workerDir, '__void_migration_handler.mjs'), 'utf-8');
-    expect(handler).toContain('VARCHAR(255)');
+    expect(await migrateMySqlInWorkerd(workerDir)).toEqual({
+      ok: true,
+      migrations: [{ name: '001_test.sql', applied: true, durationMs: expect.any(Number) }],
+    });
+  });
+
+  // npm, Yarn and Bun hoist mysql2's dependencies into the app's node_modules. The build finds
+  // them there, so anything it does not bundle stays a require that workerd cannot load.
+  it('bundles the mysql2 dependencies that sit in the app node_modules', async () => {
+    const { workerDir, projectRoot } = createMigrationFixture({
+      name: '001_test.sql',
+      sql: 'CREATE TABLE test (id INT);',
+    });
+    const mysql2PackageJson = createRequire(import.meta.url).resolve('mysql2/package.json');
+    const { dependencies } = JSON.parse(readFileSync(mysql2PackageJson, 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    const installDir = dirname(dirname(realpathSync(mysql2PackageJson)));
+    for (const name of Object.keys(dependencies)) {
+      // Copies, not symlinks, so this also runs on Windows.
+      cpSync(realpathSync(join(installDir, name)), join(projectRoot, 'node_modules', name), {
+        recursive: true,
+      });
+    }
+    await generateWrapper(workerDir, 'index.mjs', projectRoot, {
+      ...base,
+      hasMigrations: true,
+      migrationDialect: 'mysql',
+    });
+
+    expect(await migrateMySqlInWorkerd(workerDir)).toEqual({
+      ok: true,
+      migrations: [{ name: '001_test.sql', applied: true, durationMs: expect.any(Number) }],
+    });
+    // workerd serves only Node built-ins to the require shim. mysql2 requires its optional
+    // `cardinal` inside try/catch.
+    for (const file of readdirSync(workerDir).filter((name) =>
+      name.startsWith('__void_migration_handler'),
+    )) {
+      const code = readFileSync(join(workerDir, file), 'utf8');
+      const { module } = parseSync(file, code);
+      const imports = [
+        ...module.staticImports.map((entry) => entry.moduleRequest.value),
+        ...module.staticExports.flatMap((entry) =>
+          entry.entries.flatMap((item) => (item.moduleRequest ? [item.moduleRequest.value] : [])),
+        ),
+      ];
+      expect(imports.filter((id) => !/^(node:|cloudflare:|\.\/)/.test(id))).toEqual([]);
+      const required = Array.from(
+        code.matchAll(/\b__require\(\s*["']([^"']+)["']\s*\)/g),
+        (match) => match[1]!,
+      );
+      expect(required.filter((id) => !isBuiltin(id) && id !== 'cardinal')).toEqual([]);
+    }
   });
 
   it('does not generate migration handler when hasMigrations is false', async () => {

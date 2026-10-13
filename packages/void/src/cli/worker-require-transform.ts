@@ -29,11 +29,17 @@ function nodes(root: AstNode): Array<AstNode> {
   return found;
 }
 
-/** Rewrite the two CommonJS constructs emitted by the PG migration bundle. */
-export function transformPgWorkerBundle(
+/**
+ * Replace the `createRequire(import.meta.url)` binding that the bundler emits for CommonJS
+ * database drivers with `requireShim`, which serves Node built-ins from static imports.
+ * workerd gives modules no `import.meta.url`, so the original binding fails at startup.
+ * PostgreSQL bundles also replace `pgpass`, which reads the filesystem.
+ */
+export function transformWorkerRequireBundle(
   code: string,
   filename: string,
   requireShim: string,
+  database: 'PostgreSQL' | 'MySQL',
 ): string {
   if (!code.includes('createRequire') && !code.includes('pgpass')) {
     return code;
@@ -53,7 +59,9 @@ export function transformPgWorkerBundle(
         !isIdentifier(specifiers[0]?.imported as AstNode | undefined) ||
         (specifiers[0]!.imported as { name: string }).name !== 'createRequire'
       ) {
-        throw new Error(`deploy: Unsupported node:module import in PostgreSQL bundle ${filename}.`);
+        throw new Error(
+          `deploy: Unsupported node:module import in ${database} bundle ${filename}.`,
+        );
       }
       edits.push({ start: statement.start!, end: statement.end!, replacement: '' });
     }
@@ -67,7 +75,7 @@ export function transformPgWorkerBundle(
         )
       ) {
         if (declarations.length !== 1 || hasRequireBinding) {
-          throw new Error(`deploy: Unsupported require binding in PostgreSQL bundle ${filename}.`);
+          throw new Error(`deploy: Unsupported require binding in ${database} bundle ${filename}.`);
         }
         hasRequireBinding = true;
         edits.push({ start: statement.start!, end: statement.end!, replacement: requireShim });
@@ -91,12 +99,12 @@ export function transformPgWorkerBundle(
   }
   if (code.includes('createRequire') && !hasRequireBinding) {
     throw new Error(
-      `deploy: Could not locate the generated require binding in PostgreSQL bundle ${filename}.`,
+      `deploy: Could not locate the generated require binding in ${database} bundle ${filename}.`,
     );
   }
   if (code.includes('pgpass') && pgpassCalls === 0 && code.includes('__require')) {
     throw new Error(
-      `deploy: Could not locate the pgpass require in PostgreSQL bundle ${filename}.`,
+      `deploy: Could not locate the pgpass require in ${database} bundle ${filename}.`,
     );
   }
   const ms = new MagicString(code);
@@ -105,7 +113,9 @@ export function transformPgWorkerBundle(
   }
   const transformed = ms.toString();
   if (transformed.includes('createRequire') || transformed.includes('__require("pgpass")')) {
-    throw new Error(`deploy: PostgreSQL bundle ${filename} still contains an unsupported require.`);
+    throw new Error(
+      `deploy: ${database} bundle ${filename} still contains an unsupported require.`,
+    );
   }
   return pgpassCalls > 0
     ? `const __voidPgpassNoop = Object.assign(function pgpass(_connectionInfo, callback) { callback(undefined); }, { warnTo() {} });\n${transformed}`

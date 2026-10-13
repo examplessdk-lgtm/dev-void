@@ -15,7 +15,7 @@ import { build } from 'vite';
 import type { MigrationPlanBundle } from '../migrations/plan.ts';
 import { readProjectPaths } from '../project-paths.ts';
 import { generateQueueResolverSource } from '../queues/dispatch.ts';
-import { transformPgWorkerBundle } from './pg-bundle-transform.ts';
+import { transformWorkerRequireBundle } from './worker-require-transform.ts';
 
 export type WrapperFeatures = {
   /** Cron job definitions (from scanJobsSync). */
@@ -279,7 +279,7 @@ async function bundleMigrationHandler(
           },
         }
       : isMysql
-        ? { noExternal: ['mysql2'] }
+        ? { noExternal: true }
         : undefined,
     build: {
       outDir,
@@ -298,22 +298,27 @@ async function bundleMigrationHandler(
     },
   });
 
-  if (isPostgresql) {
-    patchPgWorkerBundle(outDir);
+  if (isPostgresql || isMysql) {
+    patchWorkerRequireBundle(outDir, isPostgresql ? 'PostgreSQL' : 'MySQL');
   }
   for (const file of readdirSync(outDir)) {
     copyFileSync(join(outDir, file), join(workerDir, file));
   }
 }
 
-function patchPgWorkerBundle(outDir: string): void {
+function patchWorkerRequireBundle(outDir: string, database: 'PostgreSQL' | 'MySQL'): void {
   for (const file of readdirSync(outDir)) {
     if (!file.endsWith('.mjs') && !file.endsWith('.js')) {
       continue;
     }
     const path = join(outDir, file);
     const code = readFileSync(path, 'utf-8');
-    const transformed = transformPgWorkerBundle(code, file, pgWorkerRequireShim());
+    const transformed = transformWorkerRequireBundle(
+      code,
+      file,
+      database === 'PostgreSQL' ? pgWorkerRequireShim() : mysqlWorkerRequireShim(),
+      database,
+    );
     if (transformed !== code) {
       writeFileSync(path, transformed);
     }
@@ -359,6 +364,49 @@ function pgWorkerRequireShim(): string {
     '  const mod = __voidNodeRequireModules[id];',
     '  if (mod) return mod;',
     '  throw new Error(`Unsupported require("${id}") in Void PG migration bundle`);',
+    '};',
+  ].join('\n');
+}
+
+// The Node built-ins that mysql2 and its bundled dependencies require. Each one is the
+// module's default export, which matches CommonJS `module.exports`: safer-buffer calls
+// `hasOwnProperty` on `require("buffer")`, and an ESM namespace object has no prototype.
+// mysql2 wraps its optional `cardinal` require in try/catch, so it stays unsupported.
+function mysqlWorkerRequireShim(): string {
+  return [
+    'import __voidNodeBuffer from "node:buffer";',
+    'import __voidNodeCrypto from "node:crypto";',
+    'import __voidNodeDiagnosticsChannel from "node:diagnostics_channel";',
+    'import __voidNodeEvents from "node:events";',
+    'import __voidNodeNet from "node:net";',
+    'import __voidNodeProcess from "node:process";',
+    'import __voidNodeStream from "node:stream";',
+    'import __voidNodeStringDecoder from "node:string_decoder";',
+    'import __voidNodeTimers from "node:timers";',
+    'import __voidNodeTls from "node:tls";',
+    'import __voidNodeUrl from "node:url";',
+    'import __voidNodeUtil from "node:util";',
+    'import __voidNodeZlib from "node:zlib";',
+    'var __voidNodeRequireModules = {',
+    '  buffer: __voidNodeBuffer,',
+    '  crypto: __voidNodeCrypto,',
+    '  diagnostics_channel: __voidNodeDiagnosticsChannel,',
+    '  events: __voidNodeEvents,',
+    '  net: __voidNodeNet,',
+    '  process: __voidNodeProcess,',
+    '  stream: __voidNodeStream,',
+    '  string_decoder: __voidNodeStringDecoder,',
+    '  timers: __voidNodeTimers,',
+    '  tls: __voidNodeTls,',
+    '  url: __voidNodeUrl,',
+    '  util: __voidNodeUtil,',
+    '  zlib: __voidNodeZlib,',
+    '};',
+    'var __require = (id) => {',
+    '  if (id.startsWith("node:")) id = id.slice(5);',
+    '  const mod = __voidNodeRequireModules[id];',
+    '  if (mod) return mod;',
+    '  throw new Error(`Unsupported require("${id}") in Void MySQL migration bundle`);',
     '};',
   ].join('\n');
 }
