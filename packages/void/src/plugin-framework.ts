@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { type Plugin } from 'vite';
 import { type ApplicationAnalysis } from './application-analysis.ts';
 import {
@@ -28,6 +29,8 @@ import {
 import { migrationPlugin } from './plugin-migration.ts';
 import { createCloudflareBuiltinsExternalPlugin } from './plugin-worker-environment.ts';
 import { injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
+
+const handlerFile = fileURLToPath(import.meta.resolve('#self/handler'));
 
 export function createFrameworkPlugins(input: {
   readonly localD1: ReturnType<typeof resolveLocalD1Target>;
@@ -180,6 +183,29 @@ export function createFrameworkPlugins(input: {
   const svelteKitHooksInjectPlugin: Plugin = {
     name: 'void:sveltekit-hooks-inject',
     apply: 'serve',
+    config() {
+      if (detected.class !== 'b') {
+        return;
+      }
+      // Kit's dev server runs server code in Vite's Node SSR graph. That graph
+      // externalizes a bare import resolving into node_modules before any plugin
+      // sees it, so an installed void/db would load the package's D1 runtime
+      // instead of the virtual module. Inlining keeps every void import, including
+      // the injected env import below, in the graph that holds void/db's env module.
+      return { ssr: { noExternal: ['void'] } };
+    },
+    resolveId: {
+      order: 'pre',
+      filter: { id: /^void$/ },
+      handler() {
+        if (detected.class !== 'b' || this.environment?.name === 'client') {
+          return;
+        }
+        // Inlined, the package entry would load the whole Vite plugin into Kit's module
+        // runner. Server code gets the lightweight handler subpath, as in Void apps.
+        return handlerFile;
+      },
+    },
     transform(code, id) {
       if (detected.class !== 'b') {
         return;

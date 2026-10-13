@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cloudflare } from '@cloudflare/vite-plugin';
-import { resolveConfig } from 'vite';
+import { createServer, normalizePath, resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { voidPlugin } from '../../src/index.ts';
 
@@ -200,6 +201,134 @@ describe('voidPlugin Vite environments', () => {
       expect(config.environments.ssr.optimizeDeps.include).toEqual(
         expect.arrayContaining(['void > email-validator', 'void > mysql2']),
       );
+    },
+  );
+
+  it.each([
+    ['sveltekit', '@sveltejs/kit', 'serve', true],
+    ['sveltekit', '@sveltejs/kit', 'build', false],
+    ['nuxt', 'nuxt', 'serve', false],
+    ['analog', '@analogjs/platform', 'serve', false],
+    ['astro', 'astro', 'serve', false],
+  ] as const)(
+    'keeps void in the Node SSR graph for %s (%s, %s): %s',
+    async (_name, dependency, command, inlined) => {
+      const root = createProjectRoot();
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', dependencies: { [dependency]: '*' } }),
+      );
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+      const config = await resolveConfig({ root, plugins: [voidPlugin()] }, command, 'development');
+
+      expect(config.ssr.noExternal).toEqual(
+        inlined ? expect.arrayContaining(['void']) : expect.not.arrayContaining(['void']),
+      );
+    },
+  );
+
+  it('serves the void/db virtual module to SvelteKit server code from an installed void', async () => {
+    // Windows runners report a short-name temp path, which Vite refuses to serve.
+    const root = realpathSync.native(createProjectRoot());
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', devDependencies: { '@sveltejs/kit': '*', void: '*' } }),
+    );
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ database: 'pg', worker: { compatibility_date: '2026-02-24' } }),
+    );
+    mkdirSync(join(root, 'db'));
+    writeFileSync(
+      join(root, 'db/schema.ts'),
+      "import { pgTable, serial } from 'void/schema-pg';\nexport const users = pgTable('users', { id: serial('id') });\n",
+    );
+    // A packed install: Vite externalizes bare SSR imports that resolve into node_modules.
+    const installed = join(root, 'node_modules/void');
+    mkdirSync(installed, { recursive: true });
+    writeFileSync(
+      join(installed, 'package.json'),
+      JSON.stringify({
+        name: 'void',
+        type: 'module',
+        exports: { './db': './db.mjs', './_env': './env.mjs', './schema-pg': './schema-pg.mjs' },
+      }),
+    );
+    for (const file of ['db.mjs', 'env.mjs', 'schema-pg.mjs']) {
+      writeFileSync(join(installed, file), 'export {};\n');
+    }
+    mkdirSync(join(root, 'src'));
+    writeFileSync(
+      join(root, 'src/server.ts'),
+      "import { db } from 'void/db';\nimport { withRuntimeEnv } from 'void/_env';\nexport { db, withRuntimeEnv };\n",
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [voidPlugin()],
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true, ws: false, preTransformRequests: false },
+    });
+    try {
+      const result = await server.environments.ssr.transformRequest('/src/server.ts');
+
+      expect(result?.code).toContain('virtual:void-db');
+      expect(result?.code).not.toMatch(/__vite_ssr_import__\("void\/(?:db|_env)"/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  // The package entry is the whole Vite plugin; server code needs only its handler helpers.
+  it.each([
+    ['sveltekit', '@sveltejs/kit', 'ssr', true],
+    ['sveltekit', '@sveltejs/kit', 'client', false],
+    ['astro', 'astro', 'ssr', false],
+  ] as const)(
+    'sends bare void from %s %s code in the %s environment to the handler entry: %s',
+    async (_name, dependency, environment, redirected) => {
+      const root = realpathSync.native(createProjectRoot());
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', devDependencies: { [dependency]: '*', void: '*' } }),
+      );
+      const installed = join(root, 'node_modules/void');
+      mkdirSync(installed, { recursive: true });
+      writeFileSync(
+        join(installed, 'package.json'),
+        JSON.stringify({ name: 'void', type: 'module', exports: { '.': './index.mjs' } }),
+      );
+      writeFileSync(join(installed, 'index.mjs'), 'export {};\n');
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [voidPlugin()],
+        optimizeDeps: { noDiscovery: true },
+        server: { middlewareMode: true, ws: false, preTransformRequests: false },
+      });
+      try {
+        const resolved = await server.environments[environment]!.pluginContainer.resolveId(
+          'void',
+          join(root, 'src/hooks.server.ts'),
+        );
+
+        expect(resolved?.id).toBe(
+          normalizePath(
+            redirected
+              ? createRequire(import.meta.url).resolve('void/handler')
+              : join(installed, 'index.mjs'),
+          ),
+        );
+      } finally {
+        await server.close();
+      }
     },
   );
 });
