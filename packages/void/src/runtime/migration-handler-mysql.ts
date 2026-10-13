@@ -51,6 +51,7 @@ async function runMySqlMigrations(
   const connection = await createConnection({
     uri: hyperdrive.connectionString,
     multipleStatements: true,
+    disableEval: true,
   });
   try {
     await connection.query(

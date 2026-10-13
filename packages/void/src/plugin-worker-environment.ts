@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { type Plugin } from 'vite';
 import { ensureWranglerCompat } from './cli/wrangler.ts';
-import { readConfig, isNodeTarget } from './config.ts';
+import { readConfig, isNodeTarget, type DatabaseDialect } from './config.ts';
 
 const CLOUDFLARE_BUILTIN_IMPORT = /^cloudflare:/;
 
@@ -130,7 +130,10 @@ export function createWranglerCompatPersistPlugin(
   };
 }
 
-export function createServerRuntimeOptimizerPlugin(voidOwnsWorkerRuntime: boolean): Plugin {
+export function createServerRuntimeOptimizerPlugin(
+  voidOwnsWorkerRuntime: boolean,
+  dialect: DatabaseDialect,
+): Plugin {
   const serverRuntimeOptimizerPlugin: Plugin = {
     name: 'void:server-runtime-optimizer',
     configEnvironment(name) {
@@ -146,8 +149,9 @@ export function createServerRuntimeOptimizerPlugin(voidOwnsWorkerRuntime: boolea
           // Excluding void also skips converting its CommonJS dependencies, which workerd cannot
           // evaluate: an installed void/email fails with "exports is not defined". Runtimes a
           // framework owns stay untouched; Node loads CommonJS itself, and forcing an include
-          // there turns on SSR prebundling the framework did not ask for.
-          include: ['void > email-validator'],
+          // there turns on SSR prebundling the framework did not ask for. mysql2 is CommonJS too:
+          // void/db leaves its import to drizzle, so this nested prebundle serves it.
+          include: ['void > email-validator', ...(dialect === 'mysql' ? ['void > mysql2'] : [])],
         },
       };
     },

@@ -210,6 +210,7 @@ export function voidPlugin(options?: {
   // framework and Node targets that do not all use bindingRuntimePlugin.
   const serverRuntimeOptimizerPlugin = createServerRuntimeOptimizerPlugin(
     !isNodeTarget(config.target) && !frameworkOwnsCloudflareRuntime,
+    dialect,
   );
   // Scan queues/websocket routes early so both framework-mode and default-mode
   // branches can safely close over these bindings.

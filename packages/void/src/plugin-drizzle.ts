@@ -16,7 +16,6 @@ const envModuleResolved = fileURLToPath(import.meta.resolve('#self/_env'));
 const drizzleNodePgResolved = fileURLToPath(import.meta.resolve('drizzle-orm/node-postgres'));
 const drizzleMysql2Resolved = fileURLToPath(import.meta.resolve('drizzle-orm/mysql2'));
 const pgResolved = fileURLToPath(import.meta.resolve('pg'));
-const mysql2Resolved = fileURLToPath(import.meta.resolve('mysql2'));
 
 const VIRTUAL_DB_ID = '\0virtual:void-db';
 const VIRTUAL_SCHEMA_DB_ID = '\0virtual:void-db-schema';
@@ -147,16 +146,14 @@ export function createDb() {
         const schemaImport = schema
           ? `import * as schema from ${JSON.stringify(schema.path)};`
           : '';
-        const drizzleConfig = schema
-          ? dialect === 'mysql'
-            ? ', { schema, mode: "default" }'
-            : ', { schema }'
-          : '';
+        const drizzleConfig = schema ? ', { schema }' : '';
 
         if (dialect === 'mysql') {
+          // drizzle builds the pool from `connection`, so its bare mysql2 import is the only one
+          // and the worker prebundle serves it. Its config check rejects `mode` without `schema`.
+          const mysqlDrizzleConfig = schema ? ', schema, mode: "default"' : '';
           return `
 import { drizzle } from ${JSON.stringify(drizzleMysql2Resolved)};
-import { createPool } from ${JSON.stringify(mysql2Resolved)};
 import { getRuntimeBinding, getRuntimeRequestResource } from ${JSON.stringify(envModuleResolved)};
 ${schemaImport}
 export { ${DRIZZLE_OPERATORS} } from ${JSON.stringify(drizzleOrmResolved)};
@@ -173,13 +170,16 @@ function getConnectionString() {
 
 function getInstance() {
   return getRuntimeRequestResource(_requestResourceKey, () => {
-    const pool = createPool({
-      uri: getConnectionString(),
-      connectionLimit: 1,
-      maxIdle: 1,
-      idleTimeout: 1000,
+    return drizzle({
+      connection: {
+        uri: getConnectionString(),
+        connectionLimit: 1,
+        maxIdle: 1,
+        idleTimeout: 1000,
+        // Workers forbid eval, which mysql2 uses to build its row parsers.
+        disableEval: true,
+      }${mysqlDrizzleConfig},
     });
-    return drizzle(pool${drizzleConfig});
   });
 }
 
@@ -190,7 +190,7 @@ export const db = new Proxy({}, {
 });
 
 export function createDb(connectionString) {
-  return drizzle(connectionString${drizzleConfig});
+  return drizzle({ connection: { uri: connectionString, disableEval: true }${mysqlDrizzleConfig} });
 }
 `;
         }

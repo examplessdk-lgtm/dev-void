@@ -12,7 +12,10 @@ async function applyMigrations(
   migrationSchema: VoidAuthMigrationSchema,
 ): Promise<void> {
   const { createConnection } = await import('mysql2/promise');
-  const connection = await createConnection(resolveConnectionString(env, 'MySQL'));
+  const connection = await createConnection({
+    uri: resolveConnectionString(env, 'MySQL'),
+    disableEval: true,
+  });
   try {
     await applyMySqlAuthMigrations(mysqlMigrationRunner(connection), migrationSchema);
   } finally {

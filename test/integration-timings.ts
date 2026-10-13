@@ -21,6 +21,7 @@ export const integrationTimings: Readonly<Record<string, number>> = {
   'packages/void/test/integration/full-deploy-manifest.test.ts': 6370,
   'packages/void/test/integration/kitchen-sink-build.test.ts': 7365,
   'packages/void/test/integration/kitchen-sink.test.ts': 20887,
+  'packages/void/test/integration/mysql-test.test.ts': 11000,
   'packages/void/test/integration/named-layouts.test.ts': 9939,
   'packages/void/test/integration/node-static.test.ts': 13667,
   'packages/void/test/integration/node-target.test.ts': 10833,

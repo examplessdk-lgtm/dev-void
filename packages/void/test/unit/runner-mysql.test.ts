@@ -4,18 +4,23 @@ import {
   readMySqlAppliedMigrations,
   type MySqlClient,
 } from '../../src/migrations/runner-mysql.ts';
+import { runVoidAuthMigrations } from '../../src/runtime/better-auth-mysql.ts';
 import { createMigrationHandler } from '../../src/runtime/migration-handler-mysql.ts';
 
 const mysqlQueries = vi.hoisted(() => [] as Array<string>);
+const mysqlConnections = vi.hoisted(() => [] as Array<unknown>);
 
 vi.mock('mysql2/promise', () => ({
-  createConnection: async () => ({
-    query: async (sql: string) => {
-      mysqlQueries.push(sql);
-      return [[]];
-    },
-    end: async () => {},
-  }),
+  createConnection: async (options: unknown) => {
+    mysqlConnections.push(options);
+    return {
+      query: async (sql: string) => {
+        mysqlQueries.push(sql);
+        return [[]];
+      },
+      end: async () => {},
+    };
+  },
 }));
 
 describe('MySQL migration runner', () => {
@@ -103,5 +108,36 @@ describe('MySQL migration runner', () => {
     );
     expect(await response.json()).toMatchObject({ ok: true });
     expect(migrationQueries(mysqlQueries)).toEqual(statements);
+  });
+});
+
+describe('MySQL connections in Workers', () => {
+  // Workers forbid eval, which mysql2 uses to build row parsers unless disableEval is set.
+  it('opens the hosted migration connection with eval disabled', async () => {
+    mysqlConnections.length = 0;
+    const handler = createMigrationHandler(
+      { HYPERDRIVE: { connectionString: 'mysql://localhost/app' }, __VOID_PROXY_TOKEN: 'token' },
+      [],
+    );
+    const response = await handler(
+      new Request('http://localhost/__void/migrate', {
+        method: 'POST',
+        headers: { 'x-void-internal': 'token' },
+      }),
+    );
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(mysqlConnections).toEqual([
+      { uri: 'mysql://localhost/app', multipleStatements: true, disableEval: true },
+    ]);
+  });
+
+  it('opens the Better Auth migration connection with eval disabled', async () => {
+    mysqlConnections.length = 0;
+    await runVoidAuthMigrations(
+      { DATABASE_URL: 'mysql://localhost/auth' },
+      { dialect: 'mysql', providers: null },
+      { dialect: 'mysql', idStrategy: 'text', tables: [] },
+    );
+    expect(mysqlConnections).toEqual([{ uri: 'mysql://localhost/auth', disableEval: true }]);
   });
 });

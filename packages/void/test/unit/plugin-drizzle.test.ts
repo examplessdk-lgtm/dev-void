@@ -32,6 +32,7 @@ function createProjectRoot(options?: { schema?: boolean }): string {
 type FakePoolRecord = {
   dialect: 'postgresql' | 'mysql';
   options: Record<string, unknown>;
+  drizzleConfig?: Record<string, unknown>;
 };
 
 type FakeDatabaseState = {
@@ -133,23 +134,20 @@ export function drizzle(pool) {
       `import { getRuntimeBinding as getTestRuntimeBinding } from ${JSON.stringify(envUrl)};
 const state = ${stateExpression};
 ${createDatabaseSource}
-export function createPool(options) {
-  const pool = { options };
-  state.pools.push({ dialect: "mysql", options });
-  return pool;
-}
-export function drizzle(pool) {
-  if (typeof pool === "string") pool = { options: { uri: pool } };
-  return createDatabase("mysql", pool);
+export function drizzle(config) {
+  if (typeof config?.connection !== "object" || config.connection === null) {
+    throw new Error("void/db must let drizzle build the mysql2 pool from a connection object");
+  }
+  const { connection, ...drizzleConfig } = config;
+  state.pools.push({ dialect: "mysql", options: connection, drizzleConfig });
+  return createDatabase("mysql", { options: connection });
 }
 `,
     );
-    code = code
-      .replace(/^import \{ drizzle \} from .*;$/m, `import { drizzle } from "./fake-driver.mjs";`)
-      .replace(
-        /^import \{ createPool \} from .*;$/m,
-        `import { createPool } from "./fake-driver.mjs";`,
-      );
+    code = code.replace(
+      /^import \{ drizzle \} from .*;$/m,
+      `import { drizzle } from "./fake-driver.mjs";`,
+    );
   }
 
   code = code.replace(
@@ -371,27 +369,93 @@ describe('drizzlePlugin db typing generation', () => {
       );
       expect(await background).toBe(responseInstance);
 
-      expect(state.pools).toHaveLength(6);
-      for (const pool of state.pools) {
+      // MySQL createDb() builds its own pool through drizzle; the other pools are per request.
+      const requestPools = state.pools.filter((pool) => pool.options.uri !== explicitOwner);
+      expect(requestPools).toHaveLength(6);
+      for (const pool of requestPools) {
         if (dialect === 'postgresql') {
           expect(pool.options).toMatchObject({ max: 1, idleTimeoutMillis: 1000 });
         } else {
           expect(pool.options).toMatchObject({ connectionLimit: 1, maxIdle: 1, idleTimeout: 1000 });
         }
       }
+      if (dialect === 'mysql') {
+        expect(state.pools).toHaveLength(7);
+        expect(state.pools.find((pool) => pool.options.uri === explicitOwner)?.options).toEqual({
+          uri: explicitOwner,
+          disableEval: true,
+        });
+        for (const pool of state.pools) {
+          expect(pool.options).toMatchObject({ disableEval: true });
+          expect(pool.drizzleConfig).toEqual({ schema: expect.anything(), mode: 'default' });
+        }
+      }
     },
   );
 
-  it('uses the required default mode for MySQL databases with a schema', () => {
+  it('leaves the MySQL driver import to drizzle', () => {
     const root = createProjectRoot();
     const plugin = drizzlePlugin(root, false, 'mysql');
     const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
 
     const code = load.call({}, '\0virtual:void-db');
+    const specifiers = Array.from(
+      code.matchAll(/\b(?:from|import)\s*\(?\s*("[^"]+")/g),
+      (match) => JSON.parse(match[1]!) as string,
+    );
 
-    expect(code).toContain('return drizzle(pool, { schema, mode: "default" })');
-    expect(code).toContain('drizzle(connectionString, { schema, mode: "default" })');
+    // The worker optimizer serves drizzle's bare mysql2 import from a prebundle; a direct import
+    // by file path would reach workerd as raw CommonJS.
+    expect(specifiers.filter((specifier) => specifier.includes('mysql2'))).toEqual([
+      expect.stringMatching(/drizzle-orm[\\/]mysql2[\\/]/),
+    ]);
   });
+
+  it.each([true, false])(
+    'gives drizzle a mysql2 pool with eval disabled (schema: %s)',
+    async (hasSchema) => {
+      const root = createProjectRoot({ schema: hasSchema });
+      const plugin = drizzlePlugin(root, false, 'mysql', { forceVirtualDb: true });
+      const load = getHookHandler(plugin.load) as (this: object, id: string) => string;
+      const envUrl = new URL('../../src/runtime/env.ts', import.meta.url).href;
+      const code = load
+        .call({}, '\0virtual:void-db')
+        .replace(
+          /^import \{ (getRuntimeBinding, getRuntimeRequestResource) \} from .*;$/m,
+          (_match, imports: string) => `import { ${imports} } from ${JSON.stringify(envUrl)};`,
+        );
+      writeFileSync(join(root, 'virtual-db.mjs'), code);
+      writeFileSync(
+        join(root, 'harness.mjs'),
+        `import { db, createDb } from "./virtual-db.mjs";
+import { withRuntimeEnv } from ${JSON.stringify(envUrl)};
+export { createDb };
+export const requestClient = (env) => withRuntimeEnv(env, () => db.$client);
+`,
+      );
+      type MySqlPool = { config: { connectionConfig: { disableEval: boolean } }; end(): void };
+      const harness = (await import(
+        `${pathToFileURL(join(root, 'harness.mjs')).href}?test=${crypto.randomUUID()}`
+      )) as {
+        createDb(url: string): { $client: MySqlPool };
+        requestClient(env: Record<string, unknown>): MySqlPool;
+      };
+
+      const pools = [
+        harness.createDb('mysql://void@127.0.0.1:9/app').$client,
+        harness.requestClient({ DATABASE_URL: 'mysql://void@127.0.0.1:9/app' }),
+      ];
+      try {
+        for (const pool of pools) {
+          expect(pool.config.connectionConfig.disableEval).toBe(true);
+        }
+      } finally {
+        for (const pool of pools) {
+          pool.end?.();
+        }
+      }
+    },
+  );
 
   it('serves schema imports of void/db from an operator-only virtual module', () => {
     const root = createProjectRoot();

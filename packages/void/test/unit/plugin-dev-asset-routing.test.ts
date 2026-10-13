@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plugin } from 'vite';
@@ -87,6 +87,13 @@ function createNodeProjectRoot(): string {
     join(root, 'void.json'),
     JSON.stringify({ target: 'node', worker: { compatibility_date: '2026-02-24' } }),
   );
+  return root;
+}
+
+function useDatabase(root: string, database: 'pg' | 'mysql'): string {
+  const configPath = join(root, 'void.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+  writeFileSync(configPath, JSON.stringify({ ...config, database }));
   return root;
 }
 
@@ -247,6 +254,34 @@ describe('voidPlugin dev asset routing', () => {
     await expect(resolveRuntimeOptimizerConfig(createNodeProjectRoot(), 'ssr')).resolves.toEqual({
       optimizeDeps: { exclude: ['void'] },
     });
+  });
+
+  it('prebundles mysql2 for void/db only in worker runtimes Void owns', async () => {
+    await expect(
+      resolveRuntimeOptimizerConfig(
+        useDatabase(createApiOnlyProjectRoot(), 'mysql'),
+        'void_worker',
+      ),
+    ).resolves.toEqual({
+      optimizeDeps: { exclude: ['void'], include: ['void > email-validator', 'void > mysql2'] },
+    });
+    vi.restoreAllMocks();
+    await expect(
+      resolveRuntimeOptimizerConfig(useDatabase(createApiOnlyProjectRoot(), 'pg'), 'void_worker'),
+    ).resolves.toEqual({
+      optimizeDeps: { exclude: ['void'], include: ['void > email-validator'] },
+    });
+    vi.restoreAllMocks();
+    await expect(
+      resolveRuntimeOptimizerConfig(
+        useDatabase(createFrameworkOwnedRuntimeProjectRoot(), 'mysql'),
+        'ssr',
+      ),
+    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
+    vi.restoreAllMocks();
+    await expect(
+      resolveRuntimeOptimizerConfig(useDatabase(createNodeProjectRoot(), 'mysql'), 'ssr'),
+    ).resolves.toEqual({ optimizeDeps: { exclude: ['void'] } });
   });
 
   it('leaves client dependency optimization unchanged', async () => {
