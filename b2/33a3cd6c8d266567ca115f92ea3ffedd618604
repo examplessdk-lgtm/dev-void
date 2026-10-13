@@ -1,0 +1,41 @@
+platform/packages/api/src/admin/react/styles.css
+  s_4d3516639a82a0::t_b9807af58b3496 847-849
+platform/packages/api/src/admin/react/views/BuildDetailPage.tsx
+  s_4d3516639a82a0::t_bf74c5ad414617 33-35,58-63
+platform/packages/api/src/admin/react/views/BuildTable.tsx
+  s_4d3516639a82a0::t_f60a5dd3e7c3f0 88-90
+platform/packages/api/src/admin/react/views/DashboardPage.tsx
+  s_4d3516639a82a0::t_a26af3df5baf35 113,128-130
+platform/packages/api/src/admin/react/views/DeploymentDetailPage.tsx
+  s_4d3516639a82a0::t_3d66e0eef32a75 73-75
+platform/packages/api/src/admin/react/views/DeploymentTable.tsx
+  s_4d3516639a82a0::t_b0f583afbfce5c 74-78,92
+platform/packages/api/src/admin/react/views/PlansPage.tsx
+  s_4d3516639a82a0::t_ef6098aeffb4e6 140-142,448-451
+platform/packages/api/src/admin/react/views/ProjectDetailPage.tsx
+  s_4d3516639a82a0::t_70b609fed02d78 86-92
+platform/packages/api/src/admin/react/views/ProjectTeamSection.tsx
+  s_4d3516639a82a0::t_de9ea099fe2690 73-75,95-97
+platform/packages/api/src/admin/react/views/ProjectsTable.tsx
+  s_4d3516639a82a0::t_50a54bb93aa81e 48-50,56-62
+platform/packages/api/src/admin/react/views/UserDetailPage.tsx
+  s_4d3516639a82a0::t_9ed27533ec0ce6 155-157,203-205
+platform/packages/api/src/admin/react/views/UsersListPage.tsx
+  s_4d3516639a82a0::t_4f43ca5b50843c 34-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b233a3cd6c8d266567ca115f92ea3ffedd618604",
+  "prompts": {},
+  "sessions": {
+    "s_4d3516639a82a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-3dd2-78a3-a43a-6056301747d9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
