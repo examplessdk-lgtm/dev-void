@@ -1,0 +1,23 @@
+docs/guide/platform/installation/credentials.md
+  s_26a5b913d96113::t_f9ffed746059ad 77
+packages/void/src/cli/platform-setup.ts
+  s_26a5b913d96113::t_418757fff94fc6 231-233,236
+packages/void/test/unit/platform-setup.test.ts
+  s_26a5b913d96113::t_c4ebd9899a00ee 289,295-297,299-301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b29874408e7feba2e7f60febfa1fa395e2efa42f",
+  "prompts": {},
+  "sessions": {
+    "s_26a5b913d96113": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1331c-98bb-7020-bfae-b30f8c029ecc",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
