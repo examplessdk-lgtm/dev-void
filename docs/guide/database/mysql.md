@@ -51,6 +51,8 @@ void deploy
 
 For direct Cloudflare deploys, export the production `DATABASE_URL` in the shell running `void deploy --platform cloudflare`. Void uses it to provision Hyperdrive and apply pending checked-in migrations before uploading the Worker; it is not written to the Worker config.
 
+Only one migration run changes a database at a time, whether it comes from `void db migrate`, `void deploy --platform cloudflare`, or a `void deploy` of any project that uses the database. Another run waits for it, up to about 20 seconds for a command that connects with `DATABASE_URL` and about 2 minutes for a `void deploy` to the Void platform, then stops with an error that asks you to try again.
+
 ### Failed migrations {#failed-migrations}
 
 Each migration file runs in a transaction, so a failed file that only changes data leaves the database unchanged. MySQL commits schema changes such as `CREATE TABLE` and `ALTER TABLE` immediately, so when a file with schema changes fails partway through, its earlier statements stay applied. The error names the file that failed.

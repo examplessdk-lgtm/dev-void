@@ -1,9 +1,11 @@
+import type { Connection } from 'mysql2/promise';
 import {
   splitMigrationSql,
   type MigrationEntry,
   type MigrationResponse,
   type MigrationResult,
 } from './migration-handler.ts';
+import { acquireMySqlMigrationLease, type MySqlMigrationLease } from './migration-lock-mysql.ts';
 
 export function createMigrationHandler(
   env: Record<string, unknown>,
@@ -53,7 +55,18 @@ async function runMySqlMigrations(
     multipleStatements: true,
     disableEval: true,
   });
+  let leaseConnection: Connection | undefined;
+  let lease: MySqlMigrationLease | undefined;
   try {
+    // Lease statements must stay out of the migration transactions, so they get their own connection.
+    const leaseClient = await createConnection({
+      uri: hyperdrive.connectionString,
+      disableEval: true,
+    });
+    leaseConnection = leaseClient;
+    lease = await acquireMySqlMigrationLease(
+      async (sql, params) => (await leaseClient.query(sql, params))[0],
+    );
     await connection.query(
       'CREATE TABLE IF NOT EXISTS `_void_migrations` (`name` VARCHAR(255) PRIMARY KEY, `applied_at` VARCHAR(64) NOT NULL)',
     );
@@ -69,15 +82,14 @@ async function runMySqlMigrations(
       const start = Date.now();
       try {
         // Data changes commit with the tracking row. MySQL commits DDL, and anything before it,
-        // on its own. Hyperdrive keeps one connection for the open transaction. Unlike the CLI
-        // runner, this takes no named lock: Hyperdrive pools connections per transaction, so a
-        // session lock could stay on a pooled connection. The platform migrates one deploy per
-        // project at a time.
+        // on its own. Hyperdrive keeps one connection for the open transaction.
         await connection.query('BEGIN');
         // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
         for (const statement of splitMigrationSql(migration.sql)) {
+          await lease.renew();
           await connection.query(statement);
         }
+        await lease.renew();
         await connection.query(
           'INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)',
           [migration.name, new Date().toISOString()],
@@ -98,6 +110,7 @@ async function runMySqlMigrations(
 
     return { ok: true, migrations: results };
   } finally {
-    await connection.end();
+    await lease?.release().catch(() => {});
+    await Promise.all([connection.end(), leaseConnection?.end()]);
   }
 }

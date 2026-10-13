@@ -1,6 +1,10 @@
-import { createHash } from 'node:crypto';
 import type { Connection } from 'mysql2/promise';
 import { splitMigrationSql } from '../runtime/migration-handler.ts';
+import {
+  mySqlMigrationLockError,
+  mySqlMigrationLockName,
+  readMySqlMigrationLease,
+} from '../runtime/migration-lock-mysql.ts';
 import { collectMigrations } from './collect.ts';
 
 export type MySqlClient = {
@@ -52,21 +56,33 @@ const MIGRATION_LOCK_TIMEOUT_SECONDS = 10;
 
 /**
  * Take a named lock so two runs on one database cannot both apply a pending file. The lock
- * survives the commits MySQL makes for DDL and ends with the session. Lock names are
- * server-wide and at most 64 characters, so the name carries a hash of the database name.
+ * survives the commits MySQL makes for DDL and ends with the session. A deploy cannot hold a
+ * session lock and writes a lease row instead, so this also waits for that lease.
  */
 async function acquireMySqlMigrationLock(client: MySqlClient): Promise<string> {
   const [row] = await client.query<Array<{ db: string | null }>>('SELECT DATABASE() AS db');
   const database = row?.db ?? '';
-  const name = `void_migrations:${createHash('sha1').update(database).digest('hex')}`;
+  const name = mySqlMigrationLockName(database);
   const [lock] = await client.query<Array<Record<string, unknown>>>(
     'SELECT GET_LOCK(?, ?) AS acquired',
     [name, MIGRATION_LOCK_TIMEOUT_SECONDS],
   );
   // Vitess names the column after the call and ignores the alias.
   if (Number(Object.values(lock ?? {})[0]) !== 1) {
+    throw mySqlMigrationLockError(database, 'run the command again');
+  }
+
+  const readLease = () => readMySqlMigrationLease((sql, params) => client.query(sql, params));
+  const deadline = Date.now() + MIGRATION_LOCK_TIMEOUT_SECONDS * 1000;
+  let remaining = await readLease();
+  while (remaining !== undefined && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    remaining = await readLease();
+  }
+  if (remaining !== undefined) {
+    await client.query('SELECT RELEASE_LOCK(?)', [name]).catch(() => {});
     throw new Error(
-      `Another migration run is applying migrations to MySQL database "${database}". Wait for it to finish, then run the command again.`,
+      `A deploy is applying migrations to MySQL database "${database}". Wait for it to finish, then run the command again. If that deploy stopped, its lock expires in ${remaining} seconds.`,
     );
   }
   return name;

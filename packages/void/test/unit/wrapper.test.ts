@@ -632,7 +632,10 @@ describe('generateWrapper with migrations', () => {
   /** Run the wrapped MySQL Worker in workerd and return its `/__void/migrate` response body. */
   async function migrateMySqlInWorkerd(workerDir: string): Promise<unknown> {
     // The applied-migrations SELECT returns a row, so mysql2 also parses a result set.
-    const mysql = await startFakeMySqlServer([{ name: '000_applied_elsewhere.sql' }]);
+    // No CLI run holds the named lock, so the deploy's lease is enough.
+    const mysql = await startFakeMySqlServer((sql) =>
+      sql.includes('IS_USED_LOCK') ? [{ holder: null }] : [{ name: '000_applied_elsewhere.sql' }],
+    );
     try {
       return await fetchWrappedWorker(
         workerDir,

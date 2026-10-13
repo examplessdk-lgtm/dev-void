@@ -11,7 +11,7 @@ type ServerConnection = {
   writeColumns(columns: Array<Record<string, unknown>>): void;
   writeTextRow(values: Array<unknown>): void;
   writeEof(): void;
-  writeOk(): void;
+  writeOk(packet?: { affectedRows?: number }): void;
 };
 
 const { Connection, ConnectionConfig } = mysql as unknown as {
@@ -23,21 +23,15 @@ const CHARSET = mysql.Charsets.UTF8_GENERAL_CI;
 // Every basic capability except CLIENT_SSL (0x0800), so clients never ask for TLS.
 const CAPABILITY_FLAGS = 0xffff & ~0x0800;
 
-export type FakeMySqlRow = Record<string, number | string>;
+export type FakeMySqlRow = Record<string, number | string | null>;
 
 export type FakeMySqlServer = {
   port: number;
   close(): Promise<void>;
 };
 
-/**
- * A MySQL wire-protocol server built on mysql2's own server API. It accepts any user, answers
- * every SELECT with `rows` (columns in key order of the first row) and every other statement
- * with OK. It speaks the text protocol only, which is what drizzle's mysql2 driver uses.
- */
-export async function startFakeMySqlServer(rows: Array<FakeMySqlRow>): Promise<FakeMySqlServer> {
-  const columnNames = Object.keys(rows[0] ?? {});
-  const columns = columnNames.map((name) => ({
+function columnsOf(rows: Array<FakeMySqlRow>) {
+  return Object.keys(rows[0] ?? {}).map((name) => ({
     catalog: 'def',
     schema: 'app',
     table: 'fake',
@@ -50,6 +44,17 @@ export async function startFakeMySqlServer(rows: Array<FakeMySqlRow>): Promise<F
     flags: 0,
     decimals: 0,
   }));
+}
+
+/**
+ * A MySQL wire-protocol server built on mysql2's own server API. It accepts any user, answers
+ * every SELECT with `rows`, or with what `rows` returns for the query (columns in key order of
+ * the first row), and every other statement with OK for one row. It speaks the text protocol
+ * only, which is what drizzle's mysql2 driver uses.
+ */
+export async function startFakeMySqlServer(
+  rows: Array<FakeMySqlRow> | ((sql: string) => Array<FakeMySqlRow>),
+): Promise<FakeMySqlServer> {
   const sockets = new Set<Socket>();
 
   const server = createServer((socket) => {
@@ -73,13 +78,15 @@ export async function startFakeMySqlServer(rows: Array<FakeMySqlRow>): Promise<F
     });
     connection.on('query', (sql) => {
       if (/^\s*select\b/i.test(sql)) {
+        const answer = typeof rows === 'function' ? rows(sql) : rows;
+        const columns = columnsOf(answer);
         connection.writeColumns(columns);
-        for (const row of rows) {
-          connection.writeTextRow(columnNames.map((name) => row[name]));
+        for (const row of answer) {
+          connection.writeTextRow(columns.map((column) => row[column.name]));
         }
         connection.writeEof();
       } else {
-        connection.writeOk();
+        connection.writeOk({ affectedRows: 1 });
       }
       connection.sequenceId = 0;
     });
