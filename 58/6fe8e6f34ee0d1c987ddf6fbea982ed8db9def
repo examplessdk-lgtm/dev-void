@@ -1,0 +1,31 @@
+platform/packages/api/src/admin/react/views/EmailProjectPage.tsx
+  s_4d3516639a82a0::t_58fe64ee403802 299
+platform/packages/api/src/admin/react/views/EmailSettingsPage.tsx
+  s_4d3516639a82a0::t_7e5d886cff9cab 78
+platform/packages/api/src/admin/react/views/PlansPage.tsx
+  s_4d3516639a82a0::t_3cd4892b837a9d 256,358
+platform/packages/api/src/admin/react/views/ProjectDetailPage.tsx
+  s_4d3516639a82a0::t_0ee5c4cc3b88dc 55
+platform/packages/api/src/admin/react/views/ProjectsTable.tsx
+  s_4d3516639a82a0::t_65e148cbbaef37 36
+platform/packages/api/src/admin/react/views/UserDetailPage.tsx
+  s_4d3516639a82a0::t_31da71086adcf3 192
+platform/packages/api/test/integration/admin-plans.test.ts
+  s_4d3516639a82a0::t_78dd4f5dc3cb53 115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "586fe8e6f34ee0d1c987ddf6fbea982ed8db9def",
+  "prompts": {},
+  "sessions": {
+    "s_4d3516639a82a0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1231a-3dd2-78a3-a43a-6056301747d9",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
