@@ -1,7 +1,7 @@
 import { outro, log } from '@voidzero-dev/vite-plus-prompts';
 import { getToken, getSiteDomain } from './auth.ts';
 import { PlatformClient } from './client.ts';
-import { dim, formatCount, pc, tablePrefix } from './output.ts';
+import { dim, formatCount, formatUrl, pc, tablePrefix } from './output.ts';
 
 export async function runProjectsCommand(root: string): Promise<void> {
   console.log();
@@ -37,7 +37,7 @@ export async function runProjectsCommand(root: string): Promise<void> {
   const header = `${prefix}${dim(`${'slug'.padEnd(slugWidth)}  ${'role'.padEnd(roleWidth)}  ${'type'.padEnd(typeWidth)}  url`)}`;
   const lines = rows.map(
     (row) =>
-      `${prefix}${pc.green(row.slug)}${''.padEnd(slugWidth - row.slug.length)}  ${row.role.padEnd(roleWidth)}  ${row.appType.padEnd(typeWidth)}  ${row.url}`,
+      `${prefix}${pc.green(row.slug)}${''.padEnd(slugWidth - row.slug.length)}  ${row.role.padEnd(roleWidth)}  ${row.appType.padEnd(typeWidth)}  ${formatUrl(row.url)}`,
   );
   console.log(prefix);
   console.log(header);

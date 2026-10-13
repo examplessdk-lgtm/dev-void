@@ -13,7 +13,7 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { confirm, isCancel, log, outro, select } from '@voidzero-dev/vite-plus-prompts';
-import { printSuccess, createSpinner, note, pc } from './output.ts';
+import { printSuccess, createSpinner, formatUrl, note, pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { platformDatabaseNameFromOwnerUrl } from './platform-auth-database.ts';
 import {
@@ -572,7 +572,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       if (result.setupPending) {
         const code = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
         if (code) {
-          log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+          log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
           console.log(`One-time administrator setup code: ${code}`);
         }
       }

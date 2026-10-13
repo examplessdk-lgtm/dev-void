@@ -88,7 +88,9 @@ let originalFetch: typeof globalThis.fetch | undefined;
 let savedToken: string | undefined;
 let savedProject: string | undefined;
 
-type Captured = { finalizeBody: { manifest?: { pages?: unknown } } | null };
+type Captured = {
+  finalizeBody: { manifest?: { pages?: unknown; bindings?: Record<string, unknown> } } | null;
+};
 
 // Every asset is reported as present, so the deploy skips uploads and goes straight to finalize.
 function installPlatformMocks(role: ProjectRole = 'owner'): Captured {
@@ -290,6 +292,30 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
     expect(captured.finalizeBody).not.toBeNull();
     expect(captured.finalizeBody!.manifest).toBeDefined();
     expect(captured.finalizeBody!.manifest?.pages).toBeUndefined();
+  });
+
+  it('sends custom inference.bindings names in the manifest bindings', async () => {
+    const configPath = join(fixture, 'void.config.ts');
+    const original = readFileSync(configPath, 'utf8');
+    writeFileSync(
+      configPath,
+      original.replace(
+        'export default defineConfig({',
+        "export default defineConfig({\n  inference: { bindings: { kv: 'MY_KV', storage: 'MY_BUCKET' } },",
+      ),
+    );
+    try {
+      const captured = installPlatformMocks();
+
+      await runDeploy(fixture, { skipBuild: true });
+
+      expect(captured.finalizeBody?.manifest?.bindings).toMatchObject({
+        kv: ['MY_KV'],
+        r2: ['MY_BUCKET'],
+      });
+    } finally {
+      writeFileSync(configPath, original);
+    }
   });
 
   it('uses the alternate project for Worker packaging and prerendering while retaining the saved link', async () => {

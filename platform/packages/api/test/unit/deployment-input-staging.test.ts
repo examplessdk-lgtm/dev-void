@@ -78,6 +78,44 @@ function files(count: number) {
 }
 
 describe('prepareDeploymentInput', () => {
+  it.each([
+    ['static', 'static', 0],
+    ['spa', 'spa', 0],
+    ['void', 'static', 0],
+    ['framework', 'static', 0],
+    ['void', 'worker', 1],
+    ['framework', 'worker', 1],
+  ] as const)(
+    'attributes %s input using its single existing receipt write',
+    async (appType, kind, moduleCount) => {
+      const r2 = new GatedR2();
+      const staging = prepareDeploymentInput(
+        r2 as unknown as R2Bucket,
+        'prj_test',
+        { manifest: { type: appType } },
+        files(moduleCount),
+        { appType, credentialId: 'credential', oauthApproval: 'approval' },
+      );
+      for (let index = 0; index <= moduleCount; index++) {
+        await r2.releaseNext();
+      }
+      const { input, prefix } = await staging;
+      expect(r2.started).toEqual([
+        ...Array.from({ length: moduleCount }, (_, index) => `${prefix}${index}`),
+        `${prefix}receipt-void-platform-${kind}`,
+      ]);
+      expect(input).toMatchObject({
+        body: { manifest: { type: appType } },
+        credentialId: 'credential',
+        oauthApproval: 'approval',
+      });
+      expect(input.modules).toHaveLength(moduleCount);
+      expect(JSON.parse(r2.objects.get(r2.started.at(-1)!)!)).toEqual({
+        createdAt: expect.any(Number),
+      });
+    },
+  );
+
   it('stages modules with bounded concurrency, in input order, and writes the receipt last', async () => {
     const r2 = new GatedR2();
     const count = R2_CONCURRENCY * 3 + 1;
@@ -87,19 +125,20 @@ describe('prepareDeploymentInput', () => {
       'prj_test',
       { manifest: { type: 'void' }, workerFiles: { ignored: true } },
       modules,
+      { appType: 'void' },
     );
     // Keep the pool full, and release puts out of start order: newest first.
     for (let released = 0; released < count; released++) {
       await waitFor(() => r2.pending.length === Math.min(R2_CONCURRENCY, count - released));
-      expect(r2.started.some((key) => key.endsWith('receipt'))).toBe(false);
+      expect(r2.started.some((key) => key.includes('/receipt'))).toBe(false);
       r2.pending.pop()!.release();
     }
-    expect(await r2.releaseNext()).toMatch(/receipt$/);
+    expect(await r2.releaseNext()).toMatch(/receipt-void-platform-worker$/);
     const { input, prefix, digest } = await staging;
 
     expect(r2.maxInFlight).toBe(R2_CONCURRENCY);
     expect(r2.started).toHaveLength(count + 1);
-    expect(r2.started.at(-1)).toBe(`${prefix}receipt`);
+    expect(r2.started.at(-1)).toBe(`${prefix}receipt-void-platform-worker`);
     expect(input.body).not.toHaveProperty('workerFiles');
     expect(input.modules.map(({ name, key }) => ({ name, key }))).toEqual(
       Array.from({ length: count }, (_, index) => ({
@@ -121,6 +160,7 @@ describe('prepareDeploymentInput', () => {
       'prj_test',
       { manifest: { type: 'void' } },
       files(count),
+      { appType: 'void' },
     );
     for (let released = 0; released <= count; released++) {
       await sequential.releaseNext();
@@ -136,6 +176,7 @@ describe('prepareDeploymentInput', () => {
       'prj_test',
       { manifest: { type: 'void' } },
       files(count),
+      { appType: 'void' },
     );
     const outcome = staging.then(
       () => null,
@@ -158,7 +199,26 @@ describe('prepareDeploymentInput', () => {
     expect((error as Error).message).toBe('R2 put failed');
     expect(r2.started).toHaveLength(startedAtFailure);
     expect(r2.started.length).toBeLessThan(count);
-    expect(r2.started.some((key) => key.endsWith('receipt'))).toBe(false);
+    expect(r2.started.some((key) => key.includes('/receipt'))).toBe(false);
+    expect(r2.deletedWhileInFlight).toBe(false);
+    expect(r2.objects.size).toBe(0);
+  });
+
+  it('cleans up staged modules when the receipt write fails', async () => {
+    const r2 = new GatedR2();
+    const staging = prepareDeploymentInput(
+      r2 as unknown as R2Bucket,
+      'prj_test',
+      { manifest: { type: 'void' } },
+      files(1),
+      { appType: 'void' },
+    );
+    const outcome = staging.catch((error: unknown) => error);
+    await r2.releaseNext();
+    expect(await r2.releaseNext(new Error('Receipt write failed'))).toMatch(
+      /receipt-void-platform-worker$/,
+    );
+    expect(await outcome).toEqual(new Error('Receipt write failed'));
     expect(r2.deletedWhileInFlight).toBe(false);
     expect(r2.objects.size).toBe(0);
   });

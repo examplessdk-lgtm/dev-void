@@ -35,6 +35,18 @@ describe('Cloudflare deployment onboarding', () => {
     expect(readDeploymentPlatform(root)).toBeNull();
     expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf8')).toBe(config);
   });
+  it('offers to link a Worker whose config starts with a UTF-8 BOM', async () => {
+    const bomConfig = `\uFEFF${config}`;
+    writeFileSync(join(root, 'wrangler.jsonc'), bomConfig);
+    expect(
+      await maybeLinkCloudflareDeploy(
+        root,
+        {},
+        { interactive: true, confirm: vi.fn().mockResolvedValue(true) },
+      ),
+    ).toBe('existing');
+    expect(readFileSync(join(root, 'wrangler.jsonc'), 'utf8')).toBe(bomConfig);
+  });
   it('offers to link a Worker configured through a custom Astro JSONC path', async () => {
     rmSync(join(root, 'wrangler.jsonc'));
     writeFileSync(join(root, 'wrangler.build.jsonc'), config);

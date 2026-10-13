@@ -1,4 +1,9 @@
-import type { MigrationEntry, MigrationResponse, MigrationResult } from './migration-handler.ts';
+import {
+  splitMigrationSql,
+  type MigrationEntry,
+  type MigrationResponse,
+  type MigrationResult,
+} from './migration-handler.ts';
 
 export function createMigrationHandler(
   env: Record<string, unknown>,
@@ -62,7 +67,10 @@ async function runMySqlMigrations(
       }
       const start = Date.now();
       try {
-        await connection.query(migration.sql);
+        // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
+        for (const statement of splitMigrationSql(migration.sql)) {
+          await connection.query(statement);
+        }
         await connection.query(
           'INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)',
           [migration.name, new Date().toISOString()],

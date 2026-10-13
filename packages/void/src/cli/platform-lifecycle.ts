@@ -15,7 +15,7 @@ import {
   text,
 } from '@voidzero-dev/vite-plus-prompts';
 import { resolve } from 'pathslash';
-import { printSuccess, cliCommandName, createSpinner, note, pc } from './output.ts';
+import { printSuccess, cliCommandName, createSpinner, formatUrl, note, pc } from './output.ts';
 import {
   selectInstallationAppAccess,
   prepareInstallationAppAccess,
@@ -594,7 +594,7 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       }
       if (choice === 'setup') {
         note(
-          `Create a Hyperdrive in account ${accountId} with any unused name${suggestedNameAvailable ? ` such as ${suggestedName}` : ''}. Point it at the same dedicated PostgreSQL database you will give Void, use a runtime database user, and disable SQL result caching. If your organization manages Hyperdrive, ask its administrator to create it. Then rerun this command and select it from the list.\nSetup: https://developers.cloudflare.com/hyperdrive/get-started/`,
+          `Create a Hyperdrive in account ${accountId} with any unused name${suggestedNameAvailable ? ` such as ${suggestedName}` : ''}. Point it at the same dedicated PostgreSQL database you will give Void, use a runtime database user, and disable SQL result caching. If your organization manages Hyperdrive, ask its administrator to create it. Then rerun this command and select it from the list.\nSetup: ${formatUrl('https://developers.cloudflare.com/hyperdrive/get-started/')}`,
           pc.bold('Set up Hyperdrive first'),
         );
         outro('No Cloudflare or local installation state was changed.');
@@ -1263,13 +1263,13 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       outro(`Installation ${result.manifest.id} is safely checkpointed.`);
       return;
     }
-    log.info(`API URL: ${plan.apiUrl}`);
+    log.info(`API URL: ${formatUrl(plan.apiUrl)}`);
     if (result.emailOperationId) {
       log.info(`Shared email routing ready. Operation: ${result.emailOperationId}.`);
     }
     const completedAuthCode = readInstallationRecoverySecrets(result.manifest)?.authBootstrapCode;
     if (result.setupPending && completedAuthCode) {
-      log.info(`First administrator setup: ${plan.apiUrl}/setup`);
+      log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
       console.log(`One-time administrator setup code: ${completedAuthCode}`);
       log.info(
         'Confirm your identity in the browser, then test and enable any additional login methods in Settings.',

@@ -372,7 +372,8 @@
     "mysql2": "^3.24.5",
     "pg": "^8.23.1",
     "postal-mime": "catalog:",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "terminal-link": "^5.0.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",

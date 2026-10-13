@@ -11,8 +11,22 @@ import {
   type SpinnerResult,
 } from '@voidzero-dev/vite-plus-prompts';
 import pc from 'picocolors';
+import terminalLink from 'terminal-link';
 
 export { pc };
+
+/** Keep the destination visible when the terminal cannot render a named hyperlink. */
+export function formatLink(text: string, url: string): string {
+  return terminalLink(text, sanitizeTerminalText(url), {
+    fallback: (label, href) => (label === href ? label : `${label}: ${href}`),
+  });
+}
+
+/** Link a displayed URL without duplicating it in unsupported terminals or redirected output. */
+export function formatUrl(url: string): string {
+  const text = sanitizeTerminalText(url);
+  return formatLink(text, text);
+}
 
 /** Complete an action with the same spacing, checkmark, and color on every target. */
 export function printSuccess(message: string): void {
@@ -94,18 +108,32 @@ const MIN_NOTE_COLUMNS = 6;
  */
 export function note(...args: Parameters<typeof promptsNote>): void {
   const [message, title, opts] = args;
+  const plainTitle = title && sanitizeTerminalText(stripVTControlCharacters(title));
+  const urlTitle = plainTitle && /^https?:\/\/\S+$/.test(plainTitle) ? plainTitle : undefined;
+  // Native macOS Terminal recognizes URLs by whitespace boundaries.
+  const boxedTitle = urlTitle ? ` ${urlTitle} ` : title;
   const output = opts?.output ?? process.stdout;
   const columns = (output as { columns?: unknown }).columns;
-  if (typeof columns !== 'number' || columns >= MIN_NOTE_COLUMNS) {
+  const needsWidthFallback = typeof columns === 'number' && columns < MIN_NOTE_COLUMNS;
+  if (!urlTitle && !needsWidthFallback) {
     promptsNote(...args);
     return;
   }
   // The box renderer only reads `columns` and calls `write()`.
+  let header = true;
   const sized = {
-    columns: columns > 0 ? MIN_NOTE_COLUMNS : 80,
-    write: (chunk: string) => output.write(chunk),
+    columns: needsWidthFallback ? (columns > 0 ? MIN_NOTE_COLUMNS : 80) : columns,
+    write(chunk: string) {
+      // Insert the link after layout: the renderer counts OSC 8 destinations
+      // toward the title width and can otherwise truncate a URL that fits.
+      if (header && urlTitle) {
+        chunk = chunk.replace(` ${urlTitle} `, ` ${formatUrl(urlTitle)} `);
+      }
+      header = false;
+      return output.write(chunk);
+    },
   } as unknown as Writable;
-  promptsNote(message, title, { ...opts, output: sized });
+  promptsNote(message, boxedTitle, { ...opts, output: sized });
 }
 
 export function sectionTitle(title: string): string {

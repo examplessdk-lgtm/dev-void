@@ -28,3 +28,21 @@ it('draws a note in a terminal narrower than the box', () => {
   expect(lines[0]).toMatch(/^╭.*╮$/);
   expect(lines.at(-1)).toMatch(/^╰─+╯$/);
 });
+
+it.each([0, 80, 160])('separates a deployment URL from the box border at %s columns', (columns) => {
+  let text = '';
+  const output = {
+    columns,
+    write(chunk: string) {
+      text += chunk;
+      return true;
+    },
+  } as unknown as Writable;
+  const url = 'https://blog-void.mdong185.workers.dev';
+
+  note('Static Site — 1 asset', url, { output });
+
+  const header = stripVTControlCharacters(text).split('\n')[0];
+  expect(header).toContain(` ${url} `);
+  expect(header.match(/https?:\/\/\S+/)?.[0]).toBe(url);
+});

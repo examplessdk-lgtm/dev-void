@@ -28,7 +28,7 @@ import { maybeScaffoldEnvTs } from './env-scaffold.ts';
 import { migrateFrameworkAdapterPaths } from './framework-config-migrate.ts';
 import { initialCommitCommand, setupGit } from './init-git.ts';
 import { migrateLegacyVoidConfig } from './migrate.ts';
-import { note, printSuccess } from './output.ts';
+import { formatUrl, note, printSuccess } from './output.ts';
 import { discoverPlatform, saveDiscoveredPlatform } from './platform-cmd.ts';
 import { formatProjectCommand } from './preset.ts';
 import {
@@ -132,7 +132,15 @@ const EMPTY_PROJECT_ALLOWED_ENTRIES = new Set([
   '.zencoder',
 ]);
 
-const PNPM_ALLOWED_BUILDS = ['esbuild', 'sharp', 'workerd'] as const;
+// better-sqlite3 13 already ships its Node-API binaries; no native build is needed.
+const PNPM_BUILD_DEFAULTS = [
+  ['better-sqlite3', false],
+  ['esbuild', true],
+  ['sharp', true],
+  ['workerd', true],
+] as const;
+// pnpm writes this value for each blocked build it wants a decision on.
+const PNPM_BUILD_PLACEHOLDER = 'set this to true or false';
 
 // Packages a previous Void Pages starter can leave behind, so re-running init
 // after deleting the app files still takes the starter path.
@@ -722,7 +730,6 @@ export function isVoidResolvableFrom(start: string): boolean {
     const probe = spawnSync(process.execPath, probeArgs, {
       cwd: start,
       stdio: 'ignore',
-      shell: process.platform === 'win32',
       env: buildDrizzleKitSpawnEnv(start),
     });
     return !probe.error && probe.status === 0;
@@ -1596,7 +1603,7 @@ export async function ensureVoidPlatformConnection(
   const discovery = await discoverPlatform(selectedApiUrl);
   saveDiscoveredPlatform(discovery);
   if (promptedForPlatform) {
-    log.step(`Connected to ${discovery.displayName} at ${discovery.apiUrl}.`);
+    log.step(`Connected to ${discovery.displayName} at ${formatUrl(discovery.apiUrl)}.`);
   }
   return discovery;
 }
@@ -1883,9 +1890,14 @@ function ensureGitignore(root: string): void {
   log.step('Updated .gitignore with Void defaults');
 }
 
-function removeTopLevelYamlBlock(yaml: string, key: string): string {
+/** Removes each block-style top-level `key:` block; `removed` holds its non-blank lines. */
+function removeTopLevelYamlBlock(
+  yaml: string,
+  key: string,
+): { yaml: string; removed: Array<string> } {
   const lines = yaml.split(/\r?\n/);
   const next: Array<string> = [];
+  const removed: Array<string> = [];
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (!new RegExp(`^${key}:\\s*(?:#.*)?$`).test(line)) {
@@ -1894,26 +1906,53 @@ function removeTopLevelYamlBlock(yaml: string, key: string): string {
     }
 
     i += 1;
-    while (i < lines.length && (lines[i].trim() === '' || /^\s/.test(lines[i]))) {
+    while (i < lines.length && (lines[i].trim() === '' || /^(?:\s|-(?:\s|$))/.test(lines[i]))) {
+      if (lines[i].trim() !== '') {
+        removed.push(lines[i]);
+      }
       i += 1;
     }
     i -= 1;
   }
-  return next.join('\n');
+  return { yaml: next.join('\n'), removed };
 }
 
-function pnpmAllowBuildsYaml(): string {
-  // better-sqlite3 13 already ships its Node-API binaries; no native build is needed.
-  const lines = ['allowBuilds:', '  better-sqlite3: false'];
-  for (const dependency of PNPM_ALLOWED_BUILDS) {
-    lines.push(`  ${dependency}: true`);
+function pnpmAllowBuildsEntryName(line: string): string | undefined {
+  return /^\s+(?!#)(["']?)(.+?)\1\s*:(?:\s|$)/.exec(line)?.[2];
+}
+
+/**
+ * Keeps the existing `allowBuilds` entries as written, approves the legacy
+ * `onlyBuiltDependencies` list, and adds each Void default that is missing.
+ */
+function pnpmAllowBuildsYaml(entries: Array<string>, legacyList: Array<string>): string {
+  const legacy = legacyList.flatMap((line) => {
+    const name = /^\s*-\s+(["']?)(.+?)\1\s*(?:#.*)?$/.exec(line)?.[2];
+    return name === undefined ? [] : [name];
+  });
+  const decided = new Set([...legacy, ...PNPM_BUILD_DEFAULTS.map(([name]) => name)]);
+  const lines = entries.filter((line) => {
+    const name = pnpmAllowBuildsEntryName(line);
+    return !(name !== undefined && decided.has(name) && line.includes(PNPM_BUILD_PLACEHOLDER));
+  });
+  const names = new Set(lines.map((line) => pnpmAllowBuildsEntryName(line)));
+  const firstEntry = lines.find((line) => pnpmAllowBuildsEntryName(line) !== undefined);
+  const indent = /^\s+/.exec(firstEntry ?? '')?.[0] ?? '  ';
+  const additions: Array<readonly [string, boolean]> = [
+    ...legacy.map((name) => [name, true] as const),
+    ...PNPM_BUILD_DEFAULTS,
+  ];
+  for (const [name, value] of additions) {
+    if (!names.has(name)) {
+      names.add(name);
+      lines.push(`${indent}${/^[\w.-]+$/.test(name) ? name : JSON.stringify(name)}: ${value}`);
+    }
   }
-  return lines.join('\n');
+  return ['allowBuilds:', ...lines].join('\n');
 }
 
-function insertPnpmAllowBuilds(yaml: string): string {
+function insertPnpmAllowBuilds(yaml: string, allowBuilds: string): string {
   const trimmed = yaml.trim();
-  const allowBuilds = pnpmAllowBuildsYaml();
   if (trimmed === '') {
     return `${allowBuilds}\n`;
   }
@@ -1956,19 +1995,33 @@ function resolvePnpmConfigRoot(root: string, pkg: JsonObject): string {
 function ensurePnpmAllowBuilds(root: string, pkg: JsonObject): void {
   const configRoot = resolvePnpmConfigRoot(root, pkg);
   const workspacePath = join(configRoot, 'pnpm-workspace.yaml');
+  const displayPath = configRoot === root ? 'pnpm-workspace.yaml' : relative(root, workspacePath);
   const before = existsSync(workspacePath) ? readFileSync(workspacePath, 'utf-8') : '';
-  const withoutLegacy = removeTopLevelYamlBlock(
-    removeTopLevelYamlBlock(before, 'onlyBuiltDependencies'),
-    'allowBuilds',
+  // A same-line value such as `allowBuilds: {...}` cannot be merged line by
+  // line, and a second `allowBuilds:` key would make the file invalid.
+  const inline = /^allowBuilds:[ \t]*([^\s#].*)$/m.exec(before)?.[1];
+  if (inline !== undefined) {
+    const missing = PNPM_BUILD_DEFAULTS.filter(
+      ([name]) => !new RegExp(`[{,]\\s*["']?${name}["']?\\s*:`).test(inline),
+    );
+    if (missing.length > 0) {
+      log.warn(
+        `Add ${missing.map(([name, value]) => `${name}: ${value}`).join(', ')} to allowBuilds in ${displayPath}. ` +
+          'Void only edits allowBuilds when each entry is on its own line.',
+      );
+    }
+    return;
+  }
+
+  const legacy = removeTopLevelYamlBlock(before, 'onlyBuiltDependencies');
+  const current = removeTopLevelYamlBlock(legacy.yaml, 'allowBuilds');
+  const after = insertPnpmAllowBuilds(
+    current.yaml,
+    pnpmAllowBuildsYaml(current.removed, legacy.removed),
   );
-  const after = insertPnpmAllowBuilds(withoutLegacy);
   if (after !== before) {
     writeFileSync(workspacePath, after);
-    log.step(
-      configRoot === root
-        ? 'Updated pnpm-workspace.yaml with approved builds'
-        : `Updated ${relative(root, workspacePath)} with approved builds`,
-    );
+    log.step(`Updated ${displayPath} with approved builds`);
   }
 }
 
@@ -2008,9 +2061,11 @@ export function installProjectDependencies(
         // npx void init must also work without a globally installed vp. Avoid
         // asking an older pnpm to switch itself to a pinned native pnpm 12.
         command = 'npx';
+        const packageArg = `--package=vite-plus@${SCAFFOLD_VITE_PLUS_DEV_DEPENDENCIES['vite-plus']}`;
         args = [
           '--yes',
-          `--package=vite-plus@${SCAFFOLD_VITE_PLUS_DEV_DEPENDENCIES['vite-plus']}`,
+          // cmd.exe treats the semver caret as an escape outside quotes.
+          process.platform === 'win32' ? `"${packageArg}"` : packageArg,
           'vp',
           ...args,
         ];
@@ -2049,7 +2104,6 @@ export function generateStarterMigration(
     cwd: root,
     stdio: 'pipe',
     encoding: 'utf-8',
-    shell: process.platform === 'win32',
     env: buildDrizzleKitSpawnEnv(root),
   });
 

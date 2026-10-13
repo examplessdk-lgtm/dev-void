@@ -606,14 +606,11 @@ export async function handleManifestOnlyDeploy(context: Context<ApiEnv>): Promis
     return context.json({ error: 'invalid deployment idempotency key' }, 400);
   }
   const stagedInput = durable
-    ? await prepareDeploymentInput(
-        context.env.STATIC_ASSETS_R2,
-        projectId,
-        body,
-        workerFiles,
-        context.get('deployCredential'),
-        context.get('oauthApproval'),
-      )
+    ? await prepareDeploymentInput(context.env.STATIC_ASSETS_R2, projectId, body, workerFiles, {
+        appType: incomingManifest.type,
+        credentialId: context.get('deployCredential'),
+        oauthApproval: context.get('oauthApproval'),
+      })
     : null;
   const cutoverOwnerId = execution?.operation.owner_id ?? crypto.randomUUID();
   let precheckResult:

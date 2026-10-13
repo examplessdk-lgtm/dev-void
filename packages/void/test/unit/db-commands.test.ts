@@ -13,6 +13,8 @@ import { toSlash } from 'pathslash';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vite-plus/test';
 
 const mockExecFileSync = vi.hoisted(() => vi.fn());
+const mockPgQuery = vi.hoisted(() => vi.fn(async (_sql: string) => ({ rows: [] })));
+const mockConfirm = vi.fn();
 const mockGetMiniflareDatabasePath = vi.fn();
 const mockOpenSqliteDatabase = vi.fn();
 const mockGetAppliedMigrations = vi.fn();
@@ -21,6 +23,39 @@ const mockWriteJournal = vi.fn();
 
 vi.mock('node:child_process', () => ({
   execFileSync: (...args: Array<unknown>) => mockExecFileSync(...args),
+}));
+
+vi.mock('pg', async (importOriginal) => {
+  // Keep pg's own connection-string parsing; stub only the network calls.
+  class Client extends (await importOriginal<typeof import('pg')>()).Client {}
+  Object.assign(Client.prototype, {
+    async connect() {},
+    async end() {},
+    query: (sql: string) => mockPgQuery(sql),
+  });
+  return { Client };
+});
+
+const mysqlQueries = vi.hoisted((): Array<string> => []);
+
+vi.mock('mysql2/promise', () => ({
+  createConnection: async () => ({
+    async end() {},
+    async query(sql: string) {
+      mysqlQueries.push(sql);
+      // MySQL 8 labels an unaliased information_schema column in upper case.
+      const tables = /^SELECT table_name(?: AS (\w+))? FROM information_schema\.tables/.exec(sql);
+      if (tables) {
+        const key = tables[1] ?? 'TABLE_NAME';
+        return [[{ [key]: '_void_migrations' }, { [key]: 'users' }], []];
+      }
+      if (sql === 'SELECT `name` FROM `_void_migrations`') {
+        const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
+        return [dropped ? [] : [{ name: '0000_init.sql' }], []];
+      }
+      return [[], []];
+    },
+  }),
 }));
 
 vi.mock('../../src/migrations/runner', async () => {
@@ -99,6 +134,8 @@ const mockLog = {
 };
 
 vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
+  confirm: (...args: Array<unknown>) => mockConfirm(...args),
+  isCancel: () => false,
   intro: vi.fn(),
   outro: vi.fn(),
   log: {
@@ -356,6 +393,102 @@ describe('void db reset', () => {
 
     expect(existsSync(fakeDbPath)).toBe(true);
     expect(mockRunMigrations).not.toHaveBeenCalled();
+  });
+
+  it('PostgreSQL: asks before dropping every table in a non-local DATABASE_URL', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-reset-pg-remote-'));
+    rootsToClean.push(root);
+    mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(
+      join(root, '.env'),
+      'DATABASE_URL="postgresql://user:secret@db.example.com:5432/prod"\n',
+    );
+    const stdinTty = process.stdin.isTTY;
+    try {
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+      await expect(runDbCommand(root, { action: 'reset' })).rejects.toThrow('process.exit:1');
+      const message = String(mockLog.error.mock.calls[0][0]);
+      expect(message).toContain('"prod" on db.example.com:5432');
+      expect(message).toContain('--yes');
+      expect(message).not.toContain('secret');
+
+      writeFileSync(
+        join(root, '.env'),
+        'DATABASE_URL="postgresql://user:secret@localhost/prod?host=db.example.com"\n',
+      );
+      await expect(runDbCommand(root, { action: 'reset' })).rejects.toThrow('process.exit:1');
+      expect(String(mockLog.error.mock.lastCall?.[0])).toContain('"prod" on db.example.com:5432');
+
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+      mockConfirm.mockResolvedValue(false);
+      await expect(runDbCommand(root, { action: 'seed' })).rejects.toThrow('process.exit:0');
+      expect(mockConfirm).toHaveBeenCalledOnce();
+
+      expect(mockPgQuery).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: stdinTty });
+    }
+  });
+
+  it('MySQL: drops every table and re-applies migrations', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-reset-mysql-'));
+    rootsToClean.push(root);
+    mkdirSync(join(root, 'db', 'migrations'), { recursive: true });
+    writeFileSync(
+      join(root, 'db', 'migrations', '0000_init.sql'),
+      'CREATE TABLE `users` (id INT);',
+    );
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+
+    await runDbCommand(root, { action: 'reset' });
+
+    expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `_void_migrations`');
+    expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `users`');
+    expect(mysqlQueries).toContain('CREATE TABLE `users` (id INT);');
+  });
+});
+
+describe('void db export', () => {
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    }) as never);
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const root of rootsToClean.splice(0, rootsToClean.length)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('MySQL: exports every table with foreign key checks off', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-export-mysql-'));
+    rootsToClean.push(root);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      stdout += chunk.toString();
+      return true;
+    });
+
+    await runDbCommand(root, { action: 'export' });
+
+    expect(mysqlQueries).toContain('SHOW CREATE TABLE `users`');
+    expect(mysqlQueries).toContain('SELECT * FROM `users`');
+    expect(mysqlQueries.join('\n')).not.toContain('`undefined`');
+    const lines = stdout.trim().split('\n');
+    expect(lines[0]).toBe('SET FOREIGN_KEY_CHECKS = 0;');
+    expect(lines.at(-1)).toBe('SET FOREIGN_KEY_CHECKS = 1;');
   });
 });
 

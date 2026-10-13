@@ -1,7 +1,7 @@
 import type { PlatformDeploymentManifest } from '@void/platform';
 import { type CANCEL_SYMBOL, isCancel, log } from '@voidzero-dev/vite-plus-prompts';
 import { openBrowser } from './auth.ts';
-import { pc } from './output.ts';
+import { formatLink, pc } from './output.ts';
 import type { PlatformManagementAccess } from './platform-auth.ts';
 import type { PlatformInstallPlan } from './platform-plan.ts';
 
@@ -20,13 +20,8 @@ export function platformPromptAnswer<T>(value: T | typeof CANCEL_SYMBOL): T {
   return value;
 }
 
-export function platformSetupLink(
-  page: Pick<PlatformSetupPage, 'title' | 'url'>,
-  hyperlinks: boolean = supportsSetupLinks(),
-): string {
-  return hyperlinks
-    ? '\u001b]8;;' + page.url + '\u001b\\' + pc.underline(page.title) + '\u001b]8;;\u001b\\'
-    : page.title + ': ' + pc.underline(page.url);
+export function platformSetupLink(page: Pick<PlatformSetupPage, 'title' | 'url'>): string {
+  return formatLink(pc.underline(page.title), page.url);
 }
 
 export function platformSetupFieldHelp(
@@ -62,19 +57,6 @@ export function platformSetupFieldHelp(
     default:
       return undefined;
   }
-}
-
-function supportsSetupLinks(): boolean {
-  return (
-    !!process.stdout.isTTY &&
-    (['ghostty', 'iTerm.app', 'WezTerm', 'vscode', 'WarpTerminal'].includes(
-      process.env.TERM_PROGRAM ?? '',
-    ) ||
-      !!process.env.WT_SESSION ||
-      !!process.env.VTE_VERSION ||
-      !!process.env.KONSOLE_VERSION ||
-      process.env.TERM === 'xterm-kitty')
-  );
 }
 
 /** Dashboard keys use permission-catalog labels, which can differ from product names. */

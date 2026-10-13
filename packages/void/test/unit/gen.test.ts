@@ -739,6 +739,20 @@ describe('gen migration', () => {
     ).toEqual({ fresh: { name: 'fresh' } });
   });
 
+  // cmd.exe would split `C:\Program Files\nodejs\node.exe` and paths with spaces.
+  it('runs drizzle-kit without a shell on Windows', async () => {
+    seedJournalBackedProject();
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      await runGenCommand(TMP, { subcommand: 'migration', name: 'backfill_users' });
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+
+    expect(findGenerateCall()!.options).not.toHaveProperty('shell', true);
+  });
+
   it('refuses when the journal dialect disagrees with the void.json dialect', async () => {
     const { migrationsDir, journalPath, journal } = seedJournalBackedProject();
     writeFileSync(join(TMP, 'void.json'), JSON.stringify({ database: 'pg' }));

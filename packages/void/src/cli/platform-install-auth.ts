@@ -12,6 +12,7 @@ import {
   type PlatformLoginKind,
 } from '@void/platform';
 import { confirm, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
+import { formatUrl } from './output.ts';
 import {
   activatePlatformAccessCredentials,
   parsePlatformAccessSetupSpec,
@@ -257,7 +258,7 @@ export async function collectInstallationAuthentication(
           yes: access.yes,
         })
       : undefined;
-  console.log(`Login callback URL: ${plan.apiUrl}/auth/callback`);
+  console.log(`Login callback URL: ${formatUrl(`${plan.apiUrl}/auth/callback`)}`);
   for (const entry of entries) {
     const config = { ...entry.configuration };
     const kind = config.kind as PlatformLoginKind;

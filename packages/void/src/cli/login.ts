@@ -9,7 +9,7 @@ import {
   savePlatformToken,
 } from './auth.ts';
 import { isExpiredTokenError, PlatformClient } from './client.ts';
-import { printSuccess, createSpinner, pc } from './output.ts';
+import { printSuccess, createSpinner, formatUrl, pc } from './output.ts';
 
 export type LoginPlatform = {
   apiUrl: string;
@@ -74,7 +74,7 @@ export async function promptForLoginToken(
   try {
     const onUrl = (url: string) => {
       s.message(
-        `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.blue(url)}`,
+        `Waiting for ${providerName} login. If your browser didn't open, visit:\n${pc.blue(formatUrl(url))}`,
       );
     };
     const token = await runPlatformLogin(apiUrl, provider, onUrl);

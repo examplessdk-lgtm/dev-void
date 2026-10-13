@@ -13,7 +13,7 @@ import { openBrowser } from './auth.ts';
 import { readOperatorToken, resolveOperatorOrigin } from './operator-auth.ts';
 import { OperatorClient } from './operator-client.ts';
 import { humanLines } from './operator-cmd.ts';
-import { printSuccess } from './output.ts';
+import { printSuccess, formatUrl } from './output.ts';
 import type { PlatformConfigArgs } from './platform-config-args.ts';
 import { platformPromptAnswer } from './platform-setup.ts';
 
@@ -98,7 +98,7 @@ export async function waitForPlatformLoginTest(
   if (!Number.isFinite(expiry) || expiry > Date.now() + 11 * 60 * 1000) {
     throw new Error('platform: Invalid login test expiry.');
   }
-  console.log(`Complete the login test in your browser: ${url.href}`);
+  console.log(`Complete the login test in your browser: ${formatUrl(url.href)}`);
   openBrowser(url.href);
   while (Date.now() < expiry) {
     signal?.throwIfAborted();

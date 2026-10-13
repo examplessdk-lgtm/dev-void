@@ -222,4 +222,66 @@ describe('auth migration runner', () => {
     ]);
     expect(statements.some((sql) => sql.includes('`userId`'))).toBe(false);
   });
+
+  it('re-runs MySQL auth migrations against MySQL 8 uppercase information_schema labels', async () => {
+    const statements: Array<string> = [];
+    const resolved = resolveVoidAuthMigrationSchema({ dialect: 'mysql', providers: null });
+    const user = resolved.tables.find((table) => table.name === 'user')!;
+    const schema: VoidAuthMigrationSchema = {
+      ...resolved,
+      tables: [
+        {
+          ...user,
+          fields: {
+            ...user.fields,
+            nickname: {
+              type: 'string',
+              required: false,
+              unique: false,
+              index: false,
+              bigint: false,
+            },
+          },
+        },
+      ],
+    };
+    // MySQL 8 labels an unaliased information_schema column with its uppercase name.
+    const row = (sql: string, values: Record<string, string>) =>
+      Object.fromEntries(
+        Object.entries(values).map(([column, value]) => [
+          new RegExp(`\\bAS ${column}\\b`).test(sql) ? column : column.toUpperCase(),
+          value,
+        ]),
+      );
+
+    await applyMySqlAuthMigrations(
+      {
+        async all<T extends Record<string, unknown>>(sql: string) {
+          if (sql.includes('SELECT DATABASE()')) {
+            return [row(sql, { database_name: 'app' })] as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.tables')) {
+            return [row(sql, { table_name: 'user' })] as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.columns')) {
+            return ['id', ...Object.keys(user.fields)].map((column_name) =>
+              row(sql, { column_name, data_type: 'varchar' }),
+            ) as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.statistics')) {
+            return ['PRIMARY', 'user_email_uidx'].map((index_name) =>
+              row(sql, { index_name }),
+            ) as unknown as Array<T>;
+          }
+          return [] as Array<T>;
+        },
+        async run(sql: string) {
+          statements.push(sql);
+        },
+      },
+      schema,
+    );
+
+    expect(statements).toEqual(['ALTER TABLE `user` ADD COLUMN `nickname` varchar(255)']);
+  });
 });

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve, relative } from 'pathslash';
+import { preprocess, type CompileResult, type PreprocessorGroup } from 'svelte/compiler';
 import { normalizePath, type Plugin, type ResolvedConfig } from 'vite';
 import { generateComponentManifest, scanPages, resolveEffectiveLayoutChain } from 'void/pages';
 import type { PageScanResult } from 'void/pages';
@@ -31,6 +32,19 @@ type MdPluginWithApi = Plugin & {
   };
 };
 type ScannableEntry = { filePath: string; island: boolean | undefined };
+/** The shared API of vite-plugin-svelte, set on its `vite-plugin-svelte:config` plugin. */
+type SveltePluginApi = {
+  options: { preprocess?: PreprocessorGroup | Array<PreprocessorGroup> };
+  idParser: (id: string, ssr: boolean) => unknown;
+  compileSvelte: (
+    request: unknown,
+    code: string,
+    options: unknown,
+    environment: unknown,
+    sourcemap?: unknown,
+  ) => Promise<{ compiled: CompileResult }>;
+};
+type SvelteConfigPlugin = Plugin & { api?: SveltePluginApi };
 
 export function islandsPlugin(
   pagesDir: string,
@@ -238,36 +252,60 @@ export function islandsPlugin(
     },
     {
       name: 'void-svelte:islands-style',
-      // Only the build's client entry imports `?island-style` (dev CSS comes
-      // from Void's dev CSS collector), so this raw file reader never needs
-      // to run on the dev server.
+      // Only the build's client entry imports `<file>.svelte.css?island-style`
+      // (dev CSS comes from Void's dev CSS collector).
+      // - The id stays next to the component, so CSS url() resolves as in the
+      //   component, and it misses vite-plugin-svelte's `.svelte?` filter.
+      // - The CSS comes from vite-plugin-svelte's own preprocess options and
+      //   compile, so the scope hashes match the SSR markup.
+      // - The component is compiled here, not loaded with `this.load`: island
+      //   pages and layouts render only on the server, and loading them would
+      //   resolve their server-only imports in the client build.
+      // - vite-plugin-svelte's `?svelte&type=style` id is not used: it only
+      //   reads CSS already cached on the module, and its cssScopeTo drops the
+      //   CSS when the component is not imported by the client build.
       apply: 'build',
 
       resolveId: {
-        filter: { id: /\?island-style&/ },
+        filter: { id: /\.svelte\.css\?island-style$/ },
         handler(source) {
           return source;
         },
       },
 
       load: {
-        filter: { id: /\?island-style&/ },
-        handler(id) {
-          // ?island-style&index=N&lang.{ext} — return raw CSS of Nth <style> block
-          const filePath = id.replace(/\?island-style&.*$/, '');
-          const params = new URLSearchParams(id.slice(id.indexOf('?island-style&') + 1));
-          const index = parseInt(params.get('index') || '0', 10);
-          const content = readFileSync(filePath, 'utf-8');
-          const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/g;
-          let match;
-          let i = 0;
-          while ((match = styleBlockRe.exec(content)) !== null) {
-            if (i === index) {
-              return match[1];
-            }
-            i++;
+        filter: { id: /\.svelte\.css\?island-style$/ },
+        async handler(id) {
+          const file = id.slice(0, -'.css?island-style'.length);
+          const api = resolvedConfig?.plugins.find(
+            (plugin): plugin is SvelteConfigPlugin => plugin.name === 'vite-plugin-svelte:config',
+          )?.api;
+          if (typeof api?.compileSvelte !== 'function' || typeof api.idParser !== 'function') {
+            this.error(
+              'Svelte island page styles need the @sveltejs/vite-plugin-svelte version that @void/svelte depends on.',
+            );
           }
-          return '/* style block not found */';
+          this.addWatchFile(file);
+          let code = readFileSync(file, 'utf-8');
+          let map: unknown;
+          if (api.options.preprocess) {
+            const processed = await preprocess(code, api.options.preprocess, { filename: file });
+            code = processed.code;
+            map = processed.map;
+            // This compile is outside the module graph, so `vite build --watch`
+            // only sees files the preprocessor read (Sass partials) if listed.
+            for (const dependency of processed.dependencies ?? []) {
+              this.addWatchFile(dependency);
+            }
+          }
+          const { compiled } = await api.compileSvelte(
+            api.idParser(file, false),
+            code,
+            api.options,
+            this.environment,
+            map,
+          );
+          return { code: compiled.css?.code ?? '', map: compiled.css?.map ?? null };
         },
       },
     },
@@ -371,18 +409,9 @@ function generateIslandClientEntry(
     for (const file of cssFiles) {
       const content = readFileSync(file, 'utf-8');
 
-      const styleRe = /<style\b([^>]*)>/g;
-      styleRe.lastIndex = 0;
-      let styleIndex = 0;
-      let styleMatch;
-      while ((styleMatch = styleRe.exec(content)) !== null) {
-        const attrs = styleMatch[1];
-        const langMatch = attrs.match(/\blang\s*=\s*["'](\w+)["']/);
-        const lang = langMatch ? langMatch[1] : 'css';
-        lines.push(
-          `import ${JSON.stringify(file + '?island-style&index=' + styleIndex + '&lang.' + lang)};`,
-        );
-        styleIndex++;
+      // A Svelte component has at most one top-level <style>.
+      if (/<style\b/.test(content)) {
+        lines.push(`import ${JSON.stringify(file + '.css?island-style')};`);
       }
 
       for (const item of findStaticCssImports(content, file)) {

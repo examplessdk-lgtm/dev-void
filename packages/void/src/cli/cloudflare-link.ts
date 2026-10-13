@@ -225,7 +225,7 @@ export async function maybeLinkCloudflareDeploy(
   }
   const errors: Array<ParseError> = [];
   const configPath = files.length ? join(root, name) : materializeCloudflareConfig(root);
-  const config = parse(readFileSync(configPath, 'utf8'), errors, {
+  const config = parse(readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''), errors, {
     allowTrailingComma: true,
   });
   if (!files.length && (!config || typeof config.name !== 'string' || !config.name.trim())) {

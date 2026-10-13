@@ -1,4 +1,6 @@
+import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { describe, it, expect, vi, afterEach } from 'vite-plus/test';
+import { createDb } from '../../../src/runtime/db.ts';
 import { ProxyClient } from '../../../src/runtime/remote/client.ts';
 import { ProxyD1Database } from '../../../src/runtime/remote/d1.ts';
 
@@ -162,6 +164,23 @@ describe('ProxyD1Database', () => {
 
       expect(result.count).toBe(3);
       expect(result.duration).toBe(0.005);
+    });
+  });
+
+  describe('createDb()', () => {
+    it('runs Drizzle queries through the remote binding', async () => {
+      const users = sqliteTable('users', { id: integer('id').primaryKey(), name: text('name') });
+      const fetchMock = mockFetch({ columns: ['id', 'name'], results: [[1, 'Alice']] });
+
+      const db = createDb(new ProxyD1Database(createClient(), 'DB') as unknown as D1Database);
+      const rows = await db.select().from(users);
+
+      expect(rows).toEqual([{ id: 1, name: 'Alice' }]);
+      const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      const body = JSON.parse(String(call[1].body));
+      expect(body.binding).toBe('DB');
+      expect(body.method).toBe('raw');
+      expect(body.sql).toMatch(/^select .* from "users"$/);
     });
   });
 

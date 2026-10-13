@@ -576,7 +576,6 @@ function runMigration(root: string, name: string): void {
         cwd: root,
         stdio: 'pipe',
         encoding: 'utf-8',
-        shell: process.platform === 'win32',
         // Yarn PnP projects need the PnP loader to resolve `void/schema-*`.
         env: buildDrizzleKitSpawnEnv(root),
       },

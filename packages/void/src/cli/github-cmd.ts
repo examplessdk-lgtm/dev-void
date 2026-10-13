@@ -16,7 +16,7 @@ import {
 } from './client.ts';
 import { collectGitDeployMetadata } from './git-metadata.ts';
 import type { GithubArgs } from './github-args.ts';
-import { printSuccess, pc } from './output.ts';
+import { printSuccess, formatUrl, pc } from './output.ts';
 import { platformErrorMessage } from './platform-errors.ts';
 import { readProjectConfig } from './project.ts';
 import { getRequestedProjectSlug, resolveProjectBySlug } from './resolve-project.ts';
@@ -226,7 +226,7 @@ export async function runInstall(
     }
   }
 
-  log.message(`Open this URL to install the Void GitHub App:\n${pc.blue(url)}`);
+  log.message(`Open this URL to install the Void GitHub App:\n${pc.blue(formatUrl(url))}`);
   openBrowser(url);
   log.message('After installing, run `void github connect` to link a repository to your project.');
 }
@@ -254,7 +254,8 @@ export async function runGithubLink(client: PlatformClient): Promise<void> {
         return url;
       },
       describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
-      onUrl: (url) => log.message(`Open this URL to link your GitHub account:\n${pc.blue(url)}`),
+      onUrl: (url) =>
+        log.message(`Open this URL to link your GitHub account:\n${pc.blue(formatUrl(url))}`),
       finalize: async (params) => {
         const linkCode = params.get('link_code');
         if (!linkCode) {
@@ -307,7 +308,7 @@ export async function performGithubJoin(client: PlatformClient): Promise<number>
     describeError: (p) => (p.get('error') ? 'GitHub authorization failed.' : null),
     onUrl: (url) =>
       log.message(
-        `Open this URL to join your organization's shared GitHub App installations:\n${pc.blue(url)}`,
+        `Open this URL to join your organization's shared GitHub App installations:\n${pc.blue(formatUrl(url))}`,
       ),
     finalize: async (params) => {
       const joinCode = params.get('join_code');
@@ -389,7 +390,9 @@ async function runGithubConnectAuthorize(
       return e ? 'GitHub authorization failed.' : null;
     },
     onUrl: (url) =>
-      log.message(`Open this URL to authorize access to ${repoFullName}:\n${pc.blue(url)}`),
+      log.message(
+        `Open this URL to authorize access to ${repoFullName}:\n${pc.blue(formatUrl(url))}`,
+      ),
     finalize: async (params) => {
       const grant = params.get('connect_grant');
       if (!grant) {

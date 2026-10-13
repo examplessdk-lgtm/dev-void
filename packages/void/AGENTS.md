@@ -6,6 +6,8 @@ User-facing CLI output and documentation describe Cloudflare operations through 
 
 Completed CLI actions use `printSuccess` from `src/cli/output.ts`: a blank line, a green checkmark, and green text. Use `log.step` for intermediate work. Keep listings, no-op notices, cancellations, warnings, and checkpointed or pending operations out of the success renderer. Preserve JSON, token, and SQL stdout contracts.
 
+Human-facing URLs use `formatUrl` or `formatLink` from `src/cli/output.ts` for terminal hyperlinks with readable plain-text fallbacks. Use the shared `note` renderer for URL box titles; it pads the URL with spaces and adds the hyperlink after layout. Keep machine-readable output and copyable commands free of terminal links.
+
 ## Architecture
 
 `application-analysis.ts` owns source feature enablement and handler inventories;

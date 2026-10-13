@@ -555,6 +555,28 @@ describe('astroDevTriggerInjectPlugin', () => {
       'Astro middleware already exists',
     );
   });
+
+  it('stops ignoring src/middleware.ts after the dev server closes', () => {
+    const root = createTempRoot();
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    let onClose: (() => void) | undefined;
+    // The temp root is removed after each test, so skip the process exit cleanup hook.
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    callConfigureServer(astroDevTriggerInjectPlugin(root), {
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          onClose = cb;
+        },
+      },
+    });
+
+    expect(existsSync(join(root, 'src', 'middleware.ts'))).toBe(true);
+    expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toContain('src/middleware.ts');
+
+    onClose!();
+    expect(existsSync(join(root, 'src', 'middleware.ts'))).toBe(false);
+    expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toBe('node_modules/\n');
+  });
 });
 
 describe('analogDevTriggerInjectPlugin', () => {

@@ -242,6 +242,18 @@ Dashboard auth uses the same JWT model, stored in the `void_token` cookie.
 
 `POST /projects/:id/deploy` handles both worker and static deploys. Before either branch runs, the deploy endpoint validates the manifest wire-shape — including `redirectRules` / `fallbackRules` structure and destination constraints (path-absolute, no embedded query on `status: 200` entries) — so malformed routing rules are rejected before any resources are provisioned. See [`src/routes/deploy.ts`](./src/routes/deploy.ts).
 
+Queued deployment input uses the existing R2 staging marker
+`deployment-inputs/<projectId>/<attemptId>/receipt-void-platform-<kind>`, where
+`kind` is `spa` for SPA manifests, `worker` for apps with Worker modules, or
+`static` for other apps without Worker modules. The marker
+identifies prepared deployment attempts, including cached redeploys and attempts
+that fail after staging; it does not attest admission or live publication.
+Queue redelivery reuses the input without writing another marker. HTTP retries
+can stage new input, and R2 retries can repeat a write for the same key.
+Synchronous runtimes without `DEPLOYMENTS_QUEUE` do not stage these markers.
+The object remains under its original input prefix, so cleanup also handles
+older `receipt` markers. No additional R2 write or analytics binding is needed.
+
 ### Worker deploys
 
 1. validate the actor's deploy capability and the owner's deploy limits

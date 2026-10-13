@@ -57,8 +57,8 @@ export type DbArgs =
   | { action: 'push' }
   | { action: 'generate' }
   | { action: 'status' }
-  | { action: 'reset' }
-  | { action: 'seed'; file?: string }
+  | { action: 'reset'; yes?: boolean }
+  | { action: 'seed'; file?: string; yes?: boolean }
   | { action: 'execute'; command?: string; file?: string; remote?: boolean }
   | { action: 'migrate'; remote?: boolean }
   | { action: 'studio'; remote?: boolean }
@@ -114,6 +114,7 @@ export function parseDbArgs(args: Array<string>): DbArgs {
       name: { type: 'string' },
       region: { type: 'string' },
       'local-only': { type: 'boolean' },
+      yes: { type: 'boolean' },
     },
     allowPositionals: true,
     strict: true,
@@ -134,8 +135,10 @@ export function parseDbArgs(args: Array<string>): DbArgs {
   }
 
   switch (action) {
+    case 'reset':
+      return { action, yes: values.yes };
     case 'seed':
-      return { action, file: values.file };
+      return { action, file: values.file, yes: values.yes };
     case 'execute': {
       const [command] = rest;
       if (!command && !values.file) {

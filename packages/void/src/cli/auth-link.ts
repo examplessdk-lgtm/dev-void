@@ -2,6 +2,7 @@ import { log } from '@voidzero-dev/vite-plus-prompts';
 import { getApiUrl, getToken, openBrowser, runPlatformLogin, savePlatformToken } from './auth.ts';
 import { PlatformClient } from './client.ts';
 import { selectPlatformLoginMethod } from './login.ts';
+import { formatUrl } from './output.ts';
 import { discoverPlatform } from './platform-cmd.ts';
 
 export async function runAuthLink(root: string, connectionId?: string): Promise<void> {
@@ -19,7 +20,7 @@ export async function runAuthLink(root: string, connectionId?: string): Promise<
   log.info(`Sign in again to ${existing.login} using an already linked login method.`);
   const source = await selectPlatformLoginMethod(platform);
   const freshToken = await runPlatformLogin(apiUrl, source.id, (url) =>
-    log.info(`Sign in: ${url}`),
+    log.info(`Sign in: ${formatUrl(url)}`),
   );
   const client = new PlatformClient(freshToken, { apiUrl });
   const fresh = await client.whoami();
@@ -31,7 +32,7 @@ export async function runAuthLink(root: string, connectionId?: string): Promise<
   savePlatformToken(freshToken, apiUrl);
   const launch = await client.startIdentityLink(target.id);
   log.info(
-    `Authenticate with ${target.label}, then review and confirm the identity in your browser.\n${launch.url}`,
+    `Authenticate with ${target.label}, then review and confirm the identity in your browser.\n${formatUrl(launch.url)}`,
   );
   openBrowser(launch.url);
 }

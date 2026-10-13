@@ -11,6 +11,7 @@ import {
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { confirm, isCancel, outro, log, text } from '@voidzero-dev/vite-plus-prompts';
+import { createJiti } from 'jiti';
 import { basename, dirname, extname, join, relative, resolve } from 'pathslash';
 import {
   readConfig,
@@ -49,7 +50,7 @@ import {
   quoteSqlString,
 } from './db-export-sequences.ts';
 import { formatTimestamp } from './gen.ts';
-import { printSuccess, dim, formatCount, getErrorMessage, pc } from './output.ts';
+import { printSuccess, dim, formatCount, formatUrl, getErrorMessage, pc } from './output.ts';
 import { readDeploymentPlatform, readProjectConfig } from './project.ts';
 import { drizzleKitBin } from './yarn-pnp.ts';
 
@@ -192,9 +193,9 @@ export async function runDbCommand(root: string, args: DbArgs): Promise<void> {
   } else if (args.action === 'status') {
     await runStatus(root, dialect);
   } else if (args.action === 'reset') {
-    await runReset(root, dialect);
+    await runReset(root, dialect, args.yes);
   } else if (args.action === 'seed') {
-    await runSeed(root, args.file, dialect);
+    await runSeed(root, args.file, dialect, args.yes);
   } else if (args.action === 'execute') {
     await runExecute(root, args.command, args.file, dialect, args.remote);
   } else if (args.action === 'migrate') {
@@ -314,7 +315,7 @@ async function runConnect(
     connectionString = result.connectionString;
     log.step(`Provisioned ${adapter.label} database.`);
     if (result.dashboardUrl) {
-      log.info(`Dashboard: ${result.dashboardUrl}`);
+      log.info(`Dashboard: ${formatUrl(result.dashboardUrl)}`);
     }
   }
 
@@ -525,7 +526,39 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
   outro(parts.join(', '));
 }
 
-async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<number> {
+// Hyperdrive reaches only public hosts, so a loopback or socket database is never the deployed one.
+const LOCAL_DATABASE_HOSTS = new Set(['', 'localhost', '127.0.0.1', '::1', '[::1]']);
+
+/**
+ * `.env` may hold the deployed database URL (`void db connect` writes it there), so ask before
+ * dropping every table on any other host. Without a TTY, require `--yes`.
+ */
+async function confirmDropAllTables(
+  host: string,
+  target: string,
+  yes: boolean | undefined,
+): Promise<void> {
+  if (yes || LOCAL_DATABASE_HOSTS.has(host) || host.startsWith('/')) {
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    log.error(
+      `db: Refusing to drop every table in ${target} without confirmation. Re-run with --yes.`,
+    );
+    process.exit(1);
+  }
+  const ok = await confirm({ message: `This drops every table in ${target}. Continue?` });
+  if (isCancel(ok) || !ok) {
+    log.info('Cancelled.');
+    process.exit(0);
+  }
+}
+
+async function resetDatabase(
+  root: string,
+  dialect: DatabaseDialect,
+  yes?: boolean,
+): Promise<number> {
   // Coherence check must happen before any destructive work. Report a
   // malformed `_journal.json` like `runStatus`, `runMigrate`, and the deploy
   // path do, not as a raw stack trace.
@@ -540,6 +573,12 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   }
 
   if (dialect === 'postgresql') {
+    const { Client } = await import('pg');
+    // `?host=` and PGHOST can replace the URL host, so check the host pg will connect to.
+    const { host, port, database } = new Client({
+      connectionString: getLocalDatabaseUrl(root, dialect),
+    });
+    await confirmDropAllTables(host, `database "${database}" on ${host}:${port}`, yes);
     const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
     await withPgClient(root, async (client) => {
       const tables = await client.query(
@@ -554,9 +593,13 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   }
 
   if (dialect === 'mysql') {
+    const { hostname, host, pathname } = new URL(getLocalDatabaseUrl(root, dialect));
+    const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
+    await confirmDropAllTables(hostname, target, yes);
     await withMySqlClient(root, async (client) => {
+      // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
       const tables = await client.query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+        "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
       );
       await client.query('SET FOREIGN_KEY_CHECKS = 0');
       try {
@@ -586,8 +629,8 @@ async function resetDatabase(root: string, dialect: DatabaseDialect): Promise<nu
   return applied.length;
 }
 
-async function runReset(root: string, dialect: DatabaseDialect): Promise<void> {
-  const count = await resetDatabase(root, dialect);
+async function runReset(root: string, dialect: DatabaseDialect, yes?: boolean): Promise<void> {
+  const count = await resetDatabase(root, dialect, yes);
   if (dialect === 'sqlite') {
     log.info(dim("Restart your dev server if it's running."));
   }
@@ -598,9 +641,10 @@ async function runSeed(
   root: string,
   file: string | undefined,
   dialect: DatabaseDialect,
+  yes?: boolean,
 ): Promise<void> {
   // Reset first (drop + re-run migrations)
-  const migrationCount = await resetDatabase(root, dialect);
+  const migrationCount = await resetDatabase(root, dialect, yes);
   log.step(`Reset database. Applied ${formatCount(migrationCount, 'migration')}.`);
 
   const seed = resolveSeedTarget(root, file);
@@ -1788,12 +1832,16 @@ async function runExport(
         }
         tables = [args.table];
       } else {
+        // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
         const rows = await client.query<Array<{ table_name: string }>>(
-          "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
+          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
         );
         tables = rows.map((row) => String(row.table_name));
       }
 
+      // Tables come out in name order with inline foreign keys, so a child
+      // table can precede its parent; restore with the checks off.
+      parts.push('SET FOREIGN_KEY_CHECKS = 0;');
       for (const table of tables) {
         const escapedTable = table.replaceAll('`', '``');
         if (!args.noSchema) {
@@ -1819,6 +1867,7 @@ async function runExport(
         }
         parts.push('');
       }
+      parts.push('SET FOREIGN_KEY_CHECKS = 1;', '');
     });
 
     const output = parts.join('\n');
@@ -2154,7 +2203,13 @@ function collectSchemaModuleFiles(dir: string): Array<string> {
 }
 
 async function importLocalModule(modulePath: string): Promise<Record<string, unknown>> {
-  return import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
+  // Native import() cannot resolve the extensionless re-exports that `void gen model` writes.
+  const jiti = createJiti(import.meta.url, {
+    fsCache: false,
+    moduleCache: false,
+    interopDefault: false,
+  });
+  return jiti.import<Record<string, unknown>>(modulePath);
 }
 
 function getDrizzleSchemaOptions(

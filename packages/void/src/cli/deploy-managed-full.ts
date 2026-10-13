@@ -388,6 +388,7 @@ export async function runFullDeploy(
   });
   const packageStartedAt = Date.now();
   const voidPackageOptions = {
+    bindingNames: analysis.bindingNames,
     compatibilityDate: wranglerCompat?.compatibilityDate,
     compatibilityFlags: wranglerCompat?.compatibilityFlags,
     cpuMs: voidConfig.worker?.limits?.cpu_ms,

@@ -38,7 +38,7 @@ import {
   type EmailPreflight,
   type EmailWranglerRun,
 } from './email-cloudflare.ts';
-import { printSuccess, createSpinner, note, pc } from './output.ts';
+import { printSuccess, createSpinner, formatUrl, note, pc } from './output.ts';
 import { resolveCommandProjectId } from './resolve-project.ts';
 import { writeProvisionedWranglerConfig } from './wrangler.ts';
 
@@ -557,7 +557,7 @@ export async function emailDomainAdd(
           'Create the token in three clicks: Continue to summary → Create Token → Copy.',
           'Watching the clipboard for it — nothing is read until you copy, and it is cleared afterwards.',
           '(Enter pastes it yourself instead.)',
-          `If the browser didn't open, visit:\n${pc.blue(url)}`,
+          `If the browser didn't open, visit:\n${pc.blue(formatUrl(url))}`,
         ].join('\n'),
       );
       const spinner = watchSpinner;

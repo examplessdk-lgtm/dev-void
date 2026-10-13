@@ -2,7 +2,7 @@ import type { PlatformDiscoveryDocument, PlatformInstallationManifest } from '@v
 import { isCancel, log, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { ensurePlatformAccessToken, isCloudflareAccessChallenge } from './cf-access.ts';
-import { printSuccess, pc } from './output.ts';
+import { printSuccess, formatUrl, pc } from './output.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { PlatformDisabledError, readPlatformDiscoveryResponse } from './platform-discovery.ts';
 import {
@@ -105,7 +105,7 @@ function showPlatform(
 ): void {
   const slug = platformConnectionSlug(connection, installations);
   console.log(`  ${pc.bold(connection.displayName)}${slug ? ` ${pc.dim(`(${slug})`)}` : ''}`);
-  console.log(`    ${connection.apiUrl}`);
+  console.log(`    ${formatUrl(connection.apiUrl)}`);
   if (connection.applicationDomain) {
     console.log(
       connection.applicationDomain.endsWith('.workers.dev')
@@ -243,8 +243,8 @@ export async function runPlatformCommand(_root: string, args: PlatformArgs): Pro
       throw error;
     }
     log.info(`${discovery.displayName} is reachable.`);
-    console.log(`API: ${discovery.apiUrl}`);
-    console.log(`Proxy: ${discovery.proxyUrl}`);
+    console.log(`API: ${formatUrl(discovery.apiUrl)}`);
+    console.log(`Proxy: ${formatUrl(discovery.proxyUrl)}`);
     if (discovery.applicationRouting?.workersDev && !discovery.applicationRouting.zoneName) {
       console.log('Application domain: workers.dev (testing)');
       console.log('Add a domain: void platform domain set <domain>');
@@ -274,6 +274,6 @@ function showSavedInstallationStatus(manifest: PlatformInstallationManifest): vo
     console.log(`Runtime: ${operation.fromVersion ?? 'new installation'} → ${operation.toVersion}`);
   }
   if (manifest.endpoints.apiUrl) {
-    console.log(`Administrator status: ${manifest.endpoints.apiUrl}/admin/status`);
+    console.log(`Administrator status: ${formatUrl(`${manifest.endpoints.apiUrl}/admin/status`)}`);
   }
 }

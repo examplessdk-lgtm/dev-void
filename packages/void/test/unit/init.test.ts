@@ -3596,6 +3596,41 @@ export default config;
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('keeps the existing pnpm build approvals when adding the Void defaults', async () => {
+    const roots: Array<string> = [];
+    const initWithWorkspaceYaml = async (yaml: string): Promise<string> => {
+      const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+      roots.push(root);
+      writeExistingViteApp(root);
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), yaml);
+      mockSelect.mockResolvedValueOnce('none');
+      mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+      await runInitCommand(root);
+      return readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf-8');
+    };
+    try {
+      expect(
+        await initWithWorkspaceYaml(
+          'allowBuilds:\n  "@parcel/watcher": true\n  better-sqlite3: true\nonlyBuiltDependencies:\n  - bcrypt\n',
+        ),
+      ).toBe(
+        'allowBuilds:\n  "@parcel/watcher": true\n  better-sqlite3: true\n  bcrypt: true\n  esbuild: true\n  sharp: true\n  workerd: true\n',
+      );
+      expect(await initWithWorkspaceYaml('onlyBuiltDependencies:\n- bcrypt\n')).toBe(
+        'allowBuilds:\n  bcrypt: true\n  better-sqlite3: false\n  esbuild: true\n  sharp: true\n  workerd: true\n',
+      );
+
+      const flow = 'allowBuilds: {"@parcel/watcher": true}\n';
+      expect(await initWithWorkspaceYaml(flow)).toBe(flow);
+      expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('esbuild: true'));
+    } finally {
+      for (const root of roots) {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe('detectProjectState', () => {
@@ -3810,5 +3845,30 @@ describe('generateStarterMigration', () => {
       expect(existsSync(join(metaDir, '0001_snapshot.json'))).toBe(false);
       expect(existsSync(join(migrationsDir, '0001_new.sql'))).toBe(false);
     });
+  });
+
+  // cmd.exe would split `C:\Program Files\nodejs\node.exe` and paths with spaces.
+  it('runs drizzle-kit and the Yarn PnP probe without a shell on Windows', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      withTempDir((root) => {
+        seedStarterSchema(root);
+        writeFileSync(join(root, '.pnp.cjs'), '// pnp stub\n');
+        mkdirSync(join(root, '.yarn'), { recursive: true });
+        writeFileSync(join(root, '.yarn', 'install-state.gz'), '');
+        mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+
+        generateStarterMigration(root, 'sqlite');
+        expect(isVoidResolvableFrom(root)).toBe(true);
+
+        const nodeSpawns = mockSpawnSync.mock.calls.filter(
+          ([command]) => command === process.execPath,
+        );
+        expect(nodeSpawns.map(([, , options]) => Boolean(options.shell))).toEqual([false, false]);
+      });
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 });

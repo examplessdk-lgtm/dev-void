@@ -21,6 +21,11 @@ describe('parseDbArgs', () => {
     });
   });
 
+  it('parses --yes for reset and seed', () => {
+    expect(parseDbArgs(['reset', '--yes'])).toEqual({ action: 'reset', yes: true });
+    expect(parseDbArgs(['seed', '--yes'])).toEqual({ action: 'seed', yes: true });
+  });
+
   it('parses execute with inline SQL', () => {
     expect(parseDbArgs(['execute', 'SELECT * FROM users'])).toEqual({
       action: 'execute',

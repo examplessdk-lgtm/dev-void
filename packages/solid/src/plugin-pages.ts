@@ -256,7 +256,7 @@ function generateClientEntry(
   staticPageData?: StaticPageDataBuildOptions,
 ): string {
   return `
-import { createSignal, createComponent, batch } from "solid-js";
+import { createSignal, createComponent, createMemo, mergeProps, untrack, batch } from "solid-js";
 import { createMutable } from "solid-js/store";
 import { hydrate, render } from "solid-js/web";
 import { SharedContext, ErrorsContext, ParamsContext, RouterContext, NavigationContext, setActionRouter } from "@void/solid";
@@ -265,7 +265,8 @@ import { parseCacheFor } from "void/pages-prefetch";
 
 ${generateComponentManifest(scan, pagesDir)}
 
-const [component, setComponent] = createSignal(null);
+// A new page object re-creates the page; props alone update it in place.
+const [page, setPage] = createSignal({ component: null });
 const [pageProps, setPageProps] = createSignal({});
 const [layouts, setLayouts] = createSignal([]);
 const shared = createMutable({});
@@ -280,6 +281,11 @@ function replaceShared(next) {
   Object.assign(shared, next || {});
 }
 
+function sameParams(a, b) {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
+}
+
 const { router, initialPageData, initialComponent, initialLayouts, start, commitInitialRender } =
   await createVoidRouter({
     adapter: {
@@ -287,14 +293,19 @@ const { router, initialPageData, initialComponent, initialLayouts, start, commit
       resolveDeferred(ref, value) { return { value, loading: false, error: null }; },
       rejectDeferred(ref, error) { return { value: null, loading: false, error: new Error(error) }; },
       isLoading: (ref) => ref.loading,
-      applyUpdate(pageData, comp, layoutComps) {
+      applyUpdate(pageData, comp, layoutComps, options) {
+        const params = pageData.params || {};
+        // Back/forward preserves state, but another route or another record
+        // still needs a new page so useForm() targets that route and record.
+        const current = page();
+        const keep = options?.preserveState && current.id === pageData.component && current.component === comp && sameParams(routeParams(), params);
         batch(() => {
+          if (!keep) setPage({ component: comp, id: pageData.component });
           setPageProps(pageData.props);
-          setComponent(() => comp);
           setLayouts(layoutComps);
           replaceShared(pageData.shared);
           setErrors(pageData.errors || {});
-          setRouteParams(pageData.params || {});
+          setRouteParams(params);
         });
       },
       onDeferredUpdate(props) {
@@ -320,13 +331,33 @@ const reactiveRouter = createRouterFacade(router, () => routeUrl(), () => routeP
 setActionRouter(reactiveRouter);
 
 batch(() => {
-  setComponent(() => initialComponent);
+  setPage({ component: initialComponent, id: initialPageData.component });
   setPageProps(initialPageData.props);
   setLayouts(initialLayouts);
   replaceShared(initialPageData.shared);
   setErrors(initialPageData.errors || {});
   setRouteParams(initialPageData.params || {});
 });
+
+// Each slot re-renders only when its own layout or page changes, so
+// layouts above it keep their state. The inner slot is created before its
+// layout to match the server render order for hydration.
+function renderSlot(depth) {
+  const entry = createMemo(() => {
+    const list = layouts();
+    return depth < list.length ? list[depth] : page();
+  });
+  return createMemo(() => {
+    const current = entry();
+    return untrack(() => {
+      if (typeof current === "function") {
+        const child = renderSlot(depth + 1);
+        return createComponent(current, { get children() { return child; } });
+      }
+      return current.component ? createComponent(current.component, mergeProps(pageProps)) : null;
+    });
+  });
+}
 
 function App() {
   return createComponent(SharedContext.Provider, {
@@ -344,16 +375,7 @@ function App() {
                   return createComponent(NavigationContext.Provider, {
                     value: navigation,
                     get children() {
-                      const Comp = component();
-                      if (!Comp) return null;
-                      let element = createComponent(Comp, pageProps());
-                      const layoutList = layouts();
-                      for (let i = layoutList.length - 1; i >= 0; i--) {
-                        const Layout = layoutList[i];
-                        const child = element;
-                        element = createComponent(Layout, { get children() { return child; } });
-                      }
-                      return element;
+                      return renderSlot(0);
                     }
                   });
                 }

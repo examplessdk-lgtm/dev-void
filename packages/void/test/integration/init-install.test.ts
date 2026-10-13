@@ -77,6 +77,7 @@ describe('init dependency installation (real subprocesses)', () => {
 
     installProjectDependencies(root, 'pnpm');
 
+    // Assert the received argv: Windows cmd.exe must preserve the semver caret.
     expect(calls()).toEqual([
       {
         command: 'npx',

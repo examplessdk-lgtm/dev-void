@@ -18,7 +18,7 @@ import { githubSubcommands, parseGithubArgs } from './github-args.ts';
 import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
 import { parseInfoArgs } from './info-args.ts';
 import { OperatorClientError } from './operator-client.ts';
-import { pc } from './output.ts';
+import { formatUrl, pc } from './output.ts';
 import { parsePlatformArgs, platformSubcommands } from './platform-args.ts';
 import { parsePrepareArgs } from './prepare-args.ts';
 import { projectSubcommands, parseProjectArgs } from './project-args.ts';
@@ -67,7 +67,7 @@ async function runSubcommandGroup<T>(
         log.info(
           'A Void platform lets a team deploy Void apps to a shared Cloudflare account.\n' +
             'This command sets up and manages platforms. Join with `void connect <url>`.\n' +
-            'Docs: https://void.cloud/guide/self-hosted-platform',
+            `Docs: ${formatUrl('https://void.cloud/guide/self-hosted-platform')}`,
         );
       }
       const result = await promptSubcommand(command, subcommands);
