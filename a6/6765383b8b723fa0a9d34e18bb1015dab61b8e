@@ -1,0 +1,21 @@
+platform/packages/api/src/admin/react/views/PageStack.tsx
+  s_bc65fb0d8d0e09::t_c54935f2fac745 1-8
+platform/packages/api/src/admin/react/views/SectionStack.tsx
+  s_bc65fb0d8d0e09::t_e4b13871f9ce4f 1-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a66765383b8b723fa0a9d34e18bb1015dab61b8e",
+  "prompts": {},
+  "sessions": {
+    "s_bc65fb0d8d0e09": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13555-19f5-7af2-ad36-550a0ef0f5df",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
