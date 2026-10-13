@@ -7,12 +7,60 @@ import {
   type AstProgram,
 } from './shared/ast.ts';
 
+type HooksTransform = { code: string; map: ReturnType<MagicString['generateMap']> };
+
 /** Add Void's dev bindings to SvelteKit's generated get_hooks function. */
 export function injectSvelteKitHooks(
   code: string,
   id: string,
   dispatchPath: string,
-): { code: string; map: ReturnType<MagicString['generateMap']> } | undefined {
+): HooksTransform | undefined {
+  return editGetHooks(
+    code,
+    id,
+    `\n  const { withRuntimeEnv } = await import("void/_env");\n  const { handleDevTrigger } = await import(${JSON.stringify(dispatchPath)});`,
+    `const __origHandle = handle ?? (({ event, resolve }) => resolve(event));\n` +
+      `  handle = async ({ event, resolve }) => {\n` +
+      `    const __voidEnv = event.platform?.env ?? (await import('cloudflare:workers')).env;\n` +
+      `    return withRuntimeEnv(__voidEnv, async () => {\n` +
+      `    const __triggerResp = await handleDevTrigger(event.request, __voidEnv, undefined);\n` +
+      `    if (__triggerResp) return __triggerResp;\n` +
+      `    return __origHandle({ event, resolve });\n` +
+      `    });\n  };\n  `,
+  );
+}
+
+/**
+ * Run each request of a SvelteKit build in Void's request scope. `envModule` is the env module
+ * void/db imports. Kit prerenders in Node, where `cloudflare:workers` does not load and Kit 3
+ * passes no platform, so those requests run outside the scope.
+ */
+export function injectSvelteKitBuildHooks(
+  code: string,
+  id: string,
+  envModule: string,
+): HooksTransform | undefined {
+  return editGetHooks(
+    code,
+    id,
+    `\n  const { withRuntimeEnv } = await import(${JSON.stringify(envModule)});`,
+    `const __origHandle = handle ?? (({ event, resolve }) => resolve(event));\n` +
+      `  handle = async ({ event, resolve }) => {\n` +
+      `    const __voidEnv = event.platform?.env ??\n` +
+      `      (typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers'\n` +
+      `        ? (await import('cloudflare:workers')).env\n` +
+      `        : undefined);\n` +
+      `    return withRuntimeEnv(__voidEnv, () => __origHandle({ event, resolve }));\n` +
+      `  };\n  `,
+  );
+}
+
+function editGetHooks(
+  code: string,
+  id: string,
+  prologue: string,
+  handleWrapper: string,
+): HooksTransform | undefined {
   if (!code.includes('get_hooks')) {
     return undefined;
   }
@@ -45,20 +93,7 @@ export function injectSvelteKitHooks(
     throw new Error('sveltekit: Expected one object return in generated get_hooks.');
   }
   const ms = new MagicString(code);
-  ms.appendLeft(
-    body.start + 1,
-    `\n  const { withRuntimeEnv } = await import("void/_env");\n  const { handleDevTrigger } = await import(${JSON.stringify(dispatchPath)});`,
-  );
-  ms.appendLeft(
-    returns[0].start,
-    `const __origHandle = handle ?? (({ event, resolve }) => resolve(event));\n` +
-      `  handle = async ({ event, resolve }) => {\n` +
-      `    const __voidEnv = event.platform?.env ?? (await import('cloudflare:workers')).env;\n` +
-      `    return withRuntimeEnv(__voidEnv, async () => {\n` +
-      `    const __triggerResp = await handleDevTrigger(event.request, __voidEnv, undefined);\n` +
-      `    if (__triggerResp) return __triggerResp;\n` +
-      `    return __origHandle({ event, resolve });\n` +
-      `    });\n  };\n  `,
-  );
+  ms.appendLeft(body.start + 1, prologue);
+  ms.appendLeft(returns[0].start, handleWrapper);
   return { code: ms.toString(), map: ms.generateMap({ hires: true }) };
 }

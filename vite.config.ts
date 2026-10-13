@@ -28,6 +28,7 @@ const sdkPgliteUnitTests = [
   'packages/void/test/unit/platform-database-lock.test.ts',
   'packages/void/test/unit/platform-database-migrations.test.ts',
   'packages/void/test/unit/runner-pg.test.ts',
+  'packages/void/test/unit/sveltekit-worker-build.test.ts',
   'packages/void/test/unit/wrapper.test.ts',
 ];
 

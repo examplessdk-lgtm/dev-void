@@ -1,5 +1,8 @@
-import { fileURLToPath } from 'node:url';
-import { type Plugin } from 'vite';
+import { readFileSync } from 'node:fs';
+import { builtinModules, createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join } from 'pathslash';
+import { defaultServerConditions, type Plugin } from 'vite';
 import { type ApplicationAnalysis } from './application-analysis.ts';
 import {
   ensureWranglerCompat,
@@ -8,6 +11,7 @@ import {
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
+  type WranglerCompat,
 } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
 import { resolveLocalD1Target } from './local-d1.ts';
@@ -28,13 +32,42 @@ import {
 } from './plugin-framework-triggers.ts';
 import { migrationPlugin } from './plugin-migration.ts';
 import { createCloudflareBuiltinsExternalPlugin } from './plugin-worker-environment.ts';
-import { injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
+import { injectSvelteKitBuildHooks, injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
 
 const handlerFile = fileURLToPath(import.meta.resolve('#self/handler'));
 const envModuleFile = fileURLToPath(import.meta.resolve('#self/_env'));
 
 const ASTRO_SERVER_ENTRY = '@astrojs/cloudflare/entrypoints/server';
 const ASTRO_SCOPED_SERVER_ENTRY = '\0void:astro-server-entry';
+
+const NODE_BUILTIN = new RegExp(`^(?:node:)?(?:${builtinModules.join('|')})$`);
+const NODE_BUILTIN_REQUIRE_PREFIX = '\0void:node-require:';
+
+/**
+ * The Node built-ins that workerd provides for the given compatibility settings, from the preset
+ * the Cloudflare plugin builds Workers with (a dependency of `@cloudflare/vite-plugin`). Before
+ * 2025-09-15 the preset fills in parts of `node:process` instead of listing it, but workerd
+ * provides that module at every date.
+ */
+async function readWorkerdNodeBuiltins(compat: WranglerCompat): Promise<Set<string>> {
+  const vitePlugin = fileURLToPath(import.meta.resolve('@cloudflare/vite-plugin'));
+  const manifestPath = createRequire(vitePlugin).resolve('@cloudflare/unenv-preset/package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    exports: { '.': { import: string } };
+  };
+  const { getCloudflarePreset } = (await import(
+    pathToFileURL(join(dirname(manifestPath), manifest.exports['.'].import)).href
+  )) as {
+    getCloudflarePreset(compat: { compatibilityDate: string; compatibilityFlags: Array<string> }): {
+      external: Array<string>;
+    };
+  };
+  const { external } = getCloudflarePreset({
+    compatibilityDate: compat.compatibilityDate,
+    compatibilityFlags: compat.compatibilityFlags ?? [],
+  });
+  return new Set([...external.map((name) => name.replace(/^node:/, '')), 'process']);
+}
 
 export function createFrameworkPlugins(input: {
   readonly localD1: ReturnType<typeof resolveLocalD1Target>;
@@ -263,6 +296,79 @@ export default {
         }
       : undefined;
 
+  // SvelteKit builds its server in Vite's Node `ssr` environment, and the adapter's Worker runs
+  // that output as it is. For PostgreSQL and MySQL, void/db's driver then fails in workerd: pg
+  // loads pg-cloudflare's Node stub, and CommonJS requires of Node built-ins become
+  // `createRequire(import.meta.url)`. A driver that Vite can resolve from the app root (npm, Yarn
+  // and Bun installs, or an app that lists it) even stays external, and Void's browser-target
+  // packaging bundles it with browser stubs. Build that environment as the Cloudflare plugin
+  // builds Workers, and run each request in Void's request scope, as in dev, so void/db keeps one
+  // client per request. D1 apps keep Kit's output: in a request scope, void/db reads D1 through a
+  // replica-capable session instead of the primary.
+  let workerdNodeBuiltins: Promise<Set<string>> | undefined;
+  const svelteKitWorkerBuildPlugin: Plugin | undefined =
+    detected.class === 'b' && dialect !== 'sqlite'
+      ? {
+          name: 'void:sveltekit-worker-build',
+          apply: 'build',
+          // Before Vite's resolver, which makes a required built-in external.
+          enforce: 'pre',
+          configEnvironment(name, environment) {
+            if (name !== 'ssr') {
+              return;
+            }
+            return {
+              resolve: {
+                conditions: environment.resolve?.conditions
+                  ? ['workerd', 'worker']
+                  : ['workerd', 'worker', ...defaultServerConditions],
+                noExternal: true,
+              },
+              // Node output binds `require` at load with createRequire(import.meta.url). Neutral
+              // output throws only when a require runs, as for mysql2's optional `cardinal`.
+              build: { rolldownOptions: { platform: 'neutral' } },
+            };
+          },
+          // Serve each required Node built-in that workerd provides from an import, as the
+          // Cloudflare plugin does with rolldown's esmExternalRequirePlugin. That plugin works only
+          // with the rolldown copy running the build, which need not be Void's. A require of any
+          // other built-in stays as it is and throws only if it runs.
+          resolveId: {
+            filter: { id: NODE_BUILTIN },
+            async handler(id, _importer, options) {
+              if (this.environment?.name !== 'ssr' || options.kind !== 'require-call') {
+                return;
+              }
+              const name = id.replace(/^node:/, '');
+              workerdNodeBuiltins ??= readWorkerdNodeBuiltins(readWranglerCompat(root, config));
+              if (!(await workerdNodeBuiltins).has(name)) {
+                return;
+              }
+              return `${NODE_BUILTIN_REQUIRE_PREFIX}${name}`;
+            },
+          },
+          load: {
+            // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
+            filter: { id: /^\0void:node-require:/ },
+            handler(id) {
+              // A built-in's default export is its CommonJS exports, and `require` returns an ES
+              // module's "module.exports" export.
+              const name = id.slice(NODE_BUILTIN_REQUIRE_PREFIX.length);
+              return `import builtin from "node:${name}";\nexport { builtin as "module.exports" };\n`;
+            },
+          },
+          transform(code, id) {
+            if (
+              !id.includes('.svelte-kit/generated/server/internal') &&
+              !id.includes('.svelte-kit/generated/build/server.js')
+            ) {
+              return;
+            }
+            return injectSvelteKitBuildHooks(code, id, envModuleFile);
+          },
+        }
+      : undefined;
+
   return [
     devTriggerSecretGuardPlugin(),
     createCloudflareBuiltinsExternalPlugin(),
@@ -271,6 +377,7 @@ export default {
     ...(nuxtVite8WebSocketCompatPlugin ? [nuxtVite8WebSocketCompatPlugin] : []),
     ...(astroRequestScopePlugin ? [astroRequestScopePlugin] : []),
     svelteKitHooksInjectPlugin,
+    ...(svelteKitWorkerBuildPlugin ? [svelteKitWorkerBuildPlugin] : []),
     clientStubsPlugin,
     serverRuntimeOptimizerPlugin,
     bindingRuntimePlugin(bindingNames),
