@@ -1,0 +1,21 @@
+platform/packages/api/test/unit/hosted-auth-config.test.ts
+  s_77824b01a12d99::t_6781860aff20a0 1-14
+platform/packages/api/wrangler.jsonc
+  s_77824b01a12d99::t_df0fb2b4957bfe 192,210,349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "24a1d4cacd0b0e293714b655ca2b1895f1bed4aa",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
