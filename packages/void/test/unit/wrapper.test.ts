@@ -20,7 +20,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { createServer as createPgServer } from 'pglite-server';
 import { parseSync } from 'vite';
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vite-plus/test';
 import {
   cleanupWrapper,
   needsWrapper,
@@ -504,6 +504,18 @@ describe('generated wrapper queue dispatch', () => {
 
 describe('generateWrapper with migrations', () => {
   const roots: Array<string> = [];
+  // Each new PGlite runs initdb, which can take seconds on CI. Run it once in this hook, with its
+  // own budget; each PostgreSQL test loads a fresh database from the initialized data directory.
+  let pgDataDir: Blob;
+  beforeAll(
+    async () => {
+      const pglite = new PGlite();
+      await pglite.waitReady;
+      pgDataDir = await pglite.dumpDataDir('none');
+      await pglite.close();
+    },
+    process.platform === 'win32' ? 30_000 : undefined,
+  );
   afterEach(() => {
     for (const root of roots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
@@ -754,7 +766,7 @@ describe('generateWrapper with migrations', () => {
       migrationDialect: 'postgresql',
     });
 
-    const pglite = new PGlite();
+    const pglite = new PGlite({ loadDataDir: pgDataDir });
     // pglite-server does not wait for PGlite: a query that arrives during startup spins forever.
     await pglite.waitReady;
     const server = createPgServer(pglite);
@@ -894,7 +906,7 @@ export default async function () {
   async function withPgUsers<T>(
     run: (connectionString: string, connections: () => number) => Promise<T>,
   ): Promise<T> {
-    const pglite = new PGlite();
+    const pglite = new PGlite({ loadDataDir: pgDataDir });
     await pglite.waitReady;
     await pglite.exec(
       "CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL); INSERT INTO users (name) VALUES ('alice');",
