@@ -1,0 +1,49 @@
+platform/packages/api/package.json
+  s_1cbb8f9d8ae59c::t_eb5271db1839bd 53
+platform/packages/api/src/admin/react/client.ts
+  s_1cbb8f9d8ae59c::t_7554bb7a1ca541 3,7-10
+platform/packages/api/src/admin/react/code-highlighter.ts
+  s_1cbb8f9d8ae59c::t_ca68cf7b107a0f 1-36
+platform/packages/api/src/admin/react/code-highlighting.ts
+  s_1cbb8f9d8ae59c::t_6bf4434f46b917 1-19
+platform/packages/api/src/admin/react/styles.css
+  s_1cbb8f9d8ae59c::t_7864b6b7375edb 135,141
+platform/packages/api/src/admin/react/themes/LICENSE
+  s_1cbb8f9d8ae59c::t_6f65f1e345bf72 1-21
+platform/packages/api/src/admin/react/themes/dunkel.ts
+  s_1cbb8f9d8ae59c::t_5c30c25cf9d84b 1-392
+platform/packages/api/src/admin/react/themes/licht.ts
+  s_1cbb8f9d8ae59c::t_4512936311bcfd 1-388
+platform/packages/api/src/admin/react/views/AuthSettingsPage.tsx
+  s_1cbb8f9d8ae59c::t_8910493b8ef50e 11,63-66,70-73
+platform/packages/api/src/admin/react/views/CodeBlock.tsx
+  s_1cbb8f9d8ae59c::t_624f679af66181 1-57
+platform/packages/api/src/admin/react/views/ConnectionForm.tsx
+  s_1cbb8f9d8ae59c::t_c19a30f67575a6 5,32
+platform/packages/api/src/admin/react/views/DeploymentManifestCard.tsx
+  s_1cbb8f9d8ae59c::t_dbe256d28b8d73 7,64
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_1cbb8f9d8ae59c::t_82bb4494556865 2763,2861-2875
+platform/packages/api/test/unit/admin-code-highlighter.test.ts
+  s_1cbb8f9d8ae59c::t_d516e575199f9a 1-42
+pnpm-lock.yaml
+  s_1cbb8f9d8ae59c::t_dba22d8a8aeeb9 258-260,905-907
+pnpm-workspace.yaml
+  s_1cbb8f9d8ae59c::t_41109fad2f0227 62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5de88bfb4826d5d1afc221aaffff26513d09e284",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
