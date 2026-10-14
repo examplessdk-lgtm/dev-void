@@ -85,6 +85,8 @@ export type ValidateProdEnvOptions = {
   productionOnly: boolean;
   /** Optional remote secret list (names only). Treated as "value present". */
   remoteSecrets?: Array<string>;
+  /** Explicit public vars included in a managed deployment. Never satisfy server schema keys. */
+  workerVars?: Record<string, string>;
 };
 
 export type ProdEnvValidationResult = {
@@ -130,6 +132,15 @@ export async function validateProdEnv(
   const reservedInSchema = findReservedEnvKeys(Object.keys(mod._getRegisteredSchema() ?? {}));
   if (reservedInSchema.length > 0) {
     throw new Error(`env: ${reservedEnvKeysMessage('env.ts', reservedInSchema)}`);
+  }
+  const serverVarKeys = Object.keys(mod._getRegisteredSchema() ?? {}).filter(
+    (key) => !isClientEnvKey(key) && Object.hasOwn(options.workerVars ?? {}, key),
+  );
+  if (serverVarKeys.length > 0) {
+    throw new Error(
+      `env: Server env keys cannot be Worker plaintext vars: ${serverVarKeys.join(', ')}. ` +
+        'Remove them from worker.vars and set them with the remote secret store.',
+    );
   }
 
   const local = options.productionOnly

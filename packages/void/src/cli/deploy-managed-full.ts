@@ -344,7 +344,7 @@ export async function runFullDeploy(
   );
   const workerMain = resolveDeployWorkerMain(voidConfig, join(distDir, workerDirName));
 
-  await assertEnvSchemaValid(root, client, config.projectId);
+  await assertEnvSchemaValid(root, client, config.projectId, voidConfig.worker?.vars);
 
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -421,6 +421,7 @@ export async function runFullDeploy(
       ssr: isSsr || hasRoutes || hasMiddleware || hasWebSockets || authEnabled,
       framework: isFrameworkMode ? detected!.name : undefined,
       revalidate,
+      vars: voidConfig.worker?.vars,
       queues,
       prerender: uniquePrerenderPaths,
       assetConfig,

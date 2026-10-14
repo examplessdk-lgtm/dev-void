@@ -69,18 +69,18 @@ function buildDeployRequest(projectId: string, jwt: string, manifest: object): R
 }
 
 describe('manifest var / secret collision warning', () => {
-  it('logs warning when manifest vars collide with project secrets', async () => {
+  it('uploads each binding once and warns when a secret overrides a manifest var', async () => {
     const user = await createTestUser(env.db);
     const project = await createTestProject(env.db, user.id, 'collision-app');
     await createTestProjectSecret(env.db, env, project.id, 'API_KEY', 'secret-value');
-    mockCfApi();
+    const fetchMock = mockCfApi();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const res = await app.fetch(
       buildDeployRequest(project.id, user.jwt, {
         version: 3,
         bindings: {},
-        vars: { API_KEY: 'from-manifest' },
+        vars: { API_KEY: 'from-manifest', API_URL: 'https://api.example.test' },
       }),
       env,
     );
@@ -93,5 +93,25 @@ describe('manifest var / secret collision warning', () => {
     // in `collisions`.
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('var_secret_collisions'));
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('API_KEY'));
+
+    const uploadCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).includes('/workers/dispatch/') && (init as RequestInit)?.method === 'PUT',
+    );
+    expect(uploadCall).toBeDefined();
+    const form = (uploadCall![1] as RequestInit).body as FormData;
+    const metadata = JSON.parse(await (form.get('metadata') as Blob).text()) as {
+      bindings: Array<{ name: string; type: string; text?: string }>;
+    };
+    expect(metadata.bindings.filter(({ name }) => name === 'API_KEY')).toEqual([
+      { type: 'secret_text', name: 'API_KEY', text: 'secret-value' },
+    ]);
+    expect(metadata.bindings).toContainEqual({
+      type: 'plain_text',
+      name: 'API_URL',
+      text: 'https://api.example.test',
+    });
+    const names = metadata.bindings.map(({ name }) => name);
+    expect(new Set(names).size).toBe(names.length);
   });
 });

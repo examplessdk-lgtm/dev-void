@@ -297,6 +297,8 @@ Curated Cloudflare Workers configuration. `void init` pins `compatibility_date` 
 
 `worker.vars` values must be strings. Root `.env` values override them during local development only. Production builds do not load `.env`, and reject any `worker.vars` name declared as a server key in `env.ts`. Use `void secret put` for production server values.
 
+Managed deployments include `worker.vars` as plain-text bindings. A remote secret with the same name takes precedence. To use the configured variable instead, remove that remote secret and deploy again. Secret deletion changes the running Worker immediately, so plan this migration during a maintenance window.
+
 `worker.limits.cpu_ms` sets the CPU time limit per request, from 1 to 300000 ms. On a Void platform, deploy fails if the limit exceeds the account plan; lower it in `void.config.ts` before retrying. Rollback instead caps the old limit at the current plan ceiling. On direct deploys, [Cloudflare enforces the value](https://developers.cloudflare.com/workers/platform/limits/#cpu-time): Workers Free allows up to 10 ms and Workers Paid up to 300000 ms per request.
 
 ```json

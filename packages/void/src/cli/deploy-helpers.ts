@@ -543,13 +543,14 @@ export function toManifestSchedulesAndQueues(
 
 /**
  * If the project has an `env.ts`, validate its schema against the union of
- * production env files and remote secret names. Hard-error before upload so
+ * build-shell public values and remote secret names. Hard-error before upload so
  * deploys never ship missing required env vars.
  */
 export async function assertEnvSchemaValid(
   root: string,
   client: PlatformClient,
   projectId: string,
+  workerVars: Record<string, string> | undefined,
 ): Promise<void> {
   // Skip the remote secret round-trip when the project has no typed env schema.
   if (findEnvFile(root) == null) {
@@ -560,6 +561,7 @@ export async function assertEnvSchemaValid(
   const { hasSchema, report } = await validateProdEnv(root, {
     productionOnly: true,
     remoteSecrets,
+    workerVars,
   });
   if (!hasSchema || report.valid) {
     return;

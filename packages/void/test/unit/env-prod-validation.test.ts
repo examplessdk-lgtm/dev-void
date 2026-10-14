@@ -36,6 +36,30 @@ afterEach(() => {
 });
 
 describe('validateProdEnv — deploy-time schema enforcement', () => {
+  it('rejects schema-declared server keys in managed Worker vars even when a remote secret exists', async () => {
+    const root = createTempProject();
+    defineEnv({ ADMIN_TOKEN: string().optional() });
+
+    await expect(
+      validateProdEnv(root, {
+        productionOnly: true,
+        remoteSecrets: ['ADMIN_TOKEN'],
+        workerVars: { ADMIN_TOKEN: 'must-not-be-uploaded' },
+      }),
+    ).rejects.toThrow('Server env keys cannot be Worker plaintext vars: ADMIN_TOKEN');
+  });
+
+  it('permits public Worker vars outside the server schema', async () => {
+    const root = createTempProject();
+    defineEnv({ ADMIN_TOKEN: string() });
+    const { report } = await validateProdEnv(root, {
+      productionOnly: true,
+      remoteSecrets: ['ADMIN_TOKEN'],
+      workerVars: { API_URL: 'https://api.example.test' },
+    });
+    expect(report.valid).toBe(true);
+  });
+
   it('returns hasSchema=false when the project has no env.ts (skips validation)', async () => {
     const root = createTempProject({ withEnvTs: false });
     const result = await validateProdEnv(root, { productionOnly: true });

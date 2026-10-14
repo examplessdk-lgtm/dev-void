@@ -1,4 +1,12 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import {
@@ -89,7 +97,13 @@ let savedToken: string | undefined;
 let savedProject: string | undefined;
 
 type Captured = {
-  finalizeBody: { manifest?: { pages?: unknown; bindings?: Record<string, unknown> } } | null;
+  finalizeBody: {
+    manifest?: {
+      pages?: unknown;
+      bindings?: Record<string, unknown>;
+      vars?: Record<string, string>;
+    };
+  } | null;
 };
 
 // Every asset is reported as present, so the deploy skips uploads and goes straight to finalize.
@@ -176,7 +190,7 @@ function ndjson(events: Array<unknown>): Response {
   });
 }
 
-describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () => {
+describe('managed deployment manifests (built Worker)', () => {
   beforeAll(() => {
     playground = createIsolatedPlayground(ROOT, SOURCE_PLAYGROUND);
     fixture = playground.root;
@@ -317,6 +331,44 @@ describe('runFullDeploy emits manifest.pages (Void pages app, end-to-end)', () =
       writeFileSync(configPath, original);
     }
   });
+
+  it.each([
+    ['Void', undefined],
+    ['Class A', { name: 'vinext-pages', class: 'a' }],
+    ['Class C', { name: 'astro', class: 'c' }],
+  ] as const)(
+    'includes configured worker.vars in the %s deployment request',
+    async (_, detected) => {
+      mockDetectFramework.mockReturnValue(detected);
+      const configPath = join(fixture, 'void.config.ts');
+      const original = readFileSync(configPath, 'utf8');
+      const dotenvPath = join(fixture, '.env');
+      const originalDotenv = existsSync(dotenvPath) ? readFileSync(dotenvPath) : undefined;
+      const vars = { API_URL: 'https://api.example.test', EMPTY_SETTING: '' };
+      writeFileSync(
+        configPath,
+        original.replace('worker: {', `worker: { vars: ${JSON.stringify(vars)},`),
+      );
+      writeFileSync(dotenvPath, 'API_URL=https://local.example.test\nADMIN_TOKEN=local-secret\n');
+      if (detected?.name === 'astro') {
+        // Reuse the built Worker at the Class C preset's output paths.
+        cpSync(join(fixture, 'dist/ssr'), join(fixture, 'dist/server'), { recursive: true });
+        copyFileSync(join(fixture, 'dist/server/index.js'), join(fixture, 'dist/server/entry.mjs'));
+      }
+      try {
+        const captured = installPlatformMocks();
+        await runDeploy(fixture, { skipBuild: true });
+        expect(captured.finalizeBody?.manifest?.vars).toEqual(vars);
+      } finally {
+        writeFileSync(configPath, original);
+        if (originalDotenv === undefined) {
+          rmSync(dotenvPath, { force: true });
+        } else {
+          writeFileSync(dotenvPath, originalDotenv);
+        }
+      }
+    },
+  );
 
   it('uses the alternate project for Worker packaging and prerendering while retaining the saved link', async () => {
     const original = readFileSync(projectJson, 'utf8');
