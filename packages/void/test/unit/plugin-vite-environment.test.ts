@@ -1,12 +1,22 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cloudflare } from '@cloudflare/vite-plugin';
-import { createServer, normalizePath, resolveConfig } from 'vite';
+import { createBuilder, createServer, normalizePath, resolveConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { voidPlugin } from '../../src/index.ts';
+import { findVoidDependentPackages } from '../../src/installed-packages.ts';
 
 const roots: Array<string> = [];
 
@@ -320,6 +330,426 @@ describe('voidPlugin Vite environments', () => {
     } finally {
       await server.close();
     }
+  });
+
+  /** An installed package with the given manifest and `index.js`. */
+  function installPackage(root: string, name: string, manifest: object, index: string): void {
+    const dir = join(root, 'node_modules', name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name, main: 'index.js', ...manifest }),
+    );
+    writeFileSync(join(dir, 'index.js'), index);
+  }
+
+  it('serves the app void/db to installed ES module packages that depend on void in SvelteKit dev', async () => {
+    const root = realpathSync.native(createProjectRoot());
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        dependencies: {
+          'db-lib': '*',
+          'cjs-db-lib': '*',
+          'wrapped-db-lib': '*',
+          'esm-wrapped-db-lib': '*',
+        },
+        devDependencies: { '@sveltejs/kit': '*', void: '*' },
+      }),
+    );
+    writeFileSync(
+      join(root, 'void.json'),
+      JSON.stringify({ database: 'pg', worker: { compatibility_date: '2026-02-24' } }),
+    );
+    mkdirSync(join(root, 'db'));
+    writeFileSync(
+      join(root, 'db/schema.ts'),
+      "import { pgTable, serial } from 'void/schema-pg';\nexport const users = pgTable('users', { id: serial('id') });\n",
+    );
+    installPackage(
+      root,
+      'void',
+      { type: 'module', exports: { './db': './db.mjs', './schema-pg': './schema-pg.mjs' } },
+      '',
+    );
+    for (const file of ['db.mjs', 'schema-pg.mjs']) {
+      writeFileSync(join(root, 'node_modules/void', file), 'export {};\n');
+    }
+    installPackage(
+      root,
+      'db-lib',
+      { type: 'module', peerDependencies: { void: '*' } },
+      "export { db } from 'void/db';\n",
+    );
+    // Vite's module runner cannot evaluate CommonJS, so these stay with Node: one CommonJS
+    // package, and one with an ES module wrapper that imports its CommonJS build.
+    installPackage(
+      root,
+      'cjs-db-lib',
+      { peerDependencies: { void: '*' } },
+      "exports.db = require('void/db').db;\n",
+    );
+    installPackage(
+      root,
+      'wrapped-db-lib',
+      {
+        exports: { import: './wrapper.mjs', require: './index.js' },
+        peerDependencies: { void: '*' },
+      },
+      "exports.db = require('void/db').db;\n",
+    );
+    writeFileSync(
+      join(root, 'node_modules/wrapped-db-lib/wrapper.mjs'),
+      "import lib from './index.js';\nexport const db = lib.db;\n",
+    );
+    // The same wrapper in an ES module package, as in Node's dual-package guide.
+    installPackage(
+      root,
+      'esm-wrapped-db-lib',
+      {
+        type: 'module',
+        exports: { import: './wrapper.mjs', require: './index.cjs' },
+        peerDependencies: { void: '*' },
+      },
+      '',
+    );
+    writeFileSync(
+      join(root, 'node_modules/esm-wrapped-db-lib/index.cjs'),
+      "exports.db = require('void/db').db;\n",
+    );
+    writeFileSync(
+      join(root, 'node_modules/esm-wrapped-db-lib/wrapper.mjs'),
+      "import lib from './index.cjs';\nexport const db = lib.db;\n",
+    );
+    mkdirSync(join(root, 'src'));
+    writeFileSync(
+      join(root, 'src/server.ts'),
+      "import { db } from 'db-lib';\nimport { db as cjsDb } from 'cjs-db-lib';\nimport { db as wrappedDb } from 'wrapped-db-lib';\nimport { db as esmWrappedDb } from 'esm-wrapped-db-lib';\nexport { db, cjsDb, wrappedDb, esmWrappedDb };\n",
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [voidPlugin()],
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true, ws: false, preTransformRequests: false },
+    });
+    try {
+      const app = await server.environments.ssr.transformRequest('/src/server.ts');
+      const lib = await server.environments.ssr.transformRequest('/node_modules/db-lib/index.js');
+
+      expect(app?.code).not.toContain('__vite_ssr_import__("db-lib"');
+      expect(app?.code).toContain('__vite_ssr_import__("cjs-db-lib"');
+      expect(app?.code).toContain('__vite_ssr_import__("wrapped-db-lib"');
+      expect(app?.code).toContain('__vite_ssr_import__("esm-wrapped-db-lib"');
+      expect(lib?.code).toContain('virtual:void-db');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('leaves installed packages that depend on void to Node in SvelteKit D1 dev', async () => {
+    const root = realpathSync.native(createProjectRoot());
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        dependencies: { 'db-lib': '*' },
+        devDependencies: { '@sveltejs/kit': '*', void: '*' },
+      }),
+    );
+    installPackage(root, 'void', { type: 'module', exports: { './db': './db.mjs' } }, '');
+    writeFileSync(join(root, 'node_modules/void/db.mjs'), 'export {};\n');
+    installPackage(
+      root,
+      'db-lib',
+      { type: 'module', peerDependencies: { void: '*' } },
+      "export { db } from 'void/db';\n",
+    );
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'src/server.ts'), "export { db } from 'db-lib';\n");
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [voidPlugin()],
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true, ws: false, preTransformRequests: false },
+    });
+    try {
+      const app = await server.environments.ssr.transformRequest('/src/server.ts');
+
+      expect(app?.code).toContain('__vite_ssr_import__("db-lib"');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // The rule vite-plugin-svelte applies to Svelte libraries.
+  it("finds installed ES module packages that depend on void among the app's dependencies and theirs", () => {
+    const root = createProjectRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        dependencies: {
+          'db-lib': '*',
+          'plain-lib': '*',
+          'module-db-lib': '*',
+          'mjs-db-lib': '*',
+        },
+        devDependencies: { 'dev-db-lib': '*' },
+      }),
+    );
+    const usesVoid = { peerDependencies: { void: '*' } };
+    installPackage(
+      root,
+      'db-lib',
+      { type: 'module', dependencies: { 'inner-db-lib': '*' }, ...usesVoid },
+      '',
+    );
+    installPackage(root, 'inner-db-lib', { type: 'module', ...usesVoid }, '');
+    installPackage(root, 'dev-db-lib', { type: 'module', ...usesVoid }, '');
+    // Packages that a package without void depends on stay with it.
+    installPackage(
+      root,
+      'plain-lib',
+      { type: 'module', dependencies: { 'hidden-db-lib': '*' } },
+      '',
+    );
+    installPackage(root, 'hidden-db-lib', { type: 'module', ...usesVoid }, '');
+    // ES module entries outside a `type: "module"` package.
+    installPackage(root, 'module-db-lib', { module: './index.mjs', ...usesVoid }, '');
+    installPackage(root, 'mjs-db-lib', { exports: './index.mjs', ...usesVoid }, '');
+    for (const name of ['module-db-lib', 'mjs-db-lib']) {
+      writeFileSync(join(root, 'node_modules', name, 'index.mjs'), '');
+    }
+
+    expect(findVoidDependentPackages(root)).toEqual([
+      'db-lib',
+      'dev-db-lib',
+      'inner-db-lib',
+      'mjs-db-lib',
+      'module-db-lib',
+    ]);
+  });
+
+  // Vite's module runner evaluates an inlined package as ES modules, so a package whose import
+  // entry loads CommonJS stays with Node.
+  const wrapper = {
+    'wrapper.mjs': "import lib from './index.cjs';\nexport const db = lib.db;\n",
+    'index.cjs': 'exports.db = 1;\n',
+  };
+  it.each([
+    {
+      shape: 'separate ES module and CommonJS entries',
+      manifest: { exports: { '.': { import: './index.mjs', require: './index.cjs' } } },
+      files: { 'index.mjs': 'export const db = 1;\n', 'index.cjs': 'exports.db = 1;\n' },
+      found: true,
+    },
+    {
+      shape: 'a nested type: module folder',
+      manifest: { exports: { import: './esm/index.js', require: './index.js' } },
+      files: { 'esm/package.json': '{"type":"module"}', 'esm/index.js': 'export const db = 1;\n' },
+      found: true,
+    },
+    {
+      shape: "Node's dual-package wrapper",
+      manifest: { exports: { import: './wrapper.mjs', require: './index.cjs' } },
+      files: wrapper,
+      found: false,
+    },
+    {
+      shape: 'that wrapper under type: module',
+      manifest: { type: 'module', exports: { import: './wrapper.mjs', require: './index.cjs' } },
+      files: wrapper,
+      found: false,
+    },
+    {
+      shape: 'an ES module entry that imports .cjs',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': "import vendor from './vendor.cjs';\nexport const db = vendor.db;\n",
+        'vendor.cjs': 'module.exports = { db: 1 };\n',
+      },
+      found: false,
+    },
+  ])('finds an installed package with $shape: $found', ({ manifest, files, found }) => {
+    const root = createProjectRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', dependencies: { 'db-lib': '*' } }),
+    );
+    installPackage(
+      root,
+      'db-lib',
+      { ...manifest, peerDependencies: { void: '*' } },
+      'exports.db = 1;\n',
+    );
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(join(root, 'node_modules/db-lib', path, '..'), { recursive: true });
+      writeFileSync(join(root, 'node_modules/db-lib', path), content);
+    }
+
+    expect(findVoidDependentPackages(root)).toEqual(found ? ['db-lib'] : []);
+  });
+
+  it('rejects Cloudflare-only imports from installed packages on the Node target dev server', async () => {
+    const root = realpathSync.native(createProjectRoot());
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        dependencies: { 'kv-lib': '*' },
+        devDependencies: { void: '*' },
+      }),
+    );
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
+    installPackage(root, 'void', { type: 'module', exports: { './kv': './kv.mjs' } }, '');
+    writeFileSync(join(root, 'node_modules/void/kv.mjs'), 'export const kv = {};\n');
+    installPackage(
+      root,
+      'kv-lib',
+      { type: 'module', peerDependencies: { void: '*' } },
+      "export { kv } from 'void/kv';\n",
+    );
+    mkdirSync(join(root, 'routes/api'), { recursive: true });
+    writeFileSync(
+      join(root, 'routes/api/cache.ts'),
+      "import { kv } from 'kv-lib';\nexport const GET = () => Response.json({ kv: typeof kv });\n",
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+    const server = await createServer({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [voidPlugin()],
+      optimizeDeps: { noDiscovery: true },
+      server: { middlewareMode: true, ws: false, preTransformRequests: false },
+    });
+    try {
+      await expect(server.ssrLoadModule('/routes/api/cache.ts')).rejects.toThrow(
+        "target: 'void/kv' is not available with target 'node'. CF bindings require target: \"cloudflare\". Imported by node_modules/kv-lib/index.js.",
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  describe('Node target builds with an installed void', () => {
+    /** An API-only Node-target app whose route imports void and an adapter from node_modules. */
+    function createNodeApp(route: string): string {
+      const root = realpathSync.native(createProjectRoot());
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({
+          type: 'module',
+          dependencies: { 'kv-lib': '*' },
+          devDependencies: { void: '*', '@void/adapter': '*' },
+        }),
+      );
+      writeFileSync(join(root, 'void.json'), JSON.stringify({ target: 'node' }));
+      installPackage(
+        root,
+        'void',
+        { type: 'module', exports: { './handler': './handler.mjs', './_env': './env.mjs' } },
+        '',
+      );
+      writeFileSync(
+        join(root, 'node_modules/void/handler.mjs'),
+        'export class ValidationError extends Error {}\n',
+      );
+      // Void's runtime imports cloudflare:workers only when it runs in workerd.
+      writeFileSync(
+        join(root, 'node_modules/void/env.mjs'),
+        "export const workers = () => typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers' ? import('cloudflare:workers') : null;\n",
+      );
+      installPackage(
+        root,
+        '@void/adapter',
+        { type: 'module' },
+        "export { ValidationError } from 'void/handler';\n",
+      );
+      installPackage(
+        root,
+        'kv-lib',
+        { type: 'module', peerDependencies: { void: '*' } },
+        "export { kv } from 'void/kv';\n",
+      );
+      mkdirSync(join(root, 'routes/api'), { recursive: true });
+      writeFileSync(join(root, 'routes/api/ping.ts'), route);
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      return root;
+    }
+
+    async function buildApp(root: string): Promise<string> {
+      // The CLI's builder, which runs the plugins' buildApp hooks.
+      const builder = await createBuilder(
+        { root, configFile: false, logLevel: 'silent', plugins: [voidPlugin()] },
+        null,
+      );
+      await builder.buildApp();
+      const output = join(root, 'dist/ssr');
+      return readdirSync(output, { recursive: true })
+        .map(String)
+        .filter((file) => file.endsWith('.js'))
+        .map((file) => readFileSync(join(output, file), 'utf8'))
+        .join('\n');
+    }
+
+    it('bundles void and its adapters, as the dev server inlines them', async () => {
+      const root = createNodeApp(
+        "import { ValidationError } from 'void/handler';\nimport { ValidationError as AdapterError } from '@void/adapter';\nimport { workers } from 'void/_env';\nexport const GET = () => Response.json({ same: ValidationError === AdapterError, workers: typeof workers });\n",
+      );
+
+      const code = await buildApp(root);
+
+      expect(code).toContain('ValidationError = class extends Error');
+      expect(code).not.toMatch(/from\s*"(?:void|@void)\//);
+      expect(code).toContain('import("cloudflare:workers")');
+    });
+
+    // A Pages app's build has a client environment too.
+    it('inlines void, its adapters and the packages that depend on it in a Pages app build', async () => {
+      const root = createNodeApp('export const GET = () => Response.json({});\n');
+      mkdirSync(join(root, 'pages'));
+
+      const config = await resolveConfig(
+        { root, configFile: false, logLevel: 'silent', plugins: [voidPlugin()] },
+        'build',
+        'production',
+      );
+
+      expect(config.environments.ssr!.resolve.noExternal).toEqual(
+        expect.arrayContaining(['void', /^@void\//, 'kv-lib']),
+      );
+    });
+
+    it('rejects Cloudflare-only imports from installed packages', async () => {
+      const root = createNodeApp(
+        "import { kv } from 'kv-lib';\nexport const GET = () => Response.json({ kv: typeof kv });\n",
+      );
+
+      await expect(buildApp(root)).rejects.toThrow(
+        "target: 'void/kv' is not available with target 'node'. CF bindings require target: \"cloudflare\". Imported by node_modules/kv-lib/index.js.",
+      );
+    });
+
+    it('rejects a static cloudflare: import, which Node cannot load', async () => {
+      const root = createNodeApp(
+        "import { env } from 'cloudflare:workers';\nexport const GET = () => Response.json({ env: typeof env });\n",
+      );
+
+      await expect(buildApp(root)).rejects.toThrow(
+        "target: 'cloudflare:workers' is not available with target 'node'. CF bindings require target: \"cloudflare\". Imported by routes/api/ping.ts.",
+      );
+    });
   });
 
   // The package entry is the whole Vite plugin; server code needs only its handler helpers.

@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { dirname, join, relative } from 'pathslash';
 import type { Plugin } from 'vite';
+import { findVoidDependentPackages } from './installed-packages.ts';
 import { readProjectPaths } from './project-paths.ts';
 
 /** Imports that require CF bindings and are not available in Node.js mode. */
@@ -111,17 +112,23 @@ function honoMiddleware(
  *    single SSR build for API-only apps
  */
 export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
+  const unavailable = (id: string, root: string, importer: string | undefined) => {
+    // The import can come from an installed package, so name the file.
+    const source = importer ? ` Imported by ${relative(root, importer)}.` : '';
+    return new Error(
+      `target: '${id}' is not available with target '${target}'. ` +
+        `CF bindings require target: "cloudflare".${source}`,
+    );
+  };
+
   const guardPlugin: Plugin = {
     name: 'void:node-target',
     enforce: 'pre',
 
     resolveId: {
       filter: { id: CF_ONLY_REGEX },
-      handler(id) {
-        throw new Error(
-          `target: '${id}' is not available with target '${target}'. ` +
-            `CF bindings require target: "cloudflare".`,
-        );
+      handler(id, importer) {
+        throw unavailable(id, this.environment.config.root, importer);
       },
     },
 
@@ -142,15 +149,20 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
     },
 
     config(_, { command }) {
+      const root = process.cwd();
+      // Vite's SSR graph leaves a bare import that resolves into node_modules to Node before
+      // any plugin sees it. An installed void would then skip the guard above, and in a build
+      // the app's `void/handler` would load beside the copy that the generated routes bundle,
+      // so its ValidationError is not the class the routes check. Inline void, its adapters
+      // and installed packages that import void in the dev server, Vitest and the build alike,
+      // as with a workspace link.
+      const ssr = {
+        noExternal: ['void', /^@void\//, ...findVoidDependentPackages(root)],
+      };
       if (command !== 'build') {
-        // The dev server (and Vitest) run routes in Vite's Node SSR graph, which
-        // externalizes a bare import resolving into node_modules before any plugin sees
-        // it. An installed void/kv would then skip the guard above. Inlining void keeps
-        // every void import on the plugin path, as with a workspace link.
-        return { ssr: { noExternal: ['void'] } };
+        return { ssr };
       }
 
-      const root = process.cwd();
       const voidDir = join(root, '.void');
       const ssrBuildOptions = {
         outDir: 'dist/ssr',
@@ -167,6 +179,7 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
       // API-only apps need a single SSR build.
       if (existsSync(readProjectPaths(root).pagesDir)) {
         return {
+          ssr,
           build: { outDir: 'dist/client' },
           environments: {
             ssr: { build: ssrBuildOptions },
@@ -178,6 +191,7 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
       }
 
       return {
+        ssr,
         build: {
           ssr: true,
           ...ssrBuildOptions,
@@ -185,14 +199,15 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
       };
     },
 
-    // Orchestrate dual-environment build for pages apps.
-    // For API-only apps (no `environments.ssr`), this hook is not triggered
-    // because Vite's builder is only created when extra environments exist.
+    // Orchestrate the builds. Vite runs this hook with either builder. API-only apps use
+    // the legacy single-environment builder, which creates only the `ssr` environment.
     async buildApp(builder) {
       // SSR must build first so that dist/ssr/app.js exists when the
       // prerender plugin runs in the client environment's closeBundle hook.
       await builder.build(builder.environments.ssr);
-      await builder.build(builder.environments.client);
+      if (builder.environments.client) {
+        await builder.build(builder.environments.client);
+      }
     },
 
     configureServer(server) {
@@ -228,5 +243,22 @@ export function nodeTargetPlugin(target: NodeTarget): Array<Plugin> {
     },
   };
 
-  return [guardPlugin];
+  // The build bundles void, whose runtime loads `cloudflare:` modules with import() only when it
+  // runs in workerd. Keep those external. Node cannot load a static one, so fail the build.
+  const cloudflareModulesPlugin: Plugin = {
+    name: 'void:node-target-cloudflare-modules',
+    apply: 'build',
+    enforce: 'pre',
+    resolveId: {
+      filter: { id: /^cloudflare:/ },
+      handler(id, importer, options) {
+        if (options.kind === 'dynamic-import') {
+          return { id, external: true };
+        }
+        throw unavailable(id, this.environment.config.root, importer);
+      },
+    },
+  };
+
+  return [guardPlugin, cloudflareModulesPlugin];
 }

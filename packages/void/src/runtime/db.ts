@@ -58,13 +58,15 @@ const requestDbKey = {};
 
 function requireD1(): D1Database {
   // Bundlers that skip Void's plugins load this D1 client for every app. Nitro needs the
-  // `void/nitro` module to serve a PostgreSQL or MySQL app's own `void/db`.
+  // `void/nitro` module to serve a PostgreSQL or MySQL app's own `void/db`. Vite serves it to
+  // an installed package only when the package is an ES module that depends on void and the
+  // app lists it or reaches it through such packages.
   if (
     getRuntimeBinding('DB') == null &&
     (getRuntimeBinding('HYPERDRIVE') != null || getRuntimeBinding('DATABASE_URL') != null)
   ) {
     throw new Error(
-      "db: Missing Cloudflare binding 'DB'. This app connects through HYPERDRIVE or DATABASE_URL, but its server bundle loaded the D1 client. In Nuxt or Analog, add 'void/nitro' to the Nitro modules.",
+      "db: Missing Cloudflare binding 'DB'. This app connects through HYPERDRIVE or DATABASE_URL, but its server bundle loaded the D1 client. In Nuxt or Analog, add 'void/nitro' to the Nitro modules. An installed package that imports void/db must be an ES module that lists void in its dependencies or peerDependencies, and the app must list it or reach it through such packages.",
     );
   }
   return requireRuntimeBinding<D1Database>('DB');

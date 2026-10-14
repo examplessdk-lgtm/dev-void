@@ -80,6 +80,8 @@ dist/
 
 `vite preview` also uses `app.js` to serve your built app locally.
 
+Installed packages that depend on `void` are bundled into `dist/ssr`. If one of their dependencies uses a native addon or reads files next to its own code, add that dependency, in the version the package uses, to your app's `dependencies`. The build then leaves it to Node.
+
 ## What Works
 
 These Void features work identically across all targets:

@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { builtinModules, createRequire } from 'node:module';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'pathslash';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'pathslash';
 import { defaultServerConditions, type Plugin } from 'vite';
 import { type ApplicationAnalysis } from './application-analysis.ts';
 import {
@@ -11,9 +9,9 @@ import {
   readWranglerCompat,
   resolveLiveBindingConfig,
   syncWranglerBindings,
-  type WranglerCompat,
 } from './cli/wrangler.ts';
 import { readConfig } from './config.ts';
+import { findDependencyClosure, findVoidDependentPackages } from './installed-packages.ts';
 import { resolveLocalD1Target } from './local-d1.ts';
 import { voidLog } from './log.ts';
 import { bindingRuntimePlugin } from './plugin-binding-runtime.ts';
@@ -36,38 +34,11 @@ import { injectSvelteKitBuildHooks, injectSvelteKitHooks } from './sveltekit-hoo
 
 const handlerFile = fileURLToPath(import.meta.resolve('#self/handler'));
 const envModuleFile = fileURLToPath(import.meta.resolve('#self/_env'));
+// Packages Void depends on are installed for code in this directory.
+const voidDir = dirname(fileURLToPath(import.meta.url));
 
 const ASTRO_SERVER_ENTRY = '@astrojs/cloudflare/entrypoints/server';
 const ASTRO_SCOPED_SERVER_ENTRY = '\0void:astro-server-entry';
-
-const NODE_BUILTIN = new RegExp(`^(?:node:)?(?:${builtinModules.join('|')})$`);
-const NODE_BUILTIN_REQUIRE_PREFIX = '\0void:node-require:';
-
-/**
- * The Node built-ins that workerd provides for the given compatibility settings, from the preset
- * the Cloudflare plugin builds Workers with (a dependency of `@cloudflare/vite-plugin`). Before
- * 2025-09-15 the preset fills in parts of `node:process` instead of listing it, but workerd
- * provides that module at every date.
- */
-async function readWorkerdNodeBuiltins(compat: WranglerCompat): Promise<Set<string>> {
-  const vitePlugin = fileURLToPath(import.meta.resolve('@cloudflare/vite-plugin'));
-  const manifestPath = createRequire(vitePlugin).resolve('@cloudflare/unenv-preset/package.json');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-    exports: { '.': { import: string } };
-  };
-  const { getCloudflarePreset } = (await import(
-    pathToFileURL(join(dirname(manifestPath), manifest.exports['.'].import)).href
-  )) as {
-    getCloudflarePreset(compat: { compatibilityDate: string; compatibilityFlags: Array<string> }): {
-      external: Array<string>;
-    };
-  };
-  const { external } = getCloudflarePreset({
-    compatibilityDate: compat.compatibilityDate,
-    compatibilityFlags: compat.compatibilityFlags ?? [],
-  });
-  return new Set([...external.map((name) => name.replace(/^node:/, '')), 'process']);
-}
 
 export function createFrameworkPlugins(input: {
   readonly localD1: ReturnType<typeof resolveLocalD1Target>;
@@ -228,8 +199,15 @@ export function createFrameworkPlugins(input: {
       // externalizes a bare import resolving into node_modules before any plugin
       // sees it, so an installed void/db would load the package's D1 runtime
       // instead of the virtual module. Inlining keeps every void import, including
-      // the injected env import below, in the graph that holds void/db's env module.
-      return { ssr: { noExternal: ['void'] } };
+      // the injected env import below and those of PostgreSQL and MySQL apps'
+      // installed packages that import void, in the graph that holds void/db's env
+      // module. In a D1 app, a package's own void/db reads the same D1 binding, so
+      // those packages stay with Node.
+      return {
+        ssr: {
+          noExternal: ['void', ...(dialect === 'sqlite' ? [] : findVoidDependentPackages(root))],
+        },
+      };
     },
     resolveId: {
       order: 'pre',
@@ -301,17 +279,18 @@ export default {
   // loads pg-cloudflare's Node stub, and CommonJS requires of Node built-ins become
   // `createRequire(import.meta.url)`. A driver that Vite can resolve from the app root (npm, Yarn
   // and Bun installs, or an app that lists it) even stays external, and Void's browser-target
-  // packaging bundles it with browser stubs. Build that environment as the Cloudflare plugin
-  // builds Workers, and run each request in Void's request scope, as in dev, so void/db keeps one
-  // client per request. D1 apps keep Kit's output: in a request scope, void/db reads D1 through a
-  // replica-capable session instead of the primary.
-  let workerdNodeBuiltins: Promise<Set<string>> | undefined;
+  // packaging bundles it with browser stubs. Build void/db as the Cloudflare plugin builds
+  // Workers: void, drizzle-orm, the driver with every package it depends on, and installed
+  // packages that import void. Other dependencies stay external, as in Kit's own build: Kit's
+  // analyse step loads this output in Node, and a package's `workerd` build may import
+  // `cloudflare:` modules (capnweb does). Run each request in Void's request scope, as in dev, so
+  // void/db keeps one client per request. D1 apps keep Kit's output: in a request scope, void/db
+  // reads D1 through a replica-capable session instead of the primary.
   const svelteKitWorkerBuildPlugin: Plugin | undefined =
     detected.class === 'b' && dialect !== 'sqlite'
       ? {
           name: 'void:sveltekit-worker-build',
           apply: 'build',
-          // Before Vite's resolver, which makes a required built-in external.
           enforce: 'pre',
           configEnvironment(name, environment) {
             if (name !== 'ssr') {
@@ -322,40 +301,21 @@ export default {
                 conditions: environment.resolve?.conditions
                   ? ['workerd', 'worker']
                   : ['workerd', 'worker', ...defaultServerConditions],
-                noExternal: true,
+                noExternal: [
+                  'void',
+                  // By name as well: a Yarn PnP install has no node_modules to read. The
+                  // driver's own dependencies then resolve only through it, so they are bundled.
+                  'drizzle-orm',
+                  dialect === 'mysql' ? 'mysql2' : 'pg',
+                  ...findDependencyClosure('drizzle-orm', voidDir),
+                  ...findDependencyClosure(dialect === 'mysql' ? 'mysql2' : 'pg', voidDir),
+                  ...findVoidDependentPackages(root),
+                ],
               },
               // Node output binds `require` at load with createRequire(import.meta.url). Neutral
               // output throws only when a require runs, as for mysql2's optional `cardinal`.
               build: { rolldownOptions: { platform: 'neutral' } },
             };
-          },
-          // Serve each required Node built-in that workerd provides from an import, as the
-          // Cloudflare plugin does with rolldown's esmExternalRequirePlugin. That plugin works only
-          // with the rolldown copy running the build, which need not be Void's. A require of any
-          // other built-in stays as it is and throws only if it runs.
-          resolveId: {
-            filter: { id: NODE_BUILTIN },
-            async handler(id, _importer, options) {
-              if (this.environment?.name !== 'ssr' || options.kind !== 'require-call') {
-                return;
-              }
-              const name = id.replace(/^node:/, '');
-              workerdNodeBuiltins ??= readWorkerdNodeBuiltins(readWranglerCompat(root, config));
-              if (!(await workerdNodeBuiltins).has(name)) {
-                return;
-              }
-              return `${NODE_BUILTIN_REQUIRE_PREFIX}${name}`;
-            },
-          },
-          load: {
-            // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
-            filter: { id: /^\0void:node-require:/ },
-            handler(id) {
-              // A built-in's default export is its CommonJS exports, and `require` returns an ES
-              // module's "module.exports" export.
-              const name = id.slice(NODE_BUILTIN_REQUIRE_PREFIX.length);
-              return `import builtin from "node:${name}";\nexport { builtin as "module.exports" };\n`;
-            },
           },
           transform(code, id) {
             if (
@@ -379,6 +339,7 @@ export default {
     svelteKitHooksInjectPlugin,
     ...(svelteKitWorkerBuildPlugin ? [svelteKitWorkerBuildPlugin] : []),
     clientStubsPlugin,
+    // Also serves the Node built-ins that the driver requires in SvelteKit's workerd build.
     serverRuntimeOptimizerPlugin,
     bindingRuntimePlugin(bindingNames),
     // Framework-agnostic env DX: typegen, client leak guard, and build-time

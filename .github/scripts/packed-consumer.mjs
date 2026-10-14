@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -389,8 +390,59 @@ if (runtime.manifest.platformVersion !== ${JSON.stringify(version)}) throw new E
             await task.stop();
           }
         }
+        if (framework === 'react') {
+          // The Node target bundles the installed void into its build, so a ValidationError from
+          // void/handler is the class that page actions check, as in dev.
+          await run(
+            manager,
+            manager === 'npm' ? ['install', '@hono/node-server'] : ['add', '@hono/node-server'],
+            fixture,
+          );
+          writeFileSync(
+            join(fixture, 'void.config.ts'),
+            "import { defineConfig } from 'void/config';\nexport default defineConfig({ target: 'node' });\n",
+          );
+          // KV and email are Cloudflare bindings.
+          rmSync(join(fixture, 'routes'), { recursive: true });
+          writeFileSync(
+            join(fixture, 'pages/form.tsx'),
+            'export default function Form() {\n  return <h1>Form</h1>;\n}\n',
+          );
+          writeFileSync(
+            join(fixture, 'pages/form.server.ts'),
+            "import { defineHandler, ValidationError } from 'void/handler';\nexport const action = defineHandler(() => {\n  throw new ValidationError({ email: 'Email already taken' });\n});\n",
+          );
+          await run(process.execPath, [vite, 'build'], fixture);
+          const task = launch(
+            process.execPath,
+            [vite, 'preview', '--host', '127.0.0.1', '--port', '0', '--strictPort'],
+            fixture,
+          );
+          try {
+            const deadline = Date.now() + 60_000;
+            let base;
+            while (!base && Date.now() < deadline) {
+              if (task.child.exitCode !== null) {
+                throw new Error(task.failure());
+              }
+              base = packedServerUrl(task.output());
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+            assert(base, task.failure());
+            const response = await fetch(`${base}/form`, {
+              method: 'POST',
+              headers: { accept: 'text/html' },
+              body: new URLSearchParams({ email: 'taken@example.com' }),
+            });
+            const body = await response.text();
+            assert.equal(response.status, 200, `${body}\n${task.failure()}`);
+            assert(body.includes('Email already taken'), body);
+          } finally {
+            await task.stop();
+          }
+        }
         console.log(
-          `Passed packed ${label} (${suite}): init, frozen install, public Vite build/typecheck, assets, KV, email, runtime integrity${full ? ', dev/preview, hydration/navigation' : ', dev HTTP'}`,
+          `Passed packed ${label} (${suite}): init, frozen install, public Vite build/typecheck, assets, KV, email, runtime integrity${full ? ', dev/preview, hydration/navigation' : ', dev HTTP'}${framework === 'react' ? ', Node target' : ''}`,
         );
       } catch (error) {
         failures.push({ fixture: label, error: String(error.stack ?? error) });
