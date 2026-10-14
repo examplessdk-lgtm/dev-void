@@ -1037,6 +1037,7 @@ export { recordResource } from './platform-installer-resources.ts';
 export {
   platformDatabaseClientUrl,
   acquirePlatformDatabaseLifecycleLock,
+  claimPlatformDatabase,
   acquirePlatformDatabaseLifecycleLockConnection,
   readPlatformDatabaseLifecycleManifest,
   readPlatformProjectSlugs,

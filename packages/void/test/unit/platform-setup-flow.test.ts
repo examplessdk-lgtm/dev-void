@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => ({
   password: vi.fn(),
   operatorCredential: vi.fn(),
   open: vi.fn(),
+  claim: vi.fn(),
   install: vi.fn(),
   preflight: vi.fn(),
   plan: vi.fn(),
@@ -90,6 +91,7 @@ vi.mock('../../src/cli/platform-cloudflare.ts', async (original) => ({
 }));
 vi.mock('../../src/cli/platform-installer.ts', async (original) => ({
   ...(await original<typeof import('../../src/cli/platform-installer.ts')>()),
+  claimPlatformDatabase: mocks.claim,
   installPlatform: mocks.install,
   resolveBootstrapGitHubId: async () => '12345',
   readPlatformDatabaseLifecycleManifest: mocks.database,
@@ -1149,6 +1151,87 @@ describe('platform credential onboarding', () => {
     expect(mocks.progress.error.mock.invocationCallOrder[0]).toBeLessThan(
       info.mock.invocationCallOrder[recoveryIndex]!,
     );
+  });
+
+  it('names the database variable while a refused database can still be replaced', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const hint =
+      'To use another PostgreSQL database, set VOID_PLATFORM_DATABASE_URL to its URL first.';
+    const refused =
+      'platform: This PostgreSQL database is already claimed by Void platform installation old-team.';
+    mocks.install.mockImplementationOnce(async (_plan, _secrets, manifest) => {
+      writePendingInstallationSecrets(manifest, {
+        ...readPendingInstallationSecrets(manifest),
+        databaseClaimState: 'failed',
+      });
+      throw new Error(refused);
+    });
+    await expect(runPlatformLifecycleCommand(parsePlatformArgs(args))).rejects.toThrow(refused);
+    expect(info).toHaveBeenCalledWith(hint);
+    const manifest = listInstallationManifests()[0]!;
+    const saved = readPendingInstallationSecrets(manifest)!.databaseUrl;
+
+    // A resume reuses the saved URL without asking for it again.
+    info.mockClear();
+    mocks.password.mockClear();
+    mocks.database.mockRejectedValueOnce(
+      new Error(
+        'platform: The PostgreSQL database ownership claim does not match this installation.',
+      ),
+    );
+    const resume = parsePlatformArgs(['install', '--resume', '--name', manifest.id]);
+    await expect(runPlatformLifecycleCommand(resume)).rejects.toThrow(
+      'ownership claim does not match',
+    );
+    expect(mocks.database).toHaveBeenCalledWith(saved, manifest.id, manifest.ownershipNonce);
+    expect(
+      mocks.password.mock.calls.some(([input]) => input.message.startsWith('PostgreSQL')),
+    ).toBe(false);
+    expect(info).toHaveBeenCalledWith(hint);
+
+    const replacement = 'postgres://user:password@replacement.example.com/platform';
+    vi.stubEnv('VOID_PLATFORM_DATABASE_URL', replacement);
+    mocks.database.mockResolvedValueOnce(null);
+    await runPlatformLifecycleCommand(resume);
+    expect(mocks.database).toHaveBeenLastCalledWith(
+      replacement,
+      manifest.id,
+      manifest.ownershipNonce,
+    );
+    expect(mocks.install.mock.lastCall![1].databaseUrl).toBe(replacement);
+  });
+
+  it('keeps the database hint out of failures after the database is claimed', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const manifest = await interruptedInstall();
+    mocks.database.mockResolvedValueOnce(null);
+    mocks.install.mockRejectedValueOnce(new Error('Worker upload failed'));
+    await expect(
+      runPlatformLifecycleCommand(
+        parsePlatformArgs(['install', '--resume', '--name', manifest.id]),
+      ),
+    ).rejects.toThrow('Worker upload failed');
+    expect(info.mock.calls.some(([message]) => message.startsWith('Continue with:'))).toBe(true);
+    expect(
+      info.mock.calls.some(([message]) => message.includes('VOID_PLATFORM_DATABASE_URL')),
+    ).toBe(false);
+  });
+
+  it('keeps the database hint out of failures after this run claims the database', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    mocks.install.mockImplementationOnce(async (_plan, secrets, manifest, dependencies) => {
+      await dependencies.claimDatabase?.(secrets.databaseUrl, manifest.id, manifest.ownershipNonce);
+      // Later checkpoints save the values without the claim state.
+      writePendingInstallationSecrets(manifest, { databaseUrl: secrets.databaseUrl });
+      throw new Error('App access token rejected');
+    });
+    await expect(runPlatformLifecycleCommand(parsePlatformArgs(args))).rejects.toThrow(
+      'App access token rejected',
+    );
+    expect(info.mock.calls.some(([message]) => message.startsWith('Continue with:'))).toBe(true);
+    expect(
+      info.mock.calls.some(([message]) => message.includes('VOID_PLATFORM_DATABASE_URL')),
+    ).toBe(false);
   });
 
   it.each(['void', 'void-dev'])(

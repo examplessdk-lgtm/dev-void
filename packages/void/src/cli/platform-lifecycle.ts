@@ -42,6 +42,7 @@ import {
 } from './platform-install-auth.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
+  claimPlatformDatabase,
   createPlatformInstallationSecrets,
   installPlatform,
   loadPlatformRuntime,
@@ -86,13 +87,11 @@ import {
   platformSetupFieldHelp,
 } from './platform-setup.ts';
 
-export function resolvePlatformInstallDatabaseUrl(
+function isPlatformInstallDatabaseBound(
   checkpoint: Record<string, string> | null,
-  manifest: PlatformInstallationManifest | null = null,
-): string {
-  const explicit = process.env.VOID_PLATFORM_DATABASE_URL || process.env.DATABASE_URL || '';
-  const recorded = checkpoint?.databaseUrl || '';
-  const databaseBound =
+  manifest: PlatformInstallationManifest | null,
+): boolean {
+  return Boolean(
     checkpoint?.databaseClaimState === 'claimed' ||
     manifest?.resources.some(
       (resource) =>
@@ -102,8 +101,17 @@ export function resolvePlatformInstallDatabaseUrl(
     manifest?.steps.some(
       (step) =>
         step.key.startsWith('database-schema:') || step.key.startsWith('database-migrations:'),
-    );
-  if (databaseBound) {
+    ),
+  );
+}
+
+export function resolvePlatformInstallDatabaseUrl(
+  checkpoint: Record<string, string> | null,
+  manifest: PlatformInstallationManifest | null = null,
+): string {
+  const explicit = process.env.VOID_PLATFORM_DATABASE_URL || process.env.DATABASE_URL || '';
+  const recorded = checkpoint?.databaseUrl || '';
+  if (isPlatformInstallDatabaseBound(checkpoint, manifest)) {
     if (!recorded) {
       if (explicit) {
         // Discovery intentionally recovers no credentials. The database's
@@ -456,6 +464,8 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
     active.start(message);
     return active;
   };
+  // Set while a step uses an unclaimed database URL, which a resume may still replace.
+  let usingUnboundDatabase = false;
   try {
     if (!existing && !args.plan) {
       assertPlatformInstallationSlugAvailable(installationSlug);
@@ -482,11 +492,13 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
         );
       }
       progress = startProgress('Reading the saved installation');
+      usingUnboundDatabase = !isPlatformInstallDatabaseBound(checkpoint, existing);
       const authoritative = await readPlatformDatabaseLifecycleManifest(
         databaseUrl,
         existing.id,
         existing.ownershipNonce,
       );
+      usingUnboundDatabase = false;
       progress?.stop('Read the saved installation.');
       progress = undefined;
       if (authoritative) {
@@ -1162,8 +1174,13 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       });
       existing = completePlatformSetupDraft(existing);
     }
+    usingUnboundDatabase = !isPlatformInstallDatabaseBound(checkpoint, existing);
     const result = await installPlatform(plan, secrets, existing, {
       acquireDatabaseLifecycleLock: acquirePlatformDatabaseLifecycleLock,
+      claimDatabase: async (...claim) => {
+        await claimPlatformDatabase(...claim);
+        usingUnboundDatabase = false;
+      },
       client,
       operatorApiToken: managementApiToken || operatorCredential.token,
       runtime,
@@ -1291,6 +1308,11 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       log.info(
         `Continue with: ${cliCommandName()} platform install --resume --name ${existing.id}`,
       );
+      if (usingUnboundDatabase) {
+        log.info(
+          'To use another PostgreSQL database, set VOID_PLATFORM_DATABASE_URL to its URL first.',
+        );
+      }
     }
     throw error;
   } finally {

@@ -25,6 +25,42 @@ export class PlatformCloudflareApiError extends Error {
   }
 }
 
+// The installer records a provision intent right before it creates the AI
+// Gateway, so the gateway it made was created after that intent. The intent
+// uses this machine's clock and `createdAt` uses Cloudflare's. Allow this
+// machine's clock to run a minute ahead, far more than a synced clock drifts,
+// and the create to finish within ten minutes. A gateway created before the
+// intent was not made by this installation.
+const AI_GATEWAY_CLOCK_SKEW_MS = 60_000;
+const AI_GATEWAY_CREATION_WINDOW_MS = 10 * 60_000;
+
+/** Whether Cloudflare reports `createdAt` within the AI Gateway creation window after `time`. */
+function aiGatewayCreatedAfter(createdAt: string | undefined, time: number): boolean {
+  const created = createdAt === undefined ? Number.NaN : Date.parse(createdAt);
+  return (
+    !Number.isNaN(created) &&
+    created >= time - AI_GATEWAY_CLOCK_SKEW_MS &&
+    created <= time + AI_GATEWAY_CREATION_WINDOW_MS
+  );
+}
+
+/**
+ * AI Gateway ids are chosen by the caller and can be reused after a delete,
+ * and gateways carry no ownership marker. Only a creation time next to the
+ * installer's provision intent shows that this is the gateway it created.
+ */
+export function aiGatewayCreatedDuringProvisionIntent(
+  manifest: Readonly<{ steps: ReadonlyArray<Readonly<{ key: string; completedAt: string }>> }>,
+  key: string,
+  createdAt: string | undefined,
+): boolean {
+  return manifest.steps.some(
+    (step) =>
+      (step.key === `provision-intent:${key}` || step.key.startsWith(`provision-intent:${key}:`)) &&
+      aiGatewayCreatedAfter(createdAt, Date.parse(step.completedAt)),
+  );
+}
+
 export class PlatformWorkerCustomDomainsChangedError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);

@@ -965,7 +965,7 @@ async function claimPlatformDatabaseConnection(
       claim.ownership_nonce !== ownershipNonce
     ) {
       throw new Error(
-        `platform: This PostgreSQL database is already claimed by Void platform installation ${claim.installation_id}. Use a dedicated empty database for each installation.`,
+        `platform: This PostgreSQL database is already claimed by Void platform installation ${claim.installation_id}. Uninstall keeps the database and its data, so use a dedicated empty database for each installation.`,
       );
     }
     await client.query('COMMIT');

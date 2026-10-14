@@ -92,3 +92,12 @@ it('refuses leftover migration history before claiming and still resumes its own
   lock = undefined;
   await expect(claimPlatformDatabase(url, 'test-install', 'test-owner')).resolves.toBeUndefined();
 }, 30_000);
+
+it('tells a reinstall on the same database to use a new empty database', async () => {
+  const url = 'postgresql://owner:pw@db.example.com/platform?sslmode=require';
+  await claimPlatformDatabase(url, 'test-install', 'test-owner');
+  // Uninstall leaves the claim and the data, and a reinstall gets a new owner.
+  await expect(claimPlatformDatabase(url, 'test-install', 'next-owner')).rejects.toThrow(
+    'platform: This PostgreSQL database is already claimed by Void platform installation test-install. Uninstall keeps the database and its data, so use a dedicated empty database for each installation.',
+  );
+}, 30_000);

@@ -100,4 +100,4 @@ New platform resources use deterministic `void-<installation-name>-<role>` names
 | Proxied wildcard DNS records              |                                0 or 1 | Created only when an application domain is configured                                         |
 | Zones                                     |                                0 or 1 | Created only when the requested application zone is absent                                    |
 
-The API Worker uses four Durable Object classes for usage, cron scheduling, error monitoring, and concurrency. Worker bindings create the request and log datasets in Analytics Engine. The core installation doesn't create Container applications, a GitHub App, a dashboard Worker, or build Workers.
+The API Worker uses four Durable Object classes for usage, cron scheduling, error monitoring, and concurrency. Worker bindings create the request and log datasets in Analytics Engine, which must be [enabled for the account](/guide/platform/installation/prerequisites#if-cloudflare-rejects-analytics-engine). The core installation doesn't create Container applications, a GitHub App, a dashboard Worker, or build Workers.

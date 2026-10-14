@@ -42,6 +42,44 @@ it('reports structured provider errors when stderr is empty using existing crede
   );
 });
 
+it('points to the Analytics Engine setup when Cloudflare refuses its binding', () => {
+  const raw =
+    'You need to enable Analytics Engine. Head to the Cloudflare Dashboard to enable: https://dash.cloudflare.com/account/workers/analytics-engine [code: 10089]';
+  const hint =
+    ' If the Analytics Engine page offers no way to enable it, follow https://void.cloud/guide/platform/installation/prerequisites#if-cloudflare-rejects-analytics-engine, then retry.';
+  expect(() =>
+    assertCleanPlatformWrangler(
+      { status: 1, stdout: '', stderr: raw, errorCode: 10089 },
+      'bootstrap void-team-tail',
+    ),
+  ).toThrow(`platform: Wrangler failed to bootstrap void-team-tail (${raw}).${hint}`);
+  expect(() =>
+    assertCleanPlatformWrangler(
+      {
+        status: 1,
+        stdout: '',
+        stderr: '',
+        errors: [{ code: 10089, message: 'You need to enable Analytics Engine.' }],
+      },
+      'bootstrap void-team-tail',
+    ),
+  ).toThrow(hint);
+  expect(() =>
+    assertCleanPlatformWrangler(
+      { status: 1, stdout: '', stderr: 'You need to enable Analytics Engine. [10089]' },
+      'bootstrap void-team-tail',
+    ),
+  ).toThrow(hint);
+  expect(() =>
+    assertCleanPlatformWrangler(
+      { status: 1, stdout: '', stderr: 'Authentication error [code: 10000]', errorCode: 10000 },
+      'bootstrap void-team-tail',
+    ),
+  ).toThrow(
+    /^platform: Wrangler failed to bootstrap void-team-tail \(Authentication error \[code: 10000\]\)\.$/,
+  );
+});
+
 it('retains the exit status when stdout contains only binding values', () => {
   expect(() =>
     assertCleanPlatformWrangler(

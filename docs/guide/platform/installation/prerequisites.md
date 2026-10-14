@@ -6,7 +6,7 @@ outline: deep
 
 To run a Void platform, you need:
 
-- A Cloudflare account with Workers for Platforms and R2 enabled.
+- A Cloudflare account with Workers for Platforms, R2, and Analytics Engine enabled.
 - An empty hosted PostgreSQL database.
 - An account with your chosen login provider: GitHub, Google, OIDC, or Cloudflare Access.
 - A domain for your apps, or `workers.dev` for testing. You can [add a domain later](/guide/platform/installation/domains#adding-a-domain).
@@ -27,6 +27,10 @@ In the [Cloudflare dashboard](https://dash.cloudflare.com/), select the account 
 If that domain is already in this Cloudflare account, use its existing zone. Otherwise, [add the domain to Cloudflare](https://developers.cloudflare.com/dns/zone-setups/full-setup/setup/) and follow the nameserver instructions until the zone is active. A zone is Cloudflare's DNS configuration for a domain; creating one does not buy the domain.
 
 You can also let Void create the zone during installation. Setting it up now lets you scope the API tokens to that zone and finish installation without a DNS pause. The platform API uses `workers.dev` by default, so it needs no additional domain.
+
+### If Cloudflare rejects Analytics Engine
+
+The platform stores request metrics and logs in Analytics Engine. If installation stops with "You need to enable Analytics Engine" (code 10089), add an Analytics Engine binding to a Worker that is not part of the platform under **Settings** > **Bindings**, and deploy it once from the dashboard. A new Hello World Worker works. Do not edit the platform's own Workers. Then run the printed `void platform install --resume` command.
 
 ## Install the CLI and Preview
 
@@ -78,7 +82,7 @@ Use any PostgreSQL provider that accepts connections from your computer and Clou
 | [PlanetScale Postgres](https://planetscale.com/docs/postgres/connecting) | Choose **Postgres**, not Vitess/MySQL. Open **Connect**, create role credentials, and use the direct primary connection on port `5432`, not PgBouncer on `6432`. |
 | [Neon](https://neon.com/docs/get-started-with-neon/connect-neon)         | Open **Connect**, select the database and owner role, and turn **connection pooling off**.                                                                       |
 
-Once installation claims the database, continue using that same database for resume and maintenance commands. Uninstall never deletes external PostgreSQL.
+Once installation claims the database, continue using that same database for resume and maintenance commands. If installation stops because it cannot use the database, for example because the database is not empty, set `VOID_PLATFORM_DATABASE_URL` to another database's URL before you resume. Uninstall never deletes external PostgreSQL.
 
 ### Use a provider CLI
 

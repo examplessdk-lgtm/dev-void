@@ -33,7 +33,7 @@ void platform uninstall [id] --plan
 void platform uninstall [id]
 ```
 
-Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and lists the resources left for you to review. Use `--plan` to review deletions and retained resources before making changes. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, and zones are always retained. Email Routing settings are retained; `--purge-resources` removes only the rules that send mail to the platform. DNS records, routes, custom domains, and Cloudflare Access resources are retained unless you use `--purge-resources`.
+Uninstall blocks platform traffic, removes Queues that no remaining platform Worker uses, and lists the resources left for you to review. Use `--plan` to review deletions and retained resources before making changes. By default, Workers, the Queues they use, KV, R2, Hyperdrive, the dispatch namespace, and AI Gateway remain in your account. Adopted resources, external PostgreSQL, and zones are always retained. To install a platform again, use a new empty PostgreSQL database. Email Routing settings are retained; `--purge-resources` removes only the rules that send mail to the platform. DNS records, routes, custom domains, and Cloudflare Access resources are retained unless you use `--purge-resources`.
 
 When uninstall finishes, the record of what was kept stays at `~/.void/platforms/<account-id>/<installation-id>.json`. Without `--purge-data`, the encrypted credentials file `<installation-id>.recovery.enc` next to it is kept too. Delete both once you have finished the manual cleanup below.
 

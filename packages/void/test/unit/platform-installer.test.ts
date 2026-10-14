@@ -64,6 +64,7 @@ import {
   isolatePlatformWorkerCustomDomains,
   mergePlatformWorkerTrafficConfig,
   mergePreservedTriggerRoutes,
+  recordProvisionIntent,
   retainReplacedInstallationResource,
   withoutPlatformWorkerTrafficAttachments,
 } from '../../src/cli/platform-installer-resources.ts';
@@ -4608,6 +4609,64 @@ describe('platform installer', () => {
         configHash: hyperdriveOriginConfigHash(hyperdriveOriginFromConnectionString(databaseUrl)),
         id: 'hyperdrive-id',
         key: 'hyperdrive',
+        state: 'ready',
+      }),
+    );
+  });
+
+  it('resumes with the AI Gateway that a create answered with a server error still made', async () => {
+    const directory = useRegistryDirectory();
+    const fresh = await examplePlan();
+    const action = fresh.actions.find((entry) => entry.key === 'ai-gateway')!;
+    let manifest = createPlatformInstallationManifest({
+      account: fresh.account,
+      createdAt: '2026-09-14T00:00:00.000Z',
+      deployment: fresh.deployment,
+      id: fresh.installationId,
+      ownershipNonce: '0123456789abcdef0123456789abcdef',
+      platformVersion: '1.0.0',
+    });
+    manifest = transitionInstallation(manifest, 'planned', '2026-09-14T00:00:01.000Z');
+    manifest = transitionInstallation(manifest, 'provisioning', '2026-09-14T00:00:02.000Z');
+    // The earlier attempt recorded its intent, then Cloudflare answered the
+    // create with a server error after making the gateway.
+    manifest = recordProvisionIntent(manifest, action, '2026-09-14T00:00:03.000Z');
+    manifest = transitionInstallation(manifest, 'failed', '2026-09-14T00:00:04.000Z');
+    writeInstallationManifest(manifest);
+    const plan = await createPlatformInstallPlan(
+      {
+        ...planningClient(),
+        listAiGateways: async () => [
+          { createdAt: '2026-09-14T00:00:05.000Z', id: action.name, name: action.name },
+        ],
+      },
+      EXAMPLE_PLAN_INPUT,
+      manifest,
+    );
+
+    await expect(
+      installPlatform(plan, freshSecrets(), manifest, {
+        acquireDatabaseLifecycleLock,
+        claimDatabase,
+        client: {
+          ...creatingClient(),
+          createAiGateway: async () => {
+            throw new Error('the existing gateway must be reused');
+          },
+        },
+        deployWorker: async () => {
+          throw new Error('stop after resources');
+        },
+        prepareDatabase,
+        revalidateBeforeWorkerDeploy: async () => {},
+      }),
+    ).rejects.toThrow('stop after resources');
+
+    expect(listInstallationManifests(directory)[0]!.resources).toContainEqual(
+      expect.objectContaining({
+        id: action.name,
+        key: 'ai-gateway',
+        ownership: 'created',
         state: 'ready',
       }),
     );
