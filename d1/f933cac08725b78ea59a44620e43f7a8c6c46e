@@ -1,0 +1,25 @@
+platform/packages/api/src/admin/react/styles.css
+  s_1cbb8f9d8ae59c::t_d72df9c302a342 94,106,111,116-143
+platform/packages/api/src/admin/react/views/DeploymentDetailPage.tsx
+  s_1cbb8f9d8ae59c::t_8a0dcb8f19a6c7 11,111-112
+platform/packages/api/src/admin/react/views/DeploymentManifestCard.tsx
+  s_1cbb8f9d8ae59c::t_34f3ec19465237 1-67
+platform/packages/api/test/integration/admin-dashboard.test.ts
+  s_1cbb8f9d8ae59c::t_cb2698508c8023 2787-2874
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d1f933cac08725b78ea59a44620e43f7a8c6c46e",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
