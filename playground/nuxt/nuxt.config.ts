@@ -4,17 +4,17 @@ import { voidPlugin } from 'void';
 
 export default defineNuxtConfig({
   compatibilityDate: '2026-02-24',
+  // Server routes are also typed in the app project, which reads Nuxt's aliases.
+  alias: {
+    '@schema': resolve(import.meta.dirname, 'db/schema.ts'),
+  },
   nitro: {
     preset: 'cloudflare-module',
     modules: ['void/nitro'],
-    cloudflareDev: { configPath: './.void-wrangler.jsonc' },
+    cloudflare: { dev: { configPath: './.void-wrangler.jsonc' } },
     // Remove when Nuxt ships https://github.com/nuxt/nuxt/commit/21657c6fcf.
     externals: {
       inline: [/[\\/]node_modules[\\/]nuxt[\\/]dist[\\/]/],
-    },
-    alias: {
-      // Nuxt types server routes from Nitro's aliases.
-      '@schema': resolve(import.meta.dirname, 'db/schema.ts'),
     },
   },
   vite: {

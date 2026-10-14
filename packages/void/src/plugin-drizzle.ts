@@ -1,6 +1,7 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'pathslash';
+import { dirname, isAbsolute, join, relative } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
 import { DRIZZLE_OPERATORS, generateDbDts } from './codegen/db-types.ts';
 import { ensureProjectTsconfig } from './codegen/project-tsconfig.ts';
@@ -54,6 +55,8 @@ type DrizzlePluginOptions = VoidDbModuleOptions & {
   localD1DatabaseId?: string;
   localD1PersistRoot?: string;
   redirectDbTypePaths?: boolean;
+  /** Nitro bundles the server build's output (Nuxt and Analog). */
+  nitroBundlesServer?: boolean;
 };
 
 /**
@@ -356,7 +359,19 @@ export function drizzlePlugin(
         if (id === 'void/db' && this.environment?.name === 'client') {
           return;
         }
-        return dbModule.resolveId(id, importer);
+        const resolved = dbModule.resolveId(id, importer);
+        // Nitro bundles this output with the server routes. Leave a PostgreSQL or MySQL app's
+        // `void/db` to it, so the app has one client and one driver copy: the one `void/nitro`
+        // serves, or without the module the package's own, which says to add it.
+        if (
+          resolved === VIRTUAL_DB_ID &&
+          dialect !== 'sqlite' &&
+          options.nitroBundlesServer &&
+          this.environment?.mode === 'build'
+        ) {
+          return { id, external: true };
+        }
+        return resolved;
       },
     },
 
@@ -403,14 +418,17 @@ export function drizzlePlugin(
  * schema. It reads the dialect, schema and D1 binding from the project, as the Vite plugin does.
  * Its hooks are plain Rollup hooks; Vite also needs `enforce` to run them before its resolver.
  *
- * For a bundle that runs in workerd, `sqlDriver` builds the PostgreSQL or MySQL driver, and the
- * plugin serves that module for `pg` or `mysql2`.
+ * For a bundle that runs in workerd, `sqlDriver` builds a copy of the PostgreSQL or MySQL driver
+ * from its entry file, and the plugin serves that module for `pg` or `mysql2` (for
+ * `mysql2/promise`, the promise API from the same build). Each import gets the copy that the
+ * bundler resolves for it: the generated client's drizzle-orm gets the one it depends on, and an
+ * app's own import gets the app's version.
  */
 export function voidDbBundlerPlugin(
   root: string,
   options: {
     config?: VoidConfig;
-    sqlDriver?: (dialect: 'postgresql' | 'mysql') => Promise<string>;
+    sqlDriver?: (dialect: 'postgresql' | 'mysql', entry: string) => Promise<string>;
   } = {},
 ): Plugin {
   const config = options.config ?? readConfig(root);
@@ -425,26 +443,48 @@ export function voidDbBundlerPlugin(
   );
   const driverPackage =
     dialect === 'postgresql' ? 'pg' : dialect === 'mysql' ? 'mysql2' : undefined;
-  let driver: Promise<string> | undefined;
-  let driverDir: string | undefined;
+  const drivers = new Map<string, Promise<string>>();
+  const driverDirs: Array<string> = [];
   return {
     name: 'void:db',
     enforce: 'pre',
-    async resolveId(id, importer) {
-      if (id === driverPackage && options.sqlDriver && dialect !== 'sqlite') {
-        driver ??= options.sqlDriver(dialect).then((path) => {
-          driverDir = `${normalizePath(dirname(path))}/`;
-          return path;
+    async resolveId(id, importer, resolveOptions) {
+      const promiseApi = driverPackage === 'mysql2' && MYSQL2_PROMISE.test(id);
+      if ((id === driverPackage || promiseApi) && options.sqlDriver && dialect !== 'sqlite') {
+        // Resolve it as a `require` would. For an import, Rollup's CommonJS plugin loads a CommonJS
+        // driver to wrap it: that hides the file, and its build of the driver can fail on optional
+        // native modules.
+        const custom = resolveOptions?.custom;
+        const resolved = await this.resolve(id, importer, {
+          ...resolveOptions,
+          skipSelf: true,
+          custom: { ...custom, 'node-resolve': { ...custom?.['node-resolve'], isRequire: true } },
         });
-        return driver;
+        const entry =
+          resolved && !resolved.external
+            ? resolvePackageEntry(driverPackage, resolved.id)
+            : undefined;
+        if (entry === undefined) {
+          return resolved;
+        }
+        let driver = drivers.get(entry);
+        if (!driver) {
+          assertWorkerDriver(driverPackage, entry, root, importer);
+          driver = options.sqlDriver(dialect, entry).then((path) => {
+            driverDirs.push(`${normalizePath(dirname(path))}/`);
+            return path;
+          });
+          drivers.set(entry, driver);
+        }
+        // The promise API sits next to the driver, named the way `sqlDriver` names the driver.
+        return promiseApi ? (await driver).replace(/mysql2\.mjs$/, 'promise.mjs') : driver;
       }
-      // The driver needs workerd's own Node modules: Nitro replaces them with stubs unless it
-      // finds nodejs_compat in a Wrangler config, and Void's is not one it reads.
+      // The driver needs workerd's own Node modules: Nitro replaces them with stubs when its
+      // `cloudflare.nodeCompat` option is off.
       if (
-        driverDir &&
         id.startsWith('node:') &&
         importer &&
-        normalizePath(importer).startsWith(driverDir)
+        driverDirs.some((dir) => normalizePath(importer).startsWith(dir))
       ) {
         return { id, external: true };
       }
@@ -463,4 +503,61 @@ export function voidDbBundlerPlugin(
       return dbModule.load.handler(id);
     },
   };
+}
+
+/** mysql2's promise API, which `bundleWorkerSqlDriver` builds next to the driver. */
+const MYSQL2_PROMISE = /^mysql2\/promise(?:\.js)?$/;
+
+/**
+ * The first driver versions that run in Workers: pg 8.11 brings pg-cloudflare, its socket there,
+ * and mysql2 3.13 the `disableEval` option, without which it compiles its parsers with
+ * `new Function`, which workerd forbids.
+ */
+const WORKER_DRIVER_MINIMUM: Record<'pg' | 'mysql2', [major: number, minor: number]> = {
+  pg: [8, 11],
+  mysql2: [3, 13],
+};
+
+/** Throw when the driver whose entry file is `entry` is older than Workers need. */
+function assertWorkerDriver(
+  name: 'pg' | 'mysql2',
+  entry: string,
+  root: string,
+  importer: string | undefined,
+): void {
+  let version: string | undefined;
+  try {
+    const packageJson = createRequire(entry).resolve(`${name}/package.json`);
+    ({ version } = JSON.parse(readFileSync(packageJson, 'utf8')) as { version?: string });
+  } catch {
+    return;
+  }
+  const match = /^(\d+)\.(\d+)\./.exec(version ?? '');
+  const [major, minor] = WORKER_DRIVER_MINIMUM[name];
+  if (
+    !match ||
+    Number(match[1]) > major ||
+    (Number(match[1]) === major && Number(match[2]) >= minor)
+  ) {
+    return;
+  }
+  const source = importer ? ` Imported by ${relative(root, importer)}.` : '';
+  throw new Error(
+    `${name} ${version} cannot run in Cloudflare Workers, which need ${name} ${major}.${minor} or later. Upgrade ${name}.${source}`,
+  );
+}
+
+/**
+ * The CommonJS entry of package `name`, from `file` inside one of its copies (which a bundler may
+ * have resolved to an ES module entry), or undefined if `file` is not on disk.
+ */
+function resolvePackageEntry(name: string, file: string): string | undefined {
+  if (!isAbsolute(file)) {
+    return undefined;
+  }
+  try {
+    return createRequire(file).resolve(name);
+  } catch {
+    return undefined;
+  }
 }

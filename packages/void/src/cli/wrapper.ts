@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -131,7 +132,8 @@ export async function generateWrapper(
       plugins: [
         voidDbBundlerPlugin(root, {
           config,
-          sqlDriver: (dialect) => bundleWorkerSqlDriver(dialect, join(tmpDir, 'sql-driver')),
+          sqlDriver: (dialect, entry) =>
+            bundleWorkerSqlDriver(dialect, entry, join(tmpDir, 'sql-driver')),
         }),
       ],
       resolve: {
@@ -323,26 +325,27 @@ function pgWorkerAliases(fromPath: string): Record<string, string> {
 }
 
 /**
- * Build Void's PostgreSQL or MySQL driver as one ES module for workerd, the way the migration
- * handler bundles it, and return its path. Bundlers that do not run voidPlugin() import this
- * module for `pg` or `mysql2`: their CommonJS handling breaks the drivers in workerd.
+ * Build the PostgreSQL or MySQL driver whose entry file is `main` as an ES module for workerd,
+ * the way the migration handler bundles Void's own, and return its path. Bundlers that do not run
+ * voidPlugin() import this module for `pg` or `mysql2`: their CommonJS handling breaks the
+ * drivers in workerd. Each driver copy gets its own folder in `baseDir`. The same build gives
+ * mysql2's `mysql2/promise` API as `promise.mjs` next to it, so both share one copy of the driver.
  */
 export async function bundleWorkerSqlDriver(
   dialect: 'postgresql' | 'mysql',
-  outDir: string,
+  main: string,
+  baseDir: string,
 ): Promise<string> {
   const packageName = dialect === 'postgresql' ? 'pg' : 'mysql2';
-  const require = createRequire(import.meta.url);
-  const main = require.resolve(packageName);
-  const names = Object.keys(require(packageName) as object).filter(
-    (name) => name !== 'default' && /^[A-Za-z_$][\w$]*$/.test(name),
-  );
+  const outDir = join(baseDir, createHash('sha256').update(main).digest('hex').slice(0, 12));
   mkdirSync(outDir, { recursive: true });
-  const entry = join(outDir, 'entry.mjs');
-  writeFileSync(
-    entry,
-    `import driver from ${JSON.stringify(toSlash(main))};\nexport default driver;\nexport const { ${names.join(', ')} } = driver;\n`,
-  );
+  const input: Record<string, string> = {
+    [packageName]: writeDriverEntry(join(outDir, 'entry.mjs'), main),
+  };
+  const promise = dialect === 'mysql' ? resolveMysqlPromise(main) : undefined;
+  if (promise !== undefined) {
+    input.promise = writeDriverEntry(join(outDir, 'promise-entry.mjs'), promise);
+  }
   const bundleDir = join(outDir, 'out');
   await build({
     root: outDir,
@@ -356,13 +359,13 @@ export async function bundleWorkerSqlDriver(
       outDir: bundleDir,
       emptyOutDir: true,
       minify: false,
-      ssr: entry,
+      ssr: true,
       target: 'esnext',
       rollupOptions: {
-        input: entry,
+        input,
         external: SQL_WORKER_EXTERNAL,
         output: {
-          entryFileNames: `${packageName}.mjs`,
+          entryFileNames: '[name].mjs',
           chunkFileNames: `${packageName}-[hash].mjs`,
         },
       },
@@ -374,6 +377,27 @@ export async function bundleWorkerSqlDriver(
     'driver bundle',
   );
   return join(bundleDir, `${packageName}.mjs`);
+}
+
+/** Write an ES module at `entry` that exports the CommonJS module `file`, and return `entry`. */
+function writeDriverEntry(entry: string, file: string): string {
+  const names = Object.keys(createRequire(file)(file) as object).filter(
+    (name) => name !== 'default' && /^[A-Za-z_$][\w$]*$/.test(name),
+  );
+  writeFileSync(
+    entry,
+    `import driver from ${JSON.stringify(toSlash(file))};\nexport default driver;\nexport const { ${names.join(', ')} } = driver;\n`,
+  );
+  return entry;
+}
+
+/** The `mysql2/promise` file of the mysql2 copy whose entry file is `main`, if it has one. */
+function resolveMysqlPromise(main: string): string | undefined {
+  try {
+    return createRequire(main).resolve('mysql2/promise');
+  } catch {
+    return undefined;
+  }
 }
 
 /** `bundle` names the bundle in the error a failed require throws. */

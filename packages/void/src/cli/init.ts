@@ -2373,10 +2373,18 @@ function noteManualFrameworkConfigSetup(framework: DetectedFramework): void {
   if (framework.name === 'nuxt') {
     note(
       `Detected Nuxt. Void init does not patch nuxt.config.* automatically.\n\n` +
-        `Add \`voidPlugin()\` to the Nuxt Vite plugins option and \`void/nitro\` to the Nitro modules:\n\n` +
+        `Add \`voidPlugin()\` to the Nuxt Vite plugins option, the \`@schema\` alias that \`nuxi typecheck\` reads, and the Cloudflare preset, \`void/nitro\` and the generated Cloudflare config to the Nitro options:\n\n` +
+        `import { resolve } from "node:path";\n` +
         `import { voidPlugin } from "void";\n\n` +
         `export default defineNuxtConfig({\n` +
-        `  nitro: { modules: ["void/nitro"] },\n` +
+        `  alias: {\n` +
+        `    "@schema": resolve(import.meta.dirname, "db/schema.ts"),\n` +
+        `  },\n` +
+        `  nitro: {\n` +
+        `    preset: "cloudflare-module",\n` +
+        `    modules: ["void/nitro"],\n` +
+        `    cloudflare: { dev: { configPath: "./.void-wrangler.jsonc" } },\n` +
+        `  },\n` +
         `  vite: { plugins: [voidPlugin()] },\n` +
         `});`,
       'Manual Nuxt config step',
@@ -2387,12 +2395,19 @@ function noteManualFrameworkConfigSetup(framework: DetectedFramework): void {
   if (framework.name === 'analog') {
     note(
       `Detected Analog. Void init does not patch vite.config.* automatically.\n\n` +
-        `Add \`voidPlugin()\` to the Vite plugins and \`void/nitro\` to Analog's Nitro modules:\n\n` +
+        `Install \`nitro-cloudflare-dev\` as a dev dependency. Add \`voidPlugin()\` to the Vite plugins, and the Cloudflare preset, \`void/nitro\` and the generated Cloudflare config to Analog's Nitro options:\n\n` +
         `import analog from "@analogjs/platform";\n` +
         `import { voidPlugin } from "void";\n\n` +
         `export default defineConfig({\n` +
         `  plugins: [\n` +
-        `    analog({ nitro: { modules: ["nitro-cloudflare-dev", "void/nitro"] } }),\n` +
+        `    analog({\n` +
+        `      ssr: true,\n` +
+        `      nitro: {\n` +
+        `        preset: "cloudflare-module",\n` +
+        `        modules: ["nitro-cloudflare-dev", "void/nitro"],\n` +
+        `        cloudflareDev: { configPath: "./.void-wrangler.jsonc" },\n` +
+        `      },\n` +
+        `    }),\n` +
         `    voidPlugin(),\n` +
         `  ],\n` +
         `});`,

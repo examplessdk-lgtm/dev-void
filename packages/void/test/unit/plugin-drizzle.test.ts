@@ -796,6 +796,37 @@ export const requestPoolOptions = (env) =>
     expect(readFileSync(join(root, '.void', 'db.d.ts'), 'utf8')).toContain('Record<string, never>');
   });
 
+  // Nitro bundles a Nuxt or Analog server build's output with the server routes, and serves
+  // them all one void/db: the app's through `void/nitro`, or the package's, which names it.
+  it('leaves a PostgreSQL or MySQL void/db to Nitro in a Nitro framework build', () => {
+    const root = createProjectRoot();
+    const schemaPath = join(root, 'db', 'schema.ts');
+    const resolveIn = (
+      dialect: 'sqlite' | 'postgresql' | 'mysql',
+      mode: 'build' | 'dev',
+      importer?: string,
+    ) => {
+      const plugin = drizzlePlugin(root, false, dialect, { nitroBundlesServer: true });
+      const resolveId = getHookHandler(plugin.resolveId) as (
+        this: { environment: { name: string; mode: string } },
+        source: string,
+        importer: string | undefined,
+        options: { isEntry: boolean },
+      ) => unknown;
+      return resolveId.call({ environment: { name: 'ssr', mode } }, 'void/db', importer, {
+        isEntry: false,
+      });
+    };
+
+    const page = join(root, 'src', 'app', 'pages', 'users.server.ts');
+    expect(resolveIn('postgresql', 'build', page)).toEqual({ id: 'void/db', external: true });
+    expect(resolveIn('mysql', 'build', page)).toEqual({ id: 'void/db', external: true });
+    expect(resolveIn('postgresql', 'dev', page)).toBe('\0virtual:void-db');
+    expect(resolveIn('sqlite', 'build', page)).toBe('\0virtual:void-db');
+    // The schema's own import of void/db still gets its SQL helpers.
+    expect(resolveIn('postgresql', 'build', schemaPath)).toBe('\0virtual:void-db-schema');
+  });
+
   it('uses a custom D1 binding name in the sqlite virtual module', () => {
     const root = createProjectRoot({ schema: false });
     const plugin = drizzlePlugin(root, false, 'sqlite', {

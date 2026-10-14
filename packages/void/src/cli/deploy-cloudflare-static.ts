@@ -133,7 +133,11 @@ export async function prepareCloudflareFrameworkArtifact(options: {
       voidConfig.worker?.compatibility_date ??
       readWranglerTopLevelString(rootConfig, 'compatibility_date') ??
       DEFAULT_COMPATIBILITY_DATE,
-    compatibilityFlags: preset.cloudflareCompatibilityFlags,
+    // The PostgreSQL and MySQL drivers need workerd's Node modules, as in a managed deploy.
+    compatibilityFlags:
+      analysis.dialect === 'sqlite'
+        ? preset.cloudflareCompatibilityFlags
+        : [...(preset.cloudflareCompatibilityFlags ?? []), 'nodejs_compat'],
     crons: [...new Set(crons.flatMap((job) => job.crons))],
     requiredSecrets: requiredSecretNames,
     versionMetadataBinding,

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { toSlash } from 'pathslash';
 import type { Plugin } from 'vite';
@@ -11,6 +12,8 @@ import { getRuntimeRequestResource, withRuntimeEnv } from '../../src/runtime/env
 
 const roots: Array<string> = [];
 const envModuleFile = fileURLToPath(import.meta.resolve('#self/_env'));
+// The generated MySQL void/db imports mysql2 through Void's drizzle-orm.
+const drizzleMysqlFile = fileURLToPath(import.meta.resolve('drizzle-orm/mysql2'));
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -19,10 +22,13 @@ afterEach(() => {
   delete (globalThis as { __env__?: unknown }).__env__;
 });
 
-function createApp(database: 'pg' | 'mysql' | 'd1'): string {
+function createApp(database: 'pg' | 'mysql' | 'd1', config: Record<string, unknown> = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'void-nitro-'));
   roots.push(root);
-  writeFileSync(join(root, 'void.json'), JSON.stringify(database === 'd1' ? {} : { database }));
+  writeFileSync(
+    join(root, 'void.json'),
+    JSON.stringify({ ...config, ...(database !== 'd1' && { database }) }),
+  );
   mkdirSync(join(root, 'db'));
   writeFileSync(join(root, 'db', 'schema.ts'), 'export const users = {};\n');
   return root;
@@ -36,10 +42,14 @@ type NitroOptions = {
   plugins: Array<string>;
   virtual: Record<string, string | (() => string | Promise<string>)>;
   rollupConfig: { plugins?: unknown };
+  cloudflare?: { nodeCompat?: boolean };
 };
 
 /** Run the module against the options of a Nitro Worker build. */
-function setUp(root: string, options: { dev: boolean; plugins?: unknown }): NitroOptions {
+function setUp(
+  root: string,
+  options: { dev: boolean; plugins?: unknown; cloudflare?: NitroOptions['cloudflare'] },
+): NitroOptions {
   const nitro = {
     options: {
       dev: options.dev,
@@ -49,6 +59,7 @@ function setUp(root: string, options: { dev: boolean; plugins?: unknown }): Nitr
       plugins: [],
       virtual: {},
       rollupConfig: { plugins: options.plugins },
+      ...(options.cloudflare && { cloudflare: options.cloudflare }),
     } as NitroOptions,
   };
   voidNitroModule.setup(nitro);
@@ -57,10 +68,18 @@ function setUp(root: string, options: { dev: boolean; plugins?: unknown }): Nitr
 
 type ResolveResult = string | { id: string; external?: boolean } | null | undefined;
 
-// Nitro's Rollup calls the hooks as plain functions, with its plugin context as `this`.
+// Nitro's Rollup calls the hooks as plain functions, with its plugin context as `this`. Its
+// resolver finds a package the way Node does.
 const context = {
-  async resolve(source: string): Promise<{ id: string }> {
-    return { id: source };
+  async resolve(source: string, importer: string): Promise<{ id: string } | null> {
+    if (isAbsolute(source)) {
+      return { id: source };
+    }
+    try {
+      return { id: createRequire(importer).resolve(source) };
+    } catch {
+      return null;
+    }
   },
 };
 
@@ -96,10 +115,13 @@ describe('void/nitro', () => {
     const [plugin, asyncHooks] = setUp(root, { dev: false }).rollupConfig.plugins as Array<Plugin>;
     const route = join(root, 'server', 'api', 'users.ts');
 
-    const driver = await resolve(plugin!, 'mysql2', route);
+    const driver = await resolve(plugin!, 'mysql2', drizzleMysqlFile);
     expect(typeof driver).toBe('string');
     expect(existsSync(driver as string)).toBe(true);
     expect(readFileSync(driver as string, 'utf8')).toContain('export {');
+    // mysql2's promise API comes from the same build.
+    const promiseApi = await resolve(plugin!, 'mysql2/promise', drizzleMysqlFile);
+    expect(dirname(promiseApi as string)).toBe(dirname(driver as string));
     // The driver and Void's request scope keep workerd's Node modules instead of Nitro's stubs.
     expect(await resolve(plugin!, 'node:net', driver as string)).toEqual({
       id: 'node:net',
@@ -110,6 +132,159 @@ describe('void/nitro', () => {
       external: true,
     });
     expect(await resolve(asyncHooks!, 'node:async_hooks', route)).toBeNull();
+  });
+
+  it("gives the app's own driver import the app's copy, built for workerd", async () => {
+    const root = createApp('mysql');
+    // An app that installs its own mysql2, which need not be the version Void's drizzle loads.
+    mkdirSync(join(root, 'node_modules', 'mysql2'), { recursive: true });
+    writeFileSync(
+      join(root, 'node_modules', 'mysql2', 'package.json'),
+      JSON.stringify({ name: 'mysql2', version: '3.13.0', main: 'index.js' }),
+    );
+    writeFileSync(
+      join(root, 'node_modules', 'mysql2', 'index.js'),
+      "exports.createPool = () => ({});\nexports.appCopy = require('node:util').format('app');\n",
+    );
+    const [plugin] = setUp(root, { dev: false }).rollupConfig.plugins as Array<Plugin>;
+
+    const appDriver = (await resolve(
+      plugin!,
+      'mysql2',
+      join(root, 'server', 'api', 'raw.ts'),
+    )) as string;
+    const voidDriver = (await resolve(plugin!, 'mysql2', drizzleMysqlFile)) as string;
+    expect(appDriver).not.toBe(voidDriver);
+    // Each is named by its native path, as Nitro's Rollup names modules: on Windows, Nitro's
+    // lookup of the `global` polyfill that pg imports never ends from a forward-slash name.
+    for (const driver of [appDriver, voidDriver]) {
+      expect(driver).toBe(fileURLToPath(pathToFileURL(driver)));
+    }
+    // Each copy exports its own names.
+    expect(readFileSync(appDriver, 'utf8')).toMatch(/export \{[^}]*\bappCopy\b/);
+    expect(readFileSync(voidDriver, 'utf8')).not.toContain('appCopy');
+    for (const driver of [appDriver, voidDriver]) {
+      expect(await resolve(plugin!, 'node:util', driver)).toEqual({
+        id: 'node:util',
+        external: true,
+      });
+    }
+    // An import the bundler cannot resolve stays its error.
+    expect(await resolve(plugin!, 'mysql2', join(tmpdir(), 'elsewhere.ts'))).toBeNull();
+  });
+
+  it("serves mysql2/promise from the build of the copy's driver", async () => {
+    const root = createApp('mysql');
+    // Both entries of mysql2 load the same driver modules.
+    const copy = join(root, 'node_modules', 'mysql2');
+    mkdirSync(join(copy, 'lib'), { recursive: true });
+    writeFileSync(
+      join(copy, 'package.json'),
+      JSON.stringify({
+        name: 'mysql2',
+        version: '3.13.0',
+        main: 'index.js',
+        exports: {
+          '.': './index.js',
+          './package.json': './package.json',
+          './promise': './promise.js',
+        },
+      }),
+    );
+    writeFileSync(join(copy, 'lib', 'state.js'), 'module.exports = { parsers: new Map() };\n');
+    writeFileSync(join(copy, 'index.js'), "exports.state = require('./lib/state.js');\n");
+    writeFileSync(
+      join(copy, 'promise.js'),
+      "exports.state = require('./lib/state.js');\nexports.createPool = () => ({});\n",
+    );
+    const [plugin] = setUp(root, { dev: false }).rollupConfig.plugins as Array<Plugin>;
+    const route = join(root, 'server', 'api', 'raw.ts');
+
+    const promiseApi = await resolve(plugin!, 'mysql2/promise', route);
+    expect(typeof promiseApi).toBe('string');
+    const driver = (await resolve(plugin!, 'mysql2', route)) as string;
+    const [promiseModule, driverModule] = (await Promise.all(
+      [promiseApi as string, driver].map((file) => import(pathToFileURL(file).href)),
+    )) as Array<{ default: Record<string, unknown>; state: object; createPool?: unknown }>;
+    expect(typeof promiseModule!.createPool).toBe('function');
+    expect(promiseModule!.default.createPool).toBe(promiseModule!.createPool);
+    expect(promiseModule!.state).toBe(driverModule!.state);
+  });
+
+  it.each([
+    // pg 8.10 predates pg-cloudflare, the socket pg uses in Workers.
+    { database: 'pg' as const, name: 'pg', id: 'pg', version: '8.10.0', minimum: '8.11' },
+    // mysql2 3.12 has no disableEval option, so it compiles its parsers with new Function.
+    {
+      database: 'mysql' as const,
+      name: 'mysql2',
+      id: 'mysql2',
+      version: '3.12.0',
+      minimum: '3.13',
+    },
+    {
+      database: 'mysql' as const,
+      name: 'mysql2',
+      id: 'mysql2/promise',
+      version: '3.12.0',
+      minimum: '3.13',
+    },
+  ])(
+    'names the import of $id from a $name too old for Workers',
+    async ({ database, name, id, version, minimum }) => {
+      const root = createApp(database);
+      mkdirSync(join(root, 'node_modules', name), { recursive: true });
+      writeFileSync(
+        join(root, 'node_modules', name, 'package.json'),
+        JSON.stringify({ name, version, main: 'index.js' }),
+      );
+      writeFileSync(join(root, 'node_modules', name, 'index.js'), 'exports.Client = class {};\n');
+      if (id !== name) {
+        writeFileSync(
+          join(root, 'node_modules', name, 'promise.js'),
+          'exports.Client = class {};\n',
+        );
+      }
+      const [plugin] = setUp(root, { dev: false }).rollupConfig.plugins as Array<Plugin>;
+
+      await expect(resolve(plugin!, id, join(root, 'server', 'api', 'raw.ts'))).rejects.toThrow(
+        `${name} ${version} cannot run in Cloudflare Workers, which need ${name} ${minimum} or later. ` +
+          `Upgrade ${name}. Imported by server/api/raw.ts.`,
+      );
+    },
+  );
+
+  // Nitro keeps Node stubs unless it finds nodejs_compat in a Wrangler config, which it reads
+  // from wrangler.* files only.
+  it("turns on Nitro's Node compatibility for Workers that deploy with nodejs_compat", () => {
+    const nodeCompat = (
+      database: 'pg' | 'mysql' | 'd1',
+      options: { dev?: boolean; config?: Record<string, unknown>; nodeCompat?: boolean } = {},
+    ) =>
+      setUp(createApp(database, options.config), {
+        dev: options.dev ?? false,
+        ...(options.nodeCompat !== undefined && {
+          cloudflare: { nodeCompat: options.nodeCompat },
+        }),
+      }).cloudflare?.nodeCompat;
+
+    expect(nodeCompat('pg')).toBe(true);
+    expect(nodeCompat('mysql')).toBe(true);
+    expect(nodeCompat('d1')).toBeUndefined();
+    const flags = (worker: Array<string> | undefined, cloudflare: Array<string> | undefined) => ({
+      config: {
+        ...(worker && { worker: { compatibility_flags: worker } }),
+        ...(cloudflare && { cloudflare: { compatibility_flags: cloudflare } }),
+      },
+    });
+    expect(nodeCompat('d1', flags(undefined, ['nodejs_compat', 'nodejs_als']))).toBe(true);
+    expect(nodeCompat('d1', flags(undefined, ['nodejs_compat_v2']))).toBe(true);
+    // A native deploy gives the Worker only the Cloudflare config's flags, and a managed deploy
+    // prefers `worker.compatibility_flags`. A Worker built for native modules needs the flag.
+    expect(nodeCompat('d1', flags(['nodejs_compat'], undefined))).toBeUndefined();
+    expect(nodeCompat('d1', flags(['nodejs_als'], ['nodejs_compat']))).toBeUndefined();
+    expect(nodeCompat('pg', { nodeCompat: false })).toBe(false);
+    expect(nodeCompat('pg', { dev: true })).toBeUndefined();
   });
 
   it('runs each PostgreSQL or MySQL request in one Void request scope', async () => {
@@ -164,5 +339,11 @@ describe('void/nitro', () => {
     expect(() =>
       withRuntimeEnv({ HYPERDRIVE: { connectionString: 'postgresql://db/app' } }, () => db.select),
     ).toThrow("add 'void/nitro' to the Nitro modules");
+    // Vite serves the app's void/db only to the installed packages it inlines.
+    expect(() =>
+      withRuntimeEnv({ HYPERDRIVE: { connectionString: 'postgresql://db/app' } }, () => db.select),
+    ).toThrow(
+      'An installed package that imports void/db must be an ES module that lists void in its dependencies or peerDependencies',
+    );
   });
 });

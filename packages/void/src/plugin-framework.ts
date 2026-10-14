@@ -358,6 +358,7 @@ export default {
       forceVirtualDb: bindingNames?.d1 !== undefined,
       localD1DatabaseId: localD1.databaseId,
       localD1PersistRoot: frameworkPersistRoot,
+      nitroBundlesServer: detected.name === 'nuxt' || detected.name === 'analog',
     }),
     migrationPlugin(root, dialect, localD1.databaseId, frameworkPersistRoot, {
       enabled: false,

@@ -6549,6 +6549,41 @@ describe('runCloudflareDeploy — framework artifact guard', () => {
     },
   );
 
+  // The PostgreSQL and MySQL drivers import workerd's Node modules, as a managed deploy knows.
+  it.each([
+    ['pg', ['nodejs_als', 'nodejs_compat']],
+    ['mysql', ['nodejs_als', 'nodejs_compat']],
+    ['d1', ['nodejs_als']],
+  ])(
+    'gives a %s Nuxt Worker the compatibility flags its database needs',
+    async (database, flags) => {
+      const preset = FRAMEWORK_PRESETS.nuxt!;
+      const root = makeProject({
+        'void.json': JSON.stringify(database === 'd1' ? {} : { database }),
+        'wrangler.jsonc': JSON.stringify({
+          account_id: 'acc123',
+          name: 'nuxt-app',
+          compatibility_flags: ['nodejs_als'],
+        }),
+        [`${preset.workerDir}/${preset.workerMain}`]:
+          'export default { fetch() { return new Response("page"); } };',
+        [`${preset.assetsDir}/client.js`]: 'console.log("client");',
+      });
+      await prepareCloudflareFrameworkArtifact({
+        root,
+        configPath: join(root, 'wrangler.jsonc'),
+        accountId: 'acc123',
+        workerName: 'nuxt-app',
+        voidConfig: readConfig(root),
+        framework: { name: 'nuxt', class: 'c' },
+        preset,
+      });
+      expect(parseRootWranglerConfig(join(root, 'wrangler.jsonc')).compatibility_flags).toEqual(
+        flags,
+      );
+    },
+  );
+
   it('does not add ISR to a framework worker when routing.isr is false', async () => {
     const preset = FRAMEWORK_PRESETS['tanstack-start']!;
     const root = makeProject({

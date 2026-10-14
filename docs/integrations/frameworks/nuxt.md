@@ -30,24 +30,23 @@ import { resolve } from 'node:path';
 import { voidPlugin } from 'void';
 
 export default defineNuxtConfig({
+  alias: {
+    '@schema': resolve(import.meta.dirname, 'db/schema.ts'),
+  },
   nitro: {
     preset: 'cloudflare-module',
     modules: ['void/nitro'],
-    cloudflareDev: { configPath: './.void-wrangler.jsonc' },
+    cloudflare: { dev: { configPath: './.void-wrangler.jsonc' } },
     // Required for Nuxt 4.6.0 on Windows.
     externals: {
       inline: [/[\\/]node_modules[\\/]nuxt[\\/]dist[\\/]/],
-    },
-    alias: {
-      // Nuxt types server routes from Nitro's aliases.
-      '@schema': resolve(import.meta.dirname, 'db/schema.ts'),
     },
   },
   vite: { plugins: [voidPlugin()] },
 });
 ```
 
-The `void/nitro` module gives Nuxt server routes your app's `void/db` and `@schema`.
+The `void/nitro` module gives Nuxt server routes your app's `void/db` and `@schema`. The top-level `alias` lets `nuxi typecheck` resolve `@schema`, because Nuxt also checks server routes with the app's types. `cloudflare.dev` gives the development server the bindings from Void's generated Cloudflare config; Nuxt runs it in development when `compatibilityDate` is `2025-07-15` or later.
 
 ### 4. Create `void.config.ts`
 

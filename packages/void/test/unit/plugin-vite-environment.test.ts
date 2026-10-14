@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { createRequire } from 'node:module';
+import module, { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +17,7 @@ import { createBuilder, createServer, normalizePath, resolveConfig } from 'vite'
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { voidPlugin } from '../../src/index.ts';
 import { findVoidDependentPackages } from '../../src/installed-packages.ts';
+import { getHookHandler } from '../helpers/vite-hooks.ts';
 
 const roots: Array<string> = [];
 
@@ -39,6 +40,7 @@ function createProjectRoot(): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0, roots.length)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -539,8 +541,48 @@ describe('voidPlugin Vite environments', () => {
     ]);
   });
 
+  it('finds packages that depend on void through the Yarn PnP runtime', () => {
+    const root = createProjectRoot();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ type: 'module', dependencies: { 'db-lib': '*' } }),
+    );
+    // No node_modules: Yarn serves each package from its cache, and `exports` may hide its
+    // package.json, so the runtime's unqualified resolution finds the package.
+    const store = join(root, '.yarn/cache');
+    const usesVoid = { type: 'module', exports: './index.js', peerDependencies: { void: '*' } };
+    for (const [name, manifest] of [
+      ['db-lib', { ...usesVoid, dependencies: { 'inner-db-lib': '*' } }],
+      ['inner-db-lib', usesVoid],
+    ] as const) {
+      mkdirSync(join(store, name), { recursive: true });
+      writeFileSync(join(store, name, 'package.json'), JSON.stringify({ name, ...manifest }));
+      writeFileSync(join(store, name, 'index.js'), "export { db } from 'void/db';\n");
+    }
+    // Yarn's API reads a Windows path with either separator, and the crawler passes
+    // forward slashes.
+    const inRoot = (path: string) => normalizePath(path).startsWith(normalizePath(root));
+    const pnp = {
+      resolveToUnqualified(request: string, issuer: string) {
+        expect(inRoot(issuer)).toBe(true);
+        const [name] = request.split('/package.json');
+        if (!existsSync(join(store, name!))) {
+          throw new Error(`${name} is not a dependency of ${issuer}`);
+        }
+        return join(store, request);
+      },
+    };
+    const runtime = module as { findPnpApi?: (path: string) => typeof pnp | null };
+    runtime.findPnpApi = (path) => (inRoot(path) ? pnp : null);
+    try {
+      expect(findVoidDependentPackages(root)).toEqual(['db-lib', 'inner-db-lib']);
+    } finally {
+      delete runtime.findPnpApi;
+    }
+  });
+
   // Vite's module runner evaluates an inlined package as ES modules, so a package whose import
-  // entry loads CommonJS stays with Node.
+  // entry reaches CommonJS through relative imports stays with Node.
   const wrapper = {
     'wrapper.mjs': "import lib from './index.cjs';\nexport const db = lib.db;\n",
     'index.cjs': 'exports.db = 1;\n',
@@ -579,7 +621,114 @@ describe('voidPlugin Vite environments', () => {
       },
       found: false,
     },
-  ])('finds an installed package with $shape: $found', ({ manifest, files, found }) => {
+    ...[
+      "export * from './vendor.cjs';\n",
+      "export {} from './vendor.cjs';\n",
+      "import './vendor.cjs';\n",
+      "export const db = await import('./vendor.cjs');\n",
+    ].map((entry) => ({
+      shape: `an ES module entry with \`${entry.trim()}\``,
+      manifest: { type: 'module' },
+      files: { 'index.js': entry, 'vendor.cjs': 'module.exports = { db: 1 };\n' },
+      found: false,
+    })),
+    {
+      shape: 'CommonJS imports only in comments and strings',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': [
+          "// Before 2.0 this file did `import './legacy.cjs'`.",
+          "/* export * from './legacy.cjs'; */",
+          'export const note = "import legacy from \'./legacy.cjs\'";',
+          "export const hint = `await import('./legacy.cjs')`;",
+          'export const db = 1;',
+          '',
+        ].join('\n'),
+        'legacy.cjs': 'module.exports = { db: 1 };\n',
+      },
+      found: true,
+    },
+    // Vite's module runner parses the entry with the same parser, and cannot load it either.
+    {
+      shape: 'an entry that does not parse',
+      manifest: { type: 'module' },
+      files: { 'index.js': 'export const db = ;\n' },
+      found: false,
+    },
+    {
+      shape: 'a CommonJS file that a relative ES module imports',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': "export { db } from './internal.js';\n",
+        'internal.js': "import legacy from './legacy.cjs';\nexport const db = legacy.db;\n",
+        'legacy.cjs': 'module.exports = { db: 1 };\n',
+      },
+      found: false,
+    },
+    {
+      shape: 'a CommonJS folder that a dynamically imported ES module imports',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': "export const load = () => import('./lib/internal.js');\n",
+        'lib/internal.js': "export { db } from '../cjs/db.js';\n",
+        'cjs/package.json': '{"type":"commonjs"}',
+        'cjs/db.js': 'exports.db = 1;\n',
+      },
+      found: false,
+    },
+    {
+      shape: 'a relative ES module that does not parse',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': "export * from './internal.js';\n",
+        'internal.js': 'export const db = ;\n',
+      },
+      found: false,
+    },
+    {
+      shape: 'ES modules that import each other and CommonJS of another package',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': "export * from './a.js';\n",
+        'a.js': "export * from './b.mjs';\nexport const a = 1;\n",
+        'b.mjs':
+          "import { a } from './a.js';\nimport 'other-lib/legacy.cjs';\nexport const db = () => a;\n",
+      },
+      found: true,
+    },
+    {
+      shape: 'more relative modules than the check reads',
+      manifest: { type: 'module' },
+      files: {
+        'index.js': Array.from({ length: 2000 }, (_, i) => `import './${i}.js';\n`).join(''),
+        ...Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`${i}.js`, ''])),
+      },
+      found: false,
+    },
+    // Vite also matches `development`, or `production` when NODE_ENV is production, as in a build.
+    {
+      shape: 'ES modules only under development',
+      manifest: { exports: { development: './dev.mjs', default: './index.cjs' } },
+      files: { 'dev.mjs': 'export const db = 1;\n', 'index.cjs': 'exports.db = 1;\n' },
+      found: true,
+    },
+    {
+      shape: 'ES modules only under development, in production',
+      nodeEnv: 'production',
+      manifest: { exports: { development: './dev.mjs', default: './index.cjs' } },
+      files: { 'dev.mjs': 'export const db = 1;\n', 'index.cjs': 'exports.db = 1;\n' },
+      found: false,
+    },
+    {
+      shape: 'CommonJS under development',
+      manifest: { exports: { development: './dev.cjs', default: './index.mjs' } },
+      files: { 'dev.cjs': 'exports.db = 1;\n', 'index.mjs': 'export const db = 1;\n' },
+      found: false,
+    },
+  ])('finds an installed package with $shape: $found', ({ manifest, files, found, nodeEnv }) => {
+    if (nodeEnv) {
+      vi.stubEnv('NODE_ENV', nodeEnv);
+    }
     const root = createProjectRoot();
     writeFileSync(
       join(root, 'package.json'),
@@ -598,6 +747,51 @@ describe('voidPlugin Vite environments', () => {
 
     expect(findVoidDependentPackages(root)).toEqual(found ? ['db-lib'] : []);
   });
+
+  // Nitro bundles a Nuxt or Analog server build's output, and serves it the app's void/db.
+  it.each([
+    ['nuxt', 'nuxt', true],
+    ['analog', '@analogjs/platform', true],
+    ['sveltekit', '@sveltejs/kit', false],
+  ] as const)(
+    'leaves a PostgreSQL void/db to Nitro in a %s build (dependency %s): %s',
+    async (_name, dependency, external) => {
+      const root = createProjectRoot();
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', dependencies: { [dependency]: '*' } }),
+      );
+      writeFileSync(
+        join(root, 'void.json'),
+        JSON.stringify({ database: 'pg', worker: { compatibility_date: '2026-02-24' } }),
+      );
+      mkdirSync(join(root, 'db'));
+      writeFileSync(join(root, 'db/schema.ts'), 'export {};\n');
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+
+      const config = await resolveConfig(
+        { root, configFile: false, logLevel: 'silent', plugins: [voidPlugin()] },
+        'build',
+        'production',
+      );
+      const plugin = config.plugins.find((candidate) => candidate.name === 'void:drizzle')!;
+      const resolveId = getHookHandler(plugin.resolveId) as (
+        this: { environment: { name: string; mode: string } },
+        source: string,
+        importer: string,
+        options: { isEntry: boolean },
+      ) => unknown;
+
+      expect(
+        await resolveId.call(
+          { environment: { name: 'ssr', mode: 'build' } },
+          'void/db',
+          join(root, 'src/server/users.ts'),
+          { isEntry: false },
+        ),
+      ).toEqual(external ? { id: 'void/db', external: true } : '\0virtual:void-db');
+    },
+  );
 
   it('rejects Cloudflare-only imports from installed packages on the Node target dev server', async () => {
     const root = realpathSync.native(createProjectRoot());

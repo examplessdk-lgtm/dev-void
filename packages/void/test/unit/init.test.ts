@@ -1868,10 +1868,20 @@ jobs:
           expect.stringContaining('export default defineNuxtConfig'),
           'Manual Nuxt config step',
         );
-        expect(mockNote).toHaveBeenCalledWith(
-          expect.stringContaining('nitro: { modules: ["void/nitro"] }'),
-          'Manual Nuxt config step',
+        // Without the preset Nuxt builds a Node server; without the dev config, dev has no env;
+        // without the top-level alias, `nuxi typecheck` cannot find `@schema`.
+        const nuxtNote = mockNote.mock.calls.find(
+          ([, title]) => title === 'Manual Nuxt config step',
         );
+        for (const line of [
+          'import { resolve } from "node:path";',
+          '  alias: {\n    "@schema": resolve(import.meta.dirname, "db/schema.ts"),\n  },\n  nitro: {',
+          'preset: "cloudflare-module",',
+          'modules: ["void/nitro"],',
+          'cloudflare: { dev: { configPath: "./.void-wrangler.jsonc" } },',
+        ]) {
+          expect(nuxtNote?.[0]).toContain(line);
+        }
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -1899,12 +1909,17 @@ jobs:
       await runInitCommand(root);
 
       expect(existsSync(join(root, 'vite.config.ts'))).toBe(false);
-      expect(mockNote).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'analog({ nitro: { modules: ["nitro-cloudflare-dev", "void/nitro"] } })',
-        ),
-        'Manual Analog config step',
+      const analogNote = mockNote.mock.calls.find(
+        ([, title]) => title === 'Manual Analog config step',
       );
+      for (const line of [
+        'Install `nitro-cloudflare-dev` as a dev dependency.',
+        'preset: "cloudflare-module",',
+        'modules: ["nitro-cloudflare-dev", "void/nitro"],',
+        'cloudflareDev: { configPath: "./.void-wrangler.jsonc" },',
+      ]) {
+        expect(analogNote?.[0]).toContain(line);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
