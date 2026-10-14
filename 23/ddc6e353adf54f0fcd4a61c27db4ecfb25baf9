@@ -1,0 +1,23 @@
+.github/workflows/ci.yml
+  s_1cbb8f9d8ae59c::t_a9429d1ecd2c15 36
+docs/package.json
+  s_1cbb8f9d8ae59c::t_10c00dd28e04bc 18
+pnpm-lock.yaml
+  s_1cbb8f9d8ae59c::t_4593ae11cbb9bc 364-366,14735-14740,21087,21090-21091,21097
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "23ddc6e353adf54f0fcd4a61c27db4ecfb25baf9",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
