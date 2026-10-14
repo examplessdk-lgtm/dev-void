@@ -180,6 +180,8 @@ describe('Cloudflare Access provisioning', () => {
     { type: 'onetimepin' },
     { type: 'github' },
     { type: 'cloudflare', config: { restrict_to_account_members: false } },
+    { type: 'oidc', config: { auth_url: 'https://accounts.google.com/o/oauth2/auth' } },
+    { type: 'saml', config: { sso_target_url: 'https://idp.example.net/sso/saml' } },
   ])('rejects a policy that admits anyone who signs in with %j', async (provider) => {
     const env = fixture();
     env.identityProviders.push({ id: 'public-login', name: 'Public login', ...provider });

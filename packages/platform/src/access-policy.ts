@@ -11,19 +11,21 @@ const COMPANY_IDENTITY_RULES = [
   'group',
 ] as const;
 
-// Identity provider types that sign people in through a company directory.
-// One-time PIN, passkeys and public logins such as GitHub, Google (consumer
-// accounts), Facebook, LinkedIn and Yandex admit anyone with an email address
-// or an account there.
+// Identity provider types whose required settings name one company directory:
+// an Entra ID tenant, a Centrify, Okta or OneLogin account, a Google Workspace
+// domain or a PingOne environment. One-time PIN, passkeys and public logins
+// such as GitHub, Google (consumer accounts), Facebook, LinkedIn and Yandex
+// admit anyone with an email address or an account there. Generic OIDC and
+// SAML connect any provider, including ones with public sign-up, such as
+// consumer Google in Cloudflare's own OIDC example, so their type proves
+// nothing about who can sign in.
 const COMPANY_IDENTITY_PROVIDER_TYPES: ReadonlySet<unknown> = new Set([
   'azureAD',
   'centrify',
   'google-apps',
-  'oidc',
   'okta',
   'onelogin',
   'pingone',
-  'saml',
 ]);
 
 function plainObject(value: unknown): value is Record<string, unknown> {

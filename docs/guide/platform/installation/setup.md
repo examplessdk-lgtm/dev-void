@@ -161,10 +161,16 @@ follow the printed steps.
 
 An Allow policy must name who may sign in: emails, email domains or lists,
 identity-provider groups (Okta, Microsoft Entra ID, Google Workspace, GitHub
-organizations, or SAML), company login methods such as Okta or Microsoft Entra
-ID, authentication contexts, or Access groups built from them. Policies that
-allow everyone, any service token, or bypass Access are rejected, and so are
-policies that rely only on One-time PIN or a public login such as GitHub.
+organizations, or SAML), authentication contexts, or Access groups built from
+them. A login method also counts when it uses Cloudflare's connector for a
+company directory: Microsoft Entra ID, Okta, OneLogin, PingOne, Centrify, Google
+Workspace, or the Cloudflare login with **Restrict to account members** turned
+on. Policies that allow everyone, any service token, or bypass Access are
+rejected, and so are policies that rely only on One-time PIN, a public login
+such as GitHub, or a login added with the generic **OpenID Connect** or
+**SAML** option, even one that fronts your company directory. Void cannot tell
+who can sign in through a generic login; add a Require rule such as **Emails
+ending in** your company domain to that policy.
 
 The setup credential needs **Access: Apps and Policies Write** and
 **Access: Organizations, Identity Providers, and Groups Read** in the identity
