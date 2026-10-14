@@ -154,7 +154,7 @@ export async function runFrameworkDeploy(
 
   const { schedules, queues } = toManifestSchedulesAndQueues(rawJobs, rawQueues);
 
-  await assertEnvSchemaValid(root, client, config.projectId);
+  await assertEnvSchemaValid(root, client, config.projectId, voidConfig.worker?.vars);
 
   const s = createSpinner();
   const onProgress = (msg: string) => s.message(msg);
@@ -202,6 +202,7 @@ export async function runFrameworkDeploy(
     revalidate,
     revalidateQueryAllowlist: voidConfig.routing?.revalidateQueryAllowlist,
     prerender,
+    vars: voidConfig.worker?.vars,
     // Not `routing.notFound`; see `warnIgnoredNotFoundForFramework`.
     assetConfig: { not_found_handling: 'none' },
     packageOptions,

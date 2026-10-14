@@ -442,6 +442,7 @@ export function buildVoidManifest(opts: {
   revalidate?: number | Record<string, number>;
   pages?: Array<{ pattern: string; revalidate?: number }>;
   pathRevalidate?: Record<string, number>;
+  vars?: Record<string, string>;
   queues?: Array<QueueMeta>;
   prerender?: Array<string>;
   assetConfig?: AssetConfig;
@@ -463,6 +464,7 @@ export function buildVoidManifest(opts: {
     revalidate,
     pages,
     pathRevalidate,
+    vars,
     queues,
     prerender,
     assetConfig,
@@ -567,6 +569,10 @@ export function buildVoidManifest(opts: {
 
   if (resolvedAssetConfig) {
     manifest.assetConfig = resolvedAssetConfig;
+  }
+
+  if (vars && Object.keys(vars).length > 0) {
+    manifest.vars = vars;
   }
 
   if (options?.workerMain) {
@@ -693,6 +699,7 @@ export function buildFrameworkManifest(opts: {
   revalidate?: number | Record<string, number>;
   revalidateQueryAllowlist?: Record<string, Array<string>>;
   prerender?: Array<string>;
+  vars?: Record<string, string>;
   assetConfig?: AssetConfig;
   packageOptions?: Omit<PackageOptions, 'workerMain'>;
   hashedAssetsPrefix?: string;
@@ -734,6 +741,9 @@ export function buildFrameworkManifest(opts: {
   }
   if (opts.assetConfig) {
     manifest.assetConfig = opts.assetConfig;
+  }
+  if (opts.vars && Object.keys(opts.vars).length > 0) {
+    manifest.vars = opts.vars;
   }
 
   manifest.ssr = true;

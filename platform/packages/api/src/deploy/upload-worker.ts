@@ -274,14 +274,9 @@ export async function uploadDeploymentWorker(input: {
   // route can reject before persisting; see the invariant test there.
   const userVarNames = Object.keys(manifest.vars ?? {});
   const userSecretNames = secretBindings.map((s) => s.name);
-  // Check BOTH vars and project secrets. A secret is uploaded in the
-  // same `metadata.bindings` array, so a secret named e.g. `SEND_EMAIL`
-  // or `__VOID_PROJECT_SLUG` either shadows a platform binding or is
-  // shadowed by one — CF resolves duplicates last-wins with no error.
-  // The secrets route rejects these at PUT time, but older stored rows
-  // can still reach here. Failing the deploy with
-  // a named binding beats shipping a worker that silently reads the
-  // wrong value.
+  // Vars and secrets share metadata.bindings with platform bindings. Reject
+  // reserved names before Cloudflare rejects the duplicate binding. The secrets
+  // route rejects these at PUT time, but older stored rows can still reach here.
   const reserved = [
     ...userVarNames.filter((n) => RESERVED_BINDING_NAMES.has(n)).map((n) => `vars.${n}`),
     ...userSecretNames.filter((n) => RESERVED_BINDING_NAMES.has(n)).map((n) => `secret.${n}`),
@@ -294,11 +289,13 @@ export async function uploadDeploymentWorker(input: {
   if (collisions.length > 0) {
     logger.warn('worker_upload', 'var_secret_collisions', { collisions });
   }
-  const plainTextBindings = Object.entries(manifest.vars ?? {}).map(([name, text]) => ({
-    type: 'plain_text' as const,
-    name,
-    text,
-  }));
+  const plainTextBindings = Object.entries(manifest.vars ?? {})
+    .filter(([name]) => !secretNames.has(name))
+    .map(([name, text]) => ({
+      type: 'plain_text' as const,
+      name,
+      text,
+    }));
   const durableObjects = await prepareManagedDurableObjects(
     context.env,
     context.get('db'),
