@@ -368,6 +368,54 @@ describe('pending login replacement', () => {
     );
   });
 
+  it('keeps every installed connection when several share a kind', async () => {
+    vi.stubEnv('TEST_NEW_OIDC_SECRET', 'new-oidc-secret');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const oidc = (id: string) => ({
+      configuration: {
+        id,
+        kind: 'oidc',
+        label: id,
+        issuer: `https://${id}.example.com`,
+        clientId: `${id}-client`,
+      },
+    });
+    const installed = JSON.stringify(
+      parsePlatformAuthenticationSetup({
+        connections: [
+          { ...oidc('company'), clientSecret: 'company-secret' },
+          { ...oidc('partner'), clientSecret: 'partner-secret' },
+        ],
+        administratorConnectionId: 'company',
+        admission: { mode: 'restricted' },
+        protection: null,
+        bootstrapCredentialHash: sha256('previous-code'),
+      }),
+    );
+    const replaceInstalled = async (ids: Array<string>) =>
+      replacePendingInstallationAuthentication({
+        file: await writeAuthFile({
+          connections: ids.map((id) => ({ ...oidc(id), clientSecretEnv: 'TEST_NEW_OIDC_SECRET' })),
+        }),
+        authentication: { providers: ['oidc'], configurable: true },
+        setupJson: installed,
+        apiUrl: 'https://api.example.com',
+      });
+    for (const ids of [['company'], ['company', 'partner', 'vendor'], ['company', 'vendor']]) {
+      await expect(replaceInstalled(ids)).rejects.toThrow(
+        'List each installed connection with its ID: company, partner.',
+      );
+    }
+    const setup = parsePlatformAuthenticationSetup(
+      JSON.parse((await replaceInstalled(['partner', 'company'])).authenticationSetupJson),
+    );
+    expect(setup.connections.map((entry) => entry.configuration.id)).toEqual([
+      'partner',
+      'company',
+    ]);
+    expect(setup.administratorConnectionId).toBe('company');
+  });
+
   it('asks for each setting with the saved value and keeps a secret left blank', async () => {
     const tty = process.stdin.isTTY;
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });

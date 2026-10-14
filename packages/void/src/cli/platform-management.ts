@@ -399,7 +399,11 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           'platform: Changing the login settings needs the setup authority saved on the computer that installed the platform. Run this repair there.',
         );
       }
-      await readLoginReplacementFile(loginFile, manifest.deployment.authentication);
+      await readLoginReplacementFile(
+        loginFile,
+        manifest.deployment.authentication,
+        recovery.authenticationSetupJson,
+      );
     }
     const deployment = manifest.deployment;
     const planInput = {

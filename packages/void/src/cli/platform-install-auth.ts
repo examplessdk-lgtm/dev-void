@@ -443,20 +443,32 @@ export function authenticationSetupRequestHash(setupJson: string): string {
   return createHash('sha256').update(JSON.stringify(configuration)).digest('hex');
 }
 
-/** Read a repair login file. It may change login settings, not methods or Access protection. */
+/**
+ * Read a repair login file. It may change login settings, not methods or Access
+ * protection: it lists the same connection IDs and kinds as the saved setup.
+ */
 export async function readLoginReplacementFile(
   file: string,
   authentication: PlatformDeploymentManifest['authentication'],
+  setupJson: string,
 ): Promise<AuthFile> {
   const selection = await selectInstallationAuthentication(file);
-  const kinds = new Set(selection.authentication.providers);
+  const installed = parsePlatformAuthenticationSetup(JSON.parse(setupJson)).connections;
+  const connections = (
+    entries: ReadonlyArray<{ configuration: { id?: unknown; kind?: unknown } }>,
+  ) =>
+    entries
+      .map(({ configuration: { id, kind } }) =>
+        JSON.stringify([id || defaultConnectionId(kind as PlatformLoginKind), kind]),
+      )
+      .sort()
+      .join('\n');
   if (
-    kinds.size !== new Set(authentication.providers).size ||
-    authentication.providers.some((kind) => !kinds.has(kind)) ||
+    connections(selection.file!.connections) !== connections(installed) ||
     !!selection.authentication.accessProtection !== !!authentication.accessProtection
   ) {
     throw new Error(
-      'platform: Repair changes login settings, not which login methods or Access protection the platform uses.',
+      `platform: Repair changes login settings, not which login methods or Access protection the platform uses. List each installed connection with its ID: ${installed.map(({ configuration }) => configuration.id).join(', ')}.`,
     );
   }
   return selection.file!;
@@ -476,7 +488,7 @@ export async function replacePendingInstallationAuthentication(input: {
 }): Promise<{ authenticationSetupJson: string; authBootstrapCode: string }> {
   const previous = parsePlatformAuthenticationSetup(JSON.parse(input.setupJson));
   const file = input.file
-    ? await readLoginReplacementFile(input.file, input.authentication)
+    ? await readLoginReplacementFile(input.file, input.authentication, input.setupJson)
     : undefined;
   console.log(`Login callback URL: ${formatUrl(`${input.apiUrl}/auth/callback`)}`);
   const savedConnection = (id: unknown) =>
