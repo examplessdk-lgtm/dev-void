@@ -1,0 +1,25 @@
+platform/packages/api/src/provisioning/durable-objects.ts
+  s_77824b01a12d99::t_f6252f9fba8d18 18,344-345,352-355,358,367-371
+platform/packages/api/src/provisioning/durable-snapshot.ts
+  s_77824b01a12d99::t_f0fd31bcba733f 1-48
+platform/packages/api/test/integration/managed-durable-objects.test.ts
+  s_77824b01a12d99::t_e02cdd352a8358 199-220
+platform/packages/api/test/unit/durable-snapshot.test.ts
+  s_77824b01a12d99::t_f82aadc9a395ca 1-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "37f7cd727ee15d9fe22845bfa903e89d4790587f",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
