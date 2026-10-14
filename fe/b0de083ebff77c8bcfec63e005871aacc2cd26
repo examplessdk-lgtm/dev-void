@@ -1,0 +1,21 @@
+platform/packages/api/src/provisioning/durable-objects.ts
+  s_77824b01a12d99::t_a0bb75afe9a267 63-73
+platform/packages/api/test/integration/managed-durable-objects.test.ts
+  s_77824b01a12d99::t_6b4cbef5f73ee2 81,84-86,92-94,199-213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "feb0de083ebff77c8bcfec63e005871aacc2cd26",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
