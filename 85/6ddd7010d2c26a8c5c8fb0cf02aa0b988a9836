@@ -1,0 +1,21 @@
+packages/void/src/runtime/ai.ts
+  s_77824b01a12d99::t_bf1971f4f65be9 434-438,447-454,497,500,522,525
+packages/void/test/unit/ai.test.ts
+  s_77824b01a12d99::t_e488e609c3a624 21-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "856ddd7010d2c26a8c5c8fb0cf02aa0b988a9836",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
