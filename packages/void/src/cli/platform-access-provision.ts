@@ -140,6 +140,7 @@ export class PlatformAccessPolicyRejectedError extends Error {}
 export async function verifyCompanyAccessPolicies(
   client: PlatformAccessClient,
   policies: ReadonlyArray<ObjectValue>,
+  identityProviderIds: ReadonlyArray<string>,
   identityProviders?: ReadonlyArray<ObjectValue>,
 ): Promise<void> {
   const companyProviders = new Set(
@@ -147,8 +148,22 @@ export async function verifyCompanyAccessPolicies(
       .filter(isPlatformAccessCompanyIdentityProvider)
       .map((provider) => provider.id),
   );
-  const identityRule = (entry: unknown, name: string) =>
-    isPlatformAccessIdentityRule(object(entry, name), (id) => companyProviders.has(id));
+  // The applications offer only the selected providers at sign-in, so a login
+  // method rule for any other provider matches nobody.
+  const selectedCompanyProviders = new Set(
+    identityProviderIds.filter((id) => companyProviders.has(id)),
+  );
+  const identityRule = (
+    entry: unknown,
+    name: string,
+    providers: ReadonlySet<unknown> = selectedCompanyProviders,
+  ) => isPlatformAccessIdentityRule(object(entry, name), (id) => providers.has(id));
+  const restricted = (target: ObjectValue, providers?: ReadonlySet<unknown>) =>
+    Array.isArray(target.include) &&
+    target.include.length > 0 &&
+    ((Array.isArray(target.require) &&
+      target.require.some((entry) => identityRule(entry, 'policy rule', providers))) ||
+      target.include.every((entry) => identityRule(entry, 'policy rule', providers)));
   const groups = new Set<string>();
   const checkedGroups = new Set<string>();
   const checkRules = async (value: unknown, depth = 0): Promise<void> => {
@@ -223,17 +238,11 @@ export async function verifyCompanyAccessPolicies(
     allows++;
     await checkRules(policy.include);
     await checkRules(policy.require);
-    if (
-      !Array.isArray(policy.include) ||
-      !policy.include.length ||
-      (!(
-        Array.isArray(policy.require) &&
-        policy.require.some((entry) => identityRule(entry, 'policy rule'))
-      ) &&
-        !policy.include.every((entry) => identityRule(entry, 'policy rule')))
-    ) {
+    if (!restricted(policy)) {
       throw new PlatformAccessPolicyRejectedError(
-        'platform: Select Access allow policies restricted to company identities.',
+        restricted(policy, companyProviders)
+          ? 'platform: An Access allow policy uses a login method that is not one of the selected identity providers.'
+          : 'platform: Select Access allow policies restricted to company identities.',
       );
     }
   }
@@ -291,6 +300,7 @@ export function platformAccessCreateRejected(error: unknown): boolean {
 export async function verifySelectedAccessPolicies(
   client: PlatformAccessClient,
   policyIds: ReadonlyArray<string>,
+  identityProviderIds: ReadonlyArray<string>,
   identityProviders?: ReadonlyArray<ObjectValue>,
 ): Promise<Array<ObjectValue>> {
   const policies = await Promise.all(
@@ -308,7 +318,7 @@ export async function verifySelectedAccessPolicies(
       }
     }),
   );
-  await verifyCompanyAccessPolicies(client, policies, identityProviders);
+  await verifyCompanyAccessPolicies(client, policies, identityProviderIds, identityProviders);
   return policies;
 }
 
@@ -351,7 +361,12 @@ export async function inspectPlatformAccess(
       'platform: A selected Access identity provider is unavailable in this account.',
     );
   }
-  const policies = await verifySelectedAccessPolicies(client, input.policyIds, providers);
+  const policies = await verifySelectedAccessPolicies(
+    client,
+    input.policyIds,
+    input.identityProviderIds,
+    providers,
+  );
   return { teamDomain, identityProviders, policies };
 }
 
@@ -692,7 +707,7 @@ export async function verifyPlatformAccessApplication(
   const currentPolicies = await client.list(
     `apps/${encodeURIComponent(text(app.id, 'application ID'))}/policies`,
   );
-  await verifyCompanyAccessPolicies(client, currentPolicies);
+  await verifyCompanyAccessPolicies(client, currentPolicies, input.identityProviderIds);
   const allowIds = currentPolicies
     .filter((policy) => policy.decision === 'allow' || policy.decision === 'deny')
     .map((policy) => text(policy.id, 'policy ID'));

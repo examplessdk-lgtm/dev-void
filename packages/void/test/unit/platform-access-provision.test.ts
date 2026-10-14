@@ -179,6 +179,34 @@ describe('Cloudflare Access provisioning', () => {
   });
 
   it.each([
+    { include: [{ login_method: { id: 'subsidiary-idp' } }] },
+    {
+      include: [{ ip: { ip: '203.0.113.0/24' } }],
+      require: [{ login_method: { id: 'subsidiary-idp' } }],
+    },
+  ])('accepts a company login method only when it is a selected provider (%j)', async (rules) => {
+    const env = fixture();
+    env.identityProviders.push({ id: 'subsidiary-idp', type: 'azureAD', name: 'Subsidiary SSO' });
+    delete env.policy.require;
+    Object.assign(env.policy, rules);
+    const login = { id: 'access', label: 'Company Access' };
+    await expect(
+      provisionPlatformAccess(env.client, { ...base, login }, fresh(), () => {}),
+    ).rejects.toThrow(
+      'An Access allow policy uses a login method that is not one of the selected identity providers.',
+    );
+    expect(env.calls.some((call) => call.method === 'POST')).toBe(false);
+    const result = await provisionPlatformAccess(
+      env.client,
+      { ...base, identityProviderIds: ['company-idp', 'subsidiary-idp'], login },
+      fresh(),
+      () => {},
+    );
+    expect(result.login?.configuration.kind).toBe('cloudflare-access');
+    expect([...env.apps.values()][0]?.allowed_idps).toEqual(['company-idp', 'subsidiary-idp']);
+  });
+
+  it.each([
     { type: 'onetimepin' },
     { type: 'github' },
     { type: 'cloudflare', config: { restrict_to_account_members: false } },

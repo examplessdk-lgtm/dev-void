@@ -162,9 +162,10 @@ follow the printed steps.
 An Allow policy must name who may sign in: emails, email domains or lists,
 identity-provider groups (Okta, Microsoft Entra ID, Google Workspace, GitHub
 organizations, or SAML), authentication contexts, members of a Cloudflare
-account, or Access groups built from them. A login method also counts when it
-uses Cloudflare's connector for a company directory: Microsoft Entra ID, Okta,
-OneLogin, PingOne, Centrify, Google Workspace, or the Cloudflare login with
+account, or Access groups built from them. A login method also counts when it is
+one of the identity providers you select and uses Cloudflare's connector for a
+company directory: Microsoft Entra ID, Okta, OneLogin, PingOne, Centrify,
+Google Workspace, or the Cloudflare login with
 **Restrict to account members** turned on. Policies that allow everyone, any
 service token, or bypass Access are rejected, and so are policies that rely
 only on One-time PIN, a public login such as GitHub, or a login added with the

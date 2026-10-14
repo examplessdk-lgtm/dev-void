@@ -318,6 +318,7 @@ export async function prepareInstallationAppAccess(input: {
         await access.list('policies'),
         input.plan.account.id,
         'create',
+        identityProviderIds,
       );
       input.save({ appAccessPolicyIds: JSON.stringify(policyIds) });
     }

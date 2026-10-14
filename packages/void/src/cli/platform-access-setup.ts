@@ -44,6 +44,7 @@ export async function selectCompanyAccessPolicies(
   initialPolicies: Array<Record<string, unknown>>,
   accountId: string,
   mode: PlatformAccessSetupSpec['mode'],
+  identityProviderIds: ReadonlyArray<string>,
 ): Promise<Array<string>> {
   const emailDomain = '__email_domain__';
   const create = '__create__';
@@ -167,7 +168,7 @@ export async function selectCompanyAccessPolicies(
       }
     } else if (!choices.includes(refresh)) {
       try {
-        await verifySelectedAccessPolicies(client, selectedIds);
+        await verifySelectedAccessPolicies(client, selectedIds, identityProviderIds);
         return selectedIds;
       } catch (error) {
         if (
@@ -568,7 +569,13 @@ export async function preparePlatformAccessSetup(input: {
   const policyIds =
     spec.policyIds ??
     (process.stdin.isTTY
-      ? await selectCompanyAccessPolicies(client, policies, accountId, spec.mode)
+      ? await selectCompanyAccessPolicies(
+          client,
+          policies,
+          accountId,
+          spec.mode,
+          identityProviderIds,
+        )
       : []);
   if (!identityProviderIds.length || !policyIds.length) {
     throw new Error('platform: Access setup requires explicit identityProviderIds and policyIds.');

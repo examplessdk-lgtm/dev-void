@@ -621,6 +621,32 @@ describe('interactive Access policy creation', () => {
     expect(JSON.parse(fixture.checkpoint.accessSetupSpecJson!).policyIds).toEqual(['employees']);
   });
 
+  it('asks again when a picked policy uses a login method that was not selected', async () => {
+    const fixture = setup();
+    fixture.env.identityProviders.push({ id: 'subsidiary-idp', type: 'okta', name: 'Subsidiary' });
+    fixture.setPolicies([
+      fixture.env.policy,
+      {
+        id: 'subsidiary',
+        name: 'Subsidiary SSO',
+        decision: 'allow',
+        include: [{ login_method: { id: 'subsidiary-idp' } }],
+      },
+    ]);
+    let picks = 0;
+    prompts.multiselect.mockImplementation(async ({ message }) => {
+      if (message === 'Company identity providers:') {
+        return ['company-idp'];
+      }
+      return picks++ === 0 ? ['subsidiary'] : ['employees'];
+    });
+    await preparePlatformAccessSetup(fixture.input);
+    expect(prompts.warn).toHaveBeenCalledExactlyOnceWith(
+      'An Access allow policy uses a login method that is not one of the selected identity providers. Choose other policies, or fix the policy in Cloudflare and refresh the list.',
+    );
+    expect(JSON.parse(fixture.checkpoint.accessSetupSpecJson!).policyIds).toEqual(['employees']);
+  });
+
   it('forgets a rejected saved pick so the next interactive run asks again', async () => {
     const fixture = setup();
     fixture.setPolicies([fixture.env.policy, broad]);
