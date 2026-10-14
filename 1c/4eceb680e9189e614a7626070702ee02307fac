@@ -1,0 +1,57 @@
+packages/deploy-core/src/index.ts
+  s_77824b01a12d99::t_98367505fa8bea 1,233-238,285
+packages/deploy-core/test/unit/validate.test.ts
+  s_77824b01a12d99::t_e75a91e497457e 4-40
+packages/void/src/cli/deploy-managed-full.ts
+  s_77824b01a12d99::t_480e9965d8c61b 262-268,434
+packages/void/src/cli/package.ts
+  s_77824b01a12d99::t_b1228963d550b1 455,480-489
+packages/void/src/deploy.ts
+  s_77824b01a12d99::t_d92c8244c82f52 77
+packages/void/test/unit/deploy-artifact-preparation.test.ts
+  s_77824b01a12d99::t_0288088536b045 69-83
+packages/void/test/unit/package.test.ts
+  s_77824b01a12d99::t_545c02b7617a40 80-94
+platform/packages/api/package.json
+  s_77824b01a12d99::t_59a6aeff712271 64
+platform/packages/api/src/db/resources.ts
+  s_77824b01a12d99::t_f556abb51f418c 76-82
+platform/packages/api/src/deploy/execute.ts
+  s_77824b01a12d99::t_75d90a2da264e8 336-342,597-602
+platform/packages/api/src/deploy/recovery.ts
+  s_77824b01a12d99::t_ae5ce0a379afd8 32,340,396
+platform/packages/api/src/provisioning/cleanup.ts
+  s_77824b01a12d99::t_8948c21d6f98b7 68,90-91,148-155
+platform/packages/api/src/provisioning/provision.ts
+  s_77824b01a12d99::t_806fe712825d3b 274,310-311,343-344
+platform/packages/api/src/reserved-bindings.ts
+  s_77824b01a12d99::t_6c4168b5f4cd9e 30-31
+platform/packages/api/src/routes/projects.ts
+  s_77824b01a12d99::t_6934f9cc19a41e 82,1397-1404
+platform/packages/api/src/schema.ts
+  s_77824b01a12d99::t_b0464bb73b4fd7 749-751
+platform/packages/api/test/integration/helpers.ts
+  s_77824b01a12d99::t_5c74ff197fade5 368-369,382-383
+platform/packages/tail/src/index.ts
+  s_77824b01a12d99::t_8057737786da78 22,24-33,61-65
+platform/packages/tail/test/parse-script-name.test.ts
+  s_77824b01a12d99::t_f21f216ccf8939 5-16
+pnpm-lock.yaml
+  s_77824b01a12d99::t_f81b83cd895b20 933-935
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1c4eceb680e9189e614a7626070702ee02307fac",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
