@@ -596,25 +596,32 @@ async function resetDatabase(
     const { hostname, host, pathname } = new URL(getLocalDatabaseUrl(root, dialect));
     const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
     await confirmDropAllTables(hostname, target, yes);
-    await withMySqlClient(root, async (client) => {
-      // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
-      const tables = await client.query(
-        "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
-      );
-      await client.query('SET FOREIGN_KEY_CHECKS = 0');
-      try {
-        for (const row of tables) {
-          const table = String(row.table_name).replaceAll('`', '``');
-          await client.query(`DROP TABLE IF EXISTS \`${table}\``);
+    const { applyPendingMySqlMigrations, withMySqlMigrationLock } =
+      await import('../migrations/runner-mysql.ts');
+    // The migration lock keeps deploys and other migration runs out from the first drop until
+    // the files are applied again.
+    await withMySqlClient(root, (client) =>
+      withMySqlMigrationLock(client, async () => {
+        // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
+        const tables = await client.query(
+          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+        );
+        await client.query('SET FOREIGN_KEY_CHECKS = 0');
+        try {
+          for (const row of tables) {
+            // Deploys of any project on this database keep their lease rows in this table.
+            if (row.table_name === '_void_migration_lock') {
+              continue;
+            }
+            const table = String(row.table_name).replaceAll('`', '``');
+            await client.query(`DROP TABLE IF EXISTS \`${table}\``);
+          }
+        } finally {
+          await client.query('SET FOREIGN_KEY_CHECKS = 1');
         }
-      } finally {
-        await client.query('SET FOREIGN_KEY_CHECKS = 1');
-      }
-    });
-    if (migrations.length > 0) {
-      const { applyMySqlMigrations } = await import('../migrations/runner-mysql.ts');
-      await withMySqlClient(root, (client) => applyMySqlMigrations(client, migrations));
-    }
+        await applyPendingMySqlMigrations(client, migrations);
+      }),
+    );
     return migrations.length;
   }
 

@@ -18,6 +18,8 @@ export async function runLocalVoidAuthMigrations(
   persistRoot: string,
   databaseId: string,
   configPath: string | null = findVoidAuthConfig(root),
+  /** The database to change. Without it, DATABASE_URL from the shell, then from `.env`. */
+  databaseUrl?: string,
 ): Promise<void> {
   const authConfig = await loadVoidAuthConfig(configPath);
   const runtime = {
@@ -51,9 +53,10 @@ export async function runLocalVoidAuthMigrations(
   }
 
   const connectionString =
-    typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
+    databaseUrl ??
+    (typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
       ? env.DATABASE_URL
-      : undefined;
+      : undefined);
   if (!connectionString) {
     return;
   }

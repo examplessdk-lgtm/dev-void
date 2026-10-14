@@ -47,7 +47,10 @@ vi.mock('mysql2/promise', () => ({
       const tables = /^SELECT table_name(?: AS (\w+))? FROM information_schema\.tables/.exec(sql);
       if (tables) {
         const key = tables[1] ?? 'TABLE_NAME';
-        return [[{ [key]: '_void_migrations' }, { [key]: 'users' }], []];
+        return [
+          [{ [key]: '_void_migration_lock' }, { [key]: '_void_migrations' }, { [key]: 'users' }],
+          [],
+        ];
       }
       if (sql === 'SELECT `name` FROM `_void_migrations`') {
         const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
@@ -451,6 +454,16 @@ describe('void db reset', () => {
     expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `_void_migrations`');
     expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `users`');
     expect(mysqlQueries).toContain('CREATE TABLE `users` (id INT);');
+    // The migration lock covers the drops and the new run, and deploys keep their lease table.
+    const lock = mysqlQueries.findIndex((sql) => sql.startsWith('SELECT GET_LOCK'));
+    const firstDrop = mysqlQueries.findIndex((sql) => sql.startsWith('DROP TABLE'));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeLessThan(firstDrop);
+    const leaseCheck = mysqlQueries.findIndex((sql) => sql.includes('TIMESTAMPDIFF'));
+    expect(leaseCheck).toBeGreaterThan(lock);
+    expect(leaseCheck).toBeLessThan(firstDrop);
+    expect(mysqlQueries.at(-1)).toBe('SELECT RELEASE_LOCK(?)');
+    expect(mysqlQueries).not.toContain('DROP TABLE IF EXISTS `_void_migration_lock`');
   });
 });
 

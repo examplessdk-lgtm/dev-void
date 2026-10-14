@@ -1,10 +1,10 @@
 import type { Connection } from 'mysql2/promise';
-import { splitMigrationSql } from '../runtime/migration-handler.ts';
 import {
   mySqlMigrationLockError,
   mySqlMigrationLockName,
   readMySqlMigrationLease,
 } from '../runtime/migration-lock-mysql.ts';
+import { splitMySqlMigrationSql } from '../runtime/mysql-migration-sql.ts';
 import { collectMigrations } from './collect.ts';
 
 export type MySqlClient = {
@@ -125,6 +125,22 @@ function mySqlMigrationError(name: string, error: unknown, committed: boolean): 
   return new Error(lines.join('\n'), { cause: error });
 }
 
+/**
+ * Runs `work` while this session holds the database's migration lock, so no other migration run,
+ * deploy or reset changes the schema meanwhile.
+ */
+export async function withMySqlMigrationLock<T>(
+  client: MySqlClient,
+  work: () => Promise<T>,
+): Promise<T> {
+  const lock = await acquireMySqlMigrationLock(client);
+  try {
+    return await work();
+  } finally {
+    await client.query('SELECT RELEASE_LOCK(?)', [lock]).catch(() => {});
+  }
+}
+
 export async function applyMySqlMigrations(
   client: MySqlClient,
   migrations: Array<{ name: string; sql: string }>,
@@ -132,62 +148,87 @@ export async function applyMySqlMigrations(
   if (migrations.length === 0) {
     return [];
   }
-
-  const lock = await acquireMySqlMigrationLock(client);
-  try {
-    await client.query(
-      'CREATE TABLE IF NOT EXISTS `_void_migrations` (`name` VARCHAR(255) PRIMARY KEY, `applied_at` VARCHAR(64) NOT NULL)',
-    );
-    const existing = await client.query<Array<{ name: string }>>(
-      'SELECT `name` FROM `_void_migrations`',
-    );
-    const appliedSet = new Set(existing.map((row) => String(row.name)));
-    const pending = migrations.filter((migration) => !appliedSet.has(migration.name));
-
-    for (const migration of pending) {
-      let ran = 0;
-      // Data changes commit with the tracking row. MySQL commits DDL, and anything before it, on its own.
-      await client.query('BEGIN');
-      try {
-        // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
-        for (const statement of splitMigrationSql(migration.sql)) {
-          await client.query(statement);
-          ran++;
-        }
-        await client.query('INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)', [
-          migration.name,
-          new Date().toISOString(),
-        ]);
-        await client.query('COMMIT');
-      } catch (error) {
-        const committed =
-          ran > 0 && !isRolledBackByServer(error) && !(await isTransactionOpen(client));
-        // A failed ROLLBACK means the session is gone, and MySQL rolls back with it.
-        await client.query('ROLLBACK').catch(() => {});
-        throw mySqlMigrationError(migration.name, error, committed);
-      }
-    }
-
-    return pending.map((migration) => migration.name);
-  } finally {
-    await client.query('SELECT RELEASE_LOCK(?)', [lock]).catch(() => {});
-  }
+  return withMySqlMigrationLock(client, () => applyPendingMySqlMigrations(client, migrations));
 }
 
-export async function runMySqlMigrations(
-  migrationsDir: string,
-  url: string,
+/** Applies the files not yet recorded. The caller holds the migration lock. */
+export async function applyPendingMySqlMigrations(
+  client: MySqlClient,
+  migrations: Array<{ name: string; sql: string }>,
 ): Promise<Array<string>> {
-  const migrations = collectMigrations(migrationsDir);
   if (migrations.length === 0) {
     return [];
   }
 
+  await client.query(
+    'CREATE TABLE IF NOT EXISTS `_void_migrations` (`name` VARCHAR(255) PRIMARY KEY, `applied_at` VARCHAR(64) NOT NULL)',
+  );
+  const existing = await client.query<Array<{ name: string }>>(
+    'SELECT `name` FROM `_void_migrations`',
+  );
+  const appliedSet = new Set(existing.map((row) => String(row.name)));
+  const pending = migrations.filter((migration) => !appliedSet.has(migration.name));
+
+  for (const migration of pending) {
+    let ran = 0;
+    // Data changes commit with the tracking row. MySQL commits DDL, and anything before it, on its own.
+    await client.query('BEGIN');
+    try {
+      // One statement per query, so `ran` tells whether earlier statements of the file ran.
+      for (const statement of splitMySqlMigrationSql(migration.sql)) {
+        await client.query(statement);
+        ran++;
+      }
+      await client.query('INSERT INTO `_void_migrations` (`name`, `applied_at`) VALUES (?, ?)', [
+        migration.name,
+        new Date().toISOString(),
+      ]);
+      await client.query('COMMIT');
+    } catch (error) {
+      const committed =
+        ran > 0 && !isRolledBackByServer(error) && !(await isTransactionOpen(client));
+      // A failed ROLLBACK means the session is gone, and MySQL rolls back with it.
+      await client.query('ROLLBACK').catch(() => {});
+      throw mySqlMigrationError(migration.name, error, committed);
+    }
+  }
+
+  return pending.map((migration) => migration.name);
+}
+
+/** Connects to `url` and runs `work` while holding that database's migration lock. */
+export async function withMySqlMigrationLockAt<T>(
+  url: string,
+  work: (client: MySqlClient) => Promise<T>,
+): Promise<T> {
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection({ uri: url, multipleStatements: true });
   try {
-    return await applyMySqlMigrations(toMySqlClient(connection), migrations);
+    const client = toMySqlClient(connection);
+    return await withMySqlMigrationLock(client, () => work(client));
   } finally {
     await connection.end();
   }
+}
+
+/**
+ * Applies the pending files in `migrationsDir`. `afterApply` gets the applied names and runs before
+ * the lock is released, so the schema changes it makes (Better Auth's tables) do not overlap
+ * another run either.
+ */
+export async function runMySqlMigrations(
+  migrationsDir: string,
+  url: string,
+  afterApply?: (applied: Array<string>) => Promise<void>,
+): Promise<Array<string>> {
+  const migrations = collectMigrations(migrationsDir);
+  if (migrations.length === 0 && !afterApply) {
+    return [];
+  }
+
+  return withMySqlMigrationLockAt(url, async (client) => {
+    const applied = await applyPendingMySqlMigrations(client, migrations);
+    await afterApply?.(applied);
+    return applied;
+  });
 }

@@ -1,12 +1,18 @@
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test';
+import { runLocalVoidAuthMigrations } from '../../src/auth/node.ts';
 import {
   applyMySqlMigrations,
   readMySqlAppliedMigrations,
+  runMySqlMigrations,
   type MySqlClient,
 } from '../../src/migrations/runner-mysql.ts';
 import { runVoidAuthMigrations } from '../../src/runtime/better-auth-mysql.ts';
 import { createMigrationHandler } from '../../src/runtime/migration-handler-mysql.ts';
+import { holdMySqlMigrationLease } from '../../src/runtime/migration-lock-mysql.ts';
 
 const mysqlConnections = vi.hoisted(() => [] as Array<unknown>);
 const mysqlServer = vi.hoisted(() => ({ database: undefined as unknown }));
@@ -213,10 +219,12 @@ beforeEach(() => {
 
 async function migrate(
   migrations: Array<{ name: string; sql: string }>,
+  runAuthMigrations?: () => Promise<void>,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const handler = createMigrationHandler(
     { HYPERDRIVE: { connectionString: 'mysql://localhost/app' }, __VOID_PROXY_TOKEN: 'token' },
     migrations,
+    runAuthMigrations,
   );
   const response = await handler(
     new Request('http://localhost/__void/migrate', {
@@ -229,7 +237,9 @@ async function migrate(
 
 /** Runs `start` to its end while fake time moves on one second at a time. */
 async function withFakeTime<T>(start: () => Promise<T>): Promise<T> {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+  });
   try {
     let settled = false;
     const promise = start().finally(() => {
@@ -345,6 +355,22 @@ describe('MySQL migration runner', () => {
     expect(migrationQueries(database.statements())).toEqual(statements);
   });
 
+  // Hyperdrive takes one statement per query, and the repair note counts the statements that ran.
+  it('runs each statement of a file without breakpoints as its own query', async () => {
+    const sql = '-- hand-written\nCREATE TABLE a (id int);\nCREATE TABLE b (id int); -- done\n';
+    const statements = ['CREATE TABLE a (id int);', 'CREATE TABLE b (id int);'];
+    const migrationQueries = (queries: Array<string>) =>
+      queries.filter((query) => !query.includes('_void_migrations') && !CONTROL.test(query));
+
+    const { client, sql: calls } = fakeClient();
+    await applyMySqlMigrations(client, [{ name: '001_init.sql', sql }]);
+    expect(migrationQueries(calls())).toEqual(statements);
+
+    const database = useDatabase(new FakeMySqlDatabase());
+    expect((await migrate([{ name: '001_init.sql', sql }])).body).toMatchObject({ ok: true });
+    expect(migrationQueries(database.statements())).toEqual(statements);
+  });
+
   // Two runs at once would both apply a pending data migration.
   it('holds a named lock for the database while it reads and applies migrations', async () => {
     const { client, calls, sql } = fakeClient();
@@ -426,31 +452,32 @@ describe('MySQL migration runner', () => {
     ]);
   });
 
-  it('says how to repair a file whose earlier statements MySQL already committed', async () => {
-    const cause = mySqlError(
-      "Key column 'nope' doesn't exist in table",
-      'ER_KEY_COLUMN_DOES_NOT_EXITS',
-    );
-    const { client } = fakeClient({
-      committed: true,
-      failures: { 'ALTER TABLE c ADD INDEX i (nope);': cause },
-    });
+  it.each([
+    'CREATE TABLE comments (id INT);\n--> statement-breakpoint\nALTER TABLE c ADD INDEX i (nope);',
+    'CREATE TABLE comments (id INT);\nALTER TABLE c ADD INDEX i (nope);',
+  ])(
+    'says how to repair a file whose earlier statements MySQL already committed: %j',
+    async (sql) => {
+      const cause = mySqlError(
+        "Key column 'nope' doesn't exist in table",
+        'ER_KEY_COLUMN_DOES_NOT_EXITS',
+      );
+      const { client } = fakeClient({
+        committed: true,
+        failures: { 'ALTER TABLE c ADD INDEX i (nope);': cause },
+      });
 
-    await expect(
-      applyMySqlMigrations(client, [
-        {
-          name: '002_comments.sql',
-          sql: 'CREATE TABLE comments (id INT);\n--> statement-breakpoint\nALTER TABLE c ADD INDEX i (nope);',
-        },
-      ]),
-    ).rejects.toThrow(
-      [
-        "migration 002_comments.sql failed: Key column 'nope' doesn't exist in table",
-        'MySQL commits schema changes immediately, so earlier statements in 002_comments.sql may already be applied. Undo them, fix the file, then run the command again.',
-        'See https://void.cloud/guide/database/mysql#failed-migrations',
-      ].join('\n'),
-    );
-  });
+      await expect(
+        applyMySqlMigrations(client, [{ name: '002_comments.sql', sql }]),
+      ).rejects.toThrow(
+        [
+          "migration 002_comments.sql failed: Key column 'nope' doesn't exist in table",
+          'MySQL commits schema changes immediately, so earlier statements in 002_comments.sql may already be applied. Undo them, fix the file, then run the command again.',
+          'See https://void.cloud/guide/database/mysql#failed-migrations',
+        ].join('\n'),
+      );
+    },
+  );
 
   it('does not warn about earlier statements when the first statement fails', async () => {
     const cause = mySqlError("Duplicate column name 'n'", 'ER_DUP_FIELDNAME');
@@ -595,6 +622,62 @@ describe('MySQL hosted migration handler', () => {
         },
       ],
     });
+  });
+
+  // A stored program keeps the rest of its part, and one query here takes one statement, so the
+  // server rejects SQL after the program as a syntax error.
+  const programThenInsert = 'CREATE PROCEDURE p() BEGIN SELECT 1; END;\nINSERT INTO c VALUES (1);';
+  const breakpointNote =
+    'This deploy runs one statement per query. If 002_p.sql has more SQL after a trigger, procedure, function or event, add a `--> statement-breakpoint` line after it.';
+  it.each([
+    {
+      server: 'MySQL',
+      cause: Object.assign(
+        mySqlError(
+          "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'INSERT INTO c VALUES (1)' at line 2",
+          'ER_PARSE_ERROR',
+        ),
+        { errno: 1064 },
+      ),
+    },
+    {
+      server: 'Vitess',
+      cause: Object.assign(
+        mySqlError("syntax error at position 50 near 'INSERT'", 'ER_UNKNOWN_ERROR'),
+        { errno: 1105 },
+      ),
+    },
+  ])('asks for a breakpoint after a stored program on $server', async ({ cause }) => {
+    const database = useDatabase(new FakeMySqlDatabase());
+    database.failures.set(programThenInsert, cause);
+
+    const { body } = await migrate([
+      { name: '002_p.sql', sql: `CREATE TABLE c (n INT);\n${programThenInsert}` },
+    ]);
+
+    expect(body).toMatchObject({
+      ok: false,
+      migrations: [{ name: '002_p.sql', error: `${cause.message}\n${breakpointNote}` }],
+    });
+  });
+
+  it('does not ask for a breakpoint for other failures', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+    const syntax = Object.assign(
+      mySqlError("You have an error in your SQL syntax near 'TABL c' at line 1", 'ER_PARSE_ERROR'),
+      { errno: 1064 },
+    );
+    const missing = Object.assign(mySqlError("Table 'app.c' doesn't exist", 'ER_NO_SUCH_TABLE'), {
+      errno: 1146,
+    });
+    database.failures.set('CREATE TABL c (n INT);', syntax);
+    database.failures.set(programThenInsert, missing);
+
+    const plain = await migrate([{ name: '001_c.sql', sql: 'CREATE TABL c (n INT);' }]);
+    const program = await migrate([{ name: '002_p.sql', sql: programThenInsert }]);
+
+    expect(plain.body).toMatchObject({ migrations: [{ error: syntax.message }] });
+    expect(program.body).toMatchObject({ migrations: [{ error: missing.message }] });
   });
 });
 
@@ -790,12 +873,219 @@ describe('MySQL migration lock across runners', () => {
   });
 });
 
+// Better Auth reads the schema, then adds what is missing, so two runs at once both add it.
+describe('MySQL Better Auth migrations under the lock', () => {
+  it("runs a deploy's Better Auth migrations before another deploy takes the lease", async () => {
+    const { bodies, runs } = await withFakeTime(async () => {
+      const database = useDatabase(new FakeMySqlDatabase());
+      const runs: Array<{ start: number; end: number }> = [];
+      const auth = async () => {
+        const start = Date.now();
+        await database.query(database.connect(), 'SELECT SLEEP(5)');
+        runs.push({ start, end: Date.now() });
+      };
+      // An app without migration files: the lease covers only the auth migrations.
+      const first = migrate([], auth);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const results = await Promise.all([first, migrate([], auth)]);
+      return { bodies: results.map((result) => result.body), runs };
+    });
+
+    expect(bodies.map((body) => body.ok)).toEqual([true, true]);
+    expect(runs).toHaveLength(2);
+    expect(runs[1]!.start).toBeGreaterThanOrEqual(runs[0]!.end);
+  });
+
+  it('keeps the lease while Better Auth migrations outlast it', async () => {
+    const { first, second, runs } = await withFakeTime(async () => {
+      const database = useDatabase(new FakeMySqlDatabase());
+      let runs = 0;
+      const auth = async () => {
+        runs++;
+        await database.query(database.connect(), 'SELECT SLEEP(300)');
+      };
+      const pending = migrate([], auth);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const [first, second] = await Promise.all([pending, migrate([], auth)]);
+      return { first, second, runs };
+    });
+
+    expect(first.body.ok).toBe(true);
+    expect(second.body).toEqual({
+      ok: false,
+      error:
+        'Another migration run is applying migrations to MySQL database "app". Wait for it to finish, then deploy again.',
+      migrations: [],
+    });
+    expect(runs).toBe(1);
+  });
+
+  it('fails a deploy whose lease another run took during Better Auth migrations', async () => {
+    const result = await withFakeTime(async () => {
+      const database = useDatabase(new FakeMySqlDatabase());
+      return migrate([], async () => {
+        database.lease = { owner: 'other', expiresAt: Date.now() + 3_600_000 };
+        await database.query(database.connect(), 'SELECT SLEEP(40)');
+      });
+    });
+
+    expect(result).toEqual({
+      status: 500,
+      body: {
+        ok: false,
+        error:
+          'The migration lock on MySQL database "app" expired before this run finished. Deploy again.',
+        migrations: [],
+      },
+    });
+  });
+
+  it('skips Better Auth migrations after a failed file and releases the lease', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+    database.failures.set(
+      'INSERT INTO nope VALUES (1);',
+      mySqlError("Table 'app.nope' doesn't exist", 'ER_NO_SUCH_TABLE'),
+    );
+    let authRuns = 0;
+
+    const { status, body } = await migrate(
+      [{ name: '001_backfill.sql', sql: 'INSERT INTO nope VALUES (1);' }],
+      async () => {
+        authRuns++;
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: false, error: 'migration 001_backfill.sql failed' });
+    expect(authRuns).toBe(0);
+    expect(database.lease!.expiresAt).toBeLessThan(Date.now());
+  });
+
+  it('releases the lease when Better Auth migrations fail', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+
+    const result = await migrate([], async () => {
+      throw new Error('Better Auth migration failed');
+    });
+
+    expect(result).toEqual({
+      status: 500,
+      body: { ok: false, error: 'Better Auth migration failed', migrations: [] },
+    });
+    expect(database.lease!.expiresAt).toBeLessThan(Date.now());
+  });
+
+  it('does not start Better Auth migrations after another run took the lease', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+    const query = database.query.bind(database);
+    // Another run takes the lease while this one reads its applied files.
+    vi.spyOn(database, 'query').mockImplementation(async (session, sql, params) => {
+      if (sql === 'SELECT `name` FROM `_void_migrations`') {
+        database.lease = { owner: 'other', expiresAt: Date.now() + 3_600_000 };
+      }
+      return query(session, sql, params);
+    });
+    let ran = false;
+
+    const result = await migrate([], async () => {
+      ran = true;
+    });
+
+    expect(ran).toBe(false);
+    expect(result.body).toMatchObject({
+      ok: false,
+      error:
+        'The migration lock on MySQL database "app" expired before this run finished. Deploy again.',
+    });
+  });
+
+  it('fails when a renewal still in flight at the end of Better Auth migrations fails', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let renewals = 0;
+      let failRenewal: ((error: Error) => void) | undefined;
+      const lease = {
+        // The first renewal runs before the work; the timer's renewal is still waiting on MySQL.
+        renew: () =>
+          renewals++ === 0
+            ? Promise.resolve()
+            : new Promise<void>((_resolve, reject) => {
+                failRenewal = reject;
+              }),
+        release: async () => {},
+      };
+      let finish: (() => void) | undefined;
+      const outcome = holdMySqlMigrationLease(
+        lease,
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      ).then(
+        () => 'done',
+        (error: Error) => error.message,
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      finish!();
+      await new Promise((resolve) => setImmediate(resolve));
+      failRenewal!(new Error('lease taken'));
+
+      expect(await outcome).toBe('lease taken');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // `vp dev` runs Better Auth's migrations this way when they change the database of the files.
+  it('runs follow-up work in a CLI run before it releases the named lock', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+    let holder: unknown;
+    await runMySqlMigrations(
+      join(tmpdir(), 'void-no-migrations'),
+      'mysql://localhost/app',
+      async () => {
+        const [row] = (await database.query(database.connect(), 'SELECT IS_USED_LOCK(?)', [
+          LOCK_NAME,
+        ])) as Array<Record<string, unknown>>;
+        holder = Object.values(row ?? {})[0];
+      },
+    );
+
+    expect(holder).toEqual(expect.any(Number));
+    expect(database.statements().at(-1)).toBe('SELECT RELEASE_LOCK(?)');
+  });
+
+  // `vp dev` passes the database it holds the lock of.
+  it('runs local Better Auth migrations on the database it is given', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-url-'));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL=mysql://localhost/env\n');
+    vi.stubEnv('DATABASE_URL', 'mysql://localhost/shell');
+    try {
+      await runLocalVoidAuthMigrations(
+        root,
+        'mysql',
+        join(root, '.void'),
+        'local',
+        null,
+        'mysql://localhost/locked',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    expect(mysqlConnections).toEqual(['mysql://localhost/locked']);
+  });
+});
+
 describe('MySQL connections in Workers', () => {
   // Workers forbid eval, which mysql2 uses to build row parsers unless disableEval is set.
   it('opens the hosted migration connections with eval disabled', async () => {
     expect((await migrate([])).body).toMatchObject({ ok: true });
+    // Hyperdrive does not take several statements in one query.
     expect(mysqlConnections).toEqual([
-      { uri: 'mysql://localhost/app', multipleStatements: true, disableEval: true },
+      { uri: 'mysql://localhost/app', disableEval: true },
       { uri: 'mysql://localhost/app', disableEval: true },
     ]);
   });

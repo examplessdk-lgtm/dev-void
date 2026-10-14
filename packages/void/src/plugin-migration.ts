@@ -11,6 +11,11 @@ function readDatabaseUrl(root: string): string | undefined {
   return loadLocalEnv(root).DATABASE_URL;
 }
 
+/** DATABASE_URL as Better Auth's local migrations read it: the shell before `.env`. */
+function readAuthDatabaseUrl(root: string): string | undefined {
+  return (process.env.DATABASE_URL ?? readDatabaseUrl(root)) || undefined;
+}
+
 /**
  * Vite plugin that runs local migrations on dev server startup.
  * For SQLite/D1: applies migrations to the local miniflare database.
@@ -35,10 +40,37 @@ export function migrationPlugin(
         return;
       }
 
+      const migrateAuth = async (databaseUrl?: string) => {
+        const { runLocalVoidAuthMigrations } = await import('./auth/node.ts');
+        await runLocalVoidAuthMigrations(
+          root,
+          dialect,
+          persistRoot,
+          databaseId,
+          auth?.configPath,
+          databaseUrl,
+        );
+      };
+      // MySQL runs Better Auth's migrations under the migration lock of the database they change.
+      const mysqlAuth = dialect === 'mysql' && auth?.enabled === true;
+      const logApplied = (applied: Array<string>) => {
+        if (applied.length > 0) {
+          voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
+        }
+      };
+
       try {
-        if (hasSqlMigrations && dialect !== 'sqlite') {
-          const url = readDatabaseUrl(root);
-          if (!url) {
+        if (dialect !== 'sqlite') {
+          const { collectMigrations } = await import('./migrations/collect.ts');
+          const allMigrations = collectMigrations(migrationsDir);
+          // For MySQL an empty migrations folder has nothing to apply.
+          const runFiles = dialect === 'mysql' ? allMigrations.length > 0 : hasSqlMigrations;
+          // Migration files apply to the database in .env, as `void db migrate` does. Better
+          // Auth's migrations read DATABASE_URL from the shell before .env, and each step holds
+          // the lock of the database it changes.
+          const url = runFiles ? readDatabaseUrl(root) : undefined;
+          const authUrl = mysqlAuth ? readAuthDatabaseUrl(root) : undefined;
+          if ((runFiles && !url) || (mysqlAuth && !authUrl)) {
             afterServerReady(server, () => {
               console.log();
               voidError(
@@ -47,38 +79,55 @@ export function migrationPlugin(
             });
             return;
           }
-          const { collectMigrations } = await import('./migrations/collect.ts');
-          const { validateMigrations } = await import('./migrations/validate.ts');
+          // One lock covers both steps when they change the same database.
+          const authWithFiles = authUrl !== undefined && authUrl === url;
 
-          const allMigrations = collectMigrations(migrationsDir);
-          const appliedNames =
-            dialect === 'mysql'
-              ? await import('./migrations/runner-mysql.ts').then((runner) =>
-                  runner.getMySqlAppliedMigrations(url),
-                )
-              : await import('./migrations/runner-pg.ts').then((runner) =>
-                  runner.getPgAppliedMigrations(url),
-                );
-          const appliedSet = new Set(appliedNames);
-          const pending = allMigrations.filter((migration) => !appliedSet.has(migration.name));
-          if (pending.length > 0) {
-            try {
-              validateMigrations(pending);
-            } catch (err) {
-              voidWarn(err instanceof Error ? err.message : String(err));
+          if (url) {
+            const { validateMigrations } = await import('./migrations/validate.ts');
+            const appliedNames =
+              dialect === 'mysql'
+                ? await import('./migrations/runner-mysql.ts').then((runner) =>
+                    runner.getMySqlAppliedMigrations(url),
+                  )
+                : await import('./migrations/runner-pg.ts').then((runner) =>
+                    runner.getPgAppliedMigrations(url),
+                  );
+            const appliedSet = new Set(appliedNames);
+            const pending = allMigrations.filter((migration) => !appliedSet.has(migration.name));
+            if (pending.length > 0) {
+              try {
+                validateMigrations(pending);
+              } catch (err) {
+                voidWarn(err instanceof Error ? err.message : String(err));
+              }
+            }
+
+            const applied =
+              dialect === 'mysql'
+                ? await import('./migrations/runner-mysql.ts').then((runner) =>
+                    runner.runMySqlMigrations(
+                      migrationsDir,
+                      url,
+                      // Report the applied files before Better Auth's step, which can still fail.
+                      authWithFiles
+                        ? async (names) => {
+                            logApplied(names);
+                            await migrateAuth(url);
+                          }
+                        : undefined,
+                    ),
+                  )
+                : await import('./migrations/runner-pg.ts').then((runner) =>
+                    runner.runPgMigrations(migrationsDir, url),
+                  );
+            if (!authWithFiles) {
+              logApplied(applied);
             }
           }
 
-          const applied =
-            dialect === 'mysql'
-              ? await import('./migrations/runner-mysql.ts').then((runner) =>
-                  runner.runMySqlMigrations(migrationsDir, url),
-                )
-              : await import('./migrations/runner-pg.ts').then((runner) =>
-                  runner.runPgMigrations(migrationsDir, url),
-                );
-          if (applied.length > 0) {
-            voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
+          if (authUrl && !authWithFiles) {
+            const { withMySqlMigrationLockAt } = await import('./migrations/runner-mysql.ts');
+            await withMySqlMigrationLockAt(authUrl, () => migrateAuth(authUrl));
           }
         } else if (hasSqlMigrations) {
           const { runMigrations, getMiniflareDatabasePath, getAppliedMigrations } =
@@ -106,8 +155,9 @@ export function migrationPlugin(
         }
 
         if (auth?.enabled) {
-          const { runLocalVoidAuthMigrations } = await import('./auth/node.ts');
-          await runLocalVoidAuthMigrations(root, dialect, persistRoot, databaseId, auth.configPath);
+          if (!mysqlAuth) {
+            await migrateAuth();
+          }
           voidLog('Applied Better Auth migrations');
         }
       } catch (err) {

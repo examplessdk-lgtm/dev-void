@@ -1,11 +1,11 @@
 import type { Connection } from 'mysql2/promise';
+import type { MigrationEntry, MigrationResponse, MigrationResult } from './migration-handler.ts';
 import {
-  splitMigrationSql,
-  type MigrationEntry,
-  type MigrationResponse,
-  type MigrationResult,
-} from './migration-handler.ts';
-import { acquireMySqlMigrationLease, type MySqlMigrationLease } from './migration-lock-mysql.ts';
+  acquireMySqlMigrationLease,
+  holdMySqlMigrationLease,
+  type MySqlMigrationLease,
+} from './migration-lock-mysql.ts';
+import { splitMySqlMigrationStatements } from './mysql-migration-sql.ts';
 
 export function createMigrationHandler(
   env: Record<string, unknown>,
@@ -22,11 +22,7 @@ export function createMigrationHandler(
     }
 
     try {
-      const result = await runMySqlMigrations(env, migrations);
-      if (result.ok && runAuthMigrations) {
-        await runAuthMigrations();
-      }
-      return Response.json(result);
+      return Response.json(await runMySqlMigrations(env, migrations, runAuthMigrations));
     } catch (error) {
       return Response.json(
         {
@@ -43,6 +39,7 @@ export function createMigrationHandler(
 async function runMySqlMigrations(
   env: Record<string, unknown>,
   migrations: Array<MigrationEntry>,
+  runAuthMigrations?: () => Promise<void>,
 ): Promise<MigrationResponse> {
   const hyperdrive = env.HYPERDRIVE as { connectionString?: string } | undefined;
   if (!hyperdrive?.connectionString) {
@@ -50,9 +47,9 @@ async function runMySqlMigrations(
   }
 
   const { createConnection } = await import('mysql2/promise');
+  // Hyperdrive runs one statement per query, so a file is sent statement by statement.
   const connection = await createConnection({
     uri: hyperdrive.connectionString,
-    multipleStatements: true,
     disableEval: true,
   });
   let leaseConnection: Connection | undefined;
@@ -84,10 +81,11 @@ async function runMySqlMigrations(
         // Data changes commit with the tracking row. MySQL commits DDL, and anything before it,
         // on its own. Hyperdrive keeps one connection for the open transaction.
         await connection.query('BEGIN');
-        // MySQL does not read drizzle-kit `--> statement-breakpoint` lines as comments.
-        for (const statement of splitMigrationSql(migration.sql)) {
+        for (const statement of splitMySqlMigrationStatements(migration.sql)) {
           await lease.renew();
-          await connection.query(statement);
+          await connection.query(statement.sql).catch((error: unknown) => {
+            throw statement.program ? withBreakpointNote(error, migration.name) : error;
+          });
         }
         await lease.renew();
         await connection.query(
@@ -108,9 +106,34 @@ async function runMySqlMigrations(
       }
     }
 
+    // Better Auth's migrations change the schema too, so they run before the lease is released.
+    if (runAuthMigrations) {
+      await holdMySqlMigrationLease(lease, runAuthMigrations);
+    }
     return { ok: true, migrations: results };
   } finally {
     await lease?.release().catch(() => {});
     await Promise.all([connection.end(), leaseConnection?.end()]);
   }
+}
+
+/**
+ * The splitter keeps the SQL after a trigger, routine or event with it. The CLI runs that with
+ * `multipleStatements`; here one query takes one statement, so the server rejects it as a syntax
+ * error before running any of it. MySQL reports 1064; Vitess (PlanetScale) reports "syntax error
+ * at position", or 1149 for several statements it can parse. A syntax error inside the body looks
+ * the same, so the note says "if".
+ */
+function withBreakpointNote(error: unknown, name: string): unknown {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const errno = (error as { errno?: unknown }).errno;
+  if (errno !== 1064 && errno !== 1149 && !/syntax error at position/.test(error.message)) {
+    return error;
+  }
+  return new Error(
+    `${error.message}\nThis deploy runs one statement per query. If ${name} has more SQL after a trigger, procedure, function or event, add a \`--> statement-breakpoint\` line after it.`,
+    { cause: error },
+  );
 }

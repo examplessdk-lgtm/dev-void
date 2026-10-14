@@ -16,6 +16,8 @@ const LEASE_SECONDS = 120;
 /** A deploy waits long enough for the lease of a run that stopped early to expire. */
 const DEPLOY_WAIT_MS = (LEASE_SECONDS + 10) * 1000;
 const POLL_MS = 1000;
+/** How often the lease is renewed while statements that cannot renew it themselves run. */
+const KEEP_ALIVE_MS = 30_000;
 
 /** Runs one statement and returns the rows or the result header. */
 export type MySqlLeaseQuery = (sql: string, params?: Array<unknown>) => Promise<unknown>;
@@ -114,6 +116,38 @@ export async function acquireMySqlMigrationLease(
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
+}
+
+/**
+ * Runs `work`, whose statements cannot renew the lease before each one (Better Auth's migrations),
+ * and renews the lease in the background meanwhile. Throws after `work` when a renewal failed,
+ * because another run may have taken the lease.
+ */
+export async function holdMySqlMigrationLease<T>(
+  lease: MySqlMigrationLease,
+  work: () => Promise<T>,
+): Promise<T> {
+  await lease.renew();
+  let failure: { error: unknown } | undefined;
+  let renewal = Promise.resolve();
+  const timer = setInterval(() => {
+    renewal = renewal
+      .then(() => lease.renew())
+      .catch((error: unknown) => {
+        failure ??= { error };
+      });
+  }, KEEP_ALIVE_MS);
+  let result: T;
+  try {
+    result = await work();
+  } finally {
+    clearInterval(timer);
+    await renewal;
+  }
+  if (failure) {
+    throw failure.error;
+  }
+  return result;
 }
 
 async function take(query: MySqlLeaseQuery, owner: string): Promise<boolean> {
