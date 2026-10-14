@@ -60,6 +60,8 @@ export type PlatformProjectZeroTrustState = Readonly<{
   applications: ReadonlyArray<PlatformZeroTrustApplication>;
   /** Projects whose deletion stopped before it removed their applications. */
   unfinishedDeletions: ReadonlyArray<string>;
+  /** Whether any platform user exists; read only while Zero Trust is active. */
+  usersExist?: boolean;
 }>;
 
 type ProjectApplicationRow = Readonly<{
@@ -171,9 +173,10 @@ export function projectZeroTrustUninstallState(
 export async function readPlatformProjectZeroTrustStateConnection(
   client: QueryConnection,
 ): Promise<PlatformProjectZeroTrustState> {
-  const tables = await client.query<{ settings: boolean; projects: boolean }>(
+  const tables = await client.query<{ settings: boolean; projects: boolean; users?: boolean }>(
     `SELECT to_regclass('public.platform_settings') IS NOT NULL AS "settings",
-            to_regclass('public.project_zero_trust') IS NOT NULL AS "projects"`,
+            to_regclass('public.project_zero_trust') IS NOT NULL AS "projects",
+            to_regclass('public.users') IS NOT NULL AS "users"`,
   );
   const present = tables.rows[0];
   if (!present) {
@@ -203,7 +206,18 @@ export async function readPlatformProjectZeroTrustStateConnection(
         )
       ).rows
     : [];
-  return projectZeroTrustUninstallState(setting, projectRows);
+  const state = projectZeroTrustUninstallState(setting, projectRows);
+  if (!state.active) {
+    return state;
+  }
+  const usersExist = present.users
+    ? (
+        await client.query<{ present: boolean }>(
+          'SELECT EXISTS(SELECT 1 FROM "users") AS "present"',
+        )
+      ).rows[0]?.present === true
+    : false;
+  return { ...state, usersExist };
 }
 
 /**
@@ -265,7 +279,9 @@ export async function liftPlatformProjectZeroTrustFenceConnection(
   await client.query('DELETE FROM "platform_settings" WHERE "key" = $1', [UNINSTALL_SETTING]);
 }
 
-function formatApplications(applications: ReadonlyArray<PlatformZeroTrustApplication>): string {
+export function formatZeroTrustApplications(
+  applications: ReadonlyArray<PlatformZeroTrustApplication>,
+): string {
   const lines = applications
     .slice(0, LISTED_APPLICATIONS)
     .map(
@@ -295,10 +311,13 @@ function unfinishedDeletionLines(state: PlatformProjectZeroTrustState): Readonly
 /**
  * Refuse to uninstall while project Zero Trust still owns Access applications,
  * or while its state cannot be read. Runs before uninstall changes anything.
+ * With `canTurnOff`, enabled Zero Trust on a platform no user has signed in to
+ * is not refused: the applications uninstall must turn off are returned.
  */
 export async function assertProjectZeroTrustAllowsUninstall(
   read: (() => Promise<PlatformProjectZeroTrustState>) | undefined,
-): Promise<void> {
+  options: Readonly<{ canTurnOff?: boolean }> = {},
+): Promise<{ turnOff: ReadonlyArray<PlatformZeroTrustApplication> } | undefined> {
   const state = await readPlatformDatabase(read, (reason) =>
     [
       `platform: Refusing to uninstall because the project Zero Trust state could not be read from the platform database: ${reason}`,
@@ -306,6 +325,9 @@ export async function assertProjectZeroTrustAllowsUninstall(
       'Make the installation database reachable (export VOID_PLATFORM_DATABASE_URL if this machine has not recorded it), then retry. If project Zero Trust was ever enabled, run `void platform zero-trust disable` first.',
     ].join('\n'),
   );
+  if (state.active && state.usersExist === false && options.canTurnOff) {
+    return { turnOff: state.applications };
+  }
   if (state.active) {
     const covered = state.destinations.length
       ? ` on ${state.destinations.join(' and ')}`
@@ -314,10 +336,13 @@ export async function assertProjectZeroTrustAllowsUninstall(
       [
         'platform: Refusing to uninstall while project Zero Trust is enabled or still changing.',
         `Uninstall turns off the platform API, so Void could no longer remove its Cloudflare Access applications, and Access would keep asking for sign-in${covered}, including hostnames Void does not serve.`,
-        'Run `void platform zero-trust disable`, rerun it until `void platform zero-trust status` reports Zero Trust disabled with no operation running, then retry the uninstall.',
+        // Without a user there is no administrator to run zero-trust disable.
+        state.usersExist === false
+          ? 'No platform user exists yet. Run this command on the computer that installed the platform; it keeps the authority to turn off project Zero Trust.'
+          : 'Run `void platform zero-trust disable`, rerun it until `void platform zero-trust status` reports Zero Trust disabled with no operation running, then retry the uninstall.',
         'If the platform API does not answer, bring it back with `void platform enable` or `void platform repair` first.',
         ...(state.applications.length
-          ? ['Void-managed Access applications:', formatApplications(state.applications)]
+          ? ['Void-managed Access applications:', formatZeroTrustApplications(state.applications)]
           : []),
         ...unfinishedDeletionLines(state),
         DASHBOARD_HINT,
@@ -330,7 +355,7 @@ export async function assertProjectZeroTrustAllowsUninstall(
         'platform: Refusing to uninstall while Void-managed Access applications from project Zero Trust remain.',
         'Zero Trust is disabled, but it could not remove the applications of some projects. Retry the uninstall once they are gone.',
         'Void-managed Access applications:',
-        formatApplications(state.applications),
+        formatZeroTrustApplications(state.applications),
         ...(state.applications.some((application) => !application.deleting)
           ? [
               `Hourly maintenance retries ${state.unfinishedDeletions.length ? 'the other applications' : 'them'} while the platform is enabled, and clears Void's records of any you delete in the dashboard.`,
@@ -341,4 +366,5 @@ export async function assertProjectZeroTrustAllowsUninstall(
       ].join('\n'),
     );
   }
+  return undefined;
 }

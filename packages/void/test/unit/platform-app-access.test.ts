@@ -1,7 +1,9 @@
+import { createHmac } from 'node:crypto';
 import {
   createPlatformDeploymentManifest,
   parsePlatformAppAccessSetup,
   parsePlatformDeploymentManifest,
+  PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX,
 } from '@void/platform';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
@@ -9,6 +11,7 @@ import {
   prepareInstallationAppAccess,
   selectInstallationAppAccess,
   PlatformAppAccessCredentialError,
+  turnOffInstalledProjectZeroTrust,
 } from '../../src/cli/platform-app-access.ts';
 import { parsePlatformArgs } from '../../src/cli/platform-args.ts';
 import { PlatformCloudflareClient } from '../../src/cli/platform-cloudflare.ts';
@@ -297,6 +300,66 @@ describe('guided installation app access', () => {
         Response.json({ code: 'app_access_credentials' }, { status: 403 }),
       ),
     ).rejects.toBeInstanceOf(PlatformAppAccessCredentialError);
+  });
+  it('turns off project Zero Trust with a proof only the turn-off route accepts', async () => {
+    const input = {
+      apiUrl: 'https://platform.example.test',
+      installationId: 'team',
+      probeToken: 'proof',
+      setupToken: 'one-time-setup-authority'.repeat(3),
+      updateCommand: 'void platform upgrade team',
+    };
+    const fetcher = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) =>
+      Response.json({ installationId: 'team', turnedOff: true }),
+    );
+    await turnOffInstalledProjectZeroTrust(input, fetcher);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url)).toBe('https://platform.example.test/internal/platform/app-access/turn-off');
+    expect(init).toMatchObject({
+      method: 'POST',
+      redirect: 'manual',
+      body: '{"version":1}',
+      headers: {
+        'X-Void-Platform-Probe': 'proof',
+        'X-Void-App-Access-Setup': createHmac('sha256', input.setupToken)
+          .update(`${PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX}\nteam\n{"version":1}`)
+          .digest('base64url'),
+      },
+    });
+    const answer =
+      (body: unknown, status = 200) =>
+      async () =>
+        body === null ? new Response('404 Not Found', { status }) : Response.json(body, { status });
+    // Runtimes from before the turn-off route answer in one of these ways.
+    for (const old of [
+      answer(null, 404),
+      answer({ error: 'Platform disabled' }, 503),
+      answer({ error: 'access_human_identity_required' }, 403),
+    ]) {
+      await expect(turnOffInstalledProjectZeroTrust(input, old)).rejects.toThrow(
+        'Run `void platform upgrade team`, then retry the uninstall.',
+      );
+    }
+    await expect(
+      turnOffInstalledProjectZeroTrust(input, answer({ code: 'users_exist' }, 409)),
+    ).rejects.toThrow('Run `void platform zero-trust disable`, then retry the uninstall.');
+    await expect(
+      turnOffInstalledProjectZeroTrust(input, answer({ code: 'app_access_credentials' }, 403)),
+    ).rejects.toThrow('Cloudflare rejected the saved app access token');
+    await expect(
+      turnOffInstalledProjectZeroTrust(input, answer({ installationId: 'team', turnedOff: false })),
+    ).rejects.toThrow('still turning off');
+    await expect(
+      turnOffInstalledProjectZeroTrust(input, answer({ installationId: 'other', turnedOff: true })),
+    ).rejects.toThrow('Turning off project Zero Trust failed');
+    await expect(
+      turnOffInstalledProjectZeroTrust(
+        input,
+        answer({ installationId: 'team', turnedOff: true, usersExist: true }),
+      ),
+    ).rejects.toThrow(
+      'A platform user signed in while project Zero Trust was turning off, so the uninstall stopped.',
+    );
   });
   it('rejects tokens in unmanaged payloads and contradictory public protection', () => {
     const value = {

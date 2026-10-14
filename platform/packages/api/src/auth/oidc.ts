@@ -1,6 +1,7 @@
 import { type PlatformLoginConfiguration, parsePlatformIdentityUrl } from '@void/platform';
 import * as oauth from 'oauth4webapi';
 import { assertPublicIdentityUrl, boundedIdentityResponse } from './identity-network.ts';
+import { LoginFailure } from './login-failure.ts';
 export { assertPublicIdentityUrl } from './identity-network.ts';
 
 import type { PlatformOidcIdentity } from './identity-types.ts';
@@ -84,6 +85,18 @@ export class PlatformOidcProvider {
     return server;
   }
 
+  /** Discovery for a login flow, where any failure means the issuer setting is wrong or unreachable. */
+  private async discoverForLogin(): Promise<oauth.AuthorizationServer> {
+    try {
+      return await this.discover();
+    } catch (error) {
+      throw new LoginFailure(
+        'oidc_discovery_failed',
+        error instanceof Error ? error.message : undefined,
+      );
+    }
+  }
+
   private client(server: oauth.AuthorizationServer): oauth.Client {
     const supported = server.id_token_signing_alg_values_supported ?? ['RS256'];
     const algorithm = ['RS256', 'ES256', 'PS256', 'EdDSA'].find((value) =>
@@ -99,7 +112,7 @@ export class PlatformOidcProvider {
     redirectUri: string,
     state: string,
   ): Promise<{ url: string; verifier: string; nonce: string }> {
-    const server = await this.discover();
+    const server = await this.discoverForLogin();
     const verifier = oauth.generateRandomCodeVerifier();
     const nonce = oauth.generateRandomNonce();
     const url = new URL(server.authorization_endpoint!);
@@ -130,39 +143,47 @@ export class PlatformOidcProvider {
     nonce: string;
     clientSecret: string;
   }): Promise<PlatformOidcIdentity> {
-    const server = await this.discover();
+    const server = await this.discoverForLogin();
     const client = this.client(server);
-    const params = oauth.validateAuthResponse(server, client, input.callback, input.state);
-    const methods = server.token_endpoint_auth_methods_supported ?? ['client_secret_basic'];
-    const auth = methods.includes('client_secret_basic')
-      ? oauth.ClientSecretBasic(input.clientSecret)
-      : methods.includes('client_secret_post')
-        ? oauth.ClientSecretPost(input.clientSecret)
-        : null;
-    if (!auth) {
-      throw new Error('The identity provider must support client-secret authentication.');
-    }
-    const response = await oauth.authorizationCodeGrantRequest(
-      server,
-      client,
-      auth,
-      params,
-      input.redirectUri,
-      input.verifier,
-      { [oauth.customFetch]: this.network },
-    );
-    const tokens = await oauth.processAuthorizationCodeResponse(server, client, response, {
-      expectedNonce: input.nonce,
-      requireIdToken: true,
-    });
-    await oauth.validateApplicationLevelSignature(server, response, {
-      [oauth.customFetch]: this.network,
-    });
-    const claims = oauth.getValidatedIdTokenClaims(tokens)!;
-    if (typeof claims.sub !== 'string' || claims.sub.length === 0 || claims.sub.length > 255) {
-      throw new Error(
-        'The identity provider must return a nonempty subject of at most 255 characters.',
+    let claims: oauth.IDToken;
+    try {
+      const params = oauth.validateAuthResponse(server, client, input.callback, input.state);
+      const methods = server.token_endpoint_auth_methods_supported ?? ['client_secret_basic'];
+      const auth = methods.includes('client_secret_basic')
+        ? oauth.ClientSecretBasic(input.clientSecret)
+        : methods.includes('client_secret_post')
+          ? oauth.ClientSecretPost(input.clientSecret)
+          : null;
+      if (!auth) {
+        throw new Error('The identity provider must support client-secret authentication.');
+      }
+      const response = await oauth.authorizationCodeGrantRequest(
+        server,
+        client,
+        auth,
+        params,
+        input.redirectUri,
+        input.verifier,
+        { [oauth.customFetch]: this.network },
       );
+      const tokens = await oauth.processAuthorizationCodeResponse(server, client, response, {
+        expectedNonce: input.nonce,
+        requireIdToken: true,
+      });
+      await oauth.validateApplicationLevelSignature(server, response, {
+        [oauth.customFetch]: this.network,
+      });
+      claims = oauth.getValidatedIdTokenClaims(tokens)!;
+      if (typeof claims.sub !== 'string' || claims.sub.length === 0 || claims.sub.length > 255) {
+        throw new Error(
+          'The identity provider must return a nonempty subject of at most 255 characters.',
+        );
+      }
+    } catch (error) {
+      // One code for the whole token step: the provider's error body is never read.
+      throw error instanceof oauth.AuthorizationResponseError && error.error === 'access_denied'
+        ? new LoginFailure('login_denied', error.message)
+        : new LoginFailure('oidc_token_failed', error instanceof Error ? error.message : undefined);
     }
     const groups =
       Array.isArray(claims.groups) && claims.groups.every((group) => typeof group === 'string')
@@ -173,13 +194,19 @@ export class PlatformOidcProvider {
       (typeof claims.hd !== 'string' ||
         !this.configuration.allowedDomains.includes(claims.hd.toLowerCase()))
     ) {
-      throw new Error('This Google account does not belong to an allowed Workspace domain.');
+      throw new LoginFailure(
+        'google_domain_not_allowed',
+        'This Google account does not belong to an allowed Workspace domain.',
+      );
     }
     if (
       this.configuration.requiredGroups.length &&
       !this.configuration.requiredGroups.some((group) => groups.includes(group))
     ) {
-      throw new Error('This identity does not belong to an allowed group.');
+      throw new LoginFailure(
+        'oidc_group_not_allowed',
+        'This identity does not belong to an allowed group.',
+      );
     }
     const email =
       typeof claims.email === 'string' && claims.email.length <= 320 ? claims.email : null;

@@ -13,7 +13,10 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { confirm, isCancel, log, outro, select } from '@voidzero-dev/vite-plus-prompts';
+import { ensurePlatformAccessToken } from './cf-access.ts';
 import { printSuccess, createSpinner, formatUrl, note, pc } from './output.ts';
+import { activatePlatformAccessCredentials } from './platform-access-setup.ts';
+import { turnOffInstalledProjectZeroTrust } from './platform-app-access.ts';
 import type { PlatformArgs } from './platform-args.ts';
 import { platformDatabaseNameFromOwnerUrl } from './platform-auth-database.ts';
 import {
@@ -29,7 +32,13 @@ import {
   verifyPlatformRuntimeTokenPermissions,
 } from './platform-cloudflare.ts';
 import {
+  authenticationSetupRequestHash,
+  readLoginReplacementFile,
+  replacePendingInstallationAuthentication,
+} from './platform-install-auth.ts';
+import {
   acquirePlatformDatabaseLifecycleLock,
+  createPlatformHealthProbeToken,
   createPlatformInstallationSecrets,
   installPlatform,
   loadPlatformRuntime,
@@ -59,10 +68,12 @@ import {
   acquirePlatformLifecycleLock,
   listInstallationManifests,
   readInstallationRecoverySecrets,
+  readPendingInstallationSecrets,
   removeInstallationRecoverySecrets,
   removePlatformConnectionForInstallation,
   resolveInstallationManifest,
   writeInstallationManifest,
+  writePendingInstallationSecrets,
 } from './platform-registry.ts';
 import {
   assertNoPlatformProjects,
@@ -84,6 +95,7 @@ import {
 } from './platform-teardown.ts';
 import {
   assertProjectZeroTrustAllowsUninstall,
+  formatZeroTrustApplications,
   type PlatformProjectZeroTrustState,
 } from './platform-zero-trust-uninstall.ts';
 
@@ -182,6 +194,11 @@ type PlatformManagementDependencies = Readonly<{
   fenceProjectZeroTrust?: () => Promise<void>;
   /** Removes that fence when uninstall stops before it disables traffic. */
   liftProjectZeroTrustFence?: () => Promise<void>;
+  /**
+   * Turns off project Zero Trust through the platform API while no platform
+   * user exists. Present only with the installer's saved app access authority.
+   */
+  turnOffProjectZeroTrust?: () => Promise<void>;
   /** Project slugs; --purge-resources refuses to start while any remain or when this cannot read them. */
   readProjects?: () => Promise<ReadonlyArray<string>>;
   /** Where the operator credential came from; --purge-resources checks it before any change. */
@@ -307,6 +324,8 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       return;
     }
     if (args.subcommand === 'uninstall') {
+      const apiUrl = manifest.endpoints.apiUrl;
+      const appAccessSetupToken = recovery?.appAccessSetupToken;
       await uninstallPlatform(client, manifest, args, {
         checkpoint: databaseLock?.checkpoint,
         databaseUrl,
@@ -322,6 +341,33 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           ? databaseLock.readProjects
           : () => readPlatformProjectSlugs(databaseUrl, manifest.id, manifest.ownershipNonce),
         credential: { source: operatorCredential.source, aiGatewayToken: !!gatewayToken },
+        ...(apiUrl && appAccessSetupToken
+          ? {
+              turnOffProjectZeroTrust: async () => {
+                const saved: unknown = recovery?.accessCredentialsJson
+                  ? JSON.parse(recovery.accessCredentialsJson)
+                  : {};
+                if (saved && typeof saved === 'object' && apiUrl in saved) {
+                  activatePlatformAccessCredentials(
+                    JSON.stringify({ [apiUrl]: (saved as Record<string, unknown>)[apiUrl] }),
+                    [apiUrl],
+                  );
+                }
+                if (manifest.deployment.authentication.accessProtection) {
+                  ensurePlatformAccessToken(apiUrl, false, true);
+                }
+                await turnOffInstalledProjectZeroTrust({
+                  apiUrl,
+                  installationId: manifest.id,
+                  probeToken: createPlatformHealthProbeToken(manifest.ownershipNonce),
+                  setupToken: appAccessSetupToken,
+                  updateCommand: readPendingInstallationSecrets(manifest)
+                    ? `void platform install --resume --name ${commandArgument(manifest.id)}`
+                    : `void platform upgrade ${commandArgument(manifest.id)}`,
+                });
+              },
+            }
+          : {}),
       });
       return;
     }
@@ -334,6 +380,27 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       return;
     }
 
+    // repair --auth-config replaces the login settings of a first administrator
+    // setup that is still pending. Refuse what no database read can change first.
+    const loginFile = args.subcommand === 'repair' ? args.authConfig : undefined;
+    if (loginFile !== undefined) {
+      if (manifest.desiredState === 'disabled') {
+        throw new Error(
+          `platform: This platform is disabled. Run \`void platform enable ${commandArgument(manifest.id)}\` first, then repair to change the login settings.`,
+        );
+      }
+      if (!manifest.deployment.authentication.configurable) {
+        throw new Error(
+          'platform: This installation signs in with the GitHub OAuth App from its installation settings. Set VOID_PLATFORM_GITHUB_CLIENT_ID and VOID_PLATFORM_GITHUB_CLIENT_SECRET when running repair to replace it.',
+        );
+      }
+      if (!recovery?.authenticationSetupJson || !recovery.authSetupToken) {
+        throw new Error(
+          'platform: Changing the login settings needs the setup authority saved on the computer that installed the platform. Run this repair there.',
+        );
+      }
+      await readLoginReplacementFile(loginFile, manifest.deployment.authentication);
+    }
     const deployment = manifest.deployment;
     const planInput = {
       accountId: manifest.account.id,
@@ -387,6 +454,11 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         : 'Application traffic may pause briefly during a safe cutover.',
     );
     if (args.plan) {
+      if (loginFile !== undefined) {
+        log.info(
+          `Login settings will be replaced from ${loginFile}; a new setup code is printed at the end.`,
+        );
+      }
       outro('No Cloudflare or local installation state was changed.');
       return;
     }
@@ -421,6 +493,50 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
       },
     );
     markPhase('ownership');
+    let replacedLogin: { authenticationSetupJson: string; authBootstrapCode: string } | undefined;
+    if (
+      args.subcommand === 'repair' &&
+      (loginFile !== undefined || (process.stdin.isTTY && !args.yes)) &&
+      manifest.desiredState !== 'disabled' &&
+      manifest.deployment.authentication.configurable &&
+      recovery?.authenticationSetupJson &&
+      recovery.authSetupToken
+    ) {
+      const setup = await databaseLock?.readAdministratorSetup?.();
+      if (loginFile !== undefined) {
+        if (!setup) {
+          throw new Error(
+            'platform: The database lifecycle lock cannot read the administrator setup.',
+          );
+        }
+        if (setup.usersExist || (setup.requestHash !== null && !setup.pending)) {
+          throw new Error(
+            'platform: The first administrator has already signed in. Change login methods with `void platform config auth`.',
+          );
+        }
+        if (setup.requestHash === null) {
+          throw new Error(
+            `platform: Administrator setup was never started. Resume the install with \`void platform install --resume --name ${commandArgument(manifest.id)}\`.`,
+          );
+        }
+      }
+      if (
+        setup?.pending &&
+        !setup.usersExist &&
+        (loginFile !== undefined ||
+          (await promptForConfirmation(
+            'First administrator setup is not finished. Change the login settings before continuing?',
+            false,
+          )))
+      ) {
+        replacedLogin = await replacePendingInstallationAuthentication({
+          ...(loginFile !== undefined ? { file: loginFile } : {}),
+          authentication: manifest.deployment.authentication,
+          setupJson: recovery.authenticationSetupJson,
+          apiUrl: plan.apiUrl,
+        });
+      }
+    }
     const installation =
       args.subcommand === 'enable'
         ? setInstallationDesiredState(manifest, 'enabled', new Date().toISOString())
@@ -451,6 +567,7 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION || '',
       r2AccessKeyId: process.env.VOID_PLATFORM_R2_ACCESS_KEY_ID || '',
       r2SecretAccessKey: process.env.VOID_PLATFORM_R2_SECRET_ACCESS_KEY || '',
+      ...replacedLogin,
     });
     const runtimeTokenToPreflight = resolvePlatformRuntimeTokenToPreflight(plan, secrets);
     if (runtimeTokenToPreflight) {
@@ -490,6 +607,34 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
     if (installation !== manifest) {
       writeInstallationManifest(installation);
     }
+    // The platform refuses new login settings once an administrator signed in.
+    // Keep the saved settings the platform still has, so later lifecycle
+    // commands do not resend the refused ones.
+    const keepAcceptedLogin = async (error: unknown): Promise<unknown> => {
+      const after = replacedLogin
+        ? await databaseLock?.readAdministratorSetup?.().catch(() => undefined)
+        : undefined;
+      if (
+        !after ||
+        !recovery?.authenticationSetupJson ||
+        after.requestHash !== authenticationSetupRequestHash(recovery.authenticationSetupJson) ||
+        (!after.usersExist && after.pending)
+      ) {
+        return error;
+      }
+      const pending = readPendingInstallationSecrets(installation);
+      if (pending) {
+        writePendingInstallationSecrets(installation, {
+          ...pending,
+          authenticationSetupJson: recovery.authenticationSetupJson,
+          ...(recovery.authBootstrapCode ? { authBootstrapCode: recovery.authBootstrapCode } : {}),
+        });
+      }
+      return new Error(
+        'platform: The first administrator signed in before the new login settings were applied. Nothing changed. Change login methods with `void platform config auth`.',
+        { cause: error },
+      );
+    };
     const result = await installPlatform(plan, secrets, installation, {
       // runInstalledPlatformCommand holds the database session lock across the
       // entire replan and mutation sequence.
@@ -527,6 +672,8 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
           repairMissing: args.subcommand === 'repair',
           stableWorkerUpdate: args.subcommand === 'upgrade',
         }),
+    }).catch(async (error: unknown) => {
+      throw await keepAcceptedLogin(error);
     });
     // Keep progress visible while the outer database session releases its lock.
     progress.message('Finalizing platform changes');
@@ -574,6 +721,10 @@ export async function runInstalledPlatformCommand(args: PlatformArgs): Promise<v
         if (code) {
           log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
           console.log(`One-time administrator setup code: ${code}`);
+          log.info(`Login callback URL: ${formatUrl(`${plan.apiUrl}/auth/callback`)}`);
+          log.info(
+            `If sign-in fails, run \`void platform repair ${commandArgument(manifest.id)}\` to change the login settings.`,
+          );
         }
       }
       printSuccess(
@@ -889,27 +1040,39 @@ export async function uninstallPlatform(
       `platform: Refusing to delete Cloudflare zone ${JSON.stringify(createdZone.name)} automatically. A zone can contain unrelated DNS, settings, and products that the installer cannot exhaustively prove ownership of. Uninstall with --keep-zone, inspect the retained zone in Cloudflare, and delete it manually if appropriate.`,
     );
   }
-  await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust);
+  const zeroTrust = await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust, {
+    canTurnOff: !!dependencies.turnOffProjectZeroTrust,
+  });
   if (purgeResources) {
     await assertNoPlatformProjects(dependencies.readProjects);
   }
   if (args.plan || (interactive && !args.yes)) {
     note(
-      purgeResources
-        ? purgeResourcesPlanText(manifest)
-        : [
-            'Disable platform traffic.',
-            retainData
-              ? 'Keep Workers and data.'
-              : 'Delete eligible data; keep Workers, R2, and AI Gateway.',
-            'Delete unused Queues.',
-            ...describeKeptResources(
-              manifest,
-              plannedKeptResources(manifest, retainData, hasRoutingCheckpoint),
-              'Keep for manual cleanup:',
-              'Keep Access resources:',
-            ),
-          ].join('\n'),
+      [
+        ...(zeroTrust
+          ? zeroTrust.turnOff.length
+            ? [
+                'Turn off project Zero Trust; no platform user exists yet. Delete its Access applications:',
+                formatZeroTrustApplications(zeroTrust.turnOff),
+              ]
+            : ['Turn off project Zero Trust; no platform user exists yet.']
+          : []),
+        purgeResources
+          ? purgeResourcesPlanText(manifest)
+          : [
+              'Disable platform traffic.',
+              retainData
+                ? 'Keep Workers and data.'
+                : 'Delete eligible data; keep Workers, R2, and AI Gateway.',
+              'Delete unused Queues.',
+              ...describeKeptResources(
+                manifest,
+                plannedKeptResources(manifest, retainData, hasRoutingCheckpoint),
+                'Keep for manual cleanup:',
+                'Keep Access resources:',
+              ),
+            ].join('\n'),
+      ].join('\n'),
       pc.bold('Uninstall plan'),
     );
   }
@@ -1029,6 +1192,12 @@ export async function uninstallPlatform(
     throw new Error(
       'platform: Refusing to uninstall because no platform database connection is available to hold off project Zero Trust changes.',
     );
+  }
+  if (zeroTrust) {
+    // The API takes the Zero Trust lock to turn it off, so this runs before
+    // uninstall takes that lock. The final check below then reads the result.
+    log.step('Turning off project Zero Trust');
+    await dependencies.turnOffProjectZeroTrust!();
   }
   const releaseProjectZeroTrust = await lockProjectZeroTrust();
   let fenced = false;

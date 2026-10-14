@@ -1,6 +1,7 @@
 import {
   parsePlatformAppAccessSetup,
   PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX,
+  PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX,
   PLATFORM_DISABLED_KEY,
   PLATFORM_DISABLED_VALUE,
   type PlatformAppAccessSetup,
@@ -10,13 +11,14 @@ import type { Context } from 'hono';
 import type { Db } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { getPlatformSetting, setPlatformSetting } from './platform-settings.ts';
+import { users } from './schema.ts';
 import { ZeroTrustCloudflareError } from './zero-trust/cloudflare.ts';
 import {
   readZeroTrustConfigurationStrict,
   type ZeroTrustConfiguration,
 } from './zero-trust/configuration.ts';
 import { ZeroTrustUnavailableError } from './zero-trust/errors.ts';
-import { configurePlatformZeroTrust } from './zero-trust/installation.ts';
+import { configurePlatformZeroTrust, disablePlatformZeroTrust } from './zero-trust/installation.ts';
 import { lockZeroTrustConfiguration } from './zero-trust/lock.ts';
 import { zeroTrustStatus } from './zero-trust/status.ts';
 
@@ -171,7 +173,11 @@ export async function initializePlatformAppAccess(
   return { ready: true };
 }
 
-export async function platformAppAccess(context: Context<ApiEnv>): Promise<Response> {
+/** The signed request body, or null when the installer probe or setup proof does not match. */
+async function verifyAppAccessProof(
+  context: Context<ApiEnv>,
+  prefix: string,
+): Promise<string | null> {
   const token = context.env.PLATFORM_HEALTH_PROBE_TOKEN;
   if (
     !token ||
@@ -179,12 +185,12 @@ export async function platformAppAccess(context: Context<ApiEnv>): Promise<Respo
     !context.env.PLATFORM_INSTALLATION_ID ||
     !context.env.PLATFORM_APP_ACCESS
   ) {
-    return context.json({ error: 'not found' }, 404);
+    return null;
   }
   const setupKey = context.env.PLATFORM_APP_ACCESS_SETUP_TOKEN;
   const signature = context.req.header('X-Void-App-Access-Setup') ?? '';
   if (!setupKey || setupKey.length < 32 || !/^[A-Za-z0-9_-]{43}$/.test(signature)) {
-    return context.json({ error: 'not found' }, 404);
+    return null;
   }
   const body = await context.req.text();
   const key = await crypto.subtle.importKey(
@@ -197,16 +203,18 @@ export async function platformAppAccess(context: Context<ApiEnv>): Promise<Respo
   const proof = Uint8Array.from(atob(signature.replaceAll('-', '+').replaceAll('_', '/')), (byte) =>
     byte.charCodeAt(0),
   );
-  if (
-    !(await crypto.subtle.verify(
-      'HMAC',
-      key,
-      proof,
-      new TextEncoder().encode(
-        `${PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX}\n${context.env.PLATFORM_INSTALLATION_ID}\n${body}`,
-      ),
-    ))
-  ) {
+  const verified = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    proof,
+    new TextEncoder().encode(`${prefix}\n${context.env.PLATFORM_INSTALLATION_ID}\n${body}`),
+  );
+  return verified ? body : null;
+}
+
+export async function platformAppAccess(context: Context<ApiEnv>): Promise<Response> {
+  const body = await verifyAppAccessProof(context, PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX);
+  if (body === null) {
     return context.json({ error: 'not found' }, 404);
   }
   let setup: PlatformAppAccessSetup;
@@ -250,6 +258,70 @@ export async function platformAppAccess(context: Context<ApiEnv>): Promise<Respo
         error:
           'App access is not ready. Check the Access token, identity providers, and policy selections, then resume.',
       },
+      503,
+    );
+  }
+}
+
+/**
+ * Uninstall handoff for an installation whose first administrator never signed
+ * in. It turns off the project Zero Trust the installer enabled, using the
+ * same authority that turned it on. Without a user there are no projects, and
+ * no administrator who could run `void platform zero-trust disable`.
+ */
+export async function platformAppAccessTurnOff(context: Context<ApiEnv>): Promise<Response> {
+  const body = await verifyAppAccessProof(context, PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX);
+  if (body === null) {
+    return context.json({ error: 'not found' }, 404);
+  }
+  let input: unknown;
+  try {
+    input = JSON.parse(body);
+  } catch {
+    input = null;
+  }
+  if (!input || typeof input !== 'object' || (input as { version?: unknown }).version !== 1) {
+    return context.json({ error: 'Invalid app access request.' }, 400);
+  }
+  const db = context.get('db');
+  try {
+    const [user] = await db.select({ id: users.id }).from(users).limit(1);
+    if (user) {
+      return context.json(
+        {
+          error:
+            'A platform user exists. An administrator turns off Zero Trust with `void platform zero-trust disable`.',
+          code: 'users_exist',
+        },
+        409,
+      );
+    }
+    const configuration = await disablePlatformZeroTrust(context.env, db);
+    // First administrator setup does not wait for this route. Report a user
+    // who signed in meanwhile, so the uninstall stops instead of continuing.
+    const [signedIn] = await db.select({ id: users.id }).from(users).limit(1);
+    return context.json({
+      installationId: context.env.PLATFORM_INSTALLATION_ID,
+      turnedOff:
+        !configuration.enabled && !('operation' in configuration && configuration.operation),
+      ...(signedIn ? { usersExist: true } : {}),
+    });
+  } catch (error) {
+    console.error('[platform] app access turn-off failed', error);
+    if (error instanceof ZeroTrustCloudflareError && [401, 403].includes(error.status)) {
+      return context.json(
+        {
+          error: 'Cloudflare rejected the saved app access token.',
+          code: 'app_access_credentials',
+        },
+        403,
+      );
+    }
+    if (error instanceof ZeroTrustUnavailableError) {
+      return context.json({ error: error.message }, 409);
+    }
+    return context.json(
+      { error: 'Project Zero Trust could not be turned off. Retry the uninstall.' },
       503,
     );
   }

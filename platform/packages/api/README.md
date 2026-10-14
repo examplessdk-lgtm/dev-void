@@ -388,6 +388,14 @@ receipts make upgrade/retry calls preserve administrator changes. Public-only ru
 use scoped bypass applications in Default-Deny accounts; their custom-domain rules
 are managed with the same project reconciliation and ownership checks.
 
+Uninstall calls `/internal/platform/app-access/turn-off` with the same probe proof
+and setup secret under its own HMAC purpose. It runs the normal Zero Trust disable
+only while no platform user exists, so an installation whose first administrator
+never signed in can still be removed. First administrator setup does not wait
+for it, so the route reports a user who appeared during the disable, and the CLI
+then stops the uninstall. The CLI calls it before it takes the Zero Trust lock,
+because the disable claims the same lock.
+
 The browser uses `POST /admin/fate` for administrator page data. It runs under the
 existing admin-cookie and same-origin middleware, while the CLI/operator API
 stays on `/operator/v1`. First loads hydrate a request-scoped Fate snapshot into

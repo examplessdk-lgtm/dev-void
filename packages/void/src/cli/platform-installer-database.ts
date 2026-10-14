@@ -16,6 +16,7 @@ import { join } from 'pathslash';
 import type { Pool } from 'pg';
 import { verifyPlatformDatabaseArtifacts } from './platform-installer-runtime.ts';
 import {
+  type PlatformAdministratorSetupState,
   type PlatformInstallerDependencies,
   type PlatformDatabaseLifecycleLock,
   type InstallationCheckpointWriter,
@@ -299,6 +300,36 @@ export function readPlatformProjectSlugs(
     ownershipNonce,
     readPlatformProjectSlugsConnection,
   );
+}
+
+/** Read the first administrator setup row and whether any user exists. */
+export async function readPlatformAdministratorSetupConnection(
+  client: QueryConnection,
+): Promise<PlatformAdministratorSetupState> {
+  const tables = await client.query<{ setup: boolean; users: boolean }>(
+    `SELECT to_regclass('public.platform_auth_bootstrap') IS NOT NULL AS "setup",
+            to_regclass('public.users') IS NOT NULL AS "users"`,
+  );
+  const present = tables.rows[0];
+  const setup = present?.setup
+    ? (
+        await client.query<{ request_hash: string; consumed_at: unknown }>(
+          'SELECT "request_hash", "consumed_at" FROM "platform_auth_bootstrap" WHERE "singleton" = true',
+        )
+      ).rows[0]
+    : undefined;
+  const usersExist = present?.users
+    ? (
+        await client.query<{ present: boolean }>(
+          'SELECT EXISTS(SELECT 1 FROM "users") AS "present"',
+        )
+      ).rows[0]?.present === true
+    : false;
+  return {
+    pending: !!setup && setup.consumed_at === null,
+    usersExist,
+    requestHash: setup?.request_hash ?? null,
+  };
 }
 
 /** Slugs of every project row, including projects whose deletion stopped partway. */
@@ -593,6 +624,7 @@ export async function acquirePlatformDatabaseLifecycleLockConnection(
         }
       : null;
   };
+  release.readAdministratorSetup = () => readPlatformAdministratorSetupConnection(client);
   release.readProjectZeroTrust = () => readPlatformProjectZeroTrustStateConnection(client);
   release.readProjects = () => readPlatformProjectSlugsConnection(client);
   release.lockProjectZeroTrust = () => lockPlatformProjectZeroTrustConnection(client);

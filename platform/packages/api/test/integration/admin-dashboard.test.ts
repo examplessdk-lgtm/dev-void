@@ -3031,6 +3031,47 @@ describe('GET /admin/login', () => {
     }
   });
 
+  test('names the cause when GitHub refuses the admin sign-in', async () => {
+    const start = await app.fetch(
+      new Request('http://localhost/admin/login/github', { redirect: 'manual' }),
+      env,
+    );
+    const state = new URL(start.headers.get('Location')!).searchParams.get('state')!;
+    const browserCookie = start.headers.get('Set-Cookie')!.split(';', 1)[0]!;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request): Promise<Response> => {
+        if (input.toString() === 'https://github.com/login/oauth/access_token') {
+          return Response.json({ error: 'redirect_uri_mismatch' });
+        }
+        throw new Error(`Unexpected fetch: ${input.toString()}`);
+      }),
+    );
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const callback = await app.fetch(
+        new Request(
+          `http://localhost/auth/callback?code=test-code&state=${encodeURIComponent(state)}`,
+          { headers: { Cookie: browserCookie }, redirect: 'manual' },
+        ),
+        env,
+      );
+      expect(callback.status).toBe(400);
+      const html = await callback.text();
+      expect(html).toContain('GitHub rejected the callback URL.');
+      expect(html).toContain('Error code: github_redirect_uri_mismatch');
+      expect(html).toContain('Callback URL: http://localhost/auth/callback');
+      expect(errors).toHaveBeenCalledWith('[auth] login failed', {
+        code: 'github_redirect_uri_mismatch',
+        purpose: 'admin',
+        provider: 'github',
+      });
+    } finally {
+      errors.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   test.each([
     { reason: 'admin_suspended', expectedStatus: 403, issuesCookie: false },
     { reason: 'requests_exceeded', expectedStatus: 302, issuesCookie: true },

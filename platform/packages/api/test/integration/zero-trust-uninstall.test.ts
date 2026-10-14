@@ -205,7 +205,7 @@ describe('platform uninstall check against the API database', () => {
       assertProjectZeroTrustAllowsUninstall(() =>
         readPlatformProjectZeroTrustStateConnection(connection),
       );
-    const refusal = await check().catch((error: unknown) => error as Error);
+    const refusal = (await check().catch((error: unknown) => error)) as Error;
     expect(refusal).toBeInstanceOf(Error);
     expect(refusal!.message).toContain('Deletion of project stopped-deletion stopped');
     expect(refusal!.message).toContain('`void project delete <name>`');
@@ -214,6 +214,23 @@ describe('platform uninstall check against the API database', () => {
     cloudflare.applications.delete(bypass.bypass_application_id!);
     expect((await deleteProject()).status).toBe(200);
     await expect(check()).resolves.toBeUndefined();
+  });
+
+  it('reports whether a platform user exists while Zero Trust is enabled', async () => {
+    vi.stubGlobal('fetch', accessApi().fetcher);
+    const platform = bindings();
+    await configurePlatformZeroTrust(platform, env.db, configureInput);
+    await settleOperation(platform);
+    const connection = (env.db as unknown as { $client: QueryConnection }).$client;
+    expect(await readPlatformProjectZeroTrustStateConnection(connection)).toMatchObject({
+      active: true,
+      usersExist: false,
+    });
+    await createTestUser(env.db, 'first-user');
+    expect(await readPlatformProjectZeroTrustStateConnection(connection)).toMatchObject({
+      active: true,
+      usersExist: true,
+    });
   });
 
   it('refuses every Zero Trust lock holder while the uninstall fence is in place', async () => {

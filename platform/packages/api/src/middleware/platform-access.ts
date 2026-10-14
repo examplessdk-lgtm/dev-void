@@ -77,8 +77,9 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
           (path === '/internal/platform/sandbox-drain' && method === 'GET') ||
           (path === '/__void/platform/deployment-execution' && method === 'GET') ||
           (path === '/internal/platform/email-bootstrap' && method === 'POST') ||
-          // The handler also requires its installation-specific setup HMAC.
+          // These handlers also require their installation-specific setup HMAC.
           (path === '/internal/platform/app-access' && method === 'POST') ||
+          (path === '/internal/platform/app-access/turn-off' && method === 'POST') ||
           (path === '/internal/platform/domain-preflight' && method === 'POST') ||
           (path === '/internal/platform/domain-activate' && method === 'POST')))
     ) {

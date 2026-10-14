@@ -91,6 +91,11 @@ If installation configured Cloudflare Access, the uninstall plan lists its recor
 
 Uninstall does not remove the applications created for [project Zero Trust](/guide/platform/administration/zero-trust). While Zero Trust is enabled or still has Access applications, uninstall and `--plan` stop before any change and list those applications. Run `void platform zero-trust disable` first. Uninstall reads this from the installation database, so it also stops when the database cannot be reached.
 
+If no platform user exists yet, for example because first administrator setup did
+not finish, nobody can run `zero-trust disable`. Uninstall then turns off project
+Zero Trust and deletes its applications itself. Run it on the computer that installed
+the platform. If the uninstall asks you to, update an older platform runtime first.
+
 ::: details Why some resources require manual cleanup
 
 Resources that may have been shared or repurposed require manual review before deletion. Void verifies ownership, keeps those resources in place, and blocks platform traffic.

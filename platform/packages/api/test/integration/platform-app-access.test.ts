@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import {
   PLATFORM_DISABLED_KEY,
   PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX,
+  PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX,
   type PlatformAppAccessSetup,
 } from '@void/platform';
 import { sql } from 'drizzle-orm';
@@ -25,6 +26,7 @@ import { tryActivateDomain } from '../../src/provisioning/activate-domain.ts';
 import { domains, platformAuthSettings } from '../../src/schema.ts';
 import { readZeroTrustConfigurationStrict } from '../../src/zero-trust/configuration.ts';
 import { configurePlatformZeroTrust } from '../../src/zero-trust/installation.ts';
+import * as zeroTrustInstallation from '../../src/zero-trust/installation.ts';
 import {
   initializeNewProjectZeroTrust,
   reconcileProjectZeroTrustDomains,
@@ -104,6 +106,23 @@ function request(body: unknown, token = 'installer-proof') {
       'X-Void-App-Access-Setup': signature,
     },
     body: JSON.stringify(body),
+  });
+}
+function turnOffRequest(options: { prefix?: string; token?: string; body?: string } = {}): Request {
+  const body = options.body ?? JSON.stringify({ version: 1 });
+  const signature = createHmac('sha256', setupKey)
+    .update(
+      `${options.prefix ?? PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX}\n${installationId}\n${body}`,
+    )
+    .digest('base64url');
+  return new Request('https://platform.example.test/internal/platform/app-access/turn-off', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Void-Platform-Probe': options.token ?? 'installer-proof',
+      'X-Void-App-Access-Setup': signature,
+    },
+    body,
   });
 }
 function accessApi(identity?: { issuer: string; jwk: Record<string, unknown> }) {
@@ -203,6 +222,108 @@ function accessApi(identity?: { issuer: string; jwk: Record<string, unknown> }) 
   vi.stubGlobal('fetch', fetcher);
   return { applications, fetcher, controls };
 }
+
+describe('uninstall before any platform user exists', () => {
+  // A failed install closes traffic; the installer's probe still reaches the route.
+  const closed = () => ({ ...bindings(), PLATFORM_TRAFFIC_STATE: 'enabled' });
+
+  it('turns off installer-managed Zero Trust and deletes its Access applications', async () => {
+    const cf = accessApi();
+    await claim();
+    expect((await app.fetch(request(setup()), bindings())).status).toBe(200);
+    const enabled = (await readZeroTrustConfigurationStrict(env.db))!;
+    expect(cf.applications.has(enabled.wildcardApplication!.id)).toBe(true);
+    const response = await app.fetch(turnOffRequest(), closed());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ installationId, turnedOff: true });
+    expect(cf.applications.has(enabled.wildcardApplication!.id)).toBe(false);
+    expect(await readZeroTrustConfigurationStrict(env.db)).toMatchObject({
+      enabled: false,
+      operation: null,
+    });
+  });
+
+  it('accepts the installer service identity behind platform Access', async () => {
+    const issuer = 'https://uninstall-company.cloudflareaccess.com';
+    const pair = await generateKeyPair('RS256', { extractable: true });
+    accessApi({
+      issuer,
+      jwk: { ...(await exportJWK(pair.publicKey)), alg: 'RS256', kid: 'turn-off-key', use: 'sig' },
+    });
+    await claim();
+    expect((await app.fetch(request(setup()), bindings())).status).toBe(200);
+    await importLegacyAuthentication(env.db, env);
+    await env.db.update(platformAuthSettings).set({
+      protection: {
+        teamDomain: issuer,
+        applications: [{ origin: 'https://platform.example.test', audience: 'installer-api' }],
+      },
+    });
+    expect((await app.fetch(turnOffRequest(), closed())).status).toBe(403);
+    const authorized = turnOffRequest();
+    authorized.headers.set(
+      'Cf-Access-Jwt-Assertion',
+      await new SignJWT({ type: 'app', common_name: 'installer.access' })
+        .setIssuer(issuer)
+        .setAudience('installer-api')
+        .setSubject('')
+        .setIssuedAt()
+        .setExpirationTime('5m')
+        .setProtectedHeader({ alg: 'RS256', kid: 'turn-off-key' })
+        .sign(pair.privateKey),
+    );
+    const response = await app.fetch(authorized, closed());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ installationId, turnedOff: true });
+  });
+
+  it('reports a user who signed in while Zero Trust was turning off', async () => {
+    accessApi();
+    await claim();
+    expect((await app.fetch(request(setup()), bindings())).status).toBe(200);
+    // First administrator setup finishes after the route found no user.
+    const disable = zeroTrustInstallation.disablePlatformZeroTrust;
+    vi.spyOn(zeroTrustInstallation, 'disablePlatformZeroTrust').mockImplementationOnce(
+      async (...args) => {
+        await createTestUser(env.db, 'first-admin');
+        return disable(...args);
+      },
+    );
+    const response = await app.fetch(turnOffRequest(), closed());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ installationId, turnedOff: true, usersExist: true });
+  });
+
+  it('refuses once a platform user exists', async () => {
+    accessApi();
+    await claim();
+    expect((await app.fetch(request(setup()), bindings())).status).toBe(200);
+    await createTestUser(env.db, 'first-user');
+    const response = await app.fetch(turnOffRequest(), closed());
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'users_exist' });
+    expect((await readZeroTrustConfigurationStrict(env.db))?.enabled).toBe(true);
+  });
+
+  it('accepts only the turn-off proof with the installer probe', async () => {
+    const cf = accessApi();
+    expect(
+      (
+        await app.fetch(
+          turnOffRequest({ prefix: PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX }),
+          closed(),
+        )
+      ).status,
+    ).toBe(404);
+    // Without the installer probe the closed platform answers before the route.
+    expect((await app.fetch(turnOffRequest({ token: 'wrong' }), closed())).status).toBe(503);
+    expect(
+      (await app.fetch(turnOffRequest(), { ...closed(), PLATFORM_APP_ACCESS: undefined })).status,
+    ).toBe(404);
+    expect((await app.fetch(turnOffRequest({ body: '{"version":2}' }), closed())).status).toBe(400);
+    expect(cf.fetcher).not.toHaveBeenCalled();
+  });
+});
 
 describe('installer app access handoff', () => {
   it('initializes behind platform Access with both a scoped service identity and setup authority', async () => {

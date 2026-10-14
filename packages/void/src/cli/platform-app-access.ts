@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import {
   parsePlatformAppAccessSetup,
   PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX,
+  PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX,
   type PlatformAppAccess,
   type PlatformAppAccessSetup,
   type PlatformDeploymentManifest,
@@ -424,4 +425,85 @@ export async function initializeInstalledAppAccess(
   throw new Error(
     'platform: App access setup is safely checkpointed. Resume installation to finish before app traffic opens.',
   );
+}
+
+/**
+ * Turn off the project Zero Trust the installer enabled, for an uninstall
+ * before any platform user exists. Signed with the app access setup authority
+ * that turned it on.
+ */
+export async function turnOffInstalledProjectZeroTrust(
+  input: {
+    apiUrl: string;
+    installationId: string;
+    probeToken: string;
+    setupToken: string;
+    /** Deploys a runtime that has the turn-off route. */
+    updateCommand: string;
+  },
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const body = JSON.stringify({ version: 1 });
+  const signature = createHmac('sha256', input.setupToken)
+    .update(`${PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX}\n${input.installationId}\n${body}`)
+    .digest('base64url');
+  const response = await fetcher(new URL('/internal/platform/app-access/turn-off', input.apiUrl), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Void-Platform-Probe': input.probeToken,
+      'X-Void-App-Access-Setup': signature,
+      ...cfAccessHeaders(process.env, input.apiUrl),
+    },
+    body,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(60_000),
+  });
+  let result: {
+    turnedOff?: boolean;
+    usersExist?: boolean;
+    installationId?: string;
+    error?: string;
+    code?: string;
+  } = {};
+  try {
+    result = (await response.json()) as typeof result;
+  } catch {
+    // Older runtimes answer an unknown route without a JSON body.
+  }
+  // An older runtime does not know the route: it answers 404, its traffic gate
+  // answers 503 while the platform is disabled, and its Access check refuses
+  // the installer's service token on routes it does not list.
+  if (
+    response.status === 404 ||
+    (response.status === 503 && result.error === 'Platform disabled') ||
+    (response.status === 403 && result.error === 'access_human_identity_required')
+  ) {
+    throw new Error(
+      `platform: This platform runtime cannot turn off project Zero Trust before an administrator exists. Run \`${input.updateCommand}\`, then retry the uninstall.`,
+    );
+  }
+  if (result.code === 'users_exist') {
+    throw new Error(
+      'platform: A platform user exists, so an administrator must turn off project Zero Trust. Run `void platform zero-trust disable`, then retry the uninstall.',
+    );
+  }
+  if (result.code === 'app_access_credentials') {
+    throw new Error(
+      'platform: Cloudflare rejected the saved app access token, so Void cannot turn off project Zero Trust.',
+    );
+  }
+  if (!response.ok || result.installationId !== input.installationId) {
+    throw new Error(
+      `platform: ${result.error || `Turning off project Zero Trust failed (HTTP ${response.status}).`}`,
+    );
+  }
+  if (!result.turnedOff) {
+    throw new Error('platform: Project Zero Trust is still turning off. Rerun the uninstall.');
+  }
+  if (result.usersExist) {
+    throw new Error(
+      'platform: A platform user signed in while project Zero Trust was turning off, so the uninstall stopped. Project Zero Trust is now off and the platform still runs. To keep the platform, an administrator can turn project Zero Trust back on in Admin → Zero Trust or with `void platform zero-trust configure`. To remove it, run the uninstall again.',
+    );
+  }
 }

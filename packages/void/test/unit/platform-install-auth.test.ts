@@ -2,15 +2,25 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parsePlatformAuthenticationSetup } from '@void/platform';
+import { password, text } from '@voidzero-dev/vite-plus-prompts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { PlatformCloudflareClient } from '../../src/cli/platform-cloudflare.ts';
 import {
+  authenticationSetupRequestHash,
   collectInstallationAuthentication,
+  replacePendingInstallationAuthentication,
   selectInstallationAuthentication,
   platformManagementAccessForAuthentication,
 } from '../../src/cli/platform-install-auth.ts';
 import { createPlatformInstallationSecrets } from '../../src/cli/platform-installer.ts';
 import type { PlatformInstallPlan } from '../../src/cli/platform-plan.ts';
+
+vi.mock('@voidzero-dev/vite-plus-prompts', async (original) => ({
+  ...(await original<typeof import('@voidzero-dev/vite-plus-prompts')>()),
+  password: vi.fn(),
+  text: vi.fn(),
+}));
 
 let directory: string;
 const plan = {
@@ -230,5 +240,159 @@ describe('installer login selection', () => {
     await expect(selectInstallationAuthentication(file, { providers: ['github'] })).rejects.toThrow(
       'recorded',
     );
+  });
+});
+
+describe('pending login replacement', () => {
+  const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+  const accessConnection = {
+    configuration: {
+      id: 'access',
+      kind: 'cloudflare-access',
+      label: 'Cloudflare Access',
+      clientId: 'access-client',
+      issuer: 'https://team.cloudflareaccess.com/cdn-cgi/access/sso/oidc/access-client',
+    },
+    clientSecret: 'access-secret',
+  };
+  const protection = {
+    teamDomain: 'https://team.cloudflareaccess.com',
+    applications: [{ origin: 'https://api.example.com', audience: 'api-audience' }],
+  };
+  const previous = JSON.stringify(
+    parsePlatformAuthenticationSetup({
+      connections: [
+        {
+          configuration: {
+            id: 'google',
+            kind: 'google',
+            label: 'Google',
+            clientId: 'old-client',
+            allowedDomains: ['example.com'],
+          },
+          clientSecret: 'old-google-secret',
+        },
+        accessConnection,
+      ],
+      administratorConnectionId: 'google',
+      admission: { mode: 'restricted' },
+      protection,
+      bootstrapCredentialHash: sha256('previous-code'),
+    }),
+  );
+  const authentication = {
+    providers: ['google', 'cloudflare-access'] as Array<'google' | 'cloudflare-access'>,
+    configurable: true as const,
+    accessProtection: true as const,
+  };
+  const googleFile = {
+    configuration: {
+      id: 'google',
+      kind: 'google',
+      label: 'Google',
+      clientId: 'new-client',
+      allowedDomains: ['example.com'],
+    },
+    clientSecretEnv: 'TEST_NEW_GOOGLE_SECRET',
+  };
+  async function writeAuthFile(value: unknown): Promise<string> {
+    const file = join(directory, 'replacement.json');
+    await writeFile(file, JSON.stringify(value));
+    return file;
+  }
+  function replace(file?: string) {
+    return replacePendingInstallationAuthentication({
+      ...(file ? { file } : {}),
+      authentication,
+      setupJson: previous,
+      apiUrl: 'https://api.example.com',
+    });
+  }
+
+  it('replaces the login settings from a file with a new setup code', async () => {
+    vi.stubEnv('TEST_NEW_GOOGLE_SECRET', 'new-google-secret');
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Listed in another order than installed, with the Access login kept by ID.
+    const file = await writeAuthFile({
+      connections: [{ configuration: { id: 'access', kind: 'cloudflare-access' } }, googleFile],
+      protection,
+    });
+    const result = await replace(file);
+    const setup = parsePlatformAuthenticationSetup(JSON.parse(result.authenticationSetupJson));
+    expect(setup.resetPending).toBe(true);
+    expect(setup.bootstrapCredentialHash).toBe(sha256(result.authBootstrapCode));
+    expect(setup.bootstrapCredentialHash).not.toBe(sha256('previous-code'));
+    expect(setup.connections.map((entry) => entry.configuration.id)).toEqual(['access', 'google']);
+    expect(setup.connections[1]).toMatchObject({
+      configuration: { clientId: 'new-client' },
+      clientSecret: 'new-google-secret',
+    });
+    expect(setup.connections[0]).toEqual(JSON.parse(previous).connections[1]);
+    expect(setup.protection).toEqual(protection);
+    expect(setup.administratorConnectionId).toBe('google');
+    expect(output).toHaveBeenCalledWith(
+      expect.stringContaining('https://api.example.com/auth/callback'),
+    );
+    expect(JSON.stringify(output.mock.calls)).not.toContain('new-google-secret');
+    // The platform records the same hash whether or not the request resets setup.
+    expect(authenticationSetupRequestHash(result.authenticationSetupJson)).toBe(
+      authenticationSetupRequestHash(JSON.stringify({ ...setup, resetPending: undefined })),
+    );
+  });
+
+  it('refuses a file that changes login methods or Access protection', async () => {
+    vi.stubEnv('TEST_NEW_GOOGLE_SECRET', 'new-google-secret');
+    const otherMethod = await writeAuthFile({
+      connections: [
+        { configuration: { id: 'access', kind: 'cloudflare-access' } },
+        {
+          configuration: {
+            kind: 'oidc',
+            label: 'SSO',
+            issuer: 'https://sso.example.com',
+            clientId: 'c',
+          },
+          clientSecretEnv: 'TEST_NEW_GOOGLE_SECRET',
+        },
+      ],
+      protection,
+    });
+    await expect(replace(otherMethod)).rejects.toThrow(
+      'Repair changes login settings, not which login methods or Access protection',
+    );
+    const unprotected = await writeAuthFile({
+      connections: [{ configuration: { id: 'access', kind: 'cloudflare-access' } }, googleFile],
+    });
+    await expect(replace(unprotected)).rejects.toThrow(
+      'not which login methods or Access protection',
+    );
+  });
+
+  it('asks for each setting with the saved value and keeps a secret left blank', async () => {
+    const tty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    try {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(text)
+        .mockResolvedValueOnce('changed-client')
+        .mockResolvedValueOnce('example.com, corp.example.com');
+      vi.mocked(password).mockResolvedValueOnce('');
+      const setup = parsePlatformAuthenticationSetup(
+        JSON.parse((await replace()).authenticationSetupJson),
+      );
+      expect(text).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'old-client' }));
+      expect(text).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'example.com' }));
+      expect(setup.connections[0]).toMatchObject({
+        configuration: {
+          clientId: 'changed-client',
+          allowedDomains: ['example.com', 'corp.example.com'],
+        },
+        clientSecret: 'old-google-secret',
+      });
+      expect(setup.connections[1]).toEqual(JSON.parse(previous).connections[1]);
+      expect(setup.resetPending).toBe(true);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: tty, configurable: true });
+    }
   });
 });

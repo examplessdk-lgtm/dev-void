@@ -479,7 +479,9 @@ describe('platform installer', () => {
       let verifiedHealthAccess = 0;
       let claimed = false;
       let prepared = false;
+      const progress: Array<string> = [];
       const result = await installPlatform(plan, secrets, null, {
+        onProgress: (message) => progress.push(message),
         verifyAccessProtection: async (input) => {
           verifiedProtection++;
           expect(input.protection).toEqual(JSON.parse(setupJson).protection);
@@ -597,6 +599,11 @@ describe('platform installer', () => {
         },
       });
       expect(initialized).toBe(1);
+      // The setup page answers only once traffic opens, after this progress line.
+      expect(progress).toContain(
+        'Administrator setup prepared; its link and code are shown when this finishes',
+      );
+      expect(progress.filter((message) => message.includes('/setup'))).toEqual([]);
       expect(verifiedProtection).toBe(protection ? 1 : 0);
       expect(verifiedHealthAccess).toBe(protection ? 1 : 0);
       expect(result.manifest.status).toBe('installed');
@@ -3436,6 +3443,7 @@ describe('platform installer', () => {
       applications: [],
       destinations: [],
       unfinishedDeletions: [],
+      usersExist: false,
     });
     expect(queries.find(({ sql }) => sql.includes('FROM "platform_settings"'))?.values).toEqual([
       'zeroTrust.configuration',

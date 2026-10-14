@@ -1315,8 +1315,12 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
     if (result.setupPending && completedAuthCode) {
       log.info(`First administrator setup: ${formatUrl(`${plan.apiUrl}/setup`)}`);
       console.log(`One-time administrator setup code: ${completedAuthCode}`);
+      log.info(`Login callback URL: ${formatUrl(`${plan.apiUrl}/auth/callback`)}`);
       log.info(
         'Confirm your identity in the browser, then test and enable any additional login methods in Settings.',
+      );
+      log.info(
+        `If sign-in fails, run \`void platform repair ${result.manifest.id}\` to change the login settings.`,
       );
     }
     if (!plan.deployment.application.zoneName) {

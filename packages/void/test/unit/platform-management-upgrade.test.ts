@@ -1,6 +1,11 @@
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import {
   createPlatformDeploymentManifest,
+  parsePlatformAuthenticationSetup,
   createPlatformInstallationManifest,
   recordInstallationResource,
   recordInstallationStep,
@@ -21,6 +26,7 @@ const state = vi.hoisted(() => ({
   events: [] as Array<string>,
   manifest: undefined as PlatformInstallationManifest | undefined,
   prepareDatabase: vi.fn(),
+  readAdministratorSetup: vi.fn(),
   readAuthenticationState: vi.fn(),
   readPlanZeroTrust: vi.fn(),
   readProjectZeroTrust: vi.fn(),
@@ -114,6 +120,7 @@ vi.mock('../../src/cli/platform-installer.ts', async (importOriginal) => {
           authoritativeManifest: state.manifest,
           checkpoint: vi.fn(),
           prepareDatabase: state.prepareDatabase,
+          readAdministratorSetup: state.readAdministratorSetup,
           readAuthenticationState: state.readAuthenticationState,
           readProjectZeroTrust: state.readProjectZeroTrust,
         },
@@ -198,13 +205,16 @@ vi.mock('../../src/cli/platform-registry.ts', async (importOriginal) => {
     acquirePlatformLifecycleLock: vi.fn(() => () => state.events.push('local-release')),
     listInstallationManifests: vi.fn(() => [state.manifest]),
     readInstallationRecoverySecrets: vi.fn(() => ({ databaseUrl: 'postgres://database' })),
+    readPendingInstallationSecrets: vi.fn(),
     resolveInstallationManifest: vi.fn(() => state.manifest),
     writeInstallationManifest: vi.fn(),
+    writePendingInstallationSecrets: vi.fn(),
   };
 });
 
-import { log, note } from '@voidzero-dev/vite-plus-prompts';
+import { confirm, log, note } from '@voidzero-dev/vite-plus-prompts';
 import { PlatformCloudflareApiError } from '../../src/cli/platform-cloudflare.ts';
+import { authenticationSetupRequestHash } from '../../src/cli/platform-install-auth.ts';
 import {
   acquirePlatformDatabaseLifecycleLock,
   installPlatform,
@@ -217,7 +227,9 @@ import { createPlatformInstallPlan } from '../../src/cli/platform-plan.ts';
 import {
   acquirePlatformLifecycleLock,
   readInstallationRecoverySecrets,
+  readPendingInstallationSecrets,
   writeInstallationManifest,
+  writePendingInstallationSecrets,
 } from '../../src/cli/platform-registry.ts';
 
 const upgrade = (overrides: { plan?: boolean; yes?: boolean } = {}) =>
@@ -631,6 +643,252 @@ describe('installed platform upgrade', () => {
     expect(log.info).not.toHaveBeenCalledWith(
       expect.stringContaining('Application traffic will stay paused'),
     );
+  });
+
+  describe('repair while first administrator setup is pending', () => {
+    const previousCode = 'a'.repeat(64);
+    const previousSetup = JSON.stringify(
+      parsePlatformAuthenticationSetup({
+        connections: [
+          {
+            configuration: {
+              id: 'company',
+              kind: 'oidc',
+              label: 'Company SSO',
+              issuer: 'https://sso.example.com',
+              clientId: 'old-client',
+            },
+            clientSecret: 'old-secret',
+          },
+        ],
+        administratorConnectionId: 'company',
+        admission: { mode: 'restricted' },
+        protection: null,
+        bootstrapCredentialHash: createHash('sha256').update(previousCode).digest('hex'),
+      }),
+    );
+    const recovery = {
+      databaseUrl: 'postgres://database',
+      authenticationSetupJson: previousSetup,
+      authSetupToken: 'b'.repeat(64),
+      authBootstrapCode: previousCode,
+    };
+    let directory: string;
+    let authFile: string;
+    const repair = (overrides: { authConfig?: string; plan?: boolean; yes?: boolean } = {}) =>
+      runInstalledPlatformCommand({
+        subcommand: 'repair',
+        selector: state.manifest!.id,
+        plan: false,
+        runtime: '',
+        yes: true,
+        ...overrides,
+      });
+    const replacement = () => state.createSecrets.mock.calls.at(-1)![0];
+
+    beforeEach(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'void-repair-login-'));
+      authFile = join(directory, 'auth.json');
+      await writeFile(
+        authFile,
+        JSON.stringify({
+          connections: [
+            {
+              configuration: {
+                id: 'company',
+                kind: 'oidc',
+                label: 'Company SSO',
+                issuer: 'https://sso.example.com',
+                clientId: 'new-client',
+              },
+              clientSecretEnv: 'TEST_REPAIR_LOGIN_SECRET',
+            },
+          ],
+        }),
+      );
+      vi.stubEnv('TEST_REPAIR_LOGIN_SECRET', 'new-secret');
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.mocked(readInstallationRecoverySecrets).mockReturnValue(recovery);
+      state.readAdministratorSetup.mockReset().mockResolvedValue({
+        pending: true,
+        usersExist: false,
+        requestHash: authenticationSetupRequestHash(previousSetup),
+      });
+      state.manifest = {
+        ...state.manifest!,
+        deployment: createPlatformDeploymentManifest({
+          ...state.manifest!.deployment,
+          authentication: { providers: ['oidc'], configurable: true },
+          capabilities: { ...state.manifest!.deployment.capabilities, githubOAuth: false },
+        }),
+      };
+    });
+    afterEach(async () => {
+      await rm(directory, { recursive: true, force: true });
+    });
+
+    it('sends new login settings with a new setup code and keeps the setup authority', async () => {
+      vi.mocked(installPlatform).mockResolvedValueOnce({
+        manifest: state.manifest!,
+        setupPending: true,
+        waitingForDns: false,
+        waitingForSandboxDrain: false,
+        zoneNameServers: [],
+      });
+      await repair({ authConfig: authFile });
+      const input = replacement();
+      const setup = parsePlatformAuthenticationSetup(JSON.parse(input.authenticationSetupJson));
+      expect(setup.resetPending).toBe(true);
+      expect(setup.connections[0]).toMatchObject({
+        configuration: { clientId: 'new-client' },
+        clientSecret: 'new-secret',
+      });
+      expect(input.authBootstrapCode).toMatch(/^[a-f0-9]{64}$/);
+      expect(input.authBootstrapCode).not.toBe(previousCode);
+      expect(setup.bootstrapCredentialHash).toBe(
+        createHash('sha256').update(input.authBootstrapCode).digest('hex'),
+      );
+      expect(input).not.toHaveProperty('authSetupToken');
+      expect(input.checkpoint).toBe(recovery);
+      expect(log.info).toHaveBeenCalledWith(expect.stringContaining('/auth/callback'));
+      expect(log.info).toHaveBeenCalledWith(
+        `If sign-in fails, run \`void platform repair ${state.manifest!.id}\` to change the login settings.`,
+      );
+    });
+
+    it.each([
+      [
+        'once the first administrator signed in',
+        { pending: false, usersExist: true, requestHash: 'accepted' },
+        'The first administrator has already signed in. Change login methods with `void platform config auth`.',
+      ],
+      [
+        'when setup was never started',
+        { pending: false, usersExist: false, requestHash: null },
+        'Administrator setup was never started. Resume the install with `void platform install --resume --name',
+      ],
+    ])('refuses before any change %s', async (_label, setup, message) => {
+      state.readAdministratorSetup.mockResolvedValueOnce(setup);
+      await expect(repair({ authConfig: authFile })).rejects.toThrow(message);
+      expect(state.createSecrets).not.toHaveBeenCalled();
+      expect(installPlatform).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'a GitHub-only installation',
+        () => {
+          state.manifest = {
+            ...state.manifest!,
+            deployment: createPlatformDeploymentManifest({
+              ...state.manifest!.deployment,
+              authentication: { providers: ['github'] },
+              capabilities: { ...state.manifest!.deployment.capabilities, githubOAuth: true },
+            }),
+          };
+        },
+        'Set VOID_PLATFORM_GITHUB_CLIENT_ID and VOID_PLATFORM_GITHUB_CLIENT_SECRET',
+      ],
+      [
+        'a computer without the saved setup authority',
+        () => {
+          vi.mocked(readInstallationRecoverySecrets).mockReturnValue({
+            databaseUrl: 'postgres://database',
+          });
+        },
+        'needs the setup authority saved on the computer that installed the platform',
+      ],
+    ])('refuses %s before planning', async (_label, arrange, message) => {
+      arrange();
+      await expect(repair({ authConfig: authFile })).rejects.toThrow(message);
+      expect(createPlatformInstallPlan).not.toHaveBeenCalled();
+      expect(installPlatform).not.toHaveBeenCalled();
+    });
+
+    it('refuses on a disabled platform before planning', async () => {
+      state.manifest = { ...state.manifest!, desiredState: 'disabled', status: 'disabled' };
+      await expect(repair({ authConfig: authFile })).rejects.toThrow(
+        `Run \`void platform enable ${state.manifest.id}\` first`,
+      );
+      expect(createPlatformInstallPlan).not.toHaveBeenCalled();
+      expect(installPlatform).not.toHaveBeenCalled();
+    });
+
+    it('checks the file in a plan without reading the database', async () => {
+      await repair({ authConfig: authFile, plan: true, yes: false });
+      expect(log.info).toHaveBeenCalledWith(
+        `Login settings will be replaced from ${authFile}; a new setup code is printed at the end.`,
+      );
+      expect(acquirePlatformDatabaseLifecycleLock).not.toHaveBeenCalled();
+      expect(state.readAdministratorSetup).not.toHaveBeenCalled();
+      await writeFile(
+        authFile,
+        JSON.stringify({ connections: [{ configuration: { kind: 'github', clientId: 'id' } }] }),
+      );
+      await expect(repair({ authConfig: authFile, plan: true, yes: false })).rejects.toThrow(
+        'not which login methods',
+      );
+    });
+
+    it('asks in a terminal only while setup is pending, and No keeps the saved settings', async () => {
+      const tty = process.stdin.isTTY;
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+      try {
+        vi.mocked(confirm).mockResolvedValueOnce(false);
+        await repair({ yes: false });
+        expect(confirm).toHaveBeenCalledExactlyOnceWith({
+          message:
+            'First administrator setup is not finished. Change the login settings before continuing?',
+          initialValue: false,
+        });
+        expect(replacement()).not.toHaveProperty('authenticationSetupJson');
+
+        vi.mocked(confirm).mockClear();
+        state.progress.stop.mockClear();
+        state.readAdministratorSetup.mockResolvedValueOnce({
+          pending: false,
+          usersExist: true,
+          requestHash: 'accepted',
+        });
+        await repair({ yes: false });
+        expect(confirm).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process.stdin, 'isTTY', { value: tty, configurable: true });
+      }
+    });
+
+    it('keeps the saved login settings when the first administrator signs in during repair', async () => {
+      const pending = { ...recovery, authenticationSetupJson: 'new', authBootstrapCode: 'new' };
+      vi.mocked(readPendingInstallationSecrets).mockReturnValueOnce(pending);
+      state.readAdministratorSetup
+        .mockResolvedValueOnce({
+          pending: true,
+          usersExist: false,
+          requestHash: authenticationSetupRequestHash(previousSetup),
+        })
+        .mockResolvedValueOnce({
+          pending: false,
+          usersExist: true,
+          requestHash: authenticationSetupRequestHash(previousSetup),
+        });
+      vi.mocked(installPlatform).mockRejectedValueOnce(
+        new Error('platform: Authentication setup failed (HTTP 409).'),
+      );
+      await expect(repair({ authConfig: authFile })).rejects.toThrow(
+        'The first administrator signed in before the new login settings were applied. Nothing changed.',
+      );
+      expect(writePendingInstallationSecrets).toHaveBeenCalledExactlyOnceWith(state.manifest, {
+        ...pending,
+        authenticationSetupJson: previousSetup,
+        authBootstrapCode: previousCode,
+      });
+    });
+
+    it('keeps the new login settings for a retry when the platform has not refused them', async () => {
+      vi.mocked(installPlatform).mockRejectedValueOnce(new Error('Worker upload failed'));
+      await expect(repair({ authConfig: authFile })).rejects.toThrow('Worker upload failed');
+      expect(writePendingInstallationSecrets).not.toHaveBeenCalled();
+    });
   });
 
   describe('uninstall with project Zero Trust', () => {

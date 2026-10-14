@@ -727,6 +727,127 @@ describe('uninstall with project Zero Trust', () => {
     expectNothingChanged(fake);
   });
 
+  describe('before any platform user exists', () => {
+    const noUser = () => ({
+      ...projectZeroTrustUninstallState(zeroTrustSetting(), []),
+      usersExist: false,
+    });
+
+    it('turns off Zero Trust through the platform API before taking the lock', async () => {
+      const manifest = installedManifest();
+      persistInstallation(manifest, directories);
+      const fake = client(manifest);
+      const events: Array<string> = [];
+      const putKvValue = fake.putKvValue;
+      fake.putKvValue = async (account, namespace, key, value) => {
+        if (key === PLATFORM_DISABLED_KEY) {
+          events.push('disable traffic');
+        }
+        await putKvValue(account, namespace, key, value);
+      };
+      let turnedOff = false;
+      await uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        ...zeroTrustLock(events).dependencies,
+        readProjectZeroTrust: async () => {
+          events.push('check');
+          return turnedOff ? projectZeroTrustUninstallState(disabledZeroTrust, []) : noUser();
+        },
+        turnOffProjectZeroTrust: async () => {
+          events.push('turn off');
+          turnedOff = true;
+        },
+      });
+      expect(events).toEqual([
+        'check',
+        'turn off',
+        'lock',
+        'check',
+        'fence',
+        'disable traffic',
+        'unlock',
+      ]);
+      expect(listInstallationManifests()[0]?.status).toBe('uninstalled');
+    });
+
+    it('lists the applications it will delete in the plan without changing anything', async () => {
+      const manifest = installedManifest();
+      persistInstallation(manifest, directories);
+      const fake = client(manifest);
+      const turnOff = vi.fn();
+      await uninstallPlatform(
+        fake,
+        manifest,
+        { ...uninstallArgs, plan: true },
+        {
+          interactive: false,
+          readProjectZeroTrust: async () => noUser(),
+          turnOffProjectZeroTrust: turnOff,
+        },
+      );
+      const plan = noteText('Uninstall plan');
+      expect(plan).toContain(
+        'Turn off project Zero Trust; no platform user exists yet. Delete its Access applications:',
+      );
+      expect(plan).toContain(`shared project application: ${wildcardName} (wildcard-app)`);
+      expect(turnOff).not.toHaveBeenCalled();
+      expectNothingChanged(fake);
+    });
+
+    it('keeps refusing once a platform user exists', async () => {
+      const manifest = installedManifest();
+      persistInstallation(manifest, directories);
+      const fake = client(manifest);
+      const turnOff = vi.fn();
+      await expect(
+        uninstallPlatform(fake, manifest, uninstallArgs, {
+          interactive: false,
+          ...unlockedProjectZeroTrust,
+          readProjectZeroTrust: async () => ({ ...noUser(), usersExist: true }),
+          turnOffProjectZeroTrust: turnOff,
+        }),
+      ).rejects.toThrow('Run `void platform zero-trust disable`');
+      expect(turnOff).not.toHaveBeenCalled();
+      expectNothingChanged(fake);
+    });
+
+    it('points to the installing computer instead of an administrator command', async () => {
+      const manifest = installedManifest();
+      persistInstallation(manifest, directories);
+      const fake = client(manifest);
+      const error = await uninstallPlatform(fake, manifest, uninstallArgs, {
+        interactive: false,
+        ...unlockedProjectZeroTrust,
+        readProjectZeroTrust: async () => noUser(),
+      }).catch((reason: unknown) => reason as Error);
+      expect(error!.message).toContain('Refusing to uninstall while project Zero Trust is enabled');
+      expect(error!.message).toContain(
+        'No platform user exists yet. Run this command on the computer that installed the platform',
+      );
+      expect(error!.message).not.toContain('Run `void platform zero-trust disable`');
+      expectNothingChanged(fake);
+    });
+
+    it('stops before any change when turning off fails', async () => {
+      const manifest = installedManifest();
+      persistInstallation(manifest, directories);
+      const fake = client(manifest);
+      const events: Array<string> = [];
+      await expect(
+        uninstallPlatform(fake, manifest, uninstallArgs, {
+          interactive: false,
+          ...zeroTrustLock(events).dependencies,
+          readProjectZeroTrust: async () => noUser(),
+          turnOffProjectZeroTrust: async () => {
+            throw new Error('platform: Project Zero Trust is still turning off.');
+          },
+        }),
+      ).rejects.toThrow('Project Zero Trust is still turning off.');
+      expect(events).toEqual([]);
+      expectNothingChanged(fake);
+    });
+  });
+
   it('refuses without a database session that can hold off Zero Trust changes', async () => {
     const manifest = installedManifest();
     persistInstallation(manifest, directories);
@@ -750,7 +871,11 @@ describe('uninstall with project Zero Trust', () => {
 });
 
 describe('project Zero Trust database read', () => {
-  function connection(tables: { settings: boolean; projects: boolean }, setting: unknown) {
+  function connection(
+    tables: { settings: boolean; projects: boolean; users?: boolean },
+    setting: unknown,
+    usersExist = false,
+  ) {
     const queries: Array<string> = [];
     return {
       queries,
@@ -758,6 +883,9 @@ describe('project Zero Trust database read', () => {
         queries.push(sql);
         if (sql.includes('to_regclass')) {
           return { rows: [tables] };
+        }
+        if (sql.includes('FROM "users"')) {
+          return { rows: [{ present: usersExist }] };
         }
         if (sql.includes('"platform_settings"')) {
           expect(values).toEqual(['zeroTrust.configuration']);
@@ -779,6 +907,27 @@ describe('project Zero Trust database read', () => {
       unfinishedDeletions: [],
     });
     expect(db.queries).toHaveLength(1);
+  });
+
+  it('reads whether a platform user exists only while Zero Trust is active', async () => {
+    const active = connection({ settings: true, projects: true, users: true }, zeroTrustSetting());
+    expect(await readPlatformProjectZeroTrustStateConnection(active as never)).toMatchObject({
+      active: true,
+      usersExist: false,
+    });
+    const withUser = connection(
+      { settings: true, projects: true, users: true },
+      zeroTrustSetting(),
+      true,
+    );
+    expect(await readPlatformProjectZeroTrustStateConnection(withUser as never)).toMatchObject({
+      usersExist: true,
+    });
+    const inactive = connection({ settings: true, projects: true, users: true }, disabledZeroTrust);
+    expect(await readPlatformProjectZeroTrustStateConnection(inactive as never)).not.toHaveProperty(
+      'usersExist',
+    );
+    expect(inactive.queries.some((sql) => sql.includes('FROM "users"'))).toBe(false);
   });
 
   it('reads the saved configuration and project applications', async () => {

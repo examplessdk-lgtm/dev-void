@@ -694,6 +694,59 @@ describe('configured platform login routes', () => {
     expect((await callback(await start('github'))).status).toBe(302);
     expect((await env.db.select().from(githubInstallations))[0]?.user_id).toBe(user.id);
   });
+  it('names the cause of a failed GitHub sign-in without logging provider details', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (request: string | URL | Request) => {
+        if (request.toString() === 'https://github.com/login/oauth/access_token') {
+          return Response.json({
+            error: 'incorrect_client_credentials',
+            error_description: 'The client_id and/or client_secret passed are incorrect.',
+          });
+        }
+        throw new Error(`Unexpected GitHub request: ${request.toString()}`);
+      }),
+    );
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const flow = await start('github');
+    const page = await app.fetch(
+      new Request(`${origin}/auth/callback?code=provider-code&state=${flow.state}`, {
+        headers: { Cookie: flow.cookie, Accept: 'text/html' },
+      }),
+      env,
+    );
+    expect(page.status).toBe(400);
+    const html = await page.text();
+    expect(html).toContain('GitHub rejected this platform’s client ID or client secret.');
+    expect(html).toContain('Error code: github_incorrect_client_credentials');
+    expect(html).toContain(`Callback URL: ${origin}/auth/callback`);
+    expect(html).not.toContain('void platform repair');
+    expect(errors).toHaveBeenCalledWith('[auth] login failed', {
+      code: 'github_incorrect_client_credentials',
+      purpose: 'login',
+      connectionId: 'github',
+    });
+    const logged = JSON.stringify(errors.mock.calls);
+    expect(logged).not.toContain('test-github-client-secret');
+    expect(logged).not.toContain('passed are incorrect');
+
+    const cli = await callback(await start('github'));
+    expect(cli.status).toBe(400);
+    expect(await cli.json()).toMatchObject({
+      error: 'login_failed',
+      code: 'github_incorrect_client_credentials',
+    });
+
+    const denied = await start('github');
+    const cancelled = await app.fetch(
+      new Request(`${origin}/auth/callback?error=access_denied&state=${denied.state}`, {
+        headers: { Cookie: denied.cookie },
+      }),
+      env,
+    );
+    expect(await cancelled.json()).toMatchObject({ code: 'login_denied' });
+    errors.mockRestore();
+  });
   it('backfills a GitHub App installation after explicit managed identity linking', async () => {
     const user = await createTestUser(env.db, 'oidc-user', 'oidc:company', 'oidc-user-subject');
     await env.db.insert(platformLoginIdentities).values({

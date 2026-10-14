@@ -5,6 +5,7 @@ export {
 } from './access-policy.ts';
 export {
   PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX,
+  PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX,
   parsePlatformAppAccessSetup,
   type PlatformAppAccessSetup,
 } from './app-access.ts';

@@ -19,6 +19,8 @@ import {
   commitAuthenticationRecovery,
   recoverAuthenticationCredential,
 } from '../../../../../packages/void/src/cli/platform-auth-recovery-core.ts';
+import { authenticationSetupRequestHash } from '../../../../../packages/void/src/cli/platform-install-auth.ts';
+import { readPlatformAdministratorSetupConnection } from '../../../../../packages/void/src/cli/platform-installer-database.ts';
 import { AUTH_SETUP_PROOF_PREFIX, initializeAuthentication } from '../../src/auth/bootstrap.ts';
 import { hmacSignState } from '../../src/auth/hmac.ts';
 import { signJwt } from '../../src/auth/jwt.ts';
@@ -871,6 +873,71 @@ describe('provider-independent first administrator setup', () => {
       ).status,
     ).toBe(409);
     expect(await (await initialize()).json()).toMatchObject({ setupPending: false });
+  });
+
+  it('shows the code, callback URL, and repair command when first administrator sign-in fails', async () => {
+    expect((await initialize()).status).toBe(200);
+    const start = await form('/auth/bootstrap', { code });
+    expect(start.status).toBe(302);
+    authorization = new URL(start.headers.get('Location')!);
+    const cookie = start.headers.get('Set-Cookie')!.split(';')[0]!;
+    const provider = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: string | URL | Request, options?: RequestInit) =>
+      input.toString() === `${issuer}/token`
+        ? Response.json({ error: 'invalid_client' }, { status: 401 })
+        : provider(input, options),
+    );
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const page = await app.fetch(
+      new Request(
+        `${origin}/auth/callback?code=provider-code&state=${authorization.searchParams.get('state')}`,
+        { headers: { Cookie: cookie, Accept: 'text/html' } },
+      ),
+      bindings(),
+    );
+    expect(page.status).toBe(400);
+    const html = await page.text();
+    expect(html).toContain('The provider refused the token request.');
+    expect(html).toContain('Error code: oidc_token_failed');
+    expect(html).toContain(`Callback URL: ${origin}/auth/callback`);
+    expect(html).toContain(`void platform repair ${installationId}</code>`);
+    expect(html).toContain('href="/setup"');
+    expect(errors).toHaveBeenCalledWith('[auth] login failed', {
+      code: 'oidc_token_failed',
+      purpose: 'bootstrap',
+      connectionId: 'company',
+    });
+    expect(JSON.stringify(errors.mock.calls)).not.toContain('oidc-bootstrap-secret');
+    errors.mockRestore();
+  });
+
+  it('reads pending administrator setup for the installing CLI', async () => {
+    const connection = (
+      env.db as unknown as {
+        $client: Parameters<typeof readPlatformAdministratorSetupConnection>[0];
+      }
+    ).$client;
+    expect(await readPlatformAdministratorSetupConnection(connection)).toEqual({
+      pending: false,
+      usersExist: false,
+      requestHash: null,
+    });
+    await initialize();
+    // The CLI computes the same hash the platform records for these settings.
+    expect(await readPlatformAdministratorSetupConnection(connection)).toEqual({
+      pending: true,
+      usersExist: false,
+      requestHash: authenticationSetupRequestHash(JSON.stringify(await input())),
+    });
+    await env.db
+      .update(platformAuthBootstrap)
+      .set({ consumed_at: new Date().toISOString() })
+      .where(eq(platformAuthBootstrap.singleton, true));
+    await createTestUser(env.db, 'first-user');
+    expect(await readPlatformAdministratorSetupConnection(connection)).toMatchObject({
+      pending: false,
+      usersExist: true,
+    });
   });
 
   it('allows an explicit installer-authorized reset only before an administrator exists', async () => {

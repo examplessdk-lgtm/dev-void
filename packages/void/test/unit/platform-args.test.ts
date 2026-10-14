@@ -52,6 +52,23 @@ describe('platform args', () => {
       ).toThrow();
     }
   });
+  it('accepts replacement login settings only in repair', () => {
+    expect(parsePlatformArgs(['repair', 'team', '--auth-config', 'auth.json'])).toEqual({
+      subcommand: 'repair',
+      selector: 'team',
+      plan: false,
+      runtime: '',
+      yes: false,
+      authConfig: 'auth.json',
+    });
+    expect(parsePlatformArgs(['repair'])).not.toHaveProperty('authConfig');
+    expect(() => parsePlatformArgs(['repair', '--auth-config'])).toThrow('requires a value');
+    for (const command of ['upgrade', 'enable', 'disable', 'uninstall']) {
+      expect(() => parsePlatformArgs([command, '--auth-config', 'auth.json'])).toThrow(
+        "Unknown flag '--auth-config'",
+      );
+    }
+  });
   it('parses resumable domain setup without confusing app-domain commands', () => {
     expect(
       parsePlatformArgs(['domain', 'set', 'example.com', '--installation', 'team', '--plan']),

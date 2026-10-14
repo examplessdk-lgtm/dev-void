@@ -10,6 +10,7 @@ import {
 } from '../../auth/google.ts';
 import { hmacSignState, hmacVerifyState } from '../../auth/hmac.ts';
 import { signJwt } from '../../auth/jwt.ts';
+import { LoginFailure, loginFailureHint } from '../../auth/login-failure.ts';
 import { startPlatformLogin } from '../../auth/login.ts';
 import { getPlatformCapabilities } from '../../capabilities.ts';
 import {
@@ -35,6 +36,7 @@ function loginFailure(
   context: Context<ApiEnv>,
   message: string,
   status: 400 | 404 | 501,
+  details: ReadonlyArray<string> = [],
 ): Promise<Response> {
   return renderAdminPage(
     context,
@@ -42,6 +44,7 @@ function loginFailure(
     'Login failed',
     {
       message,
+      details,
       platformName: getPlatformDisplayName(context.env, context.req.url),
     },
     { status },
@@ -188,12 +191,26 @@ export async function handleAdminOAuthCallback(context: Context<ApiEnv>): Promis
   let email: string | null;
   let emailVerified: boolean;
   if (provider === 'github') {
-    const token = await exchangeCodeForToken(
-      context.env.GITHUB_CLIENT_ID,
-      context.env.GITHUB_CLIENT_SECRET,
-      code,
-    );
-    const githubUser = await getGitHubUser(token);
+    let githubUser: Awaited<ReturnType<typeof getGitHubUser>>;
+    try {
+      const token = await exchangeCodeForToken(
+        context.env.GITHUB_CLIENT_ID,
+        context.env.GITHUB_CLIENT_SECRET,
+        code,
+      );
+      githubUser = await getGitHubUser(token);
+    } catch (error) {
+      if (!(error instanceof LoginFailure)) {
+        throw error;
+      }
+      // Log only the failure code, never the provider response.
+      console.error('[auth] login failed', { code: error.code, purpose: 'admin', provider });
+      const hint = loginFailureHint(error.code);
+      return loginFailure(context, hint.message, 400, [
+        `Error code: ${error.code}`,
+        ...(hint.callback ? [`Callback URL: ${redirectUri}`] : []),
+      ]);
+    }
     providerId = String(githubUser.id);
     login = githubUser.login;
     email = githubUser.email;

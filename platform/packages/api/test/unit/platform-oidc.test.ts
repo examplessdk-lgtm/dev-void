@@ -218,6 +218,49 @@ describe('platform OIDC', () => {
     expect((await accepted.exchange()).subject).toBe('person-123');
   });
 
+  it('names each login failure with a short code', async () => {
+    await expect(
+      fixture({ metadata: { issuer: 'https://other.example.com' } }).start(),
+    ).rejects.toMatchObject({ code: 'oidc_discovery_failed' });
+
+    const denied = fixture();
+    await denied.start();
+    await expect(
+      denied.provider.exchange({
+        callback: new URL(
+          'https://api.example.com/auth/callback?error=access_denied&state=browser-bound-state',
+        ),
+        redirectUri: 'https://api.example.com/auth/callback',
+        state: 'browser-bound-state',
+        nonce: 'unused',
+        verifier: 'unused',
+        clientSecret: 'client-secret',
+      }),
+    ).rejects.toMatchObject({ code: 'login_denied' });
+
+    const token = fixture({ metadata: { token_endpoint_auth_methods_supported: ['none'] } });
+    await token.start();
+    await expect(token.exchange()).rejects.toMatchObject({ code: 'oidc_token_failed' });
+
+    const groups = fixture({
+      configuration: { requiredGroups: ['employees'] },
+      claims: { groups: ['contractors'] },
+    });
+    await groups.start();
+    await expect(groups.exchange()).rejects.toMatchObject({ code: 'oidc_group_not_allowed' });
+
+    const domain = fixture({
+      configuration: {
+        id: 'google',
+        kind: 'google',
+        issuer: 'https://accounts.google.com',
+        allowedDomains: ['example.com'],
+      },
+    });
+    await domain.start();
+    await expect(domain.exchange()).rejects.toMatchObject({ code: 'google_domain_not_allowed' });
+  });
+
   it('rejects issuer confusion and cross-origin metadata endpoints', async () => {
     for (const metadata of [
       { issuer: 'https://other.example.com' },

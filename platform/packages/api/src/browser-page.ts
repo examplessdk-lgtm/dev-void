@@ -30,11 +30,21 @@ export function platformBrowserError(
   title: string,
   message: string,
   status: ContentfulStatusCode,
+  extra: Readonly<{
+    /** Plain-text lines shown below the message. */
+    details?: ReadonlyArray<string>;
+    /** A command the reader runs to fix the problem. */
+    command?: string;
+    /** Where "Start a new sign-in" leads instead of the usual page. */
+    returnUrl?: string;
+  }> = {},
 ): Response {
   context.header('Cache-Control', 'no-store');
   context.header('Referrer-Policy', 'no-referrer');
   let returnUrl: string | undefined;
-  if (context.req.path.startsWith('/auth/bootstrap') || context.req.path === '/setup') {
+  if (extra.returnUrl) {
+    returnUrl = extra.returnUrl;
+  } else if (context.req.path.startsWith('/auth/bootstrap') || context.req.path === '/setup') {
     returnUrl = '/setup';
   } else if (context.env.DASHBOARD_URL) {
     try {
@@ -51,10 +61,16 @@ export function platformBrowserError(
       escapeBrowserHtml(returnUrl) +
       '">Start a new sign-in</a>'
     : '';
+  const details = (extra.details ?? [])
+    .map((detail) => '<p class="void-auth-note">' + escapeBrowserHtml(detail) + '</p>')
+    .join('');
+  const command = extra.command
+    ? '<pre><code>' + escapeBrowserHtml(extra.command) + '</code></pre>'
+    : '';
   return platformBrowserPage(
     context,
     title,
-    browserPageStatus('error') + browserPageLead(title, message) + action,
+    browserPageStatus('error') + browserPageLead(title, message) + details + command + action,
     status,
   );
 }

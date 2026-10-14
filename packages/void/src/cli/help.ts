@@ -287,7 +287,10 @@ const HELP_TREE: HelpTree = {
         command: 'rollback [id]',
         description: 'Restore a compatible earlier platform runtime',
       },
-      { command: 'repair [id]', description: 'Reconcile an installed Void platform' },
+      {
+        command: 'repair [id]',
+        description: 'Reconcile an installed Void platform or its unfinished login setup',
+      },
       { command: 'disable [id]', description: 'Disable traffic without deleting data' },
       { command: 'enable [id]', description: 'Restore traffic for a disabled platform' },
       { command: 'uninstall [id]', description: 'Safely remove an installed Void platform' },
@@ -556,7 +559,10 @@ const HELP_TREE: HelpTree = {
           { command: '--yes', description: 'Acknowledge non-interactive Cloudflare changes' },
         ],
       },
-      repair: lifecycleHelp('repair', 'Reconcile drift using the installation ownership manifest.'),
+      repair: lifecycleHelp(
+        'repair',
+        'Reconcile drift using the installation ownership manifest, or change the login settings while first administrator setup is pending.',
+      ),
       disable: lifecycleHelp('disable', 'Disable platform traffic without deleting data.'),
       enable: lifecycleHelp('enable', 'Restore configured traffic for a disabled platform.'),
       uninstall: {
@@ -1389,7 +1395,7 @@ function lifecycleHelp(
   return {
     summary,
     usage: [
-      `void platform ${command} [id] [--plan]${command === 'disable' ? '' : ' [--runtime <path>]'}${command === 'upgrade' || command === 'repair' ? ' [--dashboard-url <origin>]' : ''} [--yes]`,
+      `void platform ${command} [id] [--plan]${command === 'disable' ? '' : ' [--runtime <path>]'}${command === 'upgrade' || command === 'repair' ? ' [--dashboard-url <origin>]' : ''}${command === 'repair' ? ' [--auth-config <path>]' : ''} [--yes]`,
     ],
     options: [
       { command: '--plan', description: 'Print the exact plan without making changes' },
@@ -1407,6 +1413,15 @@ function lifecycleHelp(
               command: '--dashboard-url <origin>',
               description:
                 'Configure a separately deployed dashboard; omission keeps its saved origin',
+            },
+          ]
+        : []),
+      ...(command === 'repair'
+        ? [
+            {
+              command: '--auth-config <path>',
+              description:
+                'While first administrator setup is pending, replace its login settings (install file format)',
             },
           ]
         : []),

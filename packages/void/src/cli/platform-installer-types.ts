@@ -95,6 +95,14 @@ export type PlatformWorkerSecretUpdateIntent = Readonly<{
   updates: Readonly<PlatformWorkerSecretUpdates>;
 }>;
 
+export type PlatformAdministratorSetupState = Readonly<{
+  /** A setup row exists that no administrator has used yet. */
+  pending: boolean;
+  usersExist: boolean;
+  /** Hash of the login settings the platform last accepted, or null before setup started. */
+  requestHash: string | null;
+}>;
+
 export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   readAuthenticationState?: () => Promise<{
     enabledProviders: ReadonlyArray<PlatformLoginKind>;
@@ -113,6 +121,8 @@ export type PlatformDatabaseLifecycleLock = (() => Promise<void>) & {
   prepareSandboxDrain?: (
     requiredAdmissionProtocol?: 0 | 2 | 3,
   ) => Promise<PlatformSandboxDrainPreparation>;
+  /** First administrator setup state; repair replaces its login settings only while pending. */
+  readAdministratorSetup?: () => Promise<PlatformAdministratorSetupState>;
   /** Project Zero Trust state that decides whether uninstall may start. */
   readProjectZeroTrust?: () => Promise<PlatformProjectZeroTrustState>;
   /** Project slugs, which --purge-resources requires to be empty. */

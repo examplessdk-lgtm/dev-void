@@ -102,7 +102,7 @@ Use these commands to recover, update, pause, or remove an installation:
 void platform discover [--account <id>] [--installation <id-or-name>]
 void platform upgrade [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
 void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-path>] [--plan] [--yes]
-void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--plan] [--yes]
+void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--auth-config <path>] [--plan] [--yes]
 void platform disable [id] [--plan] [--yes]
 void platform enable [id] [--runtime <path>] [--plan] [--yes]
 void platform uninstall [id] [--plan] [--purge-data | --purge-resources] [--keep-zone] [--yes]
@@ -116,6 +116,12 @@ To add or explicitly change a separately deployed dashboard after installation,
 use `repair --dashboard-url <origin>` or `upgrade --dashboard-url <origin>`.
 Preview with `--plan` first. Existing Access protection must cover the configured
 dashboard origin before maintenance can proceed. See [Optional Dashboard](../../guide/platform/installation/domains.md#optional-dashboard).
+
+While first administrator setup is pending, `repair --auth-config <path>` replaces
+the login settings from a file in the install format and prints a new setup code.
+Interactive repair offers the same change with the saved values filled in. Login
+methods and Access protection stay as installed. Run it on the computer that
+installed the platform. See [First administrator sign-in fails](../../guide/platform/installation/maintenance.md#first-administrator-sign-in-fails).
 
 After discovery on another machine, set `VOID_PLATFORM_DATABASE_URL`. See [Manage an installation from another machine](../../guide/platform/installation/maintenance.md#manage-an-installation-from-another-machine) for the secrets needed to recreate a missing Worker.
 
@@ -140,6 +146,8 @@ Platform migrations only move forward. Void checks compatibility before updating
 An upgrade completes after the new Workers pass health checks. If rollout fails, Void attempts to restore the previous Workers. Retrying does not repeat completed migrations.
 
 `platform rollback` restores a compatible earlier runtime without reversing database migrations. Pass its files with `--runtime`; if the installed version is custom, also supply that version with `--from-runtime`. Void refuses incompatible targets.
+
+If project Zero Trust is on and no platform user exists yet, uninstall turns it off and deletes its Access applications first. Run it on the computer that installed the platform.
 
 Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are retained for manual review.
 

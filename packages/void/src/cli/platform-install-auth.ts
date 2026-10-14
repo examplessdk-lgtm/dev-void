@@ -8,6 +8,7 @@ import {
   parsePlatformLoginConfiguration,
   platformDashboardUrl,
   type PlatformAppAccess,
+  type PlatformAuthenticationSetup,
   type PlatformDeploymentManifest,
   type PlatformLoginKind,
 } from '@void/platform';
@@ -42,6 +43,28 @@ type AuthFile = {
 
 function defaultConnectionId(kind: PlatformLoginKind): string {
   return kind === 'oidc' ? 'company' : kind === 'cloudflare-access' ? 'access' : kind;
+}
+
+async function prompt(message: string, initialValue = '', masked = false): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      `platform: ${message} Supply it through --auth-config and environment references.`,
+    );
+  }
+  return masked
+    ? platformPromptAnswer(await password({ message }))
+    : platformPromptAnswer(await text({ message, initialValue }));
+}
+
+function clientSecretFromEnvironment(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error('platform: Invalid clientSecretEnv reference.');
+  }
+  const secret = process.env[name];
+  if (!secret) {
+    throw new Error(`platform: ${name} must contain the login client secret.`);
+  }
+  return secret;
 }
 
 export type PlatformAuthSelection = {
@@ -200,16 +223,6 @@ export async function collectInstallationAuthentication(
       authBootstrapCode: checkpoint.authBootstrapCode ?? '',
     };
   }
-  const prompt = async (message: string, initialValue = '', masked = false): Promise<string> => {
-    if (!process.stdin.isTTY) {
-      throw new Error(
-        `platform: ${message} Supply it through --auth-config and environment references.`,
-      );
-    }
-    return masked
-      ? platformPromptAnswer(await password({ message }))
-      : platformPromptAnswer(await text({ message, initialValue }));
-  };
   const entries =
     selection.file?.connections ??
     selection.authentication.providers.map((kind) => ({
@@ -301,13 +314,7 @@ export async function collectInstallationAuthentication(
     const parsed = parsePlatformLoginConfiguration(config);
     let secret: string | undefined;
     if (entry.clientSecretEnv) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry.clientSecretEnv)) {
-        throw new Error('platform: Invalid clientSecretEnv reference.');
-      }
-      secret = process.env[entry.clientSecretEnv];
-      if (!secret) {
-        throw new Error(`platform: ${entry.clientSecretEnv} must contain the login client secret.`);
-      }
+      secret = clientSecretFromEnvironment(entry.clientSecretEnv);
     } else if (
       stored?.clientSecret &&
       stored.configuration?.clientId === parsed.clientId &&
@@ -426,4 +433,136 @@ export async function collectInstallationAuthentication(
   };
   save(result);
   return result;
+}
+
+/** The hash the platform records for accepted login settings; a reset request does not change it. */
+export function authenticationSetupRequestHash(setupJson: string): string {
+  const { resetPending: _, ...configuration } = parsePlatformAuthenticationSetup(
+    JSON.parse(setupJson),
+  );
+  return createHash('sha256').update(JSON.stringify(configuration)).digest('hex');
+}
+
+/** Read a repair login file. It may change login settings, not methods or Access protection. */
+export async function readLoginReplacementFile(
+  file: string,
+  authentication: PlatformDeploymentManifest['authentication'],
+): Promise<AuthFile> {
+  const selection = await selectInstallationAuthentication(file);
+  const kinds = new Set(selection.authentication.providers);
+  if (
+    kinds.size !== new Set(authentication.providers).size ||
+    authentication.providers.some((kind) => !kinds.has(kind)) ||
+    !!selection.authentication.accessProtection !== !!authentication.accessProtection
+  ) {
+    throw new Error(
+      'platform: Repair changes login settings, not which login methods or Access protection the platform uses.',
+    );
+  }
+  return selection.file!;
+}
+
+/**
+ * New login settings for a first administrator setup that is still pending,
+ * from a file or from prompts prefilled with the saved settings. A Cloudflare
+ * Access login and Access protection stay as installed. The result resets
+ * pending setup with a new setup code; the setup authority does not change.
+ */
+export async function replacePendingInstallationAuthentication(input: {
+  file?: string;
+  authentication: PlatformDeploymentManifest['authentication'];
+  setupJson: string;
+  apiUrl: string;
+}): Promise<{ authenticationSetupJson: string; authBootstrapCode: string }> {
+  const previous = parsePlatformAuthenticationSetup(JSON.parse(input.setupJson));
+  const file = input.file
+    ? await readLoginReplacementFile(input.file, input.authentication)
+    : undefined;
+  console.log(`Login callback URL: ${formatUrl(`${input.apiUrl}/auth/callback`)}`);
+  const savedConnection = (id: unknown) =>
+    previous.connections.find((connection) => connection.configuration.id === id);
+  const connections: Array<PlatformAuthenticationSetup['connections'][number]> = [];
+  for (const entry of file?.connections ?? []) {
+    const config = { ...entry.configuration };
+    const kind = config.kind as PlatformLoginKind;
+    if (!config.id) {
+      config.id = defaultConnectionId(kind);
+    }
+    if (kind === 'cloudflare-access') {
+      const saved = savedConnection(config.id);
+      if (saved?.configuration.kind !== 'cloudflare-access') {
+        throw new Error(
+          'platform: Repair keeps the installed Cloudflare Access login. Use its installed connection ID.',
+        );
+      }
+      connections.push(saved);
+      continue;
+    }
+    if (!config.label) {
+      config.label = kind;
+    }
+    if (kind === 'oidc' && !config.issuer) {
+      config.issuer = await prompt(`${config.label}: issuer URL:`);
+    }
+    if (!config.clientId) {
+      config.clientId = await prompt(`${config.label}: client ID:`);
+    }
+    const configuration = parsePlatformLoginConfiguration(config);
+    connections.push({
+      configuration,
+      clientSecret: entry.clientSecretEnv
+        ? clientSecretFromEnvironment(entry.clientSecretEnv)
+        : await prompt(`${configuration.label}: client secret:`, '', true),
+    });
+  }
+  for (const saved of file ? [] : previous.connections) {
+    const current = saved.configuration;
+    if (current.kind === 'cloudflare-access') {
+      connections.push(saved);
+      continue;
+    }
+    const issuer =
+      current.kind === 'oidc'
+        ? await prompt(`${current.label}: issuer URL:`, current.issuer ?? '')
+        : current.issuer;
+    const clientId = await prompt(`${current.label}: client ID:`, current.clientId);
+    const allowedDomains =
+      current.kind === 'google'
+        ? (
+            await prompt(
+              'Allowed Google Workspace domains (comma-separated, or blank):',
+              current.allowedDomains.join(', '),
+            )
+          )
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : current.allowedDomains;
+    connections.push({
+      configuration: parsePlatformLoginConfiguration({
+        ...current,
+        ...(issuer ? { issuer } : {}),
+        clientId,
+        allowedDomains,
+      }),
+      clientSecret:
+        (await prompt(`${current.label}: client secret (leave blank to keep it):`, '', true)) ||
+        saved.clientSecret,
+    });
+  }
+  const ids = connections.map((connection) => connection.configuration.id);
+  const authBootstrapCode = randomBytes(32).toString('hex');
+  const setup = parsePlatformAuthenticationSetup({
+    connections,
+    administratorConnectionId:
+      file?.administratorConnectionId ??
+      (ids.includes(previous.administratorConnectionId)
+        ? previous.administratorConnectionId
+        : ids[0]),
+    admission: file?.admission ?? previous.admission,
+    protection: previous.protection,
+    resetPending: true,
+    bootstrapCredentialHash: createHash('sha256').update(authBootstrapCode).digest('hex'),
+  });
+  return { authenticationSetupJson: JSON.stringify(setup), authBootstrapCode };
 }

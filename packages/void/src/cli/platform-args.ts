@@ -46,7 +46,7 @@ export const platformSubcommands: Array<SubcommandDef> = [
   {
     name: 'repair',
     arg: '[id]',
-    description: 'Reconcile a platform or configure its dashboard origin',
+    description: 'Reconcile a platform, its dashboard origin, or unfinished login setup',
   },
   { name: 'disable', arg: '[id]', description: 'Disable traffic without deleting data' },
   { name: 'enable', arg: '[id]', description: 'Restore traffic for a disabled platform' },
@@ -96,6 +96,8 @@ export type PlatformArgs =
     }
   | {
       subcommand: 'upgrade' | 'repair' | 'disable' | 'enable';
+      /** repair only: replaces the login settings while first administrator setup is pending. */
+      authConfig?: string;
       dashboardUrl?: string;
       selector: string;
       plan: boolean;
@@ -165,11 +167,13 @@ function parseLifecycleSelector(
   runtime: string;
   fromRuntime: string;
   yes: boolean;
+  authConfig?: string;
   dashboardUrl?: string;
 } {
   const positional: Array<string> = [];
   let runtime = '';
   let fromRuntime = '';
+  let authConfig: string | undefined;
   let dashboardUrl: string | undefined;
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index]!;
@@ -183,6 +187,10 @@ function parseLifecycleSelector(
     } else if (arg === '--dashboard-url' && (subcommand === 'upgrade' || subcommand === 'repair')) {
       const [value, next] = readValue(rest, index, arg);
       dashboardUrl = normalizePlatformDashboardUrl(value);
+      index = next;
+    } else if (arg === '--auth-config' && subcommand === 'repair') {
+      const [value, next] = readValue(rest, index, arg);
+      authConfig = value;
       index = next;
     } else if (arg === '--from-runtime' && subcommand === 'rollback') {
       const [value, next] = readValue(rest, index, arg);
@@ -200,6 +208,7 @@ function parseLifecycleSelector(
     ...parsed,
     runtime,
     fromRuntime,
+    ...(authConfig !== undefined ? { authConfig } : {}),
     ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
   };
 }
@@ -311,10 +320,8 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
     subcommand === 'disable' ||
     subcommand === 'enable'
   ) {
-    const { selector, plan, runtime, fromRuntime, yes, dashboardUrl } = parseLifecycleSelector(
-      rest,
-      subcommand,
-    );
+    const { selector, plan, runtime, fromRuntime, yes, authConfig, dashboardUrl } =
+      parseLifecycleSelector(rest, subcommand);
     return subcommand === 'rollback'
       ? { subcommand, selector, plan, runtime, fromRuntime, yes }
       : {
@@ -323,6 +330,7 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
           plan,
           runtime,
           yes,
+          ...(authConfig !== undefined ? { authConfig } : {}),
           ...(dashboardUrl !== undefined ? { dashboardUrl } : {}),
         };
   }

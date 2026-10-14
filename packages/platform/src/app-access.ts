@@ -1,4 +1,6 @@
 export const PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX = 'void-platform-app-access-v1';
+/** Uninstall handoff that turns off installer-managed project Zero Trust before any user exists. */
+export const PLATFORM_APP_ACCESS_TURN_OFF_PROOF_PREFIX = 'void-platform-app-access-turn-off-v1';
 
 /** Installer handoff. Token values belong only in encrypted recovery and request bodies. */
 export type PlatformAppAccessSetup = Readonly<{

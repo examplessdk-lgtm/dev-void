@@ -82,7 +82,7 @@ import {
 } from './onboarding-pages.ts';
 import { operatorApi } from './operator/index.ts';
 import { sandboxDrainStatus } from './operator/sandbox-operations.ts';
-import { platformAppAccess } from './platform-app-access.ts';
+import { platformAppAccess, platformAppAccessTurnOff } from './platform-app-access.ts';
 import { platformDomainActivation } from './platform-domain-activation.ts';
 import { platformDomainPreflight } from './platform-domain-preflight.ts';
 import { getPlatformApiUrl, getPlatformDisplayName } from './platform-identity.ts';
@@ -228,6 +228,8 @@ const app = new Hono<ApiEnv>()
         (context.req.path === '/internal/platform/email-bootstrap' &&
           context.req.method === 'POST') ||
         (context.req.path === '/internal/platform/app-access' && context.req.method === 'POST') ||
+        (context.req.path === '/internal/platform/app-access/turn-off' &&
+          context.req.method === 'POST') ||
         (context.req.path === '/internal/platform/domain-preflight' &&
           context.req.method === 'POST') ||
         (context.req.path === '/internal/platform/domain-activate' &&
@@ -399,6 +401,7 @@ const app = new Hono<ApiEnv>()
     );
   })
   .post('/internal/platform/app-access', platformAppAccess)
+  .post('/internal/platform/app-access/turn-off', platformAppAccessTurnOff)
   .post('/internal/platform/domain-preflight', platformDomainPreflight)
   .post('/internal/platform/domain-activate', platformDomainActivation)
   .post('/internal/platform/email-bootstrap', async (context) => {

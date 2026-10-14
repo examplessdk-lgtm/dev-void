@@ -29,6 +29,7 @@ import {
 import { exchangeCodeForToken, getGitHubAuthorizeUrl, getGitHubUser } from './github.ts';
 import { resolvePlatformLogin } from './identities.ts';
 import { verifyJwt } from './jwt.ts';
+import { LoginFailure, loginFailureHint } from './login-failure.ts';
 import {
   linkTestedIdentity,
   requireRecentAuthentication,
@@ -73,7 +74,57 @@ function oidcProvider(configuration: PlatformLoginConfiguration): PlatformOidcPr
   return provider;
 }
 
-function authenticationError(context: Context<ApiEnv>, error: unknown): Response {
+/** What is known about the login attempt when it failed. */
+type LoginAttemptDetails = { purpose?: string; connectionId?: string; redirectUri?: string };
+
+function authenticationError(
+  context: Context<ApiEnv>,
+  error: unknown,
+  attempt: LoginAttemptDetails = {},
+): Response {
+  // Provider responses may contain secrets or untrusted data. Log only the
+  // failure code, never provider bodies, tokens, or error messages.
+  const code =
+    error instanceof AuthenticationConfigurationError || error instanceof LoginFailure
+      ? error.code
+      : 'unexpected';
+  console.error('[auth] login failed', {
+    code,
+    ...(code === 'unexpected' && error instanceof Error ? { name: error.name } : {}),
+    ...(attempt.purpose ? { purpose: attempt.purpose } : {}),
+    ...(attempt.connectionId ? { connectionId: attempt.connectionId } : {}),
+  });
+  if (error instanceof LoginFailure) {
+    const hint = loginFailureHint(error.code);
+    if (!acceptsBrowserHtml(context)) {
+      return context.json({ error: 'login_failed', code: error.code, message: hint.message }, 400);
+    }
+    const bootstrap = attempt.purpose === 'bootstrap';
+    const groups = error.code === 'oidc_group_not_allowed';
+    return platformBrowserError(context, 'Login failed', hint.message, 400, {
+      details: [
+        `Error code: ${error.code}`,
+        ...(hint.callback
+          ? [
+              `Callback URL: ${attempt.redirectUri ?? context.env.AUTH_REDIRECT_URI ?? new URL('/auth/callback', context.req.url).href}`,
+            ]
+          : []),
+        ...(bootstrap
+          ? [
+              groups
+                ? 'To change the allowed groups, run this on the computer that installed the platform, with an authentication file:'
+                : 'To change the login settings, run this on the computer that installed the platform:',
+            ]
+          : []),
+      ],
+      ...(bootstrap
+        ? {
+            command: `void platform repair ${context.env.PLATFORM_INSTALLATION_ID ?? '<id>'}${groups ? ' --auth-config <path>' : ''}`,
+            returnUrl: '/setup',
+          }
+        : {}),
+    });
+  }
   if (error instanceof AuthenticationConfigurationError) {
     if (acceptsBrowserHtml(context)) {
       return platformBrowserError(
@@ -88,7 +139,6 @@ function authenticationError(context: Context<ApiEnv>, error: unknown): Response
       error.status as ContentfulStatusCode,
     );
   }
-  // Provider responses may contain secrets or untrusted data. Do not echo or log them.
   if (acceptsBrowserHtml(context)) {
     return platformBrowserError(
       context,
@@ -440,6 +490,7 @@ export async function startPlatformLogin(
 
 export async function completePlatformLogin(context: Context<ApiEnv>): Promise<Response> {
   const db = context.get('db');
+  let details: LoginAttemptDetails = {};
   try {
     const state = context.req.query('state');
     const browserProof = getCookie(context, COOKIE);
@@ -476,6 +527,11 @@ export async function completePlatformLogin(context: Context<ApiEnv>): Promise<R
     }
     deleteCookie(context, COOKIE, { path: '/auth/callback' });
     const saved = attempt.context as LoginContext;
+    details = {
+      purpose: attempt.purpose,
+      connectionId: attempt.connection_id,
+      redirectUri: saved.redirectUri,
+    };
     const currentCompany = context.get('companyIdentity');
     if (
       saved.companyIdentity?.issuer !== currentCompany?.issuer ||
@@ -506,12 +562,22 @@ export async function completePlatformLogin(context: Context<ApiEnv>): Promise<R
     if (!revision) {
       throw new Error('Missing login configuration');
     }
-    const secret = await readLoginSecret(context.env, revision);
+    const secret = await readLoginSecret(context.env, revision).catch(() => {
+      throw new LoginFailure('login_secret_unreadable');
+    });
     let identity: PlatformOidcIdentity;
     if (connection.kind === 'github') {
       const code = context.req.query('code');
-      if (!code || context.req.query('error')) {
-        throw new Error('GitHub login failed');
+      const providerError = context.req.query('error');
+      if (!code || providerError) {
+        throw new LoginFailure(
+          providerError === 'access_denied'
+            ? 'login_denied'
+            : providerError === 'redirect_uri_mismatch'
+              ? 'github_redirect_uri_mismatch'
+              : 'github_failed',
+          'GitHub login failed',
+        );
       }
       const token = await exchangeCodeForToken(
         revision.configuration.clientId,
@@ -750,7 +816,7 @@ export async function completePlatformLogin(context: Context<ApiEnv>): Promise<R
     redirect.searchParams.set('code', code);
     return context.redirect(redirect.href);
   } catch (error) {
-    return authenticationError(context, error);
+    return authenticationError(context, error, details);
   }
 }
 
@@ -796,7 +862,7 @@ export async function startBootstrapLogin(
     bindBrowser(context, browserProof);
     return context.redirect(authorization.url);
   } catch (error) {
-    return authenticationError(context, error);
+    return authenticationError(context, error, { purpose: 'bootstrap' });
   }
 }
 

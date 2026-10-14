@@ -1,3 +1,13 @@
+import { LoginFailure, type LoginFailureCode } from './login-failure.ts';
+
+/** GitHub token errors with a fix of their own; any other error is github_failed. */
+const GITHUB_TOKEN_ERRORS = new Set([
+  'incorrect_client_credentials',
+  'redirect_uri_mismatch',
+  'bad_verification_code',
+  'unverified_user_email',
+]);
+
 export type GitHubUser = Readonly<{
   id: number;
   login: string;
@@ -42,12 +52,17 @@ export async function exchangeCodeForToken(
   });
 
   if (!res.ok) {
-    throw new Error(`GitHub token exchange failed: ${res.status}`);
+    throw new LoginFailure('github_failed', `GitHub token exchange failed: ${res.status}`);
   }
 
   const data = (await res.json()) as { access_token?: string; error?: string };
   if (data.error || !data.access_token) {
-    throw new Error(`GitHub token exchange error: ${data.error ?? 'no access_token'}`);
+    throw new LoginFailure(
+      data.error && GITHUB_TOKEN_ERRORS.has(data.error)
+        ? (`github_${data.error}` as LoginFailureCode)
+        : 'github_failed',
+      `GitHub token exchange error: ${data.error ?? 'no access_token'}`,
+    );
   }
 
   return data.access_token;
@@ -72,7 +87,7 @@ export async function getGitHubUser(accessToken: string): Promise<GitHubUser> {
   ]);
 
   if (!userRes.ok) {
-    throw new Error(`GitHub user fetch failed: ${userRes.status}`);
+    throw new LoginFailure('github_failed', `GitHub user fetch failed: ${userRes.status}`);
   }
 
   const user = (await userRes.json()) as { id: number; login: string; email: string | null };
