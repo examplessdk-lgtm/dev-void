@@ -1,0 +1,19 @@
+packages/void/test/integration/astro.test.ts
+  s_1cbb8f9d8ae59c::t_a475c84e5f12b2 45-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4874af23b6569a91f5552fdac4eafae78357c01d",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
