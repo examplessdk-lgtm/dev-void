@@ -242,6 +242,26 @@ describe('provisionCloudflareResources — read-first', () => {
     ]);
   });
 
+  it('points to the Void Cloudflare login when replication has no bearer', async () => {
+    setup(
+      JSON.stringify({
+        d1_databases: [{ binding: 'DB', database_name: 'myapp-db', database_id: uuid('db1') }],
+      }),
+    );
+    vi.stubEnv('CLOUDFLARE_API_TOKEN', undefined);
+    const { run } = makeRunner([{ match: /^auth token/, reply: () => fail('', 'Not logged in') }]);
+    const error = await provisionCloudflareResourcesImpl(
+      tmpDir,
+      wranglerPath,
+      { ...emptyDesired, d1: { binding: 'DB', name: 'myapp-db' } },
+      { runWrangler: run, log: silentLog },
+    ).catch((e: unknown) => e as Error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('Run `void cloudflare login`');
+    expect((error as Error).message).not.toContain('wrangler login');
+  });
+
   it('does NOT treat a placeholder database_id ("local") as real — proceeds to provision', async () => {
     setup(
       JSON.stringify({

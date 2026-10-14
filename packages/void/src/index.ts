@@ -41,6 +41,7 @@ import {
   isViteBuildOrPreview,
   getOrCreateDevTriggerToken,
   devTriggerSecretGuardPlugin,
+  selectVoidCloudflareLogin,
 } from './plugin-dev-config.ts';
 import { devTriggersHintPlugin } from './plugin-dev-triggers-hint.ts';
 import { drizzlePlugin } from './plugin-drizzle.ts';
@@ -92,6 +93,11 @@ export function voidPlugin(options?: {
   // Resolve root relative to CWD — this runs at config time
   const root = process.cwd();
   const directCloudflareDestination = readDeploymentPlatform(root) === 'cloudflare';
+  if (directCloudflareDestination) {
+    // Here, not in a hook: `astro preview` runs no plugin hooks. Every command
+    // needs it, because build prerendering can open a remote session too.
+    selectVoidCloudflareLogin();
+  }
   warnIfPackageJsonIsNotEsm(root);
   // Token only matters in serve — the dispatch module that uses it is
   // DCE'd from production worker bundles. In build/preview we still need
@@ -410,13 +416,6 @@ export function voidPlugin(options?: {
       application = getApplicationAnalysis(routeEnvironment);
       bindings = application.bindings;
       authEnabled = application.authEnabled;
-      // `void cloudflare login` stores OAuth in Wrangler's OS-keychain-backed
-      // credential store. The Cloudflare Vite plugin runs in this process, so
-      // select that same store before it opens the remote Workers AI session.
-      // Explicit API tokens remain Wrangler's highest-priority credential.
-      if (command === 'serve' && directCloudflareDestination && bindings.needsAI) {
-        process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
-      }
       // Re-resolve for the real environment. Framework and node-target branches return before
       // `ssrEntry` is declared (TDZ) and must leave `workerConfig.assets` unset.
       if (!framework && !isNodeTarget(config.target)) {

@@ -17,8 +17,14 @@ npm run dev
 
 When the app imports `void/ai`, Void enables a remote Workers AI binding during
 development and preview. Requests use your Cloudflare account and its allowance;
-Workers AI has no local simulator. Use your Cloudflare login or
-`CLOUDFLARE_API_TOKEN` in an automated environment.
+Workers AI has no local simulator. Development and preview use the same
+Cloudflare login as `void connect`; sign in with `void cloudflare login`. A
+`CLOUDFLARE_API_TOKEN` takes precedence; use one in an automated environment.
+
+If development stops with a Cloudflare authentication error, run
+`void cloudflare login` in a terminal as a user who can access the deployment
+account shown by `void cloudflare status`, or set `CLOUDFLARE_API_TOKEN`.
+`wrangler login` does not affect development.
 
 For a team platform, use `void connect <platform-url>` and link your project.
 Development requests use that platform's account and usage limits.

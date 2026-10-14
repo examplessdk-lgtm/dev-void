@@ -35,6 +35,20 @@ export function isViteBuildOrPreview(): boolean {
   return subcommand === 'build' || subcommand === 'preview';
 }
 
+/**
+ * Point Cloudflare remote bindings opened in this process at the login from
+ * `void connect` and `void cloudflare login`. The Cloudflare Vite plugin and
+ * Wrangler's platform proxy authenticate remote bindings here, in dev, preview
+ * and build prerendering. They read cf's login only when `CLOUDFLARE_CF_AUTH`
+ * is present (any value), and Wrangler's separate login otherwise. The keyring
+ * flag selects the encrypted cf profile that Void's login writes. Environment
+ * API tokens still take precedence, and the OAuth token stays in the store.
+ */
+export function selectVoidCloudflareLogin(): void {
+  process.env.CLOUDFLARE_CF_AUTH = 'true';
+  process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
+}
+
 const DEV_TRIGGER_TOKEN_FILE_MODE = 0o600;
 
 /**

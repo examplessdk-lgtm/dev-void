@@ -2678,7 +2678,7 @@ async function reconcileD1(
       if (!token) {
         throw new Error(
           'provision: D1 read replication requires a Cloudflare API bearer with D1 Edit permission. ' +
-            'Log in with `wrangler login` or set CLOUDFLARE_API_TOKEN, then retry.',
+            'Run `void cloudflare login`, or set CLOUDFLARE_API_TOKEN, then retry.',
         );
       }
       await enableD1ReadReplicationViaApi(context, token);

@@ -210,7 +210,7 @@ Custom domain commands update routes immediately. If a first deployment times ou
 
 Local D1, KV, and R2 bindings use local data. Your production resource IDs are used during deployment.
 
-Workers AI runs remotely after you connect to Cloudflare, so development calls consume your account's allowance.
+Workers AI runs remotely after you connect to Cloudflare, so development calls consume your account's allowance. Remote bindings in development and preview use your `void cloudflare login` session, or `CLOUDFLARE_API_TOKEN` when it is set.
 
 ### AI on your Cloudflare account {#ai-self-host}
 

@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import type { ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 
+// Framework adapters own the Cloudflare runtime, so these hooks never call the real plugin.
+vi.mock('@cloudflare/vite-plugin', () => import('../helpers/cloudflare-vite-plugin.ts'));
+
 const roots: Array<string> = [];
 
 function project(
@@ -67,20 +70,36 @@ async function runFrameworkSync(root: string): Promise<Record<string, unknown>> 
   return JSON.parse(readFileSync(join(root, 'wrangler.jsonc'), 'utf8'));
 }
 
+async function runFrameworkCompat(root: string, command: 'serve' | 'build'): Promise<void> {
+  vi.spyOn(process, 'cwd').mockReturnValue(root);
+  const { voidPlugin } = await import('../../src/index.ts');
+  const compat = voidPlugin().find((plugin) => plugin.name === 'void:wrangler-compat');
+  const hook = compat?.config;
+  const handler = typeof hook === 'function' ? hook : hook?.handler;
+  if (!handler) {
+    throw new Error('Expected framework Wrangler compatibility hook');
+  }
+  handler.call({} as never, {} as never, { command } as never);
+}
+
 describe('framework Workers AI bindings', () => {
-  it('selects the Cloudflare keychain before framework development starts', async () => {
-    const root = project('cloudflare');
-    vi.spyOn(process, 'cwd').mockReturnValue(root);
+  it.each(['serve', 'build'] as const)(
+    'uses the Void Cloudflare login before a direct framework %s opens a remote session',
+    async (command) => {
+      vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
+      vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
+      await runFrameworkCompat(project('cloudflare'), command);
+      expect(process.env.CLOUDFLARE_CF_AUTH).toBe('true');
+      expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('true');
+    },
+  );
+
+  it('leaves Cloudflare login selection alone for managed framework development', async () => {
+    vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
-    const { voidPlugin } = await import('../../src/index.ts');
-    const compat = voidPlugin().find((plugin) => plugin.name === 'void:wrangler-compat');
-    const hook = compat?.config;
-    const handler = typeof hook === 'function' ? hook : hook?.handler;
-    if (!handler) {
-      throw new Error('Expected framework Wrangler compatibility hook');
-    }
-    handler.call({} as never, {} as never, { command: 'serve' } as never);
-    expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('true');
+    await runFrameworkCompat(project('void'), 'serve');
+    expect(process.env.CLOUDFLARE_CF_AUTH).toBeUndefined();
+    expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('false');
   });
 
   it('adds remote AI for a directly connected SvelteKit project', async () => {

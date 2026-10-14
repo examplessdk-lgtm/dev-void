@@ -512,6 +512,7 @@ describe('voidPlugin dev asset routing', () => {
 
   it('uses the owner Cloudflare account for Workers AI during direct local development', async () => {
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cloudflare-token');
+    vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
     vi.stubEnv('VOID_TOKEN', 'void-token-that-must-not-be-used');
     const config = await resolveCloudflareConfig(createAiProjectRoot('cloudflare'));
@@ -523,8 +524,24 @@ describe('voidPlugin dev asset routing', () => {
       __VOID_PROXY_URL: expect.anything(),
     });
     expect(process.env.CLOUDFLARE_API_TOKEN).toBe('cloudflare-token');
+    expect(process.env.CLOUDFLARE_CF_AUTH).toBe('true');
     expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('true');
   });
+
+  it.each([
+    ['preview', { command: 'serve', mode: 'production', isPreview: true }],
+    ['build', { command: 'build', mode: 'production' }],
+  ] as const)(
+    'uses the Void Cloudflare login when a direct %s opens a remote session',
+    async (_label, configEnv) => {
+      vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
+      vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', undefined);
+      await resolveCloudflareConfig(createAiProjectRoot('cloudflare'), {}, configEnv);
+
+      expect(process.env.CLOUDFLARE_CF_AUTH).toBe('true');
+      expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('true');
+    },
+  );
 
   it('passes schema-declared shell values to the dev Worker without copying unrelated shell values', async () => {
     const root = createProjectRoot();
@@ -589,6 +606,7 @@ describe('voidPlugin dev asset routing', () => {
   });
 
   it('enables remote mode on an explicit Workers AI binding during direct development', async () => {
+    vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
     const config = await resolveCloudflareConfig(createAiProjectRoot('cloudflare'), {
       ai: { binding: 'AI', staging: true },
@@ -598,6 +616,8 @@ describe('voidPlugin dev asset routing', () => {
   });
 
   it('keeps managed Workers AI development on the Void proxy', async () => {
+    vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
+    vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', undefined);
     vi.stubEnv('VOID_TOKEN', 'managed-token');
     const root = createAiProjectRoot('void');
     vi.stubEnv('VOID_API_URL', 'https://platform.example.test');
@@ -628,16 +648,20 @@ describe('voidPlugin dev asset routing', () => {
       __VOID_PROJECT_ID: 'managed-project',
       __VOID_PROXY_URL: 'https://proxy.example.test',
     });
+    expect(process.env.CLOUDFLARE_CF_AUTH).toBeUndefined();
+    expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBeUndefined();
   });
 
-  it('does not enable remote AI or Cloudflare auth for a direct non-AI app', async () => {
+  it('adds no remote AI to a direct non-AI app but keeps its remote bindings on the Void login', async () => {
+    vi.stubEnv('CLOUDFLARE_CF_AUTH', undefined);
     vi.stubEnv('CLOUDFLARE_AUTH_USE_KEYRING', 'false');
     const root = createApiOnlyProjectRoot();
     saveDeploymentPlatform(root, 'cloudflare');
     const config = await resolveCloudflareConfig(root);
 
     expect(config.ai).toBeUndefined();
-    expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('false');
+    expect(process.env.CLOUDFLARE_CF_AUTH).toBe('true');
+    expect(process.env.CLOUDFLARE_AUTH_USE_KEYRING).toBe('true');
   });
 
   it('passes worker.limits.cpu_ms from void.json into the generated worker config', async () => {

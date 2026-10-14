@@ -91,9 +91,6 @@ export function createFrameworkPlugins(input: {
     name: 'void:wrangler-compat',
     enforce: 'pre',
     config(_, env) {
-      if (env.command === 'serve' && directCloudflareDestination && bindings.needsAI) {
-        process.env.CLOUDFLARE_AUTH_USE_KEYRING = 'true';
-      }
       syncFrameworkCompat(ensureWranglerCompat(root, config));
       if (env.command !== 'serve') {
         return;
