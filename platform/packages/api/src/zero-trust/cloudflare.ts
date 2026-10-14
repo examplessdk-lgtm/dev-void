@@ -1,3 +1,4 @@
+import { isPlatformAccessIdentityRule } from '@void/platform';
 import type { ManagedAccessApplication } from './configuration.ts';
 
 type ObjectValue = Record<string, unknown>;
@@ -32,6 +33,13 @@ function text(value: unknown, label: string): string {
   return value;
 }
 
+/**
+ * Saved selections are checked again on every reconcile and domain change, so
+ * project Zero Trust keeps accepting every login method rule it accepted before.
+ * A stricter check here would stop running installations.
+ */
+const anyLoginMethod = (): boolean => true;
+
 function destinationList(application: ObjectValue): ReadonlyArray<string> {
   const destinations = Array.isArray(application.destinations) ? application.destinations : [];
   return [
@@ -43,42 +51,6 @@ function destinationList(application: ObjectValue): ReadonlyArray<string> {
         : [];
     }),
   ].filter((value, index, all) => all.indexOf(value) === index);
-}
-
-/**
- * A rule that names company identities. The CLI checks the Access policies
- * that protect the platform installation itself with a separate copy in
- * packages/void/src/cli/platform-access-provision.ts, because the public CLI
- * cannot import platform code. This list also accepts azureAD, login_method
- * and auth_context rules; review both when adding a rule type.
- */
-function identityRule(rule: ObjectValue): boolean {
-  if (rule.email_domain) {
-    const domain = object(rule.email_domain, 'email domain').domain;
-    return typeof domain === 'string' && /^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(domain);
-  }
-  if (rule.email) {
-    const email = object(rule.email, 'email rule').email;
-    return typeof email === 'string' && /^[^\s*@]+@[^\s*@]+\.[^\s*@]+$/.test(email);
-  }
-  return [
-    'email_list',
-    'gsuite',
-    'github-organization',
-    'saml',
-    'okta',
-    'azureAD',
-    'login_method',
-    'auth_context',
-    'group',
-  ].some(
-    (key) =>
-      Object.hasOwn(rule, key) &&
-      !!rule[key] &&
-      typeof rule[key] === 'object' &&
-      !Array.isArray(rule[key]) &&
-      Object.keys(rule[key] as object).length > 0,
-  );
 }
 
 type AccessApplicationSpec = Readonly<{
@@ -274,10 +246,14 @@ export class ZeroTrustCloudflareClient {
             }
             const groupHasRequiredIdentity =
               Array.isArray(group.require) &&
-              group.require.some((entry) => identityRule(object(entry, 'Access group rule')));
+              group.require.some((entry) =>
+                isPlatformAccessIdentityRule(object(entry, 'Access group rule'), anyLoginMethod),
+              );
             if (
               !groupHasRequiredIdentity &&
-              !group.include.every((entry) => identityRule(object(entry, 'Access group rule')))
+              !group.include.every((entry) =>
+                isPlatformAccessIdentityRule(object(entry, 'Access group rule'), anyLoginMethod),
+              )
             ) {
               throw new Error('Access groups must restrict company identities.');
             }
@@ -300,12 +276,16 @@ export class ZeroTrustCloudflareClient {
         await checkRules(policy.require);
         const hasRequiredIdentity =
           Array.isArray(policy.require) &&
-          policy.require.some((entry) => identityRule(object(entry, 'Access policy rule')));
+          policy.require.some((entry) =>
+            isPlatformAccessIdentityRule(object(entry, 'Access policy rule'), anyLoginMethod),
+          );
         if (
           !Array.isArray(policy.include) ||
           policy.include.length < 1 ||
           (!hasRequiredIdentity &&
-            !policy.include.every((entry) => identityRule(object(entry, 'Access policy rule'))))
+            !policy.include.every((entry) =>
+              isPlatformAccessIdentityRule(object(entry, 'Access policy rule'), anyLoginMethod),
+            ))
         ) {
           throw new Error('Access allow policies must restrict company identities.');
         }

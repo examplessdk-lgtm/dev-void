@@ -1,13 +1,15 @@
 import { stripVTControlCharacters } from 'node:util';
-import type { PlatformInstallationManifest } from '@void/platform';
+import { isPlatformAccessEmailDomain, type PlatformInstallationManifest } from '@void/platform';
 import { confirm, log, multiselect, password, select, text } from '@voidzero-dev/vite-plus-prompts';
 import { cfAccessHeaders } from '../shared/cf-access.ts';
 import { note, pc } from './output.ts';
 import {
   PlatformAccessClient,
+  PlatformAccessPolicyRejectedError,
   platformAccessIdentityProvider,
   platformAccessNonce,
   provisionPlatformAccess,
+  verifySelectedAccessPolicies,
   type PlatformAccessCheckpoint,
   type PlatformAccessProvisionResult,
 } from './platform-access-provision.ts';
@@ -22,12 +24,28 @@ function accessSetupGuide(): string {
   });
 }
 
+/** Parse up to ten exact company email domains, or return undefined when any entry is invalid. */
+function companyEmailDomains(value: string): Array<string> | undefined {
+  const domains = [
+    ...new Set(
+      value
+        .split(/[\s,]+/)
+        .map((entry) => entry.trim().replace(/^@/, '').toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  return domains.length && domains.length <= 10 && domains.every(isPlatformAccessEmailDomain)
+    ? domains
+    : undefined;
+}
+
 export async function selectCompanyAccessPolicies(
   client: PlatformAccessClient,
   initialPolicies: Array<Record<string, unknown>>,
   accountId: string,
   mode: PlatformAccessSetupSpec['mode'],
 ): Promise<Array<string>> {
+  const emailDomain = '__email_domain__';
   const create = '__create__';
   const refresh = '__refresh__';
   let policies = initialPolicies;
@@ -45,9 +63,19 @@ export async function selectCompanyAccessPolicies(
     const available = new Set(options.map((option) => option.value));
     selectedIds = selectedIds.filter((id) => available.has(id));
     const actions = [
+      // Existing applications are managed elsewhere and need policies attached there.
+      ...(mode === 'create'
+        ? [
+            {
+              value: emailDomain,
+              label: 'Allow my company’s email domain',
+              hint: 'Void creates this Allow policy for you',
+            },
+          ]
+        : []),
       {
         value: create,
-        label: 'Create new',
+        label: 'Create in Cloudflare',
         hint: 'Set up a policy in Cloudflare, then return here',
       },
       { value: refresh, label: 'Refresh list' },
@@ -73,7 +101,41 @@ export async function selectCompanyAccessPolicies(
       );
     }
     selectedIds = choices.filter((id) => available.has(id));
-    if (choices.includes(create)) {
+    if (choices.includes(emailDomain)) {
+      const domains = companyEmailDomains(
+        platformPromptAnswer(
+          await text({
+            message: 'Company email domains (comma-separated):',
+            placeholder: 'example.com',
+            validate: (value) =>
+              companyEmailDomains(value ?? '')
+                ? undefined
+                : 'Enter up to 10 email domains, such as example.com.',
+          }),
+        ),
+      )!;
+      const name = `Emails ending in @${domains[0]}${domains.length > 1 ? ` and ${domains.length - 1} more` : ''}`;
+      try {
+        // A lost response can lead to a second policy with the same name on retry. It
+        // admits the same people, so the installer does not track or remove it.
+        const created = (await client.create('policies', {
+          name,
+          decision: 'allow',
+          include: domains.map((domain) => ({ email_domain: { domain } })),
+        })) as { id?: unknown } | null;
+        if (typeof created?.id === 'string' && created.id) {
+          selectedIds.push(created.id);
+        }
+        log.info(
+          `Created the Access policy “${name}” in Cloudflare. It stays there for reuse; you can add MFA or device rules to it later.`,
+        );
+      } catch (error) {
+        if (!(error instanceof PlatformCloudflareApiError)) {
+          throw error;
+        }
+        log.warn(`${error.message} Choose “Create in Cloudflare” instead.`);
+      }
+    } else if (choices.includes(create)) {
       note(
         [
           '1. Open Zero Trust → Access controls → Policies → Add a policy in this account.',
@@ -104,7 +166,20 @@ export async function selectCompanyAccessPolicies(
         continue;
       }
     } else if (!choices.includes(refresh)) {
-      return selectedIds;
+      try {
+        await verifySelectedAccessPolicies(client, selectedIds);
+        return selectedIds;
+      } catch (error) {
+        if (
+          !(error instanceof PlatformAccessPolicyRejectedError) &&
+          !(error instanceof PlatformCloudflareApiError && error.status === 404)
+        ) {
+          throw error;
+        }
+        log.warn(
+          `${error.message.replace(/^platform: /, '')} Choose other policies, or fix the policy in Cloudflare and refresh the list.`,
+        );
+      }
     }
     policies = await client.list('policies');
   }
@@ -583,6 +658,7 @@ export async function preparePlatformAccessSetup(input: {
     );
     input.save({ accessExistingLoginSecret: loginClientSecret });
   }
+  let provisioning = previous;
   const result = await provisionPlatformAccess(
     client,
     {
@@ -606,8 +682,30 @@ export async function preparePlatformAccessSetup(input: {
       serviceToken,
     },
     previous,
-    (state) => input.save({ accessProvisioningJson: JSON.stringify(state) }),
-  );
+    (state) => {
+      provisioning = state;
+      input.save({ accessProvisioningJson: JSON.stringify(state) });
+    },
+  ).catch((error: unknown): never => {
+    if (!(error instanceof PlatformAccessPolicyRejectedError)) {
+      throw error;
+    }
+    // A resume reuses saved picks, so a rejected pick would fail the same way every
+    // time. Forget it so the next interactive run asks again, unless a configuration
+    // file owns the pick or Access resources already depend on it.
+    if (!input.spec && process.stdin.isTTY && !Object.keys(provisioning.resources).length) {
+      const { identityProviderIds: _providers, policyIds: _policies, ...unpicked } = spec;
+      input.save({ accessSetupSpecJson: JSON.stringify(unpicked) });
+      throw new PlatformAccessPolicyRejectedError(
+        `${error.message} Choose other policies when you run the command again, or fix the policy in Cloudflare.`,
+        { cause: error },
+      );
+    }
+    throw new PlatformAccessPolicyRejectedError(
+      `${error.message} Fix the selected policy in Cloudflare, then resume.`,
+      { cause: error },
+    );
+  });
   if (result.credentials) {
     const accessCredentialsJson = JSON.stringify(result.credentials);
     input.save({ accessCredentialsJson });

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
+  isPlatformAccessCompanyIdentityProvider,
+  isPlatformAccessIdentityRule,
   parsePlatformAccessProtection,
   parsePlatformLoginConfiguration,
   type PlatformAccessProtection,
@@ -131,44 +133,22 @@ export class PlatformAccessClient {
   }
 }
 
-/**
- * Project Zero Trust keeps its own, broader copy of this list in
- * platform/packages/api/src/zero-trust/cloudflare.ts; review both when adding
- * a rule type.
- */
-function identityRule(rule: ObjectValue): boolean {
-  if (rule.email_domain) {
-    const domain = object(rule.email_domain, 'email domain').domain;
-    return typeof domain === 'string' && /^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(domain);
-  }
-  if (rule.email) {
-    const email = object(rule.email, 'email rule').email;
-    return typeof email === 'string' && /^[^\s*@]+@[^\s*@]+\.[^\s*@]+$/.test(email);
-  }
-  return [
-    'email',
-    'email_domain',
-    'email_list',
-    'gsuite',
-    'github-organization',
-    'saml',
-    'okta',
-    'group',
-  ].some(
-    (key) =>
-      Object.hasOwn(rule, key) &&
-      !!rule[key] &&
-      typeof rule[key] === 'object' &&
-      !Array.isArray(rule[key]) &&
-      Object.keys(rule[key] as object).length > 0,
-  );
-}
+/** The selected providers or policies cannot protect Void; other errors are not about the selection. */
+export class PlatformAccessPolicyRejectedError extends Error {}
 
 /** Preserve corporate MFA/device requirements; reject broad policies rather than rewriting them. */
 export async function verifyCompanyAccessPolicies(
   client: PlatformAccessClient,
   policies: ReadonlyArray<ObjectValue>,
+  identityProviders?: ReadonlyArray<ObjectValue>,
 ): Promise<void> {
+  const companyProviders = new Set(
+    (identityProviders ?? (await client.list('identity_providers')))
+      .filter(isPlatformAccessCompanyIdentityProvider)
+      .map((provider) => provider.id),
+  );
+  const identityRule = (entry: unknown, name: string) =>
+    isPlatformAccessIdentityRule(object(entry, name), (id) => companyProviders.has(id));
   const groups = new Set<string>();
   const checkedGroups = new Set<string>();
   const checkRules = async (value: unknown, depth = 0): Promise<void> => {
@@ -176,41 +156,51 @@ export async function verifyCompanyAccessPolicies(
       return;
     }
     if (!Array.isArray(value) || value.length > 100 || depth > 8) {
-      throw new Error('platform: Unsupported Access policy rule structure.');
+      throw new PlatformAccessPolicyRejectedError(
+        'platform: Unsupported Access policy rule structure.',
+      );
     }
     for (const entry of value) {
       const rule = object(entry, 'policy rule');
       if (Object.hasOwn(rule, 'everyone') || Object.hasOwn(rule, 'any_valid_service_token')) {
-        throw new Error(
+        throw new PlatformAccessPolicyRejectedError(
           'platform: Company Access policies must not allow Everyone or any valid service token.',
         );
       }
       if (rule.group) {
         const id = text(object(rule.group, 'Access group').id, 'Access group ID');
         if (groups.has(id)) {
-          throw new Error('platform: Access groups contain a recursive membership rule.');
+          throw new PlatformAccessPolicyRejectedError(
+            'platform: Access groups contain a recursive membership rule.',
+          );
         }
         if (checkedGroups.has(id)) {
           continue;
         }
         if (checkedGroups.size >= 100) {
-          throw new Error('platform: Access group policy exceeds the inspection limit.');
+          throw new PlatformAccessPolicyRejectedError(
+            'platform: Access group policy exceeds the inspection limit.',
+          );
         }
         groups.add(id);
         const group = object(await client.get(`groups/${encodeURIComponent(id)}`), 'Access group');
         await checkRules(group.include, depth + 1);
         await checkRules(group.require, depth + 1);
         if (!Array.isArray(group.include) || !group.include.length) {
-          throw new Error('platform: Access groups must contain explicit identity rules.');
+          throw new PlatformAccessPolicyRejectedError(
+            'platform: Access groups must contain explicit identity rules.',
+          );
         }
         if (
           !(
             Array.isArray(group.require) &&
-            group.require.some((entry) => identityRule(object(entry, 'group rule')))
+            group.require.some((entry) => identityRule(entry, 'group rule'))
           ) &&
-          !group.include.every((entry) => identityRule(object(entry, 'group rule')))
+          !group.include.every((entry) => identityRule(entry, 'group rule'))
         ) {
-          throw new Error('platform: Access groups must restrict company identities.');
+          throw new PlatformAccessPolicyRejectedError(
+            'platform: Access groups must restrict company identities.',
+          );
         }
         groups.delete(id);
         checkedGroups.add(id);
@@ -220,10 +210,12 @@ export async function verifyCompanyAccessPolicies(
   let allows = 0;
   for (const policy of policies) {
     if (!['allow', 'deny', 'non_identity', 'bypass'].includes(String(policy.decision))) {
-      throw new Error('platform: Unsupported Access policy decision.');
+      throw new PlatformAccessPolicyRejectedError('platform: Unsupported Access policy decision.');
     }
     if (policy.decision === 'bypass') {
-      throw new Error('platform: A bypass policy cannot protect a Void platform.');
+      throw new PlatformAccessPolicyRejectedError(
+        'platform: A bypass policy cannot protect a Void platform.',
+      );
     }
     if (policy.decision !== 'allow') {
       continue;
@@ -236,15 +228,19 @@ export async function verifyCompanyAccessPolicies(
       !policy.include.length ||
       (!(
         Array.isArray(policy.require) &&
-        policy.require.some((entry) => identityRule(object(entry, 'policy rule')))
+        policy.require.some((entry) => identityRule(entry, 'policy rule'))
       ) &&
-        !policy.include.every((entry) => identityRule(object(entry, 'policy rule'))))
+        !policy.include.every((entry) => identityRule(entry, 'policy rule')))
     ) {
-      throw new Error('platform: Select Access allow policies restricted to company identities.');
+      throw new PlatformAccessPolicyRejectedError(
+        'platform: Select Access allow policies restricted to company identities.',
+      );
     }
   }
   if (!allows) {
-    throw new Error('platform: Select at least one company Access allow policy.');
+    throw new PlatformAccessPolicyRejectedError(
+      'platform: Select at least one company Access allow policy.',
+    );
   }
 }
 
@@ -291,6 +287,31 @@ export function platformAccessCreateRejected(error: unknown): boolean {
   );
 }
 
+/** Read reusable policies by ID and check that together they admit only company identities. */
+export async function verifySelectedAccessPolicies(
+  client: PlatformAccessClient,
+  policyIds: ReadonlyArray<string>,
+  identityProviders?: ReadonlyArray<ObjectValue>,
+): Promise<Array<ObjectValue>> {
+  const policies = await Promise.all(
+    policyIds.map(async (id) => {
+      try {
+        return object(await client.get(`policies/${encodeURIComponent(id)}`), 'Access policy');
+      } catch (error) {
+        if (error instanceof PlatformCloudflareApiError && error.status === 404) {
+          throw new PlatformAccessPolicyRejectedError(
+            `platform: The selected Access policy ${encodeURIComponent(id)} is unavailable in this account.`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    }),
+  );
+  await verifyCompanyAccessPolicies(client, policies, identityProviders);
+  return policies;
+}
+
 export async function inspectPlatformAccess(
   client: PlatformAccessClient,
   input: Pick<PlatformAccessProvisionInput, 'identityProviderIds' | 'policyIds'>,
@@ -317,7 +338,7 @@ export async function inspectPlatformAccess(
     new Set(input.identityProviderIds).size !== input.identityProviderIds.length ||
     new Set(input.policyIds).size !== input.policyIds.length
   ) {
-    throw new Error(
+    throw new PlatformAccessPolicyRejectedError(
       'platform: Select explicit identity providers and company policies for Access.',
     );
   }
@@ -326,16 +347,11 @@ export async function inspectPlatformAccess(
       (id) => !identityProviders.some((provider) => provider.id === id),
     )
   ) {
-    throw new Error(
+    throw new PlatformAccessPolicyRejectedError(
       'platform: A selected Access identity provider is unavailable in this account.',
     );
   }
-  const policies = await Promise.all(
-    input.policyIds.map(async (id) =>
-      object(await client.get(`policies/${encodeURIComponent(id)}`), 'Access policy'),
-    ),
-  );
-  await verifyCompanyAccessPolicies(client, policies);
+  const policies = await verifySelectedAccessPolicies(client, input.policyIds, providers);
   return { teamDomain, identityProviders, policies };
 }
 

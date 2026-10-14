@@ -153,6 +153,19 @@ providers, and existing company policies. Void creates dedicated applications
 and a scoped service token for protected installation checks. It preserves your
 company policies, including device and MFA requirements.
 
+If no policy fits, choose **Allow my company’s email domain** in the policy list
+and enter your domains. Void creates that Allow policy in your account and keeps
+it there for reuse; you can add MFA or device rules to it in Cloudflare later.
+For identity-provider groups or other rules, choose **Create in Cloudflare** and
+follow the printed steps.
+
+An Allow policy must name who may sign in: emails, email domains or lists,
+identity-provider groups (Okta, Microsoft Entra ID, Google Workspace, GitHub
+organizations, or SAML), company login methods such as Okta or Microsoft Entra
+ID, authentication contexts, or Access groups built from them. Policies that
+allow everyone, any service token, or bypass Access are rejected, and so are
+policies that rely only on One-time PIN or a public login such as GitHub.
+
 The setup credential needs **Access: Apps and Policies Write** and
 **Access: Organizations, Identity Providers, and Groups Read** in the identity
 account. Creating protection also needs **Access: Service Tokens Write**.
@@ -212,7 +225,7 @@ This OAuth App handles sign-in.
 
 ## Finish installation
 
-The installer collects your runtime token, PostgreSQL URL, login-provider credentials, R2 credentials, and signing and encryption keys. It masks secret values and saves setup progress encrypted through your system keychain. Keep a password-manager copy for recovery on another machine.
+The installer collects your runtime token, PostgreSQL URL, login-provider credentials, and R2 credentials, and generates the [signing and encryption keys](/guide/platform/installation/credentials#signing-and-encryption-keys). It masks secret values and saves setup progress encrypted through your system keychain. Keep a password-manager copy for recovery on another machine.
 
 Once installation finishes, open the printed admin dashboard link. For GitHub-only setup, sign in as the administrator selected during installation. For configurable login, use the one-time `/setup` code to confirm the administrator’s identity. Use the printed API URL to [connect and deploy an app](/guide/platform/installation/first-deployment).
 

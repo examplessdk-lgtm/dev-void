@@ -1,4 +1,9 @@
 export {
+  isPlatformAccessCompanyIdentityProvider,
+  isPlatformAccessEmailDomain,
+  isPlatformAccessIdentityRule,
+} from './access-policy.ts';
+export {
   PLATFORM_APP_ACCESS_SETUP_PROOF_PREFIX,
   parsePlatformAppAccessSetup,
   type PlatformAppAccessSetup,

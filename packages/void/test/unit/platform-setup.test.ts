@@ -396,10 +396,26 @@ describe('platform credential setup links', () => {
       plan().apiUrl + '/auth/callback',
     );
     expect(preview).toContain('PostgreSQL database URL');
-    expect(preview).toContain('JWT signing key and project encryption key');
     expect(preview).not.toMatch(/paste|copy|Workers Scripts|Object Read|Register a GitHub/);
     expect(preview).not.toMatch(/[();]/);
     expect(preview.split('\n').length).toBeLessThanOrEqual(10);
+  });
+  it('lists the identity keys only for installs that cannot generate them', () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    try {
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+      expect(formatPlatformSetupPlan(plan())).not.toContain('JWT signing key');
+      Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+      expect(formatPlatformSetupPlan(plan())).toContain(
+        'JWT signing key and project encryption key for non-interactive installs',
+      );
+    } finally {
+      if (tty) {
+        Object.defineProperty(process.stdin, 'isTTY', tty);
+      } else {
+        Reflect.deleteProperty(process.stdin, 'isTTY');
+      }
+    }
   });
   it('lists the selected Access credentials and required DNS token concisely', () => {
     const original = plan('example.com');
@@ -427,7 +443,7 @@ describe('platform credential setup links', () => {
         '• R2 upload token',
         '• Cloudflare Access OIDC client ID and secret',
         '• Cloudflare Access application and installer credentials',
-        '• JWT signing key and project encryption key',
+        '• JWT signing key and project encryption key for non-interactive installs',
       ].join('\n'),
     );
     expect(formatPlatformSetupPlan(plan())).not.toContain('management API token');

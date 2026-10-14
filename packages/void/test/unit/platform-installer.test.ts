@@ -957,6 +957,46 @@ describe('platform installer', () => {
     });
   });
 
+  it('generates missing identity keys only for a fresh install that keeps recovery data', () => {
+    const {
+      jwtSecret: _jwtSecret,
+      projectSecretKey: _projectSecretKey,
+      ...input
+    } = FRESH_SECRETS_INPUT;
+    const generated = createPlatformInstallationSecrets({
+      ...input,
+      emailEnabled: true,
+      generateIdentityKeys: true,
+    });
+    expect(Buffer.byteLength(generated.jwtSecret, 'utf8')).toBeGreaterThanOrEqual(32);
+    expect(Buffer.from(generated.projectSecretKey, 'base64')).toHaveLength(32);
+    expect(generated.projectSecretKeysJson).toBe(
+      JSON.stringify({ v1: generated.projectSecretKey }),
+    );
+    expect(
+      new Set([generated.jwtSecret, generated.projectSecretKey, generated.emailSigningSecret]).size,
+    ).toBe(3);
+
+    expect(
+      createPlatformInstallationSecrets({
+        ...input,
+        generateIdentityKeys: true,
+        jwtSecret: TEST_PLATFORM_JWT_SECRET,
+        checkpoint: { projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY },
+      }),
+    ).toMatchObject({
+      jwtSecret: TEST_PLATFORM_JWT_SECRET,
+      projectSecretKey: TEST_PLATFORM_PROJECT_SECRET_KEY,
+    });
+    expect(
+      createPlatformInstallationSecrets({
+        ...input,
+        existingInstallation: true,
+        generateIdentityKeys: true,
+      }),
+    ).toMatchObject({ jwtSecret: '', projectSecretKey: '' });
+  });
+
   it('generates and preserves a dedicated email signing key only for email installations', () => {
     const emailDisabled = freshSecrets({
       emailSigningSecret: TEST_PLATFORM_EMAIL_SIGNING_SECRET,

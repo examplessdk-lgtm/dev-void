@@ -279,7 +279,10 @@ export function formatPlatformSetupPlan(
     ...(plan.deployment.appAccess
       ? ['Cloudflare Access check and app-management token when needed (stored encrypted)']
       : []),
-    'JWT signing key and project encryption key',
+    // Interactive installs generate these keys.
+    ...(process.stdin.isTTY
+      ? []
+      : ['JWT signing key and project encryption key for non-interactive installs']),
   ];
   return [
     'The installation will guide you through setting up the following credentials:',

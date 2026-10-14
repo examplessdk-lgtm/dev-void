@@ -13,7 +13,9 @@ export function platformAccessFixture(): {
 } {
   const apps = new Map<string, RecordValue>();
   const tokens = new Map<string, RecordValue>();
-  const identityProviders: Array<RecordValue> = [{ id: 'company-idp', name: 'Company SSO' }];
+  const identityProviders: Array<RecordValue> = [
+    { id: 'company-idp', type: 'okta', name: 'Company SSO' },
+  ];
   const policy: RecordValue = {
     id: 'employees',
     name: 'Employees and managed devices',

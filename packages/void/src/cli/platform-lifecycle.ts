@@ -85,6 +85,7 @@ import {
   platformInstallCommandArguments,
   platformSetupPages,
   platformSetupFieldHelp,
+  platformSetupLink,
 } from './platform-setup.ts';
 
 function isPlatformInstallDatabaseBound(
@@ -1113,6 +1114,19 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       process.env.VOID_PLATFORM_PROJECT_SECRET_KEYS_JSON ||
       process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION,
     );
+    // Interactive fresh installs keep the identity keys in this machine's encrypted
+    // recovery data, like the email signing key. Headless runners may lose that data,
+    // so they still supply both keys.
+    const generateIdentityKeys = credentialSetup && !!process.stdin.isTTY;
+    const generatedKeys = generateIdentityKeys
+      ? [
+          configured('jwtSecret', 'VOID_PLATFORM_JWT_SECRET') ? '' : 'JWT signing key',
+          configured('projectSecretKey', 'VOID_PLATFORM_PROJECT_SECRET_KEY') ||
+          hasFullProjectSecretKeyring
+            ? ''
+            : 'project encryption key',
+        ].filter(Boolean)
+      : [];
     const secrets = createPlatformInstallationSecrets({
       configurableAuthentication: !!authenticationSelection.authentication.configurable,
       ...authenticationSecrets,
@@ -1129,22 +1143,25 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       r2AccessKeyId,
       r2SecretAccessKey,
       existingInstallation: !credentialSetup,
-      jwtSecret: await collect(
-        'jwtSecret',
-        'VOID_PLATFORM_JWT_SECRET',
-        'JWT signing key:',
-        true,
-        true,
-        credentialSetup
-          ? (value) =>
-              Buffer.byteLength(value, 'utf8') >= 32
-                ? undefined
-                : 'The JWT signing secret must contain at least 32 random bytes.'
-          : undefined,
-      ),
+      generateIdentityKeys,
+      jwtSecret: generateIdentityKeys
+        ? configured('jwtSecret', 'VOID_PLATFORM_JWT_SECRET')
+        : await collect(
+            'jwtSecret',
+            'VOID_PLATFORM_JWT_SECRET',
+            'JWT signing key:',
+            true,
+            true,
+            credentialSetup
+              ? (value) =>
+                  Buffer.byteLength(value, 'utf8') >= 32
+                    ? undefined
+                    : 'The JWT signing secret must contain at least 32 random bytes.'
+              : undefined,
+          ),
       projectSecretKey:
         configured('projectSecretKey', 'VOID_PLATFORM_PROJECT_SECRET_KEY') ||
-        (hasFullProjectSecretKeyring
+        (hasFullProjectSecretKeyring || generateIdentityKeys
           ? ''
           : await collect(
               'projectSecretKey',
@@ -1165,10 +1182,20 @@ export async function runPlatformLifecycleCommand(commandArgs: PlatformArgs): Pr
       projectSecretActiveKeyVersion:
         process.env.VOID_PLATFORM_PROJECT_SECRET_ACTIVE_KEY_VERSION || '',
     });
+    if (generatedKeys.length) {
+      log.info(
+        `Void generated the ${generatedKeys.join(' and ')} and keeps ${generatedKeys.length > 1 ? 'them' : 'it'} in this machine’s encrypted recovery data. ` +
+          platformSetupLink({
+            title: 'About these keys',
+            url: 'https://void.cloud/guide/platform/installation/credentials#signing-and-encryption-keys',
+          }),
+      );
+    }
     progress = startProgress('Installing the platform');
     if (credentialSetup) {
       // Stop treating this as an untouched local draft before any database claim is attempted.
       saveValues({
+        jwtSecret: secrets.jwtSecret,
         projectSecretKey: secrets.projectSecretKey,
         ...(secrets.emailEnabled ? { emailSigningSecret: secrets.emailSigningSecret } : {}),
       });

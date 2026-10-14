@@ -58,11 +58,15 @@ authentication file. Upgrades preserve administrator settings.
 
 New resources use `void-<name>-<role>` names; choose an unused installation name. The installer opens setup pages for missing credentials and reuses values already supplied.
 
-During Access setup, choose existing company policies or **Create new** for manual
-setup instructions and an account dashboard link. After you save the policy and
-confirm completion, Void reloads the list so you can select it and continue in the
-same run. **Refresh list** reloads policies created in another window. Your
-identity-provider choice and still-available policy selections are retained.
+During Access setup, choose existing company policies or **Create in Cloudflare**
+for manual setup instructions and an account dashboard link. After you save the
+policy and confirm completion, Void reloads the list so you can select it and
+continue in the same run. When Void creates the Access applications, **Allow my
+company’s email domain** creates an Allow policy for the domains you enter and
+selects it. **Refresh list** reloads policies created in another window. Your
+identity-provider choice and still-available policy selections are retained. If a
+selected policy does not restrict sign-in to company identities, Void explains why
+and asks again.
 
 Installation progress and partial credentials are saved encrypted locally. Rerun the installer to continue unfinished setup, or pass `--resume --name <id>`. Use lifecycle commands for completed installations.
 

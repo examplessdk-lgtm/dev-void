@@ -6,6 +6,18 @@ outline: deep
 
 Keep one password-manager entry for this platform. Paste the saved values into the installer when asked; most do not need shell environment variables.
 
+| Credential                             | Created by                       | Why the platform needs it                                                                |
+| -------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
+| Management API token                   | You, in Cloudflare               | Lets the CLI change DNS and Access for a domain installation or Access setup.            |
+| Runtime API token                      | You, in Cloudflare               | Stored as a Worker secret so the platform can deploy apps after you close your terminal. |
+| PostgreSQL URL                         | You, with your database provider | Stores platform users, projects, and deployments.                                        |
+| Login provider client ID and secret    | You, or Void for Access login    | Signs people in to the platform.                                                         |
+| R2 Access Key ID and Secret Access Key | You, in Cloudflare               | Lets the platform sign upload links so `void deploy` sends static files straight to R2.  |
+| Access setup and app-access tokens     | You, in Cloudflare               | Only with Cloudflare Access: create and manage Access applications.                      |
+| JWT signing key                        | Void, on interactive installs    | Signs platform login tokens.                                                             |
+| Project encryption key                 | Void, on interactive installs    | Encrypts app secrets stored by your platform.                                            |
+| Email signing key                      | Void, when email is enabled      | Signs confirmation links and email requests.                                             |
+
 ## Cloudflare API Tokens {#runtime-token-permissions}
 
 For a domain installation or Cloudflare Access setup, the installer guides you through creating separate management and runtime tokens using Cloudflare's [API token setup](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/). Its links preselect the permissions and suggest names based on your platform's display name, but Cloudflare's form cannot preselect a zone: for a domain installation, change the zone policy from **All Domains** to **Specified Domains** and select your zone. If Void will create the zone, keep **All Domains** on both tokens: the zone does not exist yet, and the runtime token needs it to purge cache. Save the tokens in your password manager and paste them into the masked CLI prompts.
@@ -74,17 +86,21 @@ The installer deploys the email gateway, prepares the shared mail route, and ver
 
 ## R2 Upload Credentials
 
+`void deploy --platform void` uploads your app's static files straight to R2 instead of through the platform API. The API signs short-lived upload links for them with an R2 key pair.
+
 The installer opens the **R2 token creation** form with a token name based on your platform's display name, **Object Read & Write**, and **Apply to all buckets in this account (including newly created buckets)** preselected. Review the settings and create an account token, or a user token if your role requires it. Save its **Access Key ID** and **Secret Access Key** in your password manager, then paste both into the installer. These differ from the management and runtime API tokens. See [R2’s token instructions](https://developers.cloudflare.com/r2/api/tokens/).
 
 ## Signing and Encryption Keys {#signing-and-encryption-keys}
 
-The **JWT signing key** signs platform login tokens. The **Project encryption key** encrypts app secrets stored by your platform. Generate a separate key for each by running this command twice:
+The **JWT signing key** signs platform login tokens. The **Project encryption key** encrypts app secrets stored by your platform. An interactive install generates both and keeps them in this machine's encrypted recovery data. Lifecycle commands on this machine read them from there.
+
+To keep your own copy, for example to repair the platform from CI or another machine, create both keys before installing and set `VOID_PLATFORM_JWT_SECRET` and `VOID_PLATFORM_PROJECT_SECRET_KEY`. Non-interactive installs must set both. Generate a separate key for each by running this command twice:
 
 ```sh
 openssl rand -base64 32
 ```
 
-Save each result in your password manager, then paste it into the corresponding installer prompt. The command generates 32 random bytes encoded as base64, suitable for either field. Keep the two original keys for recovery; do not regenerate them when resuming or upgrading.
+Save each result in your password manager. The command generates 32 random bytes encoded as base64, suitable for either field. Keep the two original keys for recovery; do not regenerate them when resuming or upgrading.
 
 ::: details Generate the keys without printing them to your terminal
 

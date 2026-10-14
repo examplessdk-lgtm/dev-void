@@ -1284,7 +1284,7 @@ describe('platform credential onboarding', () => {
     },
   );
 
-  it('explains database and key inputs without displaying their values', async () => {
+  it('explains the database input and generates identity keys without displaying values', async () => {
     const info = vi.spyOn(log, 'info').mockImplementation(() => {});
     await runPlatformLifecycleCommand(parsePlatformArgs(args));
     expect(mocks.password).toHaveBeenCalledWith(
@@ -1293,16 +1293,24 @@ describe('platform credential onboarding', () => {
         placeholder: 'postgresql://user:pw@…/database',
       }),
     );
-    expect(mocks.password).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'JWT signing key:' }),
-    );
-    expect(mocks.password).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Project encryption key:' }),
-    );
     expect(mocks.text).toHaveBeenCalledWith(expect.objectContaining({ message: 'Access Key ID:' }));
     expect(mocks.password).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Secret Access Key:' }),
     );
+    const prompts = [...mocks.password.mock.calls, ...mocks.text.mock.calls].map(
+      ([input]) => input.message,
+    );
+    expect(prompts).not.toContain('JWT signing key:');
+    expect(prompts).not.toContain('Project encryption key:');
+    const secrets = mocks.install.mock.calls[0]![1];
+    expect(Buffer.byteLength(secrets.jwtSecret, 'utf8')).toBeGreaterThanOrEqual(32);
+    expect(Buffer.from(secrets.projectSecretKey, 'base64').toString('base64')).toBe(
+      secrets.projectSecretKey,
+    );
+    expect(Buffer.from(secrets.projectSecretKey, 'base64')).toHaveLength(32);
+    const saved = readPendingInstallationSecrets(listInstallationManifests()[0]!)!;
+    expect(saved.jwtSecret).toBe(secrets.jwtSecret);
+    expect(saved.projectSecretKey).toBe(secrets.projectSecretKey);
     const descriptions = stripVTControlCharacters(
       info.mock.calls.map(([message]) => message).join('\n'),
     );
@@ -1310,14 +1318,54 @@ describe('platform credential onboarding', () => {
       'https://void.cloud/guide/platform/installation/prerequisites#platform-database',
     );
     expect(descriptions).toContain(
+      'Void generated the JWT signing key and project encryption key and keeps them in this machine’s encrypted recovery data.',
+    );
+    expect(descriptions).not.toContain('openssl rand');
+    expect(descriptions).not.toContain(environment.VOID_PLATFORM_DATABASE_URL);
+    expect(descriptions).not.toContain(secrets.jwtSecret);
+    expect(descriptions).not.toContain(secrets.projectSecretKey);
+  });
+  it('asks for missing identity keys with guidance when resuming a started install', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const manifest = await interruptedInstall();
+    for (const [key, value] of Object.entries(environment)) {
+      if (key !== 'VOID_PLATFORM_JWT_SECRET' && key !== 'VOID_PLATFORM_PROJECT_SECRET_KEY') {
+        vi.stubEnv(key, value);
+      }
+    }
+    await runPlatformLifecycleCommand(
+      parsePlatformArgs(['install', '--resume', '--name', manifest.id]),
+    );
+    expect(mocks.password.mock.calls.map(([input]) => input.message)).toEqual([
+      'JWT signing key:',
+      'Project encryption key:',
+    ]);
+    const descriptions = stripVTControlCharacters(
+      info.mock.calls.map(([message]) => message).join('\n'),
+    );
+    expect(descriptions).toContain(
       'Create a JWT signing key for platform login tokens. Run openssl rand -base64 32',
     );
     expect(descriptions).toContain(
       'Generate a project encryption key for app secrets. Run openssl rand -base64 32 separately',
     );
-    expect(descriptions).not.toContain(environment.VOID_PLATFORM_DATABASE_URL);
-    expect(descriptions).not.toContain(environment.VOID_PLATFORM_JWT_SECRET);
-    expect(descriptions).not.toContain(environment.VOID_PLATFORM_PROJECT_SECRET_KEY);
+    expect(descriptions).not.toContain('Void generated');
+    expect(mocks.install.mock.calls[0]![1]).toMatchObject({
+      jwtSecret: environment.VOID_PLATFORM_JWT_SECRET,
+      projectSecretKey: environment.VOID_PLATFORM_PROJECT_SECRET_KEY,
+    });
+  });
+  it('requires identity keys from the environment on a non-interactive install', async () => {
+    for (const [key, value] of Object.entries(environment)) {
+      if (key !== 'VOID_PLATFORM_JWT_SECRET' && key !== 'VOID_PLATFORM_PROJECT_SECRET_KEY') {
+        vi.stubEnv(key, value);
+      }
+    }
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    await expect(
+      runPlatformLifecycleCommand(parsePlatformArgs([...args, '--yes'])),
+    ).rejects.toThrow('JWT signing key is required in non-interactive mode');
+    expect(mocks.install).not.toHaveBeenCalled();
   });
   it('replaces a revoked saved token during the same continued setup', async () => {
     const draft = await savedSetup();
@@ -1843,12 +1891,9 @@ describe('platform credential onboarding', () => {
     expect(saved.emailSigningSecret).not.toBe(environment.VOID_PLATFORM_JWT_SECRET);
   });
   it('does not persist an invalid signing key or begin provisioning', async () => {
-    const normal = mocks.password.getMockImplementation()!;
-    mocks.password.mockImplementation(async (input) =>
-      input.message.startsWith('JWT') ? 'short' : normal(input),
-    );
+    vi.stubEnv('VOID_PLATFORM_JWT_SECRET', 'short');
     await expect(runPlatformLifecycleCommand(parsePlatformArgs(args))).rejects.toThrow(
-      '32 random bytes',
+      'at least 32 bytes',
     );
     const draft = listInstallationManifests()[0]!;
     expect(isPlatformSetupDraft(draft)).toBe(true);

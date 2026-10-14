@@ -32,6 +32,8 @@ export function createPlatformInstallationSecrets(input: {
   githubClientId: string;
   githubClientSecret: string;
   existingInstallation?: boolean;
+  /** Create missing identity keys for a fresh interactive install that keeps them in recovery data. */
+  generateIdentityKeys?: boolean;
   /** The caller supplies current explicit rotation inputs, not resumed inputs. */
   updateExistingWorkers?: boolean;
   jwtSecret?: string;
@@ -54,6 +56,7 @@ export function createPlatformInstallationSecrets(input: {
   // explicit complete-keyring pair is the only supported way to supersede a
   // stale encryption checkpoint, and existing Workers still inherit live keys.
   const existingInstallation = input.existingInstallation === true;
+  const generateIdentityKeys = input.generateIdentityKeys === true && !existingInstallation;
   const restoredIdentity = (explicit: string, name: string): string =>
     existingInstallation ? checkpoint[name] || explicit || '' : explicit || checkpoint[name] || '';
   const configured = (explicit: string, name: string): string => explicit || checkpoint[name] || '';
@@ -85,7 +88,9 @@ export function createPlatformInstallationSecrets(input: {
       );
     }
   }
-  const jwtSecret = restoredIdentity(input.jwtSecret || '', 'jwtSecret');
+  const jwtSecret =
+    restoredIdentity(input.jwtSecret || '', 'jwtSecret') ||
+    (generateIdentityKeys ? randomBytes(32).toString('base64') : '');
   const resolvedJwtSecret = input.existingInstallation
     ? jwtSecret
     : required(jwtSecret, 'VOID_PLATFORM_JWT_SECRET');
@@ -125,6 +130,7 @@ export function createPlatformInstallationSecrets(input: {
   const projectSecretKeyring = resolveProjectSecretKeyring({
     checkpoint,
     existingInstallation,
+    generateIdentityKeys,
     projectSecretActiveKeyVersion: input.projectSecretActiveKeyVersion || '',
     projectSecretKey: input.projectSecretKey || '',
     projectSecretKeysJson: input.projectSecretKeysJson || '',
@@ -228,6 +234,7 @@ export function createPlatformInstallationSecrets(input: {
 function resolveProjectSecretKeyring(input: {
   checkpoint: Record<string, string>;
   existingInstallation: boolean;
+  generateIdentityKeys: boolean;
   projectSecretActiveKeyVersion: string;
   projectSecretKey: string;
   projectSecretKeysJson: string;
@@ -281,7 +288,9 @@ function resolveProjectSecretKeyring(input: {
   const v1Key = input.existingInstallation
     ? input.checkpoint.projectSecretKey || input.projectSecretKey || ''
     : input.required(
-        input.projectSecretKey || input.checkpoint.projectSecretKey || '',
+        input.projectSecretKey ||
+          input.checkpoint.projectSecretKey ||
+          (input.generateIdentityKeys ? randomBytes(32).toString('base64') : ''),
         'VOID_PLATFORM_PROJECT_SECRET_KEY',
       );
   if (!v1Key) {
