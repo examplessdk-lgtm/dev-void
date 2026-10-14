@@ -1,0 +1,31 @@
+platform/packages/api/src/admin/react/AdminNavigationFallback.tsx
+  s_37771ca5a252bd::t_4eacf8ce5f67bb 18
+platform/packages/api/src/admin/react/AdminProviders.tsx
+  s_37771ca5a252bd::t_0754635eda98b0 3,24-28
+platform/packages/api/src/admin/react/pages.ts
+  s_37771ca5a252bd::t_46b9d788d876e0 19,134
+platform/packages/api/src/admin/react/styles.css
+  s_37771ca5a252bd::t_d706e1a523227c 66-72
+platform/packages/api/src/admin/react/views/PlansPage.tsx
+  s_37771ca5a252bd::t_f14d867669221b 11,74-94,120,203,527,529-530,535-536,585-588,610,612,614,627
+platform/packages/api/src/admin/routes/plans.ts
+  s_37771ca5a252bd::t_c824a3ae1bdb40 6,75-99,197,199-204,213,219-223,225-230
+platform/packages/api/test/integration/admin-plans.test.ts
+  s_37771ca5a252bd::t_8aa538daccf17c 191-195,223,231,233,235-237,251-255,261,273-278,299-301,417-440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8d092cb5b9c16e29bc671f7313aeb0f5b538e0be",
+  "prompts": {},
+  "sessions": {
+    "s_37771ca5a252bd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1387a-e31d-7990-9350-de96e6326ca7",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
