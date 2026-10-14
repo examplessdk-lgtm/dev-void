@@ -19,10 +19,7 @@ import {
   type PlatformInstallationManifest,
 } from '@void/platform';
 import { pc } from './output.ts';
-import {
-  aiGatewayCreatedDuringProvisionIntent,
-  PlatformCloudflareApiError,
-} from './platform-cloudflare.ts';
+import { PlatformCloudflareApiError } from './platform-cloudflare.ts';
 import type {
   CloudflareAccount,
   CloudflareDnsRecord,
@@ -412,15 +409,6 @@ export async function createPlatformInstallPlan(
       ) {
         intentProofs.add('assets-bucket');
       }
-    }
-    // A create that failed with a server error may still have made the gateway.
-    const gateway = aiGateways.find((resource) => resource.id === names.aiGateway);
-    if (
-      gateway &&
-      hasUnrecordedProvisionIntent(existing, 'ai-gateway', 'ai-gateway', gateway.name) &&
-      aiGatewayCreatedDuringProvisionIntent(existing, 'ai-gateway', gateway.createdAt)
-    ) {
-      intentProofs.add('ai-gateway');
     }
     for (const [key, name] of [
       ['api-worker', names.apiWorker],
@@ -1000,11 +988,12 @@ function addNamedPlan(
       !markedProvision &&
       !ambiguousProvision
     ) {
-      // When this installation asked for the resource before it stopped, the
-      // user is already resuming the owner, so name the way out instead.
+      // When this installation asked for the resource before it stopped, its
+      // failed create may have made it, or someone else may have taken the
+      // name. Without a matching marker only the user can tell which.
       throw new Error(
         existing !== null && hasUnrecordedProvisionIntent(existing, key, kind, name)
-          ? `platform: ${kind} ${JSON.stringify(name)} already exists, but Void cannot prove that this installation created it, so it is not owned by this installation. Nothing was overwritten. If nothing else uses it, delete it in the Cloudflare dashboard, then rerun the command.`
+          ? `platform: ${kind} ${JSON.stringify(name)} already exists, and Void cannot tell whether this installation created it. Nothing was overwritten. If an earlier failed attempt of this installation created it, delete it in the Cloudflare dashboard, then rerun the command. Otherwise, choose another installation name.`
           : `platform: ${kind} ${JSON.stringify(name)} already exists but is not owned by this installation. Resume the owning installation, or choose another installation name. Nothing was overwritten.`,
       );
     }

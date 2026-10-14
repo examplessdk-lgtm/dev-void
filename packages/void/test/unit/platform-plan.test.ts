@@ -1166,7 +1166,7 @@ describe('platform installation planning', () => {
     });
   });
 
-  it('resumes an AI Gateway that an interrupted create made for this installation', async () => {
+  it('refuses a same-named AI Gateway after an interrupted create', async () => {
     const initial = await createPlatformInstallPlan(client(), input, null);
     const action = initial.actions.find((entry) => entry.key === 'ai-gateway')!;
     const name = action.name;
@@ -1175,35 +1175,18 @@ describe('platform installation planning', () => {
       action,
       '2026-09-14T00:00:01.000Z',
     );
-    expect(manifest.steps.map((step) => step.key)).toEqual([
-      expect.stringMatching(/^provision-intent:ai-gateway:[0-9a-f]{16}$/),
-    ]);
-    const withGateway = (createdAt?: string) =>
-      client({
-        listAiGateways: async () => [{ id: name, name, ...(createdAt ? { createdAt } : {}) }],
-      });
+    // Gateways carry no ownership marker, so a creation time just after the
+    // intent does not show who created this one.
+    const withGateway = client({
+      listAiGateways: async () => [{ createdAt: '2026-09-14T00:00:03.000Z', id: name, name }],
+    });
 
-    // A clock a second ahead of Cloudflare's still proves the create.
-    for (const createdAt of ['2026-09-14T00:00:03.000Z', '2026-09-14T00:00:00.000Z']) {
-      const resumed = await createPlatformInstallPlan(withGateway(createdAt), input, manifest);
-      expect(resumed.actions.find((entry) => entry.key === 'ai-gateway')).toMatchObject({
-        action: 'reuse',
-        id: name,
-        name,
-      });
-    }
-
-    // Creation minutes before the intent, a day after it, or no creation time proves nothing.
-    for (const createdAt of ['2026-09-13T23:55:01.000Z', '2026-09-15T00:00:00.000Z', undefined]) {
-      await expect(
-        createPlatformInstallPlan(withGateway(createdAt), input, manifest),
-      ).rejects.toThrow(
-        `platform: ai-gateway "${name}" already exists, but Void cannot prove that this installation created it, so it is not owned by this installation. Nothing was overwritten. If nothing else uses it, delete it in the Cloudflare dashboard, then rerun the command.`,
-      );
-    }
-    await expect(
-      createPlatformInstallPlan(withGateway('2026-09-14T00:00:03.000Z'), input, null),
-    ).rejects.toThrow('Resume the owning installation, or choose another installation name.');
+    await expect(createPlatformInstallPlan(withGateway, input, manifest)).rejects.toThrow(
+      `platform: ai-gateway "${name}" already exists, and Void cannot tell whether this installation created it. Nothing was overwritten. If an earlier failed attempt of this installation created it, delete it in the Cloudflare dashboard, then rerun the command. Otherwise, choose another installation name.`,
+    );
+    await expect(createPlatformInstallPlan(withGateway, input, null)).rejects.toThrow(
+      'Resume the owning installation, or choose another installation name.',
+    );
   });
 
   it('refuses an intent-only resource after an ambiguous create response', async () => {
@@ -1234,7 +1217,7 @@ describe('platform installation planning', () => {
         input,
         manifest,
       ),
-    ).rejects.toThrow('not owned');
+    ).rejects.toThrow('cannot tell whether this installation created it');
 
     const recovered = await createPlatformInstallPlan(
       client({
@@ -1413,7 +1396,7 @@ describe('platform installation planning', () => {
         input,
         manifest,
       ),
-    ).rejects.toThrow('not owned');
+    ).rejects.toThrow('cannot tell whether this installation created it');
   });
 
   it('resumes an intent-owned dispatch Worker after its public route was uploaded', async () => {
