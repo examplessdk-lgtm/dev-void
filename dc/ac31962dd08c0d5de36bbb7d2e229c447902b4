@@ -1,0 +1,29 @@
+docs/guide/sandboxes.md
+  s_eaa448e33ebbdf::t_5057f35e16ea5d 124
+packages/void/package.json
+  s_eaa448e33ebbdf::t_a85864da2efab5 345
+packages/void/sandbox.Dockerfile
+  s_eaa448e33ebbdf::t_214edadcf64e40 2
+platform/packages/api/package.json
+  s_eaa448e33ebbdf::t_293b4b521b0541 31
+platform/packages/api/src/sandbox-shim.ts
+  s_eaa448e33ebbdf::t_cdc79faa53cd75 1,3
+pnpm-lock.yaml
+  s_eaa448e33ebbdf::t_614551217266bf 619-620,837-838,2578-2579,11636,11639
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dcac31962dd08c0d5de36bbb7d2e229c447902b4",
+  "prompts": {},
+  "sessions": {
+    "s_eaa448e33ebbdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a137c0-4e3c-7693-8590-175a832d6d1e",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
