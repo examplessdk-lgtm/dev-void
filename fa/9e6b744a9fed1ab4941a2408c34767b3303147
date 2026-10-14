@@ -1,0 +1,19 @@
+packages/void/test/unit/sveltekit-worker-build.test.ts
+  s_1cbb8f9d8ae59c::t_1d47e21cf1982f 4,80-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fa9e6b744a9fed1ab4941a2408c34767b3303147",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
