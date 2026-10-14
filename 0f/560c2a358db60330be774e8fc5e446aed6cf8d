@@ -1,0 +1,21 @@
+packages/void/test/integration/resource-name-migration.test.ts
+  s_1cbb8f9d8ae59c::t_60dfc4a3c7763f 17,21,383-385,390
+pnpm-workspace.yaml
+  s_1cbb8f9d8ae59c::t_4136ec73e16864 35-36,43-46,53,70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0f560c2a358db60330be774e8fc5e446aed6cf8d",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
