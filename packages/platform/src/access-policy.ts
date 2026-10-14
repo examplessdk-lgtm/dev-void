@@ -77,6 +77,15 @@ export function isPlatformAccessIdentityRule(
       companyLoginMethod(rule.login_method.id)
     );
   }
+  if (rule.cloudflare_account_member) {
+    // Members of one Cloudflare account; without an ID, the account that owns the policy.
+    const member = rule.cloudflare_account_member;
+    return (
+      plainObject(member) &&
+      (member.account_id === undefined ||
+        (typeof member.account_id === 'string' && /^[0-9a-f]{32}$/i.test(member.account_id)))
+    );
+  }
   return COMPANY_IDENTITY_RULES.some((key) => {
     const value = Object.hasOwn(rule, key) ? rule[key] : undefined;
     return plainObject(value) && Object.keys(value).length > 0;

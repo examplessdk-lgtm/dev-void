@@ -162,6 +162,8 @@ describe('Cloudflare Access provisioning', () => {
     { azureAD: { id: 'company-group', identity_provider_id: 'company-idp' } },
     { login_method: { id: 'company-idp' } },
     { auth_context: { id: 'context', ac_id: 'c1', identity_provider_id: 'company-idp' } },
+    { cloudflare_account_member: {} },
+    { cloudflare_account_member: { account_id: '023e105f4ecef8ad9ca31a8372d0c353' } },
   ])('accepts %j as a company identity rule', async (rule) => {
     const env = fixture();
     env.policy.include = [rule];
