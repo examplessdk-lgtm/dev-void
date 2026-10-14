@@ -554,6 +554,23 @@ export const onRequest = defineMiddleware(async (context, next) => {
 `;
 }
 
+type AstroMiddlewareClaim = { servers: number; gitignoreLines: ReadonlyArray<string> };
+
+const ASTRO_MIDDLEWARE_CLAIMS: unique symbol = Symbol.for('void.astroDevMiddleware.v1');
+
+/**
+ * The dev servers in this process that use the middleware Void wrote, by file path. Astro restarts
+ * the dev server in the same process with a fresh config, so a new plugin instance (from a new
+ * copy of this module, too) is set up before the old server closes. Kept on `globalThis` so both
+ * see the same claim.
+ */
+function astroMiddlewareClaims(): Map<string, AstroMiddlewareClaim> {
+  const store = globalThis as typeof globalThis & {
+    [ASTRO_MIDDLEWARE_CLAIMS]?: Map<string, AstroMiddlewareClaim>;
+  };
+  return (store[ASTRO_MIDDLEWARE_CLAIMS] ??= new Map());
+}
+
 /**
  * Writes a tiny Astro middleware to the user's project so
  * `/__void/scheduled` and `/__void/queue` are intercepted inside Astro's
@@ -563,47 +580,72 @@ export const onRequest = defineMiddleware(async (context, next) => {
  * already has `src/middleware.ts` we don't overwrite it — instead we log a
  * one-shot snippet they can paste into their existing middleware.
  *
- * If we wrote the file we remove it on dev-server close so the user's
- * source tree stays clean. `src/middleware.ts` belongs to the user, so the
- * `.gitignore` line we add for it is removed too; otherwise a middleware they
- * write later would be silently left out of git.
+ * If we wrote the file we remove it when the last dev server using it closes,
+ * so the user's source tree stays clean. `src/middleware.ts` belongs to the
+ * user, so the `.gitignore` line we add for it is removed too; otherwise a
+ * middleware they write later would be silently left out of git.
  */
 export function astroDevTriggerInjectPlugin(root: string): Plugin {
   const middlewarePath = join(root, ASTRO_MIDDLEWARE_RELATIVE);
   const middlewareDirIndexPath = join(root, 'src', 'middleware', 'index.ts');
-  let wroteFile = false;
-  let addedGitignoreLines: ReadonlyArray<string> = [];
+  const claims = astroMiddlewareClaims();
 
-  const ensureFile = () => {
+  /** Whether the dev server being set up now holds the middleware Void wrote. */
+  const ensureFile = (): boolean => {
+    const claim = claims.get(middlewarePath);
+    if (claim && existsSync(middlewarePath)) {
+      // A restart: the server being replaced wrote this file and still holds it.
+      claim.servers++;
+      return true;
+    }
     if (existsSync(middlewarePath) || existsSync(middlewareDirIndexPath)) {
       voidWarn(
         'Astro middleware already exists. To enable /__void/scheduled and /__void/queue,\n' +
           '         add the Void dev-trigger middleware to your existing onRequest sequence.\n' +
           '         See https://void.cloud/guide/jobs#local-development.',
       );
-      return;
+      return false;
     }
     mkdirSync(dirname(middlewarePath), { recursive: true });
     writeFileSync(middlewarePath, astroMiddlewareSource(frameworkTriggersDispatchPath(root)));
-    wroteFile = true;
+    if (claim) {
+      // Removed while the server being replaced still holds it.
+      claim.servers++;
+    } else {
+      claims.set(middlewarePath, {
+        servers: 1,
+        gitignoreLines: ensureGitignoreLines(root, [ASTRO_MIDDLEWARE_RELATIVE]),
+      });
+    }
+    return true;
   };
 
-  const cleanup = () => {
-    if (wroteFile) {
-      rmSync(middlewarePath, { force: true });
+  const release = () => {
+    const claim = claims.get(middlewarePath);
+    if (!claim || --claim.servers > 0) {
+      return;
     }
-    removeGitignoreLines(root, addedGitignoreLines);
-    addedGitignoreLines = [];
+    claims.delete(middlewarePath);
+    rmSync(middlewarePath, { force: true });
+    removeGitignoreLines(root, claim.gitignoreLines);
   };
 
   return {
     name: 'void:astro-dev-trigger-inject',
     apply: 'serve',
     configureServer(server) {
-      ensureFile();
-      if (wroteFile) {
-        addedGitignoreLines = ensureGitignoreLines(root, [ASTRO_MIDDLEWARE_RELATIVE]);
+      if (!ensureFile()) {
+        return;
       }
+      // One release per dev server. Vite's own restart (after an .env edit) sets up this same
+      // plugin for the new server before it closes the old one.
+      let held = true;
+      const cleanup = () => {
+        if (held) {
+          held = false;
+          release();
+        }
+      };
       server.httpServer?.once('close', cleanup);
       process.once('exit', cleanup);
     },

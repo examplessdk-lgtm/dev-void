@@ -756,7 +756,8 @@ describe('voidPlugin Vite environments', () => {
   it.each([
     ['sveltekit', '@sveltejs/kit', 'ssr', true],
     ['sveltekit', '@sveltejs/kit', 'client', false],
-    ['astro', 'astro', 'ssr', false],
+    ['astro', 'astro', 'ssr', true],
+    ['astro', 'astro', 'client', false],
   ] as const)(
     'sends bare void from %s %s code in the %s environment to the handler entry: %s',
     async (_name, dependency, environment, redirected) => {
@@ -798,6 +799,50 @@ describe('voidPlugin Vite environments', () => {
       } finally {
         await server.close();
       }
+    },
+  );
+});
+
+describe('Astro preview', () => {
+  // `astro preview` loads the Astro config, which calls voidPlugin(), but runs none of its hooks.
+  it.each([
+    ['preview', true],
+    ['dev', false],
+  ] as const)(
+    "puts back the build's Wrangler deploy config for `astro %s`: %s",
+    (command, restored) => {
+      const root = createProjectRoot();
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ type: 'module', dependencies: { astro: '*' } }),
+      );
+      rmSync(join(root, 'void.json'));
+      writeFileSync(join(root, 'void.config.ts'), 'export default {};\n');
+      const pointer = '{"configPath":"../../dist/server/wrangler.json"}';
+      mkdirSync(join(root, '.void'));
+      writeFileSync(join(root, '.void/preview-deploy-config.json'), pointer);
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      // Run the process exit cleanup below, before the temp root is removed.
+      const once = vi.spyOn(process, 'once').mockReturnValue(process);
+      const argv = process.argv;
+      process.argv = [argv[0]!, 'astro.mjs', command];
+      try {
+        voidPlugin();
+      } finally {
+        process.argv = argv;
+      }
+
+      const deployConfig = join(root, '.wrangler/deploy/config.json');
+      expect(existsSync(deployConfig) ? readFileSync(deployConfig, 'utf8') : undefined).toBe(
+        restored ? pointer : undefined,
+      );
+      // As after a Vite preview, a deploy then finds no implicit Wrangler config.
+      for (const [event, listener] of once.mock.calls) {
+        if (event === 'exit') {
+          (listener as () => void)();
+        }
+      }
+      expect(existsSync(deployConfig)).toBe(false);
     },
   );
 });

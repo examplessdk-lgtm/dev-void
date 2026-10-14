@@ -49,6 +49,29 @@ export function createCloudflareBuiltinsExternalPlugin(): Plugin {
   };
 }
 
+/**
+ * Send a bare `void` import in server code to the handler helpers (`defineScheduled`,
+ * `defineQueue`, ...), as Void apps and the cron/queue deploy bundles do. The package entry is the
+ * Vite plugin: loaded in a worker environment, it pulls Wrangler into the dependency optimizer.
+ */
+export function createBareVoidRedirectPlugin(): Plugin {
+  let handlerFile: string | undefined;
+  return {
+    name: 'void:bare-void-redirect',
+    resolveId: {
+      order: 'pre',
+      filter: { id: /^void$/ },
+      handler() {
+        if (this.environment?.config.consumer === 'client') {
+          return;
+        }
+        handlerFile ??= fileURLToPath(import.meta.resolve('#self/handler'));
+        return handlerFile;
+      },
+    },
+  };
+}
+
 export function createDefaultWorkerEnvironmentPlugin(): Plugin {
   return {
     name: 'void:default-worker-environment',

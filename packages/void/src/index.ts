@@ -63,6 +63,7 @@ import { restartPlugin } from './plugin-restart.ts';
 import { routingPlugin } from './plugin-routing.ts';
 import { mergeWorkerBindings } from './plugin-worker-bindings.ts';
 import {
+  createBareVoidRedirectPlugin,
   createServerRuntimeOptimizerPlugin,
   DEV_ASSET_ROUTING_EXCLUSIONS,
   createCloudflareBuiltinsExternalPlugin,
@@ -108,18 +109,26 @@ export function voidPlugin(options?: {
       ? projectCloudflareConfigPath
       : undefined;
   let previewing = false;
+  // A preview reads the build's Wrangler deploy config, which the build moved aside. Put it back
+  // until the preview exits.
+  const restorePreviewPointer = () => {
+    if (!existsSync(join(root, 'void.config.ts'))) {
+      return;
+    }
+    if (restoreCloudflarePreviewPointer(root) && !scheduledPreviewPointerCleanups.has(root)) {
+      scheduledPreviewPointerCleanups.add(root);
+      process.once('exit', () => {
+        rmSync(join(root, '.wrangler', 'deploy', 'config.json'), { force: true });
+      });
+    }
+  };
   const implicitDeployGuard: Plugin = {
     name: 'void:remove-implicit-cloudflare-deploy-pointer',
     enforce: 'pre',
     config(_config, environment) {
       previewing = environment.isPreview === true;
-      if (previewing && existsSync(join(root, 'void.config.ts'))) {
-        if (restoreCloudflarePreviewPointer(root) && !scheduledPreviewPointerCleanups.has(root)) {
-          scheduledPreviewPointerCleanups.add(root);
-          process.once('exit', () => {
-            rmSync(join(root, '.wrangler', 'deploy', 'config.json'), { force: true });
-          });
-        }
+      if (previewing) {
+        restorePreviewPointer();
       }
     },
     closeBundle() {
@@ -157,6 +166,11 @@ export function voidPlugin(options?: {
   assertNoRootSourceConventionConflicts(paths);
   const detected = application.framework;
   const framework = detected?.class === 'a' ? (detected.name as Framework) : undefined;
+  if (detected?.name === 'astro' && process.argv[2] === 'preview') {
+    // `astro preview` loads this config but starts the adapter's preview server without its
+    // Vite plugins, after the adapter checks for the deploy config.
+    restorePreviewPointer();
+  }
 
   const scanDirs = config.inference?.scanDirs ?? (detected ? FRAMEWORK_SCAN_DIRS : undefined);
   const frameworkOwnsCloudflareRuntime =
@@ -728,6 +742,7 @@ export function voidPlugin(options?: {
 
     return [
       createCloudflareBuiltinsExternalPlugin(),
+      createBareVoidRedirectPlugin(),
       createWorkerEnvironmentSanitizerPlugin([
         viteEnvironment.name,
         ...(viteEnvironment.childEnvironments ?? []),

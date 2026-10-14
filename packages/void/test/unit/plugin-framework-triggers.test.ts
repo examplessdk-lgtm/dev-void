@@ -577,6 +577,72 @@ describe('astroDevTriggerInjectPlugin', () => {
     expect(existsSync(join(root, 'src', 'middleware.ts'))).toBe(false);
     expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toBe('node_modules/\n');
   });
+
+  // A restart sets up the new dev server, with a new plugin, before it closes the old one.
+  it.each([
+    ['', false],
+    [' after it was deleted', true],
+  ])(
+    'keeps its middleware for the dev server that replaces it on a restart%s',
+    (_name, deleted) => {
+      const root = createTempRoot();
+      const middlewarePath = join(root, 'src', 'middleware.ts');
+      writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      const closeServer: Array<() => void> = [];
+      const startServer = () =>
+        callConfigureServer(astroDevTriggerInjectPlugin(root), {
+          httpServer: {
+            once(_event: string, cb: () => void) {
+              closeServer.push(cb);
+            },
+          },
+        });
+
+      startServer();
+      if (deleted) {
+        rmSync(middlewarePath);
+      }
+      startServer();
+      closeServer[0]!();
+      expect(existsSync(middlewarePath)).toBe(true);
+      expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toContain('src/middleware.ts');
+      expect(log).not.toHaveBeenCalled();
+
+      closeServer[1]!();
+      expect(existsSync(middlewarePath)).toBe(false);
+      expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toBe('node_modules/\n');
+    },
+  );
+
+  // Vite restarts on an .env edit with the same plugins: it sets up this plugin for the new
+  // server, then closes the old one.
+  it('removes its middleware when the last server closes after Vite restarts the same plugin', () => {
+    const root = createTempRoot();
+    const middlewarePath = join(root, 'src', 'middleware.ts');
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\n');
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    const plugin = astroDevTriggerInjectPlugin(root);
+    const closeServer: Array<() => void> = [];
+    const startServer = () =>
+      callConfigureServer(plugin, {
+        httpServer: {
+          once(_event: string, cb: () => void) {
+            closeServer.push(cb);
+          },
+        },
+      });
+
+    startServer();
+    startServer();
+    closeServer[0]!();
+    expect(existsSync(middlewarePath)).toBe(true);
+
+    closeServer[1]!();
+    expect(existsSync(middlewarePath)).toBe(false);
+    expect(readFileSync(join(root, '.gitignore'), 'utf-8')).toBe('node_modules/\n');
+  });
 });
 
 describe('analogDevTriggerInjectPlugin', () => {

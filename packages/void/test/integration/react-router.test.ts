@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import spawn from 'cross-spawn';
 import { afterAll, beforeAll, describe, expect, it } from 'vite-plus/test';
@@ -94,6 +94,18 @@ describe('playground/react-router with MySQL', () => {
     );
     rmSync(join(root, 'db/migrations'), { recursive: true, force: true });
     rmSync(join(root, 'crons'), { recursive: true, force: true });
+    // The import the jobs guide shows. The package entry is Void's Vite plugin, which workerd
+    // cannot load.
+    mkdirSync(join(root, 'crons'));
+    writeFileSync(
+      join(root, 'crons/tick.ts'),
+      `import { defineScheduled } from 'void';
+
+export const cron = '*/5 * * * *';
+
+export default defineScheduled(async () => {});
+`,
+    );
     writeFileSync(
       join(root, 'db/schema.ts'),
       `import { int, mysqlTable, varchar } from 'void/schema-mysql';
@@ -175,10 +187,18 @@ export async function loader() {
     }
   }
 
-  it('queries MySQL through void/db in dev', async () => {
+  it('queries MySQL through void/db and runs a cron in dev', async () => {
     const server = await start('dev');
     try {
       await expectUsers(server);
+      const token = readFileSync(join(playground.root, '.void/dev-trigger-token'), 'utf8').trim();
+      const response = await fetch(`${server.base}/__void/scheduled`, {
+        method: 'POST',
+        headers: { 'x-void-dev-trigger': token },
+        body: JSON.stringify({ cron: '*/5 * * * *', scheduledTime: Date.now() }),
+      });
+      const result = { status: response.status, body: await response.text() };
+      expect(result, server.output().slice(-4000)).toEqual({ status: 200, body: '{"ok":true}' });
     } finally {
       await killChild(server.child);
       child = undefined;

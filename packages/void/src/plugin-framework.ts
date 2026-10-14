@@ -29,7 +29,10 @@ import {
   nitroDevTriggerInjectPlugin,
 } from './plugin-framework-triggers.ts';
 import { migrationPlugin } from './plugin-migration.ts';
-import { createCloudflareBuiltinsExternalPlugin } from './plugin-worker-environment.ts';
+import {
+  createBareVoidRedirectPlugin,
+  createCloudflareBuiltinsExternalPlugin,
+} from './plugin-worker-environment.ts';
 import { injectSvelteKitBuildHooks, injectSvelteKitHooks } from './sveltekit-hooks-transform.ts';
 
 const handlerFile = fileURLToPath(import.meta.resolve('#self/handler'));
@@ -365,7 +368,10 @@ export default {
       ? [nitroDevTriggerInjectPlugin(root, { serverDir: 'server' })]
       : []),
     ...(detected.name === 'analog' ? [analogDevTriggerInjectPlugin(root)] : []),
-    ...(detected.name === 'astro' ? [astroDevTriggerInjectPlugin(root)] : []),
+    // Astro runs its server code, the dev cron and queue dispatch included, in workerd.
+    ...(detected.name === 'astro'
+      ? [createBareVoidRedirectPlugin(), astroDevTriggerInjectPlugin(root)]
+      : []),
     implicitDeployGuard,
   ];
 }

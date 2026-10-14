@@ -1,9 +1,18 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Plugin, ResolvedConfig } from 'vite';
+import { createServer, normalizePath, type Plugin, type ResolvedConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { frameworkTriggersDispatchPath } from '../../src/plugin-framework-triggers.ts';
 
@@ -129,6 +138,53 @@ describe('Class A framework dev wrapper', () => {
       'ordinary page',
     );
   });
+});
+
+describe('Class A bare void imports', () => {
+  // The package entry is the whole Vite plugin; a cron needs only `defineScheduled` and friends.
+  it.each([
+    ['ssr', true],
+    ['client', false],
+  ] as const)(
+    'sends bare void in the %s environment to the handler entry: %s',
+    async (environment, redirected) => {
+      const root = realpathSync.native(createTanStackRoot());
+      const installed = join(root, 'node_modules/void');
+      mkdirSync(installed, { recursive: true });
+      writeFileSync(
+        join(installed, 'package.json'),
+        JSON.stringify({ name: 'void', type: 'module', exports: { '.': './index.mjs' } }),
+      );
+      writeFileSync(join(installed, 'index.mjs'), 'export {};\n');
+      vi.spyOn(process, 'cwd').mockReturnValue(root);
+      const { voidPlugin } = await import('../../src/index.ts');
+
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [voidPlugin()],
+        optimizeDeps: { noDiscovery: true },
+        server: { middlewareMode: true, ws: false, preTransformRequests: false },
+      });
+      try {
+        const resolved = await server.environments[environment]!.pluginContainer.resolveId(
+          'void',
+          join(root, 'crons/tick.ts'),
+        );
+
+        expect(resolved?.id).toBe(
+          normalizePath(
+            redirected
+              ? createRequire(import.meta.url).resolve('void/handler')
+              : join(installed, 'index.mjs'),
+          ),
+        );
+      } finally {
+        await server.close();
+      }
+    },
+  );
 });
 
 describe('Class A framework request scope', () => {
