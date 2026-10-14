@@ -1,0 +1,27 @@
+platform/packages/api/src/provisioning/containers.ts
+  s_77824b01a12d99::t_5fd1d355019436 3-39
+platform/packages/api/src/provisioning/sandbox-controller.ts
+  s_77824b01a12d99::t_73f5bcb42e3b2c 13,186-188
+platform/packages/api/test/integration/api-sandbox.test.ts
+  s_77824b01a12d99::t_7c6fe0c3081cba 139-155,203,856,888
+platform/packages/api/test/integration/helpers.ts
+  s_77824b01a12d99::t_aad80cc3a4ba85 1111,1690-1699
+platform/packages/api/test/unit/container-image-preparation.test.ts
+  s_77824b01a12d99::t_0635203fd38e57 1-62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2b8cabe6213e62c9bb88ba491d345a5b49ad5011",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
