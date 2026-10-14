@@ -1,0 +1,25 @@
+packages/platform/src/browser-page.ts
+  s_1cbb8f9d8ae59c::t_c1242d4fd03fc5 42-43
+platform/packages/api/src/admin/react/views/EmailProjectPage.tsx
+  s_1cbb8f9d8ae59c::t_41c15fb476f554 296-321
+platform/packages/api/src/routes/oauth.ts
+  s_1cbb8f9d8ae59c::t_c6dc5482d494b0 185,191-192,236
+platform/packages/dashboard/pages/account.tsx
+  s_1cbb8f9d8ae59c::t_37be70b82471ce 2,16-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b482f5d8f14d205377fec28de819def1a753b627",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
