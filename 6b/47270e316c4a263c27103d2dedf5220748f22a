@@ -1,0 +1,21 @@
+platform/packages/proxy/src/ai.ts
+  s_77824b01a12d99::t_7ef3f7e7dd5133 208-210,410-413
+platform/packages/proxy/test/unit/proxy.test.ts
+  s_77824b01a12d99::t_362bbe80751db7 1403-1425,1444,1467,1497,1552,1580,1706
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6b47270e316c4a263c27103d2dedf5220748f22a",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
