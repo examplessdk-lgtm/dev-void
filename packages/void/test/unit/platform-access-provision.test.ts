@@ -164,6 +164,7 @@ describe('Cloudflare Access provisioning', () => {
     { auth_context: { id: 'context', ac_id: 'c1', identity_provider_id: 'company-idp' } },
     { cloudflare_account_member: {} },
     { cloudflare_account_member: { account_id: '023e105f4ecef8ad9ca31a8372d0c353' } },
+    { okta: { identity_provider_id: 'subsidiary-idp', name: 'Engineering' } },
   ])('accepts %j as a company identity rule', async (rule) => {
     const env = fixture();
     env.policy.include = [rule];
@@ -184,7 +185,14 @@ describe('Cloudflare Access provisioning', () => {
       include: [{ ip: { ip: '203.0.113.0/24' } }],
       require: [{ login_method: { id: 'subsidiary-idp' } }],
     },
-  ])('accepts a company login method only when it is a selected provider (%j)', async (rules) => {
+    { include: [{ azureAD: { id: 'company-group', identity_provider_id: 'subsidiary-idp' } }] },
+    {
+      include: [{ ip: { ip: '203.0.113.0/24' } }],
+      require: [
+        { auth_context: { id: 'context', ac_id: 'c1', identity_provider_id: 'subsidiary-idp' } },
+      ],
+    },
+  ])('accepts a company provider rule only when it is a selected provider (%j)', async (rules) => {
     const env = fixture();
     env.identityProviders.push({ id: 'subsidiary-idp', type: 'azureAD', name: 'Subsidiary SSO' });
     delete env.policy.require;
@@ -193,7 +201,7 @@ describe('Cloudflare Access provisioning', () => {
     await expect(
       provisionPlatformAccess(env.client, { ...base, login }, fresh(), () => {}),
     ).rejects.toThrow(
-      'An Access allow policy uses a login method that is not one of the selected identity providers.',
+      'An Access allow policy uses an identity provider that is not one of the selected identity providers.',
     );
     expect(env.calls.some((call) => call.method === 'POST')).toBe(false);
     const result = await provisionPlatformAccess(
@@ -205,6 +213,24 @@ describe('Cloudflare Access provisioning', () => {
     expect(result.login?.configuration.kind).toBe('cloudflare-access');
     expect([...env.apps.values()][0]?.allowed_idps).toEqual(['company-idp', 'subsidiary-idp']);
   });
+
+  it.each([{ azureAD: { id: 'company-group' } }, { auth_context: { id: 'context', ac_id: 'c1' } }])(
+    'rejects %j without its identity provider',
+    async (rule) => {
+      const env = fixture();
+      env.policy.include = [rule];
+      delete env.policy.require;
+      await expect(
+        provisionPlatformAccess(
+          env.client,
+          { ...base, login: { id: 'access', label: 'Company Access' } },
+          fresh(),
+          () => {},
+        ),
+      ).rejects.toThrow('Select Access allow policies restricted to company identities.');
+      expect(env.calls.some((call) => call.method === 'POST')).toBe(false);
+    },
+  );
 
   it.each([
     { type: 'onetimepin' },

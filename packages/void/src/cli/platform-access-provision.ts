@@ -149,7 +149,8 @@ export async function verifyCompanyAccessPolicies(
       .map((provider) => provider.id),
   );
   // The applications offer only the selected providers at sign-in, so a login
-  // method rule for any other provider matches nobody.
+  // method, Entra ID group or authentication context rule for any other
+  // provider matches nobody.
   const selectedCompanyProviders = new Set(
     identityProviderIds.filter((id) => companyProviders.has(id)),
   );
@@ -157,7 +158,15 @@ export async function verifyCompanyAccessPolicies(
     entry: unknown,
     name: string,
     providers: ReadonlySet<unknown> = selectedCompanyProviders,
-  ) => isPlatformAccessIdentityRule(object(entry, name), (id) => providers.has(id));
+  ) => {
+    const rule = object(entry, name);
+    const entra = rule.azureAD || rule.auth_context;
+    if (entra) {
+      const id = typeof entra === 'object' ? (entra as ObjectValue).identity_provider_id : null;
+      return typeof id === 'string' && providers.has(id);
+    }
+    return isPlatformAccessIdentityRule(rule, (id) => providers.has(id));
+  };
   const restricted = (target: ObjectValue, providers?: ReadonlySet<unknown>) =>
     Array.isArray(target.include) &&
     target.include.length > 0 &&
@@ -241,7 +250,7 @@ export async function verifyCompanyAccessPolicies(
     if (!restricted(policy)) {
       throw new PlatformAccessPolicyRejectedError(
         restricted(policy, companyProviders)
-          ? 'platform: An Access allow policy uses a login method that is not one of the selected identity providers.'
+          ? 'platform: An Access allow policy uses an identity provider that is not one of the selected identity providers.'
           : 'platform: Select Access allow policies restricted to company identities.',
       );
     }

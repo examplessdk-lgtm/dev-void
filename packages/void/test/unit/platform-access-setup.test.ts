@@ -642,7 +642,7 @@ describe('interactive Access policy creation', () => {
     });
     await preparePlatformAccessSetup(fixture.input);
     expect(prompts.warn).toHaveBeenCalledExactlyOnceWith(
-      'An Access allow policy uses a login method that is not one of the selected identity providers. Choose other policies, or fix the policy in Cloudflare and refresh the list.',
+      'An Access allow policy uses an identity provider that is not one of the selected identity providers. Choose other policies, or fix the policy in Cloudflare and refresh the list.',
     );
     expect(JSON.parse(fixture.checkpoint.accessSetupSpecJson!).policyIds).toEqual(['employees']);
   });
