@@ -130,20 +130,26 @@ describe.each(['postgresql', 'mysql'] as const)('void/db %s across requests', (d
   let pgServer: ReturnType<typeof createServer> | undefined;
   let mysqlServer: FakeMySqlServer | undefined;
 
-  beforeAll(async () => {
-    if (dialect === 'postgresql') {
-      pglite = new PGlite();
-      await pglite.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);');
-      await pglite.exec("INSERT INTO users VALUES (1, 'Ada'), (2, 'Linus');");
-      pgServer = createServer(pglite);
-      pgServer.listen(0, '127.0.0.1');
-      await once(pgServer, 'listening');
-      url = `postgresql://postgres@127.0.0.1:${(pgServer.address() as AddressInfo).port}/postgres`;
-    } else {
-      mysqlServer = await startFakeMySqlServer(USERS);
-      url = `mysql://void@127.0.0.1:${mysqlServer.port}/app`;
-    }
-  });
+  beforeAll(
+    async () => {
+      if (dialect === 'postgresql') {
+        pglite = new PGlite();
+        // Cold WASM startup can exceed 10s on Windows CI. Pay that cost in this hook,
+        // with its own budget; query and test deadlines stay unchanged.
+        await pglite.waitReady;
+        await pglite.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);');
+        await pglite.exec("INSERT INTO users VALUES (1, 'Ada'), (2, 'Linus');");
+        pgServer = createServer(pglite);
+        pgServer.listen(0, '127.0.0.1');
+        await once(pgServer, 'listening');
+        url = `postgresql://postgres@127.0.0.1:${(pgServer.address() as AddressInfo).port}/postgres`;
+      } else {
+        mysqlServer = await startFakeMySqlServer(USERS);
+        url = `mysql://void@127.0.0.1:${mysqlServer.port}/app`;
+      }
+    },
+    process.platform === 'win32' ? 30_000 : undefined,
+  );
 
   afterAll(async () => {
     if (pgServer) {
