@@ -1,0 +1,25 @@
+.github/scripts/packed-consumer.mjs
+  s_1cbb8f9d8ae59c::t_a63fe3fb38b877 24-32,38,41,187-194,265-295,325-328,490
+.github/scripts/packed-init.mjs
+  s_1cbb8f9d8ae59c::t_4fb5a71f4e7ec1 118-124,128,153-156
+.github/workflows/prepublish-test.yml
+  s_1cbb8f9d8ae59c::t_b89887631042e2 89-94
+TESTING.md
+  s_1cbb8f9d8ae59c::t_9986c96a7a865a 232-235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "04169cfccb5a2465c4051e9fad6821d7a32be9c8",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
