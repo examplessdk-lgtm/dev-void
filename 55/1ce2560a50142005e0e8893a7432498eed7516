@@ -1,0 +1,125 @@
+platform/packages/api/src/routes/oauth.ts
+  s_77824b01a12d99::t_d7b01f0cb0904b 14,31,51,222-224,249-257,315-326,334-339,420-425,466-471,496,616,622,627-631,759,779
+platform/packages/api/src/index.ts
+  s_77824b01a12d99::t_5c8b4141dbb441 91,193-196,838-840
+platform/packages/api/src/routing.ts
+  s_77824b01a12d99::t_26d819ac8a185f 13-20,230-235,261-265,280,295,324,335
+platform/packages/api/drizzle/0060_private_previews.sql
+  s_77824b01a12d99::t_ed1d7307d63b4a 1-16
+platform/packages/api/src/middleware/auth.ts
+  s_77824b01a12d99::t_543a04fb41f379 105,152-173,183-187
+platform/packages/api/src/middleware/platform-access.ts
+  s_77824b01a12d99::t_c015ff4469f99a 9-11,68-75,111
+platform/packages/api/drizzle/compatibility.json
+  s_77824b01a12d99::t_33f80e388d296e 72-83
+platform/packages/api/src/deploy/publish-worker.ts
+  s_77824b01a12d99::t_ff6b17dd6b2fcd 39,363,367,386
+platform/packages/api/src/provisioning/activate-domain.ts
+  s_77824b01a12d99::t_c4877b95b2f169 10,120
+packages/platform/scripts/build-runtime.mjs
+  s_77824b01a12d99::t_385e8bc7ac2bc2 158
+platform/packages/api/src/auth/jwt.ts
+  s_77824b01a12d99::t_eee61ec239cbd8 33-34
+platform/packages/api/test/integration/helpers.ts
+  s_1cbb8f9d8ae59c::t_eb1ecb4fe301ff 569,598-599
+platform/packages/api/src/deploy/compensate.ts
+  s_77824b01a12d99::t_2908af5bac1834 23,360
+platform/packages/api/test/integration/operator-operations.test.ts
+  s_77824b01a12d99::t_2f4940865d715a 962,966-967,972,978
+platform/packages/api/src/operator/audit.ts
+  s_77824b01a12d99::t_0d1ed81f390e3b 67,70-74
+packages/platform/src/installer.ts
+  s_77824b01a12d99::t_8c2e7c899a072c 49,99-101,234
+platform/packages/api/src/admin/react/views/ConnectedAppsPage.tsx
+  s_77824b01a12d99::t_f7963745e02986 66-70,81-97
+platform/packages/dispatch/test/unit/project-hostname.test.ts
+  s_77824b01a12d99::t_8c07f022162ad7 32-74
+platform/packages/api/src/zero-trust/state.ts
+  s_77824b01a12d99::t_b433a93b68b5a8 301,303-307
+platform/package.json
+  s_77824b01a12d99::t_88a287c3262ccd 8,14
+platform/packages/api/src/deploy/publish-static.ts
+  s_77824b01a12d99::t_be39e19fdcb837 20,190,194,209
+platform/packages/api/src/operator/project-normalization.ts
+  s_77824b01a12d99::t_2a1abca2ddcbea 14,40
+platform/packages/api/drizzle/meta/_journal.json
+  s_77824b01a12d99::t_cf73238e6eda1f 375-381
+platform/packages/api/src/routes/previews.ts
+  s_77824b01a12d99::t_2ea7fe044bb3bd 1-358
+packages/void/src/cli/platform-installer.ts
+  s_77824b01a12d99::t_e15d4f08f13f8f 239-246,581-582,651,658,665-667,1013-1023
+platform/packages/api/test/integration/oauth.test.ts
+  s_77824b01a12d99::t_d61e2558e31a58 20,33,120-121,191-479,582-644,768-772
+platform/packages/dispatch/wrangler.jsonc
+  s_77824b01a12d99::t_1fd57c9010c9f3 4,63,118
+platform/packages/api/src/auth/oauth-types.ts
+  s_77824b01a12d99::t_0fd2bda56737cc 5,7-8
+platform/packages/dispatch/src/env.ts
+  s_1cbb8f9d8ae59c::t_6f60e171fd529c 4
+platform/packages/api/src/routes/projects.ts
+  s_77824b01a12d99::t_bf74768e223da8 97,1275,1320,1331,1408,1708,3436
+platform/packages/api/test/unit/admin-upgrade-compatibility.test.ts
+  s_77824b01a12d99::t_18877442d72ae7 8-63,285-287
+platform/packages/dispatch/src/index.ts
+  s_77824b01a12d99::t_f9b77d092de596 9,93,660-666,733-740,748-766,2139-2147
+platform/packages/api/drizzle/meta/0060_snapshot.json
+  s_77824b01a12d99::t_25d7a436dac35e 1-6966
+packages/platform/src/worker-config.ts
+  s_77824b01a12d99::t_b1ac53d5106f16 32,106-124,295-297
+platform/packages/api/test/unit/routing.test.ts
+  s_77824b01a12d99::t_e25ba0508b4203 453-474
+platform/packages/api/src/operator/platform-workers.ts
+  s_77824b01a12d99::t_8f4b7ba82b083a 23-24,45,51-52,66
+platform/packages/api/src/provisioning/cleanup.ts
+  s_77824b01a12d99::t_01031bf72ecb7f 14,45,468-472,525,952-987
+platform/packages/api/src/zero-trust/routing.ts
+  s_77824b01a12d99::t_948037e42a170d 14,323
+packages/void/test/unit/platform-installer.test.ts
+  s_77824b01a12d99::t_f7568015bd1102 707-714
+platform/packages/api/wrangler.jsonc
+  s_77824b01a12d99::t_bc824f0afb3abe 4-10,222-228,377-383
+platform/packages/api/src/schema.ts
+  s_77824b01a12d99::t_a5123a2d9868da 102,366-368,381-389,393-403
+platform/packages/api/src/deploy/recovery.ts
+  s_77824b01a12d99::t_a85e6ec5136659 34,273,290,304,344,400
+platform/packages/api/src/admin/routes/connected-apps.ts
+  s_77824b01a12d99::t_4bb4efdc85c2c7 7,49-53,86-97
+packages/platform/test/unit/worker-config.test.ts
+  s_77824b01a12d99::t_fc87b1ffc9dbc9 37-51
+platform/packages/api/src/env.ts
+  s_1cbb8f9d8ae59c::t_0c59fc2a0bfb3b 32
+docs/.vitepress/config.ts
+  s_1cbb8f9d8ae59c::t_08f91dd0365ca7 171
+docs/guide/platform/administration/connected-apps.md
+  s_1cbb8f9d8ae59c::t_431abce28ce64f 7,21-36,49
+platform/meta/design-docs/0092-private-checkpoint-previews.md
+  s_1cbb8f9d8ae59c::t_0c3c708957e71b 1-43
+platform/packages/api/src/auth/oauth.ts
+  s_1cbb8f9d8ae59c::t_aac8ecdee2ac83 2,9,19,69,95-119,130-133,145,194-196,209,257-317,327-331,346,365-368,381-392
+platform/packages/api/src/auth/sessions.ts
+  s_1cbb8f9d8ae59c::t_7b65db20e6a29c 16,118,121-122,140-160,163-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "551ce2560a50142005e0e8893a7432498eed7516",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    },
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
