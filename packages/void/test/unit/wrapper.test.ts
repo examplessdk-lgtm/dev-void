@@ -502,7 +502,10 @@ describe('generated wrapper queue dispatch', () => {
   });
 });
 
-describe('generateWrapper with migrations', () => {
+// These tests bundle Workers and start workerd. Windows CI runners stall on disk and process start,
+// so one test can take 20 seconds there. Keep the longer budget local to these tests.
+const migrationTestTimeout = process.platform === 'win32' ? 60_000 : undefined;
+describe('generateWrapper with migrations', { timeout: migrationTestTimeout }, () => {
   const roots: Array<string> = [];
   // Each new PGlite runs initdb, which can take seconds on CI. Run it once in this hook, with its
   // own budget; each PostgreSQL test loads a fresh database from the initialized data directory.
