@@ -30,6 +30,8 @@ export type VoidAuthMigrationField = {
   index: boolean;
   bigint: boolean;
   unbounded?: boolean;
+  /** A fixed default of a required field. Adding the column fills rows that exist with it. */
+  defaultValue?: string | number | boolean;
   references?: {
     table: string;
     field: string;
@@ -177,6 +179,24 @@ function usesUnboundedMySqlText(
   );
 }
 
+/**
+ * The default of a required field when the database can store it as a literal.
+ * Function, date and JSON defaults have none.
+ */
+function resolveFixedDefault(
+  field: DBFieldAttribute,
+): Pick<VoidAuthMigrationField, 'defaultValue'> {
+  if (field.required === false || field.type === 'date' || isJsonField(field)) {
+    return {};
+  }
+  const value = field.defaultValue;
+  return typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+    ? { defaultValue: value }
+    : {};
+}
+
 function resolveReferenceFieldName(
   schema: BetterAuthDBSchema,
   model: string,
@@ -307,6 +327,13 @@ function createColumnDefinition(
     if (dialect === 'mysql' && idStrategy === 'serial') {
       parts.push('.autoincrement()');
     }
+    // Better Auth leaves these ids out of inserts on PostgreSQL, so the database makes them.
+    if (dialect === 'postgresql' && idStrategy === 'serial') {
+      parts.push('.generatedByDefaultAsIdentity()');
+    }
+    if (dialect === 'postgresql' && idStrategy === 'uuid') {
+      parts.push('.defaultRandom()');
+    }
   }
   if (field.required !== false || actualFieldName === 'id') {
     parts.push('.notNull()');
@@ -358,9 +385,6 @@ function collectCoreImports(
     for (const [defaultFieldName, field] of Object.entries(table.fields)) {
       const actualFieldName = resolveFieldName(defaultFieldName, field);
       if (actualFieldName === 'id' || field.references?.field === 'id') {
-        if (idStrategy === 'serial') {
-          imports.add('integer');
-        }
         if (idStrategy === 'uuid' && dialect === 'postgresql') {
           imports.add('uuid');
         }
@@ -536,6 +560,7 @@ export function resolveVoidAuthMigrationSchema(
               index: field.index === true,
               bigint: field.bigint === true,
               ...(unboundedMySqlFields.has(`${name}\0${fieldName}`) ? { unbounded: true } : {}),
+              ...resolveFixedDefault(field),
               ...(field.references
                 ? {
                     references: {

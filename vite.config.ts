@@ -23,8 +23,10 @@ const cliUnitTests = [
 ];
 // SDK unit files that start PGlite. Add new PGlite unit files here.
 const sdkPgliteUnitTests = [
+  'packages/void/test/unit/auth-migrations.test.ts',
   'packages/void/test/unit/db-export-roundtrip.test.ts',
   'packages/void/test/unit/db-request-pool.test.ts',
+  'packages/void/test/unit/db-reset-pg.test.ts',
   'packages/void/test/unit/platform-database-lock.test.ts',
   'packages/void/test/unit/platform-database-migrations.test.ts',
   'packages/void/test/unit/runner-pg.test.ts',

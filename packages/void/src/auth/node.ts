@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'pathslash';
 import { readConfig } from '../config.ts';
 import { getMiniflareDatabasePath } from '../migrations/runner.ts';
 import {
@@ -18,7 +20,10 @@ export async function runLocalVoidAuthMigrations(
   persistRoot: string,
   databaseId: string,
   configPath: string | null = findVoidAuthConfig(root),
-  /** The database to change. Without it, DATABASE_URL from the shell, then from `.env`. */
+  /**
+   * The database to change. Without it, DATABASE_URL from the shell, then from `.env`. An empty
+   * shell value counts as unset.
+   */
   databaseUrl?: string,
 ): Promise<void> {
   const authConfig = await loadVoidAuthConfig(configPath);
@@ -27,12 +32,15 @@ export async function runLocalVoidAuthMigrations(
     providers: readConfig(root).auth?.providers ?? null,
     userConfig: authConfig,
   };
-  const env = { ...loadLocalEnv(root), ...process.env } as unknown as VoidAuthEnv;
+  const localEnv = loadLocalEnv(root);
+  const env = { ...localEnv, ...process.env } as unknown as VoidAuthEnv;
   const migrationSchema = resolveVoidAuthMigrationSchema(runtime, env);
 
   if (dialect === 'sqlite') {
     const { DatabaseSync } = await import('node:sqlite');
     const dbPath = getMiniflareDatabasePath(persistRoot, databaseId);
+    // The first dev run gets here before Miniflare creates its D1 directory.
+    mkdirSync(dirname(dbPath), { recursive: true });
     const db = new DatabaseSync(dbPath);
     try {
       await applySqliteAuthMigrations(
@@ -53,10 +61,7 @@ export async function runLocalVoidAuthMigrations(
   }
 
   const connectionString =
-    databaseUrl ??
-    (typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.length > 0
-      ? env.DATABASE_URL
-      : undefined);
+    databaseUrl ?? (process.env.DATABASE_URL || localEnv.DATABASE_URL || undefined);
   if (!connectionString) {
     return;
   }

@@ -207,7 +207,11 @@ export async function runFullDeploy(
   assertDeploySchemaDriftFree(root, dialect);
 
   // Validate migrations before the Hyperdrive check so migrations can gate provisioning.
-  const validatedMigrations = validateDeployMigrations(paths.migrationsDir, analysis.migrations);
+  const validatedMigrations = validateDeployMigrations(
+    paths.migrationsDir,
+    analysis.migrations,
+    paths.sourceRelative,
+  );
 
   // Pre-deploy: ensure Hyperdrive is provisioned for external SQL projects.
   // Migrations on disk also gate this — even if inference says needsD1: false,

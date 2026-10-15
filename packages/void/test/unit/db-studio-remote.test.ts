@@ -244,7 +244,9 @@ describe('void db studio and push (local)', () => {
 
     await expect(runDbCommand(root, { action: 'studio' })).rejects.toThrow('process.exit:1');
 
-    expect(clackLog.error).toHaveBeenCalledWith('No local database found. Run `void dev` first.');
+    expect(clackLog.error).toHaveBeenCalledWith(
+      'No local database found. Start the dev server first.',
+    );
     expect(mockGetDatabaseUrl).not.toHaveBeenCalled();
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });

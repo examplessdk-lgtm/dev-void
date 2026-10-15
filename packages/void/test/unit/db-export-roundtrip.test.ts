@@ -148,6 +148,60 @@ describe('SQL export restore', () => {
     }
   });
 
+  it('exports SQLite app tables and views whose names start with an underscore', async () => {
+    const root = project();
+    const { databasePath } = getLocalD1Target(root);
+    mkdirSync(join(databasePath, '..'), { recursive: true });
+    const source = new Database(databasePath);
+    source.exec(`CREATE TABLE _drafts (id INTEGER PRIMARY KEY, title TEXT);
+      CREATE VIEW _draft_titles AS SELECT title FROM _drafts;
+      CREATE TABLE _void_migrations (name TEXT PRIMARY KEY, applied_at TEXT);
+      CREATE TABLE _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB);
+      INSERT INTO _drafts VALUES (1, 'draft');`);
+    source.close();
+    await runDbCommand(root, { action: 'export', output: 'dump.sql' });
+    const dump = readFileSync(join(root, 'dump.sql'), 'utf8');
+    expect(dump).not.toContain('_void_migrations');
+    expect(dump).not.toContain('_cf_METADATA');
+    const restored = new Database(':memory:');
+    try {
+      restored.exec(dump);
+      expect(restored.prepare('SELECT * FROM _draft_titles').all()).toEqual([{ title: 'draft' }]);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it('exports PostgreSQL app tables whose names start with an underscore', async () => {
+    const pg = state.pg!;
+    const root = project(true);
+    await pg.exec(`CREATE TABLE _drafts (id integer PRIMARY KEY, title text);
+      CREATE TABLE posts (id integer PRIMARY KEY, draft_id integer REFERENCES _drafts(id));
+      CREATE TABLE _void_migrations (name text PRIMARY KEY, applied_at text NOT NULL);
+      INSERT INTO _drafts VALUES (1, 'draft'); INSERT INTO posts VALUES (1, 1);`);
+    await runDbCommand(root, { action: 'export', output: 'dump.sql' });
+    const dump = readFileSync(join(root, 'dump.sql'), 'utf8');
+    expect(dump).not.toContain('_void_migrations');
+    await pg.exec('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
+    await pg.exec(dump);
+    expect(
+      (await pg.query('SELECT title FROM posts JOIN _drafts ON _drafts.id = posts.draft_id')).rows,
+    ).toEqual([{ title: 'draft' }]);
+  });
+
+  it('writes an export to an absolute --output path', async () => {
+    const root = project();
+    const outDir = mkdtempSync(join(tmpdir(), 'void-export-out-'));
+    roots.push(outDir);
+    const { databasePath } = getLocalD1Target(root);
+    mkdirSync(join(databasePath, '..'), { recursive: true });
+    const source = new Database(databasePath);
+    source.exec('CREATE TABLE notes (id INTEGER PRIMARY KEY)');
+    source.close();
+    await runDbCommand(root, { action: 'export', output: join(outDir, 'dump.sql') });
+    expect(readFileSync(join(outDir, 'dump.sql'), 'utf8')).toContain('CREATE TABLE notes');
+  });
+
   it('round-trips SQLite blobs and generated columns', async () => {
     const root = project();
     const { databasePath } = getLocalD1Target(root);

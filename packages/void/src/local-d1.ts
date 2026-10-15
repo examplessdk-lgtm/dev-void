@@ -138,7 +138,9 @@ function readLocalD1PersistState(root: string): LocalD1PersistState | undefined 
   try {
     state = JSON.parse(readFileSync(path, 'utf-8')) as LocalD1PersistState;
   } catch {
-    throw new Error(`db: local D1 state in ${path} is invalid. Run \`void dev\` to refresh it.`);
+    throw new Error(
+      `db: local D1 state in ${path} is invalid. Start the dev server to refresh it.`,
+    );
   }
   const projectRoot = resolve(root);
   if (
@@ -147,14 +149,14 @@ function readLocalD1PersistState(root: string): LocalD1PersistState | undefined 
     typeof state.persistRoot !== 'string' ||
     state.persistRoot.length === 0
   ) {
-    throw new Error(`db: local D1 state in ${path} is stale. Run \`void dev\` to refresh it.`);
+    throw new Error(`db: local D1 state in ${path} is stale. Start the dev server to refresh it.`);
   }
   if (state.viteConfig) {
     const { path: configPath, hash } = state.viteConfig;
     if (!existsSync(configPath) || hashFile(configPath) !== hash) {
       throw new Error(
         `db: voidPlugin persistence configuration changed since the local D1 state was written. ` +
-          'Run `void dev` to refresh it before using `void db`.',
+          'Start the dev server to refresh it before using `void db`.',
       );
     }
   }

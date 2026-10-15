@@ -1161,7 +1161,10 @@ const HELP_TREE: HelpTree = {
     summary: 'Manage local and remote database state.',
     usage: ['void db <command>'],
     commands: [
-      { command: 'push', description: 'Push schema to local D1 without migration files' },
+      {
+        command: 'push',
+        description: 'Push schema to the development database without migration files',
+      },
       { command: 'generate', description: 'Generate SQL migrations from schema changes' },
       { command: 'status', description: 'Show migration status (local and remote)' },
       { command: 'reset', description: 'Reset local DB and re-run migrations' },
@@ -1181,7 +1184,10 @@ const HELP_TREE: HelpTree = {
       { command: 'rename-migrations', description: 'Rename migrations to timestamp format' },
     ],
     children: {
-      push: basicSubcommand('Push schema to local D1 without migration files.', 'void db push'),
+      push: basicSubcommand(
+        'Push schema to the development database without migration files.',
+        'void db push',
+      ),
       generate: basicSubcommand('Generate SQL migrations from schema changes.', 'void db generate'),
       status: basicSubcommand('Show migration status for local and remote DBs.', 'void db status'),
       reset: {

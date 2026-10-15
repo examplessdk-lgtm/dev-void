@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'pathslash';
 import type { Plugin } from 'vite';
 import type { DatabaseDialect } from './config.ts';
-import { voidLog, voidWarn, voidError } from './log.ts';
+import { voidLog, voidError } from './log.ts';
 import { afterServerReady } from './plugin-dev-config.ts';
 import { readProjectPaths } from './project-paths.ts';
 import { loadLocalEnv } from './shared/env.ts';
@@ -11,9 +11,12 @@ function readDatabaseUrl(root: string): string | undefined {
   return loadLocalEnv(root).DATABASE_URL;
 }
 
-/** DATABASE_URL as Better Auth's local migrations read it: the shell before `.env`. */
+/**
+ * DATABASE_URL as Better Auth's local migrations read it: the shell before `.env`. An empty
+ * shell value counts as unset.
+ */
 function readAuthDatabaseUrl(root: string): string | undefined {
-  return (process.env.DATABASE_URL ?? readDatabaseUrl(root)) || undefined;
+  return process.env.DATABASE_URL || readDatabaseUrl(root) || undefined;
 }
 
 /**
@@ -58,6 +61,16 @@ export function migrationPlugin(
           voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
         }
       };
+      // A pending migration that fails validation stops every migration for this start, as
+      // `void db migrate` does, so files never apply out of order. The dev server still starts.
+      const refuse = (err: unknown) => {
+        afterServerReady(server, () => {
+          console.log();
+          voidError(
+            `${err instanceof Error ? err.message : String(err)}\nNo migrations were applied. Fix the files, then restart the dev server.`,
+          );
+        });
+      };
 
       try {
         if (dialect !== 'sqlite') {
@@ -70,7 +83,7 @@ export function migrationPlugin(
           // the lock of the database it changes.
           const url = runFiles ? readDatabaseUrl(root) : undefined;
           const authUrl = mysqlAuth ? readAuthDatabaseUrl(root) : undefined;
-          if ((runFiles && !url) || (mysqlAuth && !authUrl)) {
+          if ((runFiles && !url) || (auth?.enabled && !readAuthDatabaseUrl(root))) {
             afterServerReady(server, () => {
               console.log();
               voidError(
@@ -98,7 +111,8 @@ export function migrationPlugin(
               try {
                 validateMigrations(pending);
               } catch (err) {
-                voidWarn(err instanceof Error ? err.message : String(err));
+                refuse(err);
+                return;
               }
             }
 
@@ -144,11 +158,12 @@ export function migrationPlugin(
             try {
               validateMigrations(pending);
             } catch (err) {
-              voidWarn(err instanceof Error ? err.message : String(err));
+              refuse(err);
+              return;
             }
           }
 
-          const applied = await runMigrations(migrationsDir, dbPath);
+          const applied = await runMigrations(migrationsDir, dbPath, paths.sourceRelative);
           if (applied.length > 0) {
             voidLog(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
           }

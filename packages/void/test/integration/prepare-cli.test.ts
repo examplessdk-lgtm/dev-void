@@ -115,6 +115,34 @@ describe('void prepare (subprocess)', () => {
     expect(existsSync(join(root, '.void', 'env.d.ts'))).toBe(false);
   });
 
+  it('writes every file that .void/tsconfig.json lists when queues/ has only helper files', () => {
+    const root = createProject({ withSources: true });
+    mkdirSync(join(root, 'queues'));
+    writeFileSync(join(root, 'queues', '_shared.ts'), 'export const helper = 1;\n');
+
+    const { status } = runVoid(root, ['prepare']);
+
+    expect(status).toBe(0);
+
+    const outDir = join(root, '.void');
+    const tsconfig = JSON.parse(readFileSync(join(outDir, 'tsconfig.json'), 'utf8')) as {
+      files: Array<string>;
+      compilerOptions?: { paths?: Record<string, Array<string>> };
+    };
+    expect(tsconfig.files).toContain('queues.d.ts');
+    for (const file of tsconfig.files) {
+      expect(existsSync(join(outDir, file)), file).toBe(true);
+    }
+    for (const targets of Object.values(tsconfig.compilerOptions?.paths ?? {})) {
+      for (const target of targets.filter((path) => path.startsWith('./'))) {
+        expect(existsSync(join(outDir, target)), target).toBe(true);
+      }
+    }
+    expect(readFileSync(join(outDir, 'queues.d.ts'), 'utf8')).toContain(
+      'export interface QueueMap',
+    );
+  });
+
   it('generates project-local files from sourceDir conventions', () => {
     const root = createProject({ withSources: true, sourceDir: 'src' });
     mkdirSync(join(root, 'routes', 'api'), { recursive: true });

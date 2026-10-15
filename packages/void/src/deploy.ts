@@ -51,7 +51,11 @@ export async function prepareDeployArtifact(
   const clientDir = join(dist, 'client');
   const { paths, dialect, bindings, authEnabled, scan, websockets } = analysis;
   assertDeploySchemaDriftFree(root, dialect);
-  const migrations = validateDeployMigrations(paths.migrationsDir, analysis.migrations);
+  const migrations = validateDeployMigrations(
+    paths.migrationsDir,
+    analysis.migrations,
+    paths.sourceRelative,
+  );
   const { schedules, queues } = toManifestSchedulesAndQueues(analysis.jobs, analysis.queues);
   const pages = existsSync(paths.pagesDir);
   const ssr = Boolean(validateSsrEntry(root, paths)) || pages;

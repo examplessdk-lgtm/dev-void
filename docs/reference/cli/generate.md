@@ -22,7 +22,7 @@ Creates:
 - An export from `db/schema.ts`
 - `routes/api/posts/index.ts`: `GET` for list and `POST` for insert with validation
 - `routes/api/posts/[id].ts`: `GET` by id with `404` handling
-- Regenerated `.void/db.d.ts`
+- Regenerated types and TypeScript configuration in `.void/`
 
 The generated routes automatically detect your validation library from `package.json` (`valibot`, `zod`, or `arktype`). If none is found, you will be prompted to choose one or skip validation. Run `void db push` to apply the schema locally, or `void db generate` to create migrations before deploying.
 

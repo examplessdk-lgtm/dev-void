@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import type { SubcommandDef } from './subcommand-prompt.ts';
 
 export const dbSubcommands: Array<SubcommandDef> = [
-  { name: 'push', description: 'Push schema to local D1 (no migration files)' },
+  { name: 'push', description: 'Push schema to the development database (no migration files)' },
   { name: 'generate', description: 'Generate SQL migrations from schema changes' },
   { name: 'status', description: 'Show migration status (local + remote)' },
   { name: 'reset', description: 'Reset local DB and re-run migrations' },
@@ -96,6 +96,23 @@ const MAX_POSITIONALS: Record<DbArgs['action'], number> = {
   export: 0,
 };
 
+// Flags each action reads. Every other flag stops the command, so `reset --remote` cannot
+// quietly act on the local database.
+const ACTION_FLAGS: Record<DbArgs['action'], Array<string>> = {
+  push: [],
+  generate: [],
+  status: [],
+  reset: ['yes'],
+  seed: ['file', 'yes'],
+  execute: ['file', 'remote'],
+  migrate: ['remote'],
+  studio: ['remote'],
+  'set-url': [],
+  connect: ['provider', 'name', 'region', 'local-only'],
+  'rename-migrations': [],
+  export: ['output', 'no-data', 'no-schema', 'table'],
+};
+
 function isDbAction(value: string | undefined): value is DbArgs['action'] {
   return value !== undefined && Object.hasOwn(MAX_POSITIONALS, value);
 }
@@ -130,6 +147,10 @@ export function parseDbArgs(args: Array<string>): DbArgs {
     throw new Error(
       'db: `void db export` reads only the local database; --remote is not supported.',
     );
+  }
+  const unsupported = Object.keys(values).find((flag) => !ACTION_FLAGS[action].includes(flag));
+  if (unsupported) {
+    throw new Error(`db: \`void db ${action}\` does not support --${unsupported}.`);
   }
   const maxPositionals = MAX_POSITIONALS[action];
   if (rest.length > maxPositionals) {

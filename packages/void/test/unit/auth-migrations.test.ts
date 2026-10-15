@@ -1,11 +1,76 @@
-import { describe, expect, it } from 'vite-plus/test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+import { PGlite } from '@electric-sql/pglite';
+import type { DBFieldAttribute } from 'better-auth/db';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
 import type { VoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
 import { resolveVoidAuthMigrationSchema } from '../../src/auth/drizzle.ts';
+import { runLocalVoidAuthMigrations } from '../../src/auth/node.ts';
+import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
 import {
   applyMySqlAuthMigrations,
   applyPgAuthMigrations,
   applySqliteAuthMigrations,
+  pgMigrationRunner,
 } from '../../src/runtime/auth-migrations.ts';
+
+// PGlite serves the `pg` clients, and each client records the database it names.
+const state = vi.hoisted(() => ({ pg: null as PGlite | null, connections: [] as Array<string> }));
+vi.mock('pg', () => ({
+  Client: class {
+    constructor(options: { connectionString: string }) {
+      state.connections.push(options.connectionString);
+    }
+    async connect() {}
+    async end() {}
+    query(sql: string, params?: Array<unknown>) {
+      return state.pg!.query(sql, params);
+    }
+  },
+}));
+
+beforeAll(async () => {
+  // Load PostgreSQL once: Windows' cold WASM startup belongs to the hook budget.
+  state.pg = new PGlite();
+  await state.pg.waitReady;
+}, 30_000);
+beforeEach(async () => {
+  await state.pg!.exec('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
+});
+afterAll(async () => {
+  await state.pg?.close();
+  state.pg = null;
+});
+
+function resolveWithUserFields(
+  dialect: VoidAuthMigrationSchema['dialect'],
+  additionalFields: Record<string, DBFieldAttribute> = {},
+): VoidAuthMigrationSchema {
+  return resolveVoidAuthMigrationSchema({
+    dialect,
+    providers: null,
+    userConfig: ({ defaults }) => ({ ...defaults, user: { additionalFields } }),
+  });
+}
+
+function sqliteRunner(db: DatabaseSync) {
+  return {
+    async all<T extends Record<string, unknown>>(sql: string) {
+      return db.prepare(sql).all() as Array<T>;
+    },
+    async run(sql: string) {
+      db.prepare(sql).run();
+    },
+  };
+}
+
+function sqliteColumns(db: DatabaseSync, table: string): Array<string> {
+  return (db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>).map(
+    (column) => column.name,
+  );
+}
 
 describe('auth migration runner', () => {
   it('applies the sqlite auth schema idempotently', async () => {
@@ -91,6 +156,39 @@ describe('auth migration runner', () => {
     expect(statements[1]).toContain(
       'CREATE UNIQUE INDEX IF NOT EXISTS "user_email_uidx" ON "user" ("email")',
     );
+  });
+
+  it('gives postgres uuid auth ids a random default', async () => {
+    const statements: Array<string> = [];
+    const schema = resolveVoidAuthMigrationSchema({
+      dialect: 'postgresql',
+      providers: null,
+      userConfig: ({ defaults }) => ({
+        ...defaults,
+        advanced: { database: { generateId: 'uuid' } },
+      }),
+    });
+
+    await applyPgAuthMigrations(
+      {
+        async all<T extends Record<string, unknown>>(sql: string) {
+          if (sql.includes('current_schema')) {
+            return [{ schema: 'public' }] as unknown as Array<T>;
+          }
+          return [] as Array<T>;
+        },
+        async run(sql: string) {
+          statements.push(sql);
+        },
+      },
+      schema,
+    );
+
+    const session = statements.find(
+      (sql) => sql.startsWith('CREATE TABLE') && sql.includes('"session"'),
+    );
+    expect(session).toContain('"id" uuid DEFAULT gen_random_uuid() PRIMARY KEY NOT NULL');
+    expect(session).toContain('"userId" uuid NOT NULL REFERENCES');
   });
 
   it('uses string-literal table names for sqlite PRAGMA introspection', async () => {
@@ -283,5 +381,208 @@ describe('auth migration runner', () => {
     );
 
     expect(statements).toEqual(['ALTER TABLE `user` ADD COLUMN `nickname` varchar(255)']);
+  });
+
+  it('fills rows that exist with the fixed default of a new required field (sqlite)', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(':memory:');
+    try {
+      const runner = sqliteRunner(db);
+      await applySqliteAuthMigrations(runner, resolveWithUserFields('sqlite'));
+      db.prepare(
+        "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u1', 'A', 'a@example.com', 0, 0, 0)",
+      ).run();
+
+      await applySqliteAuthMigrations(
+        runner,
+        resolveWithUserFields('sqlite', {
+          plan: { type: 'string', defaultValue: 'free' },
+          banned: { type: 'boolean', defaultValue: false },
+          credits: { type: 'number', defaultValue: -3 },
+        }),
+      );
+
+      expect(db.prepare('SELECT plan, banned, credits FROM user').get()).toEqual({
+        plan: 'free',
+        banned: 0,
+        credits: -3,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('fills rows that exist with the fixed default of a new required field (postgres)', async () => {
+    const pg = state.pg!;
+    const runner = pgMigrationRunner(pg);
+    await applyPgAuthMigrations(runner, resolveWithUserFields('postgresql'));
+    await pg.query(
+      `INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ('u1', 'A', 'a@example.com', false, now(), now())`,
+    );
+
+    await applyPgAuthMigrations(
+      runner,
+      resolveWithUserFields('postgresql', {
+        plan: { type: 'string', defaultValue: "it's free" },
+        banned: { type: 'boolean', defaultValue: true },
+      }),
+    );
+
+    expect((await pg.query('SELECT plan, banned FROM "user"')).rows).toEqual([
+      { plan: "it's free", banned: true },
+    ]);
+  });
+
+  it('refuses a required field without a default only when the table has rows', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(':memory:');
+    try {
+      const runner = sqliteRunner(db);
+      await applySqliteAuthMigrations(runner, resolveWithUserFields('sqlite'));
+      // An empty table takes the column: no row needs a value.
+      await applySqliteAuthMigrations(
+        runner,
+        resolveWithUserFields('sqlite', { nickname: { type: 'string' } }),
+      );
+      expect(sqliteColumns(db, 'user')).toContain('nickname');
+      db.prepare(
+        "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt, nickname) VALUES ('u1', 'A', 'a@example.com', 0, 0, 0, 'a')",
+      ).run();
+
+      await expect(
+        applySqliteAuthMigrations(
+          runner,
+          resolveWithUserFields('sqlite', {
+            nickname: { type: 'string' },
+            plan: { type: 'string' },
+          }),
+        ),
+      ).rejects.toThrow(
+        'Cannot add required auth field "plan" to table "user": the table has rows, and there is no fixed default value to fill them. Set `required: false` on the field.',
+      );
+      expect(sqliteColumns(db, 'user')).not.toContain('plan');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses a required postgres field without a default when the table has rows', async () => {
+    const pg = state.pg!;
+    const runner = pgMigrationRunner(pg);
+    await applyPgAuthMigrations(runner, resolveWithUserFields('postgresql'));
+    await pg.query(
+      `INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ('u1', 'A', 'a@example.com', false, now(), now())`,
+    );
+
+    await expect(
+      applyPgAuthMigrations(
+        runner,
+        resolveWithUserFields('postgresql', { plan: { type: 'string' } }),
+      ),
+    ).rejects.toThrow(
+      'Cannot add required auth field "plan" to table "user": the table has rows, and there is no fixed default value to fill them. Set `required: false` on the field.',
+    );
+    const columns = await pg.query<{ column_name: string }>(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'user'",
+    );
+    expect(columns.rows.map((row) => row.column_name)).not.toContain('plan');
+  });
+
+  it('adds a new required MySQL column with its fixed default', async () => {
+    const statements: Array<string> = [];
+    const resolved = resolveWithUserFields('mysql', {
+      plan: { type: 'string', defaultValue: 'free' },
+      motto: { type: 'string', defaultValue: "it's a\\b" },
+      nickname: { type: 'string' },
+    });
+    const user = resolved.tables.find((table) => table.name === 'user')!;
+    const existing = ['id', 'name', 'email', 'emailVerified', 'image', 'createdAt', 'updatedAt'];
+
+    await applyMySqlAuthMigrations(
+      {
+        async all<T extends Record<string, unknown>>(sql: string) {
+          if (sql.includes('SELECT DATABASE()')) {
+            return [{ database_name: 'app' }] as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.tables')) {
+            return [{ table_name: 'user' }] as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.columns')) {
+            return existing.map((column_name) => ({
+              column_name,
+              data_type: 'varchar',
+            })) as unknown as Array<T>;
+          }
+          if (sql.includes('information_schema.statistics')) {
+            return [{ index_name: 'user_email_uidx' }] as unknown as Array<T>;
+          }
+          // The user table has rows.
+          return [{ present: 1 }] as unknown as Array<T>;
+        },
+        async run(sql: string) {
+          statements.push(sql);
+        },
+      },
+      { ...resolved, tables: [user] },
+    );
+
+    expect(statements).toEqual([
+      "ALTER TABLE `user` ADD COLUMN `plan` varchar(255) NOT NULL DEFAULT 'free'",
+      "ALTER TABLE `user` ADD COLUMN `motto` varchar(255) NOT NULL DEFAULT 'it''s a\\\\b'",
+      'ALTER TABLE `user` ADD COLUMN `nickname` varchar(255) NOT NULL',
+    ]);
+  });
+});
+
+describe('runLocalVoidAuthMigrations', () => {
+  it('creates the local D1 directory on the first dev run', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-migrations-'));
+    try {
+      const persistRoot = join(root, '.void');
+      await runLocalVoidAuthMigrations(root, 'sqlite', persistRoot, 'local', null);
+
+      const { DatabaseSync } = await import('node:sqlite');
+      const db = new DatabaseSync(getMiniflareDatabasePath(persistRoot, 'local'));
+      try {
+        const tables = db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+          .all() as Array<{ name: string }>;
+        expect(tables.map((table) => table.name)).toEqual([
+          'account',
+          'session',
+          'user',
+          'verification',
+        ]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // An empty DATABASE_URL in the shell counts as unset, so the one in .env is used.
+  it('uses DATABASE_URL from .env when the shell value is empty', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-migrations-'));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL=postgres://localhost/app\n');
+    vi.stubEnv('DATABASE_URL', '');
+    state.connections.length = 0;
+    try {
+      await runLocalVoidAuthMigrations(root, 'postgresql', join(root, '.void'), 'local', null);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    expect(state.connections).toEqual(['postgres://localhost/app']);
+    const tables = await state.pg!.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([
+      'account',
+      'session',
+      'user',
+      'verification',
+    ]);
   });
 });

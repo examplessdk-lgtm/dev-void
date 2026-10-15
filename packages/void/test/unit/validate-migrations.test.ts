@@ -439,4 +439,26 @@ describe('assertJournalCoherence', () => {
     expect(message).toContain('duplicate');
     expect(message).toContain('0000_initial');
   });
+
+  it('names files under the source directory', () => {
+    const sourceRelative = (path: string) => `src/${path}`;
+
+    writeJournal(['0000_initial']);
+    expect(() =>
+      assertJournalCoherence(
+        migrationsDir,
+        [
+          { name: '0000_initial.sql', sql: 'CREATE TABLE posts (id TEXT);' },
+          { name: '0001_orphan.sql', sql: 'SELECT 1;' },
+        ],
+        sourceRelative,
+      ),
+    ).toThrow('  - src/db/migrations/0001_orphan.sql');
+
+    rmSync(join(migrationsDir, 'meta', '_journal.json'));
+    writeFileSync(join(migrationsDir, 'meta', '0000_snapshot.json'), JSON.stringify({ id: 'abc' }));
+    expect(() => assertJournalCoherence(migrationsDir, [], sourceRelative)).toThrow(
+      'src/db/migrations/meta/0000_snapshot.json',
+    );
+  });
 });

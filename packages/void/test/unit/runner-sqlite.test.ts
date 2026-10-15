@@ -148,9 +148,16 @@ describe('runMigrations (local SQLite)', () => {
 
     writeMigration(migDir, '001_init.sql', 'CREATE TABLE users (id TEXT PRIMARY KEY)');
 
-    await expect(runMigrations(migDir, dbPath)).rejects.toThrow(
-      'Local database migration history does not match db/migrations/.',
+    const error = await runMigrations(migDir, dbPath, (path) => `src/${path}`).catch(
+      (caught: unknown) => caught,
     );
+    const message = (error as Error).message;
+    expect(message).toContain(
+      'Local database migration history does not match src/db/migrations/.',
+    );
+    // Renaming files back is the fix; rename-migrations cannot help once the files are renamed.
+    expect(message).toContain('restore their old names');
+    expect(message).not.toContain('rename-migrations');
   });
 
   it('applies multi-statement migrations in order', async () => {

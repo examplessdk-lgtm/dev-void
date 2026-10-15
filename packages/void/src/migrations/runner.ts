@@ -182,6 +182,7 @@ function assertLocalMigrationState(
   migrations: Array<{ name: string; sql: string }>,
   appliedNames: Set<string>,
   applicationTables: Array<string>,
+  dir: string,
 ): void {
   const migrationNames = new Set(migrations.map((migration) => migration.name));
   const missingFiles = [...appliedNames].filter((name) => !migrationNames.has(name)).sort();
@@ -189,12 +190,12 @@ function assertLocalMigrationState(
   if (missingFiles.length > 0) {
     throw new Error(
       [
-        'Local database migration history does not match db/migrations/.',
+        `Local database migration history does not match ${dir}/.`,
         '',
         'These migrations are recorded as applied locally but no longer exist on disk:',
         ...missingFiles.map((name) => `  - ${name}`),
         '',
-        'If the migration files were renamed, run `void db rename-migrations`.',
+        'If the migration files were renamed, restore their old names.',
         'If the migration history was intentionally rewritten, run `void db reset` to recreate the local database from the current files.',
       ].join('\n'),
     );
@@ -208,7 +209,7 @@ function assertLocalMigrationState(
         `Existing tables: ${applicationTables.join(', ')}`,
         '',
         'This usually means the schema was applied with `void db push` or the local database was created before migration tracking existed.',
-        'Run `void db reset` to recreate the local database from db/migrations/, or delete the local D1 state if you do not need its data.',
+        `Run \`void db reset\` to recreate the local database from ${dir}/, or delete the local D1 state if you do not need its data.`,
       ].join('\n'),
     );
   }
@@ -217,8 +218,14 @@ function assertLocalMigrationState(
 /**
  * Apply pending SQL migrations and record them in `_void_migrations`.
  * Each file runs through one `exec` so SQLite parses multi-statement SQL itself.
+ * `sourceRelative` (`ProjectPaths.sourceRelative`) adds the configured `sourceDir` to the
+ * migrations folder that errors name.
  */
-export async function runMigrations(migrationsDir: string, dbPath: string): Promise<Array<string>> {
+export async function runMigrations(
+  migrationsDir: string,
+  dbPath: string,
+  sourceRelative: (path: string) => string = (path) => path,
+): Promise<Array<string>> {
   const allMigrations = collectMigrations(migrationsDir);
   if (allMigrations.length === 0) {
     return [];
@@ -245,7 +252,12 @@ export async function runMigrations(migrationsDir: string, dbPath: string): Prom
     );
     const applicationTables = getApplicationTableNames(db);
 
-    assertLocalMigrationState(allMigrations, appliedSet, applicationTables);
+    assertLocalMigrationState(
+      allMigrations,
+      appliedSet,
+      applicationTables,
+      sourceRelative('db/migrations'),
+    );
 
     const pending = allMigrations.filter((m) => !appliedSet.has(m.name));
     if (pending.length === 0) {

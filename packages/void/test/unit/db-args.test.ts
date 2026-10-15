@@ -131,6 +131,24 @@ describe('parseDbArgs', () => {
     );
   });
 
+  it('rejects flags the action does not use', () => {
+    expect(() => parseDbArgs(['reset', '--remote'])).toThrow(
+      'db: `void db reset` does not support --remote.',
+    );
+    expect(() => parseDbArgs(['seed', '--remote'])).toThrow(
+      'db: `void db seed` does not support --remote.',
+    );
+    expect(() => parseDbArgs(['push', '--remote'])).toThrow(
+      'db: `void db push` does not support --remote.',
+    );
+    expect(() => parseDbArgs(['migrate', '--file', 'x.sql'])).toThrow(
+      'db: `void db migrate` does not support --file.',
+    );
+    expect(() => parseDbArgs(['status', '--yes'])).toThrow(
+      'db: `void db status` does not support --yes.',
+    );
+  });
+
   it('parses studio', () => {
     expect(parseDbArgs(['studio'])).toEqual({ action: 'studio', remote: undefined });
   });

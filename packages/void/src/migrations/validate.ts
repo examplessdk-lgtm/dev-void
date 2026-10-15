@@ -123,13 +123,17 @@ export function validateMigrations(
 /**
  * Enumerate drizzle-kit metadata artifacts in a migrations directory.
  * Returns repo-relative paths like `db/migrations/meta/0000_snapshot.json`
- * and `db/migrations/migrations.js`. Empty when none are present.
+ * and `db/migrations/migrations.js`, passed through `sourceRelative` so they
+ * include the configured `sourceDir`. Empty when none are present.
  *
  * Shared across `assertJournalCoherence`, `void gen migration`, and
  * `void db rename-migrations` so all three agree on what counts as a
  * "partial drizzle-kit state" (journal gone but other metadata lingering).
  */
-export function listDrizzleArtifacts(migrationsDir: string): Array<string> {
+export function listDrizzleArtifacts(
+  migrationsDir: string,
+  sourceRelative: (path: string) => string = (path) => path,
+): Array<string> {
   const metaDir = join(migrationsDir, 'meta');
   const snapshotFiles = existsSync(metaDir)
     ? readdirSync(metaDir).filter((f) => f.endsWith('_snapshot.json'))
@@ -137,10 +141,10 @@ export function listDrizzleArtifacts(migrationsDir: string): Array<string> {
   const bundledPath = join(migrationsDir, 'migrations.js');
   const out: Array<string> = [];
   for (const f of snapshotFiles) {
-    out.push(`db/migrations/meta/${f}`);
+    out.push(sourceRelative(`db/migrations/meta/${f}`));
   }
   if (existsSync(bundledPath)) {
-    out.push('db/migrations/migrations.js');
+    out.push(sourceRelative('db/migrations/migrations.js'));
   }
   return out;
 }
@@ -156,13 +160,18 @@ export function listDrizzleArtifacts(migrationsDir: string): Array<string> {
  * hand-written `.sql` projects without `db/schema.ts` are supported and are
  * tracked by filename in `_void_migrations`. They cannot run
  * `void db generate`, so the check is skipped for them.
+ *
+ * `sourceRelative` (`ProjectPaths.sourceRelative`) adds the configured
+ * `sourceDir` to the paths in error messages.
  */
 export function assertJournalCoherence(
   migrationsDir: string,
   collected: Array<{ name: string; sql: string }>,
+  sourceRelative: (path: string) => string = (path) => path,
 ): void {
-  const journal = readJournal(migrationsDir);
-  const drizzleArtifacts = listDrizzleArtifacts(migrationsDir);
+  const dir = sourceRelative('db/migrations');
+  const journal = readJournal(migrationsDir, sourceRelative);
+  const drizzleArtifacts = listDrizzleArtifacts(migrationsDir, sourceRelative);
 
   // `undefined` means the file is absent. Parseable scalars such as `null` or
   // `false` are malformed journals, not missing ones, so avoid a falsy check.
@@ -172,7 +181,7 @@ export function assertJournalCoherence(
     if (drizzleArtifacts.length > 0) {
       throw new Error(
         [
-          'db/migrations/meta/_journal.json is missing, but other drizzle-kit metadata is still present:',
+          `${dir}/meta/_journal.json is missing, but other drizzle-kit metadata is still present:`,
           ...drizzleArtifacts.map((p) => `  - ${p}`),
           '',
           'This is a partial drizzle-kit state. Restore _journal.json from version control, or delete the orphaned metadata files above if you intended to revert to hand-written migrations.',
@@ -193,7 +202,7 @@ export function assertJournalCoherence(
     !Array.isArray((journal as DrizzleJournal).entries)
   ) {
     throw new Error(
-      'db/migrations/meta/_journal.json is malformed: expected an object with string `version`, string `dialect`, and an `entries` array. Restore the file from version control, or delete it if you intended to revert to hand-written migrations.',
+      `${dir}/meta/_journal.json is malformed: expected an object with string \`version\`, string \`dialect\`, and an \`entries\` array. Restore the file from version control, or delete it if you intended to revert to hand-written migrations.`,
     );
   }
 
@@ -211,7 +220,7 @@ export function assertJournalCoherence(
       typeof (entry as DrizzleJournalEntry).breakpoints !== 'boolean'
     ) {
       throw new Error(
-        `db/migrations/meta/_journal.json is malformed: entry at index ${i} is missing required fields (\`idx\`, \`version\`, \`tag\`, \`breakpoints\`). Restore the file from version control, or delete it if you intended to revert to hand-written migrations.`,
+        `${dir}/meta/_journal.json is malformed: entry at index ${i} is missing required fields (\`idx\`, \`version\`, \`tag\`, \`breakpoints\`). Restore the file from version control, or delete it if you intended to revert to hand-written migrations.`,
       );
     }
   }
@@ -225,7 +234,7 @@ export function assertJournalCoherence(
     }
     throw new Error(
       [
-        'db/migrations/meta/_journal.json has no entries, but drizzle-kit metadata is still present:',
+        `${dir}/meta/_journal.json has no entries, but drizzle-kit metadata is still present:`,
         ...drizzleArtifacts.map((p) => `  - ${p}`),
         '',
         'This is a partial drizzle-kit state. Restore _journal.json from version control (or run `void db generate`), or delete the orphaned metadata files above if you intended to revert to hand-written migrations.',
@@ -243,7 +252,7 @@ export function assertJournalCoherence(
   if (duplicateTags.length > 0) {
     throw new Error(
       [
-        'db/migrations/meta/_journal.json has duplicate migration entries:',
+        `${dir}/meta/_journal.json has duplicate migration entries:`,
         ...duplicateTags.map((t) => `  - ${t} (appears ${tagCounts.get(t)} times)`),
         '',
         'Each migration must have a unique tag. Restore _journal.json from version control, or hand-edit to remove the duplicates.',
@@ -266,22 +275,22 @@ export function assertJournalCoherence(
   }
 
   const lines: Array<string> = [
-    'Migration drift detected between db/migrations/ and db/migrations/meta/_journal.json.',
+    `Migration drift detected between ${dir}/ and ${dir}/meta/_journal.json.`,
   ];
   if (orphans.length > 0) {
     lines.push('', 'These files exist on disk but are not tracked in _journal.json:');
     for (const f of orphans) {
-      lines.push(`  - db/migrations/${f}`);
+      lines.push(`  - ${dir}/${f}`);
     }
     lines.push(
       '',
-      'Delete the orphan file(s), or move their contents into `db/schema.ts` and re-run `void db generate`.',
+      `Delete the orphan file(s), or move their contents into \`${sourceRelative('db/schema.ts')}\` and re-run \`void db generate\`.`,
     );
   }
   if (missing.length > 0) {
     lines.push('', 'These entries are in _journal.json but the matching file is missing:');
     for (const f of missing) {
-      lines.push(`  - db/migrations/${f}`);
+      lines.push(`  - ${dir}/${f}`);
     }
     lines.push('', 'Restore the missing file(s) from version control, or regenerate migrations.');
   }

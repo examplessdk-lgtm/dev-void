@@ -37,9 +37,13 @@ export type DrizzleJournal = {
  * Read `db/migrations/meta/_journal.json` if it exists. Drizzle maintains
  * this file whenever `drizzle-kit generate` runs; every `.sql` migration
  * under `db/migrations/` should correspond to an entry whose `tag` is the
- * filename without the `.sql` suffix.
+ * filename without the `.sql` suffix. `sourceRelative` adds the configured
+ * `sourceDir` to the path in the parse error.
  */
-export function readJournal(migrationsDir: string): DrizzleJournal | undefined {
+export function readJournal(
+  migrationsDir: string,
+  sourceRelative: (path: string) => string = (path) => path,
+): DrizzleJournal | undefined {
   const journalPath = join(migrationsDir, 'meta', '_journal.json');
   if (!existsSync(journalPath)) {
     return undefined;
@@ -48,7 +52,7 @@ export function readJournal(migrationsDir: string): DrizzleJournal | undefined {
     return JSON.parse(readFileSync(journalPath, 'utf-8')) as DrizzleJournal;
   } catch (err) {
     throw new Error(
-      `db: Failed to parse db/migrations/meta/_journal.json: '${(err as Error).message}'.`,
+      `db: Failed to parse ${sourceRelative('db/migrations/meta/_journal.json')}: '${(err as Error).message}'.`,
     );
   }
 }

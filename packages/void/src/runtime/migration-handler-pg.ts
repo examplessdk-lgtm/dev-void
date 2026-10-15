@@ -20,7 +20,19 @@ export function createMigrationHandler(
     try {
       const result = await runPgMigrations(env, migrations);
       if (result.ok && runAuthMigrations) {
-        await runAuthMigrations();
+        // The files are already committed, so a Better Auth failure still reports them.
+        try {
+          await runAuthMigrations();
+        } catch (err) {
+          return Response.json(
+            {
+              ...result,
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            } satisfies MigrationResponse,
+            { status: 500 },
+          );
+        }
       }
       return Response.json(result);
     } catch (err) {

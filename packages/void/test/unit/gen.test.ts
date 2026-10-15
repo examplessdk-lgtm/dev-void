@@ -452,6 +452,28 @@ describe('gen model', () => {
     expect(read('.void/db.d.ts')).toContain('NodePgDatabase<Schema>');
   });
 
+  it('writes every file .void/tsconfig.json lists in a project with routes and queues', async () => {
+    writePkg({ valibot: '^1.0.0' });
+    mkdirSync(join(TMP, 'routes', 'api'), { recursive: true });
+    writeFileSync(join(TMP, 'routes', 'api', 'hello.ts'), 'export const GET = () => "hi";\n');
+    mkdirSync(join(TMP, 'queues'), { recursive: true });
+    writeFileSync(join(TMP, 'queues', 'emails.ts'), 'export default async () => {};\n');
+
+    await runGenCommand(TMP, {
+      subcommand: 'model',
+      name: 'posts',
+      columns: [{ name: 'title', type: 'string', nullable: false }],
+    });
+
+    const tsconfig = JSON.parse(read('.void/tsconfig.json')) as { files: Array<string> };
+    expect(tsconfig.files).toEqual(
+      expect.arrayContaining(['routes.d.ts', 'db.d.ts', 'queues.d.ts']),
+    );
+    for (const file of tsconfig.files) {
+      expect(existsSync(join(TMP, '.void', file)), file).toBe(true);
+    }
+  });
+
   it('skips existing files without overwriting', async () => {
     writePkg({ valibot: '^1.0.0' });
     const routePath = join(TMP, 'routes/api/posts/index.ts');

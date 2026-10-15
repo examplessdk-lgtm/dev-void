@@ -5,7 +5,7 @@ import {
   resolveD1MigrateTarget,
   assertCloudflareDurableObjectLifecycleSupported,
 } from '@void/deploy-cloudflare';
-import { dirname } from 'pathslash';
+import { dirname, relative } from 'pathslash';
 import { type VoidConfig } from '../config.ts';
 import { collectMigrations } from '../migrations/collect.ts';
 import { SqliteMigrationError } from '../migrations/sqlite-validation.ts';
@@ -311,6 +311,7 @@ export async function buildCloudflareWorker(input: {
         desired.d1.binding,
         d1MigrationsDir,
         migrations,
+        relative(root, migrationsDir),
       );
       if (!applyCheck.ok) {
         log.error(applyCheck.reason);

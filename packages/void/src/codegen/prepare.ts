@@ -64,7 +64,9 @@ export async function prepareProject(root: string): Promise<PrepareProjectResult
     removeGeneratedFile(outDir, 'routes.d.ts', removed);
   }
 
-  if (scan.queues.length > 0) {
+  // .void/tsconfig.json lists queues.d.ts whenever the queues directory exists,
+  // so write it then, even with no queue files.
+  if (existsSync(paths.queuesDir)) {
     const dts = generateQueueTypes(scan.queues, paths.queuesDir, outDir);
     writeGeneratedFile(outDir, 'queues.d.ts', dts, written);
   } else {

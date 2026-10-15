@@ -21,14 +21,16 @@ export function createMigrationHandler(
       );
     }
 
+    // A later failure, such as Better Auth's step, still reports the files that committed.
+    const results: Array<MigrationResult> = [];
     try {
-      return Response.json(await runMySqlMigrations(env, migrations, runAuthMigrations));
+      return Response.json(await runMySqlMigrations(env, migrations, results, runAuthMigrations));
     } catch (error) {
       return Response.json(
         {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
-          migrations: [],
+          migrations: results,
         } satisfies MigrationResponse,
         { status: 500 },
       );
@@ -39,6 +41,7 @@ export function createMigrationHandler(
 async function runMySqlMigrations(
   env: Record<string, unknown>,
   migrations: Array<MigrationEntry>,
+  results: Array<MigrationResult>,
   runAuthMigrations?: () => Promise<void>,
 ): Promise<MigrationResponse> {
   const hyperdrive = env.HYPERDRIVE as { connectionString?: string } | undefined;
@@ -69,7 +72,6 @@ async function runMySqlMigrations(
     );
     const [rows] = await connection.query('SELECT `name` FROM `_void_migrations`');
     const applied = new Set((rows as Array<{ name: string }>).map((row) => String(row.name)));
-    const results: Array<MigrationResult> = [];
 
     for (const migration of migrations) {
       if (applied.has(migration.name)) {

@@ -570,6 +570,21 @@ describe('Cloudflare D1 operations', () => {
     });
   });
 
+  it('leaves migrationsDir unset when the D1 binding has none', () => {
+    const root = project(`{
+  "name": "my-worker",
+  "account_id": "account-1",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "my-data",
+    "database_id": "11111111-2222-3333-4444-555555555555"
+  }]
+}\n`);
+    const ctx = resolveCloudflareD1Context(root, 'DB', vi.fn<CloudflareOperationRunner>());
+    expect(ctx.migrationsDir).toBeUndefined();
+    expect(ctx.migrationsTable).toBe('d1_migrations');
+  });
+
   it('reads applied migration names from a custom tracking table', async () => {
     const runner = vi
       .fn<CloudflareOperationRunner>()

@@ -13,6 +13,7 @@ const mockLog = {
   info: vi.fn(),
   step: vi.fn(),
   success: vi.fn(),
+  warn: vi.fn(),
 };
 const mockGetMiniflareDatabasePath = vi.fn();
 const mockGetAppliedMigrations = vi.fn();
@@ -30,6 +31,7 @@ vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
     info: (...args: Array<unknown>) => mockLog.info(...args),
     step: (...args: Array<unknown>) => mockLog.step(...args),
     success: (...args: Array<unknown>) => mockLog.success(...args),
+    warn: (...args: Array<unknown>) => mockLog.warn(...args),
   },
 }));
 
@@ -41,11 +43,14 @@ vi.mock('../../src/migrations/runner', () => ({
 
 vi.mock('../../src/migrations/runner-pg', () => ({
   getPgAppliedMigrations: (...args: Array<unknown>) => mockGetPgAppliedMigrations(...args),
+  readPgAppliedMigrations: vi.fn(),
   runPgMigrations: (...args: Array<unknown>) => mockRunPgMigrations(...args),
 }));
 
 vi.mock('../../src/migrations/runner-mysql', () => ({
   getMySqlAppliedMigrations: (...args: Array<unknown>) => mockGetMySqlAppliedMigrations(...args),
+  readMySqlAppliedMigrations: vi.fn(),
+  toMySqlClient: vi.fn(),
   runMySqlMigrations: (...args: Array<unknown>) => mockRunMySqlMigrations(...args),
 }));
 
@@ -135,6 +140,17 @@ function selectCloudflare(root: string): void {
   );
 }
 
+const mockReadCloudflareD1Migrations = vi.fn();
+const mockApplyCloudflareD1Migrations = vi.fn();
+
+// The D1 context still comes from the real config reader; only the Cloudflare calls are fake.
+vi.mock('../../src/cli/cloudflare-operations.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/cli/cloudflare-operations.ts')>()),
+  readCloudflareD1Migrations: (...args: Array<unknown>) => mockReadCloudflareD1Migrations(...args),
+  applyCloudflareD1Migrations: (...args: Array<unknown>) =>
+    mockApplyCloudflareD1Migrations(...args),
+}));
+
 describe('void db migrate', () => {
   let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
 
@@ -188,6 +204,7 @@ describe('void db migrate', () => {
     expect(mockRunMigrations).toHaveBeenCalledWith(
       toSlash(join(root, 'db', 'migrations')),
       join(tmpdir(), 'void-db-migrate.sqlite'),
+      expect.any(Function),
     );
     expect(output.printSuccess).toHaveBeenCalledWith('Applied 1 migration.');
   });
@@ -221,6 +238,38 @@ describe('void db migrate', () => {
     );
     expect(mockGetAppliedMigrations).not.toHaveBeenCalled();
     expect(mockRunMigrations).not.toHaveBeenCalled();
+  });
+
+  it('refuses remote D1 migrate when the binding has no migrations_dir', async () => {
+    const root = createProjectRoot({
+      '001_create_users.sql': 'CREATE TABLE users (id integer primary key);',
+    });
+    writeFileSync(
+      join(root, 'wrangler.jsonc'),
+      JSON.stringify({
+        name: 'linked-worker',
+        account_id: 'acc1',
+        d1_databases: [
+          {
+            binding: 'DB',
+            database_name: 'app-db',
+            database_id: '3f2a9c1e-0000-4000-8000-000000000000',
+          },
+        ],
+      }),
+    );
+    // Cloudflare's default folder holds SQL that Void never checked.
+    mkdirSync(join(root, 'migrations'));
+    writeFileSync(join(root, 'migrations', '0001_legacy.sql'), 'DROP TABLE users;');
+    selectCloudflare(root);
+    mockReadCloudflareD1Migrations.mockResolvedValue([]);
+
+    await expect(runDbCommand(root, { action: 'migrate', remote: true })).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('"migrations_dir"'));
+    expect(mockApplyCloudflareD1Migrations).not.toHaveBeenCalled();
   });
 
   it('applies pending PostgreSQL migrations directly for a Cloudflare target', async () => {
@@ -270,8 +319,11 @@ describe('void db migrate', () => {
     await runDbCommand(root, { action: 'status' });
 
     expect(mockGetPgAppliedMigrations).toHaveBeenCalledWith(process.env.DATABASE_URL);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.stringContaining('DATABASE_URL not found in .env'),
+    );
     expect(infoMessagesWithoutColor()).toContain(
-      '  001_create_users.sql  local: pending  remote: applied',
+      '  001_create_users.sql  local: unknown  remote: applied',
     );
   });
 
@@ -286,8 +338,51 @@ describe('void db migrate', () => {
     await runDbCommand(root, { action: 'status' });
 
     expect(mockGetMySqlAppliedMigrations).toHaveBeenCalledWith(process.env.DATABASE_URL);
-    expect(infoMessagesWithoutColor()).toContain(
-      '  001_create_users.sql  local: pending  remote: applied',
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.stringContaining('DATABASE_URL not found in .env'),
     );
+    expect(infoMessagesWithoutColor()).toContain(
+      '  001_create_users.sql  local: unknown  remote: applied',
+    );
+  });
+
+  it('counts pending files, not tracked names, in the status summary', async () => {
+    // Another branch applied 002 and 003, which are not on disk here.
+    const root = createProjectRoot({
+      '001_a.sql': 'CREATE TABLE a (id integer);',
+      '004_d.sql': 'CREATE TABLE d (id integer);',
+    });
+    mockGetAppliedMigrations.mockResolvedValue(
+      ['001_a.sql', '002_b.sql', '003_c.sql'].map((name) => ({ name, applied_at: '' })),
+    );
+
+    await runDbCommand(root, { action: 'status' });
+
+    expect(mockOutro).toHaveBeenCalledWith('2 migrations, 1 pending locally');
+  });
+
+  it('names journal drift under sourceDir', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-db-migrate-'));
+    roots.push(root);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ sourceDir: 'src' }, null, 2) + '\n');
+    const migrationsDir = join(root, 'src', 'db', 'migrations');
+    mkdirSync(join(migrationsDir, 'meta'), { recursive: true });
+    writeFileSync(join(migrationsDir, '0000_init.sql'), 'CREATE TABLE a (id integer);');
+    writeFileSync(join(migrationsDir, '0001_orphan.sql'), 'CREATE TABLE b (id integer);');
+    writeFileSync(
+      join(migrationsDir, 'meta', '_journal.json'),
+      JSON.stringify({
+        version: '7',
+        dialect: 'sqlite',
+        entries: [{ idx: 0, version: '7', when: 0, tag: '0000_init', breakpoints: true }],
+      }),
+    );
+
+    await expect(runDbCommand(root, { action: 'migrate' })).rejects.toThrow('process.exit:1');
+
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.stringContaining('  - src/db/migrations/0001_orphan.sql'),
+    );
+    expect(mockRunMigrations).not.toHaveBeenCalled();
   });
 });

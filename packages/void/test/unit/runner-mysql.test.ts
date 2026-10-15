@@ -975,6 +975,27 @@ describe('MySQL Better Auth migrations under the lock', () => {
     expect(database.lease!.expiresAt).toBeLessThan(Date.now());
   });
 
+  it('reports the applied files when Better Auth migrations fail', async () => {
+    const database = useDatabase(new FakeMySqlDatabase());
+
+    const result = await migrate(
+      [{ name: '001_create.sql', sql: 'CREATE TABLE posts (id INT);' }],
+      async () => {
+        throw new Error('Better Auth migration failed');
+      },
+    );
+
+    expect(result).toEqual({
+      status: 500,
+      body: {
+        ok: false,
+        error: 'Better Auth migration failed',
+        migrations: [{ name: '001_create.sql', applied: true, durationMs: expect.any(Number) }],
+      },
+    });
+    expect(database.applied).toEqual(['001_create.sql']);
+  });
+
   it('does not start Better Auth migrations after another run took the lease', async () => {
     const database = useDatabase(new FakeMySqlDatabase());
     const query = database.query.bind(database);

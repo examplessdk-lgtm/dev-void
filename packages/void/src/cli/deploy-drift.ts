@@ -133,7 +133,7 @@ export function getDeploySchemaDriftMessage(root: string): string {
   }
 
   return [
-    'Schema drift detected between your Drizzle schema and db/migrations/.',
+    `Schema drift detected between your Drizzle schema and ${relative(root, migrationsDir)}/.`,
     'Run `void db generate`, review the generated migration, commit it yourself, then rerun `void deploy`.',
   ].join('\n');
 }

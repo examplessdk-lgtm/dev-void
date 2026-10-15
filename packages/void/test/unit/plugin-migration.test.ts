@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
 import { migrationPlugin } from '../../src/plugin-migration.ts';
@@ -240,5 +241,134 @@ describe('migrationPlugin with MySQL and Better Auth', () => {
     const failed = lines.findIndex((line) => line.includes('Better Auth migration failed'));
     expect(applied).toBeGreaterThanOrEqual(0);
     expect(failed).toBeGreaterThan(applied);
+  });
+});
+
+async function captureConsoleLog(run: () => Promise<void>): Promise<Array<string>> {
+  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    await run();
+    return log.mock.calls.map(([line]) => String(line));
+  } finally {
+    log.mockRestore();
+  }
+}
+
+describe('migrationPlugin with destructive migrations', () => {
+  // Like `void db migrate`, dev applies none of the pending files when one of them is
+  // destructive without the pragma, and the dev server still starts.
+  it('applies no SQLite migrations when a pending file is destructive without the pragma', async () => {
+    const root = createProjectRoot();
+    await runConfigureServer(migrationPlugin(root, 'sqlite'));
+    const dbPath = getMiniflareDatabasePath(join(root, '.void'), 'local');
+    const seed = new DatabaseSync(dbPath);
+    seed.exec("INSERT INTO users (name) VALUES ('a'), ('b'), ('c');");
+    seed.close();
+    const migrationsDir = join(root, 'db', 'migrations');
+    writeFileSync(join(migrationsDir, '002_create_posts.sql'), 'CREATE TABLE posts (id INTEGER);');
+    writeFileSync(join(migrationsDir, '003_wipe_users.sql'), 'DELETE FROM users;');
+
+    const lines = await captureConsoleLog(() =>
+      runConfigureServer(migrationPlugin(root, 'sqlite')),
+    );
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 3 });
+      expect(
+        db
+          .prepare('SELECT name FROM _void_migrations ORDER BY name')
+          .all()
+          .map((row) => row.name),
+      ).toEqual(['001_create_users.sql']);
+    } finally {
+      db.close();
+    }
+    expect(
+      lines.some(
+        (line) =>
+          line.includes('Destructive migrations detected without pragma') &&
+          line.includes('No migrations were applied'),
+      ),
+    ).toBe(true);
+  });
+
+  it('runs no MySQL migration or Better Auth step when a pending file is destructive without the pragma', async () => {
+    const root = createProjectRoot();
+    writeFileSync(join(root, 'db', 'migrations', '001_create_users.sql'), 'DELETE FROM users;');
+    writeFileSync(join(root, '.env'), 'DATABASE_URL=mysql://root@127.0.0.1:3306/app\n');
+    mysqlQueries.length = 0;
+
+    const lines = await captureConsoleLog(() =>
+      runConfigureServer(
+        migrationPlugin(root, 'mysql', 'local', join(root, '.void'), {
+          enabled: true,
+          configPath: null,
+        }),
+      ),
+    );
+
+    expect(mysqlQueries).not.toContain('DELETE FROM users;');
+    expect(mysqlQueries.some((sql) => sql.startsWith('INSERT INTO `_void_migrations`'))).toBe(
+      false,
+    );
+    expect(mysqlQueries).not.toContain('Better Auth migrations');
+    expect(
+      lines.some((line) => line.includes('Destructive migrations detected without pragma')),
+    ).toBe(true);
+  });
+});
+
+describe('migrationPlugin with PostgreSQL and Better Auth', () => {
+  it('reports a missing DATABASE_URL instead of logging success', async () => {
+    const root = createProjectRoot();
+    rmSync(join(root, 'db'), { recursive: true });
+    vi.stubEnv('DATABASE_URL', undefined);
+    mysqlSteps.length = 0;
+
+    let lines: Array<string>;
+    try {
+      lines = await captureConsoleLog(() =>
+        runConfigureServer(
+          migrationPlugin(root, 'postgresql', 'local', join(root, '.void'), {
+            enabled: true,
+            configPath: null,
+          }),
+        ),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(lines.some((line) => line.includes('DATABASE_URL not found'))).toBe(true);
+    expect(lines.some((line) => line.includes('Applied Better Auth migrations'))).toBe(false);
+    expect(mysqlSteps).toEqual([]);
+  });
+
+  // An empty DATABASE_URL in the shell counts as unset, so the one in .env is used.
+  it('uses DATABASE_URL from .env when the shell value is empty', async () => {
+    const root = createProjectRoot();
+    rmSync(join(root, 'db'), { recursive: true });
+    writeFileSync(join(root, '.env'), 'DATABASE_URL=postgres://localhost/app\n');
+    vi.stubEnv('DATABASE_URL', '');
+    mysqlSteps.length = 0;
+
+    let lines: Array<string>;
+    try {
+      lines = await captureConsoleLog(() =>
+        runConfigureServer(
+          migrationPlugin(root, 'postgresql', 'local', join(root, '.void'), {
+            enabled: true,
+            configPath: null,
+          }),
+        ),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(lines.some((line) => line.includes('DATABASE_URL not found'))).toBe(false);
+    expect(lines.some((line) => line.includes('Applied Better Auth migrations'))).toBe(true);
+    expect(mysqlSteps).toEqual(['auth (no URL)']);
   });
 });

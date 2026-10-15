@@ -153,12 +153,17 @@ async function withPgClient<T>(root: string, fn: (client: PgClient) => Promise<T
 async function withMySqlClient<T>(
   root: string,
   fn: (client: MySqlClient) => Promise<T>,
+  options: { textValues?: boolean } = {},
 ): Promise<T> {
   const { toMySqlClient } = await import('../migrations/runner-mysql.ts');
   const { createConnection } = await import('mysql2/promise');
   const connection = await createConnection({
     uri: getLocalDatabaseUrl(root, 'mysql'),
     multipleStatements: true,
+    // Read dates, JSON and large integers as MySQL's own text, not as JavaScript values.
+    ...(options.textValues
+      ? { dateStrings: true, jsonStrings: true, supportBigNumbers: true, bigNumberStrings: true }
+      : {}),
   });
   try {
     return await fn(toMySqlClient(connection));
@@ -417,7 +422,7 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
   const allMigrations = collectMigrations(migrationsDir);
 
   try {
-    assertJournalCoherence(migrationsDir, allMigrations);
+    assertJournalCoherence(migrationsDir, allMigrations, paths.sourceRelative);
   } catch (err: unknown) {
     log.error(getErrorMessage(err));
     process.exit(1);
@@ -429,27 +434,29 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
     return;
   }
 
-  let localApplied: Array<string>;
+  // A local database that cannot be read has an unknown status, not "pending".
+  let localApplied: Array<string> | undefined;
+  let localError: unknown;
   if (dialect === 'postgresql') {
     try {
       const { readPgAppliedMigrations } = await import('../migrations/runner-pg.ts');
       localApplied = await withPgClient(root, readPgAppliedMigrations);
-    } catch {
-      localApplied = [];
+    } catch (error) {
+      localError = error;
     }
   } else if (dialect === 'mysql') {
     try {
       const { readMySqlAppliedMigrations } = await import('../migrations/runner-mysql.ts');
       localApplied = await withMySqlClient(root, readMySqlAppliedMigrations);
-    } catch {
-      localApplied = [];
+    } catch (error) {
+      localError = error;
     }
   } else {
     const { getAppliedMigrations } = await import('../migrations/runner.ts');
     const { databasePath: dbPath } = getLocalD1Target(root);
     localApplied = (await getAppliedMigrations(dbPath)).map((m) => m.name);
   }
-  const localSet = new Set(localApplied);
+  const localSet = localApplied ? new Set(localApplied) : null;
 
   let remoteApplied: Array<{ name: string; applied_at: string }> | null = null;
   const deploymentPlatform = readDeploymentPlatform(root);
@@ -495,9 +502,23 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
   const remoteSet = remoteApplied ? new Set(remoteApplied.map((m) => m.name)) : null;
 
+  if (localSet === null) {
+    const message = `Local migration status is unavailable: ${getErrorMessage(localError)}`;
+    if (remoteSet === null) {
+      log.error(message);
+      process.exit(1);
+    }
+    log.warn(message);
+  }
+
   const lines: Array<string> = [];
   for (const migration of allMigrations) {
-    const localStatus = localSet.has(migration.name) ? pc.green('applied') : pc.yellow('pending');
+    const localStatus =
+      localSet === null
+        ? dim('unknown')
+        : localSet.has(migration.name)
+          ? pc.green('applied')
+          : pc.yellow('pending');
 
     let remotePart = '';
     if (remoteSet !== null) {
@@ -512,13 +533,16 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
   log.info(lines.join('\n'));
 
-  const localPending = allMigrations.length - localSet.size;
+  // Count files that are not applied; the database may record names that have no file here.
   const parts = [formatCount(allMigrations.length, 'migration')];
-  if (localPending > 0) {
-    parts.push(`${localPending} pending locally`);
+  if (localSet !== null) {
+    const localPending = allMigrations.filter((m) => !localSet.has(m.name)).length;
+    if (localPending > 0) {
+      parts.push(`${localPending} pending locally`);
+    }
   }
   if (remoteSet !== null) {
-    const remotePending = allMigrations.length - remoteSet.size;
+    const remotePending = allMigrations.filter((m) => !remoteSet.has(m.name)).length;
     if (remotePending > 0) {
       parts.push(`${remotePending} pending remotely`);
     }
@@ -528,6 +552,68 @@ async function runStatus(root: string, dialect: DatabaseDialect): Promise<void> 
 
 // Hyperdrive reaches only public hosts, so a loopback or socket database is never the deployed one.
 const LOCAL_DATABASE_HOSTS = new Set(['', 'localhost', '127.0.0.1', '::1', '[::1]']);
+
+/**
+ * Objects that `void db reset` drops in `public` before it applies every migration again:
+ * tables and views first, then standalone sequences, then enum, domain, range and composite
+ * types. drizzle-kit creates them without `IF NOT EXISTS`, so any one that stays makes the
+ * migration fail. Extension members stay, and so do sequences that a column owns: the table
+ * drop removes them, and their names change when a table is renamed.
+ */
+const PG_RESET_OBJECTS = `SELECT kind, name FROM (
+  SELECT CASE rel.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW'
+           WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END AS kind,
+         rel.relname AS name, CASE rel.relkind WHEN 'S' THEN 1 ELSE 0 END AS step
+  FROM pg_class rel JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+  WHERE ns.nspname = 'public' AND rel.relkind IN ('r', 'p', 'v', 'm', 'S')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_class'::regclass AND dep.objid = rel.oid
+        AND (dep.deptype = 'e' OR (rel.relkind = 'S' AND dep.deptype IN ('a', 'i')))
+    )
+  UNION ALL
+  SELECT 'TYPE', typ.typname, 2
+  FROM pg_type typ JOIN pg_namespace ns ON ns.oid = typ.typnamespace
+  WHERE ns.nspname = 'public'
+    AND (typ.typtype IN ('e', 'd', 'r')
+      OR (typ.typtype = 'c' AND (SELECT relkind FROM pg_class WHERE oid = typ.typrelid) = 'c'))
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_depend dep WHERE dep.classid = 'pg_type'::regclass AND dep.objid = typ.oid
+        AND dep.deptype = 'e'
+    )
+) objects ORDER BY step, name`;
+
+/**
+ * Objects in other schemas that `CASCADE` would also drop with the types ($1) and sequences ($2)
+ * that reset drops in `public`: a column of that type or its array type, a view, a function, a
+ * column default and so on, also through a type or function in `public` that goes with them.
+ * Reset leaves other schemas alone, so it stops when there are any. A view in another schema that
+ * also reads a `public` table is listed too, although the table drop would remove it anyway.
+ */
+const PG_RESET_OUTSIDE_DEPENDENTS = `WITH RECURSIVE dropped(classid, objid) AS (
+  SELECT 'pg_type'::regclass::oid, typ.oid FROM pg_type typ
+  WHERE typ.typnamespace = 'public'::regnamespace AND typ.typname = ANY($1::text[])
+  UNION ALL
+  SELECT 'pg_class'::regclass::oid, rel.oid FROM pg_class rel
+  WHERE rel.relnamespace = 'public'::regnamespace AND rel.relname = ANY($2::text[])
+  UNION
+  SELECT dep.classid, dep.objid FROM dropped
+  JOIN pg_depend dep ON dep.refclassid = dropped.classid AND dep.refobjid = dropped.objid
+  WHERE dep.classid IN ('pg_type'::regclass, 'pg_proc'::regclass)
+    AND (pg_identify_object(dep.classid, dep.objid, 0)).schema = 'public'
+)
+SELECT DISTINCT pg_describe_object(dep.classid, dep.objid, dep.objsubid) || ' uses '
+  || pg_describe_object(dep.refclassid, dep.refobjid, 0) AS object
+FROM dropped
+JOIN pg_depend dep ON dep.refclassid = dropped.classid AND dep.refobjid = dropped.objid
+WHERE COALESCE((pg_identify_object(dep.classid, dep.objid, dep.objsubid)).schema, (
+  SELECT ns.nspname FROM pg_class rel JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+  WHERE rel.oid = CASE dep.classid
+    WHEN 'pg_attrdef'::regclass THEN (SELECT adrelid FROM pg_attrdef WHERE oid = dep.objid)
+    WHEN 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = dep.objid)
+    WHEN 'pg_trigger'::regclass THEN (SELECT tgrelid FROM pg_trigger WHERE oid = dep.objid)
+    WHEN 'pg_policy'::regclass THEN (SELECT polrelid FROM pg_policy WHERE oid = dep.objid)
+  END)) <> 'public'
+ORDER BY object`;
 
 /**
  * `.env` may hold the deployed database URL (`void db connect` writes it there), so ask before
@@ -554,6 +640,25 @@ async function confirmDropAllTables(
   }
 }
 
+async function confirmReset(
+  root: string,
+  dialect: DatabaseDialect,
+  yes: boolean | undefined,
+): Promise<void> {
+  if (dialect === 'postgresql') {
+    const { Client } = await import('pg');
+    // `?host=` and PGHOST can replace the URL host, so check the host pg will connect to.
+    const { host, port, database } = new Client({
+      connectionString: getLocalDatabaseUrl(root, dialect),
+    });
+    await confirmDropAllTables(host, `database "${database}" on ${host}:${port}`, yes);
+  } else if (dialect === 'mysql') {
+    const { hostname, host, pathname } = new URL(getLocalDatabaseUrl(root, dialect));
+    const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
+    await confirmDropAllTables(hostname, target, yes);
+  }
+}
+
 async function resetDatabase(
   root: string,
   dialect: DatabaseDialect,
@@ -566,26 +671,35 @@ async function resetDatabase(
   const migrationsDir = paths.migrationsDir;
   const migrations = collectMigrations(migrationsDir);
   try {
-    assertJournalCoherence(migrationsDir, migrations);
+    assertJournalCoherence(migrationsDir, migrations, paths.sourceRelative);
   } catch (err: unknown) {
     log.error(getErrorMessage(err));
     process.exit(1);
   }
+  await confirmReset(root, dialect, yes);
 
   if (dialect === 'postgresql') {
-    const { Client } = await import('pg');
-    // `?host=` and PGHOST can replace the URL host, so check the host pg will connect to.
-    const { host, port, database } = new Client({
-      connectionString: getLocalDatabaseUrl(root, dialect),
-    });
-    await confirmDropAllTables(host, `database "${database}" on ${host}:${port}`, yes);
     const { applyPgMigrations } = await import('../migrations/runner-pg.ts');
     await withPgClient(root, async (client) => {
-      const tables = await client.query(
-        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
-      );
-      for (const row of tables.rows) {
-        await client.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
+      const objects = await client.query<{ kind: string; name: string }>(PG_RESET_OBJECTS);
+      const names = (kind: string) =>
+        objects.rows.filter((row) => row.kind === kind).map((row) => row.name);
+      const types = names('TYPE');
+      const sequences = names('SEQUENCE');
+      const outside =
+        types.length > 0 || sequences.length > 0
+          ? await client.query<{ object: string }>(PG_RESET_OUTSIDE_DEPENDENTS, [types, sequences])
+          : { rows: [] };
+      if (outside.rows.length > 0) {
+        throw new Error(
+          'db: Reset stopped before dropping anything. Dropping the types and sequences in the public schema would also remove these objects in other schemas:\n' +
+            outside.rows.map((row) => `  - ${row.object}\n`).join('') +
+            'Change or drop these objects, or move the types and sequences they use out of the public schema, then run the command again.',
+        );
+      }
+      for (const { kind, name } of objects.rows) {
+        // Qualify the name: search_path could find an object of that name in another schema.
+        await client.query(`DROP ${kind} IF EXISTS public.${quoteSqlIdentifier(name)} CASCADE`);
       }
       await applyPgMigrations(client, migrations);
     });
@@ -593,18 +707,16 @@ async function resetDatabase(
   }
 
   if (dialect === 'mysql') {
-    const { hostname, host, pathname } = new URL(getLocalDatabaseUrl(root, dialect));
-    const target = `database "${decodeURIComponent(pathname.slice(1))}" on ${host}`;
-    await confirmDropAllTables(hostname, target, yes);
     const { applyPendingMySqlMigrations, withMySqlMigrationLock } =
       await import('../migrations/runner-mysql.ts');
     // The migration lock keeps deploys and other migration runs out from the first drop until
     // the files are applied again.
     await withMySqlClient(root, (client) =>
       withMySqlMigrationLock(client, async () => {
-        // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
+        // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`. A view stays
+        // when its tables are dropped, and its migration would then fail, so drop views too.
         const tables = await client.query(
-          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+          "SELECT table_name AS table_name, table_type AS table_type FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type IN ('BASE TABLE', 'VIEW')",
         );
         await client.query('SET FOREIGN_KEY_CHECKS = 0');
         try {
@@ -613,8 +725,9 @@ async function resetDatabase(
             if (row.table_name === '_void_migration_lock') {
               continue;
             }
+            const kind = row.table_type === 'VIEW' ? 'VIEW' : 'TABLE';
             const table = String(row.table_name).replaceAll('`', '``');
-            await client.query(`DROP TABLE IF EXISTS \`${table}\``);
+            await client.query(`DROP ${kind} IF EXISTS \`${table}\``);
           }
         } finally {
           await client.query('SET FOREIGN_KEY_CHECKS = 1');
@@ -650,15 +763,18 @@ async function runSeed(
   dialect: DatabaseDialect,
   yes?: boolean,
 ): Promise<void> {
-  // Reset first (drop + re-run migrations)
-  const migrationCount = await resetDatabase(root, dialect, yes);
+  // Load the seed before the reset, so a wrong path or a broken module stops the command
+  // before any data is dropped. Importing a module runs its code, so ask about the database first.
+  const seed = resolveSeedTarget(root, file);
+  const sql = seed.kind === 'sql' ? readFileSync(seed.path, 'utf-8') : undefined;
+  await confirmReset(root, dialect, yes);
+  const seedFn = sql === undefined ? await loadSeedFunction(seed.path) : undefined;
+
+  // Reset first (drop + re-run migrations). The drop is confirmed above, so do not ask again.
+  const migrationCount = await resetDatabase(root, dialect, true);
   log.step(`Reset database. Applied ${formatCount(migrationCount, 'migration')}.`);
 
-  const seed = resolveSeedTarget(root, file);
-
-  if (seed.kind === 'sql') {
-    const sql = readFileSync(seed.path, 'utf-8');
-
+  if (sql !== undefined) {
     if (dialect === 'postgresql') {
       await withPgClient(root, async (client) => {
         await client.query(sql);
@@ -686,7 +802,7 @@ async function runSeed(
       db.close();
     }
   } else {
-    await runSeedModule(root, seed.path, dialect);
+    await runSeedModule(root, seedFn!, dialect);
   }
 
   log.info(dim("Restart your dev server if it's running."));
@@ -801,7 +917,7 @@ async function runExecute(
 ): Promise<void> {
   if (remote) {
     const directCloudflare = readDeploymentPlatform(root) === 'cloudflare';
-    const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+    const sql = file ? readFileSync(resolve(root, file), 'utf-8') : command!;
 
     if (directCloudflare) {
       const shouldProceed = await confirmDestructiveRemote(sql);
@@ -934,7 +1050,7 @@ async function runExecute(
   }
 
   if (dialect === 'postgresql') {
-    const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+    const sql = file ? readFileSync(resolve(root, file), 'utf-8') : command!;
     await withPgClient(root, async (client) => {
       const result = await client.query(sql);
       if (result.rows && result.rows.length > 0) {
@@ -946,7 +1062,7 @@ async function runExecute(
   }
 
   if (dialect === 'mysql') {
-    const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+    const sql = file ? readFileSync(resolve(root, file), 'utf-8') : command!;
     await withMySqlClient(root, async (client) => {
       const rows = await client.query(sql);
       if (rows.length > 0) {
@@ -961,11 +1077,11 @@ async function runExecute(
   const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
-    log.error('No local database found. Run `void dev` first.');
+    log.error('No local database found. Start the dev server first.');
     process.exit(1);
   }
 
-  const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
+  const sql = file ? readFileSync(resolve(root, file), 'utf-8') : command!;
 
   const db = await openSqliteDatabase(dbPath);
   try {
@@ -1018,7 +1134,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
   const rawMigrations = collectMigrations(migrationsDir);
 
   try {
-    assertJournalCoherence(migrationsDir, rawMigrations);
+    assertJournalCoherence(migrationsDir, rawMigrations, paths.sourceRelative);
   } catch (err: unknown) {
     log.error(getErrorMessage(err));
     process.exit(1);
@@ -1108,6 +1224,15 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
         log.error(getErrorMessage(error));
         process.exit(1);
       }
+      // Without `migrations_dir`, Cloudflare applies `./migrations`, which the check below
+      // would not read.
+      if (!context.migrationsDir) {
+        const dir = paths.sourceRelative('db/migrations');
+        log.error(
+          `db: D1 binding ${binding} has no "migrations_dir", so Cloudflare would apply ./migrations instead of ${dir}/. Add "migrations_dir": "./${dir}" to that D1 binding in your Cloudflare config, then run the command again.`,
+        );
+        process.exit(1);
+      }
       const { checkWranglerMigrationApplySet, parseRootWranglerConfig } =
         await import('./deploy.ts');
       const applySet = await checkWranglerMigrationApplySet(
@@ -1116,6 +1241,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
         binding,
         context.migrationsDir,
         rawMigrations,
+        paths.sourceRelative('db/migrations'),
       );
       if (!applySet.ok) {
         log.error(applySet.reason);
@@ -1278,7 +1404,7 @@ async function runMigrate(root: string, dialect: DatabaseDialect, remote?: boole
     process.exit(1);
   }
 
-  const applied = await runMigrations(migrationsDir, dbPath);
+  const applied = await runMigrations(migrationsDir, dbPath, paths.sourceRelative);
   if (applied.length === 0) {
     log.info('All migrations are up to date.');
   } else {
@@ -1339,7 +1465,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
-    log.error('No local database found. Run `void dev` first.');
+    log.error('No local database found. Start the dev server first.');
     process.exit(1);
   }
 
@@ -1353,8 +1479,29 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   }
 }
 
+/** A direct Cloudflare deploy records its D1 or Hyperdrive id in the checked-in Cloudflare config. */
+async function hasDeployedCloudflareDatabase(root: string): Promise<boolean> {
+  const { readRootWranglerConfig } = await import('./wrangler.ts');
+  const { isRealD1Id } = await import('./provision.ts');
+  const config = readRootWranglerConfig(root)?.config;
+  const entries = (key: string): Array<Record<string, unknown>> => {
+    const value = config?.[key];
+    return Array.isArray(value)
+      ? value.filter(
+          (entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object',
+        )
+      : [];
+  };
+  return (
+    entries('d1_databases').some((entry) => isRealD1Id(entry.database_id)) ||
+    entries('hyperdrive').some((entry) => typeof entry.id === 'string' && entry.id !== '')
+  );
+}
+
 async function runRenameMigrations(root: string, dialect: DatabaseDialect): Promise<void> {
-  const migrationsDir = readProjectPaths(root).migrationsDir;
+  const paths = readProjectPaths(root);
+  const migrationsDir = paths.migrationsDir;
+  const dir = paths.sourceRelative('db/migrations');
   if (!existsSync(migrationsDir)) {
     log.info('No migrations directory found.');
 
@@ -1364,7 +1511,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // Refuse drift or a partial drizzle-kit state before changing anything, local or remote.
   const currentMigrations = collectMigrations(migrationsDir);
   try {
-    assertJournalCoherence(migrationsDir, currentMigrations);
+    assertJournalCoherence(migrationsDir, currentMigrations, paths.sourceRelative);
   } catch (err: unknown) {
     log.error(getErrorMessage(err));
     process.exit(1);
@@ -1373,10 +1520,10 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // The bundled `migrations.js` imports each `.sql` file by name, so renaming would break it.
   if (existsSync(join(migrationsDir, 'migrations.js'))) {
     log.error(
-      "This project uses Drizzle's bundled migration format (db/migrations/migrations.js).\n" +
+      `This project uses Drizzle's bundled migration format (${dir}/migrations.js).\n` +
         '`void db rename-migrations` cannot rename migrations in bundled mode because\n' +
         '`migrations.js` contains static imports of the SQL files by filename.\n\n' +
-        'Delete db/migrations/migrations.js and re-run `void db generate` to migrate away\n' +
+        `Delete ${dir}/migrations.js and re-run \`void db generate\` to migrate away\n` +
         'from bundled mode, then retry `void db rename-migrations`.',
     );
     process.exit(1);
@@ -1391,6 +1538,31 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
     log.info('No migrations with numeric prefixes found. Nothing to rename.');
 
     return;
+  }
+
+  // Void cannot rename the records in a direct Cloudflare database, and `void deploy` decides
+  // what is pending by file name, so a renamed applied migration would run again. `.void` is not
+  // checked in, so a fresh checkout shows a direct deploy only through its Cloudflare config.
+  const platform = readDeploymentPlatform(root);
+  const config = readProjectConfig(root);
+  if (
+    platform === 'cloudflare' ||
+    (!config && platform !== 'void' && (await hasDeployedCloudflareDatabase(root)))
+  ) {
+    log.error(
+      '`void db rename-migrations` does not support direct Cloudflare deploys.\n' +
+        'Void cannot rename the migration records in your deployed database, so the next deploy would run the renamed migrations again.\n' +
+        'Keep the current file names. New migrations use timestamps and run after them.',
+    );
+    process.exit(1);
+  }
+  // A hosted project renames its deployed records only through its link.
+  if (platform === 'void' && !config) {
+    log.error(
+      'This project deploys to Void but is not linked, so Void cannot rename the migration records in its deployed database.\n' +
+        'Run `void project link`, then run `void db rename-migrations` again.',
+    );
+    process.exit(1);
   }
 
   // Renamed files sort just before the earliest existing timestamped migration.
@@ -1426,7 +1598,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   const originalJournalBytes: Buffer | null = existsSync(journalPath)
     ? readFileSync(journalPath)
     : null;
-  const journal = readJournal(migrationsDir);
+  const journal = readJournal(migrationsDir, paths.sourceRelative);
   // Drizzle-kit finds a snapshot by the part of the journal tag before the first underscore.
   const snapshotPrefix = (tag: string): string => tag.split('_')[0];
   const snapshotPathFor = (tag: string): string =>
@@ -1448,7 +1620,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         'db: Cannot rename migrations because one or more Drizzle snapshot files are missing:',
       );
       for (const p of missingSnapshots) {
-        log.error(`  - db/migrations/${p}`);
+        log.error(`  - ${dir}/${p}`);
       }
       log.error(
         '\nRestore the missing snapshot(s) from version control, or reset the migration directory with `void db generate`, then retry.',
@@ -1459,7 +1631,6 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
 
   // Update remote tracking first. If this fails, nothing local has changed yet.
   const token = getToken(root);
-  const config = readProjectConfig(root);
   let remoteRenamed = false;
   if (config && !token) {
     log.error(
@@ -1513,7 +1684,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         writeFileSync(journalPath, originalJournalBytes);
       } catch (error) {
         log.warn(
-          'Could not restore db/migrations/meta/_journal.json after rollback. ' +
+          `Could not restore ${dir}/meta/_journal.json after rollback. ` +
             'The journal may be in a partial state.\n' +
             'Regenerate it with `void db generate`, or restore it from version control.',
         );
@@ -1554,10 +1725,10 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   // Rewrite journal tags before the tracking tables, so a tracking failure also restores it.
   if (journal) {
     try {
-      const current = readJournal(migrationsDir);
+      const current = readJournal(migrationsDir, paths.sourceRelative);
       if (!current) {
         throw new Error(
-          'db: db/migrations/meta/_journal.json disappeared mid-run. File renames will be reverted.',
+          `db: ${dir}/meta/_journal.json disappeared mid-run. File renames will be reverted.`,
         );
       }
       const renameMap = new Map<string, string>();
@@ -1577,7 +1748,7 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
       });
     } catch (err) {
       await rollback(
-        'db: Failed to update db/migrations/meta/_journal.json. File renames have been reverted.',
+        `db: Failed to update ${dir}/meta/_journal.json. File renames have been reverted.`,
         err,
       );
     }
@@ -1619,11 +1790,19 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
         if (rows.length === 0) {
           return;
         }
-        for (const { from, to } of renames) {
-          await client.query('UPDATE `_void_migrations` SET `name` = ? WHERE `name` = ?', [
-            to,
-            from,
-          ]);
+        await client.query('START TRANSACTION');
+        try {
+          for (const { from, to } of renames) {
+            await client.query('UPDATE `_void_migrations` SET `name` = ? WHERE `name` = ?', [
+              to,
+              from,
+            ]);
+          }
+          await client.query('COMMIT');
+        } catch (err) {
+          // A lost connection also rolls back on the server, so report the first error.
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
         }
       });
     } catch (err) {
@@ -1674,6 +1853,25 @@ async function runRenameMigrations(root: string, dialect: DatabaseDialect): Prom
   printSuccess(`Renamed ${formatCount(renames.length, 'migration')} to timestamp format.`);
 }
 
+// Void and Cloudflare bookkeeping tables. A full export skips them; app tables starting with `_` stay.
+const INTERNAL_TABLES = new Set([
+  '_void_migrations',
+  '_void_migration_attempts',
+  '_void_migration_lock',
+  '_void_migration_fences',
+  '__drizzle_migrations',
+]);
+
+function isInternalTable(name: string, dialect: DatabaseDialect): boolean {
+  if (INTERNAL_TABLES.has(name)) {
+    return true;
+  }
+  return (
+    dialect === 'sqlite' &&
+    (name === '_migrations' || name.startsWith('_cf_') || name.startsWith('sqlite_'))
+  );
+}
+
 function formatMySqlExportValue(value: unknown): string {
   if (value === null || value === undefined) {
     return 'NULL';
@@ -1687,8 +1885,7 @@ function formatMySqlExportValue(value: unknown): string {
   if (value instanceof Uint8Array) {
     return `X'${Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join('')}'`;
   }
-  const serialized = value instanceof Date ? value.toISOString() : String(value);
-  return `'${serialized.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
+  return `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
 }
 
 function formatSqliteExportValue(value: unknown): string {
@@ -1726,9 +1923,11 @@ async function runExport(
         tables = [args.table];
       } else {
         const result = await client.query(
-          "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '\\_%' ORDER BY tablename",
+          "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
         );
-        tables = result.rows.map((row) => String(row.tablename));
+        tables = result.rows
+          .map((row) => String(row.tablename))
+          .filter((name) => !isInternalTable(name, dialect));
       }
 
       if (!args.noSchema) {
@@ -1811,7 +2010,7 @@ async function runExport(
 
     const output = parts.join('\n');
     if (args.output) {
-      writeFileSync(join(root, args.output), output);
+      writeFileSync(resolve(root, args.output), output);
       printSuccess(`Exported to ${args.output}`);
     } else {
       process.stdout.write(output);
@@ -1821,7 +2020,7 @@ async function runExport(
 
   if (dialect === 'mysql') {
     const parts: Array<string> = [];
-    await withMySqlClient(root, async (client) => {
+    const exportTables = async (client: MySqlClient) => {
       let tables: Array<string>;
       if (args.table) {
         const rows = await client.query<Array<{ table_name: string }>>(
@@ -1836,14 +2035,18 @@ async function runExport(
       } else {
         // MySQL 8 returns an unaliased information_schema column as `TABLE_NAME`.
         const rows = await client.query<Array<{ table_name: string }>>(
-          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' AND table_name NOT LIKE '\\_%' ORDER BY table_name",
+          "SELECT table_name AS table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name",
         );
-        tables = rows.map((row) => String(row.table_name));
+        tables = rows
+          .map((row) => String(row.table_name))
+          .filter((name) => !isInternalTable(name, dialect));
       }
 
       // Tables come out in name order with inline foreign keys, so a child
-      // table can precede its parent; restore with the checks off.
-      parts.push('SET FOREIGN_KEY_CHECKS = 0;');
+      // table can precede its parent; restore with the checks off. TIMESTAMP
+      // text follows the session time zone, so read and restore it in UTC.
+      await client.query("SET time_zone = '+00:00'");
+      parts.push('SET FOREIGN_KEY_CHECKS = 0;', "SET time_zone = '+00:00';");
       for (const table of tables) {
         const escapedTable = table.replaceAll('`', '``');
         if (!args.noSchema) {
@@ -1870,11 +2073,12 @@ async function runExport(
         parts.push('');
       }
       parts.push('SET FOREIGN_KEY_CHECKS = 1;', '');
-    });
+    };
+    await withMySqlClient(root, exportTables, { textValues: true });
 
     const output = parts.join('\n');
     if (args.output) {
-      writeFileSync(join(root, args.output), output);
+      writeFileSync(resolve(root, args.output), output);
       printSuccess(`Exported to ${args.output}`);
     } else {
       process.stdout.write(output);
@@ -1886,7 +2090,7 @@ async function runExport(
   const { databasePath: dbPath } = getLocalD1Target(root);
 
   if (!existsSync(dbPath)) {
-    log.error('No local database found. Run `void dev` first.', errOut);
+    log.error('No local database found. Start the dev server first.', errOut);
     process.exit(1);
   }
 
@@ -1905,11 +2109,11 @@ async function runExport(
     } else {
       tables = db
         .prepare<{ name: unknown }>(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\' ORDER BY name",
+          "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
         )
         .all()
         .map((row) => String(row.name))
-        .filter((name) => !name.startsWith('sqlite_'));
+        .filter((name) => !isInternalTable(name, dialect));
     }
 
     const parts: Array<string> = [];
@@ -1978,7 +2182,7 @@ async function runExport(
             continue;
           }
           if (type === 'view') {
-            if (args.table || object.name.startsWith('_')) {
+            if (args.table || isInternalTable(object.name, dialect)) {
               continue;
             }
           } else if (!tables.includes(object.tbl_name)) {
@@ -1992,7 +2196,7 @@ async function runExport(
     const output = parts.join('\n');
 
     if (args.output) {
-      writeFileSync(join(root, args.output), output);
+      writeFileSync(resolve(root, args.output), output);
       printSuccess(`Exported to ${args.output}`);
     } else {
       // Print raw SQL to stdout for piping — no clack formatting
@@ -2098,10 +2302,9 @@ function toSeedTarget(root: string, seedPath: string, displayPath?: string): See
 
 async function runSeedModule(
   root: string,
-  seedPath: string,
+  seed: SeedFn<Record<string, unknown>>,
   dialect: DatabaseDialect,
 ): Promise<void> {
-  const seed = await loadSeedFunction(seedPath);
   const schema = await loadSeedSchema(root);
 
   if (dialect === 'postgresql') {

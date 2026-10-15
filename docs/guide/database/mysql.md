@@ -22,7 +22,7 @@ Add a direct connection for local development:
 DATABASE_URL=mysql://user:password@host:3306/app
 ```
 
-Void reads `.env` for `void dev` and `void db` commands. In production, the Worker connects through the inferred `HYPERDRIVE` binding.
+Void reads `.env` for the dev server and `void db` commands. In production, the Worker connects through the inferred `HYPERDRIVE` binding.
 
 ## Define a schema
 

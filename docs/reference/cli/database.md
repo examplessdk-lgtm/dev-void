@@ -20,7 +20,7 @@ For SQLite, Void checks that the migration history applies to a fresh database. 
 
 ## `void db status` {#void-db-status}
 
-Show migration status. Displays which migrations are applied or pending locally, then uses the saved deployment target for remote status: the hosted API for Void projects, the pinned D1 database and its configured migration table for direct Cloudflare SQLite projects, or the shell `DATABASE_URL` for direct Cloudflare PostgreSQL/MySQL projects. If the remote credential or service is unavailable, local status is still shown.
+Show migration status. Displays which migrations are applied or pending locally, then uses the saved deployment target for remote status: the hosted API for Void projects, the pinned D1 database and its configured migration table for direct Cloudflare SQLite projects, or the shell `DATABASE_URL` for direct Cloudflare PostgreSQL/MySQL projects. If the remote credential or service is unavailable, local status is still shown. If the local PostgreSQL or MySQL database cannot be read, local status shows `unknown`; the command fails when remote status is not available either.
 
 ## `void db reset` {#void-db-reset}
 
@@ -28,7 +28,7 @@ Show migration status. Displays which migrations are applied or pending locally,
 void db reset [--yes]
 ```
 
-Drop the development database and re-apply all migrations. D1 resets the local database; PostgreSQL and MySQL drop all tables in the `DATABASE_URL` database from `.env`.
+Drop the development database and re-apply all migrations. D1 resets the local database. PostgreSQL drops the tables, views, sequences, and custom types in the `public` schema of the `DATABASE_URL` database from `.env` and keeps installed extensions. If a table, view, or function in another schema uses one of those types or sequences, reset stops before it drops anything and lists those objects. MySQL drops every table and view in that database.
 
 When that `DATABASE_URL` points to a host other than `localhost`, Void names the database and asks before dropping its tables. Pass `--yes` to skip the prompt in scripts and CI; without a terminal, the command stops unless `--yes` is set. If `.env` uses the same URL as your deployment (for example after `void db connect`), reset drops the deployed tables.
 
@@ -73,7 +73,7 @@ void db migrate [--remote]
 
 Apply pending migrations to the local database without resetting. Unlike `void db reset`, this preserves existing data and only runs migrations that haven't been applied yet.
 
-Pass `--remote` to apply pending migrations to the saved target. Hosted projects require a Void login and link. Direct Cloudflare D1 projects use the binding's configured migration directory, table, and pattern; direct PostgreSQL and MySQL projects use the shell `DATABASE_URL`.
+Pass `--remote` to apply pending migrations to the saved target. Hosted projects require a Void login and link. Direct Cloudflare D1 projects use the binding's configured migration directory, table, and pattern. The D1 binding must set `migrations_dir`. Direct PostgreSQL and MySQL projects use the shell `DATABASE_URL`.
 
 ## `void db studio` {#void-db-studio}
 
@@ -91,7 +91,9 @@ By default, targets the local database. Pass `--remote` to open Studio against t
 
 ## `void db rename-migrations` {#void-db-rename-migrations}
 
-Rename existing migrations from the old numeric prefix format (`0001_name.sql`) to timestamp-based format (`20260410161500_name.sql`). Updates local tracking table and remote records if logged in with a linked project.
+Rename existing migrations from the old numeric prefix format (`0001_name.sql`) to timestamp-based format (`20260410161500_name.sql`). Updates local tracking table and remote records if logged in with a linked project. A project that deploys to Void must be linked first with `void project link`; otherwise the command stops without changes.
+
+Direct Cloudflare deploys are not supported: Void cannot rename the records in the deployed database, so the command stops without changes. Keep the existing names; new migrations use timestamps and run after them.
 
 ## `void db connect` {#void-db-connect}
 

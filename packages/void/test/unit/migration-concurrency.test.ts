@@ -291,7 +291,7 @@ describe('D1 migration ownership', () => {
     const paused = deferred();
     const resume = deferred();
     let once = true;
-    const { handler } = createDatabase({
+    const { sqlite, handler } = createDatabase({
       afterLockWrite: async () => {
         if (once) {
           once = false;
@@ -304,6 +304,12 @@ describe('D1 migration ownership', () => {
     const pending = owner(apply('owner'));
     await paused.promise;
     try {
+      // The contender gets 409 with or without the owner's attempt row, so check the row too.
+      expect(
+        sqlite
+          .prepare("SELECT status FROM _void_migration_attempts WHERE attempt_id = 'owner'")
+          .get(),
+      ).toEqual({ status: 'running' });
       expect((await handler([])(apply('contender'))).status).toBe(409);
     } finally {
       resume.resolve();

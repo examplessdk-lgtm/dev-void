@@ -63,7 +63,8 @@ export type CloudflareD1Context = {
   operation: CloudflareOperationContext;
   binding: string;
   migrateToken: string;
-  migrationsDir: string;
+  /** Unset when the binding has no `migrations_dir`; Cloudflare then applies `./migrations`. */
+  migrationsDir: string | undefined;
   migrationsTable: string;
 };
 
@@ -206,7 +207,7 @@ export function resolveCloudflareD1Context(
     operation,
     binding,
     migrateToken: target.token,
-    migrationsDir: migrationsDir.present ? (migrationsDir.value as string) : 'db/migrations',
+    migrationsDir: migrationsDir.present ? (migrationsDir.value as string) : undefined,
     migrationsTable: migrationsTable.present ? (migrationsTable.value as string) : 'd1_migrations',
   };
 }

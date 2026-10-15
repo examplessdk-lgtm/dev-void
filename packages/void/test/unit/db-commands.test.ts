@@ -13,7 +13,9 @@ import { toSlash } from 'pathslash';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vite-plus/test';
 
 const mockExecFileSync = vi.hoisted(() => vi.fn());
-const mockPgQuery = vi.hoisted(() => vi.fn(async (_sql: string) => ({ rows: [] })));
+const mockPgQuery = vi.hoisted(() =>
+  vi.fn(async (_sql: string) => ({ rows: [] as Array<Record<string, unknown>> })),
+);
 const mockConfirm = vi.fn();
 const mockGetMiniflareDatabasePath = vi.fn();
 const mockOpenSqliteDatabase = vi.fn();
@@ -37,31 +39,54 @@ vi.mock('pg', async (importOriginal) => {
 });
 
 const mysqlQueries = vi.hoisted((): Array<string> => []);
+const mysqlConnectOptions = vi.hoisted((): Array<Record<string, unknown>> => []);
+// Runs after each query is recorded, so a test can make one statement fail.
+const mockMySqlQuery = vi.hoisted(() => vi.fn<(sql: string) => void>());
 
 vi.mock('mysql2/promise', () => ({
-  createConnection: async () => ({
-    async end() {},
-    async query(sql: string) {
-      mysqlQueries.push(sql);
-      // MySQL 8 labels an unaliased information_schema column in upper case.
-      const tables = /^SELECT table_name(?: AS (\w+))? FROM information_schema\.tables/.exec(sql);
-      if (tables) {
-        const key = tables[1] ?? 'TABLE_NAME';
-        return [
-          [{ [key]: '_void_migration_lock' }, { [key]: '_void_migrations' }, { [key]: 'users' }],
-          [],
-        ];
-      }
-      if (sql === 'SELECT `name` FROM `_void_migrations`') {
-        const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
-        return [dropped ? [] : [{ name: '0000_init.sql' }], []];
-      }
-      if (sql.startsWith('SELECT GET_LOCK')) {
-        return [[{ acquired: 1 }], []];
-      }
-      return [[], []];
-    },
-  }),
+  createConnection: async (options: Record<string, unknown>) => {
+    mysqlConnectOptions.push(options);
+    return {
+      async end() {},
+      async query(sql: string) {
+        mysqlQueries.push(sql);
+        mockMySqlQuery(sql);
+        // MySQL 8 labels an unaliased information_schema column in upper case.
+        const tables =
+          /^SELECT table_name(?: AS (\w+))?(, table_type(?: AS (\w+))?)? FROM information_schema\.tables/.exec(
+            sql,
+          );
+        if (tables) {
+          const key = tables[1] ?? 'TABLE_NAME';
+          // `_drafts` is an app table whose name starts with an underscore.
+          const names = ['_drafts', '_void_migration_lock', '_void_migrations', 'users'];
+          if (!tables[2]) {
+            return [names.map((name) => ({ [key]: name })), []];
+          }
+          // A query that reads table_type also sees views.
+          const typeKey = tables[3] ?? 'TABLE_TYPE';
+          return [
+            [
+              ...names.map((name) => ({ [key]: name, [typeKey]: 'BASE TABLE' })),
+              { [key]: 'user_names', [typeKey]: 'VIEW' },
+            ],
+            [],
+          ];
+        }
+        if (sql === 'SELECT `name` FROM `_void_migrations`') {
+          const dropped = mysqlQueries.includes('DROP TABLE IF EXISTS `_void_migrations`');
+          return [dropped ? [] : [{ name: '0000_init.sql' }], []];
+        }
+        if (sql === 'SELECT * FROM `_drafts`') {
+          return [[{ id: '1', title: 'draft' }], []];
+        }
+        if (sql.startsWith('SELECT GET_LOCK')) {
+          return [[{ acquired: 1 }], []];
+        }
+        return [[], []];
+      },
+    };
+  },
 }));
 
 vi.mock('../../src/migrations/runner', async () => {
@@ -106,6 +131,7 @@ vi.mock('../../src/migrations/collect', async () => {
 
 const mockGetToken = vi.fn<() => string | null>(() => null);
 const mockReadProjectConfig = vi.fn<() => { projectId: string; slug: string } | null>(() => null);
+const mockReadDeploymentPlatform = vi.fn<() => string | null>(() => 'void');
 const mockRenameMigrations =
   vi.fn<
     (projectId: string, renames: Array<{ from: string; to: string }>) => Promise<{ ok: boolean }>
@@ -117,7 +143,7 @@ vi.mock('../../src/cli/auth', () => ({
 
 vi.mock('../../src/cli/project', () => ({
   readProjectConfig: () => mockReadProjectConfig(),
-  readDeploymentPlatform: () => 'void',
+  readDeploymentPlatform: () => mockReadDeploymentPlatform(),
 }));
 
 vi.mock('../../src/cli/client', () => ({
@@ -428,6 +454,8 @@ describe('void db reset', () => {
 
       Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
       mockConfirm.mockResolvedValue(false);
+      // Seed checks its file before the prompt.
+      writeFileSync(join(root, 'db', 'seed.sql'), '');
       await expect(runDbCommand(root, { action: 'seed' })).rejects.toThrow('process.exit:0');
       expect(mockConfirm).toHaveBeenCalledOnce();
 
@@ -453,6 +481,9 @@ describe('void db reset', () => {
 
     expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `_void_migrations`');
     expect(mysqlQueries).toContain('DROP TABLE IF EXISTS `users`');
+    // A view stays when its tables are dropped, so reset drops it as a view.
+    expect(mysqlQueries).toContain('DROP VIEW IF EXISTS `user_names`');
+    expect(mysqlQueries).not.toContain('DROP TABLE IF EXISTS `user_names`');
     expect(mysqlQueries).toContain('CREATE TABLE `users` (id INT);');
     // The migration lock covers the drops and the new run, and deploys keep their lease table.
     const lock = mysqlQueries.findIndex((sql) => sql.startsWith('SELECT GET_LOCK'));
@@ -506,6 +537,94 @@ describe('void db export', () => {
     expect(lines[0]).toBe('SET FOREIGN_KEY_CHECKS = 0;');
     expect(lines.at(-1)).toBe('SET FOREIGN_KEY_CHECKS = 1;');
   });
+
+  it('MySQL: skips only Void bookkeeping tables and reads values as MySQL text', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-export-mysql-'));
+    rootsToClean.push(root);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+    mysqlConnectOptions.length = 0;
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      stdout += chunk.toString();
+      return true;
+    });
+
+    await runDbCommand(root, { action: 'export' });
+
+    expect(mysqlQueries).toContain('SHOW CREATE TABLE `users`');
+    expect(mysqlQueries).toContain('SHOW CREATE TABLE `_drafts`');
+    expect(stdout).toContain("INSERT INTO `_drafts` (`id`, `title`) VALUES ('1', 'draft');");
+    expect(mysqlQueries).not.toContain('SHOW CREATE TABLE `_void_migrations`');
+    expect(mysqlQueries).not.toContain('SHOW CREATE TABLE `_void_migration_lock`');
+    expect(mysqlConnectOptions[0]).toMatchObject({
+      dateStrings: true,
+      jsonStrings: true,
+      supportBigNumbers: true,
+      bigNumberStrings: true,
+    });
+    // TIMESTAMP text follows the session time zone, so the dump pins it for the restore.
+    expect(mysqlQueries).toContain("SET time_zone = '+00:00'");
+    expect(stdout).toContain("SET time_zone = '+00:00';");
+  });
+
+  it('PostgreSQL: writes an absolute --output path as given', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-export-pg-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'void-export-out-'));
+    rootsToClean.push(root, elsewhere);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="postgresql://u:p@127.0.0.1:5432/app"\n');
+    const output = join(elsewhere, 'dump.sql');
+
+    await runDbCommand(root, { action: 'export', output });
+
+    expect(existsSync(output)).toBe(true);
+  });
+});
+
+describe('void db execute', () => {
+  let runDbCommand: typeof import('../../src/cli/db.ts').runDbCommand;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    runDbCommand = (await import('../../src/cli/db.ts')).runDbCommand;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const root of rootsToClean.splice(0, rootsToClean.length)) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an absolute --file path as given', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-execute-abs-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'void-execute-sql-'));
+    rootsToClean.push(root, elsewhere);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    writeFileSync(join(elsewhere, 'query.sql'), 'UPDATE users SET id = id;');
+    mysqlQueries.length = 0;
+
+    await runDbCommand(root, { action: 'execute', file: join(elsewhere, 'query.sql') });
+
+    expect(mysqlQueries).toContain('UPDATE users SET id = id;');
+  });
+
+  it('PostgreSQL: reads an absolute --file path as given', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-execute-abs-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'void-execute-sql-'));
+    rootsToClean.push(root, elsewhere);
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="postgresql://u:p@127.0.0.1:5432/app"\n');
+    writeFileSync(join(elsewhere, 'query.sql'), 'UPDATE users SET id = id;');
+
+    await runDbCommand(root, { action: 'execute', file: join(elsewhere, 'query.sql') });
+
+    expect(mockPgQuery).toHaveBeenCalledWith('UPDATE users SET id = id;');
+  });
 });
 
 describe('void db status', () => {
@@ -548,6 +667,58 @@ describe('void db status', () => {
     const errorMessage = mockLog.error.mock.calls[0][0] as string;
     expect(errorMessage).toContain('_journal.json');
   });
+
+  it('PostgreSQL: reports an unreachable local database instead of pending migrations', async () => {
+    const root = createRenameProjectRoot({ files: { '0000_init.sql': 'SELECT 1;' } });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="postgresql://u:p@127.0.0.1:5432/app"\n');
+    mockPgQuery.mockRejectedValueOnce(
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' }),
+    );
+
+    await expect(runDbCommand(root, { action: 'status' })).rejects.toThrow('process.exit:1');
+
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
+    expect(mockLog.info).not.toHaveBeenCalled();
+  });
+
+  it('PostgreSQL: reports a missing DATABASE_URL instead of pending migrations', async () => {
+    const root = createRenameProjectRoot({ files: { '0000_init.sql': 'SELECT 1;' } });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+
+    await expect(runDbCommand(root, { action: 'status' })).rejects.toThrow('process.exit:1');
+
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.stringContaining('DATABASE_URL not found in .env'),
+    );
+    expect(mockLog.info).not.toHaveBeenCalled();
+  });
+
+  it('counts remote pending files, not tracked names, in the status summary', async () => {
+    // Another branch applied 0001 and 0002 remotely, which are not on disk here.
+    const root = createRenameProjectRoot({
+      files: { '0000_a.sql': 'SELECT 1;', '0003_d.sql': 'SELECT 1;' },
+    });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    mockReadDeploymentPlatform.mockReturnValueOnce('cloudflare');
+    mockPgQuery.mockResolvedValueOnce({
+      rows: [{ name: '0000_a.sql' }, { name: '0001_b.sql' }, { name: '0002_c.sql' }],
+    });
+    const databaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgresql://u:p@db.example.com:5432/prod';
+    try {
+      await runDbCommand(root, { action: 'status' });
+    } finally {
+      if (databaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = databaseUrl;
+      }
+    }
+
+    const { outro } = await import('@voidzero-dev/vite-plus-prompts');
+    expect(outro).toHaveBeenCalledWith('2 migrations, 1 pending remotely');
+  });
 });
 
 describe('void db rename-migrations', () => {
@@ -560,6 +731,8 @@ describe('void db rename-migrations', () => {
     // afterEach resets these mocks, so reinstall the defaults.
     mockGetToken.mockImplementation(() => null);
     mockReadProjectConfig.mockImplementation(() => null);
+    // A project that was never deployed has no saved deployment platform.
+    mockReadDeploymentPlatform.mockImplementation(() => null);
     mockRenameMigrations.mockReset();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -577,6 +750,8 @@ describe('void db rename-migrations', () => {
     mockGetToken.mockReset();
     mockReadProjectConfig.mockReset();
     mockRenameMigrations.mockReset();
+    mockReadDeploymentPlatform.mockReset();
+    mockMySqlQuery.mockReset();
     for (const root of rootsToClean.splice(0, rootsToClean.length)) {
       rmSync(root, { recursive: true, force: true });
     }
@@ -828,9 +1003,6 @@ describe('void db rename-migrations', () => {
     expect(existsSync(bundledPath)).toBe(true);
     expect(readFileSync(bundledPath).equals(originalBundleBytes)).toBe(true);
 
-    expect(mockOpenSqliteDatabase).not.toHaveBeenCalled();
-    expect(mockWriteJournal).not.toHaveBeenCalled();
-
     const errorMessages = mockLog.error.mock.calls.map((call) => String(call[0])).join('\n');
     expect(errorMessages).toMatch(/bundled migration format/);
     expect(errorMessages).toContain('db/migrations/migrations.js');
@@ -913,5 +1085,147 @@ describe('void db rename-migrations', () => {
     const errorMessages = mockLog.error.mock.calls.map((call) => String(call[0])).join('\n');
     expect(errorMessages).toContain('snapshot files are missing');
     expect(errorMessages).toContain('db/migrations/meta/0001_snapshot.json');
+  });
+
+  it('refuses direct Cloudflare deploys before renaming anything', async () => {
+    mockReadDeploymentPlatform.mockReturnValue('cloudflare');
+    // A project that moved from Void keeps its old link, so the hosted rename must not run either.
+    mockGetToken.mockReturnValue('test-token');
+    mockReadProjectConfig.mockReturnValue({ projectId: 'proj-under-test', slug: 'under-test' });
+    const root = createRenameProjectRoot({
+      files: { '0001_a.sql': '-- a\n', '0002_b.sql': '-- b\n' },
+      withJournal: false,
+    });
+    const migrationsDir = join(root, 'db', 'migrations');
+
+    await expect(runDbCommand(root, { action: 'rename-migrations' })).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+    expect(files.sort()).toEqual(['0001_a.sql', '0002_b.sql']);
+    expect(mockRenameMigrations).not.toHaveBeenCalled();
+    const errorMessages = mockLog.error.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(errorMessages).toContain('direct Cloudflare');
+  });
+
+  // `.void/project.json` is not checked in, so a fresh checkout of a deployed app has no saved platform.
+  it.each([
+    {
+      name: 'a root Wrangler config with a D1 database id',
+      write(root: string): void {
+        writeFileSync(
+          join(root, 'wrangler.jsonc'),
+          JSON.stringify({
+            d1_databases: [
+              {
+                binding: 'DB',
+                database_name: 'app',
+                database_id: '11111111-2222-3333-4444-555555555555',
+              },
+            ],
+          }),
+        );
+      },
+    },
+    {
+      name: 'void.lock.json with a Hyperdrive id',
+      write(root: string): void {
+        rmSync(join(root, 'void.json'));
+        writeFileSync(join(root, 'void.config.ts'), "export default { database: 'pg' };\n");
+        writeFileSync(
+          join(root, '.env'),
+          'DATABASE_URL="postgresql://postgres@127.0.0.1:5432/app"\n',
+        );
+        const resolved = { hyperdrive: [{ binding: 'HYPERDRIVE', id: 'a'.repeat(32) }] };
+        writeFileSync(
+          join(root, 'void.lock.json'),
+          JSON.stringify({ version: 1, source: {}, resolved, text: JSON.stringify(resolved) }),
+        );
+      },
+    },
+  ])('refuses a fresh checkout of a direct Cloudflare app ($name)', async ({ write }) => {
+    const root = createRenameProjectRoot({
+      files: { '0001_a.sql': '-- a\n', '0002_b.sql': '-- b\n' },
+      withJournal: false,
+    });
+    write(root);
+
+    await expect(runDbCommand(root, { action: 'rename-migrations' })).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    const files = readdirSync(join(root, 'db', 'migrations')).filter((f) => f.endsWith('.sql'));
+    expect(files.sort()).toEqual(['0001_a.sql', '0002_b.sql']);
+    const errorMessages = mockLog.error.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(errorMessages).toContain('direct Cloudflare');
+  });
+
+  it('refuses a Void project that is not linked', async () => {
+    mockReadDeploymentPlatform.mockReturnValue('void');
+    const root = createRenameProjectRoot({
+      files: { '0001_a.sql': '-- a\n', '0002_b.sql': '-- b\n' },
+      withJournal: false,
+    });
+
+    await expect(runDbCommand(root, { action: 'rename-migrations' })).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    const files = readdirSync(join(root, 'db', 'migrations')).filter((f) => f.endsWith('.sql'));
+    expect(files.sort()).toEqual(['0001_a.sql', '0002_b.sql']);
+    const errorMessages = mockLog.error.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(errorMessages).toContain('`void project link`');
+  });
+
+  function createMySqlRenameRoot(): string {
+    const root = createRenameProjectRoot({
+      files: { '0001_a.sql': '-- a\n', '0002_b.sql': '-- b\n' },
+      withJournal: false,
+    });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'mysql' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="mysql://root@127.0.0.1:3306/app"\n');
+    mysqlQueries.length = 0;
+    return root;
+  }
+
+  it('MySQL: commits the tracking renames in one transaction', async () => {
+    const root = createMySqlRenameRoot();
+
+    await runDbCommand(root, { action: 'rename-migrations' });
+
+    const begin = mysqlQueries.indexOf('START TRANSACTION');
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(mysqlQueries.slice(begin).map((sql) => sql.split(' ')[0])).toEqual([
+      'START',
+      'UPDATE',
+      'UPDATE',
+      'COMMIT',
+    ]);
+  });
+
+  it('MySQL: rolls back every tracking rename when one fails', async () => {
+    const root = createMySqlRenameRoot();
+    let updates = 0;
+    mockMySqlQuery.mockImplementation((sql) => {
+      if (sql.startsWith('UPDATE') && ++updates === 2) {
+        throw new Error('Lock wait timeout exceeded');
+      }
+    });
+
+    await expect(runDbCommand(root, { action: 'rename-migrations' })).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    const begin = mysqlQueries.indexOf('START TRANSACTION');
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(mysqlQueries.slice(begin).map((sql) => sql.split(' ')[0])).toEqual([
+      'START',
+      'UPDATE',
+      'UPDATE',
+      'ROLLBACK',
+    ]);
+    const files = readdirSync(join(root, 'db', 'migrations')).filter((f) => f.endsWith('.sql'));
+    expect(files.sort()).toEqual(['0001_a.sql', '0002_b.sql']);
   });
 });

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test';
@@ -8,14 +8,32 @@ import { getMiniflareDatabasePath } from '../../src/migrations/runner.ts';
 
 const mockIntro = vi.fn();
 const mockOutro = vi.fn();
+const mockConfirm = vi.fn();
 const mockLog = {
   error: vi.fn(),
   info: vi.fn(),
   step: vi.fn(),
   success: vi.fn(),
 };
+const pgQueries = vi.hoisted((): Array<string> => []);
+
+vi.mock('pg', async (importOriginal) => {
+  // Keep pg's own connection-string parsing; record the queries instead of sending them.
+  class Client extends (await importOriginal<typeof import('pg')>()).Client {}
+  Object.assign(Client.prototype, {
+    async connect() {},
+    async end() {},
+    async query(sql: string) {
+      pgQueries.push(sql);
+      return { rows: [] };
+    },
+  });
+  return { Client };
+});
 
 vi.mock('@voidzero-dev/vite-plus-prompts', () => ({
+  confirm: (...args: Array<unknown>) => mockConfirm(...args),
+  isCancel: () => false,
   intro: (...args: Array<unknown>) => mockIntro(...args),
   outro: (...args: Array<unknown>) => mockOutro(...args),
   log: {
@@ -187,6 +205,66 @@ await runDbCommand(${JSON.stringify(root)}, { action: 'seed' });`,
     expect(result.status, result.stderr).toBe(0);
     expect(await readMessages(root)).toEqual([{ id: 1, text: 'from barrel' }]);
   }, 30_000);
+
+  it('checks the seed file before it resets the database', async () => {
+    const root = createProjectRoot({
+      seedFile: {
+        name: 'seed.sql',
+        content: "INSERT INTO messages (text) VALUES ('kept');\n",
+      },
+    });
+    writeFileSync(join(root, 'db', 'no-export.ts'), 'export const value = 1;\n');
+    await runDbCommand(root, { action: 'seed' });
+
+    await expect(runDbCommand(root, { action: 'seed', file: 'db/missing.sql' })).rejects.toThrow(
+      'process.exit:1',
+    );
+    await expect(runDbCommand(root, { action: 'seed', file: 'db/no-export.ts' })).rejects.toThrow(
+      'must export a default function',
+    );
+
+    expect(await readMessages(root)).toEqual([{ id: 1, text: 'kept' }]);
+  });
+
+  it('asks about a non-local database before it imports the seed module', async () => {
+    const root = createProjectRoot({ seedFile: { name: 'seed.ts', content: '' } });
+    const marker = join(root, 'seed-module-ran');
+    writeFileSync(
+      join(root, 'db', 'seed.ts'),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker)}, "");
+export default async function seed() {}
+`,
+    );
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(
+      join(root, '.env'),
+      'DATABASE_URL="postgresql://user:secret@db.example.com:5432/prod"\n',
+    );
+    pgQueries.length = 0;
+    const stdinTty = process.stdin.isTTY;
+    try {
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+      await expect(runDbCommand(root, { action: 'seed' })).rejects.toThrow('process.exit:1');
+      expect(existsSync(marker)).toBe(false);
+
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+      mockConfirm.mockResolvedValue(false);
+      await expect(runDbCommand(root, { action: 'seed' })).rejects.toThrow('process.exit:0');
+      expect(mockConfirm).toHaveBeenCalledOnce();
+      expect(existsSync(marker)).toBe(false);
+      // Nothing reached the database.
+      expect(pgQueries).toEqual([]);
+
+      // One answer covers the reset too.
+      mockConfirm.mockResolvedValue(true);
+      await runDbCommand(root, { action: 'seed' });
+      expect(mockConfirm).toHaveBeenCalledTimes(2);
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: stdinTty });
+    }
+  });
 
   it('fails when multiple default seed files exist', async () => {
     const root = createProjectRoot({

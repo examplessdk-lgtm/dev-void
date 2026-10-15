@@ -22,7 +22,7 @@ vi.mock('../../src/migrations/runner', () => {
               { name: 'title', hidden: 0 },
             ];
           }
-          if (sql.includes('NOT LIKE')) {
+          if (sql.startsWith("SELECT name FROM sqlite_master WHERE type='table'")) {
             return [{ name: 'notes' }];
           }
           if (sql.startsWith('SELECT * FROM')) {

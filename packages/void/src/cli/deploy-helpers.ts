@@ -461,9 +461,10 @@ export function getGitCommit(root: string): string | null {
 export function validateDeployMigrations(
   migrationsDir: string,
   rawMigrations: Array<{ name: string; sql: string }>,
+  sourceRelative?: (path: string) => string,
 ): Array<MigrationFile> | undefined {
   try {
-    assertJournalCoherence(migrationsDir, rawMigrations);
+    assertJournalCoherence(migrationsDir, rawMigrations, sourceRelative);
   } catch (err: unknown) {
     log.error(getErrorMessage(err));
     process.exit(1);

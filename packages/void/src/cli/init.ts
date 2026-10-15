@@ -2469,18 +2469,33 @@ function setupExistingProject(root: string, framework?: DetectedFramework): bool
   return dependencyAdded;
 }
 
-/**
- * Scaffolds the "SQL → types → handler → fetch" demo into an existing project.
- * `setupExistingProject` has already declared `void` in `package.json`.
- */
-function scaffoldDemo(root: string): void {
-  const devCommand = getDevCommand(root);
-  const paths = readProjectPaths(root);
+/** The demo `posts` table for the database dialect that init configured. */
+function demoSchemaSource(dialect: DatabaseDialect): string {
+  if (dialect === 'postgresql') {
+    return `import { pgTable, serial, text, timestamp } from "void/schema-pg";
 
-  mkdirSync(paths.dbDir, { recursive: true });
-  writeFileSync(
-    paths.schemaFile,
-    `import { sql } from "void/db";
+export const posts = pgTable("posts", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+`;
+  }
+
+  if (dialect === 'mysql') {
+    return `import { int, mysqlTable, text, timestamp } from "void/schema-mysql";
+
+export const posts = mysqlTable("posts", {
+  id: int("id").autoincrement().primaryKey(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+`;
+  }
+
+  return `import { sql } from "void/db";
 import { integer, sqliteTable, text } from "void/schema-d1";
 
 export const posts = sqliteTable("posts", {
@@ -2489,8 +2504,19 @@ export const posts = sqliteTable("posts", {
   body: text("body").notNull(),
   createdAt: text("created_at").notNull().default(sql\`(datetime('now'))\`),
 });
-`,
-  );
+`;
+}
+
+/**
+ * Scaffolds the "SQL → types → handler → fetch" demo into an existing project.
+ * `setupExistingProject` has already declared `void` in `package.json`.
+ */
+function scaffoldDemo(root: string, dialect: DatabaseDialect): void {
+  const devCommand = getDevCommand(root);
+  const paths = readProjectPaths(root);
+
+  mkdirSync(paths.dbDir, { recursive: true });
+  writeFileSync(paths.schemaFile, demoSchemaSource(dialect));
   log.step('Created db/schema.ts');
 
   // API route
@@ -2769,7 +2795,9 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
         process.exit(0);
       }
       if (scaffold) {
-        scaffoldDemo(root);
+        // Read the dialect from config, as later `void db` commands do.
+        const demoDialect = getDatabaseDialect(readConfig(root));
+        scaffoldDemo(root, demoDialect);
         // The existing-project step already queued any install or workspace deferral the demo needs.
         const voidResolvable = isVoidResolvableFrom(root);
         const deferral = resolveWorkspaceDeferral(root, readPackageJson(root));
@@ -2782,7 +2810,7 @@ export async function runInitCommand(root: string, initArgs?: InitArgs): Promise
             'Workspace subpackage',
           );
         }
-        scaffoldedStarterMode = 'sqlite';
+        scaffoldedStarterMode = demoDialect;
       }
     }
   }

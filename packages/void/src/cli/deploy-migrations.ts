@@ -6,6 +6,7 @@ import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import { type DatabaseDialect } from '../config.ts';
 import { openMigrationValidationDatabase } from '../migrations/sqlite-validation.ts';
 import { assertJournalCoherence, validateMigrations } from '../migrations/validate.ts';
+import { readProjectPaths } from '../project-paths.ts';
 import { isCleanCloudflareExit } from './cloudflare-process.ts';
 import { hasDeploySchemaDrift, getDeploySchemaDriftMessage } from './deploy-drift.ts';
 import { log } from './deploy-helpers.ts';
@@ -394,7 +395,7 @@ export function assertRemoteMigrationsDeployable(
   if (hasDeploySchemaDrift(root, dialect)) {
     throw new Error(getDeploySchemaDriftMessage(root));
   }
-  assertJournalCoherence(migrationsDir, migrations);
+  assertJournalCoherence(migrationsDir, migrations, readProjectPaths(root).sourceRelative);
   if (migrations.length > 0) {
     validateMigrations(migrations);
   }
@@ -519,7 +520,8 @@ function listWranglerMigrationFiles(directory: string, pattern: string): Array<s
  * Assert the files `d1 migrations apply` would apply from the binding's `migrations_dir` and
  * `migrations_pattern` match the validated migrations by name and content, and in the same
  * order. Otherwise a stray file such as `seed.sql`, or an unpadded `2_` vs `10_` prefix, would
- * reach remote D1 unvalidated or out of order.
+ * reach remote D1 unvalidated or out of order. `displayDir` is the project's migrations folder
+ * as the messages name it.
  */
 export async function checkWranglerMigrationApplySet(
   configPath: string,
@@ -527,6 +529,7 @@ export async function checkWranglerMigrationApplySet(
   binding: string,
   migrationsDirRaw: string,
   gated: Array<{ name: string; sql: string }>,
+  displayDir = 'db/migrations',
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const absDir = resolve(dirname(configPath), migrationsDirRaw);
   if (!existsSync(absDir)) {
@@ -535,7 +538,7 @@ export async function checkWranglerMigrationApplySet(
       reason:
         `deploy: configured migrations_dir ${JSON.stringify(migrationsDirRaw)} resolves to ` +
         `${absDir}, which does not exist — wrangler would have nothing to apply (or error). ` +
-        `Align "migrations_dir" with your db/migrations, then rerun.`,
+        `Align "migrations_dir" with your ${displayDir}, then rerun.`,
     };
   }
   const resolvedPattern = resolveWranglerMigrationPattern(config, binding, migrationsDirRaw);
@@ -569,7 +572,7 @@ export async function checkWranglerMigrationApplySet(
       lines.push(`  • content differs between Void's copy and wrangler's: ${changed.join(', ')}`);
     }
     lines.push(
-      'Only Void-managed db/migrations/*.sql may be applied. Remove stray .sql (e.g. seed.sql) ' +
+      `Only Void-managed ${displayDir}/*.sql may be applied. Remove stray .sql (e.g. seed.sql) ` +
         'from migrations_dir, then rerun.',
     );
     return { ok: false, reason: lines.join('\n') };
@@ -587,8 +590,9 @@ export async function checkWranglerMigrationApplySet(
         `  • Void's validated order:          ${gatedNames.join(', ')}`,
         "This happens when a migration's numeric prefix is not zero-padded (e.g. `2_` vs `10_`),",
         'so it sorts differently for wrangler (numeric) than for Void (lexicographic) — remote D1',
-        'would receive them out of the validated order. Zero-pad the prefixes (0001_, 0002_, …),',
-        'e.g. with `void db rename-migrations`, then rerun.',
+        'would receive them out of the validated order. Rename only migrations that are not applied',
+        'yet (a renamed applied migration runs again), or give the new file a name that sorts last',
+        'in both orders, then rerun.',
       ].join('\n'),
     };
   }

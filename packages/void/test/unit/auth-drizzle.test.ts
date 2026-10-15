@@ -87,6 +87,25 @@ describe('Better Auth Drizzle codegen', () => {
     expect(code).toContain('"unbounded": true');
   });
 
+  it('gives PostgreSQL serial and uuid ids a database default', () => {
+    const generate = (dialect: 'postgresql' | 'mysql', generateId: 'serial' | 'uuid') =>
+      generateVoidAuthDrizzleSchema({
+        dialect,
+        providers: null,
+        userConfig: ({ defaults }) => ({ ...defaults, advanced: { database: { generateId } } }),
+      });
+
+    expect(generate('postgresql', 'serial')).toContain(
+      '"id": integer("id").primaryKey().generatedByDefaultAsIdentity().notNull()',
+    );
+    expect(generate('postgresql', 'uuid')).toContain(
+      '"id": uuid("id").primaryKey().defaultRandom().notNull()',
+    );
+    expect(generate('mysql', 'serial')).toContain(
+      'import { boolean, index, int, mysqlTable, text, timestamp, varchar } from "void/schema-mysql"',
+    );
+  });
+
   it('does not add MySQL storage metadata to PostgreSQL or SQLite schemas', () => {
     for (const dialect of ['postgresql', 'sqlite'] as const) {
       const code = generateVoidAuthDrizzleSchema({ dialect, providers: ['google'] });

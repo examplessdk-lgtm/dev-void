@@ -228,6 +228,7 @@ describe('local D1 identity', () => {
 
     writeFileSync(viteConfigPath, 'export default { changed: true }');
     expect(() => getLocalD1Target(root)).toThrow('persistence configuration changed');
+    expect(() => getLocalD1Target(root)).toThrow('Start the dev server to refresh it');
 
     // A fresh plugin evaluation replaces stale state with the current setting.
     writeLocalD1PersistState(root, customPersistRoot);

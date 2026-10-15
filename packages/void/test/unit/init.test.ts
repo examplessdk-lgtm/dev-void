@@ -3327,6 +3327,35 @@ export default config;
     }
   });
 
+  it.each([
+    ['postgresql', 'pg', 'void/schema-pg'],
+    ['mysql', 'mysql', 'void/schema-mysql'],
+  ] as const)(
+    'scaffolds the demo for the chosen %s database',
+    async (dialect, configValue, schemaModule) => {
+      const root = mkdtempSync(join(tmpdir(), 'void-init-'));
+      try {
+        writeExistingViteApp(root, { void: '^0.0.1' });
+        mockSelect.mockResolvedValueOnce(dialect);
+        mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+        await runInitCommand(root);
+
+        expect(readConfig(root).database).toBe(configValue);
+        const schema = readFileSync(join(root, 'db', 'schema.ts'), 'utf-8');
+        expect(schema).toContain(`from "${schemaModule}"`);
+        expect(schema).not.toContain('void/schema-d1');
+        expect(drizzleGenerateCalls()).toHaveLength(1);
+        const drizzleConfig = JSON.parse(
+          readFileSync(join(root, '.void', 'drizzle.config.json'), 'utf-8'),
+        );
+        expect(drizzleConfig.dialect).toBe(dialect);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('runs starter migration with injected PnP NODE_OPTIONS in a Yarn Berry PnP project', async () => {
     const root = mkdtempSync(join(tmpdir(), 'void-init-'));
     try {

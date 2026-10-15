@@ -154,6 +154,11 @@ describe('rendered help advertises the flags the parser honours', () => {
     expect(render(['gen'])).not.toContain('CRUD');
   });
 
+  it('describes db push for every database, not only D1', () => {
+    expect(render(['db', 'push'])).not.toContain('local D1');
+    expect(render(['db'])).not.toContain('local D1');
+  });
+
   it('lists proxy token rotation under platform system with its scope flags', () => {
     expect(render(['platform', 'system'])).toContain('rotate-proxy-tokens');
     const page = render(['platform', 'system', 'rotate-proxy-tokens']);

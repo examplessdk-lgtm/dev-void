@@ -168,6 +168,18 @@ describe('hasDeploySchemaDrift', { timeout: driftTestTimeout }, () => {
     );
   });
 
+  it('names the migrations folder under sourceDir in the drift message', () => {
+    const root = createTempApp();
+    expect(getDeploySchemaDriftMessage(root)).toContain(
+      'Schema drift detected between your Drizzle schema and db/migrations/.',
+    );
+
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ sourceDir: 'src' }));
+    expect(getDeploySchemaDriftMessage(root)).toContain(
+      'Schema drift detected between your Drizzle schema and src/db/migrations/.',
+    );
+  });
+
   it('throws when drizzle-kit cannot evaluate the schema', () => {
     const root = createTempApp();
     writeFileSync(
