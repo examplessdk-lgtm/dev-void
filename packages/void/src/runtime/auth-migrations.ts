@@ -151,6 +151,10 @@ function renderDefaultLiteral(
     ).join('');
     return `_utf8mb4 X'${hex}'`;
   }
+  if (dialect === 'postgresql' && value.includes('\\')) {
+    // standard_conforming_strings changes what a backslash means in '...'. E'...' does not change.
+    return `E'${value.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
+  }
   return `'${value.replaceAll("'", "''")}'`;
 }
 

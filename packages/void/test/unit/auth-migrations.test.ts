@@ -415,22 +415,35 @@ describe('auth migration runner', () => {
   it('fills rows that exist with the fixed default of a new required field (postgres)', async () => {
     const pg = state.pg!;
     const runner = pgMigrationRunner(pg);
-    await applyPgAuthMigrations(runner, resolveWithUserFields('postgresql'));
-    await pg.query(
-      `INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ('u1', 'A', 'a@example.com', false, now(), now())`,
-    );
+    // With standard_conforming_strings off, a backslash in '...' starts an escape.
+    for (const mode of ['on', 'off']) {
+      await pg.exec(
+        `DROP SCHEMA public CASCADE; CREATE SCHEMA public; SET standard_conforming_strings = ${mode}`,
+      );
+      try {
+        await applyPgAuthMigrations(runner, resolveWithUserFields('postgresql'));
+        await pg.query(
+          `INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") VALUES ('u1', 'A', 'a@example.com', false, now(), now())`,
+        );
 
-    await applyPgAuthMigrations(
-      runner,
-      resolveWithUserFields('postgresql', {
-        plan: { type: 'string', defaultValue: "it's free" },
-        banned: { type: 'boolean', defaultValue: true },
-      }),
-    );
+        await applyPgAuthMigrations(
+          runner,
+          resolveWithUserFields('postgresql', {
+            plan: { type: 'string', defaultValue: "it's free" },
+            motto: { type: 'string', defaultValue: "it's a\\b" },
+            folder: { type: 'string', defaultValue: 'end\\' },
+            banned: { type: 'boolean', defaultValue: true },
+          }),
+        );
 
-    expect((await pg.query('SELECT plan, banned FROM "user"')).rows).toEqual([
-      { plan: "it's free", banned: true },
-    ]);
+        expect(
+          (await pg.query('SELECT plan, motto, folder, banned FROM "user"')).rows,
+          `standard_conforming_strings = ${mode}`,
+        ).toEqual([{ plan: "it's free", motto: "it's a\\b", folder: 'end\\', banned: true }]);
+      } finally {
+        await pg.exec('RESET standard_conforming_strings');
+      }
+    }
   });
 
   it('refuses a required field without a default only when the table has rows', async () => {
