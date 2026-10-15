@@ -128,6 +128,18 @@ describe('playground/astro dev', () => {
       await browser.close();
     }
   });
+
+  // An app without middleware gets Void's dev middleware, which answers the trigger.
+  it('runs a cron through the dev trigger endpoint', async () => {
+    const token = readFileSync(join(ROOT, PLAYGROUND, '.void/dev-trigger-token'), 'utf8').trim();
+    const response = await fetch(`${DEV_BASE}/__void/scheduled`, {
+      method: 'POST',
+      headers: { 'x-void-dev-trigger': token },
+      body: JSON.stringify({ cron: '0 * * * *', scheduledTime: Date.now() }),
+    });
+    const result = { status: response.status, body: await response.text() };
+    expect(result).toEqual({ status: 200, body: '{"ok":true}' });
+  });
 });
 
 // Astro owns its Worker entry; Void runs it in a request scope for PostgreSQL.
@@ -142,6 +154,10 @@ describe('playground/astro with PostgreSQL', () => {
   let child: ReturnType<typeof spawn> | undefined;
   let dev: StartedServer;
   let connections = 0;
+  const USER_MIDDLEWARE = `import { defineMiddleware } from 'astro:middleware';
+
+export const onRequest = defineMiddleware((_context, next) => next());
+`;
 
   function start(script: 'dev' | 'preview'): Promise<StartedServer> {
     const root = playground.root;
@@ -261,7 +277,7 @@ export async function GET() {
 `,
     );
     // The import the jobs guide shows. The package entry is Void's Vite plugin, which workerd
-    // cannot load; the dev middleware imports every cron on each request.
+    // cannot load; the dev trigger dispatch imports every cron with the Worker entry.
     writeFileSync(
       join(root, 'crons/tick.ts'),
       `import { defineScheduled } from 'void';
@@ -275,6 +291,8 @@ export default defineScheduled(async () => {});
       join(root, '.env'),
       `DATABASE_URL=postgresql://postgres@127.0.0.1:${port}/postgres\n`,
     );
+    // An app's own middleware must not hide the dev trigger endpoints.
+    writeFileSync(join(root, 'src/middleware.ts'), USER_MIDDLEWARE);
 
     dev = await start('dev');
   });
@@ -315,10 +333,11 @@ export default defineScheduled(async () => {});
     });
     const result = { status: response.status, body: await response.text() };
     expect(result, dev.output().slice(-4000)).toEqual({ status: 200, body: '{"ok":true}' });
+    expect(readFileSync(join(playground.root, 'src/middleware.ts'), 'utf8')).toBe(USER_MIDDLEWARE);
   });
 
   it('runs every query of a request on one connection in the built Worker', async () => {
-    // The dev server writes Void's dev-only middleware into src/ until it stops.
+    // Stop dev so the build and preview run on their own.
     await killChild(dev.child);
     child = undefined;
     execFileSync(

@@ -26,6 +26,7 @@ import {
   astroDevTriggerInjectPlugin,
   frameworkTriggersDispatchPath,
   frameworkTriggersPlugin,
+  hasOwnAstroMiddleware,
   nitroDevTriggerInjectPlugin,
 } from './plugin-framework-triggers.ts';
 import { migrationPlugin } from './plugin-migration.ts';
@@ -235,20 +236,34 @@ export function createFrameworkPlugins(input: {
     },
   };
 
-  // Astro's Cloudflare adapter owns the Worker entry. For PostgreSQL and MySQL, its default
-  // entry runs each request inside Void's request scope (`withRuntimeEnv`), as the Class A
-  // wrapper does, so void/db keeps one client per request instead of one per query. D1 apps
-  // keep Astro's own entry: in a request scope, void/db reads D1 through a replica-capable
-  // session instead of the primary.
-  const astroRequestScopePlugin: Plugin | undefined =
-    detected.name === 'astro' && dialect !== 'sqlite'
+  // Astro's Cloudflare adapter owns the Worker entry. Void wraps its default entry:
+  // - For PostgreSQL and MySQL, each request runs inside Void's request scope
+  //   (`withRuntimeEnv`), as the Class A wrapper does, so void/db keeps one client per request
+  //   instead of one per query. D1 apps run without it: inside a request scope, void/db reads D1
+  //   through a replica-capable session instead of the primary.
+  // - In dev, Void's own middleware answers `/__void/scheduled` and `/__void/queue`
+  //   (`astroDevTriggerInjectPlugin`). When the app has its own middleware, Void cannot add
+  //   one, so the wrapper sends these requests to the generated trigger dispatch before Astro
+  //   sees them. A build never imports the dispatch file, which exists only in dev and embeds
+  //   the dev-trigger token.
+  const scopeAstroRequests = dialect !== 'sqlite';
+  let astroDevTriggers = false;
+  const astroServerEntryPlugin: Plugin | undefined =
+    detected.name === 'astro'
       ? {
-          name: 'void:astro-request-scope',
+          name: 'void:astro-server-entry',
           enforce: 'pre',
+          configResolved(resolvedConfig) {
+            astroDevTriggers = resolvedConfig.command === 'serve' && hasOwnAstroMiddleware(root);
+          },
           resolveId: {
             filter: { id: /^@astrojs\/cloudflare\/entrypoints\/server(?:\.js)?$/ },
             handler(_id, importer) {
-              if (importer === ASTRO_SCOPED_SERVER_ENTRY || this.environment?.name === 'client') {
+              if (
+                (!scopeAstroRequests && !astroDevTriggers) ||
+                importer === ASTRO_SCOPED_SERVER_ENTRY ||
+                this.environment?.name === 'client'
+              ) {
                 return;
               }
               return ASTRO_SCOPED_SERVER_ENTRY;
@@ -258,14 +273,28 @@ export function createFrameworkPlugins(input: {
             // oxlint-disable-next-line no-control-regex -- \0 prefix is Vite's virtual module convention
             filter: { id: /^\0void:astro-server-entry$/ },
             handler() {
-              return `import original from ${JSON.stringify(ASTRO_SERVER_ENTRY)};
-import { withRuntimeEnv } from ${JSON.stringify(envModuleFile)};
+              const imports = [
+                `import original from ${JSON.stringify(ASTRO_SERVER_ENTRY)};`,
+                ...(scopeAstroRequests
+                  ? [`import { withRuntimeEnv } from ${JSON.stringify(envModuleFile)};`]
+                  : []),
+                ...(astroDevTriggers
+                  ? [
+                      `import { handleDevTrigger } from ${JSON.stringify(frameworkTriggersDispatchPath(root))};`,
+                    ]
+                  : []),
+              ];
+              const handle = astroDevTriggers
+                ? 'async () => (await handleDevTrigger(request, env, ctx)) ?? original.fetch(request, env, ctx)'
+                : '() => original.fetch(request, env, ctx)';
+              return `${imports.join('\n')}
 export * from ${JSON.stringify(ASTRO_SERVER_ENTRY)};
 
 export default {
   ...original,
   fetch(request, env, ctx) {
-    return withRuntimeEnv(env, () => original.fetch(request, env, ctx));
+    const handle = ${handle};
+    return ${scopeAstroRequests ? 'withRuntimeEnv(env, handle)' : 'handle()'};
   },
 };
 `;
@@ -335,7 +364,7 @@ export default {
     wranglerCompatPlugin,
     wranglerSyncPlugin,
     ...(nuxtVite8WebSocketCompatPlugin ? [nuxtVite8WebSocketCompatPlugin] : []),
-    ...(astroRequestScopePlugin ? [astroRequestScopePlugin] : []),
+    ...(astroServerEntryPlugin ? [astroServerEntryPlugin] : []),
     svelteKitHooksInjectPlugin,
     ...(svelteKitWorkerBuildPlugin ? [svelteKitWorkerBuildPlugin] : []),
     clientStubsPlugin,

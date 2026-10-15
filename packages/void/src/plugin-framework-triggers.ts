@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'pathslash';
 import { normalizePath, type Plugin } from 'vite';
+import { readRootWranglerConfig } from './cli/wrangler.ts';
 import { scanJobsSync, type JobDefinition } from './crons/scan.ts';
 import { voidWarn } from './log.ts';
 import { readProjectPaths } from './project-paths.ts';
@@ -51,9 +52,9 @@ export function writeFrameworkTriggersDispatch(root: string, devTriggerToken: st
 /**
  * Writes a real file at `<root>/.void/dev-triggers.ts` exporting
  * `handleDevTrigger(request, env, ctx)`. We use a real file (not a Vite
- * virtual module) because Nitro and Astro have their own server bundlers
- * that don't go through Vite's plugin pipeline. The framework injection
- * code imports this path at runtime to dispatch cron and queue handlers
+ * virtual module) because Nitro has its own server bundler that doesn't go
+ * through Vite's plugin pipeline. The framework injection code imports
+ * this path at runtime to dispatch cron and queue handlers
  * with the framework adapter's real bindings.
  */
 export function frameworkTriggersPlugin(root: string, options: FrameworkTriggersOptions): Plugin {
@@ -572,13 +573,42 @@ function astroMiddlewareClaims(): Map<string, AstroMiddlewareClaim> {
 }
 
 /**
+ * Whether the Astro app has middleware that Void did not write. Void cannot add its dev trigger
+ * middleware then, so the wrapper around Astro's Cloudflare server entry answers the triggers.
+ */
+export function hasOwnAstroMiddleware(root: string): boolean {
+  const middlewarePath = join(root, ASTRO_MIDDLEWARE_RELATIVE);
+  if (existsSync(middlewarePath)) {
+    // A restart: the dev server being replaced wrote this file and still holds it.
+    return !astroMiddlewareClaims().has(middlewarePath);
+  }
+  return existsSync(join(root, 'src', 'middleware', 'index.ts'));
+}
+
+/** The Worker entry from the app's Cloudflare config, unless it is Astro's server entry. */
+function customAstroWorkerEntry(root: string): string | undefined {
+  let main: unknown;
+  try {
+    main = readRootWranglerConfig(root)?.config.main;
+  } catch {
+    return undefined;
+  }
+  return typeof main === 'string' &&
+    !/^@astrojs\/cloudflare\/entrypoints\/server(?:\.js)?$/.test(main)
+    ? main
+    : undefined;
+}
+
+/**
  * Writes a tiny Astro middleware to the user's project so
  * `/__void/scheduled` and `/__void/queue` are intercepted inside Astro's
- * request pipeline, with bindings from `cloudflare:workers`.
+ * request pipeline, with bindings from `cloudflare:workers`. Astro runs
+ * middleware for a custom Worker entry too.
  *
  * Astro middleware lives at a single discoverable entry, so if the user
- * already has `src/middleware.ts` we don't overwrite it — instead we log a
- * one-shot snippet they can paste into their existing middleware.
+ * already has `src/middleware.ts` we don't overwrite it. The wrapper around
+ * Astro's Cloudflare server entry answers the triggers then. A custom Worker
+ * entry can skip that server entry, so we warn when the app sets one.
  *
  * If we wrote the file we remove it when the last dev server using it closes,
  * so the user's source tree stays clean. `src/middleware.ts` belongs to the
@@ -587,24 +617,27 @@ function astroMiddlewareClaims(): Map<string, AstroMiddlewareClaim> {
  */
 export function astroDevTriggerInjectPlugin(root: string): Plugin {
   const middlewarePath = join(root, ASTRO_MIDDLEWARE_RELATIVE);
-  const middlewareDirIndexPath = join(root, 'src', 'middleware', 'index.ts');
   const claims = astroMiddlewareClaims();
 
   /** Whether the dev server being set up now holds the middleware Void wrote. */
   const ensureFile = (): boolean => {
+    if (hasOwnAstroMiddleware(root)) {
+      const entry = customAstroWorkerEntry(root);
+      if (entry) {
+        voidWarn(
+          `Your Astro app has its own middleware and its own Worker entry (${entry}).\n` +
+            '         In dev, /__void/scheduled and /__void/queue do not work if this entry calls\n' +
+            '         handle() from @astrojs/cloudflare/handler. To use them, call fetch() on the\n' +
+            '         default export of @astrojs/cloudflare/entrypoints/server instead.',
+        );
+      }
+      return false;
+    }
     const claim = claims.get(middlewarePath);
     if (claim && existsSync(middlewarePath)) {
       // A restart: the server being replaced wrote this file and still holds it.
       claim.servers++;
       return true;
-    }
-    if (existsSync(middlewarePath) || existsSync(middlewareDirIndexPath)) {
-      voidWarn(
-        'Astro middleware already exists. To enable /__void/scheduled and /__void/queue,\n' +
-          '         add the Void dev-trigger middleware to your existing onRequest sequence.\n' +
-          '         See https://void.cloud/guide/jobs#local-development.',
-      );
-      return false;
     }
     mkdirSync(dirname(middlewarePath), { recursive: true });
     writeFileSync(middlewarePath, astroMiddlewareSource(frameworkTriggersDispatchPath(root)));

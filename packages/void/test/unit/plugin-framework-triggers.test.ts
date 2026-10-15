@@ -18,6 +18,7 @@ import {
   astroDevTriggerInjectPlugin,
   frameworkTriggersDispatchPath,
   frameworkTriggersPlugin,
+  hasOwnAstroMiddleware,
   nitroDevTriggerInjectPlugin,
 } from '../../src/plugin-framework-triggers.ts';
 import type { QueueBatch } from '../../src/runtime/handler.ts';
@@ -538,22 +539,57 @@ describe('astroDevTriggerInjectPlugin', () => {
     expect(code).toContain(`from "${frameworkTriggersDispatchPath(root)}"`);
   });
 
-  it('warns and skips when src/middleware.ts already exists', () => {
+  // Next to the app's own middleware, the wrapper around Astro's server entry answers the
+  // triggers. A custom Worker entry can skip that server entry.
+  it.each([
+    [undefined, false],
+    ['@astrojs/cloudflare/entrypoints/server', false],
+    ['./src/worker.ts', true],
+  ])(
+    'skips an app with its own middleware and warns only for a custom Worker entry (main: %s)',
+    (main, warns) => {
+      const root = createTempRoot();
+      mkdirSync(join(root, 'src'), { recursive: true });
+      const existing = '// user middleware\nexport const onRequest = () => {};\n';
+      writeFileSync(join(root, 'src', 'middleware.ts'), existing);
+      writeFileSync(join(root, 'wrangler.jsonc'), JSON.stringify({ main }));
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      callConfigureServer(astroDevTriggerInjectPlugin(root));
+
+      expect(readFileSync(join(root, 'src', 'middleware.ts'), 'utf-8')).toBe(existing);
+      const output = log.mock.calls.map((call) => String(call[0])).join('\n');
+      if (warns) {
+        expect(output).toContain('its own Worker entry (./src/worker.ts)');
+        expect(output).toContain('default export of @astrojs/cloudflare/entrypoints/server');
+      } else {
+        expect(output).toBe('');
+      }
+    },
+  );
+
+  it('treats only middleware that Void did not write as app middleware', () => {
     const root = createTempRoot();
-    mkdirSync(join(root, 'src'), { recursive: true });
-    const existing = '// user middleware\nexport const onRequest = () => {};\n';
-    writeFileSync(join(root, 'src', 'middleware.ts'), existing);
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let onClose: (() => void) | undefined;
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    expect(hasOwnAstroMiddleware(root)).toBe(false);
 
-    const plugin = astroDevTriggerInjectPlugin(root);
-    callConfigureServer(plugin);
+    callConfigureServer(astroDevTriggerInjectPlugin(root), {
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          onClose = cb;
+        },
+      },
+    });
+    expect(hasOwnAstroMiddleware(root)).toBe(false);
 
-    // User file untouched
-    expect(readFileSync(join(root, 'src', 'middleware.ts'), 'utf-8')).toBe(existing);
-    // Warned
-    expect(log.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
-      'Astro middleware already exists',
-    );
+    onClose!();
+    writeFileSync(join(root, 'src', 'middleware.ts'), 'export const onRequest = () => {};\n');
+    expect(hasOwnAstroMiddleware(root)).toBe(true);
+    rmSync(join(root, 'src', 'middleware.ts'));
+    mkdirSync(join(root, 'src', 'middleware'));
+    writeFileSync(join(root, 'src', 'middleware', 'index.ts'), '');
+    expect(hasOwnAstroMiddleware(root)).toBe(true);
   });
 
   it('stops ignoring src/middleware.ts after the dev server closes', () => {
