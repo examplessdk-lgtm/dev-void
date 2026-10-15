@@ -528,7 +528,8 @@ describe('auth migration runner', () => {
 
     expect(statements).toEqual([
       "ALTER TABLE `user` ADD COLUMN `plan` varchar(255) NOT NULL DEFAULT 'free'",
-      "ALTER TABLE `user` ADD COLUMN `motto` varchar(255) NOT NULL DEFAULT 'it''s a\\\\b'",
+      // A hex string keeps the backslash when the server sets NO_BACKSLASH_ESCAPES.
+      "ALTER TABLE `user` ADD COLUMN `motto` varchar(255) NOT NULL DEFAULT _utf8mb4 X'6974277320615c62'",
       'ALTER TABLE `user` ADD COLUMN `nickname` varchar(255) NOT NULL',
     ]);
   });

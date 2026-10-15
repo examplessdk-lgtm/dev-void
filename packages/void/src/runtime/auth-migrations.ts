@@ -144,8 +144,14 @@ function renderDefaultLiteral(
   if (typeof value === 'number') {
     return String(value);
   }
-  const escaped = value.replaceAll("'", "''");
-  return `'${dialect === 'mysql' ? escaped.replaceAll('\\', '\\\\') : escaped}'`;
+  if (dialect === 'mysql' && value.includes('\\')) {
+    // NO_BACKSLASH_ESCAPES changes what a backslash means in a MySQL string. A hex string does not change.
+    const hex = Array.from(new TextEncoder().encode(value), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    return `_utf8mb4 X'${hex}'`;
+  }
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function buildColumnDefinition(
