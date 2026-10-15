@@ -1,0 +1,21 @@
+platform/packages/api/src/deployment-execution.ts
+  s_77824b01a12d99::t_c62bf33f6279c1 452-455,492,494-504
+platform/packages/api/test/integration/deployment-execution.test.ts
+  s_77824b01a12d99::t_15d53fb65b4d94 28,649-717,767
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4d20ab9e154c3e63783662e3ae9043242532f695",
+  "prompts": {},
+  "sessions": {
+    "s_77824b01a12d99": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12dbe-f04a-71b1-acbd-3d132f151fae",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
