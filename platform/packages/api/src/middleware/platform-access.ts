@@ -6,6 +6,9 @@ import type { ApiEnv } from '../env.ts';
 
 /** These service-binding routes independently validate purpose-bound credentials. */
 function internallyAuthenticated(method: string, path: string): boolean {
+  if (/^\/oauth\/preview-serve\/proj_[a-z0-9]+$/.test(path)) {
+    return true;
+  }
   return (
     ((method === 'GET' || method === 'POST') && path === '/email/destinations/confirm') ||
     (method === 'POST' &&
@@ -62,7 +65,14 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
     // checks its underlying session, including during queued execution.
     if (
       (method === 'POST' &&
-        ['/oauth/token', '/oauth/revoke', '/oauth/deployment-requests'].includes(path)) ||
+        [
+          '/oauth/token',
+          '/oauth/revoke',
+          '/oauth/deployment-requests',
+          '/oauth/previews',
+          '/oauth/preview-deployment-requests',
+        ].includes(path)) ||
+      (method === 'POST' && /^\/oauth\/previews\/proj_[a-z0-9]+\/launch$/.test(path)) ||
       (method === 'GET' && path === '/oauth/userinfo')
     ) {
       return next();
@@ -98,7 +108,7 @@ export const platformAccessProtection: MiddlewareHandler<ApiEnv> = async (contex
       const payload = authorization?.startsWith('Bearer ')
         ? await verifyJwt(authorization.slice(7), context.env.JWT_SECRET)
         : null;
-      if (payload?.project && (payload.aud === 'deploy' || payload.aud === 'oauth-deploy')) {
+      if (payload?.project && ['deploy', 'oauth-deploy', 'oauth-preview'].includes(payload.aud)) {
         // Normal API middleware still enforces the exact project/build/endpoint scope.
         return next();
       }

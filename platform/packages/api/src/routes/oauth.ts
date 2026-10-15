@@ -11,7 +11,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { readAuthSettings, readEnabledLoginConnections } from '../auth/configuration.ts';
 import { signJwt, verifyJwt } from '../auth/jwt.ts';
-import type { OAuthRequestData, OAuthSession } from '../auth/oauth-types.ts';
+import type { OAuthRequestData, OAuthSession, OAuthScope } from '../auth/oauth-types.ts';
 import {
   activeOAuthClient,
   activeOAuthGrant,
@@ -28,6 +28,7 @@ import { consumeCliAuthCode, getProjectBySlug, getUser } from '../db.ts';
 import { isDevBypass, type ApiEnv } from '../env.ts';
 import { oauthClients, oauthGrants, oauthRequests } from '../schema.ts';
 import { isAdminSuspended } from '../suspension.ts';
+import previews from './previews.ts';
 import { createUserProject, MAX_SLUG_LENGTH } from './projects.ts';
 
 const app = new Hono<ApiEnv>();
@@ -47,7 +48,7 @@ export function oauthMetadata(context: Context<ApiEnv>) {
     userinfo_endpoint: issuer + '/oauth/userinfo',
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code'],
-    scopes_supported: ['profile', 'deploy:approve'],
+    scopes_supported: ['profile', 'deploy:approve', 'preview:deploy'],
     token_endpoint_auth_methods_supported: ['client_secret_basic'],
     revocation_endpoint_auth_methods_supported: ['client_secret_basic'],
     code_challenge_methods_supported: ['S256'],
@@ -218,7 +219,9 @@ async function consentPage(context: Context<ApiEnv>, request: typeof oauthReques
   const deploy = request.data.kind === 'deployment';
   const details = deploy
     ? `Publish ${request.data.checkpoint} to ${request.data.slug}. This approval permits one deployment of the prepared artifact. Published code can use the project’s existing secrets and resources.`
-    : 'Read your user ID and username. Project access requires separate approval for each publish.';
+    : request.data.scopes?.includes('preview:deploy')
+      ? 'Read your user ID and username, and build private previews with separate resources and no production secrets. Production publishing still requires your approval for each artifact.'
+      : 'Read your user ID and username. Project access requires separate approval for each publish.';
   const artifact = request.data.artifact;
   const summary = artifact
     ? `<p>Resources: ${h(Object.keys(artifact.manifest.bindings).join(', ') || 'none')}. ${Object.keys(artifact.assetManifest).length} assets; ${request.data.workerModules?.length ?? 0} Worker modules.</p><details><summary>Deployment details</summary><pre>${h(JSON.stringify(artifact.manifest, null, 2))}</pre><p>Artifact: ${h(request.data.artifactDigest!)}</p></details>`
@@ -243,9 +246,15 @@ app.use('*', async (context, next) => {
   await next();
 });
 app.use('*', (context, next) =>
-  bodyLimit({
-    maxSize: context.req.path === '/oauth/deployment-requests' ? 48 * 1024 * 1024 : 32768,
-  })(context, next),
+  context.req.path.startsWith('/oauth/preview-serve/')
+    ? next()
+    : bodyLimit({
+        maxSize: ['/oauth/deployment-requests', '/oauth/preview-deployment-requests'].includes(
+          context.req.path,
+        )
+          ? 48 * 1024 * 1024
+          : 32768,
+      })(context, next),
 );
 app.onError((error, context) =>
   error instanceof OAuthError
@@ -295,7 +304,6 @@ app.get('/authorize', async (context) => {
   }
   if (
     context.req.query('response_type') !== 'code' ||
-    context.req.query('scope') !== 'profile' ||
     context.req.query('code_challenge_method') !== 'S256'
   ) {
     throw new OAuthError(
@@ -304,8 +312,18 @@ app.get('/authorize', async (context) => {
     );
   }
   const client = await activeOAuthClient(context.get('db'), context.req.query('client_id') ?? '');
-  if (!client.scopes.includes('profile')) {
-    throw new OAuthError('invalid_scope', 'Identity access is not enabled for this application.');
+  const scopes = (context.req.query('scope') ?? '').split(' ') as Array<OAuthScope>;
+  if (
+    !scopes.includes('profile') ||
+    new Set(scopes).size !== scopes.length ||
+    scopes.some(
+      (scope) => !['profile', 'preview:deploy'].includes(scope) || !client.scopes.includes(scope),
+    )
+  ) {
+    throw new OAuthError(
+      'invalid_scope',
+      'Request only enabled identity and private preview permissions.',
+    );
   }
   const redirectUri = context.req.query('redirect_uri')!;
   const state = context.req.query('state')!;
@@ -313,7 +331,12 @@ app.get('/authorize', async (context) => {
   validateAuthorization(client, redirectUri, state, challenge, isDevBypass(context.env));
   return consentPage(
     context,
-    await newRequest(context, client.id, { kind: 'profile', redirectUri, state, challenge }, true),
+    await newRequest(
+      context,
+      client.id,
+      { kind: 'profile', scopes, redirectUri, state, challenge },
+      true,
+    ),
   );
 });
 
@@ -394,6 +417,12 @@ app.post('/approve', async (context) => {
   const code = randomLoginProof();
   await context.get('db').transaction(async (tx) => {
     const client = await activeOAuthClient(tx, request.client_id!, true);
+    if (
+      request.data.kind === 'profile' &&
+      request.data.scopes?.some((scope) => !client.scopes.includes(scope))
+    ) {
+      throw new OAuthError('invalid_scope', 'The requested permission is no longer enabled.', 403);
+    }
     if (request.data.kind === 'deployment') {
       const { grant } = await activeOAuthGrant(
         tx,
@@ -434,7 +463,12 @@ app.post('/approve', async (context) => {
     let data = locked.data;
     if (data.kind === 'deployment') {
       let project = await getProjectBySlug(tx, data.slug!);
-      if (project && (project.user_id !== session.sub || project.status !== 'active')) {
+      if (
+        project &&
+        (project.user_id !== session.sub ||
+          project.status !== 'active' ||
+          project.preview_client_id)
+      ) {
         throw new OAuthError('access_denied', 'You must own the selected project.', 403);
       }
       if (!project) {
@@ -459,6 +493,7 @@ app.post('/approve', async (context) => {
         client_id: client.id,
         user_id: session.sub,
         session,
+        scopes: data.scopes ?? ['profile'],
         token_hash: await hashLoginProof(randomLoginProof()),
         expires_at: new Date(
           Math.min(Date.now() + TOKEN_SECONDS * 1000, session.exp * 1000),
@@ -578,18 +613,22 @@ app.post('/token', async (context) => {
       access_token: accessToken,
       token_type: 'Bearer',
       expires_in: Math.max(0, Math.floor((Date.parse(grant.expires_at) - Date.now()) / 1000)),
-      scope: 'profile',
+      scope: grant.scopes.join(' '),
     });
   });
 });
 
 app.get('/userinfo', async (context) => {
-  const { user } = await oauthBearer(
+  const { user, grant } = await oauthBearer(
     context.get('db'),
     context.req.header('Authorization'),
     context.get('companyIdentity'),
   );
-  return context.json({ sub: user.id, preferred_username: user.login });
+  return context.json({
+    sub: user.id,
+    preferred_username: user.login,
+    scope: grant.scopes.join(' '),
+  });
 });
 app.post('/revoke', async (context) => {
   const client = await authenticateOAuthClient(
@@ -717,7 +756,7 @@ app.get('/connections', async (context) => {
       grants
         .map(
           ({ grant, client }) =>
-            `<form method="post" action="/oauth/connections/revoke"><p>${h(client.name)} by ${h(client.operator)}</p><p>Identity access; each publish requires approval.</p><input type="hidden" name="grant" value="${h(grant.id)}"><button class="void-auth-button" type="submit">Disconnect</button></form>`,
+            `<form method="post" action="/oauth/connections/revoke"><p>${h(client.name)} by ${h(client.operator)}</p><p>${grant.scopes.includes('preview:deploy') ? 'Identity access and private previews.' : 'Identity access.'} Each publish requires approval.</p><input type="hidden" name="grant" value="${h(grant.id)}"><button class="void-auth-button" type="submit">Disconnect</button></form>`,
         )
         .join('') +
       (grants.length ? '' : '<p>No connected apps.</p>'),
@@ -737,4 +776,5 @@ app.post('/connections/revoke', async (context) => {
     .where(and(eq(oauthGrants.id, String(body.grant ?? '')), eq(oauthGrants.user_id, session.sub)));
   return context.redirect('/oauth/connections');
 });
+app.route('/', previews);
 export default app;

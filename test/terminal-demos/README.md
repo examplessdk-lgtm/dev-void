@@ -1,10 +1,10 @@
 # Void terminal demos
 
-This is a standalone local test app. It is not imported into the docs site, included in the docs build, or published by the docs deployment. Any future website integration requires user approval.
+This is a standalone local capture studio. The homepage CLI section and this studio share the player, transcripts, and playback clock in `docs/.vitepress/theme/terminal/`. The studio controls and recording app are not included in the docs build or deployment.
 
 Run `vp dev --config test/terminal-demos/vite.config.ts` from the repository root, then open `http://127.0.0.1:41742`. It reuses the installed Vue and Iconify dependencies from the docs package. No new dependency or workspace is needed.
 
-`TerminalDemos.vue` provides the recording controls. `TerminalPlayer.vue` can play one `TerminalDemo` directly. The player uses a single animation clock, pauses offscreen or in a hidden tab, and shows a static final frame for reduced motion. Explicit Play still allows a visitor to run a demo.
+`TerminalDemos.vue` provides the recording controls. The shared `TerminalPlayer.vue` can play one `TerminalDemo` directly, with studio chrome or the homepage's Vite+ terminal appearance. The player uses a single animation clock, pauses offscreen or in a hidden tab, and shows a static final frame for reduced motion. Explicit Play still allows a visitor to run a demo.
 
 The studio includes pause, replay, scrubbing, a final-frame button, 0.75×–2× speed, and an optional cycle through all three flows. Each animation lasts 7.5 seconds at 1× and at most ten seconds at the slowest setting. Clean capture hides the controls and starts the selected demo after three seconds. Use CleanShot's area recording on the terminal. `R` replays with the same lead-in, `Space` pauses/resumes, and `Esc` exits clean capture. Controls are outside the recording area.
 
@@ -25,4 +25,4 @@ When updating transcripts, compare wording and phases to:
 
 Keep transient spinner updates on the same line ID and remove prompt options after selection. Do not invent resource guarantees or hide required credentials in the surrounding explanatory copy. The deploy sample targets Cloudflare directly; installation and recovery demonstrate the Orange Cloud Void platform.
 
-Verify with `node --test test/terminal-demos/timeline.test.ts`, `vp build --config test/terminal-demos/vite.config.ts`, and browser playback of all three flows. The local app build goes to ignored `playground-local/terminal-demos-build`. The unit tests cover pause/speed continuity, replay, backward seeking, Unicode typing, and aligned box edges. After changes to docs integration, run `vp run build:docs` and check that no demo route or content is emitted.
+Verify with `node --test test/terminal-demos/timeline.test.ts`, `vp build --config test/terminal-demos/vite.config.ts`, and browser playback of all three flows. The local app build goes to ignored `playground-local/terminal-demos-build`. The unit tests cover pause/speed continuity, replay, backward seeking, Unicode typing, and aligned box edges. For homepage changes, also run `vp run build:docs` and check desktop/mobile playback, keyboard tabs, and reduced motion. The capture studio remains a local app without a published route.

@@ -7,6 +7,7 @@ import {
   updateDomainVerificationData,
 } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
+import { projectRouteKey } from '../routing.ts';
 import type { DomainVerificationData } from '../schema.ts';
 import type { Domain, Project } from '../types.ts';
 import { ZeroTrustUnavailableError } from '../zero-trust/errors.ts';
@@ -116,7 +117,7 @@ export async function tryActivateDomain(
       ) {
         return;
       }
-      slugRouting = await env.ROUTING.get(lockedProject.slug);
+      slugRouting = await env.ROUTING.get(projectRouteKey(lockedProject));
       if (!slugRouting) {
         return;
       }

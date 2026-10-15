@@ -34,6 +34,21 @@ describe('platform email deployment manifest', () => {
 });
 
 describe('platform usage queue bindings', () => {
+  it('binds the preview entrypoint only after the dispatcher exists at enabled cutover', () => {
+    const staging = workerConfigs({ privatePreviews: true, trafficState: 'staging' });
+    expect(staging.api.services).toBeUndefined();
+    expect(staging.dispatch.services).toEqual([
+      { binding: 'PREVIEW_API', service: deployment.resources.apiWorker },
+    ]);
+    const enabled = workerConfigs({ privatePreviews: true, trafficState: 'enabled' });
+    expect(enabled.api.services).toEqual([
+      {
+        binding: 'PREVIEW_DISPATCH',
+        service: deployment.resources.dispatchWorker,
+        entrypoint: 'PreviewDispatcher',
+      },
+    ]);
+  });
   it.each([
     { trafficState: 'staging' as const, publicEndpoints: true, bound: false },
     { trafficState: 'sandbox-drain' as const, publicEndpoints: true, bound: false },

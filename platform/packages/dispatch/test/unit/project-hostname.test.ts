@@ -29,6 +29,49 @@ function fixture() {
 }
 afterEach(() => vi.unstubAllGlobals());
 describe('workers.dev routing', () => {
+  it('never invokes a private Worker on the public dispatcher, including a lost privacy marker', async () => {
+    const { env, values } = fixture();
+    const privateProject = { ...project, slug: 'preview-app' };
+    const privateHost = platformProjectWorkersDevHostname(privateProject, workersDev);
+    values.set(platformWorkersDevAliasKey(privateHost), JSON.stringify(privateProject));
+    values.set(
+      'preview:' + privateProject.slug,
+      JSON.stringify({ projectId: project.id, workerName: 'private-app' }),
+    );
+    const worker = vi.fn();
+    Object.assign(env, { DISPATCH: { get: worker } });
+    expect(
+      (await app.fetch(new Request('https://' + privateHost), env, {} as ExecutionContext)).status,
+    ).toBe(404);
+    expect(worker).not.toHaveBeenCalled();
+    values.set(
+      'preview:' + privateProject.slug,
+      JSON.stringify({ projectId: project.id, workerName: 'private-app', privatePreview: true }),
+    );
+    const authorize = vi.fn(async (req: Request) => {
+      expect(req.url).toBe('https://preview.invalid/oauth/preview-serve/' + project.id);
+      expect(req.headers.get('X-Void-Preview-URL')).toBe('https://' + privateHost + '/');
+      expect(req.headers.has('Authorization')).toBe(false);
+      return new Response('authorization required', { status: 401 });
+    });
+    Object.assign(env, { PREVIEW_API: { fetch: authorize } });
+    expect(
+      (
+        await app.fetch(
+          new Request('https://' + privateHost, {
+            headers: {
+              Authorization: 'spoofed',
+              'X-Void-Preview-URL': 'https://spoofed.example.com',
+            },
+          }),
+          env,
+          {} as ExecutionContext,
+        )
+      ).status,
+    ).toBe(401);
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(worker).not.toHaveBeenCalled();
+  });
   it('keeps the old alias and routes the new domain to the same project after activation', async () => {
     const { env, values } = fixture();
     values.set(

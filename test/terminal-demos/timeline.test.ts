@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { terminalDemos } from './demos.ts';
-import { PlaybackClock, playbackSpeeds, terminalFrame, type TerminalDemo } from './timeline.ts';
+import { terminalDemos } from '../../docs/.vitepress/theme/terminal/demos.ts';
+import {
+  PlaybackClock,
+  playbackSpeeds,
+  terminalFrame,
+  type TerminalDemo,
+} from '../../docs/.vitepress/theme/terminal/timeline.ts';
 
 test('pause and speed changes preserve playback position without counting paused time', () => {
   const clock = new PlaybackClock(20000);

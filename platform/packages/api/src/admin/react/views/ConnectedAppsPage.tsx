@@ -63,6 +63,11 @@ export function ConnectedAppsPage({
               name="publish"
               submitValue="true"
             />
+            <FormCheckbox
+              label="Allow private previews with isolated resources"
+              name="preview"
+              submitValue="true"
+            />
             <Button type="submit" label="Register" />
           </SectionStack>
         </AdminCard>
@@ -73,6 +78,23 @@ export function ConnectedAppsPage({
             </p>
             <p>{client.redirect_uris.join(', ')}</p>
             <p>{client.enabled ? 'Enabled' : 'Disabled'}</p>
+            {client.enabled && (
+              <form method="post" action={`/admin/connected-apps/${client.id}/preview-permission`}>
+                <input
+                  type="hidden"
+                  name="enabled"
+                  value={client.scopes.includes('preview:deploy') ? 'false' : 'true'}
+                />
+                <Button
+                  type="submit"
+                  label={
+                    client.scopes.includes('preview:deploy')
+                      ? 'Disable private previews'
+                      : 'Enable private previews'
+                  }
+                />
+              </form>
+            )}
             {client.enabled && (
               <form
                 method="post"

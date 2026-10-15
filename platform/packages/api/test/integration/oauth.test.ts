@@ -17,6 +17,7 @@ import {
   disableOAuthClient,
   verifyOAuthDeployment,
   activeOAuthApproval,
+  setOAuthPreviewPermission,
 } from '../../src/auth/oauth.ts';
 import { createCodeChallenge } from '../../src/auth/pkce.ts';
 import { createHumanSession, revokeConnectionSessions } from '../../src/auth/sessions.ts';
@@ -29,6 +30,7 @@ import {
   oauthRequests,
   operatorEvents,
   users,
+  projects,
 } from '../../src/schema.ts';
 import {
   setupEnv,
@@ -115,8 +117,8 @@ async function exchange(
     }),
   });
 }
-async function connect() {
-  const flow = await authorize();
+async function connect(extra: Record<string, string> = {}) {
+  const flow = await authorize(extra);
   expect(flow.response.status).toBe(200);
   const consent = await approve(flow.id!, flow.cookie);
   expect(consent.status).toBe(302);
@@ -186,6 +188,295 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('registered OAuth applications', () => {
+  it('signs only the assets declared by a private preview receipt', async () => {
+    await setOAuthPreviewPermission(env.db, registration.client.id, true);
+    const { token } = await connect({ scope: 'profile preview:deploy' });
+    const headers = {
+      Authorization: 'Bearer ' + token.access_token,
+      'Content-Type': 'application/json',
+    };
+    const project = (await (
+      await request('/oauth/previews', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ workspace: 'asset-preview' }),
+      })
+    ).json()) as { project_id: string };
+    const asset = {
+      blake3: computeAssetHash(new TextEncoder().encode('app').buffer, '/app.js'),
+      md5: 'a'.repeat(32),
+      size: 3,
+      contentType: 'text/javascript',
+    };
+    const prepared = createDeployArtifact({
+      ...artifact,
+      assetManifest: { '/app.js': { ...asset, hash: asset.blake3 } },
+    });
+    const issued = await request('/oauth/preview-deployment-requests', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        project_id: project.project_id,
+        checkpoint: 'head',
+        artifact: prepared,
+      }),
+    });
+    const receipt = (await issued.json()) as { access_token: string; approval_id: string };
+    const upload = (entry: typeof asset) =>
+      request('/projects/' + project.project_id + '/deploy/upload-urls', {
+        method: 'POST',
+        headers: { ...headers, Authorization: 'Bearer ' + receipt.access_token },
+        body: JSON.stringify({ assets: [entry] }),
+      });
+    expect((await upload(asset)).status).toBe(200);
+    expect((await upload({ ...asset, size: 4 })).status).toBe(403);
+    expect((await upload({ ...asset, blake3: 'c'.repeat(32) })).status).toBe(403);
+    const [record] = await env.db
+      .select()
+      .from(oauthRequests)
+      .where(eq(oauthRequests.id, receipt.approval_id));
+    expect(record.data.artifact?.workerFiles).toBeUndefined();
+    expect(record.data.workerModules).toEqual(['index.js']);
+  });
+  it('requires user consent to private previews without elevating old grants', async () => {
+    const { token: old } = await connect();
+    await setOAuthPreviewPermission(env.db, registration.client.id, true);
+    const create = (token: string, workspace = 'workspace-1') =>
+      request('/oauth/previews', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspace }),
+      });
+    expect((await create(old.access_token)).status).toBe(403);
+    const { token } = await connect({ scope: 'profile preview:deploy' });
+    expect(token.scope).toBe('profile preview:deploy');
+    const created = await create(token.access_token);
+    expect(created.status).toBe(201);
+    const preview = (await created.json()) as { project_id: string };
+    expect(
+      ((await (await create(token.access_token)).json()) as { project_id: string }).project_id,
+    ).toBe(preview.project_id);
+    const [row] = await env.db.select().from(projects).where(eq(projects.id, preview.project_id));
+    expect(row.preview_client_id).toBe(registration.client.id);
+    expect(row.preview_workspace_id).toBe('workspace-1');
+    expect(
+      (
+        await request('/projects/' + row.id + '/secrets', {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer ' + user.jwt },
+          body: '{}',
+        })
+      ).status,
+    ).toBe(403);
+    await setOAuthPreviewPermission(env.db, registration.client.id, false);
+    expect((await create(token.access_token)).status).toBe(403);
+  });
+  it('pins preview deployment credentials to isolated projects and exact artifacts', async () => {
+    await setOAuthPreviewPermission(env.db, registration.client.id, true);
+    const { token } = await connect({ scope: 'profile preview:deploy' });
+    const headers = {
+      Authorization: 'Bearer ' + token.access_token,
+      'Content-Type': 'application/json',
+    };
+    const preview = (await (
+      await request('/oauth/previews', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ workspace: 'checkpoint-app' }),
+      })
+    ).json()) as { project_id: string; url: string };
+    const production = await createTestProject(env.db, user.id, 'production-app');
+    const credential = (id: string, prepared = artifact) =>
+      request('/oauth/preview-deployment-requests', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ project_id: id, checkpoint: 'abc', artifact: prepared }),
+      });
+    expect((await credential(production.id)).status).toBe(404);
+    expect(
+      (
+        await credential(
+          preview.project_id,
+          createDeployArtifact({
+            ...artifact,
+            manifest: { ...artifact.manifest, bindings: { hyperdrive: ['production'] } },
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    const issued = await credential(preview.project_id);
+    expect(issued.status).toBe(201);
+    const approval = (await issued.json()) as { access_token: string; approval_id: string };
+    await expect(
+      verifyOAuthDeployment(
+        env.db,
+        approval.approval_id,
+        preview.project_id,
+        approval.approval_id,
+        artifact,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      verifyOAuthDeployment(
+        env.db,
+        approval.approval_id,
+        preview.project_id,
+        approval.approval_id,
+        createDeployArtifact({ ...artifact, workerFiles: { 'index.js': btoa('changed') } }),
+      ),
+    ).rejects.toThrow();
+    const denied = await request('/projects/' + production.id + '/deploy', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + approval.access_token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(artifact),
+    });
+    expect(denied.status).toBe(403);
+    await request('/oauth/revoke', {
+      method: 'POST',
+      headers: { Authorization: basic(), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: token.access_token }),
+    });
+    await expect(activeOAuthApproval(env.db, approval.approval_id)).rejects.toThrow();
+  });
+  it('exchanges one-use launch tickets, isolates origins and strips credentials before serving', async () => {
+    await setOAuthPreviewPermission(env.db, registration.client.id, true);
+    const { token } = await connect({ scope: 'profile preview:deploy' });
+    const headers = {
+      Authorization: 'Bearer ' + token.access_token,
+      'Content-Type': 'application/json',
+    };
+    const preview = (await (
+      await request('/oauth/previews', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ workspace: 'ready-app' }),
+      })
+    ).json()) as { project_id: string; url: string };
+    await env.db
+      .update(projects)
+      .set({ active_deployment_id: 'ready' })
+      .where(eq(projects.id, preview.project_id));
+    const launch = await request('/oauth/previews/' + preview.project_id + '/launch', {
+      method: 'POST',
+      headers,
+    });
+    expect(launch.status).toBe(200);
+    const { url } = (await launch.json()) as { url: string };
+    let forwarded: Request | undefined;
+    (env as unknown as ApiEnv['Bindings']).PREVIEW_DISPATCH = {
+      fetch: async (req: Request) => {
+        forwarded = req;
+        return new Response('ready', {
+          headers: { 'Set-Cookie': 'stolen=1', 'Content-Type': 'text/html' },
+        });
+      },
+    } as Fetcher;
+    const serve = '/oauth/preview-serve/' + preview.project_id;
+    expect((await request(serve, { headers: { 'X-Void-Preview-URL': preview.url } })).status).toBe(
+      401,
+    );
+    const opened = await request(serve, { headers: { 'X-Void-Preview-URL': url } });
+    expect(opened.status).toBe(303);
+    expect(opened.headers.get('Location')).toBe(preview.url + '/');
+    expect((await request(serve, { headers: { 'X-Void-Preview-URL': url } })).status).toBe(401);
+    const cookie = cookies(opened);
+    const response = await request(serve, {
+      headers: {
+        Cookie: cookie,
+        'X-Void-Preview-URL': preview.url + '/hello',
+        Authorization: 'Bearer do-not-forward',
+        'CF-Access-Client-Secret': 'private',
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('ready');
+    expect(forwarded!.url).toBe(preview.url + '/hello');
+    expect([...forwarded!.headers.keys()]).not.toContain('cookie');
+    expect([...forwarded!.headers.keys()]).not.toContain('authorization');
+    expect([...forwarded!.headers.keys()]).not.toContain('cf-access-client-secret');
+    expect(response.headers.has('Set-Cookie')).toBe(false);
+    expect(response.headers.get('Cache-Control')).toContain('no-store');
+    expect(response.headers.has('X-Frame-Options')).toBe(false);
+    expect(response.headers.get('Content-Security-Policy')).not.toBe("frame-ancestors 'none'");
+    expect(
+      (
+        await request(serve, {
+          method: 'POST',
+          headers: {
+            Cookie: cookie,
+            'X-Void-Preview-URL': preview.url,
+            Origin: 'https://other-preview.example.com',
+          },
+          body: 'write',
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(serve, {
+          headers: { Cookie: cookie, 'X-Void-Preview-URL': 'https://other-preview.example.com/' },
+        })
+      ).status,
+    ).toBe(404);
+    await disableOAuthClient(env.db, registration.client.id);
+    expect(
+      (await request(serve, { headers: { Cookie: cookie, 'X-Void-Preview-URL': preview.url } }))
+        .status,
+    ).toBe(401);
+    delete (env as unknown as ApiEnv['Bindings']).PREVIEW_DISPATCH;
+  });
+  it('deploys previews with the normal receipt and keeps their replayed routing private', async () => {
+    await setOAuthPreviewPermission(env.db, registration.client.id, true);
+    const { token } = await connect({ scope: 'profile preview:deploy' });
+    const headers = {
+      Authorization: 'Bearer ' + token.access_token,
+      'Content-Type': 'application/json',
+    };
+    const preview = (await (
+      await request('/oauth/previews', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ workspace: 'deployed-preview' }),
+      })
+    ).json()) as { project_id: string };
+    const issued = (await (
+      await request('/oauth/preview-deployment-requests', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ project_id: preview.project_id, checkpoint: 'head', artifact }),
+      })
+    ).json()) as { access_token: string; approval_id: string };
+    mockCfApi();
+    const init = {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + issued.access_token,
+        'Content-Type': 'application/json',
+        'x-void-deploy-idempotency-key': issued.approval_id,
+      },
+      body: JSON.stringify({ ...artifact, source: 'connected-app', commit: 'head' }),
+    };
+    const deployed = await request('/projects/' + preview.project_id + '/deploy', init);
+    expect(deployed.status, await deployed.clone().text()).toBe(200);
+    expect(await readAllEvents(deployed)).toContainEqual(
+      expect.objectContaining({ event: 'done' }),
+    );
+    const [project] = await env.db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, preview.project_id));
+    const routing = JSON.parse((await env.ROUTING.get('preview:' + project.slug))!);
+    expect(routing.privatePreview).toBe(true);
+    expect(routing.projectId).toBe(preview.project_id);
+    const retry = await request('/projects/' + preview.project_id + '/deploy', init);
+    expect(await readAllEvents(retry)).toContainEqual(expect.objectContaining({ event: 'done' }));
+    expect(JSON.parse((await env.ROUTING.get('preview:' + project.slug))!).privatePreview).toBe(
+      true,
+    );
+  });
   it('invalidates derived grants when the upstream human session is revoked', async () => {
     await importLegacyAuthentication(env.db, env);
     const human = await createHumanSession(env.db, env.JWT_SECRET, {
@@ -288,33 +579,69 @@ describe('registered OAuth applications', () => {
       expect.objectContaining({ event: 'done' }),
     );
   });
-  it('stops publication when the administrator disables the client during a queued upload', async () => {
-    const { token } = await connect();
-    const project = await createTestProject(env.db, user.id, 'revoked-app');
-    const flow = await publishApproval(token.access_token, project.slug);
-    const consent = await approve(flow.id, flow.cookie);
-    const { access_token: access } = (await (
-      await exchange(new URL(consent.headers.get('Location')!).searchParams.get('code')!)
-    ).json()) as { access_token: string };
-    mockCfApi({
-      uploadWorker: async () => {
-        await disableOAuthClient(env.db, registration.client.id);
-        return new Response('ok');
-      },
-    });
-    const result = await request('/projects/' + project.id + '/deploy', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + access,
-        'Content-Type': 'application/json',
-        'x-void-deploy-idempotency-key': flow.id,
-      },
-      body: JSON.stringify(artifact),
-    });
-    const events = await readAllEvents(result);
-    expect(events.some((event) => (event as { event: string }).event === 'done')).toBe(false);
-    expect(events).toContainEqual(expect.objectContaining({ event: 'error' }));
-  });
+  it.each([false, true])(
+    'stops publication when the administrator disables the client during a queued upload (private preview: %s)',
+    async (privatePreview) => {
+      if (privatePreview) {
+        await setOAuthPreviewPermission(env.db, registration.client.id, true);
+      }
+      const { token } = await connect(privatePreview ? { scope: 'profile preview:deploy' } : {});
+      let projectId: string;
+      let approvalId: string;
+      let access: string;
+      if (privatePreview) {
+        const headers = {
+          Authorization: 'Bearer ' + token.access_token,
+          'Content-Type': 'application/json',
+        };
+        const created = await request('/oauth/previews', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ workspace: 'revoked-preview' }),
+        });
+        projectId = ((await created.json()) as { project_id: string }).project_id;
+        const issued = await request('/oauth/preview-deployment-requests', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ project_id: projectId, checkpoint: 'abc', artifact }),
+        });
+        const receipt = (await issued.json()) as { access_token: string; approval_id: string };
+        access = receipt.access_token;
+        approvalId = receipt.approval_id;
+      } else {
+        const project = await createTestProject(env.db, user.id, 'revoked-app');
+        projectId = project.id;
+        const flow = await publishApproval(token.access_token, project.slug);
+        const consent = await approve(flow.id, flow.cookie);
+        access = (
+          (await (
+            await exchange(new URL(consent.headers.get('Location')!).searchParams.get('code')!)
+          ).json()) as { access_token: string }
+        ).access_token;
+        approvalId = flow.id;
+      }
+      mockCfApi({
+        uploadWorker: async () => {
+          await disableOAuthClient(env.db, registration.client.id);
+          return new Response('ok');
+        },
+      });
+      const result = await request('/projects/' + projectId + '/deploy', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + access,
+          'Content-Type': 'application/json',
+          'x-void-deploy-idempotency-key': approvalId,
+        },
+        body: JSON.stringify(artifact),
+      });
+      const events = await readAllEvents(result);
+      expect(events.some((event) => (event as { event: string }).event === 'done')).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({ event: 'error' }));
+      const [project] = await env.db.select().from(projects).where(eq(projects.id, projectId));
+      expect(project.active_deployment_id).toBeNull();
+    },
+  );
   it('registers and disables clients through the administrator UI with an audit trail', async () => {
     const admin = await createTestUser(env.db, 'administrator', 'github', 'admin', 'free', 'admin');
     const input = new URLSearchParams({
@@ -438,7 +765,11 @@ describe('registered OAuth applications', () => {
     const identity = await request('/oauth/userinfo', {
       headers: { Authorization: 'Bearer ' + token.access_token },
     });
-    expect(await identity.json()).toEqual({ sub: user.id, preferred_username: 'alice' });
+    expect(await identity.json()).toEqual({
+      sub: user.id,
+      preferred_username: 'alice',
+      scope: 'profile',
+    });
     for (const path of ['/me', '/projects', '/admin/projects']) {
       const response = await request(path, {
         headers: { Authorization: 'Bearer ' + token.access_token },

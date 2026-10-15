@@ -17,6 +17,7 @@ import { getProjectQueueName } from '../naming.ts';
 import { type DeployLogger } from '../observability/logger.ts';
 import { removeQueueConsumer } from '../provisioning/cloudflare-api.ts';
 import { reconcileManagedDurableObjects } from '../provisioning/durable-objects.ts';
+import { projectRouteKey } from '../routing.ts';
 import { buildStaticRoutingJson } from '../routing.ts';
 import { deployments } from '../schema.ts';
 import { REASON_REQUESTS_EXCEEDED } from '../suspension.ts';
@@ -186,10 +187,11 @@ export async function publishStaticDeployment(input: {
   await assertDeploymentCanProceed(context.get('db'), deployment.id, projectId);
   markPhase('routing_switch');
   await withProjectCutoverFence(deployment.id, async (txDb, currentOwner) => {
-    const existingRouting = await context.env.ROUTING.get(project.slug);
+    const existingRouting = await context.env.ROUTING.get(projectRouteKey(project));
     const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
     const zeroTrust = await resolveProjectZeroTrustRouting(txDb, projectId);
     const routingJson = buildStaticRoutingJson({
+      privatePreview: Boolean(project.preview_client_id),
       projectId: projectId,
       userId: project.user_id,
       deploymentId: deployment.id,
@@ -204,7 +206,7 @@ export async function publishStaticDeployment(input: {
     });
     const cutoverDomains = await getDomainsByProjectId(txDb, projectId);
     await reconcileManagedDurableObjects(context.env, txDb, projectId, deployment.id, manifest);
-    await putTrackedRouting(project.slug, routingJson);
+    await putTrackedRouting(projectRouteKey(project), routingJson);
     input.routingSwitched = true;
     input.logger = input.logger.with({ routingSwitched: true });
     input.logger.info('routing_switch', 'slug_routed', { slug: project.slug });

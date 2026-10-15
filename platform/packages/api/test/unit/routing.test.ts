@@ -450,6 +450,28 @@ describe('applyRoutingSuspension', () => {
 });
 
 describe('setProjectsRoutingSuspension', () => {
+  it('uses the authoritative private namespace when an input snapshot omits preview identity', async () => {
+    const { store, kv } = createKvStore({
+      'preview:preview-app': JSON.stringify({ projectId: 'proj_a', privatePreview: true }),
+    });
+    const db = createRoutingDb('owner_a');
+    vi.spyOn(dbModule, 'getProject').mockResolvedValue({
+      id: 'proj_a',
+      user_id: 'owner_a',
+      slug: 'preview-app',
+      preview_client_id: 'client',
+    } as Awaited<ReturnType<typeof dbModule.getProject>>);
+    vi.spyOn(dbModule, 'getDomainsByProjectIds').mockResolvedValue(new Map());
+    await setProjectsRoutingSuspension(
+      kv,
+      db,
+      [{ id: 'proj_a', slug: 'preview-app', user_id: 'owner_a' }],
+      { op: 'suspend', reason: 'requests_exceeded', force: false },
+    );
+    expect(JSON.parse(store.get('preview:preview-app')!).suspended).toBe('requests_exceeded');
+    expect(store.has('preview-app')).toBe(false);
+    vi.restoreAllMocks();
+  });
   beforeEach(() => {
     vi.spyOn(zeroTrust, 'resolveProjectZeroTrustRoutingForPublication').mockResolvedValue(null);
   });

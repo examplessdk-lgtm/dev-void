@@ -10,6 +10,14 @@ import {
 
 export { computeDispatchLimits } from './routing-limits.ts';
 
+/** Older dispatchers never look in this namespace, so rollback cannot publish previews. */
+export function projectRouteKey(project: {
+  slug: string;
+  preview_client_id?: string | null;
+}): string {
+  return project.preview_client_id ? 'preview:' + project.slug : project.slug;
+}
+
 export function sandboxBlockKey(userId: string): string {
   return `sandbox-block:${userId}`;
 }
@@ -219,7 +227,12 @@ export async function applyRoutingSuspension(
 export async function setProjectsRoutingSuspension(
   routing: KVNamespace,
   db: Db,
-  projects: ReadonlyArray<{ id: string; slug: string; user_id: string }>,
+  projects: ReadonlyArray<{
+    id: string;
+    slug: string;
+    user_id: string;
+    preview_client_id?: string | null;
+  }>,
   update: RoutingSuspensionUpdate,
 ): Promise<void> {
   if (projects.length === 0) {
@@ -245,7 +258,11 @@ export async function setProjectsRoutingSuspension(
         const domainKeys = (domainMap.get(project.id) ?? []).map(
           (domain) => `domain:${domain.hostname}`,
         );
-        await applyRoutingSuspension(routing, [project.slug, ...domainKeys], update, {
+        const route = projectRouteKey({
+          slug: project.slug,
+          preview_client_id: current.preview_client_id,
+        });
+        await applyRoutingSuspension(routing, [route, ...domainKeys], update, {
           id: project.id,
           protection,
         });
@@ -260,6 +277,7 @@ export async function setProjectsRoutingSuspension(
 }
 
 export function buildRoutingJson(opts: {
+  privatePreview?: boolean;
   workerName: string;
   projectId: string;
   userId: string;
@@ -274,6 +292,7 @@ export function buildRoutingJson(opts: {
 }): string {
   const { manifest } = opts;
   return JSON.stringify({
+    ...(opts.privatePreview ? { privatePreview: true } : {}),
     workerName: opts.workerName,
     projectId: opts.projectId,
     userId: opts.userId,
@@ -302,6 +321,7 @@ export function buildRoutingJson(opts: {
 }
 
 export function buildStaticRoutingJson(opts: {
+  privatePreview?: boolean;
   projectId: string;
   userId: string;
   deploymentId: string;
@@ -312,6 +332,7 @@ export function buildStaticRoutingJson(opts: {
 }): string {
   const { manifest } = opts;
   return JSON.stringify({
+    ...(opts.privatePreview ? { privatePreview: true } : {}),
     staticDeploymentId: opts.deploymentId,
     projectId: opts.projectId,
     userId: opts.userId,

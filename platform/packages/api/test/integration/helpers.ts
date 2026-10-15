@@ -566,9 +566,8 @@ export async function teardownEnv(): Promise<void> {
 
 export async function clearTables(db: Db): Promise<void> {
   const tables = [
+    schema.previewTickets,
     schema.oauthRequests,
-    schema.oauthGrants,
-    schema.oauthClients,
     schema.projectCleanupJobs,
     schema.emailDestinationCleanups,
     schema.emailOperationSteps,
@@ -596,6 +595,8 @@ export async function clearTables(db: Db): Promise<void> {
     githubWebhookRedeliveries,
     deployments,
     projects,
+    schema.oauthGrants,
+    schema.oauthClients,
     invitations,
     oauthAccounts,
     users,

@@ -11,6 +11,7 @@ import type { ApiEnv } from '../env.ts';
 import { getProjectDeploymentWorkerName, getProjectQueueName } from '../naming.ts';
 import { hasLiveDeployment, isQueueId } from '../project-state.ts';
 import { getQueueByName } from '../provisioning/cloudflare-api.ts';
+import { projectRouteKey } from '../routing.ts';
 import { projects, resources } from '../schema.ts';
 import type { Project } from '../types.ts';
 import { OperatorError, preview } from './common.ts';
@@ -36,7 +37,7 @@ async function servingDeployment(
   if (!(await hasLiveDeployment(db, project.id))) {
     return null;
   }
-  const raw = await context.env.ROUTING.get(project.slug);
+  const raw = await context.env.ROUTING.get(projectRouteKey(project));
   let route: Record<string, unknown>;
   try {
     route = JSON.parse(raw ?? '') as Record<string, unknown>;

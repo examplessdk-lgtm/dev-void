@@ -20,6 +20,7 @@ import { type DeployLogger } from '../observability/logger.ts';
 import { ProjectAccessDeniedError } from '../project-access.ts';
 import { reconcileManagedDurableObjects } from '../provisioning/durable-objects.ts';
 import { deleteSandboxController } from '../provisioning/sandbox-controller.ts';
+import { projectRouteKey } from '../routing.ts';
 import {
   type DeployManifest,
   type DeployEvent,
@@ -356,7 +357,7 @@ export async function recoverFailedDeployment(input: {
           // restored route; touching cron/queues here would regress
           // pre-routing failures that never changed those surfaces.
           const currentDomains = await getDomainsByProjectId(tx, projectId);
-          const rawRouting = await context.env.ROUTING.get(lockedProject.slug);
+          const rawRouting = await context.env.ROUTING.get(projectRouteKey(lockedProject));
           const restoredRouting =
             rawRouting === null
               ? null

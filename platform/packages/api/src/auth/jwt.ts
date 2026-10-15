@@ -30,6 +30,8 @@ export type JwtPayload = Readonly<{
   sid?: string;
   /** Delegated application deployment, accepted only by the OAuth-aware runtime. */
   oauthApproval?: string;
+  /** Private preview view, tied to a live connected-app grant. */
+  oauthGrant?: string;
 }>;
 
 const EXPIRY_SECONDS = 30 * 24 * 60 * 60; // 30 days

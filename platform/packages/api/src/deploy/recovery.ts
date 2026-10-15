@@ -31,6 +31,7 @@ import {
 } from '../provisioning/cloudflare-api.ts';
 import { reconcileManagedDurableObjects } from '../provisioning/durable-objects.ts';
 import { requestRotationIfReplacingUntrustedCode } from '../proxy-token-rotation.ts';
+import { projectRouteKey } from '../routing.ts';
 import { buildRoutingJson, buildStaticRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { type DeployManifest, type Deployment, type Project } from '../types.ts';
 import {
@@ -269,7 +270,7 @@ export async function replayDeploymentCutover(
   const targetType = resolvePersistedDeploymentType(manifest, deployment, committedProjectType);
   const isStatic = targetType === 'static' || targetType === 'spa';
   const workerName = `user-${project.slug}-${deployment.id}`;
-  const existingRouting = await env.ROUTING.get(project.slug);
+  const existingRouting = await env.ROUTING.get(projectRouteKey(project));
   const existingEntry = existingRouting
     ? (JSON.parse(existingRouting) as { suspended?: string })
     : {};
@@ -286,6 +287,7 @@ export async function replayDeploymentCutover(
   }
   const routingJson = isStatic
     ? buildStaticRoutingJson({
+        privatePreview: Boolean(project.preview_client_id),
         projectId: project.id,
         userId: project.user_id,
         deploymentId: deployment.id,
@@ -299,6 +301,7 @@ export async function replayDeploymentCutover(
         zeroTrust,
       })
     : buildRoutingJson({
+        privatePreview: Boolean(project.preview_client_id),
         workerName,
         projectId: project.id,
         userId: project.user_id,
@@ -338,7 +341,7 @@ export async function replayDeploymentCutover(
     : null;
 
   await reconcileManagedDurableObjects(env, db, project.id, deployment.id, manifest);
-  await env.ROUTING.put(project.slug, routingJson);
+  await env.ROUTING.put(projectRouteKey(project), routingJson);
   await reconcileProjectDomainRoutes(env, domains, routingJson);
   if (!isStatic && manifest.schedules?.length) {
     await syncCronScheduler(env, project.id, {
@@ -394,7 +397,7 @@ export async function clearProjectExternalState(
   const queueNames = await persistedQueueNames(db, project.id);
 
   await reconcileManagedDurableObjects(env, db, project.id, null, null);
-  await env.ROUTING.delete(project.slug);
+  await env.ROUTING.delete(projectRouteKey(project));
   await reconcileProjectDomainRoutes(env, domains, null);
   await clearCronScheduler(env, project.id);
   const dispatchWorkerName = env.DISPATCH_WORKER_NAME ?? 'void-dispatch';

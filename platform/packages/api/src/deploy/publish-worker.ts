@@ -36,6 +36,7 @@ import {
 import { reconcileManagedDurableObjects } from '../provisioning/durable-objects.ts';
 import { provisionBindings } from '../provisioning/provision.ts';
 import { deleteSandboxController, isManagedSandbox } from '../provisioning/sandbox-controller.ts';
+import { projectRouteKey } from '../routing.ts';
 import { buildRoutingJson, computeDispatchLimits } from '../routing.ts';
 import { REASON_REQUESTS_EXCEEDED } from '../suspension.ts';
 import type { PlanLimits } from '../tiers.ts';
@@ -359,10 +360,11 @@ export async function publishWorkerDeployment(input: {
       await resolvePlanLimits(txDb, currentOwner.plan),
       manifest.limits,
     );
-    const existingRouting = await context.env.ROUTING.get(project.slug);
+    const existingRouting = await context.env.ROUTING.get(projectRouteKey(project));
     const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
     const zeroTrust = await resolveProjectZeroTrustRouting(txDb, projectId);
     const routingJson = buildRoutingJson({
+      privatePreview: Boolean(project.preview_client_id),
       workerName: workerName,
       projectId: projectId,
       userId: project.user_id,
@@ -381,7 +383,7 @@ export async function publishWorkerDeployment(input: {
     });
     const cutoverDomains = await getDomainsByProjectId(txDb, projectId);
     await reconcileManagedDurableObjects(context.env, txDb, projectId, deployment.id, manifest);
-    await putTrackedRouting(project.slug, routingJson);
+    await putTrackedRouting(projectRouteKey(project), routingJson);
     input.routingSwitched = true;
     input.logger = input.logger.with({ routingSwitched: true });
     input.logger.info('routing_switch', 'slug_routed', { slug: project.slug });

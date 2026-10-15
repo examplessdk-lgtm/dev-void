@@ -1,11 +1,12 @@
 import { deployArtifactDigest, createDeployArtifact, type DeployArtifact } from '@void/deploy-core';
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { Db, DbOrTx } from '../db.ts';
 import type { ApiEnv } from '../env.ts';
 import {
   oauthClients,
   oauthGrants,
   oauthRequests,
+  previewTickets,
   users,
   projects,
   platformAuthSettings,
@@ -15,7 +16,7 @@ import {
 import { isAdminSuspended } from '../suspension.ts';
 import type { OAuthScope } from './oauth-types.ts';
 import { hashLoginProof, randomLoginProof } from './proofs.ts';
-import { validateHumanSession } from './sessions.ts';
+import { validateHumanSession, validHumanSessionSnapshot } from './sessions.ts';
 
 export class OAuthError extends Error {
   constructor(
@@ -65,7 +66,7 @@ export async function registerOAuthClient(
     new Set(redirectUris).size !== redirectUris.length ||
     !Array.isArray(scopes) ||
     !scopes.includes('profile') ||
-    scopes.some((value) => !['profile', 'deploy:approve'].includes(value)) ||
+    scopes.some((value) => !['profile', 'deploy:approve', 'preview:deploy'].includes(value)) ||
     new Set(scopes).size !== scopes.length
   ) {
     throw new OAuthError(
@@ -91,6 +92,31 @@ export function publicOAuthClient(client: typeof oauthClients.$inferSelect) {
   const { secret_hash: _secret, ...value } = client;
   return value;
 }
+export async function setOAuthPreviewPermission(db: Db, id: string, enabled: boolean) {
+  return db.transaction(async (tx) => {
+    const [client] = await tx
+      .select()
+      .from(oauthClients)
+      .where(eq(oauthClients.id, id))
+      .for('update');
+    if (!client?.enabled) {
+      throw new OAuthError('invalid_client', 'Application not found.', 404);
+    }
+    const scopes: Array<OAuthScope> = client.scopes.filter((scope) => scope !== 'preview:deploy');
+    if (enabled) {
+      scopes.push('preview:deploy');
+    }
+    await tx.update(oauthClients).set({ scopes }).where(eq(oauthClients.id, id));
+    if (!enabled) {
+      await tx
+        .update(projects)
+        .set({ preview_expires_at: new Date().toISOString() })
+        .where(eq(projects.preview_client_id, id));
+    }
+    // Changing a client's maximum permission never elevates existing grants.
+    return publicOAuthClient({ ...client, scopes });
+  });
+}
 export async function disableOAuthClient(db: Db, id: string) {
   await db.transaction(async (tx) => {
     const [client] = await tx
@@ -102,6 +128,10 @@ export async function disableOAuthClient(db: Db, id: string) {
       throw new OAuthError('invalid_client', 'Application not found.', 404);
     }
     await tx
+      .update(projects)
+      .set({ preview_expires_at: new Date().toISOString() })
+      .where(eq(projects.preview_client_id, id));
+    await tx
       .update(oauthGrants)
       .set({ revoked_at: new Date().toISOString() })
       .where(eq(oauthGrants.client_id, id));
@@ -112,6 +142,7 @@ export async function disableOAuthClient(db: Db, id: string) {
   });
 }
 export async function purgeExpiredOAuthRequests(db: Db) {
+  await db.delete(previewTickets).where(sql`${previewTickets.expires_at} < now()`);
   await db.execute(sql`DELETE FROM oauth_requests WHERE id IN (
     SELECT id FROM oauth_requests WHERE expires_at < now() - interval '1 day'
     ORDER BY expires_at LIMIT 1000
@@ -160,6 +191,9 @@ export async function activeOAuthGrant(
   companyIdentity?: ApiEnv['Variables']['companyIdentity'],
   lock = false,
 ) {
+  if (!lock) {
+    return readActiveOAuthGrant(db, eq(oauthGrants.id, id), companyIdentity);
+  }
   // Fence changes to the upstream login configuration during publish cutover.
   if (lock) {
     await db
@@ -172,7 +206,7 @@ export async function activeOAuthGrant(
   if (!initial) {
     throw new OAuthError('invalid_token', 'Application access expired or was revoked.', 401);
   }
-  await activeOAuthClient(db, initial.client_id, lock);
+  const client = await activeOAuthClient(db, initial.client_id, lock);
   const query = db
     .select()
     .from(oauthGrants)
@@ -220,7 +254,67 @@ export async function activeOAuthGrant(
   ) {
     throw new OAuthError('invalid_token', 'Sign in to Void again.', 401);
   }
-  return { grant, user };
+  return { grant, user, client };
+}
+
+// Read the authorization snapshot in one uncached query. Do not cache grants:
+// disabling a client, revoking a grant or suspending an owner must apply to the
+// next asset request as well as to the next page load.
+async function readActiveOAuthGrant(
+  db: DbOrTx,
+  condition: SQL,
+  companyIdentity?: ApiEnv['Variables']['companyIdentity'],
+) {
+  const [row] = await db
+    .select({
+      grant: oauthGrants,
+      user: users,
+      client: oauthClients,
+      settings: platformAuthSettings,
+      humanSession: platformHumanSessions,
+      connection: platformLoginConnections,
+    })
+    .from(oauthGrants)
+    .innerJoin(oauthClients, eq(oauthClients.id, oauthGrants.client_id))
+    .innerJoin(users, eq(users.id, oauthGrants.user_id))
+    .leftJoin(platformAuthSettings, eq(platformAuthSettings.singleton, true))
+    .leftJoin(
+      platformHumanSessions,
+      eq(platformHumanSessions.id, sql`${oauthGrants.session}->>'sid'`),
+    )
+    .leftJoin(
+      platformLoginConnections,
+      eq(platformLoginConnections.id, platformHumanSessions.connection_id),
+    )
+    .where(
+      and(
+        condition,
+        isNull(oauthGrants.revoked_at),
+        gt(oauthGrants.expires_at, new Date().toISOString()),
+      ),
+    );
+  if (!row) {
+    throw new OAuthError('invalid_token', 'Application access expired or was revoked.', 401);
+  }
+  const { grant, user, client } = row;
+  if (!client.enabled) {
+    throw new OAuthError('invalid_client', 'This application is unavailable.', 401);
+  }
+  if (
+    isAdminSuspended(user.suspended_reason) ||
+    grant.session.exp <= Date.now() / 1000 ||
+    !validHumanSessionSnapshot(
+      grant.session,
+      row.settings,
+      row.humanSession && row.connection
+        ? { session: row.humanSession, connection: row.connection, user }
+        : null,
+      companyIdentity ?? grant.session.companyIdentity,
+    )
+  ) {
+    throw new OAuthError('invalid_token', 'Sign in to Void again.', 401);
+  }
+  return { grant, user, client };
 }
 export async function oauthBearer(
   db: Db,
@@ -230,14 +324,11 @@ export async function oauthBearer(
   if (!authorization?.startsWith('Bearer ')) {
     throw new OAuthError('invalid_token', 'Application access is required.', 401);
   }
-  const [grant] = await db
-    .select()
-    .from(oauthGrants)
-    .where(eq(oauthGrants.token_hash, await hashLoginProof(authorization.slice(7))));
-  if (!grant) {
-    throw new OAuthError('invalid_token', 'Application access expired or was revoked.', 401);
-  }
-  return activeOAuthGrant(db, grant.id, companyIdentity);
+  return readActiveOAuthGrant(
+    db,
+    eq(oauthGrants.token_hash, await hashLoginProof(authorization.slice(7))),
+    companyIdentity,
+  );
 }
 export async function activeOAuthApproval(
   db: DbOrTx,
@@ -252,7 +343,7 @@ export async function activeOAuthApproval(
   if (
     !approval?.approved_at ||
     !approval.consumed_at ||
-    approval.data.kind !== 'deployment' ||
+    !['deployment', 'preview'].includes(approval.data.kind) ||
     !approval.data.grantId ||
     !approval.data.projectId
   ) {
@@ -271,7 +362,10 @@ export async function activeOAuthApproval(
   }
   const client = await activeOAuthClient(db, grant.client_id, lock);
   if (
-    !client.scopes.includes('deploy:approve') ||
+    !client.scopes.includes(
+      approval.data.kind === 'preview' ? 'preview:deploy' : 'deploy:approve',
+    ) ||
+    (approval.data.kind === 'preview' && !grant.scopes.includes('preview:deploy')) ||
     approval.user_id !== user.id ||
     approval.client_id !== client.id
   ) {
@@ -283,6 +377,18 @@ export async function activeOAuthApproval(
     .where(and(eq(projects.id, approval.data.projectId), eq(projects.user_id, user.id)));
   if (!project || project.status !== 'active') {
     throw new OAuthError('invalid_token', 'Deployment project is unavailable.', 401);
+  }
+  if (
+    approval.data.kind === 'preview'
+      ? project.preview_client_id !== client.id ||
+        Date.parse(project.preview_expires_at!) <= Date.now()
+      : project.preview_client_id !== null
+  ) {
+    throw new OAuthError(
+      'invalid_token',
+      'This credential cannot deploy to the selected project.',
+      403,
+    );
   }
   return { approval, grant, user };
 }

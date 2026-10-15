@@ -5,6 +5,62 @@ import { PGlite } from '@electric-sql/pglite';
 import { platformDatabaseSchemaDigest } from '@void/platform/installer';
 import { expect, it } from 'vite-plus/test';
 
+it('upgrades the OAuth schema without elevating existing grants or changing production projects', async () => {
+  const root = resolve(import.meta.dirname, '../../drizzle');
+  const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8')) as {
+    entries: Array<{ idx: number; tag: string; when: number }>;
+  };
+  const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8'));
+  const previous = journal.entries.filter((entry) => entry.idx < 60);
+  const schemaDigest = platformDatabaseSchemaDigest(
+    compatibility.lineage,
+    previous.map((entry) => ({
+      index: entry.idx,
+      tag: entry.tag,
+      timestampMillis: entry.when,
+      sha256: createHash('sha256')
+        .update(readFileSync(resolve(root, entry.tag + '.sql')))
+        .digest('hex'),
+    })),
+  );
+  for (const platformVersion of ['0.28.0', '1.0.0', '1.1.0']) {
+    expect(compatibility.rollbackSafeFrom).toContainEqual({ platformVersion, schemaDigest });
+  }
+  const db = new PGlite();
+  try {
+    for (const entry of previous) {
+      await db.exec(readFileSync(resolve(root, entry.tag + '.sql'), 'utf8'));
+    }
+    await db.exec(
+      "INSERT INTO users (id, login) VALUES ('migration-user', 'migration-user'); INSERT INTO projects (id, user_id, slug, active_deployment_id) VALUES ('production', 'migration-user', 'production', 'old-deployment'); INSERT INTO oauth_clients (id, name, operator, redirect_uris, scopes, secret_hash) VALUES ('client', 'client', 'operator', '[]', '[\"profile\"]', 'hash'); INSERT INTO oauth_grants (id, client_id, user_id, session, token_hash, expires_at) VALUES ('grant', 'client', 'migration-user', '{}', 'token-hash', now() + interval '1 hour');",
+    );
+    await db.exec(readFileSync(resolve(root, '0060_private_previews.sql'), 'utf8'));
+    expect((await db.query('SELECT scopes FROM oauth_grants')).rows).toEqual([
+      { scopes: ['profile'] },
+    ]);
+    expect(
+      (
+        await db.query(
+          'SELECT active_deployment_id, preview_client_id, preview_workspace_id, preview_expires_at FROM projects',
+        )
+      ).rows,
+    ).toEqual([
+      {
+        active_deployment_id: 'old-deployment',
+        preview_client_id: null,
+        preview_workspace_id: null,
+        preview_expires_at: null,
+      },
+    ]);
+    // The previous runtime can still create ordinary projects and identity grants.
+    await db.exec(
+      "INSERT INTO projects (id, user_id, slug) VALUES ('older-runtime', 'migration-user', 'older-runtime'); INSERT INTO oauth_grants (id, client_id, user_id, session, token_hash, expires_at) VALUES ('older-grant', 'client', 'migration-user', '{}', 'older-token-hash', now() + interval '1 hour');",
+    );
+  } finally {
+    await db.close();
+  }
+}, 30000);
+
 it('normalizes worker project modes without changing deployment pointers and retains rollback to 0.22.0', async () => {
   const root = resolve(import.meta.dirname, '../../drizzle');
   const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8')) as {
@@ -226,7 +282,9 @@ it('retains rollback to 0.27.0 after adding registered OAuth clients', () => {
   const root = resolve(import.meta.dirname, '../../drizzle');
   const journal = JSON.parse(readFileSync(resolve(root, 'meta/_journal.json'), 'utf8'));
   const compatibility = JSON.parse(readFileSync(resolve(root, 'compatibility.json'), 'utf8'));
-  expect(journal.entries.at(-1)?.tag).toBe('0059_oauth_clients');
+  expect(journal.entries.some((entry: { tag: string }) => entry.tag === '0059_oauth_clients')).toBe(
+    true,
+  );
   const schemaDigest = platformDatabaseSchemaDigest(
     compatibility.lineage,
     journal.entries

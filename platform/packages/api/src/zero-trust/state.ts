@@ -298,8 +298,13 @@ export async function markPendingProjectError(
  */
 export function initialProjectProtection(
   configuration: ZeroTrustConfiguration,
-  project: Pick<Project, 'created_at'>,
+  project: Pick<Project, 'created_at'> & Partial<Pick<Project, 'preview_client_id'>>,
 ): boolean {
+  // These origins have their own live OAuth grant gate at dispatch. The client
+  // preview permission authorizes this exception, not public application data.
+  if (project.preview_client_id) {
+    return false;
+  }
   const operation = configuration.operation;
   return operation?.kind === 'configure' &&
     operation.existingProjects !== null &&

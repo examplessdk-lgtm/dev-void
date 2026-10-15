@@ -6,6 +6,7 @@ import {
   readPlatformApplication,
   resolvePlatformApplicationEnvironment,
 } from '@void/platform';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { projectAccessVerifier } from './access.ts';
 import type { Env } from './env.ts';
 import { createErrorResponse, createMaintenanceResponse } from './error-page.ts';
@@ -89,6 +90,7 @@ type RoutingEntry = Readonly<{
   assetManifestId?: string;
   assetConfig?: AssetConfig;
   zeroTrust?: ProjectZeroTrustRouting;
+  privatePreview?: boolean;
 }>;
 
 // Written by the API (suspension.ts projectSuspensionKey) while an administrator
@@ -655,8 +657,13 @@ export function rebuildRequest(
   });
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+const dispatcher = {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+    privatePreview = false,
+  ): Promise<Response> {
     env = await resolvePlatformApplicationEnvironment(env);
     const url = new URL(request.url);
     if (
@@ -723,7 +730,14 @@ export default {
     }
     const routingKey = slug ?? `domain:${url.hostname}`;
 
-    const routingRaw = await env.ROUTING.get(routingKey, { cacheTtl: 60 });
+    let routingRaw = await env.ROUTING.get(privatePreview ? 'preview:' + routingKey : routingKey, {
+      cacheTtl: 60,
+    });
+    let previewRoute = privatePreview;
+    if (!routingRaw && !privatePreview && slug?.startsWith('preview-')) {
+      routingRaw = await env.ROUTING.get('preview:' + routingKey, { cacheTtl: 60 });
+      previewRoute = true;
+    }
     if (!routingRaw) {
       return createErrorResponse(request, 404, 'Not Found', {
         'Cache-Control': 'public, max-age=30',
@@ -731,6 +745,25 @@ export default {
     }
 
     const routing: RoutingEntry = JSON.parse(routingRaw);
+    if (!privatePreview && (routing.privatePreview || previewRoute)) {
+      if (!routing.privatePreview || !env.PREVIEW_API) {
+        return createErrorResponse(request, 404, 'Not Found', { 'Cache-Control': 'no-store' });
+      }
+      const headers = new Headers(request.headers);
+      headers.set('X-Void-Preview-URL', request.url);
+      headers.delete('Authorization');
+      return env.PREVIEW_API.fetch(
+        new Request('https://preview.invalid/oauth/preview-serve/' + routing.projectId, {
+          method: request.method,
+          headers,
+          body: request.body,
+          redirect: 'manual',
+        }),
+      );
+    }
+    if (Boolean(routing.privatePreview) !== privatePreview) {
+      return createErrorResponse(request, 404, 'Not Found', { 'Cache-Control': 'no-store' });
+    }
     if (selected.projectId && selected.projectId !== routing.projectId) {
       return createErrorResponse(request, 404, 'Not Found');
     }
@@ -2102,6 +2135,15 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+export default dispatcher;
+
+/** Only the platform API is bound to this entrypoint; public HTTP uses dispatcher. */
+export class PreviewDispatcher extends WorkerEntrypoint<Env> {
+  fetch(request: Request): Promise<Response> {
+    return dispatcher.fetch(request, this.env, this.ctx, true);
+  }
+}
 
 class StaticAssetReadError extends Error {
   constructor(cause: unknown) {

@@ -102,10 +102,7 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   // (minted for remote builds). Verify the signature/expiry without pinning the
   // audience, then accept only these two audiences.
   const payload = await verifyJwt(token, context.env.JWT_SECRET);
-  if (
-    !payload ||
-    (payload.aud !== 'api' && payload.aud !== 'deploy' && payload.aud !== 'oauth-deploy')
-  ) {
+  if (!payload || !['api', 'deploy', 'oauth-deploy', 'oauth-preview'].includes(payload.aud)) {
     return context.json(
       {
         error: 'invalid or expired token',
@@ -152,7 +149,28 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
   }
 
   context.set('user', user);
-  if (payload.aud === 'oauth-deploy') {
+  const projectId = context.req.path.match(/^\/projects\/(proj_[a-z0-9]+)(?:\/|$)/)?.[1];
+  if (projectId && payload.aud !== 'oauth-preview') {
+    const [project] = await context
+      .get('db')
+      .select({ preview: projects.preview_client_id })
+      .from(projects)
+      .where(eq(projects.id, projectId));
+    if (
+      project?.preview &&
+      !(
+        payload.aud === 'api' &&
+        context.req.method === 'DELETE' &&
+        context.req.path === '/projects/' + projectId
+      )
+    ) {
+      return context.json(
+        { error: 'Private preview projects can only be updated with preview authorization.' },
+        403,
+      );
+    }
+  }
+  if (payload.aud === 'oauth-deploy' || payload.aud === 'oauth-preview') {
     try {
       if (!payload.oauthApproval || !payload.project) {
         throw new OAuthError('invalid_token', 'A publish approval is required.', 401);
@@ -162,7 +180,11 @@ export const authMiddleware: MiddlewareHandler<ApiEnv> = async (context, next) =
         payload.oauthApproval,
         context.get('companyIdentity'),
       );
-      if (actor.id !== payload.sub || approval.data.projectId !== payload.project) {
+      if (
+        actor.id !== payload.sub ||
+        approval.data.projectId !== payload.project ||
+        (payload.aud === 'oauth-preview') !== (approval.data.kind === 'preview')
+      ) {
         throw new OAuthError('invalid_token', 'Invalid publish approval.', 401);
       }
       const path = context.req.path;

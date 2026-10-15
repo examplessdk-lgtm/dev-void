@@ -64,11 +64,14 @@ function auditTarget(
         name: boundedString(body.name, 80),
         operator: boundedString(body.operator, 160),
         redirectUris: boundedList(body.redirectUris, 10, 2048),
-        scopes: boundedList(body.scopes, 2, 32),
+        scopes: boundedList(body.scopes, 3, 32),
       });
     }
-    if (segments[2] === 'disable') {
-      return JSON.stringify({ clientId: boundedString(body.id, 128) });
+    if (segments[2] === 'disable' || segments[2] === 'preview-permission') {
+      return JSON.stringify({
+        clientId: boundedString(body.id, 128),
+        ...(segments[2] === 'preview-permission' ? { enabled: body.enabled === true } : {}),
+      });
     }
   }
   if (segments[0] === 'config' && segments[1] === 'auth') {

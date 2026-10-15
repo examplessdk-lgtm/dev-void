@@ -8,8 +8,9 @@ const props = withDefaults(
     speed?: number;
     autoplay?: boolean;
     reducedMotion?: boolean;
+    appearance?: 'studio' | 'home';
   }>(),
-  { speed: 1, autoplay: true, reducedMotion: false },
+  { speed: 1, autoplay: true, reducedMotion: false, appearance: 'studio' },
 );
 const emit = defineEmits<{
   progress: [state: { time: number; playing: boolean; countdown: number }];
@@ -206,8 +207,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="terminal" class="void-terminal" :data-demo="demo.id">
-    <div class="void-terminal-bar" aria-hidden="true">
+  <div
+    ref="terminal"
+    class="void-terminal"
+    :class="{ 'void-terminal--home': appearance === 'home' }"
+    :data-demo="demo.id"
+  >
+    <div v-if="appearance === 'studio'" class="void-terminal-bar" aria-hidden="true">
       <span class="void-terminal-dots"><i /><i /><i /></span>
       <span class="void-terminal-directory">{{ demo.directory }}</span>
       <span class="void-terminal-wordmark">void</span>
@@ -406,6 +412,44 @@ onBeforeUnmount(() => {
   }
   .void-terminal-viewport {
     height: 460px;
+  }
+}
+
+.void-terminal--home {
+  --terminal-base: #ffffff;
+  --terminal-muted: #aaa6b2;
+  --terminal-green: #22ff73;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #111111;
+  box-shadow: none;
+  font-family: var(--font-mono);
+}
+.void-terminal--home .void-terminal-viewport {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: auto;
+}
+.void-terminal--home .void-terminal-output {
+  padding: 24px 32px;
+}
+.void-terminal--home .void-terminal-line {
+  font-size: 14px;
+  line-height: 22px;
+  min-height: 22px;
+}
+.void-terminal--home .void-terminal-box-top .void-terminal-content {
+  background: #111111;
+}
+@media (max-width: 640px) {
+  .void-terminal--home .void-terminal-output {
+    padding: 20px 16px;
+  }
+  .void-terminal--home .void-terminal-line {
+    font-size: 11px;
+    line-height: 19px;
+    min-height: 19px;
   }
 }
 </style>

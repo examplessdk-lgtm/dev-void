@@ -158,20 +158,17 @@ const socialLinks = [
 ];
 
 const companyLinks = {
-  text: 'Company',
+  text: 'VoidZero',
   items: [
-    { text: 'Company', link: 'https://voidzero.dev' },
+    { text: 'VoidZero', link: 'https://voidzero.dev' },
     { text: 'Blog', link: 'https://voidzero.dev/blog' },
-    { text: 'Terms of Service', link: 'https://voidzero.dev/legal/terms' },
-    { text: 'Privacy Policy', link: 'https://voidzero.dev/legal/privacy' },
-    { text: 'Acceptable Use Policy', link: 'https://voidzero.dev/legal/acceptable-use' },
   ],
 };
 
 export default extendConfig(
   defineConfig({
     title: 'Void',
-    description: 'Build and deploy full-stack Vite apps at warp speed',
+    description: 'Build with Vite. Deploy with Void.',
     cleanUrls: true,
     head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/icon.svg' }]],
     appearance: 'dark',
@@ -377,6 +374,7 @@ export default extendConfig(
       },
 
       footer: {
+        copyright: `© ${new Date().getFullYear()} Cloudflare Inc. All Rights Reserved.`,
         nav: [
           {
             title: 'Docs',

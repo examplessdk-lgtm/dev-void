@@ -1,6 +1,7 @@
 {
   "name": "void-dispatch",
   "main": "src/index.ts",
+  "services": [{ "binding": "PREVIEW_API", "service": "void-api" }],
   "compatibility_date": "2026-02-12",
   "routes": [
     { "pattern": "*.void.app/*", "zone_name": "void.app" },
@@ -59,6 +60,7 @@
   "tail_consumers": [{ "service": "void-tail" }],
   "env": {
     "production": {
+      "services": [{ "binding": "PREVIEW_API", "service": "void-api" }],
       "name": "void-dispatch",
       "routes": [
         { "pattern": "*.void.app/*", "zone_name": "void.app" },
@@ -113,6 +115,7 @@
       },
     },
     "staging": {
+      "services": [{ "binding": "PREVIEW_API", "service": "void-api-staging" }],
       "name": "void-dispatch-staging",
       "routes": [
         {

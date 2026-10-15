@@ -1,6 +1,7 @@
 export type Env = Readonly<{
   PLATFORM_APPLICATION?: string;
   DISPATCH: DispatchNamespace;
+  PREVIEW_API?: Fetcher;
   ISR_CACHE: KVNamespace;
   ROUTING: KVNamespace;
   STATIC_ASSETS: KVNamespace;

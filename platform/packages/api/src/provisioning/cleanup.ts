@@ -11,7 +11,7 @@ import {
   ne,
   notInArray,
 } from 'drizzle-orm';
-import type { Context } from 'hono';
+import { Context } from 'hono';
 import { deleteProjectAssets, deleteWorkerBundle } from '../assets.ts';
 import { DEFAULT_DISPATCH_NAMESPACE } from '../constants.ts';
 import { clearCronScheduler } from '../cron-scheduler-client.ts';
@@ -42,6 +42,7 @@ import { generateId } from '../id.ts';
 import { getLegacyProjectWorkerName, getProjectDeploymentWorkerName } from '../naming.ts';
 import { requireProjectCapability } from '../project-access.ts';
 import { CLOSED_PROXY_TOKEN_STATE, proxyTokenStateKey } from '../proxy-token.ts';
+import { projectRouteKey } from '../routing.ts';
 import {
   deployments as deploymentsTable,
   projectCleanupJobs,
@@ -464,7 +465,11 @@ async function cleanupBestEffortResources(
   cleanup.push(cleanupJob(projectId, 'cron', projectId, { projectId }));
 
   // KV routing entry
-  cleanup.push(cleanupJob(projectId, 'routing-key', project.slug, { key: project.slug }));
+  cleanup.push(
+    cleanupJob(projectId, 'routing-key', projectRouteKey(project), {
+      key: projectRouteKey(project),
+    }),
+  );
   cleanup.push(
     cleanupJob(projectId, 'routing-key', `ai-block:${projectId}`, { key: `ai-block:${projectId}` }),
   );
@@ -517,7 +522,7 @@ async function cleanupBestEffortResources(
     remaining.failed.some(
       (job) =>
         job.kind === 'routing-key' &&
-        (job.payload.key === project.slug || job.payload.key?.startsWith('domain:')),
+        (job.payload.key === projectRouteKey(project) || job.payload.key?.startsWith('domain:')),
     )
   ) {
     throw new Error('Could not remove project routing; retry project deletion.');
@@ -942,6 +947,42 @@ export async function teardownProject(
     cleanedCfIds,
   );
   return { warnings: [...bestEffortWarnings, ...orphanWarnings] };
+}
+
+/** Renewal and this expiry claim both serialize on the project row. */
+export async function reapExpiredPreviews(db: Db, env: ApiEnv['Bindings']): Promise<void> {
+  const candidates = await db
+    .select()
+    .from(projectsTable)
+    .where(
+      and(
+        isNotNull(projectsTable.preview_client_id),
+        lte(projectsTable.preview_expires_at, drizzleSql`now()`),
+      ),
+    )
+    .limit(3);
+  for (const project of candidates) {
+    const claimed = await db
+      .update(projectsTable)
+      .set({ status: 'deleting' })
+      .where(
+        and(
+          eq(projectsTable.id, project.id),
+          lte(projectsTable.preview_expires_at, drizzleSql`now()`),
+        ),
+      )
+      .returning();
+    if (!claimed.length) {
+      continue;
+    }
+    const context = new Context<ApiEnv>(new Request('https://preview.invalid/'), { env });
+    context.set('db', db);
+    try {
+      await teardownProject(context, project.id, project);
+    } catch (error) {
+      console.error('[preview] teardown will retry', { projectId: project.id, error });
+    }
+  }
 }
 
 /** Revoke project consent and hand last-reference tags to durable cleanup. */

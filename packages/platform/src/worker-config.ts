@@ -29,6 +29,7 @@ export function createPlatformWorkerConfigs(input: {
   platformVersion: string;
   proxyHealthBinding?: boolean;
   publicEndpoints?: boolean;
+  privatePreviews?: boolean;
   proxyUrl: string;
   emailGatewayUrl: string;
   resources: PlatformProvisionedResourceIds;
@@ -102,8 +103,25 @@ export function createPlatformWorkerConfigs(input: {
 
   const api: Record<string, unknown> = {
     ...common,
-    ...(input.proxyHealthBinding && publicEndpoints && trafficState === 'enabled'
-      ? { services: [{ binding: 'PLATFORM_PROXY', service: names.proxyWorker }] }
+    ...((input.privatePreviews || input.proxyHealthBinding) &&
+    publicEndpoints &&
+    trafficState === 'enabled'
+      ? {
+          services: [
+            ...(input.privatePreviews
+              ? [
+                  {
+                    binding: 'PREVIEW_DISPATCH',
+                    service: names.dispatchWorker,
+                    entrypoint: 'PreviewDispatcher',
+                  },
+                ]
+              : []),
+            ...(input.proxyHealthBinding
+              ? [{ binding: 'PLATFORM_PROXY', service: names.proxyWorker }]
+              : []),
+          ],
+        }
       : {}),
     version_metadata: { binding: 'VERSION_METADATA' },
     workers_dev:
@@ -274,6 +292,9 @@ export function createPlatformWorkerConfigs(input: {
     },
     dispatch: {
       ...common,
+      ...(input.privatePreviews
+        ? { services: [{ binding: 'PREVIEW_API', service: names.apiWorker }] }
+        : {}),
       name: names.dispatchWorker,
       main: runtimeEntrypoints.dispatch,
       no_bundle: true,

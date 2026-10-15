@@ -1,6 +1,13 @@
 {
   "name": "void-api",
   "main": "src/worker/index.ts",
+  "services": [
+    {
+      "binding": "PREVIEW_DISPATCH",
+      "service": "void-dispatch",
+      "entrypoint": "PreviewDispatcher",
+    },
+  ],
   "build": { "command": "node scripts/build-worker.mjs" },
   "alias": {
     "void:sandbox-controller-source": "./dist/sandbox-controller-source.ts",
@@ -212,6 +219,13 @@
   // For local Hyperdrive, set CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://user:pass@localhost:5432/void_api_dev in .dev.vars (run `pnpm setup` to auto-configure)
   "env": {
     "production": {
+      "services": [
+        {
+          "binding": "PREVIEW_DISPATCH",
+          "service": "void-dispatch",
+          "entrypoint": "PreviewDispatcher",
+        },
+      ],
       "name": "void-api",
       "version_metadata": { "binding": "VERSION_METADATA" },
       "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },
@@ -360,6 +374,13 @@
       },
     },
     "staging": {
+      "services": [
+        {
+          "binding": "PREVIEW_DISPATCH",
+          "service": "void-dispatch-staging",
+          "entrypoint": "PreviewDispatcher",
+        },
+      ],
       "name": "void-api-staging",
       "version_metadata": { "binding": "VERSION_METADATA" },
       "secrets": { "required": ["EMAIL_SIGNING_SECRET"] },

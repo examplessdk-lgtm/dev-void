@@ -4,6 +4,7 @@ import {
   registerOAuthClient,
   publicOAuthClient,
   disableOAuthClient,
+  setOAuthPreviewPermission,
   OAuthError,
 } from '../../auth/oauth.ts';
 import { isDevBypass, type ApiEnv } from '../../env.ts';
@@ -45,7 +46,11 @@ app.post('/', async (context) => {
       .split(/\r?\n/)
       .map((value) => value.trim())
       .filter(Boolean),
-    scopes: ['profile', ...(body.publish === 'true' ? ['deploy:approve'] : [])],
+    scopes: [
+      'profile',
+      ...(body.publish === 'true' ? ['deploy:approve'] : []),
+      ...(body.preview === 'true' ? ['preview:deploy'] : []),
+    ],
   };
   return executeAuditedMutation(
     context,
@@ -78,4 +83,16 @@ app.post('/:id/disable', async (context) =>
     },
   ),
 );
+app.post('/:id/preview-permission', async (context) => {
+  const body = await context.req.parseBody();
+  const input = { id: context.req.param('id'), enabled: body.enabled === 'true' };
+  return executeAuditedMutation(
+    context,
+    operatorAuditIntent('oauth/clients/preview-permission', input),
+    async () => {
+      await setOAuthPreviewPermission(context.get('db'), input.id, input.enabled);
+      return { succeeded: true, response: context.redirect('/admin/connected-apps') };
+    },
+  );
+});
 export default app;

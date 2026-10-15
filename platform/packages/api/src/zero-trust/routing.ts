@@ -11,6 +11,7 @@ import {
 import type { ApiEnv } from '../env.ts';
 import { resolvePlanLimits } from '../plans.ts';
 import { computeDispatchLimits } from '../routing-limits.ts';
+import { projectRouteKey } from '../routing.ts';
 import { domains } from '../schema.ts';
 import { routingSuspensionReason } from '../suspension.ts';
 import type { DeployManifest, Project, ProjectZeroTrust } from '../types.ts';
@@ -319,7 +320,7 @@ export async function publishProjectZeroTrustRoutingLocked(
   const page = projectDomains.slice(0, domainBudget);
   const keys = [
     ...(cursor === null
-      ? [{ key: project.slug, expected: !!expectedDeploymentId, pending: false }]
+      ? [{ key: projectRouteKey(project), expected: !!expectedDeploymentId, pending: false }]
       : []),
     ...page.map((domain) => ({
       key: `domain:${domain.hostname}`,

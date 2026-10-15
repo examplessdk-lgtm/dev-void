@@ -155,6 +155,7 @@ try {
       },
     },
     applicationRoutingVersion: 1,
+    privatePreviews: 1,
     authenticationProtocolVersion: 1,
     deploymentExecution: 1,
     appAccessSetup: 1,

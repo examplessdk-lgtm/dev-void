@@ -704,7 +704,14 @@ describe('platform installer', () => {
               (config.vars as Record<string, string>).PLATFORM_TRAFFIC_STATE === 'enabled';
             expect(config.services).toEqual(
               enabled
-                ? [{ binding: 'PLATFORM_PROXY', service: plan.deployment.resources.proxyWorker }]
+                ? [
+                    {
+                      binding: 'PREVIEW_DISPATCH',
+                      service: plan.deployment.resources.dispatchWorker,
+                      entrypoint: 'PreviewDispatcher',
+                    },
+                    { binding: 'PLATFORM_PROXY', service: plan.deployment.resources.proxyWorker },
+                  ]
                 : undefined,
             );
             if (enabled) {

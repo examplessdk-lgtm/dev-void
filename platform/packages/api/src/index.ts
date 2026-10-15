@@ -88,7 +88,7 @@ import { platformDomainPreflight } from './platform-domain-preflight.ts';
 import { getPlatformApiUrl, getPlatformDisplayName } from './platform-identity.ts';
 import { processPlatformQueue } from './platform-queue.ts';
 import { tryActivateDomain } from './provisioning/activate-domain.ts';
-import { reconcileProjectCleanupJobs } from './provisioning/cleanup.ts';
+import { reconcileProjectCleanupJobs, reapExpiredPreviews } from './provisioning/cleanup.ts';
 import {
   CloudflareApiError,
   deleteCustomHostname,
@@ -190,7 +190,10 @@ const app = new Hono<ApiEnv>()
   // the API (e.g. on workers.dev), so a framing page would get the admin cookie.
   .use('*', async (context, next) => {
     await next();
-    if (context.res.headers.get('Content-Type')?.startsWith('text/html')) {
+    if (
+      !/^\/oauth\/preview-serve\/proj_[a-z0-9]+$/.test(context.req.path) &&
+      context.res.headers.get('Content-Type')?.startsWith('text/html')
+    ) {
       context.header('X-Frame-Options', 'DENY');
       context.header('Content-Security-Policy', "frame-ancestors 'none'");
     }
@@ -831,6 +834,9 @@ async function scheduled(
   // Purge expired OAuth nonces and auth codes left by abandoned login flows (best-effort)
   await purgeExpiredOAuthRequests(db).catch((err) =>
     console.error('[scheduled] failed to purge expired connected-app grants:', err),
+  );
+  await reapExpiredPreviews(db, env).catch((err) =>
+    console.error('[scheduled] preview teardown failed:', err),
   );
   await purgeExpiredOAuthNonces(db).catch((err) =>
     console.error('[scheduled] failed to purge expired OAuth nonces:', err),

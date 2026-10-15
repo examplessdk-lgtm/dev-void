@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { Icon } from '@iconify/vue';
+import RiveAnimation from '@components/shared/RiveAnimation.vue';
 import { useData } from 'vitepress';
+import heroAnimation from './assets/animations/640_x_630_vite_to_void_box_vertical_v3.riv';
 
-const props = defineProps<{
-  background?: string;
-}>();
+if (typeof document !== 'undefined') {
+  const preload = document.createElement('link');
+  preload.rel = 'preload';
+  preload.href = heroAnimation;
+  preload.as = 'fetch';
+  preload.crossOrigin = 'anonymous';
+  document.head.appendChild(preload);
+}
 
 const { frontmatter } = useData();
 </script>
@@ -12,7 +18,7 @@ const { frontmatter } = useData();
 <template>
   <div
     v-if="frontmatter.hero"
-    class="wrapper wrapper--ticks grid lg:grid-cols-2 w-full border-nickel md:divide-x"
+    class="home-hero wrapper wrapper--ticks grid lg:grid-cols-2 w-full border-nickel md:divide-x"
   >
     <div class="flex flex-col p-15 sm:p-20 justify-between gap-20 items-center md:items-start">
       <div class="flex flex-col gap-5 items-center md:items-start text-center md:text-left">
@@ -29,7 +35,7 @@ const { frontmatter } = useData();
         >
           {{ frontmatter.hero.tagline }}
         </p>
-        <div class="flex flex-col min-[410px]:flex-row items-center gap-5 mt-8">
+        <div class="flex flex-col min-[410px]:flex-row flex-wrap items-center gap-5 mt-8">
           <a
             v-for="action in frontmatter.hero.actions"
             :key="action.text"
@@ -45,50 +51,20 @@ const { frontmatter } = useData();
     </div>
     <div class="flex flex-col min-h-[22rem] sm:min-h-[30rem]">
       <div
-        class="flex flex-col bg-cover bg-center"
-        :style="props.background ? { backgroundImage: `url(${props.background})` } : undefined"
+        class="relative px-10 pb-10 md:pt-10 h-full flex flex-col justify-center overflow-clip"
+        role="img"
+        aria-label="Animation showing a Vite app becoming a Void app"
       >
-        <div
-          class="relative px-10 pb-10 md:pt-10 h-full flex flex-col justify-center overflow-clip"
-        >
-          <slot name="hero-image">
-            <img
-              v-if="frontmatter.hero.image?.src"
-              :src="frontmatter.hero.image.src"
-              :alt="frontmatter.hero.image.alt"
-              class="max-h-[20rem]"
-            />
-          </slot>
-        </div>
+        <RiveAnimation
+          :desktop-src="heroAnimation"
+          :mobile-src="heroAnimation"
+          :desktop-width="640"
+          :desktop-height="630"
+          :mobile-width="640"
+          :mobile-height="630"
+          canvas-class="w-full"
+        />
       </div>
-      <a
-        href="https://www.youtube.com/watch?v=Bp86buftbX8"
-        target="_blank"
-        class="p-5 flex gap-5 items-center relative group"
-      >
-        <div class="relative h-16 aspect-244/144 shrink-0 overflow-hidden">
-          <img
-            src="./void-thumb.jpg"
-            alt="Video thumbnail"
-            class="h-16 aspect-244/144 group-hover:opacity-75 group-hover:scale-105 transition-[scale,opacity]"
-          />
-          <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div
-              class="flex h-10 w-10 items-center justify-center rounded-full bg-black/55 shadow-[0_6px_24px_rgba(0,0,0,0.35)] transition-transform duration-200 group-hover:scale-110"
-            >
-              <Icon icon="simple-icons:youtube" class="h-5 w-5 text-[#ff0033]" />
-            </div>
-          </div>
-        </div>
-        <div>
-          <h5 class="text-white">What is Void?</h5>
-          <p class="text-base">Evan You announces Void</p>
-        </div>
-        <span
-          class="absolute top-5 right-5 text-electric bg-slate rounded px-3 py-1 text-xs font-mono"
-          >15:33</span
-        >
-      </a>
     </div>
   </div>
 </template>

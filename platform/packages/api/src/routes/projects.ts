@@ -94,6 +94,7 @@ import {
   requestRotationIfReplacingUntrustedCode,
 } from '../proxy-token-rotation.ts';
 import { EMAIL_RESERVED_SLUGS } from '../reserved-slugs.ts';
+import { projectRouteKey } from '../routing.ts';
 import {
   buildRoutingJson,
   buildStaticRoutingJson,
@@ -1271,7 +1272,7 @@ const app = new Hono<ApiEnv>()
           // snapshot or the eagerly-written resources table. See queue
           // sweep below for why the union uses `deployed_at IS NOT NULL`.
           const workerName = getProjectDeploymentWorkerName(lockedProject.slug, target.id);
-          const existingRouting = await context.env.ROUTING.get(lockedProject.slug);
+          const existingRouting = await context.env.ROUTING.get(projectRouteKey(lockedProject));
           const existingEntry = existingRouting ? JSON.parse(existingRouting) : null;
           const zeroTrust = await resolveProjectZeroTrustRouting(tx, projectId).catch(
             (error: unknown) => {
@@ -1316,6 +1317,7 @@ const app = new Hono<ApiEnv>()
               not_found_handling: targetType === 'spa' ? 'single-page-application' : '404-page',
             };
             routingJson = buildStaticRoutingJson({
+              privatePreview: Boolean(project.preview_client_id),
               projectId,
               userId: lockedProject.user_id,
               deploymentId: target.id,
@@ -1326,6 +1328,7 @@ const app = new Hono<ApiEnv>()
             });
           } else {
             routingJson = buildRoutingJson({
+              privatePreview: Boolean(project.preview_client_id),
               workerName,
               projectId,
               userId: lockedProject.user_id,
@@ -1402,7 +1405,7 @@ const app = new Hono<ApiEnv>()
               manifest ?? null,
               (undo) => externalUndo.push(async () => undo()),
             );
-            await putRouting(lockedProject.slug, routingJson);
+            await putRouting(projectRouteKey(lockedProject), routingJson);
 
             // Resolve the target worker's baked __VOID_PROXY_TOKEN once if
             // either cron or queues need it. Re-fetching on each path would
@@ -1702,7 +1705,7 @@ const app = new Hono<ApiEnv>()
               // database status update was interrupted.
               let restoredProjectRouting: string | null = null;
               try {
-                const rawRouting = await context.env.ROUTING.get(project.slug);
+                const rawRouting = await context.env.ROUTING.get(projectRouteKey(project));
                 restoredProjectRouting =
                   rawRouting === null
                     ? null
@@ -3430,7 +3433,7 @@ export async function createUserProject(
     return context.json({ error: `slug must be at most ${MAX_SLUG_LENGTH} characters` }, 400);
   }
 
-  if (RESERVED_SLUGS.has(body.slug)) {
+  if (RESERVED_SLUGS.has(body.slug) || body.slug.startsWith('preview-')) {
     return context.json({ error: 'this name is reserved' }, 400);
   }
 

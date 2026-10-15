@@ -959,22 +959,23 @@ describe('operator installation-aware system and worker operations', () => {
     expect(result).toMatchObject({ ok: false, partial: true, environment: 'staging' });
     // Rollback runs in reverse deploy order, so the email gateway, which the
     // API's confirmation page posts back through, rolls back after the API.
+    // Its dispatch service entrypoint also stays intact if API rollback fails.
     expect(result.events.map((event) => [event.worker_name, event.status])).toEqual([
       ['dashboard', 'success'],
-      ['dispatch', 'success'],
-      ['tail', 'success'],
       ['api', 'failed'],
+      ['dispatch', 'skipped'],
+      ['tail', 'skipped'],
       ['email-gateway', 'skipped'],
       ['proxy', 'skipped'],
     ]);
     const writes = fetch.mock.calls.filter(([, init]) => init?.method === 'POST');
-    expect(writes).toHaveLength(4);
+    expect(writes).toHaveLength(2);
     expect(writes[0][0]).toContain('void-dashboard-staging');
     expect(JSON.parse(String(writes[0][1]?.body))).toMatchObject({
       versions: [{ version_id: 'previous', percentage: 100 }],
     });
     const persisted = await env.db.select().from(platformEvents);
-    expect(persisted.filter((event) => event.status === 'skipped')).toHaveLength(2);
+    expect(persisted.filter((event) => event.status === 'skipped')).toHaveLength(4);
   });
   test('queue backfill preview reads all targets without writing or returning tokens', async () => {
     await env.ROUTING.put(

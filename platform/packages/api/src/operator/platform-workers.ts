@@ -20,7 +20,8 @@ export type PlatformWorker = PlatformWorkerDef & {
 
 // `deployOrder` follows the platform deploy script; rollback-all runs it in
 // reverse. The API's confirmation page posts back through the email gateway,
-// so the gateway ships before the API and rolls back after it.
+// so the gateway ships before the API and rolls back after it. The dispatcher's
+// private preview entrypoint must also exist before the API binds to it.
 const WORKER_DEFS: ReadonlyArray<PlatformWorkerDef> = [
   {
     name: 'proxy',
@@ -41,14 +42,14 @@ const WORKER_DEFS: ReadonlyArray<PlatformWorkerDef> = [
     prodScript: 'void-tail',
     stagingScript: 'void-tail-staging',
     dependsOn: [],
-    deployOrder: 4,
+    deployOrder: 3,
   },
   {
     name: 'api',
     prodScript: 'void-api',
     stagingScript: 'void-api-staging',
-    dependsOn: ['proxy', 'email-gateway'],
-    deployOrder: 3,
+    dependsOn: ['proxy', 'email-gateway', 'dispatch'],
+    deployOrder: 5,
   },
   {
     name: 'dashboard',
@@ -62,7 +63,7 @@ const WORKER_DEFS: ReadonlyArray<PlatformWorkerDef> = [
     prodScript: 'void-dispatch',
     stagingScript: 'void-dispatch-staging',
     dependsOn: ['proxy', 'tail'],
-    deployOrder: 5,
+    deployOrder: 4,
   },
 ];
 

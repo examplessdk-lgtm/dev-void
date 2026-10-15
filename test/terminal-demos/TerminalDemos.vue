@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
-import { terminalDemos } from './demos.ts';
-import TerminalPlayer from './TerminalPlayer.vue';
-import { playbackSpeeds, terminalFrame } from './timeline.ts';
+import { terminalDemos } from '../../docs/.vitepress/theme/terminal/demos.ts';
+import TerminalPlayer from '../../docs/.vitepress/theme/terminal/TerminalPlayer.vue';
+import { playbackSpeeds, terminalFrame } from '../../docs/.vitepress/theme/terminal/timeline.ts';
 
 const props = withDefaults(defineProps<{ studio?: boolean }>(), { studio: false });
 const selected = ref('deploy');

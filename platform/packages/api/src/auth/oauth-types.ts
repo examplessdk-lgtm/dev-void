@@ -2,9 +2,10 @@ import type { DeployArtifact } from '@void/deploy-core';
 import type { CompanyIdentity } from './identity-types.ts';
 import type { JwtPayload } from './jwt.ts';
 
-export type OAuthScope = 'profile' | 'deploy:approve';
+export type OAuthScope = 'profile' | 'deploy:approve' | 'preview:deploy';
 export type OAuthRequestData = {
-  kind: 'profile' | 'deployment' | 'connections';
+  kind: 'profile' | 'deployment' | 'preview' | 'connections';
+  scopes?: Array<OAuthScope>;
   redirectUri: string;
   state: string;
   challenge: string;

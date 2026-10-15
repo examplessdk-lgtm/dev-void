@@ -46,6 +46,7 @@ export type PlatformRuntimeManifest = Readonly<{
   deploymentExecution?: 1;
   authenticationProtocolVersion?: 1;
   applicationRoutingVersion?: 1;
+  privatePreviews?: 1;
   artifacts: Readonly<
     Record<'api' | 'dispatch' | 'proxy' | 'tail', PlatformRuntimeArtifact> &
       Partial<Record<'emailGateway', PlatformRuntimeArtifact>>
@@ -95,6 +96,9 @@ export function platformDatabaseSchemaDigest(
 
 export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeManifest {
   const root = record(value, 'runtime manifest');
+  if (root.privatePreviews !== undefined && root.privatePreviews !== 1) {
+    throw new Error('Unsupported private preview protocol.');
+  }
   if (root.schemaVersion !== 2) {
     throw new Error('runtime manifest schemaVersion must be 2');
   }
@@ -227,6 +231,7 @@ export function parsePlatformRuntimeManifest(value: unknown): PlatformRuntimeMan
       : {}),
     ...(root.emailProtocolVersion === 1 ? { emailProtocolVersion: 1 as const } : {}),
     ...(root.applicationRoutingVersion === 1 ? { applicationRoutingVersion: 1 as const } : {}),
+    ...(root.privatePreviews === 1 ? { privatePreviews: 1 as const } : {}),
     database: {
       journalSha256: sha256(databaseValue.journalSha256, 'database journal digest'),
       lineage,

@@ -13,6 +13,7 @@ import {
   lockAuthSettings,
   readAuthSettings,
   readLoginConnection,
+  type AuthSettings,
 } from './configuration.ts';
 import type { CompanyIdentity } from './identity-types.ts';
 import { signJwt, type JwtPayload } from './jwt.ts';
@@ -112,13 +113,13 @@ export async function validateHumanSession(
   if (payload.aud !== 'api' && payload.aud !== 'admin') {
     return false;
   }
-  const settings = await readAuthSettings(db);
   if (!payload.sid) {
     // Preserve legacy installations until the coordinated session migration is activated.
+    const settings = await readAuthSettings(db);
     return !settings?.sessions_required && !settings?.protection;
   }
-  const [row] = await db
-    .select({ session: platformHumanSessions, user: users })
+  const sessionQuery = db
+    .select({ session: platformHumanSessions, user: users, connection: platformLoginConnections })
     .from(platformHumanSessions)
     .innerJoin(
       platformLoginConnections,
@@ -136,8 +137,38 @@ export async function validateHumanSession(
         gt(platformHumanSessions.expires_at, new Date().toISOString()),
       ),
     );
+  const [settings, [row]] = await Promise.all([readAuthSettings(db), sessionQuery]);
+  return validHumanSessionSnapshot(payload, settings, row ?? null, companyIdentity);
+}
+
+/** Validate an uncached database snapshot; shared by session and OAuth reads. */
+export function validHumanSessionSnapshot(
+  payload: Pick<JwtPayload, 'sub' | 'aud' | 'sid'>,
+  settings: AuthSettings | null,
+  row: {
+    session: PlatformHumanSession;
+    user: typeof users.$inferSelect;
+    connection: typeof platformLoginConnections.$inferSelect;
+  } | null,
+  companyIdentity?: CompanyIdentity,
+): boolean {
+  if (payload.aud !== 'api' && payload.aud !== 'admin') {
+    return false;
+  }
+  if (!payload.sid) {
+    return !settings?.sessions_required && !settings?.protection;
+  }
   if (
     !row ||
+    row.session.id !== payload.sid ||
+    row.session.user_id !== payload.sub ||
+    row.user.id !== payload.sub ||
+    row.session.audience !== payload.aud ||
+    !row.connection.enabled ||
+    row.connection.id !== row.session.connection_id ||
+    row.session.generation !== row.connection.generation ||
+    row.session.revoked_at !== null ||
+    Date.parse(row.session.expires_at) <= Date.now() ||
     isAdminSuspended(row.user.suspended_reason) ||
     (payload.aud === 'admin' && row.user.role !== 'admin')
   ) {

@@ -69,6 +69,18 @@
     {
       "platformVersion": "0.27.0",
       "schemaDigest": "8580c6074cecbe15a7078428bd7f3ac4f5009f922bb8d2f300c58dcb717bfea3"
+    },
+    {
+      "platformVersion": "0.28.0",
+      "schemaDigest": "bd1c4f124ee52cde71a9e2e974e3af2f1431cc7c92796be233784d5790b06eb4"
+    },
+    {
+      "platformVersion": "1.0.0",
+      "schemaDigest": "bd1c4f124ee52cde71a9e2e974e3af2f1431cc7c92796be233784d5790b06eb4"
+    },
+    {
+      "platformVersion": "1.1.0",
+      "schemaDigest": "bd1c4f124ee52cde71a9e2e974e3af2f1431cc7c92796be233784d5790b06eb4"
     }
   ]
 }

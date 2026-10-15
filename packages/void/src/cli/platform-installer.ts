@@ -236,6 +236,14 @@ export async function installPlatform(
     throw new Error('platform: This runtime does not support the installation’s app access setup.');
   }
   const hasEmailGatewayArtifact = runtime.artifacts.emailGateway !== undefined;
+  if (
+    existing?.steps.some((step) => step.key === 'private-previews-initialized:v1') &&
+    runtime.privatePreviews !== 1
+  ) {
+    throw new Error(
+      'platform: This installation has private previews. Use a runtime with private preview support.',
+    );
+  }
   if (runtime.emailProtocolVersion !== 1 && plan.deployment.capabilities.email) {
     throw new Error(
       'platform: This runtime cannot serve enabled platform email without email protocol version 1.',
@@ -570,6 +578,8 @@ export async function installPlatform(
       createsWorker ||
       recoveringCreatedWorker ||
       state.manifest.usageProtocolVersion !== targetUsageProtocolVersion ||
+      (runtime.privatePreviews === 1 &&
+        !state.manifest.steps.some((step) => step.key === 'private-previews-initialized:v1')) ||
       authenticationProtocolTransition ||
       shouldBootstrapSharedEmail ||
       requiresSandboxDrain ||
@@ -638,18 +648,23 @@ export async function installPlatform(
     const requiresStagedCommit = !preserveDisabled && requiresTrafficGuard;
     const enabledConfigs = createPlatformWorkerConfigs({
       ...configInput,
+      privatePreviews: runtime.privatePreviews === 1,
       publicEndpoints: !preserveDisabled,
       trafficState: preserveDisabled ? 'staging' : 'enabled',
     });
     const configs = requiresStagedCommit
       ? createPlatformWorkerConfigs({
           ...configInput,
+          privatePreviews: runtime.privatePreviews === 1,
           publicEndpoints: true,
           trafficState: requiresSandboxDrain ? 'sandbox-drain' : 'staging',
         })
       : enabledConfigs;
     const previousConfigs = createPlatformWorkerConfigs({
       ...configInput,
+      privatePreviews: existing?.steps.some(
+        (step) => step.key === 'private-previews-initialized:v1',
+      ),
       publicEndpoints: previousPublicEndpoints,
       trafficState: previousPublicEndpoints ? 'enabled' : 'staging',
     });
@@ -995,6 +1010,17 @@ export async function installPlatform(
       runtimeProvenance,
     });
     const emailOperationId = enableInstallationServicesResult.emailOperationId;
+    if (runtime.privatePreviews === 1) {
+      state.manifest = recordInstallationStep(
+        state.manifest,
+        {
+          key: 'private-previews-initialized:v1',
+          completedAt: now(),
+          resultHash: hash('private-previews:v1'),
+        },
+        now(),
+      );
+    }
     await checkpointOperation('complete');
     writeInstallationManifest(state.manifest);
     await writeRemoteInstallationCheckpoint(dependencies.client, state.plan, state.manifest);

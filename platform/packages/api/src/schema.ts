@@ -99,6 +99,7 @@ export const oauthGrants = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     session: jsonb('session').notNull().$type<OAuthSession>(),
+    scopes: jsonb('scopes').notNull().default(['profile']).$type<Array<OAuthScope>>(),
     token_hash: text('token_hash').notNull(),
     expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
     revoked_at: timestamp('revoked_at', { mode: 'string', withTimezone: true }),
@@ -362,6 +363,9 @@ export const projects = pgTable(
       .notNull()
       .references(() => users.id),
     slug: text('slug').notNull(),
+    preview_client_id: text('preview_client_id').references(() => oauthClients.id),
+    preview_workspace_id: text('preview_workspace_id'),
+    preview_expires_at: timestamp('preview_expires_at', { mode: 'string', withTimezone: true }),
     type: text('mode').notNull().default('void').$type<'void' | 'spa' | 'static' | 'framework'>(),
     active_deployment_id: text('active_deployment_id'),
     websocket_version: integer('websocket_version').notNull().default(0),
@@ -374,8 +378,28 @@ export const projects = pgTable(
     unique().on(table.user_id, table.slug),
     uniqueIndex('idx_projects_slug').on(table.slug),
     index('idx_projects_user_id').on(table.user_id),
+    uniqueIndex('projects_preview_workspace').on(
+      table.preview_client_id,
+      table.user_id,
+      table.preview_workspace_id,
+    ),
+    check(
+      'projects_preview_identity',
+      sql`(${table.preview_client_id} IS NULL AND ${table.preview_workspace_id} IS NULL AND ${table.preview_expires_at} IS NULL) OR (${table.preview_client_id} IS NOT NULL AND ${table.preview_workspace_id} IS NOT NULL AND ${table.preview_expires_at} IS NOT NULL AND ${table.slug} LIKE 'preview-%')`,
+    ),
   ],
 );
+
+export const previewTickets = pgTable('preview_tickets', {
+  token_hash: text('token_hash').primaryKey(),
+  project_id: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  grant_id: text('grant_id')
+    .notNull()
+    .references(() => oauthGrants.id, { onDelete: 'cascade' }),
+  expires_at: timestamp('expires_at', { mode: 'string', withTimezone: true }).notNull(),
+});
 
 // Revocable project-scoped credentials for headless CI. The bearer value is a
 // signed aud:deploy JWT; this row is the authoritative revocation and expiry

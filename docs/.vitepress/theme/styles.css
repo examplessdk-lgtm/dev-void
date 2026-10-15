@@ -2,6 +2,86 @@
 
 @source "./**/*.vue";
 
+.home-feature-link {
+  transition-property: color, border-color, background-color;
+  transition-duration: var(--default-transition-duration);
+  transition-timing-function: var(--default-transition-timing-function);
+}
+
+@supports (corner-shape: squircle) {
+  .marketing-layout:has(.home-hero) {
+    --radius-xs: 0.5rem;
+    --radius-sm: 1rem;
+    --radius-md: 1.25rem;
+    --radius-lg: 1.5rem;
+    --radius-xl: 2rem;
+
+    &,
+    & *,
+    & *::before,
+    & *::after {
+      corner-shape: squircle;
+    }
+
+    .rounded,
+    .home-feature-link {
+      border-radius: var(--radius-lg);
+    }
+
+    .button--primary::before {
+      border-radius: calc(var(--radius-lg) + 3px);
+    }
+
+    .button--primary::after,
+    .resource-code-window,
+    .feature-visual,
+    .void-terminal:not(.void-terminal--home) {
+      border-radius: var(--radius-lg);
+    }
+
+    .cli-terminal,
+    .platform-command-window {
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    }
+
+    .cli-tabs {
+      border-radius: var(--radius-md);
+    }
+
+    .cli-playback,
+    .cli-tabs [role='tab'],
+    .resource-code-tabs [role='tab'],
+    .platform-command-list code {
+      border-radius: var(--radius-sm);
+    }
+
+    .void-terminal-box-top::before {
+      border-radius: var(--radius-xs) var(--radius-xs) 0 0;
+    }
+
+    .void-terminal-box-bottom::before {
+      border-radius: 0 0 var(--radius-xs) var(--radius-xs);
+    }
+
+    .rounded-full,
+    .void-terminal-dots i,
+    .VPSwitch .check,
+    .VPSwitch::before {
+      corner-shape: round;
+    }
+
+    @media (min-width: 768px) {
+      .VPNavBarSearchButton {
+        border-radius: var(--radius-lg);
+      }
+
+      .VPNavBarSearchButton .keys {
+        border-radius: var(--radius-sm);
+      }
+    }
+  }
+}
+
 :root {
   --color-brand: #4f30e8;
 }
