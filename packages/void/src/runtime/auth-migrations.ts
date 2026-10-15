@@ -304,8 +304,10 @@ async function ensurePgIndexes(
 }
 
 /**
- * SQLite and PostgreSQL cannot add a NOT NULL column with no default to a table that has rows.
- * Name the fields and the fix before the table changes.
+ * Name the fields that a table with rows cannot take, and the fix, before the table changes.
+ * SQLite and PostgreSQL cannot add a NOT NULL column with no default to a table that has rows;
+ * MySQL fills those rows itself. On each dialect, a new required column gives every row the same
+ * value, so its unique index fails when the table has two or more rows.
  */
 async function assertRequiredColumnsCanBeAdded(
   runner: Pick<SqliteMigrationRunner, 'all'>,
@@ -313,27 +315,41 @@ async function assertRequiredColumnsCanBeAdded(
   table: VoidAuthMigrationTable,
   missing: Array<string>,
 ): Promise<void> {
-  const blocked = missing.filter((fieldName) => {
-    const field = table.fields[fieldName]!;
-    return field.required && field.defaultValue === undefined;
-  });
-  if (blocked.length === 0) {
+  const required = missing.filter((fieldName) => table.fields[fieldName]!.required);
+  const unique = required.filter((fieldName) => table.fields[fieldName]!.unique);
+  const noDefault =
+    dialect === 'mysql'
+      ? []
+      : required.filter((fieldName) => table.fields[fieldName]!.defaultValue === undefined);
+  if (unique.length === 0 && noDefault.length === 0) {
     return;
   }
+  // One row blocks a field with no default. Two rows block a unique field.
   const rows = await runner.all(
-    `SELECT 1 AS present FROM ${quoteIdentifier(table.name, dialect)} LIMIT 1`,
+    `SELECT 1 AS present FROM ${quoteIdentifier(table.name, dialect)} LIMIT 2`,
   );
-  if (rows.length === 0) {
-    return;
+  const describe = (fieldNames: Array<string>) => ({
+    names: fieldNames.map((fieldName) => JSON.stringify(fieldName)).join(', '),
+    noun: fieldNames.length === 1 ? 'field' : 'fields',
+  });
+  if (rows.length >= 2 && unique.length > 0) {
+    const { names, noun } = describe(unique);
+    throw new Error(
+      `Cannot add required unique auth ${noun} ${names} to table ${JSON.stringify(table.name)}: ` +
+        'the table has more than one row, and a new column gives every row the same value. ' +
+        `Set \`required: false\` on the ${noun}, ` +
+        `or add the ${unique.length === 1 ? 'column' : 'columns'} in a migration that gives each row its own value.`,
+    );
   }
-  const names = blocked.map((fieldName) => JSON.stringify(fieldName)).join(', ');
-  const noun = blocked.length === 1 ? 'field' : 'fields';
-  throw new Error(
-    `Cannot add required auth ${noun} ${names} to table ${JSON.stringify(table.name)}: ` +
-      'the table has rows, and there is no fixed default value to fill them. ' +
-      `Set \`required: false\` on the ${noun}. ` +
-      'A string, number or boolean field can use a fixed `defaultValue` instead.',
-  );
+  if (rows.length >= 1 && noDefault.length > 0) {
+    const { names, noun } = describe(noDefault);
+    throw new Error(
+      `Cannot add required auth ${noun} ${names} to table ${JSON.stringify(table.name)}: ` +
+        'the table has rows, and there is no fixed default value to fill them. ' +
+        `Set \`required: false\` on the ${noun}. ` +
+        'A string, number or boolean field can use a fixed `defaultValue` instead.',
+    );
+  }
 }
 
 export async function applySqliteAuthMigrations(
@@ -444,6 +460,12 @@ export async function applyMySqlAuthMigrations(
       );
       const existingColumns = new Map(
         columnRows.map((row) => [String(row.column_name), row] as const),
+      );
+      await assertRequiredColumnsCanBeAdded(
+        runner,
+        'mysql',
+        table,
+        Object.keys(table.fields).filter((fieldName) => !existingColumns.has(fieldName)),
       );
       for (const [fieldName, field] of Object.entries(table.fields)) {
         const existingColumn = existingColumns.get(fieldName);

@@ -501,6 +501,44 @@ describe('auth migration runner', () => {
     expect(columns.rows.map((row) => row.column_name)).not.toContain('plan');
   });
 
+  it('refuses a required unique field only when the table has more than one row', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(':memory:');
+    try {
+      const runner = sqliteRunner(db);
+      await applySqliteAuthMigrations(runner, resolveWithUserFields('sqlite'));
+      db.prepare(
+        "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u1', 'A', 'a@example.com', 0, 0, 0)",
+      ).run();
+      // One row can take the default of a unique field.
+      await applySqliteAuthMigrations(
+        runner,
+        resolveWithUserFields('sqlite', {
+          code: { type: 'string', unique: true, defaultValue: 'a' },
+        }),
+      );
+      expect(sqliteColumns(db, 'user')).toContain('code');
+      db.prepare(
+        "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt, code) VALUES ('u2', 'B', 'b@example.com', 0, 0, 0, 'b')",
+      ).run();
+
+      await expect(
+        applySqliteAuthMigrations(
+          runner,
+          resolveWithUserFields('sqlite', {
+            code: { type: 'string', unique: true, defaultValue: 'a' },
+            handle: { type: 'string', unique: true, defaultValue: 'x' },
+          }),
+        ),
+      ).rejects.toThrow(
+        'Cannot add required unique auth field "handle" to table "user": the table has more than one row, and a new column gives every row the same value. Set `required: false` on the field, or add the column in a migration that gives each row its own value.',
+      );
+      expect(sqliteColumns(db, 'user')).not.toContain('handle');
+    } finally {
+      db.close();
+    }
+  });
+
   it('adds a new required MySQL column with its fixed default', async () => {
     const statements: Array<string> = [];
     const resolved = resolveWithUserFields('mysql', {
@@ -545,6 +583,48 @@ describe('auth migration runner', () => {
       "ALTER TABLE `user` ADD COLUMN `motto` varchar(255) NOT NULL DEFAULT _utf8mb4 X'6974277320615c62'",
       'ALTER TABLE `user` ADD COLUMN `nickname` varchar(255) NOT NULL',
     ]);
+  });
+
+  it('refuses a required unique MySQL field when the table has more than one row', async () => {
+    const statements: Array<string> = [];
+    const resolved = resolveWithUserFields('mysql', {
+      code: { type: 'string', unique: true, defaultValue: 'x' },
+      handle: { type: 'string', unique: true },
+    });
+    const user = resolved.tables.find((table) => table.name === 'user')!;
+    const existing = ['id', 'name', 'email', 'emailVerified', 'image', 'createdAt', 'updatedAt'];
+
+    await expect(
+      applyMySqlAuthMigrations(
+        {
+          async all<T extends Record<string, unknown>>(sql: string) {
+            if (sql.includes('SELECT DATABASE()')) {
+              return [{ database_name: 'app' }] as unknown as Array<T>;
+            }
+            if (sql.includes('information_schema.tables')) {
+              return [{ table_name: 'user' }] as unknown as Array<T>;
+            }
+            if (sql.includes('information_schema.columns')) {
+              return existing.map((column_name) => ({
+                column_name,
+                data_type: 'varchar',
+              })) as unknown as Array<T>;
+            }
+            if (sql === 'SELECT 1 AS present FROM `user` LIMIT 2') {
+              return [{ present: 1 }, { present: 1 }] as unknown as Array<T>;
+            }
+            return [] as Array<T>;
+          },
+          async run(sql: string) {
+            statements.push(sql);
+          },
+        },
+        { ...resolved, tables: [user] },
+      ),
+    ).rejects.toThrow(
+      'Cannot add required unique auth fields "code", "handle" to table "user": the table has more than one row, and a new column gives every row the same value. Set `required: false` on the fields, or add the columns in a migration that gives each row its own value.',
+    );
+    expect(statements).toEqual([]);
   });
 });
 
