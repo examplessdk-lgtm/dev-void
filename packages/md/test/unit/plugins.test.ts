@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vite-plus/test';
 import { compile } from '../../src/compile.ts';
+import { CODE_COPY_SCRIPT } from '../../src/plugins/pre-wrapper.ts';
+
+/** Runs the copy script, then clicks a copy button whose code block has these lines. */
+function clickCopy(lines: Array<string>, writeText: (text: string) => unknown): void {
+  class FakeElement {}
+  const button = Object.assign(new FakeElement(), {
+    closest: () => button,
+    classList: { add() {}, remove() {} },
+    parentElement: {
+      querySelector: () => ({
+        querySelectorAll: () => lines.map((textContent) => ({ textContent })),
+      }),
+    },
+  });
+  let onClick: ((event: { target: unknown }) => void) | undefined;
+  const body = CODE_COPY_SCRIPT.slice('<script>'.length, -'</script>'.length);
+  new Function('window', 'document', 'navigator', 'Element', 'setTimeout', body)(
+    {},
+    {
+      addEventListener: (_type: string, listener: typeof onClick) => {
+        onClick = listener;
+      },
+    },
+    { clipboard: { writeText } },
+    FakeElement,
+    () => {},
+  );
+  onClick!({ target: button });
+}
 
 describe('plugins', () => {
   describe('pre-wrapper', () => {
@@ -8,6 +37,40 @@ describe('plugins', () => {
       expect(result.html).toContain('class="language-js');
       expect(result.html).toContain('class="copy"');
       expect(result.html).toContain('class="lang"');
+    });
+
+    it('adds one copy script per page with code blocks', async () => {
+      const result = await compile('```js\nconst x = 1;\n```\n\n```sh\nnpm i\n```');
+      expect(result.html.match(/<script>/g)).toHaveLength(1);
+      expect(result.html).toMatch(/navigator\.clipboard\.writeText[\s\S]*<\/script>$/);
+
+      const prose = await compile('# Title');
+      expect(prose.html).not.toContain('<script');
+    });
+
+    it('copy script drops the empty last line that Shiki adds', () => {
+      const copied: Array<string> = [];
+      clickCopy(['const x = 1;', '', 'const y = 2;', ''], (text) => {
+        copied.push(text);
+        return Promise.resolve();
+      });
+      expect(copied).toEqual(['const x = 1;\n\nconst y = 2;']);
+    });
+
+    it('copy script handles a rejected clipboard write', () => {
+      const rejectionHandlers: Array<unknown> = [];
+      const write = {
+        then: (_onFulfilled: unknown, onRejected?: unknown) => {
+          rejectionHandlers.push(onRejected);
+          return write;
+        },
+        catch: (onRejected: unknown) => {
+          rejectionHandlers.push(onRejected);
+          return write;
+        },
+      };
+      clickCopy(['x', ''], () => write);
+      expect(rejectionHandlers.some((handler) => typeof handler === 'function')).toBe(true);
     });
   });
 

@@ -209,7 +209,7 @@ After a successful action, an island page reloads or redirects through `window.l
 
 ## Forms
 
-Island pages cannot use `useForm` because it depends on the Void Router. Use `useIslandForm` instead. It has the same API, but it uses `fetch()` directly:
+Island pages cannot use `useForm` because it depends on the Void Router. Use `useIslandForm` instead. It has the same form state, but its submit helpers take the action URL and use `fetch()` directly:
 
 ::: code-group
 
@@ -344,7 +344,7 @@ export default function PostForm() {
 
 :::
 
-`useIslandForm` provides the same state and methods as [`useForm`](./actions-and-forms#useform). Use `post`, `put`, `patch`, or `delete` with the action URL to submit.
+`useIslandForm` provides the same form state as [`useForm`](./actions-and-forms#useform). Pass the action URL to `post`, `put`, `patch`, or `delete` to submit.
 
 Successful submissions reload the page; redirects navigate to their destination. A `422` response populates `errors` from `{ errors: { field: "message" } }`. Submit helpers return `Promise<void>`.
 

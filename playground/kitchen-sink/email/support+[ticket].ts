@@ -8,9 +8,8 @@ import { defineEmail, parseEmail, replyEmail } from 'void/email';
  *   - parseEmail for the parsed body / subject
  *   - replyEmail with threading-aware reply MIME (In-Reply-To / References / Re:)
  *
- * For local dev: deliver a synthetic message via the test harness in
- * `test/email-handler.test.ts` (or the inbox round-trip on `/__void/inbox`
- * when that lands).
+ * To try it locally, deliver a test message with `createInboundTestHarness`
+ * from `void/email/testing`.
  */
 export default defineEmail(async (message, _env, _ctx, info) => {
   const ticket = info?.params.ticket ?? 'unknown';

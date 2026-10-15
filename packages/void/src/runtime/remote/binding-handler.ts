@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { base64ToBytes } from '../base64.ts';
-import { parseR2Conditional } from './r2-conditions.ts';
+import { R2_OBJECT_HEADER, parseR2Conditional, parseR2HttpMetadata } from './r2-conditions.ts';
 
 type BindingRequest = { binding: string };
 
@@ -28,6 +28,20 @@ function requireBinding(body: BindingRequest): string | undefined {
 
 function requireKey(body: BindingRequest & { key: string }): string | undefined {
   return body.binding && body.key ? undefined : 'binding and key required';
+}
+
+/** Object fields that ProxyR2Bucket reads. `contentType` serves older clients. */
+function r2ObjectJson(obj: R2Object) {
+  return {
+    key: obj.key,
+    size: obj.size,
+    etag: obj.etag,
+    version: obj.version,
+    lastModified: obj.uploaded.toISOString(),
+    contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
+    httpMetadata: obj.httpMetadata,
+    customMetadata: obj.customMetadata,
+  };
 }
 
 function r2DeleteKeys(body: { key?: string; keys?: Array<string> }): Array<string> {
@@ -254,6 +268,8 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     if (obj.httpEtag) {
       headers.set('etag', obj.httpEtag);
     }
+    // Header values must be ASCII, and custom metadata can hold any text.
+    headers.set(R2_OBJECT_HEADER, encodeURIComponent(JSON.stringify(r2ObjectJson(obj))));
 
     return new Response(obj.body, { headers });
   });
@@ -267,6 +283,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
         base64?: string;
         value?: string;
         contentType?: string;
+        httpMetadata?: unknown;
         customMetadata?: Record<string, string>;
         onlyIf?: unknown;
       }
@@ -279,8 +296,14 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
       ? base64ToBytes(body.base64)
       : new TextEncoder().encode(body.value ?? '');
 
+    let httpMetadata: R2HTTPMetadata | Headers;
     let onlyIf: R2Conditional | Headers | undefined;
     try {
+      // Older clients send only `contentType`.
+      httpMetadata =
+        body.httpMetadata === undefined
+          ? { contentType: body.contentType ?? 'application/octet-stream' }
+          : parseR2HttpMetadata(body.httpMetadata);
       if (body.onlyIf !== undefined || c.req.path.endsWith('/put-conditional')) {
         onlyIf = parseR2Conditional(body.onlyIf);
       }
@@ -288,7 +311,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
       return c.json({ error: String(error) }, 400);
     }
     const obj = await bucket.put(body.key, data, {
-      httpMetadata: { contentType: body.contentType ?? 'application/octet-stream' },
+      httpMetadata,
       customMetadata: body.customMetadata,
       onlyIf,
     });
@@ -296,16 +319,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     if (!obj) {
       return c.json(null);
     }
-    return c.json({
-      key: obj.key,
-      size: obj.size,
-      etag: obj.etag,
-      version: obj.version,
-      lastModified: obj.uploaded.toISOString(),
-      contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
-      httpMetadata: obj.httpMetadata,
-      customMetadata: obj.customMetadata,
-    });
+    return c.json(r2ObjectJson(obj));
   });
 
   app.post('/r2/delete', async (c) => {
@@ -329,7 +343,15 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
   app.post('/r2/list', async (c) => {
     const request = await readBindingRequest<
       R2Bucket,
-      { binding: string; prefix?: string; limit?: number; cursor?: string; delimiter?: string }
+      {
+        binding: string;
+        prefix?: string;
+        limit?: number;
+        cursor?: string;
+        delimiter?: string;
+        startAfter?: string;
+        include?: R2ListOptions['include'];
+      }
     >(c, env, requireBinding);
     if (request instanceof Response) {
       return request;
@@ -348,16 +370,19 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
     if (body.delimiter) {
       opts.delimiter = body.delimiter;
     }
+    if (body.startAfter) {
+      opts.startAfter = body.startAfter;
+    }
+    if (Array.isArray(body.include)) {
+      opts.include = body.include;
+    }
 
     const result = await bucket.list(opts);
     return c.json({
-      objects: result.objects.map((o) => ({
-        key: o.key,
-        size: o.size,
-        lastModified: o.uploaded.toISOString(),
-      })),
+      objects: result.objects.map(r2ObjectJson),
       truncated: result.truncated,
       cursor: result.truncated ? result.cursor : null,
+      delimitedPrefixes: result.delimitedPrefixes,
     });
   });
 
@@ -375,13 +400,7 @@ export function createBindingHandler(env: Record<string, unknown>): Hono {
       return c.json(null);
     }
 
-    return c.json({
-      key: request.body.key,
-      size: obj.size,
-      etag: obj.httpEtag,
-      lastModified: obj.uploaded.toISOString(),
-      contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
-    });
+    return c.json(r2ObjectJson(obj));
   });
 
   return app;

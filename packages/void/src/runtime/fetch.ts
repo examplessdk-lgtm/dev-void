@@ -64,8 +64,8 @@ type UntypedFetchOptions = {
 /**
  * Typed fetch client for Void API routes.
  *
- * Built on top of ofetch. Supports baseURL, retry, timeout, and all
- * ofetch features while providing full route type safety.
+ * Built on ofetch. Supports `method`, `params`, `query`, `body`, `headers`,
+ * `signal`, `baseURL`, `retry` and `timeout`, with full route type safety.
  *
  * ```ts
  * import { fetch } from "void/client";

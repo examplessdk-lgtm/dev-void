@@ -5,7 +5,7 @@ export const genSubcommands: Array<SubcommandDef> = [
   {
     name: 'model',
     arg: '<name>',
-    description: 'Generate migration + CRUD routes + db types',
+    description: 'Scaffold a Drizzle table, API routes, and DB types',
     followUp: { type: 'repeat-input', placeholder: 'name:type or name:type?' },
   },
   { name: 'migration', arg: '<name>', description: 'Generate an empty migration file' },

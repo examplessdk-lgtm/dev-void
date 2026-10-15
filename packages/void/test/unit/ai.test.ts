@@ -329,6 +329,36 @@ describe('runtime ai', () => {
     });
   });
 
+  it('sends JSON provider bodies unchanged through the proxy', async () => {
+    vi.resetModules();
+    const { envContext } = await import('../../src/runtime/env-raw.ts');
+    const { ai } = await import('../../src/runtime/ai.ts');
+
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) => new Response('ok'),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const json = {
+      model: 'm',
+      image: { data: 'aGk=', name: 'a.png', type: 'image/png' },
+    };
+    await envContext.run(
+      {
+        __VOID_TOKEN: 'void-token',
+        __VOID_PROJECT_ID: 'proj_1',
+        __VOID_PROXY_URL: 'https://proxy.test',
+        OPENAI_API_KEY: 'sk-test',
+      },
+      async () => {
+        await ai.provider('openai').fetch('/images/edits', { body: json });
+      },
+    );
+
+    const init = fetchMock.mock.calls[0][1]!;
+    expect(JSON.parse(init.body as string).body).toEqual({ type: 'json', value: json });
+  });
+
   it('returns blobs for non-JSON run responses', async () => {
     vi.resetModules();
     const { envContext } = await import('../../src/runtime/env-raw.ts');
@@ -507,7 +537,7 @@ describe('runtime ai', () => {
         expect(response.status).toBe(501);
         const body = (await response.json()) as { error: string };
         expect(body.error).toMatch(/gateway/i);
-        expect(body.error).toContain('void.json');
+        expect(body.error).toContain('Set `ai.gateway` in void.config.ts.');
       });
 
       expect(fetchMock).not.toHaveBeenCalled();

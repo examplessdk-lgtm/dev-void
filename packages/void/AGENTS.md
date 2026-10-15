@@ -141,6 +141,9 @@ the CLI binary at `dist/cli/cli.mjs`. The
 supported imports. Keep Worker-safe runtime subpaths separate from the
 Vite/CLI dependency graph.
 
+`void/remote` stays exported only for semver. Generated code imports
+`#self/remote`. Remove the subpath in the next major version.
+
 Build output uses `.mjs` / `.d.mts` extensions (`vp pack` / tsdown default).
 
 ### Route Filename Parsing Rules

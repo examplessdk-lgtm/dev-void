@@ -41,7 +41,7 @@ export type PageDefinition = {
   island?: boolean;
   /** Frontmatter metadata extracted from .md files (title, description) */
   metadata?: { title?: string; description?: string };
-  /** Named layout selection: "name", "!name", false, or relative path */
+  /** Named layout selection: "name", "!name", or false */
   layout?: string | false;
 };
 

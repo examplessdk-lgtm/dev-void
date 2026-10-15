@@ -108,75 +108,9 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return bytesToBase64(new Uint8Array(buffer));
 }
 
-function isFileLikeRecord(value: Record<string, unknown>): value is {
-  data: string;
-  name?: string;
-  type?: string;
-} {
-  return (
-    typeof value.data === 'string' &&
-    (value.name === undefined || typeof value.name === 'string') &&
-    (value.type === undefined || typeof value.type === 'string')
-  );
-}
-
 function fileNameFromBlob(value: Blob): string | undefined {
   const name = (value as { name?: unknown }).name;
   return typeof name === 'string' && name.length > 0 ? name : undefined;
-}
-
-async function serializeProxyValue(
-  value: unknown,
-  serializeDataObjectAsFile = false,
-): Promise<unknown> {
-  if (value instanceof Blob) {
-    return {
-      [VOID_FILE_MARKER]: true,
-      data: arrayBufferToBase64(await value.arrayBuffer()),
-      name: fileNameFromBlob(value),
-      type: value.type || undefined,
-    } satisfies SerializedFileInput;
-  }
-
-  if (value instanceof ArrayBuffer) {
-    return {
-      [VOID_FILE_MARKER]: true,
-      data: arrayBufferToBase64(value),
-      type: 'application/octet-stream',
-    } satisfies SerializedFileInput;
-  }
-
-  if (isBinaryView(value)) {
-    return {
-      [VOID_FILE_MARKER]: true,
-      data: arrayBufferToBase64(copyBinaryView(value)),
-      type: 'application/octet-stream',
-    } satisfies SerializedFileInput;
-  }
-
-  if (Array.isArray(value)) {
-    return Promise.all(value.map((item) => serializeProxyValue(item, serializeDataObjectAsFile)));
-  }
-
-  if (typeof value === 'object' && value !== null) {
-    const record = value as Record<string, unknown>;
-    if (serializeDataObjectAsFile && isFileLikeRecord(record)) {
-      return {
-        [VOID_FILE_MARKER]: true,
-        data: record.data,
-        name: record.name,
-        type: record.type,
-      } satisfies SerializedFileInput;
-    }
-
-    const serialized: Record<string, unknown> = {};
-    for (const [key, nestedValue] of Object.entries(record)) {
-      serialized[key] = await serializeProxyValue(nestedValue, key === 'image' || key === 'mask');
-    }
-    return serialized;
-  }
-
-  return value;
 }
 
 async function serializeFormData(form: FormData): Promise<SerializedProviderBody> {
@@ -236,7 +170,7 @@ async function serializeProviderBody(body: unknown): Promise<SerializedProviderB
     return { type: 'base64', data: arrayBufferToBase64(copyBinaryView(body)) };
   }
 
-  return { type: 'json', value: await serializeProxyValue(body) };
+  return { type: 'json', value: body };
 }
 
 function headersToRecord(headers: HeadersInit | undefined): Record<string, string> | undefined {
@@ -572,7 +506,7 @@ function makeDirectBackend(
         return Response.json(
           {
             error:
-              'ai: ai.provider().fetch() needs an AI Gateway when self-hosting. Set "ai": { "gateway": "<id>" } in void.json.',
+              'ai: ai.provider().fetch() needs an AI Gateway when self-hosting. Set `ai.gateway` in void.config.ts.',
           },
           { status: 501 },
         );

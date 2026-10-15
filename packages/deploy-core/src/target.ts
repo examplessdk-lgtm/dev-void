@@ -3,14 +3,15 @@ export type DeployTarget = 'cloudflare' | 'void';
 
 export type DeployAppType = 'void' | 'spa' | 'static' | 'framework';
 
+/**
+ * @deprecated Void does not read deploy target capabilities. Removed in the
+ * next major version.
+ */
 export type DeployCapabilitySupport = 'supported' | 'partial' | 'unsupported';
 
 /**
- * Cross-target capabilities used by CLI planning and user-facing diagnostics.
- *
- * A target reports what it can execute today. Capability declarations must not
- * be aspirational: feature gates are removed only when the corresponding
- * adapter and end-to-end coverage exist.
+ * @deprecated Void does not read deploy target capabilities. They do not gate
+ * deploys or appear in diagnostics. Removed in the next major version.
  */
 export type DeployTargetCapabilities = {
   managedProjects: boolean;
@@ -42,6 +43,7 @@ export type DeployTargetCapabilities = {
  */
 export type DeployTargetAdapter<TOptions, TContext> = {
   readonly target: DeployTarget;
+  /** @deprecated Void ignores this field. Removed in the next major version. */
   readonly capabilities: DeployTargetCapabilities;
   deploy(root: string, options: TOptions, context: TContext): Promise<void>;
 };

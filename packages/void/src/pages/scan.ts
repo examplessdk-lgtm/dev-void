@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname, basename, extname } from 'pathslash';
 import { glob } from 'tinyglobby';
 import { parseSync } from 'vite';
+import { voidWarn } from '../log.ts';
 import { readProjectPaths, type ProjectPaths } from '../project-paths.ts';
 import { parseRouteFilename } from '../router/parse-filename.ts';
 import {
@@ -31,6 +32,9 @@ const COMPONENT_EXTENSIONS = ['vue', 'tsx', 'jsx', 'svelte', 'md'];
 const SERVER_EXTENSIONS = ['ts', 'tsx', 'js', 'mjs', 'mts'];
 const PAGE_METHODS = new Set(['loader', 'action', 'actions']);
 export const MAX_REVALIDATE = 31536000; // 1 year in seconds
+
+/** Layout paths already reported; a dev server rescans pages on every file change. */
+const warnedLayoutPaths = new Set<string>();
 
 type PageRenderingSource = {
   componentPath: string;
@@ -378,8 +382,14 @@ export async function scanPages(root: string, options?: PageScanOptions): Promis
     }
     const isExclusive = page.layout.startsWith('!');
     const name = isExclusive ? page.layout.slice(1) : page.layout;
-    // Skip relative path layouts
     if (name.startsWith('.') || name.startsWith('/')) {
+      const key = `${pagesDir}\0${page.componentPath}\0${page.layout}`;
+      if (!warnedLayoutPaths.has(key)) {
+        warnedLayoutPaths.add(key);
+        voidWarn(
+          `pages: Page '${page.componentPath}' specifies layout '${page.layout}'. Layout paths are not supported, so the default layouts are used. Use the name of a file in a _layouts/ directory, such as 'landing'.`,
+        );
+      }
       continue;
     }
     if (!resolveNamedLayout(name, page.componentId, namedLayouts, page.componentPath)) {

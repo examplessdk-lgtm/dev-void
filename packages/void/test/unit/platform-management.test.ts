@@ -307,7 +307,6 @@ const uninstallArgs = {
   plan: false,
   purgeData: false,
   purgeResources: false,
-  deleteZone: null,
   yes: true,
 };
 
@@ -1639,24 +1638,6 @@ describe('platform lifecycle management', () => {
     expect(noteText('Kept resources')).not.toContain('ai-gateway:');
   });
 
-  it('refuses automatic deletion of an installer-created zone', async () => {
-    const manifest = installedManifest();
-    persistInstallation(manifest, directories);
-    const fake = client(manifest);
-
-    await expect(
-      uninstallPlatform(
-        fake,
-        manifest,
-        { ...uninstallArgs, deleteZone: true },
-        uninstallDependencies,
-      ),
-    ).rejects.toThrow('Refusing to delete Cloudflare zone');
-    expect(fake.deleted).toEqual([]);
-    expect(trafficRetentionSteps()).toEqual([]);
-    expect(listInstallationManifests()[0]?.status).toBe('installed');
-  });
-
   it('purges installer-owned data while never deleting an adopted zone', async () => {
     const manifest = installedManifest('adopted');
     persistInstallation(manifest, directories);
@@ -1664,7 +1645,7 @@ describe('platform lifecycle management', () => {
     await uninstallPlatform(
       fake,
       manifest,
-      { ...uninstallArgs, purgeData: true, deleteZone: true },
+      { ...uninstallArgs, purgeData: true },
       uninstallDependencies,
     );
     expect(fake.deleted).toHaveLength(5);

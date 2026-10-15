@@ -114,7 +114,7 @@ void email status --platform cloudflare
 
 Check the domain configured in `email.from`: permissions, DNS, routing, sending, handler addresses, and the email binding. Exits unsuccessfully when setup is incomplete. Workers Free setup can be ready with sending limited to verified destinations; run `void email setup --platform cloudflare` after upgrading to Workers Paid.
 
-Without `--platform cloudflare` (or with `--platform void`) the command is not available yet; on the Void platform use `void email usage` and `void email destinations`.
+`void email status` reads only your own Cloudflare account, so `--platform cloudflare` is required. On the Void platform, use `void email usage` and `void email destinations`.
 
 ## `void email setup` {#void-email-setup}
 

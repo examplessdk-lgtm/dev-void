@@ -6,6 +6,9 @@ import { ProxyR2Bucket } from './r2.ts';
 /**
  * Replace local D1/KV/R2 bindings with proxy-backed versions.
  * Called from the generated worker entry point when `__VOID_REMOTE` is set.
+ *
+ * @deprecated Internal to Void. The generated worker calls this in remote mode.
+ * `void/remote` is not a supported import. Removed in the next major version.
  */
 export function createRemoteEnv(
   env: Record<string, unknown>,

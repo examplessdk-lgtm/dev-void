@@ -42,6 +42,11 @@ export type WebSocketBaseContext = {
   readonly id: string;
   readonly params: ParamsRecord;
   readonly user: AuthUser | null;
+  /**
+   * The HTTP request in `onBeforeConnect`, `onConnect` and `onRequest`. In `onMessage` and
+   * `onClose` the connection can resume after hibernation, so this is a placeholder without
+   * headers, cookies or query. Use `params`, `user` or the connection `state` there.
+   */
   readonly request: Request;
   readonly env: CloudEnv['Bindings'];
   readonly storage: DurableObjectStorage;

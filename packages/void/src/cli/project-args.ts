@@ -37,7 +37,7 @@ export const projectSubcommands: Array<SubcommandDef> = [
     arg: '[name]',
     description: 'Delete a project (omit name to delete linked project)',
   },
-  { name: 'purge-cache', description: 'Purge all cached pages' },
+  { name: 'purge-cache', description: 'Purge all cached pages (Void platform)' },
 ];
 
 export type ProjectArgs =

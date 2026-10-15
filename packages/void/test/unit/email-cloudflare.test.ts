@@ -288,7 +288,6 @@ function transcriptInputs(
     from: 'noreply@mail.acme.com',
     workerName: 'acme-support',
     accountId: ACCOUNT,
-    sendEmailFiles: 2,
     runWrangler: fakeRunner(runnerTable, calls),
     getSessionBearer: async () => BEARER,
     fetchImpl: fakeFetch(fetchTable, fetchCalls),
@@ -1318,7 +1317,7 @@ describe('renderEmailChecklist', () => {
     const pre = await preflightEmail(inputs);
     expect(renderEmailChecklist(pre)).toBe(
       [
-        '  Email in use   email/support+[ticket].ts · email/_default.ts · sendEmail() in 2 files',
+        '  Email in use   email/support+[ticket].ts · email/_default.ts',
         '    domain    mail.acme.com          (void.config.ts email.from)',
         '    zone      acme.com               account Acme (f721b8e5…) · session dev@acme.com',
         '    apex MX   aspmx.l.google.com     left alone — mail lives on the subdomain',
@@ -1346,6 +1345,13 @@ describe('renderEmailChecklist', () => {
     expect(text).toContain('    binding   SEND_EMAIL             (found EMAIL instead)');
     expect(text).toContain(
       '    ✘ Cloudflare config already has a send_email binding named "EMAIL"',
+    );
+  });
+
+  it('names a send-only app in the header when there are no email/ handlers', async () => {
+    const pre = await preflightEmail(transcriptInputs({ handlers: scan([]) }).inputs);
+    expect(renderEmailChecklist(pre).split('\n')[0]).toBe(
+      '  Email in use   sending only (no email/ handlers)',
     );
   });
 });

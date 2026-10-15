@@ -24,7 +24,7 @@ import {
   type ProvisionedWranglerPatch,
   writeProvisionedWranglerConfig,
 } from '../../src/cli/wrangler.ts';
-import type { VoidConfig } from '../../src/config.ts';
+import { readConfig, type VoidConfig } from '../../src/config.ts';
 import type { InferredBindings } from '../../src/inference/walk.ts';
 
 const tmpDir = join(import.meta.dirname, '.tmp-wrangler-test');
@@ -276,6 +276,16 @@ describe('ensureWranglerCompat', () => {
     expect(JSON.parse(readFileSync(join(tmpDir, 'void.json'), 'utf-8'))).toEqual({
       worker: { compatibility_date: LATEST_KNOWN_COMPAT_DATE },
     });
+  });
+
+  it('tells the user how to resolve the pinned void.json when void.config.ts is added later', () => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    ensureWranglerCompat(tmpDir);
+    writeFileSync(join(tmpDir, 'void.config.ts'), 'export default {};\n');
+    expect(() => readConfig(tmpDir)).toThrow(
+      'config: Found both void.config.ts and void.json. Move the settings from void.json into void.config.ts, then delete void.json.',
+    );
   });
 
   it('preserves existing void.json fields when pinning compatibility_date', () => {

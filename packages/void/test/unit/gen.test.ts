@@ -427,6 +427,31 @@ describe('gen model', () => {
     expect(tsconfig.compilerOptions.paths['@schema/*']).toEqual(['../db/schema/*']);
   });
 
+  it('writes .void/db.d.ts typed with the new schema', async () => {
+    writePkg({ valibot: '^1.0.0' });
+    await runGenCommand(TMP, {
+      subcommand: 'model',
+      name: 'posts',
+      columns: [{ name: 'title', type: 'string', nullable: false }],
+    });
+
+    const dbTypes = read('.void/db.d.ts');
+    expect(dbTypes).toContain('import type * as schema from "@schema";');
+    expect(dbTypes).toContain('DrizzleD1Database<Schema>');
+  });
+
+  it('writes a PostgreSQL .void/db.d.ts for pg projects', async () => {
+    writePkg({ valibot: '^1.0.0' });
+    writeFileSync(join(TMP, 'void.json'), JSON.stringify({ database: 'pg' }));
+    await runGenCommand(TMP, {
+      subcommand: 'model',
+      name: 'posts',
+      columns: [{ name: 'title', type: 'string', nullable: false }],
+    });
+
+    expect(read('.void/db.d.ts')).toContain('NodePgDatabase<Schema>');
+  });
+
   it('skips existing files without overwriting', async () => {
     writePkg({ valibot: '^1.0.0' });
     const routePath = join(TMP, 'routes/api/posts/index.ts');

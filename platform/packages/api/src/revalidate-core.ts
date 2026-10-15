@@ -5,9 +5,6 @@ import {
   isrCacheVariantPrefix,
   isrEdgeCacheUrl,
   isrEdgeCacheUrlForToken,
-  isrLegacyCacheKey,
-  isrLegacyCachePrefix,
-  isrLegacyCacheVariantPrefix,
   splitIsrCacheKey,
 } from '@void/isr';
 import { platformProjectHostnames, readPlatformApplication } from '@void/platform';
@@ -16,6 +13,11 @@ import { R2_CONCURRENCY, uploadPool } from './concurrency.ts';
 import { getDomainsByProjectId, type Db } from './db.ts';
 import type { ApiEnv } from './env.ts';
 import { resolveCurrentIsrDeployments, type IsrRoutingTarget } from './isr-cache.ts';
+import {
+  legacyIsrCacheKey,
+  legacyIsrCachePrefix,
+  legacyIsrCacheVariantPrefix,
+} from './isr-legacy-keys.ts';
 import { purgeZoneCache } from './provisioning/cloudflare-api.ts';
 
 type RevalidateProject = Readonly<{
@@ -170,7 +172,7 @@ export async function runRevalidate(
       // fan the edge purge across every hostname resolving to this id (superset
       // purge — a never-cached URL is a harmless CDN no-op). Delete this block
       // once v2 entries have aged out.
-      const legacyPrefix = isrLegacyCachePrefix(projectId, deploymentId);
+      const legacyPrefix = legacyIsrCachePrefix(projectId, deploymentId);
       let legacyCursor: string | undefined;
 
       do {
@@ -277,9 +279,9 @@ export async function runRevalidate(
   for (const deploymentId of union) {
     const hostsForId = hostsResolvingTo(perHostname, deploymentId);
     for (const path of body.paths) {
-      await context.env.ISR_CACHE.delete(isrLegacyCacheKey(projectId, deploymentId, path));
+      await context.env.ISR_CACHE.delete(legacyIsrCacheKey(projectId, deploymentId, path));
 
-      const legacyVariantPrefix = isrLegacyCacheVariantPrefix(projectId, deploymentId, path);
+      const legacyVariantPrefix = legacyIsrCacheVariantPrefix(projectId, deploymentId, path);
       let cursor: string | undefined;
       do {
         const listed = await context.env.ISR_CACHE.list({ prefix: legacyVariantPrefix, cursor });

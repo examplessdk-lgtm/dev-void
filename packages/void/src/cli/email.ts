@@ -55,7 +55,7 @@ export async function runEmailCommand(root: string, args: EmailArgs): Promise<vo
   }
   if (args.subcommand === 'status') {
     log.error(
-      'email: `void email status` is available with `--platform cloudflare` today. On the Void platform use `void email usage` and `void email destinations`.',
+      'email: `void email status` checks email on your own Cloudflare account. Run it with `--platform cloudflare`. On the Void platform, use `void email usage` and `void email destinations`.',
     );
     process.exit(1);
   }
@@ -455,7 +455,6 @@ export async function emailDomainAdd(
   projectId: string,
   rawDomain: string,
   deps: EmailDomainAddDeps = {},
-  subdomain?: string,
 ): Promise<void> {
   const exit = deps.exit ?? ((code: number): never => process.exit(code));
   const fail = (message: string): never => {
@@ -466,11 +465,6 @@ export async function emailDomainAdd(
   const domain = normalizeEmailDomainInput(rawDomain);
   if (!isValidEmailDomainInput(domain)) {
     return fail(`email: invalid domain '${rawDomain}'.`);
-  }
-  if (subdomain !== undefined) {
-    return fail(
-      'email: Platform-managed custom email requires a Cloudflare zone apex because inbound email uses its catch-all. Omit --subdomain, choose an unused zone apex, or use the platform shared mail address.',
-    );
   }
 
   // A foreign MX on the apex stops here; an unreadable one is left to the platform, which
@@ -882,7 +876,7 @@ async function runEmailDomainCommand(
 ): Promise<void> {
   switch (args.domainVerb) {
     case 'add':
-      return emailDomainAdd(client, projectId, args.domain!, {}, args.subdomain);
+      return emailDomainAdd(client, projectId, args.domain!);
     case 'status':
       return emailDomainStatus(client, projectId, args.domain!);
     case 'list':

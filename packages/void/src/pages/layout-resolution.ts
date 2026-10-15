@@ -96,11 +96,6 @@ function resolveEffectiveLayoutEntries(
 
   const isExclusive = page.layout.startsWith('!');
   const name = isExclusive ? page.layout.slice(1) : page.layout;
-  // Relative paths: passthrough default chain
-  if (name.startsWith('.') || name.startsWith('/')) {
-    return defaultChain;
-  }
-
   const resolved = resolveNamedLayout(name, page.componentId, namedLayouts, page.componentPath);
   if (!resolved) {
     return defaultChain;

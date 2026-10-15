@@ -61,11 +61,21 @@ When set, those conventions move under the configured directory:
 
 With that config, Void reads `src/pages`, `src/routes`, `src/db/schema.ts`, `src/db/migrations`, `src/auth.ts`, and `src/env.ts`. Project files such as `void.config.ts`, `vite.config.ts`, `package.json`, `tsconfig.json`, `public/`, and the local-only `.env` stay at the project root. Void does not scan both locations; if source conventions exist in both places during dev/build, remove one copy so the active source tree is unambiguous.
 
+### `ai`
+
+`ai.gateway` names the Cloudflare AI Gateway that `ai.provider().fetch()` uses when your app runs on your own Cloudflare account. `ai.run()`, `ai.stream()`, and `ai.image()` use the Workers AI binding and do not need a gateway. On a Void platform, the platform selects the gateway and ignores this setting.
+
+```json
+{ "ai": { "gateway": "my-gateway" } }
+```
+
+See [AI on your Cloudflare account](../integrations/cloudflare.md#ai-self-host).
+
 ### `auth`
 
 High-level Better Auth configuration.
 
-Use `auth.providers` to select which built-in auth providers Void should enable by default. Include `"email"` for email/password auth. Social providers read credentials from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`.
+Use `auth.providers` to select which built-in auth providers Void should enable by default. Include `"email"` for email/password auth. Social providers read credentials from `AUTH_<PROVIDER>_CLIENT_ID` and `AUTH_<PROVIDER>_CLIENT_SECRET`. `cognito` also needs a domain, region, and user pool ID: set `AUTH_COGNITO_DOMAIN`, `AUTH_COGNITO_REGION`, and `AUTH_COGNITO_USER_POOL_ID`, or set them in `auth.ts`.
 
 ```json
 {

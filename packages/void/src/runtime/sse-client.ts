@@ -19,6 +19,10 @@ export type SseClient<Events extends SseEventMap = SseEventMap> = {
 
 export type ConnectEventStreamOptions = {
   withCredentials?: boolean;
+  /**
+   * @deprecated Has no effect. Register each event with `client.on(name, handler)`.
+   * Removed in the next major version.
+   */
   events?: Array<string>;
   parse?: 'json' | 'text' | ((data: string) => unknown);
 };

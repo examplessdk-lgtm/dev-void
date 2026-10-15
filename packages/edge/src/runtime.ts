@@ -13,6 +13,11 @@ export type StaticEdgeEnv = Readonly<{
 export type StaticEdgeConfig = Readonly<{
   /** Optional native Worker self-metadata used to identify the served version. */
   versionMetadataBinding?: string;
+  /**
+   * @deprecated Ignored. Cloudflare applies asset handling from the Worker's
+   * `assets` config (`not_found_handling`, `html_handling`), which `void deploy`
+   * writes. Removed in the next major version.
+   */
   assetConfig?: AssetConfig;
   headerRules?: ReadonlyArray<HeaderRule>;
   redirectRules?: ReadonlyArray<RedirectRule>;

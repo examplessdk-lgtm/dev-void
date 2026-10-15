@@ -105,7 +105,7 @@ void platform rollback [id] --runtime <earlier-path> [--from-runtime <current-pa
 void platform repair [id] [--runtime <path>] [--dashboard-url <origin>] [--auth-config <path>] [--plan] [--yes]
 void platform disable [id] [--plan] [--yes]
 void platform enable [id] [--runtime <path>] [--plan] [--yes]
-void platform uninstall [id] [--plan] [--purge-data | --purge-resources] [--keep-zone] [--yes]
+void platform uninstall [id] [--plan] [--purge-data | --purge-resources] [--yes]
 ```
 
 `discover --installation` limits recovery and endpoint verification to one installation in a shared Cloudflare account.
@@ -149,7 +149,7 @@ An upgrade completes after the new Workers pass health checks. If rollout fails,
 
 If project Zero Trust is on and no platform user exists yet, uninstall turns it off and deletes its Access applications first. Run it on the computer that installed the platform.
 
-Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are retained for manual review.
+Uninstall verifies remote ownership before removing anything. Data resources are retained unless you pass `--purge-data`. Workers, the Queues they use, R2, AI Gateway, DNS records, routes, custom domains, adopted resources, external PostgreSQL, and zones are retained for manual review. `--keep-zone` is deprecated and has no effect; uninstall always keeps zones.
 
 `--purge-resources` includes `--purge-data` and also deletes every other resource the installation created, including Workers, Queues, R2, AI Gateway, the platform DNS record, routes, custom domains, and installer-created Access resources. It removes only the Email Routing rules that send mail to the platform email gateway, and keeps zones, adopted resources, external PostgreSQL, other Email Routing settings, and API tokens. A route, custom domain, DNS record, or Access resource that no longer matches the installation's record is kept and listed. It refuses before any change while projects remain or resource reads are denied. Use the Edit permissions listed by `--plan`; read checks cannot verify them, so a denied deletion can stop uninstall after changes have begun. Rerun the same command to continue after an interruption, or after a plain or `--purge-data` uninstall stopped.
 

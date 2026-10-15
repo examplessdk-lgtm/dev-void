@@ -96,7 +96,7 @@ to check current provider routing and any remaining setup steps.
 
 For direct deployments, follow [Your own Cloudflare account](./domains.md#your-own-cloudflare-account) to configure inbound addresses.
 
-There is no local inbound trigger yet — `void dev` serves the outbound dev inbox only, so test inbound handlers with `createInboundTestHarness` below.
+`void dev` has no local inbound trigger. It serves only the outbound dev inbox. Test inbound handlers with `createInboundTestHarness` below.
 
 ## Testing inbound handlers {#testing-inbound-handlers}
 

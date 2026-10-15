@@ -166,6 +166,11 @@ const HELP_TREE: HelpTree = {
           'Fail instead of deploying without email when the mail domain is not set up (with --platform cloudflare)',
       },
       {
+        command: '--provision',
+        description:
+          'Run resource provisioning again, for example to enable D1 read replication (with --platform cloudflare)',
+      },
+      {
         command: '--atomic',
         description:
           'Publish a Durable Object Worker without pre-traffic staging (Cloudflare only)',
@@ -582,7 +587,7 @@ const HELP_TREE: HelpTree = {
           },
           {
             command: '--keep-zone',
-            description: 'Explicitly retain an installer-created zone',
+            description: 'Deprecated. Has no effect: uninstall always keeps zones',
           },
         ],
       },
@@ -606,7 +611,7 @@ const HELP_TREE: HelpTree = {
       { command: 'rollback [deployId]', description: 'Roll back to a previous deployment' },
       { command: 'cancel [deployId]', description: 'Cancel an active deployment' },
       { command: 'delete [name]', description: 'Delete a project and all its resources' },
-      { command: 'purge-cache', description: 'Purge all cached pages' },
+      { command: 'purge-cache', description: 'Purge all cached pages (Void platform)' },
     ],
     children: {
       status: basicSubcommand(
@@ -780,7 +785,7 @@ const HELP_TREE: HelpTree = {
         examples: [{ command: 'void project delete my-app', description: 'Delete a project' }],
       },
       'purge-cache': {
-        summary: 'Purge all cached pages for a project.',
+        summary: 'Purge all cached pages for a Void platform project.',
         usage: ['void project purge-cache [options]'],
         options: [{ command: '--project <name>', description: 'Project name override' }],
       },
@@ -954,7 +959,8 @@ const HELP_TREE: HelpTree = {
         options: [
           {
             command: '--platform cloudflare',
-            description: 'Your own Cloudflare account (the only platform with a status today)',
+            description:
+              'Your own Cloudflare account (required; on the Void platform use `void email usage`)',
           },
         ],
       },
@@ -1165,7 +1171,10 @@ const HELP_TREE: HelpTree = {
         description: 'Run SQL against the database (--remote for deployed)',
       },
       { command: 'migrate', description: 'Apply pending migrations' },
-      { command: 'studio', description: 'Open Drizzle Studio (--remote for deployed PG)' },
+      {
+        command: 'studio',
+        description: 'Open Drizzle Studio (--remote for deployed PostgreSQL/MySQL)',
+      },
       { command: 'export', description: 'Export local database as SQL' },
       { command: 'connect', description: 'Connect or provision an external database' },
       { command: 'set-url', description: 'Update the external database URL' },
@@ -1224,20 +1233,19 @@ const HELP_TREE: HelpTree = {
       },
       studio: {
         summary:
-          'Open Drizzle Studio against the database (local by default; use --remote for the deployed PostgreSQL database; D1 remote not yet supported).',
+          'Open Drizzle Studio against the database (local by default; use --remote for the deployed PostgreSQL or MySQL database).',
         usage: ['void db studio [options]'],
         options: [
           {
             command: '--remote',
-            description:
-              'Open Studio against the deployed PostgreSQL database (D1 remote not yet supported)',
+            description: 'Open Studio against the deployed PostgreSQL or MySQL database (not D1)',
           },
         ],
         examples: [
           { command: 'void db studio', description: 'Open Studio for the local database' },
           {
             command: 'void db studio --remote',
-            description: 'Open Studio against the deployed PostgreSQL database',
+            description: 'Open Studio against the deployed PostgreSQL or MySQL database',
           },
         ],
       },
@@ -1308,7 +1316,7 @@ const HELP_TREE: HelpTree = {
     commands: [
       {
         command: 'model <name> [cols...]',
-        description: 'Generate migration, CRUD routes, and DB types',
+        description: 'Scaffold a Drizzle table, API routes, and DB types',
       },
       { command: 'migration <name>', description: 'Generate an empty migration file' },
       { command: 'route <path>', description: 'Generate a route with handler exports' },
@@ -1319,7 +1327,7 @@ const HELP_TREE: HelpTree = {
     ],
     children: {
       model: {
-        summary: 'Generate a migration, CRUD routes, and database types.',
+        summary: 'Scaffold a Drizzle table, list/create/get API routes, and database types.',
         usage: ['void gen model <name> [columns...]'],
         examples: [
           { command: 'void gen model post title:string body:text', description: 'Create a model' },

@@ -1,5 +1,6 @@
-import { isrCachePrefix, isrLegacyCachePrefix } from '@void/isr';
+import { isrCachePrefix } from '@void/isr';
 import { R2_CONCURRENCY, uploadPool } from '../concurrency.ts';
+import { legacyIsrCachePrefix } from '../isr-legacy-keys.ts';
 
 export async function clearIsrCache(
   kv: KVNamespace,
@@ -19,7 +20,7 @@ export async function clearIsrCache(
   // `…/isr/v2/…`), so nothing is listed or deleted twice. Transition-only:
   // drop the v2 sweep once no v2 entries remain in production.
   await deleteIsrKeysByPrefix(kv, isrCachePrefix(projectId, deploymentId));
-  await deleteIsrKeysByPrefix(kv, isrLegacyCachePrefix(projectId, deploymentId));
+  await deleteIsrKeysByPrefix(kv, legacyIsrCachePrefix(projectId, deploymentId));
 }
 
 async function deleteIsrKeysByPrefix(kv: KVNamespace, prefix: string): Promise<void> {

@@ -87,7 +87,7 @@ By default, targets the local database. Pass `--remote` to open Studio against t
 
 - **Hosted PostgreSQL and MySQL projects**: fetch the stored connection string from the platform and open Studio against it. If the URL isn't stored yet, run `void db set-url` first.
 - **Direct Cloudflare PostgreSQL and MySQL projects**: use `DATABASE_URL` from the current shell.
-- **D1 projects**: remote Studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.
+- **D1 projects**: remote Studio is not available. Use `void db execute --remote` to query your deployed D1 database.
 
 ## `void db rename-migrations` {#void-db-rename-migrations}
 

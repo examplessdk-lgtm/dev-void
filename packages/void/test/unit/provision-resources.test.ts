@@ -1081,7 +1081,7 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
           },
         },
       ),
-    ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+    ).rejects.toThrow(/could not check whether Hyperdrive config "myapp-hd" already exists/);
     expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
   });
 
@@ -1151,8 +1151,8 @@ describe('provisionCloudflareResources — Hyperdrive', () => {
   });
 });
 
-// The Hyperdrive existence check needs an API token (there is no machine-readable list
-// command), so a missing token must be reported before any other resource is created.
+// The Hyperdrive existence check uses the Cloudflare API and needs an API token, so a
+// missing token must be reported before any other resource is created.
 describe('provisionCloudflareResources — Hyperdrive API token requirement', () => {
   beforeEach(() => {
     vi.stubEnv('CLOUDFLARE_API_TOKEN', undefined);
@@ -1203,11 +1203,12 @@ describe('provisionCloudflareResources — Hyperdrive API token requirement', ()
     const message = (error as Error).message;
     expect(message).toContain('CLOUDFLARE_API_TOKEN');
     expect(message).toContain('Hyperdrive');
-    // Explains WHY a token is needed where `wrangler login` suffices elsewhere.
-    expect(message).toMatch(/no machine-readable/i);
-    // Remedy 2: create the config yourself and paste its id into wrangler.jsonc.
-    expect(message).toContain(wranglerPath);
-    expect(message).toMatch(/wrangler login|OAuth/i);
+    // Explains WHY a token is needed where a browser login suffices elsewhere.
+    expect(message).toMatch(/API token/);
+    expect(message).toMatch(/browser login/);
+    // Remedy 2: create the config in Cloudflare and add its id to void.config.ts.
+    expect(message).toContain('cloudflare.hyperdrive');
+    expect(message).not.toContain('wrangler');
     // The connection string is never echoed into the error.
     expect(message).not.toContain('postgres://');
   });
@@ -1345,7 +1346,8 @@ describe('provisionCloudflareResources — Hyperdrive API token requirement', ()
     expect(err).toBeInstanceOf(Error);
     const message = (err as Error).message;
     expect(message).toContain('DATABASE_URL');
-    expect(message).toContain('wrangler hyperdrive create');
+    expect(message).toContain('cloudflare.hyperdrive');
+    expect(message).not.toContain('wrangler');
     expect(message).toContain('HYPERDRIVE');
     // The remedy must point at the shell, never at a dotenv file — project-derived env
     // is read only inside the build subprocess, and a shipped .env value would leak.
@@ -1923,7 +1925,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (pagination + fa
         },
         { runWrangler: run, apiToken: 'tok', log: silentLog },
       ),
-    ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+    ).rejects.toThrow(/could not check whether Hyperdrive config "myapp-hd" already exists/);
     expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
   });
 
@@ -1949,7 +1951,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (pagination + fa
           },
           { runWrangler: run, apiToken: 'tok', log: silentLog },
         ),
-      ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+      ).rejects.toThrow(/could not check whether Hyperdrive config "myapp-hd" already exists/);
       expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
     }
   });
@@ -2048,7 +2050,7 @@ describe('provisionCloudflareResources — Hyperdrive discovery (pagination + fa
           },
           { runWrangler: run, apiToken: 'tok', log: silentLog },
         ),
-      ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+      ).rejects.toThrow(/could not check whether Hyperdrive config "myapp-hd" already exists/);
       expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
     }
   });
@@ -2410,24 +2412,28 @@ describe('provisionCloudflareResources — boundary account fence', () => {
     vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', undefined);
     let restCalled = false;
     const { run, calls } = makeRunner([{ match: /.*/, reply: () => ok() }]);
-    await expect(
-      provisionCloudflareResources(
-        tmpDir,
-        wranglerPath,
-        {
-          ...emptyDesired,
-          hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+    const error = await provisionCloudflareResources(
+      tmpDir,
+      wranglerPath,
+      {
+        ...emptyDesired,
+        hyperdrive: { binding: 'HYPERDRIVE', name: 'myapp-hd', connectionString: 'postgres://x' },
+      },
+      {
+        runWrangler: run,
+        log: silentLog,
+        listHyperdriveConfigs: async () => {
+          restCalled = true;
+          return [];
         },
-        {
-          runWrangler: run,
-          log: silentLog,
-          listHyperdriveConfigs: async () => {
-            restCalled = true;
-            return [];
-          },
-        },
-      ),
-    ).rejects.toThrow(/no Cloudflare account is resolvable/);
+      },
+    ).catch((e: unknown) => e as Error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toMatch(/no Cloudflare account is resolvable/);
+    // The remedy names the Void setting, not a Wrangler config file.
+    expect(message).toContain('cloudflare.account_id');
+    expect(message).not.toContain('wrangler');
     expect(calls).toEqual([]);
     expect(restCalled).toBe(false);
     expect(readConfig().account_id).toBeUndefined();
@@ -2700,7 +2706,7 @@ describe('provisionCloudflareResources — Hyperdrive list validation at the cal
           log: silentLog,
           listHyperdriveConfigs: async () => bad as never,
         }),
-      ).rejects.toThrow(/cannot verify whether Hyperdrive config "myapp-hd"/);
+      ).rejects.toThrow(/could not check whether Hyperdrive config "myapp-hd" already exists/);
       // No blind create, and nothing written to the config.
       expect(calls.some((c) => isCall(c, 'hyperdrive', 'create'))).toBe(false);
       expect(readConfig().hyperdrive).toBeUndefined();
@@ -3356,7 +3362,7 @@ describe('provisionCloudflareResources — Hyperdrive password never reaches wra
             Promise.reject('fetch failed for postgres://u:leaky-pass@h/db'),
         },
       ),
-    ).rejects.toThrow(/cannot verify/);
+    ).rejects.toThrow(/could not check whether/);
     const listerWarn = warns.find((w) => w.includes('existence check'));
     expect(listerWarn).toBeDefined();
     expect(listerWarn).not.toContain('leaky-pass');
@@ -3387,7 +3393,7 @@ describe('provisionCloudflareResources — Hyperdrive password never reaches wra
           },
         },
       ),
-    ).rejects.toThrow(/cannot verify/);
+    ).rejects.toThrow(/could not check whether/);
     const listerWarn = warns.find((w) => w.includes('existence check'));
     expect(listerWarn).toBeDefined();
     expect(listerWarn).not.toContain('leaky-pass');
@@ -3411,7 +3417,7 @@ describe('assertNoTransportRedirectInProjectDotenv — the files and keys wrangl
     {
       name: 'WRANGLER_OUTPUT_FILE_DIRECTORY in .env',
       files: { '.env': 'WRANGLER_OUTPUT_FILE_DIRECTORY=/tmp/wrangler-out\n' },
-      error: /refusing to provision.*\.env.*WRANGLER_OUTPUT_FILE_DIRECTORY.*session diagnostics/s,
+      error: /refusing to provision.*\.env.*WRANGLER_OUTPUT_FILE_DIRECTORY.*session output files/s,
     },
     {
       name: 'WRANGLER_OUTPUT_FILE_PATH in .env.local',
@@ -3495,7 +3501,7 @@ describe('assertNoTransportRedirectInProjectDotenv — the files and keys wrangl
     setup(JSON.stringify({ name: 'app' }));
     writeFileSync(join(tmpDir, '.env'), 'Wrangler_Output_File_Path=/tmp/out.json\n');
     expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'win32')).toThrow(
-      /session diagnostics/,
+      /session output files/,
     );
     expect(() => assertNoTransportRedirectInProjectDotenv(tmpDir, 'darwin')).not.toThrow();
   });

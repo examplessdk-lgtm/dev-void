@@ -35,7 +35,7 @@ export function loadVoidConfig(root: string): LoadedVoidConfig | null {
   const hasJson = existsSync(jsonPath);
   if (hasTyped && hasJson) {
     throw new Error(
-      `config: Found both ${TYPED_CONFIG_FILE} and ${LEGACY_CONFIG_FILE}. Keep one source of truth.`,
+      `config: Found both ${TYPED_CONFIG_FILE} and ${LEGACY_CONFIG_FILE}. Move the settings from ${LEGACY_CONFIG_FILE} into ${TYPED_CONFIG_FILE}, then delete ${LEGACY_CONFIG_FILE}.`,
     );
   }
   if (!hasTyped && !hasJson) {

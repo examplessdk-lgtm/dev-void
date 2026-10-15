@@ -151,7 +151,7 @@ Messages are JSON events. Raw string and binary messages are not supported.
 
 When Void auth is enabled, every WebSocket hook receives the current user as `ctx.user`, or `null` for an anonymous connection. Use `onBeforeConnect` to reject unauthenticated clients.
 
-Connections from another origin are anonymous unless that origin is in your auth `trustedOrigins`. If you read your own cookies from `ctx.request`, check its `Origin` header yourself.
+Connections from another origin are anonymous unless that origin is in your auth `trustedOrigins`. If you read your own cookies from `ctx.request` in `onBeforeConnect`, check its `Origin` header yourself.
 
 `ctx.user` is resolved when the socket connects and stays the same for that connection, even if the user later signs out or the session is revoked. For actions that must respect a ban or role change, re-check your own records in `onMessage` and close the connection with `ctx.connection.close()` in rooms or `ctx.socket.close()` in `defineWebSocket()`.
 
@@ -173,7 +173,7 @@ Every hook receives a context with:
 - `ctx.id`: deterministic route instance id
 - `ctx.params`: matched route params
 - `ctx.user`: resolved auth user or `null`
-- `ctx.request`
+- `ctx.request`: the HTTP request in `onBeforeConnect`, `onConnect`, and `onRequest`. In `onMessage` and `onClose`, it is a placeholder without headers, cookies, or query. To keep request data, save it in `onConnect` with `ctx.connection.setState()` in rooms or `ctx.socket.setState()` in `defineWebSocket()`. Read it later from `ctx.connection.state` or `ctx.socket.state`.
 - `ctx.env`
 - `ctx.storage`
 

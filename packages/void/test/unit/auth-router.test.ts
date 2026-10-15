@@ -84,6 +84,19 @@ describe('void auth destination routing', () => {
     expect(mocks.account).toHaveBeenCalledWith(root, { subcommand: 'login' });
   });
 
+  it('shows the Void platform as disabled until a platform is connected', async () => {
+    mocks.select.mockResolvedValue('cloudflare');
+    await runAuthRouter(root, parseAuthArgs(['login']), true);
+    expect(mocks.select.mock.calls[0]?.[0].options).toContainEqual(
+      expect.objectContaining({
+        value: 'void',
+        disabled: true,
+        hint: expect.stringContaining('void connect'),
+      }),
+    );
+    expect(mocks.cloudflare).toHaveBeenCalledWith(root, { subcommand: 'login' });
+  });
+
   it('fails clearly in a non-interactive project without a destination', async () => {
     await expect(runAuthRouter(root, parseAuthArgs(['login']), false)).rejects.toThrow(
       'No deployment destination is saved',

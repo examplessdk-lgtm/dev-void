@@ -40,18 +40,12 @@ export interface SendEmailOptions {
    */
   idempotencyKey?: string;
   /**
-   * Per-call escape hatch for local development. When true, bypasses the
-   * `void dev` in-memory inbox for this one send.
-   *
-   * It does not deliver. `void dev` binds no send transport at all: the
-   * platform's `__VOID_PROXY` service binding is added only on a deployed
-   * worker, and the own-account `SEND_EMAIL` binding is stripped under
-   * `serve`. With the inbox skipped there is nothing to fall through to,
-   * so the call returns `BINDING_MISSING`. To verify real delivery, deploy
-   * and send from the deployed worker.
-   *
-   * Has no effect outside `void dev` (production always sends; the dev
-   * inbox is registered only when `void dev` is running).
+   * @deprecated During `void dev` it skips the local inbox, and the send
+   * returns `BINDING_MISSING`, so it never delivers there. While a
+   * `createEmailTestHarness` sink is active, it skips the sink, and the send
+   * uses the `SEND_EMAIL` binding or the platform proxy of the current
+   * environment. A deployed app ignores it. Remove it, and deploy the app to
+   * test real delivery. Removed in the next major version.
    */
   sendInDev?: boolean;
 }

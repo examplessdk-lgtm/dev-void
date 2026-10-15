@@ -5,6 +5,7 @@ import type { VoidAuthMigrationSchema } from '../auth/drizzle.ts';
 import {
   VOID_EMAIL_AUTH_PROVIDER,
   getVoidAuthProviderEnvNames,
+  getVoidAuthProviderSettingEnvNames,
   isVoidSocialAuthProvider,
   type VoidAuthProvider,
   type VoidSocialAuthProvider,
@@ -169,10 +170,12 @@ function resolveEmailAndPassword(
   return undefined;
 }
 
+type SocialProviderOptions = Record<string, string> & { clientId: string; clientSecret: string };
+
 function resolveSocialProviderCredentials(
   env: VoidAuthEnv,
   provider: VoidSocialAuthProvider,
-): { clientId: string; clientSecret: string } {
+): SocialProviderOptions {
   const envNames = getVoidAuthProviderEnvNames(provider);
   const clientId = readEnvString(env, envNames.clientId);
   const clientSecret = readEnvString(env, envNames.clientSecret);
@@ -183,7 +186,53 @@ function resolveSocialProviderCredentials(
     );
   }
 
-  return { clientId, clientSecret };
+  // auth.ts can supply settings that the env leaves out, so
+  // assertSocialProviderSettings checks the final options.
+  const settings: Record<string, string> = {};
+  for (const [option, envName] of Object.entries(getVoidAuthProviderSettingEnvNames(provider))) {
+    const value = readEnvString(env, envName);
+    if (value) {
+      settings[option] = value;
+    }
+  }
+
+  return { ...settings, clientId, clientSecret };
+}
+
+/** Fail early when a configured provider still lacks a required setting after auth.ts runs. */
+function assertSocialProviderSettings(
+  options: BetterAuthOptions,
+  configuredProviders: Array<VoidAuthProvider> | null,
+): void {
+  const socialProviders = options.socialProviders as Record<string, unknown> | undefined;
+  for (const provider of configuredProviders ?? []) {
+    if (!isVoidSocialAuthProvider(provider)) {
+      continue;
+    }
+    // A function form resolves later, inside Better Auth; a disabled provider needs nothing.
+    const config = socialProviders?.[provider];
+    if (typeof config !== 'object' || config === null) {
+      continue;
+    }
+    const values = config as Record<string, unknown>;
+    if (values.enabled === false) {
+      continue;
+    }
+    const missing = Object.entries(getVoidAuthProviderSettingEnvNames(provider)).filter(
+      ([option]) => !values[option],
+    );
+    if (missing.length > 0) {
+      const options = joinNames(missing.map(([option]) => option));
+      throw new Error(
+        `auth: Missing ${options} for the ${provider} provider. Set ${joinNames(missing.map(([, envName]) => envName))}, or set ${options} in auth.ts.`,
+      );
+    }
+  }
+}
+
+/** `a`, `a and b`, `a, b and c`. */
+function joinNames(names: Array<string>): string {
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]!;
 }
 
 function resolveSocialProviders(
@@ -194,7 +243,7 @@ function resolveSocialProviders(
     return undefined;
   }
 
-  const providers: Record<string, { clientId: string; clientSecret: string }> = {};
+  const providers: Record<string, SocialProviderOptions> = {};
 
   for (const provider of configuredProviders) {
     if (!isVoidSocialAuthProvider(provider)) {
@@ -446,6 +495,7 @@ export function createVoidAuthRuntime(
     };
 
     const resolved = resolveUserConfig(runtime.userConfig, defaults, request, env, dialect);
+    assertSocialProviderSettings(resolved, runtime.providers);
     return runtime.dev !== true && cloudflareClientIp(request)
       ? applyCloudflareRateLimitDefaults(resolved)
       : resolved;

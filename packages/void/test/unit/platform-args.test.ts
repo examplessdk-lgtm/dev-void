@@ -190,10 +190,11 @@ describe('platform args', () => {
       plan: false,
       purgeData: true,
       purgeResources: false,
-      deleteZone: false,
       yes: false,
     });
-    expect(() => parsePlatformArgs(['uninstall', '--delete-zone', '--keep-zone'])).toThrow();
+    expect(() => parsePlatformArgs(['uninstall', '--delete-zone'])).toThrow(
+      "Unknown flag '--delete-zone'",
+    );
   });
 
   it('treats --purge-resources as a purge of data and every other created resource', () => {
@@ -203,7 +204,6 @@ describe('platform args', () => {
       plan: true,
       purgeData: true,
       purgeResources: true,
-      deleteZone: null,
       yes: false,
     });
     expect(parsePlatformArgs(['uninstall', '--purge-data', '--purge-resources'])).toMatchObject({

@@ -900,7 +900,6 @@ describe('installed platform upgrade', () => {
     };
     const uninstall = (plan: boolean) =>
       runInstalledPlatformCommand({
-        deleteZone: null,
         plan,
         purgeData: true,
         purgeResources: false,

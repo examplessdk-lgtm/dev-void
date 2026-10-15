@@ -189,8 +189,10 @@ void project cancel [deployId]
 
 Cancel an active deployment.
 
-- If `[deployId]` is omitted, shows an interactive select menu of active deployments for the linked project
-- If `[deployId]` is provided, cancels that deployment directly
+- If `[deployId]` is omitted, targets the linked project's active deployment
+- If `[deployId]` is provided, targets that deployment; it must still be active
+
+Void asks for confirmation before it requests cancellation.
 
 This command is hosted-only. Direct Cloudflare deploys are local operations and do not expose a remote build to cancel.
 

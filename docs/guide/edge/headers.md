@@ -33,9 +33,17 @@ For hashed assets, you can add headers, but the platform keeps control of cachin
 
 Header rules do not apply to ISR cache responses.
 
-### Blocked headers
+### Cookie headers
 
-`Set-Cookie` and `Clear-Site-Data` are ignored in header rules. On a shared domain such as `*.apps.example.com`, a rule could otherwise affect cookies or data belonging to another project's subdomain.
+On a [Void platform](../deployment.md#deploy-to-a-team-platform), apps usually share an application domain, such as `apps.example.com`. Header rules on a platform deploy change two headers on all hostnames of the app, including custom domains:
+
+- Void ignores `Set-Cookie` in header rules.
+- Void removes the `"cookies"` directive from `Clear-Site-Data` in header rules. Other directives, such as `"cache"` and `"storage"`, still apply.
+- Void ignores the full value of a `Clear-Site-Data` rule that includes `"*"`. The response then keeps the `Clear-Site-Data` value from your app's response, without `"cookies"`. If that value also includes `"*"`, the response has no `Clear-Site-Data`.
+
+This stops a header rule from setting or clearing cookies for other apps on the same domain. These limits apply only to header rules. Your app's own response can set cookies and send `Clear-Site-Data`, and on a shared domain those can affect other apps. See [Domains and Resources](../platform/installation/domains.md#adding-a-domain).
+
+In `void dev`, with `void deploy --platform cloudflare`, and on [other runtimes](../deployment.md#other-runtimes), header rules apply both headers as written.
 
 ## Framework `_headers` files
 

@@ -2,9 +2,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { log, select, isCancel, cancel } from '@voidzero-dev/vite-plus-prompts';
 import { join, dirname, relative } from 'pathslash';
+import { generateDbDts } from '../codegen/db-types.ts';
 import { ensureProjectTsconfig } from '../codegen/project-tsconfig.ts';
 import { readConfig, getDatabaseDialect, type DatabaseDialect } from '../config.ts';
 import { PLACEHOLDER_DB_URL, writeDrizzleConfig } from '../drizzle/config.ts';
+import { discoverSchema } from '../drizzle/discover.ts';
 import { snapshotDrizzleOutputs } from '../drizzle/generate.ts';
 import { collectMigrations, readJournal } from '../migrations/collect.ts';
 import { assertJournalCoherence } from '../migrations/validate.ts';
@@ -462,7 +464,8 @@ async function runModel(root: string, name: string, columns: Array<ColumnSpec>):
     writeFileSync(barrelPath, exportLine + '\n');
   }
 
-  // 3. Regenerate .void/tsconfig.json and db.d.ts
+  // 3. Regenerate .void/db.d.ts and .void/tsconfig.json
+  generateDbDts(join(root, '.void'), discoverSchema(root, paths), dialect);
   ensureProjectTsconfig(root, undefined, true, true, { paths });
 
   log.step(`Created ${relative(root, modelPath)}`);

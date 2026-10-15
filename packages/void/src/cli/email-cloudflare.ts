@@ -75,8 +75,6 @@ export interface EmailCloudflareInputs {
   existingVars?: Record<string, unknown>;
   /** Writer refusals (`findEmailConfigConflicts`); each blocks before the account changes. */
   configConflicts?: Array<string>;
-  /** Number of source files calling `sendEmail()` — shown in the header line only. */
-  sendEmailFiles?: number;
   /** The pinned project config used for provider operations. */
   configPath?: string;
   apiBaseUrl?: string;
@@ -430,7 +428,7 @@ export interface EmailPreflight {
   mode: EmailDomainMode | null;
   workerName: string;
   accountId: string;
-  usage: { handlers: Array<string>; sendEmailFiles?: number };
+  usage: { handlers: Array<string> };
   session: {
     state: 'ok' | 'not-logged-in' | 'missing-scopes' | 'api-key' | 'unknown';
     /** `whoami --json` `authType`; an API token's permissions are not enumerable. */
@@ -572,7 +570,7 @@ export async function preflightEmail(inputs: EmailCloudflareInputs): Promise<Ema
     mode: null,
     workerName: inputs.workerName,
     accountId: inputs.accountId,
-    usage: { handlers: usageHandlers, sendEmailFiles: inputs.sendEmailFiles },
+    usage: { handlers: usageHandlers },
     session: { state: 'unknown', missingScopes: [] },
     zone: { state: 'unknown' },
     apexMx: { state: 'unknown', exchanges: [] },
@@ -996,15 +994,11 @@ function pad(text: string, width: number): string {
 export function renderEmailChecklist(pre: EmailPreflight): string {
   const apex = pre.apex ?? '?';
   const lines: Array<string> = [];
-  const inUse = [
-    ...pre.usage.handlers,
-    ...(pre.usage.sendEmailFiles
-      ? [
-          `sendEmail() in ${pre.usage.sendEmailFiles} file${pre.usage.sendEmailFiles === 1 ? '' : 's'}`,
-        ]
-      : []),
-  ];
-  lines.push(`  Email in use   ${inUse.join(' · ')}`);
+  const inUse =
+    pre.usage.handlers.length > 0
+      ? pre.usage.handlers.join(' · ')
+      : 'sending only (no email/ handlers)';
+  lines.push(`  Email in use   ${inUse}`);
   const row = (label: string, value: string, note = ''): void => {
     lines.push(`    ${pad(label, 10)}${note ? `${pad(value, 23)}${note}` : value}`);
   };

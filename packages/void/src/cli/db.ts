@@ -801,14 +801,6 @@ async function runExecute(
 ): Promise<void> {
   if (remote) {
     const directCloudflare = readDeploymentPlatform(root) === 'cloudflare';
-    // Reject --file with --remote D1 before reading the file or prompting.
-    if (dialect === 'sqlite' && file && !directCloudflare) {
-      log.error(
-        '--file is not yet supported with --remote D1; pipe statements through stdin or run them one at a time.',
-      );
-      process.exit(1);
-    }
-
     const sql = file ? readFileSync(join(root, file), 'utf-8') : command!;
 
     if (directCloudflare) {
@@ -871,16 +863,19 @@ async function runExecute(
 
     // D1 remote: route through the platform proxy.
     const platformClient = new PlatformClient(token, { root });
-    let binding = configuredD1Binding(root);
+    const configuredBinding = configuredD1Binding(root);
+    let binding = configuredBinding;
     try {
-      const resources = await platformClient.getResources(projectConfig.projectId);
-      // TODO: support --binding for projects with multiple D1 bindings (currently auto-selects the first).
-      const d1Resource = resources.find((r) => r.type === 'd1');
-      if (d1Resource) {
-        binding = d1Resource.binding_name;
+      const d1Bindings = (await platformClient.getResources(projectConfig.projectId))
+        .filter((r) => r.type === 'd1')
+        .map((r) => r.binding_name);
+      // The configured binding wins. A renamed binding leaves its old resource
+      // behind, so only a single D1 resource is a safe fallback.
+      if (!d1Bindings.includes(configuredBinding) && d1Bindings.length === 1) {
+        binding = d1Bindings[0]!;
       }
     } catch {
-      // Fall back to the locally-configured binding name (or 'DB' by default) if resource discovery fails.
+      // Keep the configured binding name (or 'DB' by default) if resource discovery fails.
     }
 
     const proxyUrl = getProxyUrl(root);
@@ -1299,7 +1294,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
   if (remote) {
     if (dialect === 'sqlite') {
       log.error(
-        'Remote D1 studio is not yet supported. Use `void db execute --remote` for ad-hoc queries against your deployed D1 database.',
+        'Remote Studio supports PostgreSQL and MySQL databases. For D1, use `void db execute --remote` to query the deployed database.',
       );
       process.exit(1);
     }

@@ -1,5 +1,6 @@
-import { isrCachePrefix, isrLegacyCachePrefix } from '@void/isr';
+import { isrCachePrefix } from '@void/isr';
 import { describe, expect, it } from 'vite-plus/test';
+import { legacyIsrCachePrefix } from '../../src/isr-legacy-keys.ts';
 import { clearIsrCache } from '../../src/routes/deploy.ts';
 
 // Minimal KV mock: `list({ prefix })` returns seeded keys whose name starts with
@@ -31,11 +32,11 @@ describe('clearIsrCache', () => {
     const dep = 'dep1';
     const v3a = `${isrCachePrefix(proj, dep)}example.com/about`; // proj1/isr/v3/dep1/example.com/about
     const v3b = `${isrCachePrefix(proj, dep)}app.void.app/`;
-    const v2a = `${isrLegacyCachePrefix(proj, dep)}about`; // proj1/isr/v2/dep1/about
-    const v2b = `${isrLegacyCachePrefix(proj, dep)}blog/post`;
+    const v2a = `${legacyIsrCachePrefix(proj, dep)}about`; // proj1/isr/v2/dep1/about
+    const v2b = `${legacyIsrCachePrefix(proj, dep)}blog/post`;
     // A different deployment's entries (both namespaces) must survive.
     const otherV3 = `${isrCachePrefix(proj, 'dep2')}example.com/x`;
-    const otherV2 = `${isrLegacyCachePrefix(proj, 'dep2')}y`;
+    const otherV2 = `${legacyIsrCachePrefix(proj, 'dep2')}y`;
 
     const { kv, deleted, store } = makeKv([v3a, v3b, v2a, v2b, otherV3, otherV2]);
     await clearIsrCache(kv, proj, dep);
@@ -54,6 +55,6 @@ describe('clearIsrCache', () => {
     const { kv, listedPrefixes } = makeKv([]);
     await clearIsrCache(kv, 'p', 'd');
     expect(listedPrefixes).toContain(isrCachePrefix('p', 'd')); // p/isr/v3/d/
-    expect(listedPrefixes).toContain(isrLegacyCachePrefix('p', 'd')); // p/isr/v2/d/
+    expect(listedPrefixes).toContain(legacyIsrCachePrefix('p', 'd')); // p/isr/v2/d/
   });
 });

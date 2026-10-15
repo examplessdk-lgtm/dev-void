@@ -195,7 +195,7 @@ describe('void db studio --remote (D1)', () => {
     }
   });
 
-  it('errors with "not yet supported" message and does not call writeDrizzleConfig or execFileSync', async () => {
+  it('errors with a PostgreSQL/MySQL-only message for D1 and does not call writeDrizzleConfig or execFileSync', async () => {
     const root = createProjectRoot();
 
     const { log: clackLog } = await import('@voidzero-dev/vite-plus-prompts');
@@ -207,7 +207,7 @@ describe('void db studio --remote (D1)', () => {
     const errorCalls = (clackLog.error as ReturnType<typeof vi.fn>).mock.calls
       .map((c: Array<unknown>) => String(c[0]))
       .join('\n');
-    expect(errorCalls).toContain('not yet supported');
+    expect(errorCalls).toContain('PostgreSQL and MySQL');
     expect(errorCalls).toContain('void db execute --remote');
 
     expect(mockWriteDrizzleConfig).not.toHaveBeenCalled();

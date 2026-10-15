@@ -17,6 +17,7 @@ import { genSubcommands, parseGenArgs } from './gen-args.ts';
 import { githubSubcommands, parseGithubArgs } from './github-args.ts';
 import { getHelpPath, printGlobalHelp, printHelpPage, printVoidHeader } from './help.ts';
 import { parseInfoArgs } from './info-args.ts';
+import { operatorGroups } from './operator-args.ts';
 import { OperatorClientError } from './operator-client.ts';
 import { formatUrl, pc } from './output.ts';
 import { parsePlatformArgs, platformSubcommands } from './platform-args.ts';
@@ -298,7 +299,7 @@ if (helpPath) {
     },
     {
       name: 'platform',
-      hint: 'config | auth | user | project | deployment | signup | email | zero-trust | system | install',
+      hint: ['config', ...operatorGroups, 'install'].join(' | '),
       description:
         'Install platforms and administer plans, users, projects, access, and operations',
     },
@@ -335,7 +336,7 @@ if (helpPath) {
     },
     {
       name: 'db',
-      hint: 'connect | status | reset | seed | execute | migrate | studio | export',
+      hint: dbSubcommands.map(({ name }) => name).join(' | '),
       description: 'Database migrations and management',
     },
     {

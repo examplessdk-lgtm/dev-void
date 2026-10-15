@@ -29,8 +29,16 @@ async function chooseDestination(
       label: connection.displayName,
       hint: connection.apiUrl,
     })),
+    // With no saved connection, a Void platform has no origin to sign in to yet.
     ...(connections.length === 0
-      ? [{ value: 'void', label: 'Void platform', hint: 'Use the current Void account origin' }]
+      ? [
+          {
+            value: 'void',
+            label: 'Void platform',
+            hint: 'Run `void connect <url>` first',
+            disabled: true,
+          },
+        ]
       : []),
   ];
   const selected = await select({ message: 'Where do you want to authenticate?', options });
@@ -39,7 +47,7 @@ async function chooseDestination(
   }
   return selected === 'cloudflare'
     ? { platform: 'cloudflare' }
-    : { platform: 'void', ...(selected === 'void' ? {} : { apiUrl: selected }) };
+    : { platform: 'void', apiUrl: selected };
 }
 
 export async function runAuthRouter(

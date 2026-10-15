@@ -102,6 +102,104 @@ describe('resolveVoidAuthOptions', () => {
     }
   });
 
+  it('passes the Cognito domain, region and user pool id from env', async () => {
+    const options = await resolveVoidAuthOptions(
+      new Request('https://example.com/api/auth'),
+      {
+        BETTER_AUTH_SECRET: 'secret',
+        AUTH_COGNITO_CLIENT_ID: 'cognito-id',
+        AUTH_COGNITO_CLIENT_SECRET: 'cognito-secret',
+        AUTH_COGNITO_DOMAIN: 'app.auth.us-east-1.amazoncognito.com',
+        AUTH_COGNITO_REGION: 'us-east-1',
+        AUTH_COGNITO_USER_POOL_ID: 'us-east-1_abc',
+      },
+      { dialect: 'sqlite', providers: ['email', 'cognito'] },
+      {} as never,
+    );
+
+    expect(options.socialProviders).toEqual({
+      cognito: {
+        clientId: 'cognito-id',
+        clientSecret: 'cognito-secret',
+        domain: 'app.auth.us-east-1.amazoncognito.com',
+        region: 'us-east-1',
+        userPoolId: 'us-east-1_abc',
+      },
+    });
+  });
+
+  it('names only the missing Cognito settings', async () => {
+    for (const [settings, message] of [
+      [
+        {},
+        'auth: Missing domain, region and userPoolId for the cognito provider. Set AUTH_COGNITO_DOMAIN, AUTH_COGNITO_REGION and AUTH_COGNITO_USER_POOL_ID, or set domain, region and userPoolId in auth.ts.',
+      ],
+      [
+        {
+          AUTH_COGNITO_DOMAIN: 'app.auth.us-east-1.amazoncognito.com',
+          AUTH_COGNITO_USER_POOL_ID: 'us-east-1_abc',
+        },
+        'auth: Missing region for the cognito provider. Set AUTH_COGNITO_REGION, or set region in auth.ts.',
+      ],
+    ] as const) {
+      await expect(
+        resolveVoidAuthOptions(
+          new Request('https://example.com/api/auth'),
+          {
+            BETTER_AUTH_SECRET: 'secret',
+            AUTH_COGNITO_CLIENT_ID: 'cognito-id',
+            AUTH_COGNITO_CLIENT_SECRET: 'cognito-secret',
+            ...settings,
+          },
+          { dialect: 'sqlite', providers: ['cognito'] },
+          {} as never,
+        ),
+      ).rejects.toThrow(message);
+    }
+  });
+
+  it('accepts Cognito settings from auth.ts', async () => {
+    const options = await resolveVoidAuthOptions(
+      new Request('https://example.com/api/auth'),
+      {
+        BETTER_AUTH_SECRET: 'secret',
+        AUTH_COGNITO_CLIENT_ID: 'cognito-id',
+        AUTH_COGNITO_CLIENT_SECRET: 'cognito-secret',
+        AUTH_COGNITO_REGION: 'us-east-1',
+      },
+      {
+        dialect: 'sqlite',
+        providers: ['cognito'],
+        userConfig: ({ defaults }) => ({
+          ...defaults,
+          socialProviders: {
+            ...defaults.socialProviders,
+            cognito: {
+              ...(defaults.socialProviders?.cognito as {
+                clientId: string;
+                clientSecret: string;
+                region: string;
+              }),
+              domain: 'app.auth.us-east-1.amazoncognito.com',
+              userPoolId: 'us-east-1_abc',
+            },
+          },
+        }),
+      },
+      {} as never,
+    );
+
+    expect(options.socialProviders).toEqual({
+      cognito: {
+        clientId: 'cognito-id',
+        clientSecret: 'cognito-secret',
+        domain: 'app.auth.us-east-1.amazoncognito.com',
+        region: 'us-east-1',
+        userPoolId: 'us-east-1_abc',
+      },
+    });
+  });
+
   it('preserves a custom password handler when email auth is customized', async () => {
     const password = {
       async hash(value: string) {

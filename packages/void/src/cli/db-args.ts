@@ -25,7 +25,7 @@ export const dbSubcommands: Array<SubcommandDef> = [
   {
     name: 'studio',
     description:
-      'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL database)',
+      'Open Drizzle Studio against the database (use --remote for the deployed PostgreSQL or MySQL database)',
     flags: [{ name: '--remote', description: 'Open Studio against the deployed database' }],
   },
   { name: 'set-url', description: 'Update the external database URL for deployment' },
@@ -127,7 +127,9 @@ export function parseDbArgs(args: Array<string>): DbArgs {
     );
   }
   if (action === 'export' && values.remote) {
-    throw new Error('`void db export --remote` is not yet supported. Local export only for now.');
+    throw new Error(
+      'db: `void db export` reads only the local database; --remote is not supported.',
+    );
   }
   const maxPositionals = MAX_POSITIONALS[action];
   if (rest.length > maxPositionals) {

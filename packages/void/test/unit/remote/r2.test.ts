@@ -7,6 +7,31 @@ function createClient() {
   return new ProxyClient('https://proxy.void.cloud', 'jwt-token', 'proj_1');
 }
 
+/** Send ProxyClient requests to the binding handler that a deployed worker runs. */
+function connectBucket(bucket: Partial<Record<keyof R2Bucket, unknown>>) {
+  const handler = createBindingHandler({ __VOID_PROXY_TOKEN: 'internal', STORAGE: bucket });
+  globalThis.fetch = vi.fn(async (input, init) =>
+    handler.request(new URL(String(input)).pathname, {
+      ...init,
+      headers: { 'content-type': 'application/json', 'x-void-internal': 'internal' },
+    }),
+  ) as typeof fetch;
+  return new ProxyR2Bucket(createClient(), 'STORAGE');
+}
+
+const uploaded = new Date('2024-01-01T00:00:00Z');
+const cacheExpiry = new Date('2030-01-01T00:00:00Z');
+const stored = {
+  key: 'a.txt',
+  size: 10,
+  etag: 'abc',
+  httpEtag: '"abc"',
+  version: 'v1',
+  uploaded,
+  httpMetadata: { contentType: 'text/plain', cacheControl: 'max-age=60', cacheExpiry },
+  customMetadata: { owner: 'x' },
+};
+
 function mockFetch(response: unknown, contentType = 'application/json') {
   const fetchMock = vi.fn(
     async () =>
@@ -53,6 +78,34 @@ describe('ProxyR2Bucket', () => {
 
       expect(obj).toBeNull();
     });
+
+    it('returns the stored object metadata through the binding handler', async () => {
+      const obj = await connectBucket({ head: async () => stored }).head('a.txt');
+
+      expect(obj).toMatchObject({
+        etag: 'abc',
+        httpEtag: '"abc"',
+        version: 'v1',
+        uploaded,
+        httpMetadata: { cacheControl: 'max-age=60', cacheExpiry },
+        customMetadata: { owner: 'x' },
+      });
+    });
+
+    it('removes the quotes from an etag in the HTTP form', async () => {
+      mockFetch({
+        key: 'file.txt',
+        size: 1,
+        etag: '"abc"',
+        lastModified: '2024-01-01T00:00:00Z',
+        contentType: 'text/plain',
+      });
+
+      const obj = await new ProxyR2Bucket(createClient(), 'STORAGE').head('file.txt');
+
+      expect(obj!.etag).toBe('abc');
+      expect(obj!.httpEtag).toBe('"abc"');
+    });
   });
 
   describe('get()', () => {
@@ -88,6 +141,61 @@ describe('ProxyR2Bucket', () => {
       const obj = await r2.get('missing.txt');
 
       expect(obj).toBeNull();
+    });
+
+    it('returns object metadata and writes HTTP metadata through the binding handler', async () => {
+      const body = '0123456789';
+      const r2 = connectBucket({
+        get: async () => ({
+          ...stored,
+          customMetadata: { owner: '日本' },
+          body: new Response(body).body,
+        }),
+      });
+
+      const obj = await r2.get('a.txt');
+      const headers = new Headers();
+      obj!.writeHttpMetadata(headers);
+
+      expect(obj).toMatchObject({
+        etag: 'abc',
+        httpEtag: '"abc"',
+        version: 'v1',
+        uploaded,
+        customMetadata: { owner: '日本' },
+      });
+      expect(Object.fromEntries(headers)).toEqual({
+        'content-type': 'text/plain',
+        'cache-control': 'max-age=60',
+        expires: cacheExpiry.toUTCString(),
+      });
+      expect(await obj!.text()).toBe(body);
+    });
+
+    it.each<[string, R2GetOptions]>([
+      ['other request headers', { range: new Headers({ accept: '*/*' }), onlyIf: new Headers() }],
+      ['empty options', { onlyIf: { etagMatches: undefined, secondsGranularity: true } }],
+      ['a Range header', { range: new Headers({ range: 'bytes=0-1' }) }],
+      ['an If-None-Match header', { onlyIf: new Headers({ 'if-none-match': '"abc"' }) }],
+    ])('returns the whole object for %s', async (_name, options) => {
+      const get = vi.fn(async () => ({ ...stored, body: new Response('hello').body }));
+
+      const obj = await connectBucket({ get }).get('a.txt', options);
+
+      expect(await obj!.text()).toBe('hello');
+      expect(get).toHaveBeenCalledWith('a.txt');
+    });
+
+    it.each<[string, R2GetOptions]>([
+      ['range', { range: { offset: 2, length: 3 } }],
+      ['onlyIf', { onlyIf: { etagMatches: 'abc' } }],
+    ])('rejects %s without a request', async (_name, options) => {
+      const fetchMock = mockFetch(null);
+
+      await expect(
+        new ProxyR2Bucket(createClient(), 'STORAGE').get('a.txt', options),
+      ).rejects.toThrow('remote: R2 get() with range or onlyIf is not supported in remote mode.');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
@@ -209,6 +317,55 @@ describe('ProxyR2Bucket', () => {
       expect(body.base64).toBe(btoa('Hello'));
     });
 
+    it('stores all HTTP metadata through the binding handler', async () => {
+      const put = vi.fn(async () => stored);
+      const r2 = connectBucket({ put });
+
+      await r2.put('a.txt', 'x', {
+        httpMetadata: { contentType: 'text/plain', cacheControl: 'max-age=60', cacheExpiry },
+      });
+      await r2.put('b.txt', 'x', {
+        httpMetadata: new Headers({ 'content-type': 'text/css', 'cache-control': 'no-cache' }),
+      });
+
+      const options = put.mock.calls.map(
+        (call) => (call as unknown as [string, unknown, R2PutOptions])[2].httpMetadata,
+      );
+      expect(options[0]).toEqual({
+        contentType: 'text/plain',
+        cacheControl: 'max-age=60',
+        cacheExpiry,
+      });
+      expect(options[1]).toBeInstanceOf(Headers);
+      expect(Object.fromEntries(options[1] as Headers)).toEqual({
+        'content-type': 'text/css',
+        'cache-control': 'no-cache',
+      });
+    });
+
+    it.each<[string, unknown, R2PutOptions, string]>([
+      [
+        'the REST fallback',
+        { success: true },
+        { httpMetadata: { contentType: 'text/plain' }, customMetadata: { owner: 'x' } },
+        'without customMetadata.',
+      ],
+      [
+        'an older handler',
+        { key: 'a.txt', size: 1, lastModified: '', httpMetadata: { contentType: 'text/plain' } },
+        {
+          httpMetadata: new Headers({ 'content-type': 'text/plain', 'cache-control': 'no-cache' }),
+        },
+        'without cacheControl.',
+      ],
+    ])('rejects metadata that %s did not store', async (_name, response, options, message) => {
+      mockFetch(response);
+
+      await expect(
+        new ProxyR2Bucket(createClient(), 'STORAGE').put('a.txt', 'x', options),
+      ).rejects.toThrow(`remote: R2 put() stored "a.txt" ${message} Remote R2 metadata needs`);
+    });
+
     it('sends httpMetadata.contentType', async () => {
       mockFetch({ success: true });
 
@@ -269,6 +426,47 @@ describe('ProxyR2Bucket', () => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
         'https://proxy.void.cloud/r2/list',
         expect.anything(),
+      );
+    });
+
+    it('passes startAfter and include and returns prefixes through the binding handler', async () => {
+      const list = vi.fn(async () => ({
+        objects: [stored],
+        truncated: false,
+        delimitedPrefixes: ['dir/'],
+      }));
+      const r2 = connectBucket({ list });
+
+      const result = await r2.list({
+        delimiter: '/',
+        startAfter: 'a',
+        include: ['httpMetadata', 'customMetadata'],
+      });
+
+      expect(list).toHaveBeenCalledWith({
+        delimiter: '/',
+        startAfter: 'a',
+        include: ['httpMetadata', 'customMetadata'],
+      });
+      expect(result.delimitedPrefixes).toEqual(['dir/']);
+      expect(result.objects[0]).toMatchObject({
+        etag: 'abc',
+        version: 'v1',
+        uploaded,
+        httpMetadata: { cacheControl: 'max-age=60' },
+        customMetadata: { owner: 'x' },
+      });
+    });
+
+    it.each<[string, R2ListOptions]>([
+      ['delimiter', { delimiter: '/' }],
+      ['startAfter', { startAfter: 'a' }],
+      ['include', { include: ['customMetadata'] }],
+    ])('rejects %s when the response has no prefixes', async (_name, options) => {
+      mockFetch({ objects: [], truncated: false, cursor: null });
+
+      await expect(new ProxyR2Bucket(createClient(), 'STORAGE').list(options)).rejects.toThrow(
+        'got no answer from a current project deployment. The deployment uses an older Void version, or the platform could not reach it. Retry.',
       );
     });
 

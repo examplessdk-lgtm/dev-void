@@ -41,6 +41,42 @@ function defineMdClientEntryTests(getBase: () => string) {
   });
 }
 
+function defineCodeCopyTests(getBase: () => string) {
+  let BASE: string;
+  beforeAll(() => {
+    BASE = getBase();
+  });
+
+  it('copy button copies the code block without removed diff lines', async () => {
+    const context = await browser.newContext({
+      permissions: ['clipboard-read', 'clipboard-write'],
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(10_000);
+    try {
+      await page.goto(`${BASE}/posts/code-examples`);
+
+      const blocks = page.locator('div.language-ts');
+      await blocks.first().hover();
+      await blocks.first().locator('button.copy').click();
+      await blocks.first().locator('button.copy.copied').waitFor();
+      const first = await page.evaluate(() => navigator.clipboard.readText());
+      expect(first).toContain('interface User');
+      expect(first.endsWith('}')).toBe(true);
+
+      const diffBlock = blocks.filter({ hasText: 'voidMarkdown()' });
+      await diffBlock.hover();
+      await diffBlock.locator('button.copy').click();
+      await diffBlock.locator('button.copy.copied').waitFor();
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      expect(copied).toContain('voidMarkdown(),');
+      expect(copied.split('voidVue()')).toHaveLength(2);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 function defineClientScriptTests(getBase: () => string) {
   let BASE: string;
   beforeAll(() => {
@@ -235,6 +271,7 @@ describe('markdown-blog playground', () => {
     defineSidebarTests(() => DEV_BASE);
     defineMdClientEntryTests(() => DEV_BASE);
     defineClientScriptTests(() => DEV_BASE);
+    defineCodeCopyTests(() => DEV_BASE);
   });
 
   describe('production (build + preview)', () => {
@@ -331,5 +368,6 @@ describe('markdown-blog playground', () => {
     defineSidebarTests(() => PREVIEW_BASE);
     defineMdClientEntryTests(() => PREVIEW_BASE);
     defineClientScriptTests(() => PREVIEW_BASE);
+    defineCodeCopyTests(() => PREVIEW_BASE);
   });
 });

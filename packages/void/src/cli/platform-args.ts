@@ -119,7 +119,6 @@ export type PlatformArgs =
       purgeData: boolean;
       /** Delete every resource the installation created; implies purgeData. */
       purgeResources: boolean;
-      deleteZone: boolean | null;
       yes: boolean;
     };
 
@@ -335,17 +334,12 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
         };
   }
   if (subcommand === 'uninstall') {
+    // --keep-zone is deprecated and accepted without effect: uninstall always keeps zones.
     const parsed = parseSelector(
-      rest.filter(
-        (arg) =>
-          !['--purge-data', '--purge-resources', '--delete-zone', '--keep-zone'].includes(arg),
-      ),
+      rest.filter((arg) => !['--purge-data', '--purge-resources', '--keep-zone'].includes(arg)),
       subcommand,
       { allowYes: true },
     );
-    if (rest.includes('--delete-zone') && rest.includes('--keep-zone')) {
-      throw new Error('platform: --delete-zone and --keep-zone cannot be used together.');
-    }
     return {
       subcommand,
       selector: parsed.selector,
@@ -353,11 +347,6 @@ export function parsePlatformArgs(args: Array<string>): PlatformArgs {
       purgeData: rest.includes('--purge-data') || rest.includes('--purge-resources'),
       purgeResources: rest.includes('--purge-resources'),
       yes: parsed.yes,
-      deleteZone: rest.includes('--delete-zone')
-        ? true
-        : rest.includes('--keep-zone')
-          ? false
-          : null,
     };
   }
   if (subcommand === 'install') {

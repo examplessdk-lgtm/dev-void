@@ -71,14 +71,14 @@ const PROXY_ENV_KEYS = {
   __PROJECT_ID: 'p_test',
 };
 
-/** Sends through `__VOID_PROXY`; `sendInDev` keeps a harness sink from capturing it. */
+/** Sends through `__VOID_PROXY` when no harness sink is active. */
 function send(
   proxy: ReturnType<typeof fakeProxy>['proxy'],
   to: string | Array<string> = 'b@y.dev',
   extra: Partial<Parameters<typeof sendEmail>[0]> = {},
 ): ReturnType<typeof sendEmail> {
   return withRuntimeEnv({ __VOID_PROXY: proxy, ...PROXY_ENV_KEYS }, () =>
-    sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', sendInDev: true, ...extra }),
+    sendEmail({ from: 'a@x.dev', to, subject: 's', text: 't', ...extra }),
   );
 }
 
@@ -1119,7 +1119,7 @@ describe('sendEmail (proxy mid-batch delivery list)', () => {
   });
 });
 
-describe('sendEmail (sendInDev escape hatch)', () => {
+describe('sendEmail (deprecated sendInDev)', () => {
   it('bypasses the harness and calls the proxy', async () => {
     const harness = createEmailTestHarness();
     try {
@@ -1127,7 +1127,7 @@ describe('sendEmail (sendInDev escape hatch)', () => {
         status: 200,
         body: { ok: true, ids: [{ recipient: 'b@y.dev', messageId: 'cf-id-123' }] },
       }));
-      const result = await send(proxy);
+      const result = await send(proxy, 'b@y.dev', { sendInDev: true });
       expect(harness.messages).toHaveLength(0);
       expect(calls).toHaveLength(1);
       expect(result.ok).toBe(true);
@@ -1165,14 +1165,15 @@ describe('sendEmail (sendInDev escape hatch)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok && 'error' in result) {
       expect(result.error.code).toBe('BINDING_MISSING');
-      expect(result.error.message).toContain('`sendInDev: true`, which does not deliver');
-      expect(result.error.message).toContain('`void dev` binds no send transport at all');
+      expect(result.error.message).toContain(
+        'bypassed by the deprecated `sendInDev: true` (it never delivers)',
+      );
     }
   });
 });
 
 describe('sendEmail platform idempotency', () => {
-  const options = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't', sendInDev: true };
+  const options = { from: 'a@x.dev', to: 'b@y.dev', subject: 's', text: 't' };
   it('carries the key and preserves the operation and provider acceptance state', async () => {
     const { proxy, calls } = fakeProxy(() => ({
       status: 200,

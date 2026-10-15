@@ -276,9 +276,8 @@ const TRANSPORT_REDIRECT_ENV_VARS = [
 ] as const;
 
 /**
- * Wrangler session-output sinks. When set, wrangler writes the raw argv to disk, which can
- * include a Hyperdrive password. They are scrubbed from the child env and rejected in project
- * dotenv, which wrangler reloads before writing.
+ * Session-output file variables. Provisioning keeps operation output off disk, so they are
+ * scrubbed from the child env and rejected in project dotenv. Secrets travel over stdin.
  */
 const OUTPUT_FILE_ENV_VARS = [
   'WRANGLER_OUTPUT_FILE_PATH',
@@ -364,21 +363,21 @@ function resolveComplianceRegion(
   return envRegion ?? configRegion ?? 'public';
 }
 
-/** Dotenv files wrangler loads for `--env=<env>`; provisioning always passes an empty env. */
+/** Project dotenv files the fence scans for `env`; provisioning selects no named env (`''`). */
 function defaultWranglerEnvFiles(env: string): Array<string> {
   return ['.env', '.env.local', `.env.${env}`, `.env.${env}.local`];
 }
 
 /**
  * Fail when a project dotenv file sets a transport-redirect or session-output variable.
- * Wrangler reloads these files on every command, which would move its authenticated transport
- * away from the pinned base. Values exported in the shell are honored instead.
+ * Cloudflare tooling reads these files from the project, which would move its authenticated
+ * transport away from the pinned base. Values exported in the shell are honored instead.
  */
 export function assertNoTransportRedirectInProjectDotenv(
   root: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  // Scan the files wrangler loads for an empty `--env=`, with its case rules:
+  // Scan the project dotenv and dev-vars files with these case rules:
   //   - all four dotenv files; keys fold case only on win32;
   //   - `.dev.vars.` if present, else `.dev.vars`; keys are always case-sensitive.
   const dotenvCaseInsensitive = platform === 'win32';
@@ -401,25 +400,22 @@ export function assertNoTransportRedirectInProjectDotenv(
     if (offenders.length > 0) {
       throw new Error(
         `provision: refusing to provision — the project file "${file}" sets ` +
-          `${offenders.join(', ')}, which wrangler reloads on every command and would redirect its ` +
+          `${offenders.join(', ')}, which Cloudflare tooling reads from project files and would redirect its ` +
           `authenticated Cloudflare API transport (and credentials) to a different endpoint/account ` +
           `than this provision is pinned to (the Hyperdrive existence check would then run against a ` +
           `DIFFERENT endpoint, risking cross-environment writes or duplicate resources). Remove ` +
           `${offenders.join(', ')} from "${file}" and, if you truly need a non-default endpoint, ` +
-          `export it in your shell/CI environment instead — that pin IS honored for both wrangler and ` +
-          `the existence check.`,
+          `export it in your shell/CI environment instead — that pin IS honored for both the ` +
+          `Cloudflare operations and the existence check.`,
       );
     }
-    // A session-output sink would write the raw argv, with a Hyperdrive password, to disk.
+    // Session output files are not allowed while provisioning.
     const outputOffenders = OUTPUT_FILE_ENV_VARS.filter(declares);
     if (outputOffenders.length > 0) {
       throw new Error(
         `provision: refusing to provision — the project file "${file}" sets ` +
-          `${outputOffenders.join(', ')}, which wrangler reloads on every command and which makes ` +
-          `wrangler persist its session diagnostics — including the verbatim command line, where a ` +
-          `Hyperdrive connection string's password would appear — to that output file. Remove ` +
-          `${outputOffenders.join(', ')} from "${file}" (set it in your shell only for ` +
-          `non-provisioning wrangler commands if you need session output).`,
+          `${outputOffenders.join(', ')}. Void does not allow Cloudflare session output files ` +
+          `during provisioning. Remove ${outputOffenders.join(', ')} from "${file}".`,
       );
     }
   }
@@ -527,14 +523,14 @@ export class WranglerQuarantineError extends Error {
   constructor(pid: number | undefined, detail: string) {
     const pidLabel = pid !== undefined ? ` (pid ${pid})` : '';
     super(
-      `provision: the spawned wrangler could not be confirmed terminated${pidLabel} — ${detail}. ` +
+      `provision: the spawned Cloudflare operation process could not be confirmed terminated${pidLabel} — ${detail}. ` +
         `It may still be running and creating resources, so the cross-process provision lock is ` +
         `intentionally RETAINED (not released) and its owner is recorded in a quarantine sidecar ` +
-        `("<wrangler config>.void-provision.lock.quarantine.json") that blocks concurrent ` +
+        `("<Cloudflare config>.void-provision.lock.quarantine.json") that blocks concurrent ` +
         `provisions. Recovery: verify the process${pidLabel} is dead (e.g. \`kill -0 <pid>\`; ` +
         `terminate it if not) — the NEXT provision then confirms the recorded group is gone and ` +
         `clears the quarantine automatically. To clear it manually instead, remove the sidecar ` +
-        `and the "<wrangler config>.void-provision.lock.lock" directory, then re-run.`,
+        `and the "<Cloudflare config>.void-provision.lock.lock" directory, then re-run.`,
     );
     this.name = 'WranglerQuarantineError';
     this.pid = pid;
@@ -564,7 +560,7 @@ function acquireProcessProvisionSlot(): () => void {
   if (retentionWatchdog !== undefined) {
     throw new Error(
       'provision: a previous provision in this process is still retaining its lock — an ' +
-        `unconfirmed wrangler child` +
+        `unconfirmed Cloudflare operation process` +
         `${retentionWatchdog.info.pid !== undefined ? ` (pid ${retentionWatchdog.info.pid})` : ''} ` +
         'could not be quarantined durably yet. No new provision may start until that ' +
         'retention resolves (the child is confirmed dead, or the quarantine metadata ' +
@@ -711,7 +707,7 @@ function coordinatorHandleSignal(signal: NodeJS.Signals): void {
   if (retentionWatchdog !== undefined && activeRegistrations.size === 0) {
     process.stderr.write(
       `provision: ignoring ${signal} — a provision lock is retained while an unconfirmed ` +
-        `wrangler child may live and its quarantine metadata is not yet durable. The ` +
+        `Cloudflare operation process may live and its quarantine metadata is not yet durable. The ` +
         `process exits once the child is confirmed dead or the metadata persists.\n`,
     );
     return;
@@ -779,7 +775,7 @@ function coordinatorTearDownRegistrant(
         lockQuarantine({
           pid: registrant.pid(),
           reason:
-            `the spawned wrangler could not be confirmed terminated after a forwarded ` +
+            `the spawned Cloudflare operation process could not be confirmed terminated after a forwarded ` +
             `${teardown.signal} — ${detail}`,
         });
       } catch (failure) {
@@ -790,7 +786,7 @@ function coordinatorTearDownRegistrant(
     }
     const pid = registrant.pid();
     process.stderr.write(
-      `provision: warning — the wrangler child process group` +
+      `provision: warning — the Cloudflare operation process group` +
         `${typeof pid === 'number' ? ` (pid ${pid})` : ''} could not be confirmed terminated ` +
         `after ${teardown.signal} (${detail}). It may still be running; the provision lock is ` +
         `retained (quarantined) — verify the process is dead before re-running provision.\n`,
@@ -834,8 +830,8 @@ function finishCoordinatorTeardown(teardown: CoordinatorTeardown): void {
     process.stderr.write(
       `provision: NOT re-raising ${teardown.signal} — a provision lock's quarantine ` +
         `metadata could not be persisted, so the lock is intentionally still held by this ` +
-        `process to keep it from being stolen while the unconfirmed wrangler child may ` +
-        `live.\n`,
+        `process to keep it from being stolen while the unconfirmed Cloudflare operation ` +
+        `process may live.\n`,
     );
     return;
   }
@@ -881,7 +877,7 @@ function armRetentionWatchdog(lock: ProvisionLock, info: QuarantineInfo): void {
   }
   // Surface the retained state LOUDLY, once, naming the pid and the lock path.
   process.stderr.write(
-    `provision: warning — quarantine metadata for the unconfirmed wrangler child` +
+    `provision: warning — quarantine metadata for the unconfirmed Cloudflare operation process` +
       `${info.pid !== undefined ? ` (pid ${info.pid})` : ''} could not be persisted, so the ` +
       `provision lock "${lock.lockTargetPath}.lock" is RETAINED by this process, which stays ` +
       `alive until the child is confirmed dead or the metadata persists durably.\n`,
@@ -980,8 +976,9 @@ export function createDefaultRunWrangler(
       if (activeTeardown !== undefined) {
         rejectPromise(
           new Error(
-            `provision: refusing to spawn wrangler — a fatal ${activeTeardown.signal} is being ` +
-              `handled and this process is terminating; no new wrangler work may start.`,
+            `provision: refusing to spawn a Cloudflare operation process — a fatal ` +
+              `${activeTeardown.signal} is being handled and this process is terminating; no new ` +
+              `Cloudflare operation may start.`,
           ),
         );
         return;
@@ -991,8 +988,8 @@ export function createDefaultRunWrangler(
       if (!canRegisterRunner(parallelWorkerUpload)) {
         rejectPromise(
           new Error(
-            'provision: refusing to spawn wrangler — another wrangler child is already active ' +
-              'in this process (only two immutable Worker uploads may overlap; all other ' +
+            'provision: refusing to spawn a Cloudflare operation process — another one is already ' +
+              'active in this process (only two immutable Worker uploads may overlap; all other ' +
               'Cloudflare commands and provisions remain sequential).',
           ),
         );
@@ -1100,7 +1097,11 @@ export function createDefaultRunWrangler(
       };
 
       const timeoutStderr = (extra?: string): string =>
-        [stderr, `provision: wrangler exceeded the ${timeoutMs}ms command timeout`, extra]
+        [
+          stderr,
+          `provision: the Cloudflare operation process exceeded the ${timeoutMs}ms command timeout`,
+          extra,
+        ]
           .filter(Boolean)
           .join('\n');
 
@@ -1255,7 +1256,7 @@ export function createDefaultRunWrangler(
               stdout,
               stderr: [
                 stderr,
-                `provision: the spawned wrangler child emitted an error after spawn: ` +
+                `provision: the spawned Cloudflare operation process emitted an error after spawn: ` +
                   `${error.message}`,
               ]
                 .filter(Boolean)
@@ -1327,10 +1328,14 @@ export function normalizeRunWranglerResult(result: {
   const stdout = result.stdout ?? '';
   const notes: Array<string> = [];
   if (result.signal != null) {
-    notes.push(`provision: wrangler was terminated by signal ${result.signal}`);
+    notes.push(
+      `provision: the Cloudflare operation process was terminated by signal ${result.signal}`,
+    );
   }
   if (result.error != null) {
-    notes.push(`provision: wrangler could not be spawned: ${result.error.message}`);
+    notes.push(
+      `provision: the Cloudflare operation process could not be spawned: ${result.error.message}`,
+    );
   }
   const failed = typeof result.status !== 'number' || result.signal != null || result.error != null;
   // A failure must be non-zero. Keep a genuine non-zero exit code when present;
@@ -1696,7 +1701,7 @@ function assertQuarantineClearedOrClear(lockTarget: string, onBeforeClear?: () =
         : 'an unrecorded process';
     throw new Error(
       `provision: refusing to provision — a previous provision QUARANTINED this config's lock ` +
-        `because a spawned wrangler child could not be confirmed terminated (${who}` +
+        `because a spawned Cloudflare operation process could not be confirmed terminated (${who}` +
         `${quarantinedAt ? `, quarantined at ${quarantinedAt}` : ''}` +
         `${reason ? `; reason: ${reason}` : ''}). It may still be creating resources. Verify the ` +
         `process is dead (e.g. \`kill -0 ${String(pid ?? '<pid>')}\`; terminate it if not) and ` +
@@ -2012,7 +2017,7 @@ export async function acquireProvisionLock(
             `"${quarantineSidecarPath(lockTarget)}" (${(error as Error).message}). The ` +
             `cross-process provision lock "${lockTarget}.lock" is intentionally STILL HELD by ` +
             `this process (tracked, heartbeat running) so it cannot go stale and be stolen ` +
-            `while the unconfirmed wrangler child` +
+            `while the unconfirmed Cloudflare operation process` +
             `${info.pid !== undefined ? ` (pid ${info.pid})` : ''} may still be running. ` +
             `Manual recovery: verify the process is dead` +
             `${info.pid !== undefined ? ` (e.g. \`kill -0 ${info.pid}\`)` : ''} and terminate ` +
@@ -2078,18 +2083,18 @@ function readRootConfig(configPath: string): Record<string, unknown> {
 function assertDiscoverySucceeded(result: RunWranglerResult, label: string): void {
   if (!isCleanSuccess(result)) {
     throw new Error(
-      `provision: "${label}" failed (exit ${String(result.status)}): ` +
+      `provision: ${label} failed (exit ${String(result.status)}): ` +
         `${result.stderr || result.stdout || 'no output'}. Cannot verify existing resources; ` +
         `refusing to create a possible duplicate.`,
     );
   }
 }
 
-/** Field spec describing a wrangler `--json` list member's required identity. */
+/** Field spec describing a Cloudflare list member's required identity. */
 interface ResourceListSpec {
   /** Human resource name for messages, e.g. `KV namespace` / `D1 database`. */
   resource: string;
-  /** Command name for messages, e.g. `wrangler kv namespace list`. */
+  /** Operation label for messages, e.g. `Cloudflare kv namespace list`. */
   command: string;
   /** Identity check for every member, before name filtering. */
   hasValidId: (member: Record<string, unknown>) => boolean;
@@ -2113,7 +2118,7 @@ function validateResourceList(
   for (const member of list) {
     if (!isRecord(member)) {
       throw new Error(
-        `provision: "${spec.command}" returned a malformed ${spec.resource} entry (not an object). ` +
+        `provision: ${spec.command} returned a malformed ${spec.resource} entry (not an object). ` +
           `Cannot verify existing resources; refusing to create a possible duplicate.`,
       );
     }
@@ -2122,14 +2127,14 @@ function validateResourceList(
     const idValid = spec.hasValidId(member);
     if (nameValid && !idValid) {
       throw new Error(
-        `provision: "${spec.command}" returned a ${spec.resource} ${spec.nameLabel} ` +
+        `provision: ${spec.command} returned a ${spec.resource} ${spec.nameLabel} ` +
           `${JSON.stringify(rawName)} with no valid id (${spec.idRule}). Cannot verify existing ` +
           `resources; refusing to create a possible duplicate.`,
       );
     }
     if (!nameValid) {
       throw new Error(
-        `provision: "${spec.command}" returned a malformed ${spec.resource} entry with no valid ` +
+        `provision: ${spec.command} returned a malformed ${spec.resource} entry with no valid ` +
           `${spec.nameField}. Cannot verify existing resources; refusing to create a possible duplicate.`,
       );
     }
@@ -2245,13 +2250,13 @@ interface CreatePostcondition {
   nameField?: string;
   /** Human resource name for the message. */
   resource: string;
-  /** Command name for the message. */
+  /** Operation label for the message. */
   command: string;
 }
 
 /**
  * After a create reports success, re-read the config and require a real id, plus the exact
- * name where the name is the identity. A killed child can still report exit 0.
+ * name where the name is the identity. A success status alone is not trusted.
  */
 function assertCreateWroteRealId(
   configPath: string,
@@ -2264,12 +2269,11 @@ function assertCreateWroteRealId(
   const nameOk = spec.nameField === undefined || (!!entry && entry[spec.nameField] === name);
   if (!idOk || !nameOk) {
     throw new Error(
-      `provision: "${spec.command} ${name}" reported success but "${configPath}" does not hold the ` +
+      `provision: ${spec.command} ${name} reported success but "${configPath}" does not hold the ` +
         `expected ${spec.resource} for binding ${JSON.stringify(binding)} afterward (need a real ` +
         `${spec.idField}${spec.nameField ? ` and ${spec.nameField} === ${JSON.stringify(name)}` : ''}). ` +
-        `The create may have been interrupted or written a different resource — wrangler's launcher ` +
-        `can mask a signal-killed child as exit 0. Refusing to record a wrong/unprovisioned ` +
-        `resource; inspect the account/config and retry.`,
+        `The create may have been interrupted or written a different resource. Refusing to record ` +
+        `a wrong/unprovisioned resource; inspect the account/config and retry.`,
     );
   }
 }
@@ -2290,7 +2294,7 @@ function hasControlChar(value: string): boolean {
   return false;
 }
 
-/** The universal option-injection guard for ANY wrangler ARGV positional. */
+/** The universal option-injection guard for ANY Cloudflare operation ARGV positional. */
 function assertNoOptionInjection(kind: string, name: string): void {
   if (
     typeof name !== 'string' ||
@@ -2299,7 +2303,8 @@ function assertNoOptionInjection(kind: string, name: string): void {
     hasControlChar(name)
   ) {
     throw new Error(
-      `provision: refusing to pass an unsafe ${kind} name ${JSON.stringify(name)} to wrangler. A ` +
+      `provision: refusing to pass an unsafe ${kind} name ${JSON.stringify(name)} to a Cloudflare ` +
+        `operation. A ` +
         `name may not be empty, begin with "-" (it would be parsed as a CLI flag), or contain ` +
         `control characters. Rename the resource and retry.`,
     );
@@ -2348,7 +2353,8 @@ export function assertValidResourceName(kind: ResourceNameKind, name: string): v
   if (!grammar.re.test(name)) {
     throw new Error(
       `provision: refusing to pass an invalid ${grammar.label} name ${JSON.stringify(name)} to ` +
-        `wrangler. A ${grammar.label} name must ${grammar.rule}. Rename the resource and retry.`,
+        `a Cloudflare operation. A ${grammar.label} name must ${grammar.rule}. Rename the ` +
+        `resource and retry.`,
     );
   }
 }
@@ -2439,7 +2445,7 @@ async function provisionWithProcessSlot(
         // Not persisted: the watchdog keeps the lock held. Surface both errors.
         throw new AggregateError(
           [bodyError, quarantineError],
-          `provision failed with an unconfirmed wrangler child AND its quarantine metadata ` +
+          `provision failed with an unconfirmed Cloudflare operation process AND its quarantine metadata ` +
             `could not be persisted — the cross-process provision lock is intentionally still ` +
             `held by this process (not released, not stealable) while the child may live. ` +
             `Primary error: ` +
@@ -2554,17 +2560,17 @@ async function reconcileD1(
       resources.push({ kind: 'd1', binding, name, action: 'reused', id: entry.database_id });
     } else {
       const listResult = await runWrangler({ type: 'd1.list', configPath }, {});
-      assertDiscoverySucceeded(listResult, 'wrangler d1 list');
+      assertDiscoverySucceeded(listResult, 'Cloudflare d1 list');
       const rawList = listResult.data;
       if (!Array.isArray(rawList)) {
         throw new Error(
-          `provision: "wrangler d1 list --json" did not return a JSON array; cannot verify whether ` +
+          `provision: Cloudflare d1 list did not return a JSON array; cannot verify whether ` +
             `D1 database ${JSON.stringify(name)} exists. Refusing to create a possible duplicate.`,
         );
       }
       const databases = validateResourceList(rawList, {
         resource: 'D1 database',
-        command: 'wrangler d1 list',
+        command: 'Cloudflare d1 list',
         hasValidId: (member) => reconcileD1IdAliases(member).kind === 'id',
         idRule:
           'its uuid/database_id aliases must be present, well-formed D1 UUIDs agreeing on one id',
@@ -2577,7 +2583,7 @@ async function reconcileD1(
         .filter((m): m is Exclude<D1Match, { kind: 'other' }> => m.kind !== 'other');
       if (claimants.length > 1) {
         throw new Error(
-          `provision: "wrangler d1 list" returned ${claimants.length} D1 databases named ` +
+          `provision: Cloudflare d1 list returned ${claimants.length} D1 databases named ` +
             `${JSON.stringify(name)}. D1 database names are account-unique, so this is ambiguous; ` +
             `cannot pick one to adopt and refusing to create a possible duplicate. Inspect the ` +
             `account and retry.`,
@@ -2585,7 +2591,7 @@ async function reconcileD1(
       }
       if (claimants.length === 1 && claimants[0].kind === 'claimed-but-invalid') {
         throw new Error(
-          `provision: "wrangler d1 list" returned a D1 database named ${JSON.stringify(name)} with ` +
+          `provision: Cloudflare d1 list returned a D1 database named ${JSON.stringify(name)} with ` +
             `an ambiguous or empty id (conflicting/blank uuid/database_id, or conflicting name ` +
             `aliases). Cannot adopt it, and refusing to create a possible duplicate; inspect the ` +
             `account and retry.`,
@@ -2614,7 +2620,7 @@ async function reconcileD1(
               idValidator: isRealD1Id,
               nameField: 'database_name',
               resource: 'D1 database',
-              command: 'wrangler d1 create',
+              command: 'Cloudflare d1 create',
             },
             binding,
             name,
@@ -2626,12 +2632,12 @@ async function reconcileD1(
         } else if (isCleanFailure(created) && isAlreadyExistsError(created)) {
           // Created between list and create (code 7502): adopt only an exact `d1 info` match.
           const infoResult = await runWrangler({ type: 'd1.info', name: name, configPath }, {});
-          assertDiscoverySucceeded(infoResult, `wrangler d1 info ${name}`);
+          assertDiscoverySucceeded(infoResult, `Cloudflare d1 info ${name}`);
           const info = normalizeD1(isRecord(infoResult.data) ? infoResult.data : undefined, name);
           if (info.kind !== 'match') {
             throw new Error(
-              `provision: "wrangler d1 create ${name}" reported the database already exists, ` +
-                `but "wrangler d1 info ${name} --json" did not return a database with a matching ` +
+              `provision: Cloudflare d1 create ${name} reported the database already exists, ` +
+                `but Cloudflare d1 info ${name} did not return a database with a matching ` +
                 `name and an unambiguous id. Refusing to adopt an unverified database.`,
             );
           }
@@ -2644,7 +2650,7 @@ async function reconcileD1(
           resources.push({ kind: 'd1', binding, name, action: 'adopted', id: info.id });
         } else {
           throw new Error(
-            `provision: "wrangler d1 create ${name}" failed: ${created.stderr || created.stdout}`,
+            `provision: Cloudflare d1 create ${name} failed: ${created.stderr || created.stdout}`,
           );
         }
       }
@@ -2703,17 +2709,17 @@ async function reconcileKv(
     }
     // KV titles are not unique and create never dedupes, so this list is the only orphan guard.
     const listResult = await runWrangler({ type: 'kv.namespace.list', configPath }, {});
-    assertDiscoverySucceeded(listResult, 'wrangler kv namespace list');
+    assertDiscoverySucceeded(listResult, 'Cloudflare kv namespace list');
     const rawList = listResult.data;
     if (!Array.isArray(rawList)) {
       throw new Error(
-        `provision: "wrangler kv namespace list" did not return a JSON array; cannot verify whether ` +
+        `provision: Cloudflare kv namespace list did not return a JSON array; cannot verify whether ` +
           `KV namespace ${JSON.stringify(title)} exists. Refusing to create a possible duplicate.`,
       );
     }
     const namespaces = validateResourceList(rawList, {
       resource: 'KV namespace',
-      command: 'wrangler kv namespace list',
+      command: 'Cloudflare kv namespace list',
       hasValidId: (member) => isRealKvId(member.id),
       idRule: 'its id is missing or not a well-formed 32-hex namespace id',
       nameField: 'title',
@@ -2745,7 +2751,7 @@ async function reconcileKv(
       });
       if (!isCleanSuccess(created)) {
         throw new Error(
-          `provision: "wrangler kv namespace create ${title}" failed: ${created.stderr || created.stdout}`,
+          `provision: Cloudflare kv namespace create ${title} failed: ${created.stderr || created.stdout}`,
         );
       }
       assertCreateWroteRealId(
@@ -2755,7 +2761,7 @@ async function reconcileKv(
           idField: 'id',
           idValidator: isRealKvId,
           resource: 'KV namespace',
-          command: 'wrangler kv namespace create',
+          command: 'Cloudflare kv namespace create',
         },
         binding,
         title,
@@ -2800,7 +2806,7 @@ async function reconcileR2(
         const payload = info.data;
         if (!isRecord(payload) || payload.name !== bucketName) {
           throw new Error(
-            `provision: "wrangler r2 bucket info ${bucketName} --json" exited 0 but did not identify ` +
+            `provision: Cloudflare r2 bucket info ${bucketName} exited 0 but did not identify ` +
               `the requested bucket (expected name ${JSON.stringify(bucketName)}). Refusing to adopt an ` +
               `unverified bucket. Output: ${info.stdout || info.stderr}`,
           );
@@ -2817,7 +2823,7 @@ async function reconcileR2(
         });
         if (!isCleanSuccess(created)) {
           throw new Error(
-            `provision: "wrangler r2 bucket create ${bucketName}" failed: ${created.stderr || created.stdout}`,
+            `provision: Cloudflare r2 bucket create ${bucketName} failed: ${created.stderr || created.stdout}`,
           );
         }
         // No placeholder rule here: a bucket really named `default` is valid.
@@ -2829,7 +2835,7 @@ async function reconcileR2(
             idValidator: isValidR2BucketNameFormat,
             nameField: 'bucket_name',
             resource: 'R2 bucket',
-            command: 'wrangler r2 bucket create',
+            command: 'Cloudflare r2 bucket create',
           },
           binding,
           bucketName,
@@ -2847,12 +2853,11 @@ async function reconcileR2(
             verify.data.name !== bucketName
           ) {
             throw new Error(
-              `provision: "wrangler r2 bucket create ${bucketName}" reported success but a ` +
-                `follow-up "wrangler r2 bucket info ${bucketName}" did not confirm the bucket ` +
-                `exists. The create may have been interrupted — wrangler's launcher can mask a ` +
-                `signal-killed child as exit 0, and the config entry is indistinguishable from ` +
-                `the local-dev placeholder for this name. Refusing to record an unprovisioned ` +
-                `bucket; inspect the account and retry.`,
+              `provision: Cloudflare r2 bucket create ${bucketName} reported success but a ` +
+                `follow-up Cloudflare r2 bucket info ${bucketName} did not confirm the bucket ` +
+                `exists. The create may have been interrupted, and the config entry is ` +
+                `indistinguishable from the local-dev placeholder for this name. Refusing to ` +
+                `record an unprovisioned bucket; inspect the account and retry.`,
             );
           }
         }
@@ -2861,7 +2866,7 @@ async function reconcileR2(
       } else {
         // Any other failure: the bucket may exist, so do not create.
         throw new Error(
-          `provision: "wrangler r2 bucket info ${bucketName}" failed: ${info.stderr || info.stdout}. ` +
+          `provision: Cloudflare r2 bucket info ${bucketName} failed: ${info.stderr || info.stdout}. ` +
             `Cannot determine whether the bucket exists; refusing to create a possible duplicate.`,
         );
       }
@@ -2941,10 +2946,10 @@ async function reconcileHyperdrive(
       } else if (existenceUnknown) {
         // We would create but cannot check for a duplicate.
         throw new Error(
-          `provision: cannot verify whether Hyperdrive config ${JSON.stringify(name)} already ` +
-            `exists (no existence check available — provide an accountId + API token, or inject a ` +
-            `listHyperdriveConfigs seam). "wrangler hyperdrive create" silently duplicates a ` +
-            `same-named config, so provisioning refuses to create it blindly.`,
+          `provision: could not check whether Hyperdrive config ${JSON.stringify(name)} already ` +
+            `exists (see the warning above). A create would duplicate a config with the same ` +
+            `name, so Void did not create it. Check that CLOUDFLARE_API_TOKEN can read ` +
+            `Hyperdrive configs, then retry.`,
         );
       } else {
         const created = await runWrangler(
@@ -2953,7 +2958,7 @@ async function reconcileHyperdrive(
         );
         if (!isCleanSuccess(created)) {
           throw new Error(
-            `provision: "wrangler hyperdrive create ${name}" failed: ${created.stderr || created.stdout}`,
+            `provision: Cloudflare hyperdrive create ${name} failed: ${created.stderr || created.stdout}`,
           );
         }
         assertCreateWroteRealId(
@@ -2963,7 +2968,7 @@ async function reconcileHyperdrive(
             idField: 'id',
             idValidator: isRealHyperdriveId,
             resource: 'Hyperdrive config',
-            command: 'wrangler hyperdrive create',
+            command: 'Cloudflare hyperdrive create',
           },
           binding,
           name,
@@ -2992,24 +2997,23 @@ async function reconcileQueues(
     // Create only on a typed not-found; anything else fails closed.
     if (!isConfirmedAbsent(info, 'queue')) {
       throw new Error(
-        `provision: "wrangler queues info ${name}" failed or did not confirm the queue exists: ` +
+        `provision: Cloudflare queues info ${name} failed or did not confirm the queue exists: ` +
           `${info.stderr || info.stdout || 'no output'}`,
       );
     }
     const created = await runWrangler({ type: 'queues.create', name: name, configPath });
     if (!isCleanSuccess(created)) {
       throw new Error(
-        `provision: "wrangler queues create ${name}" failed: ${created.stderr || created.stdout}`,
+        `provision: Cloudflare queues create ${name} failed: ${created.stderr || created.stdout}`,
       );
     }
     // Queue creates write no config, so re-probe to confirm.
     const verify = await runWrangler({ type: 'queues.info', name: name, configPath });
     if (!queueInfoConfirmsExists(verify, name)) {
       throw new Error(
-        `provision: "wrangler queues create ${name}" reported success but "wrangler queues info ` +
-          `${name}" did not confirm the queue exists afterward. The create may have been ` +
-          `interrupted — wrangler's launcher can mask a signal-killed child as exit 0. Refusing to ` +
-          `record an unprovisioned queue; inspect the account and retry.`,
+        `provision: Cloudflare queues create ${name} reported success but Cloudflare queues info ` +
+          `${name} did not confirm the queue exists afterward. The create may have been ` +
+          `interrupted. Refusing to record an unprovisioned queue; inspect the account and retry.`,
       );
     }
     resources.push({ kind: 'queue', name, action: 'created' });
@@ -3100,14 +3104,13 @@ async function provisionCloudflareResourcesLocked(
   // rebind these resources.
   if (hasRemoteWork && !effectiveAccountId) {
     throw new Error(
-      `provision: no Cloudflare account is resolvable — set "account_id" in your root wrangler ` +
-        `config or export CLOUDFLARE_ACCOUNT_ID before deploying. Refusing to provision resources ` +
-        `without a pinned account (wrangler would otherwise fall back to an ambient/interactive ` +
-        `account that is never persisted, so a later retry could rebind them elsewhere).`,
+      `provision: no Cloudflare account is resolvable. Set \`cloudflare.account_id\` in ` +
+        `void.config.ts or export CLOUDFLARE_ACCOUNT_ID, then rerun \`void deploy\`. Void does ` +
+        `not provision resources without a pinned account.`,
     );
   }
 
-  // Wrangler reloads project dotenv on every command; reject transport redirects first.
+  // Cloudflare tooling reads project dotenv files; reject transport redirects first.
   if (hasRemoteWork) {
     assertNoTransportRedirectInProjectDotenv(root);
   }
@@ -3123,28 +3126,28 @@ async function provisionCloudflareResourcesLocked(
     if (!alreadyProvisioned && !resolveHyperdriveApiToken(opts?.apiToken)) {
       if (connectionString) {
         throw new Error(
-          `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
-            `creating it needs a Cloudflare API token. wrangler exposes no machine-readable ` +
-            `Hyperdrive list, so Void checks the account over the Cloudflare REST API, which a ` +
-            `Cloudflare browser OAuth cannot authenticate. Without that check a create ` +
-            `would silently duplicate an existing same-named config, so nothing was provisioned. ` +
-            `Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive edit permission and rerun, or ` +
-            `(b) create the Hyperdrive config yourself (dashboard / "wrangler hyperdrive create") ` +
-            `and add its id to the ${JSON.stringify(binding)} hyperdrive binding in ` +
-            `"${configPath}" — deploying an already-provisioned Hyperdrive needs no token.`,
+          `provision: Hyperdrive config ${JSON.stringify(name)} has no ID yet. Before Void ` +
+            `creates one, it checks for an existing config with the Cloudflare API. That check ` +
+            `needs an API token; a browser login cannot call it. Without the check, a create ` +
+            `could duplicate an existing config with the same name, so nothing was ` +
+            `provisioned. Either (a) export CLOUDFLARE_API_TOKEN with Hyperdrive ` +
+            `edit permission and rerun, or (b) create the Hyperdrive config in the Cloudflare ` +
+            `dashboard and add its ID to the ${JSON.stringify(binding)} entry in ` +
+            `\`cloudflare.hyperdrive\` in void.config.ts. Deploying an already-provisioned ` +
+            `Hyperdrive needs no token.`,
         );
       }
       // This run could only skip, which deploy treats as fatal. DATABASE_URL must come from
       // the shell: project dotenv is read only inside the credential-scrubbed build.
       throw new Error(
-        `provision: Hyperdrive config ${JSON.stringify(name)} is not in "${configPath}" yet, and ` +
+        `provision: Hyperdrive config ${JSON.stringify(name)} has no ID yet, and ` +
           `there is no DATABASE_URL to create it from. Nothing was provisioned. ` +
           `Either (a) export DATABASE_URL with your PostgreSQL connection string and rerun ` +
           `(Void reads it from the shell — a value in .env/.env.local is NOT used here, so it ` +
-          `never ships as a plaintext worker var), or (b) create the Hyperdrive config yourself ` +
-          `(dashboard / "wrangler hyperdrive create") and add its id to the ` +
-          `${JSON.stringify(binding)} hyperdrive binding in "${configPath}" — deploying an ` +
-          `already-provisioned Hyperdrive needs neither DATABASE_URL nor an API token.`,
+          `never ships as a plaintext worker var), or (b) create the Hyperdrive config in the ` +
+          `Cloudflare dashboard and add its ID to the ${JSON.stringify(binding)} entry in ` +
+          `\`cloudflare.hyperdrive\` in void.config.ts. Deploying an already-provisioned ` +
+          `Hyperdrive needs neither DATABASE_URL nor an API token.`,
       );
     }
   }

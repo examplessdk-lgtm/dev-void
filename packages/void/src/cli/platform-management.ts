@@ -1034,16 +1034,8 @@ export async function uninstallPlatform(
     routingKv?.state === 'retained' &&
     isPurgeResourcesCandidate(manifest, routingKv);
   const hasRoutingCheckpoint = routingKv?.state === 'ready' || reopenedRouting;
-  const createdZone = manifest.resources.find(
-    (resource) => resource.key === 'zone' && resource.ownership === 'created',
-  );
   const interactive = dependencies.interactive ?? process.stdin.isTTY;
   const confirmAction = dependencies.confirm ?? promptForConfirmation;
-  if (createdZone && args.deleteZone === true) {
-    throw new Error(
-      `platform: Refusing to delete Cloudflare zone ${JSON.stringify(createdZone.name)} automatically. A zone can contain unrelated DNS, settings, and products that the installer cannot exhaustively prove ownership of. Uninstall with --keep-zone, inspect the retained zone in Cloudflare, and delete it manually if appropriate.`,
-    );
-  }
   const zeroTrust = await assertProjectZeroTrustAllowsUninstall(dependencies.readProjectZeroTrust, {
     canTurnOff: !!dependencies.turnOffProjectZeroTrust,
   });

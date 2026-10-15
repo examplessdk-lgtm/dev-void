@@ -82,7 +82,6 @@ export function createNeonDatabaseProvider(
       const projectId = typeof project?.id === 'string' ? project.id : undefined;
       return {
         connectionString,
-        projectId,
         dashboardUrl: projectId ? `https://console.neon.tech/app/projects/${projectId}` : undefined,
       };
     },

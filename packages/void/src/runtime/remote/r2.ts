@@ -1,6 +1,35 @@
 import { bytesToBase64 } from '../base64.ts';
 import type { ProxyClient } from './client.ts';
-import { serializeR2Conditional } from './r2-conditions.ts';
+import {
+  R2_OBJECT_HEADER,
+  serializeR2Conditional,
+  serializeR2HttpMetadata,
+  type RemoteR2HttpMetadata,
+} from './r2-conditions.ts';
+
+/** Object fields from the binding handler or from the proxy's REST fallback. */
+type RemoteR2Object = {
+  key: string;
+  size: number;
+  etag?: string;
+  lastModified: string;
+  contentType?: string;
+  version?: string;
+  httpMetadata?: RemoteR2HttpMetadata;
+  customMetadata?: Record<string, string>;
+};
+
+/**
+ * HTTP metadata that the REST fallback and older deployments do not store.
+ * Every path stores `contentType`.
+ */
+const EXTRA_HTTP_METADATA: Array<[keyof R2HTTPMetadata, string]> = [
+  ['contentLanguage', 'content-language'],
+  ['contentDisposition', 'content-disposition'],
+  ['contentEncoding', 'content-encoding'],
+  ['cacheControl', 'cache-control'],
+  ['cacheExpiry', 'expires'],
+];
 
 /**
  * R2Bucket implementation backed by the remote proxy.
@@ -17,20 +46,17 @@ export class ProxyR2Bucket {
       binding: this.binding,
       key,
     });
-    const data = (await res.json()) as {
-      key: string;
-      size: number;
-      etag: string;
-      lastModified: string;
-      contentType: string;
-    } | null;
+    const data = (await res.json()) as RemoteR2Object | null;
     if (!data) {
       return null;
     }
     return makeR2Object(data);
   }
 
-  async get(key: string): Promise<R2ObjectBody | null> {
+  async get(key: string, options?: R2GetOptions): Promise<R2ObjectBody | null> {
+    if (requestsRange(options?.range) || requestsCondition(options?.onlyIf)) {
+      throw new Error('remote: R2 get() with range or onlyIf is not supported in remote mode.');
+    }
     const res = await this.client.fetch('/r2/get', { binding: this.binding, key });
 
     // Check if the proxy returned null (JSON response for 404).
@@ -79,6 +105,8 @@ export class ProxyR2Bucket {
     }
     if (options?.httpMetadata) {
       const meta = options.httpMetadata;
+      body.httpMetadata = serializeR2HttpMetadata(meta);
+      // Older handlers and the REST fallback read only the content type.
       if (meta instanceof Headers) {
         body.contentType = meta.get('content-type') ?? undefined;
       } else {
@@ -95,20 +123,25 @@ export class ProxyR2Bucket {
     }
     // A separate endpoint prevents older proxies/workers from silently ignoring onlyIf.
     const res = await this.client.fetch(conditional ? '/r2/put-conditional' : '/r2/put', body);
-    const result = (await res.json()) as
-      | Parameters<typeof makeR2Object>[0]
-      | null
-      | { success: true };
+    const result = (await res.json()) as RemoteR2Object | null | { success: true };
     if (result === null) {
       return null;
     }
-    if ('key' in result) {
-      return makeR2Object(result);
-    }
-    if (conditional) {
+    // `{ success: true }` comes from the REST fallback or an older handler.
+    const stored = 'key' in result ? result : undefined;
+    if (!stored && conditional) {
       throw new Error(
         'remote: R2 conditional put requires a compatible Void platform and deployment.',
       );
+    }
+    const missing = missingMetadata(options, stored);
+    if (missing.length > 0) {
+      throw new Error(
+        `remote: R2 put() stored "${key}" without ${missing.join(', ')}. Remote R2 metadata needs a project deployment with the current Void version. Deploy the project, then put the object again.`,
+      );
+    }
+    if (stored) {
+      return makeR2Object(stored);
     }
 
     // Return a minimal R2Object
@@ -138,26 +171,33 @@ export class ProxyR2Bucket {
       limit: options?.limit,
       cursor: options?.cursor,
       delimiter: options?.delimiter,
+      startAfter: options?.startAfter,
+      include: options?.include,
     });
     const data = (await res.json()) as {
-      objects: Array<{ key: string; size: number; lastModified: string }>;
+      objects: Array<RemoteR2Object>;
       truncated: boolean;
       cursor: string | null;
+      delimitedPrefixes?: Array<string>;
     };
+    // Older handlers and the REST fallback ignore these options and return no prefixes.
+    // The proxy also uses the REST fallback when it cannot reach a current deployment for a moment.
+    if (
+      !Array.isArray(data.delimitedPrefixes) &&
+      (options?.delimiter || options?.startAfter || options?.include)
+    ) {
+      throw new Error(
+        'remote: R2 list() with delimiter, startAfter or include got no answer from a current project deployment. The deployment uses an older Void version, or the platform could not reach it. Retry. If the error continues, deploy the project with the current Void version.',
+      );
+    }
 
     return {
       objects: data.objects.map((o) =>
-        makeR2Object({
-          key: o.key,
-          size: o.size,
-          etag: '',
-          lastModified: o.lastModified,
-          contentType: 'application/octet-stream',
-        }),
+        makeR2Object({ contentType: 'application/octet-stream', ...o }),
       ),
       truncated: data.truncated,
       cursor: data.cursor ?? undefined,
-      delimitedPrefixes: [],
+      delimitedPrefixes: data.delimitedPrefixes ?? [],
     } as R2Objects;
   }
 
@@ -170,41 +210,113 @@ export class ProxyR2Bucket {
   }
 }
 
-function makeR2Object(data: {
-  key: string;
-  size: number;
-  etag: string;
-  lastModified: string;
-  contentType: string;
-  version?: string;
-  httpMetadata?: R2HTTPMetadata;
-  customMetadata?: Record<string, string>;
-}): R2Object {
+/**
+ * Remote mode ignores a `Headers` value, such as `request.headers`, and returns the whole
+ * object, so a reload with If-None-Match or a Range request for media still gets a body.
+ * Native R2 ignores fields that are undefined.
+ */
+function requestsRange(range: R2GetOptions['range']): boolean {
+  if (range instanceof Headers) {
+    return false;
+  }
+  return Object.values(range ?? {}).some((value) => value !== undefined);
+}
+
+/** Same rules as `requestsRange`. `secondsGranularity` alone asks for no condition. */
+function requestsCondition(onlyIf: R2GetOptions['onlyIf']): boolean {
+  if (onlyIf instanceof Headers) {
+    return false;
+  }
+  return Object.entries(onlyIf ?? {}).some(
+    ([name, value]) => name !== 'secondsGranularity' && value !== undefined,
+  );
+}
+
+/** Metadata in `options` that the stored object in the put response does not have. */
+function missingMetadata(
+  options: R2PutOptions | undefined,
+  stored: RemoteR2Object | undefined,
+): Array<string> {
+  const meta = options?.httpMetadata;
+  const missing: Array<string> = EXTRA_HTTP_METADATA.filter(
+    ([field, header]) =>
+      (meta instanceof Headers ? meta.has(header) : meta?.[field] !== undefined) &&
+      stored?.httpMetadata?.[field] === undefined,
+  ).map(([field]) => field);
+  if (
+    Object.keys(options?.customMetadata ?? {}).some(
+      (name) => stored?.customMetadata?.[name] === undefined,
+    )
+  ) {
+    missing.push('customMetadata');
+  }
+  return missing;
+}
+
+/** R2 `etag` is unquoted. HTTP headers and older handlers send the quoted form. */
+function normalizeEtag(etag: string): string {
+  const value = etag.startsWith('W/') ? etag.slice(2) : etag;
+  return value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1)
+    : value;
+}
+
+function readHttpMetadata(data: RemoteR2Object): R2HTTPMetadata {
+  if (!data.httpMetadata) {
+    return { contentType: data.contentType };
+  }
+  const { cacheExpiry, ...metadata } = data.httpMetadata;
+  return cacheExpiry ? { ...metadata, cacheExpiry: new Date(cacheExpiry) } : metadata;
+}
+
+function makeR2Object(data: RemoteR2Object): R2Object {
+  const etag = normalizeEtag(data.etag ?? '');
+  const httpMetadata = readHttpMetadata(data);
   return {
     key: data.key,
     version: data.version ?? '',
     size: data.size,
-    etag: data.etag,
-    httpEtag: data.etag ? `"${data.etag}"` : '',
+    etag,
+    httpEtag: etag ? `"${etag}"` : '',
     checksums: { toJSON: () => ({}) } as R2Checksums,
     uploaded: new Date(data.lastModified || Date.now()),
-    httpMetadata: data.httpMetadata ?? { contentType: data.contentType },
+    httpMetadata,
     customMetadata: data.customMetadata ?? {},
     storageClass: 'Standard',
     range: undefined,
-    writeHttpMetadata(_headers: Headers) {
-      // no-op for remote proxy
+    writeHttpMetadata(headers: Headers) {
+      // Same headers as native R2.
+      const fields: Array<[string, string | undefined]> = [
+        ['content-type', httpMetadata.contentType],
+        ['content-language', httpMetadata.contentLanguage],
+        ['content-disposition', httpMetadata.contentDisposition],
+        ['content-encoding', httpMetadata.contentEncoding],
+        ['cache-control', httpMetadata.cacheControl],
+        ['expires', httpMetadata.cacheExpiry?.toUTCString()],
+      ];
+      for (const [name, value] of fields) {
+        if (value !== undefined) {
+          headers.set(name, value);
+        }
+      }
     },
   } as R2Object;
 }
 
 function makeR2ObjectBody(key: string, res: Response): R2ObjectBody {
-  const size = parseInt(res.headers.get('content-length') ?? '0');
-  const etag = res.headers.get('etag') ?? '';
-  const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
-  const lastModified = res.headers.get('last-modified') ?? new Date().toISOString();
-
-  const obj = makeR2Object({ key, size, etag, lastModified, contentType });
+  // Older handlers and the REST fallback send only standard headers.
+  const meta = res.headers.get(R2_OBJECT_HEADER);
+  const obj = makeR2Object(
+    meta
+      ? (JSON.parse(decodeURIComponent(meta)) as RemoteR2Object)
+      : {
+          key,
+          size: parseInt(res.headers.get('content-length') ?? '0'),
+          etag: res.headers.get('etag') ?? '',
+          lastModified: res.headers.get('last-modified') ?? '',
+          contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+        },
+  );
 
   return {
     ...obj,

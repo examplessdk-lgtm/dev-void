@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, beforeEach, afterEach } from 'vite-plus/test';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vite-plus/test';
 import { generateRouteTypes } from '../../src/codegen/route-types.ts';
 import { resolveLayoutIds } from '../../src/pages/layout-resolution.ts';
 import {
@@ -726,6 +726,48 @@ const example = 'export const layout = "home"';
       );
       await expect(scanPages(TMP)).rejects.toThrow('_layouts/missing.vue');
     });
+
+    it.each(['./Shell.vue', '!./Shell.vue', '/layouts/shell'])(
+      'warns and uses the default layouts when a page sets layout path %s',
+      async (value) => {
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          writeFile('layout.vue', '<template><slot /></template>');
+          writeFile(
+            'index.vue',
+            `<script>export const layout = "${value}";</script>\n<template><div /></template>`,
+          );
+          const result = await scanPages(TMP);
+          const page = result.pages.find((p) => p.componentId === 'index')!;
+          expect(
+            resolveEffectiveLayoutChain(page, result.layouts, result.namedLayouts).map(
+              (layout) => layout.filePath,
+            ),
+          ).toEqual(['layout.vue']);
+          expect(log).toHaveBeenCalledOnce();
+          expect(log.mock.calls[0][0]).toContain(
+            `pages: Page 'index.vue' specifies layout '${value}'. Layout paths are not supported, so the default layouts are used.`,
+          );
+        } finally {
+          log.mockRestore();
+        }
+      },
+    );
+
+    it('warns when markdown frontmatter sets a layout path', async () => {
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        writeFile('post.md', '---\nlayout: ./x\n---\n# Hi');
+        await scanPages(TMP);
+        await scanPages(TMP);
+        expect(log).toHaveBeenCalledOnce();
+        expect(log.mock.calls[0][0]).toContain(
+          "pages: Page 'post.md' specifies layout './x'. Layout paths are not supported",
+        );
+      } finally {
+        log.mockRestore();
+      }
+    });
   });
 });
 
@@ -857,17 +899,6 @@ describe('resolveEffectiveLayoutChain', () => {
   it('falls back to default chain for unresolvable named layout', () => {
     const chain = resolveEffectiveLayoutChain(
       { componentId: 'guide/intro', layout: 'missing' },
-      layouts,
-      namedLayouts,
-    );
-    expect(chain).toHaveLength(2);
-    expect(chain[0].directory).toBe('');
-    expect(chain[1].directory).toBe('guide');
-  });
-
-  it('passes through default chain for relative path layouts', () => {
-    const chain = resolveEffectiveLayoutChain(
-      { componentId: 'guide/intro', layout: './custom' },
       layouts,
       namedLayouts,
     );

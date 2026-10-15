@@ -44,19 +44,14 @@ describe('parseEmailArgs — domain group', () => {
     });
   });
 
-  it('parses --subdomain on domain add (space and = forms)', () => {
-    expect(parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx'])).toMatchObject({
-      domainVerb: 'add',
-      domain: 'acme.com',
-      subdomain: 'mx',
-    });
-    expect(
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain=mail.acme.com']),
-    ).toMatchObject({
-      domainVerb: 'add',
-      domain: 'acme.com',
-      subdomain: 'mail.acme.com',
-    });
+  it('rejects --subdomain as an unknown option', () => {
+    for (const args of [
+      ['domain', 'add', 'acme.com', '--subdomain', 'mx'],
+      ['domain', 'add', 'acme.com', '--subdomain=mail.acme.com'],
+      ['usage', '--subdomain', 'mx'],
+    ]) {
+      expect(() => parseEmailArgs(args)).toThrow("email: Unknown option '--subdomain'.");
+    }
   });
 
   it('errors on a missing or unknown domain verb', () => {
@@ -89,40 +84,6 @@ describe('parseEmailArgs — domain group', () => {
     expect(() => parseEmailArgs(['domain', 'status', 'a.com', 'b.com', 'c.com'])).toThrow(
       /takes exactly one domain argument \(got 3/,
     );
-  });
-
-  it('rejects --subdomain on the other domain verbs and on non-domain subcommands', () => {
-    for (const args of [
-      ['domain', 'status', 'acme.com', '--subdomain', 'mx'],
-      ['domain', 'list', '--subdomain=mx'],
-      ['domain', 'remove', 'acme.com', '--subdomain', 'mx'],
-      ['setup', '--platform', 'cloudflare', '--subdomain', 'mail'],
-    ]) {
-      expect(() => parseEmailArgs(args)).toThrow(
-        'email: --subdomain applies to `void email domain add` only.',
-      );
-    }
-    expect(() => parseEmailArgs(['usage', '--subdomain', 'mx'])).toThrow(
-      'email: --subdomain applies to `void email domain add` only.',
-    );
-    expect(() => parseEmailArgs(['allow', 'a@x.dev', '--subdomain', 'mx'])).toThrow(
-      'email: --subdomain applies to `void email domain add` only.',
-    );
-  });
-
-  it('rejects --subdomain without a value, with an empty value, or repeated', () => {
-    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain'])).toThrow(
-      'email: --subdomain requires a value (a subdomain label or host).',
-    );
-    expect(() =>
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', '--project', 'x']),
-    ).toThrow(/--subdomain requires a value/);
-    expect(() => parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain='])).toThrow(
-      /--subdomain requires a value/,
-    );
-    expect(() =>
-      parseEmailArgs(['domain', 'add', 'acme.com', '--subdomain', 'mx', '--subdomain', 'mg']),
-    ).toThrow('email: --subdomain can only be specified once.');
   });
 
   it('rejects --platform cloudflare on the domain group, accepts --platform void', () => {

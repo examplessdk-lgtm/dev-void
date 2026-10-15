@@ -269,7 +269,7 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
       timeoutMs: 30_000,
     });
     await expect(runB({ type: 'd1.list' }, { accountId: 'acct' })).rejects.toThrow(
-      /another wrangler child is already active in this process/,
+      /another one is already active in this process/,
     );
     // The first runner is unaffected and settles cleanly.
     const result = await first;
@@ -294,11 +294,11 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
     const second = run({ type: 'versions.upload' }, { accountId: 'acct' });
     expect(spawned).toHaveLength(2);
     await expect(run({ type: 'versions.upload' }, { accountId: 'acct' })).rejects.toThrow(
-      /another wrangler child is already active in this process/,
+      /another one is already active in this process/,
     );
     await expect(
       run({ type: 'versions.deploy', versions: [] }, { accountId: 'acct' }),
-    ).rejects.toThrow(/another wrangler child is already active in this process/);
+    ).rejects.toThrow(/another one is already active in this process/);
     expect(spawned).toHaveLength(2);
     expect((await Promise.all([first, second])).map((result) => result.status)).toEqual([0, 0]);
     expect(
@@ -479,7 +479,9 @@ describe('createDefaultRunWrangler — ONE signal coordinator: repeated signals 
       expect(signal).toBe('SIGTERM');
       const outcome = readFileSync(outcomeFile, 'utf-8');
       expect(outcome).toContain('LATE-SPAWN-REJECTED:');
-      expect(outcome).toMatch(/refusing to spawn wrangler.*fatal SIGTERM.*terminating/s);
+      expect(outcome).toMatch(
+        /refusing to spawn a Cloudflare operation process.*fatal SIGTERM.*terminating/s,
+      );
     } finally {
       try {
         parent.kill('SIGKILL');

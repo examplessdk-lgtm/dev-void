@@ -288,6 +288,34 @@ describe('void db execute --remote (D1)', () => {
     expect(body.binding).toBe('MY_DB');
   });
 
+  it('prefers the configured D1 binding over other D1 resources', async () => {
+    const root = createProjectRoot({ d1Binding: 'MAIN_DB' });
+    mockGetResources.mockResolvedValue([
+      { type: 'd1', binding_name: 'DB' },
+      { type: 'd1', binding_name: 'MAIN_DB' },
+    ]);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.binding).toBe('MAIN_DB');
+  });
+
+  it('keeps the configured binding when several D1 resources do not match it', async () => {
+    const root = createProjectRoot();
+    mockGetResources.mockResolvedValue([
+      { type: 'd1', binding_name: 'OLD_A' },
+      { type: 'd1', binding_name: 'OLD_B' },
+    ]);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
+
+    await runDbCommand(root, { action: 'execute', command: 'SELECT 1', remote: true });
+
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.binding).toBe('DB');
+  });
+
   it('falls back to binding DB when getResources has no d1 resource', async () => {
     const root = createProjectRoot();
     mockGetResources.mockResolvedValue([{ type: 'kv', binding_name: 'KV_STORE' }]);
@@ -344,16 +372,18 @@ describe('void db execute --remote (D1)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('rejects --file with --remote D1 before prompting for confirmation', async () => {
+  it('sends --file SQL to the D1 proxy like inline SQL', async () => {
     const root = createProjectRoot();
+    const fileSql = 'INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\n';
+    writeFileSync(join(root, 'seed.sql'), fileSql);
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [], success: true }));
 
-    // The file does not exist: the rejection comes before it is read.
-    await expect(
-      runDbCommand(root, { action: 'execute', file: 'delete.sql', remote: true }),
-    ).rejects.toThrow('process.exit:1');
+    await runDbCommand(root, { action: 'execute', file: 'seed.sql', remote: true });
 
-    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.sql).toBe(fileSql);
   });
 
   it('errors on proxy non-OK response', async () => {

@@ -545,7 +545,6 @@ const purgeResourcesArgs = {
   plan: false,
   purgeData: true,
   purgeResources: true,
-  deleteZone: null,
   yes: true,
 };
 

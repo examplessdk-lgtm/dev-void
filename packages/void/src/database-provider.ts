@@ -8,8 +8,14 @@ export type DatabaseProvisionOptions = {
 };
 
 export type DatabaseProvisionResult = {
+  /** Connection string that `void db connect` saves as `DATABASE_URL`. */
   connectionString: string;
+  /**
+   * @deprecated Void does not read this field. Put a provider console link in
+   * `dashboardUrl` instead. Removed in the next major version.
+   */
   projectId?: string;
+  /** Provider console URL that `void db connect` prints after provisioning. */
   dashboardUrl?: string;
 };
 

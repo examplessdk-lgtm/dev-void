@@ -108,7 +108,7 @@ export async function runProjectCommand(root: string, args: ProjectArgs): Promis
   if (args.subcommand === 'purge-cache') {
     if (cloudflare) {
       throw new Error(
-        'project: Direct Cloudflare ISR cache purge is not available yet; redeploy or purge the configured KV namespace explicitly.',
+        'project: `void project purge-cache` is available only for projects hosted on a Void platform. For a direct Cloudflare deploy, redeploy or purge the configured ISR KV namespace.',
       );
     }
     const { runPurgeCacheCommand } = await import('./cache.ts');

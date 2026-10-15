@@ -124,11 +124,34 @@ describe('rendered help advertises the flags the parser honours', () => {
     return lines.join('\n').replace(/\u001b\[[0-9;]*m/g, '');
   }
 
+  it('shows --provision on `deploy` with the platform it requires', () => {
+    const page = render(['deploy']);
+    expect(page).toContain('--provision');
+    const line = page.split('\n').find((text) => text.includes('--provision'));
+    expect(line).toContain('--platform cloudflare');
+  });
+
   it('shows --limit and --project on `email logs`', () => {
     const page = render(['email', 'logs']);
 
     expect(page).toContain('--limit <n>');
     expect(page).toContain('--project <name>');
+  });
+
+  it('states plain limits for remote studio and purge-cache', () => {
+    const studio = render(['db', 'studio']);
+    expect(studio).not.toContain('not yet');
+    expect(studio).toContain('MySQL');
+    expect(render(['db'])).toContain('PostgreSQL/MySQL');
+    expect(render(['project', 'purge-cache'])).toContain('Void platform');
+  });
+
+  it('describes gen model without a migration or CRUD claim', () => {
+    const model = render(['gen', 'model']);
+    expect(model).not.toContain('migration');
+    expect(model).not.toContain('CRUD');
+    // The gen page lists `gen migration` on its own, so check only the CRUD claim there.
+    expect(render(['gen'])).not.toContain('CRUD');
   });
 
   it('lists proxy token rotation under platform system with its scope flags', () => {

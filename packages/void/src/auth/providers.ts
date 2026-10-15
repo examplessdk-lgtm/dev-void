@@ -56,6 +56,23 @@ export function isVoidAuthProvider(value: string): value is VoidAuthProvider {
   return VOID_AUTH_PROVIDER_SET.has(value);
 }
 
+/** Provider options other than the client credentials, with the env var that holds each one. */
+const VOID_AUTH_PROVIDER_SETTING_ENV_NAMES: Partial<
+  Record<VoidSocialAuthProvider, Record<string, string>>
+> = {
+  cognito: {
+    domain: 'AUTH_COGNITO_DOMAIN',
+    region: 'AUTH_COGNITO_REGION',
+    userPoolId: 'AUTH_COGNITO_USER_POOL_ID',
+  },
+};
+
+export function getVoidAuthProviderSettingEnvNames(
+  provider: VoidSocialAuthProvider,
+): Record<string, string> {
+  return VOID_AUTH_PROVIDER_SETTING_ENV_NAMES[provider] ?? {};
+}
+
 export function getVoidAuthProviderEnvNames(provider: VoidSocialAuthProvider): {
   clientId: string;
   clientSecret: string;

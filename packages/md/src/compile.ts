@@ -20,7 +20,7 @@ import { gitHubAlertsPlugin } from './plugins/github-alerts.ts';
 import { imagePlugin } from './plugins/image.ts';
 import { lineNumberPlugin } from './plugins/line-numbers.ts';
 import { linkPlugin } from './plugins/link.ts';
-import { preWrapperPlugin } from './plugins/pre-wrapper.ts';
+import { CODE_COPY_SCRIPT, preWrapperPlugin } from './plugins/pre-wrapper.ts';
 import { tocPlugin } from './plugins/toc.ts';
 
 export type Heading = Readonly<{
@@ -39,6 +39,11 @@ export type CompileResult = Readonly<{
 export type CompileOptions = Readonly<{
   shiki?: {
     themes?: { light: string; dark: string };
+    /**
+     * @deprecated Has no effect. Code block languages load on demand from
+     * Shiki's bundled languages. Remove this option. Removed in the next major
+     * version.
+     */
     langs?: ReadonlyArray<string>;
   };
 }>;
@@ -138,10 +143,15 @@ export async function compile(source: string, options?: CompileOptions): Promise
   const { data: frontmatter, content } = matter(source);
   const compiler = await getCompiler(options);
 
-  const env = {};
+  const env: { codeCopy?: boolean } = {};
   const tokens = compiler.parse(content, env);
   const headings = extractHeadings(tokens);
-  const html = await compiler.renderer.renderAsync(tokens, compiler.options, env);
+  let html = await compiler.renderer.renderAsync(tokens, compiler.options, env);
+  // At the end, after any island tag: the emitters drop the children of
+  // paired island tags, which would also drop a script placed among them.
+  if (env.codeCopy) {
+    html += CODE_COPY_SCRIPT;
+  }
 
   const title =
     (frontmatter.title as string) ?? headings.find((heading) => heading.depth === 1)?.text ?? '';

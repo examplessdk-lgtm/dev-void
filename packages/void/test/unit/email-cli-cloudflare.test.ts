@@ -950,4 +950,20 @@ describe('void email setup|status without --platform cloudflare', () => {
       expect(exitSpy).toHaveBeenLastCalledWith(1);
     }
   });
+
+  it('says status reads your own Cloudflare account and names the Void platform commands', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-email-cli-'));
+    roots.push(root);
+    const logged = captureLog();
+    try {
+      await expect(runEmailCommand(root, { subcommand: 'status' })).rejects.toBeInstanceOf(
+        ExitSignal,
+      );
+    } finally {
+      logged.restore();
+    }
+    expect(logged.lines).toEqual([
+      'email: `void email status` checks email on your own Cloudflare account. Run it with `--platform cloudflare`. On the Void platform, use `void email usage` and `void email destinations`.',
+    ]);
+  });
 });

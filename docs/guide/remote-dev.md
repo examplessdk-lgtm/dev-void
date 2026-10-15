@@ -59,6 +59,8 @@ When the dev server starts with remote mode active, it prints:
 
 - **Network latency:** each binding call makes a network request, so responses may be slower than local development.
 - **R2 multipart uploads:** `createMultipartUpload()` and `resumeMultipartUpload()` are not supported in remote mode.
+- **R2 range and conditional reads:** in remote mode, `get()` ignores request headers passed as `range` or `onlyIf` and returns the whole object. For example, `get(key, { range: request.headers, onlyIf: request.headers })` returns the whole object when the request has a `Range` or `If-None-Match` header. `get()` throws when `range` or `onlyIf` is an object that asks for a byte range or a condition, such as `{ offset: 0, length: 100 }` or `{ etagMatches: etag }`.
 - **R2 conditional writes:** `put(..., { onlyIf })` requires an updated platform and project deployment. Failed preconditions return `null`.
+- **R2 metadata and list options:** custom metadata, HTTP metadata, and `list()` with `delimiter`, `startAfter`, or `include` require an updated project deployment. Without one, `list()` with these options and `put()` with metadata other than `contentType` throw an error.
 - **D1 dump:** `db.dump()` is not supported in remote mode.
 - **D1 batches:** `db.batch()` requires an updated platform and project deployment.

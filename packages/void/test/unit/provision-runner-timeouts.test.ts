@@ -206,7 +206,7 @@ describe('provisionCloudflareResources — Hyperdrive lister deadline', () => {
           listTimeoutMs: 150,
         },
       ),
-    ).rejects.toThrow(/cannot verify/);
+    ).rejects.toThrow(/could not check whether/);
     expect(capturedSignal?.aborted).toBe(true);
   }, 10_000);
 });

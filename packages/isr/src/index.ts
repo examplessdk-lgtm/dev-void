@@ -72,8 +72,10 @@ export function isrCachePrefix(projectId: string, deploymentId?: string): string
 }
 
 /**
- * Like `isrCachePrefix`, for hostless `v2` keys. The `isrLegacy*` helpers exist
- * only to purge `v2` entries; remove them once those entries have aged out.
+ * Like `isrCachePrefix`, for hostless `v2` keys.
+ *
+ * @deprecated Void no longer writes hostless `v2` keys and does not use this
+ * helper. Removed in the next major version.
  */
 export function isrLegacyCachePrefix(projectId: string, deploymentId?: string): string {
   return versionedIsrCachePrefix(projectId, ISR_LEGACY_CACHE_KEY_VERSION, deploymentId);
@@ -115,7 +117,12 @@ export function isrCacheVariantPrefix(
   return `${isrCachePrefix(projectId, deploymentId)}${host}/${normalizeIsrPath(pathname)}${ISR_VARIANT_SEPARATOR}`;
 }
 
-/** Hostless `v2` direct-hit key for a pathname (purge only; see `isrLegacyCachePrefix`). */
+/**
+ * Hostless `v2` direct-hit key for a pathname.
+ *
+ * @deprecated Void no longer writes hostless `v2` keys and does not use this
+ * helper. Removed in the next major version.
+ */
 export function isrLegacyCacheKey(
   projectId: string,
   deploymentId: string,
@@ -124,7 +131,12 @@ export function isrLegacyCacheKey(
   return `${isrLegacyCachePrefix(projectId, deploymentId)}${normalizeIsrPath(pathname)}`;
 }
 
-/** Hostless `v2` rewrite-variant prefix for a pathname (purge only; see `isrLegacyCachePrefix`). */
+/**
+ * Hostless `v2` rewrite-variant prefix for a pathname.
+ *
+ * @deprecated Void no longer writes hostless `v2` keys and does not use this
+ * helper. Removed in the next major version.
+ */
 export function isrLegacyCacheVariantPrefix(
   projectId: string,
   deploymentId: string,
