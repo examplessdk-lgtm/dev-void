@@ -1,0 +1,19 @@
+docs/index.md
+  s_1cbb8f9d8ae59c::t_f292129bd319a4 22-23,25-27,29-30,33-34,36-38,40-41,44-45,47-49,51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d75600d218cb2f0285fd86d8600844c3fbcbb306",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
