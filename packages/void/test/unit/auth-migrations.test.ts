@@ -535,31 +535,36 @@ describe('auth migration runner', () => {
 });
 
 describe('runLocalVoidAuthMigrations', () => {
-  it('creates the local D1 directory on the first dev run', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'void-auth-migrations-'));
-    try {
-      const persistRoot = join(root, '.void');
-      await runLocalVoidAuthMigrations(root, 'sqlite', persistRoot, 'local', null);
-
-      const { DatabaseSync } = await import('node:sqlite');
-      const db = new DatabaseSync(getMiniflareDatabasePath(persistRoot, 'local'));
+  // This test writes a SQLite file on disk. Windows CI disk writes can stall for 30 seconds.
+  it(
+    'creates the local D1 directory on the first dev run',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'void-auth-migrations-'));
       try {
-        const tables = db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-          .all() as Array<{ name: string }>;
-        expect(tables.map((table) => table.name)).toEqual([
-          'account',
-          'session',
-          'user',
-          'verification',
-        ]);
+        const persistRoot = join(root, '.void');
+        await runLocalVoidAuthMigrations(root, 'sqlite', persistRoot, 'local', null);
+
+        const { DatabaseSync } = await import('node:sqlite');
+        const db = new DatabaseSync(getMiniflareDatabasePath(persistRoot, 'local'));
+        try {
+          const tables = db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .all() as Array<{ name: string }>;
+          expect(tables.map((table) => table.name)).toEqual([
+            'account',
+            'session',
+            'user',
+            'verification',
+          ]);
+        } finally {
+          db.close();
+        }
       } finally {
-        db.close();
+        rmSync(root, { recursive: true, force: true });
       }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+    },
+    process.platform === 'win32' ? 60_000 : undefined,
+  );
 
   // An empty DATABASE_URL in the shell counts as unset, so the one in .env is used.
   it('uses DATABASE_URL from .env when the shell value is empty', async () => {
