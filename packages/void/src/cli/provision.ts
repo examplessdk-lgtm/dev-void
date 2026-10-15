@@ -239,7 +239,7 @@ export function isRealKvId(value: unknown): value is string {
   return typeof value === 'string' && value !== KV_ID_PLACEHOLDER && HEX32_ID_RE.test(value);
 }
 /** A Hyperdrive config `id` that is a real 32-hex string (no placeholder exists). */
-function isRealHyperdriveId(value: unknown): value is string {
+export function isRealHyperdriveId(value: unknown): value is string {
   return typeof value === 'string' && HEX32_ID_RE.test(value);
 }
 /** An R2 `bucket_name` satisfying wrangler's bucket-name GRAMMAR (format only). */

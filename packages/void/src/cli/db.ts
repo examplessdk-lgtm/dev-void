@@ -1483,7 +1483,7 @@ async function runStudio(root: string, dialect: DatabaseDialect, remote?: boolea
 /** A direct Cloudflare deploy records its D1 or Hyperdrive id in the checked-in Cloudflare config. */
 async function hasDeployedCloudflareDatabase(root: string): Promise<boolean> {
   const { readRootWranglerConfig } = await import('./wrangler.ts');
-  const { isRealD1Id } = await import('./provision.ts');
+  const { isRealD1Id, isRealHyperdriveId } = await import('./provision.ts');
   const config = readRootWranglerConfig(root)?.config;
   const entries = (key: string): Array<Record<string, unknown>> => {
     const value = config?.[key];
@@ -1495,7 +1495,7 @@ async function hasDeployedCloudflareDatabase(root: string): Promise<boolean> {
   };
   return (
     entries('d1_databases').some((entry) => isRealD1Id(entry.database_id)) ||
-    entries('hyperdrive').some((entry) => typeof entry.id === 'string' && entry.id !== '')
+    entries('hyperdrive').some((entry) => isRealHyperdriveId(entry.id))
   );
 }
 

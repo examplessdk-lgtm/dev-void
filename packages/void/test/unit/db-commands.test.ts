@@ -1161,6 +1161,29 @@ describe('void db rename-migrations', () => {
     expect(errorMessages).toContain('direct Cloudflare');
   });
 
+  // Deploy creates the Hyperdrive and replaces any id that is not a real one.
+  it('renames a fresh checkout whose Hyperdrive id is a placeholder', async () => {
+    const root = createRenameProjectRoot({
+      files: { '0001_a.sql': '-- a\n', '0002_b.sql': '-- b\n' },
+      withJournal: false,
+    });
+    writeFileSync(join(root, 'void.json'), JSON.stringify({ database: 'pg' }));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL="postgresql://postgres@127.0.0.1:5432/app"\n');
+    writeFileSync(
+      join(root, 'wrangler.jsonc'),
+      JSON.stringify({ hyperdrive: [{ binding: 'HYPERDRIVE', id: 'local' }] }),
+    );
+
+    await runDbCommand(root, { action: 'rename-migrations' });
+
+    const files = readdirSync(join(root, 'db', 'migrations')).filter((f) => f.endsWith('.sql'));
+    expect(files.sort()).toEqual([
+      expect.stringMatching(/^\d{14}_a\.sql$/),
+      expect.stringMatching(/^\d{14}_b\.sql$/),
+    ]);
+    expect(mockLog.error).not.toHaveBeenCalled();
+  });
+
   it('refuses a Void project that is not linked', async () => {
     mockReadDeploymentPlatform.mockReturnValue('void');
     const root = createRenameProjectRoot({
