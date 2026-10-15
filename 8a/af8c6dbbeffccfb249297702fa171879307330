@@ -1,0 +1,47 @@
+docs/.vitepress/theme/game/assets/tanstack.svg
+  s_1cbb8f9d8ae59c::t_c9675e2a21c6bc 1-2
+docs/.vitepress/theme/game/assets/analog.svg
+  s_1cbb8f9d8ae59c::t_c02e1f3b59d33a 1-2
+docs/.vitepress/theme/game/assets/nuxt.svg
+  s_1cbb8f9d8ae59c::t_04bffcc7b23b91 1-2
+docs/.vitepress/theme/game/assets/astro.svg
+  s_1cbb8f9d8ae59c::t_a457f37d16ef00 1-2
+docs/.vitepress/theme/game/assets/react.svg
+  s_1cbb8f9d8ae59c::t_a6629f4e879572 1-2
+docs/.vitepress/theme/game/assets/svelte.svg
+  s_1cbb8f9d8ae59c::t_0fe7c83d266b10 1-2
+docs/.vitepress/theme/game/assets/vue.svg
+  s_1cbb8f9d8ae59c::t_bffdc0a0f681ca 1-2
+docs/.vitepress/theme/game/assets/solid.svg
+  s_1cbb8f9d8ae59c::t_1bbfefa4e3c6be 1-2
+docs/.vitepress/theme/game/assets/react-router.svg
+  s_1cbb8f9d8ae59c::t_efcd618dc71e32 1-2
+docs/.vitepress/theme/game/stack-and-ship.test.ts
+  s_1cbb8f9d8ae59c::t_35e3b6d7deec5c 1-128
+docs/.vitepress/theme/game/stack-and-ship.ts
+  s_1cbb8f9d8ae59c::t_d0e553ff8f442d 1-138
+docs/.vitepress/theme/HomeFeatureVisual.vue
+  s_1cbb8f9d8ae59c::t_e3be1eeda64754 5,21-24,35,43,64-67
+docs/.vitepress/theme/game/StackAndShip.vue
+  s_1cbb8f9d8ae59c::t_1b7269e7a519ba 1-482
+docs/.vitepress/theme/game/StackTile.vue
+  s_1cbb8f9d8ae59c::t_b0bfe4933e5372 1-159
+docs/.vitepress/theme/game/frameworks.ts
+  s_1cbb8f9d8ae59c::t_88eded21dfdb44 1-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8aaf8c6dbbeffccfb249297702fa171879307330",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
