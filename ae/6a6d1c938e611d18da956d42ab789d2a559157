@@ -1,0 +1,23 @@
+docs/.vitepress/theme/Hero.vue
+  s_1cbb8f9d8ae59c::t_782b7f8194a050 3,40,44-48
+docs/.vitepress/theme/HomeFeatures.vue
+  s_1cbb8f9d8ae59c::t_8b099528e5e44e 3,37,40-43
+docs/.vitepress/theme/HomePlatform.vue
+  s_1cbb8f9d8ae59c::t_8efb6d1c2b812b 4,34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ae6a6d1c938e611d18da956d42ab789d2a559157",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
