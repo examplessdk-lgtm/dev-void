@@ -4,17 +4,18 @@
   "type": "module",
   "scripts": {
     "build": "vitepress build",
-    "dev": "vitepress dev --host 0.0.0.0 --port 3000",
-    "preview": "vitepress preview --host 0.0.0.0 --port 3000"
+    "deploy": "cd .. && vp run deploy:docs",
+    "dev": "vitepress dev",
+    "preview": "vitepress preview"
   },
   "devDependencies": {
     "@iconify/vue": "5.0.3",
-    "@voidzero-dev/vitepress-theme": "^5.0.7",
-    "reka-ui": "^2.5.1",
+    "@voidzero-dev/vitepress-theme": "catalog:",
+    "reka-ui": "catalog:",
     "vitepress": "2.0.0-alpha.20",
     "vitepress-plugin-group-icons": "^1.7.7",
-    "void": "*",
+    "void": "workspace:*",
     "vue": "^3.5.44",
-    "wrangler": "^3.114.0"
+    "wrangler": "catalog:"
   }
 }
