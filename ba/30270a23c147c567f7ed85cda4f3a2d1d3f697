@@ -1,0 +1,21 @@
+docs/.vitepress/theme/Hero.vue
+  s_1cbb8f9d8ae59c::t_1a38d2b05bff14 38
+docs/index.md
+  s_1cbb8f9d8ae59c::t_5600a098d89f41 14,16-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ba30270a23c147c567f7ed85cda4f3a2d1d3f697",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}

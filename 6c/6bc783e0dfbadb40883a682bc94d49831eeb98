@@ -1,0 +1,122 @@
+docs/.vitepress/theme/HomeFeatures.vue
+  s_c073333243b932::t_e980ea3038e380 1-3,6-45,48,51-54
+  s_755bbfd847145e::t_dc7258f79a5693 4
+  s_316d9314e13e4c::t_cdc7e52ccb05e9 5,46-47,49-50,55-60
+docs/.vitepress/theme/HomePlatform.vue
+  s_c073333243b932::t_a6d9b1dfa41799 1,14-16,40,70,73
+  s_755bbfd847145e::t_993fbb2985925e 23
+  s_c2e8aeb2f4eea7::t_eb3c12e1cb7914 1,3,14-15,32,60,70,74-75,79-80,84-85,88-90,93-94,98-99,102-103,106-107
+  s_3d8fbcf6888aa5::t_ab96d3de11be5e 2,7,42-45,47-54,56-60,62,81-90
+  s_3d8fbcf6888aa5::t_2f01454803b1f1 5-6,10-13,55
+docs/index.md
+  s_c073333243b932::t_0b1d75ebe1b266 13-15,21,24-27,42-49,55,59
+  s_3d8fbcf6888aa5::t_48f71c71eb2f55 7,53,66,76,88-89
+  s_3d8fbcf6888aa5::t_c87819f4e262d5 8,62-63
+docs/.vitepress/theme/HomeFeatureVisual.vue
+  s_755bbfd847145e::t_972243ab8dccf3 1,5-6,8-9,10,13-22,30-31,40-54,56,59-60,64-70,71
+  s_c2e8aeb2f4eea7::t_749c0e99df4b23 2,12,33-34,36,38-39,57-58,62-63
+  s_316d9314e13e4c::t_8c639d16705c4d 7,23
+docs/.vitepress/theme/Home.vue
+  s_c2e8aeb2f4eea7::t_300b7151ab7700 24,70-74
+  s_c2e8aeb2f4eea7::t_98f5ccc24b1f1f 22,43,78-79
+  s_c2e8aeb2f4eea7::t_b947e8b9fd4fb3 27-33,75-92
+  s_c2e8aeb2f4eea7::t_e3054ffa96158a 14
+  s_316d9314e13e4c::t_6b6c6388e7db46 38
+  s_3d8fbcf6888aa5::t_8e0e19e4c84d96 46-60
+docs/public/void-platform-dark.svg
+  s_c2e8aeb2f4eea7::t_784d1898cf87cc 1-2,4,7-13
+  s_c2e8aeb2f4eea7::t_a49fd260ccb589 3,5-6
+docs/public/void-sdk.svg
+  s_c2e8aeb2f4eea7::t_16beca767fb12c 7-8,11-13
+  s_c2e8aeb2f4eea7::t_10d7915d888c6d 1-6,9-10
+docs/.vitepress/theme/Hero.vue
+  s_c2e8aeb2f4eea7::t_b44bbaac25aced 2,6-13,54-56,58-66
+docs/.vitepress/theme/HomeCli.vue
+  s_316d9314e13e4c::t_bb57a155d51b1d 1-117,122-302
+docs/.vitepress/theme/terminal/README.md
+  s_316d9314e13e4c::t_8c1854cb7f701f 1-9
+docs/public/void-cli.svg
+  s_316d9314e13e4c::t_1592cb921d6a1f 1-13
+test/terminal-demos/README.md
+  s_316d9314e13e4c::t_6e628ead8a5a0e 3,7,28
+docs/.vitepress/theme/terminal/TerminalPlayer.vue
+  s_316d9314e13e4c::t_e88778b51111df 11,13,210-216,417-430,433-454
+  s_3d8fbcf6888aa5::t_a93275257d6291 431-432
+test/terminal-demos/TerminalDemos.vue
+  s_316d9314e13e4c::t_5511c13f36e140 4-6
+test/terminal-demos/timeline.test.ts
+  s_316d9314e13e4c::t_5cc30d5030ef73 3-9
+docs/.vitepress/theme/HomeResourceCode.vue
+  s_316d9314e13e4c::t_5fe70666c1771a 1-29,57-62,64-155,158-185,190-224
+  s_316d9314e13e4c::t_a81c6e2eefa96c 30-56,63,156-157,186-189
+docs/.vitepress/theme/assets/security/cloudflare.svg
+  s_316d9314e13e4c::t_e942b606b56208 1-5
+docs/.vitepress/theme/assets/security/github.svg
+  s_316d9314e13e4c::t_2ee7f2b9b13862 1
+docs/.vitepress/theme/assets/security/google.svg
+  s_316d9314e13e4c::t_f352d3a57663ad 1
+docs/.vitepress/theme/assets/security/openid.svg
+  s_316d9314e13e4c::t_7f90ad2cbd992e 1
+docs/.vitepress/theme/assets/security/README.md
+  s_a12d14d1888beb::t_fae2a05311431b 1-8
+docs/public/platform-feature-placeholder.svg
+  s_a12d14d1888beb::t_6542ccd4d7c95e 1-9
+docs/.vitepress/theme/HomePlatformResourceCode.vue
+  s_3d8fbcf6888aa5::t_2f28f6e3f33b62 1-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6c6bc783e0dfbadb40883a682bc94d49831eeb98",
+  "prompts": {},
+  "sessions": {
+    "s_316d9314e13e4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10ad5-8944-72e3-b6d3-336861cf7d12",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_3d8fbcf6888aa5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a111ba-835c-7261-b434-ec4dc3731ff5",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_755bbfd847145e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fbd1-5f29-7553-aca8-790608d46721",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_a12d14d1888beb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10af1-857b-7d31-b510-09bcb4aa9dc0",
+        "model": "unknown"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_c073333243b932": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f22d-9bf4-7392-86d3-bb75fe72d4a0",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    },
+    "s_c2e8aeb2f4eea7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0fc34-2cd7-70d2-aeb0-671d69f880fe",
+        "model": "unknown"
+      },
+      "human_author": "mdong <mdong@cloudflare.com>"
+    }
+  }
+}
