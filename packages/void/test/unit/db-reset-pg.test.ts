@@ -166,4 +166,24 @@ describe('void db reset on PostgreSQL', () => {
       { count: 1 },
     ]);
   });
+
+  it('stops before dropping anything when another schema uses a public view', async () => {
+    const pg = state.pg!;
+    const root = project([`CREATE VIEW "public"."app_info" AS (select 'v1'::text as version);`]);
+    await runDbCommand(root, { action: 'migrate' });
+    // Made by hand, outside the migrations.
+    await pg.exec(`
+      CREATE SCHEMA analytics;
+      CREATE VIEW analytics.versions AS SELECT version FROM public.app_info;
+    `);
+
+    const error = await runDbCommand(root, { action: 'reset', yes: true }).catch(
+      (err: unknown) => err,
+    );
+
+    expect(String(error)).toContain('rule _RETURN on view analytics.versions uses view app_info');
+    expect((await pg.query('SELECT version FROM analytics.versions')).rows).toEqual([
+      { version: 'v1' },
+    ]);
+  });
 });

@@ -583,12 +583,13 @@ const PG_RESET_OBJECTS = `SELECT kind, name FROM (
 ) objects ORDER BY step, name`;
 
 /**
- * Objects in other schemas that `CASCADE` would also drop with the types ($1) and sequences ($2)
- * that reset drops in `public`: a column of that type or its array type, a view, a function, a
- * column default and so on, also through a type or function in `public` that goes with them.
- * Reset must not remove these, so it stops when there are any. The table drops still remove what
- * depends on a `public` table in another schema (a view, a foreign key, an inheriting table); a
- * view that also uses one of these types is listed here too.
+ * Objects in other schemas that `CASCADE` would also drop with the types ($1) and the views,
+ * materialized views and sequences ($2) that reset drops in `public`: a column of that type or
+ * its array type, a view, a function, a column default and so on, also through a type or
+ * function in `public` that goes with them. Reset must not remove these, so it stops when there
+ * are any. The TOAST table of a materialized view is part of it, so it does not count. The table
+ * drops still remove what depends on a `public` table in another schema (a view, a foreign key,
+ * an inheriting table); a view that also uses one of these objects is listed here too.
  */
 const PG_RESET_OUTSIDE_DEPENDENTS = `WITH RECURSIVE dropped(classid, objid) AS (
   SELECT 'pg_type'::regclass::oid, typ.oid FROM pg_type typ
@@ -606,7 +607,8 @@ SELECT DISTINCT pg_describe_object(dep.classid, dep.objid, dep.objsubid) || ' us
   || pg_describe_object(dep.refclassid, dep.refobjid, 0) AS object
 FROM dropped
 JOIN pg_depend dep ON dep.refclassid = dropped.classid AND dep.refobjid = dropped.objid
-WHERE COALESCE((pg_identify_object(dep.classid, dep.objid, dep.objsubid)).schema, (
+WHERE NOT (dep.classid = 'pg_class'::regclass AND dep.deptype = 'i')
+  AND COALESCE((pg_identify_object(dep.classid, dep.objid, dep.objsubid)).schema, (
   SELECT ns.nspname FROM pg_class rel JOIN pg_namespace ns ON ns.oid = rel.relnamespace
   WHERE rel.oid = CASE dep.classid
     WHEN 'pg_attrdef'::regclass THEN (SELECT adrelid FROM pg_attrdef WHERE oid = dep.objid)
@@ -686,16 +688,16 @@ async function resetDatabase(
       const names = (kind: string) =>
         objects.rows.filter((row) => row.kind === kind).map((row) => row.name);
       const types = names('TYPE');
-      const sequences = names('SEQUENCE');
+      const relations = [...names('VIEW'), ...names('MATERIALIZED VIEW'), ...names('SEQUENCE')];
       const outside =
-        types.length > 0 || sequences.length > 0
-          ? await client.query<{ object: string }>(PG_RESET_OUTSIDE_DEPENDENTS, [types, sequences])
+        types.length > 0 || relations.length > 0
+          ? await client.query<{ object: string }>(PG_RESET_OUTSIDE_DEPENDENTS, [types, relations])
           : { rows: [] };
       if (outside.rows.length > 0) {
         throw new Error(
-          'db: Reset stopped before dropping anything. Dropping the types and sequences in the public schema would also remove these objects in other schemas:\n' +
+          'db: Reset stopped before dropping anything. Dropping the views, sequences and types in the public schema would also remove these objects in other schemas:\n' +
             outside.rows.map((row) => `  - ${row.object}\n`).join('') +
-            'Change or drop these objects, or move the types and sequences they use out of the public schema, then run the command again.',
+            'Change or drop these objects, or move the views, sequences and types they use out of the public schema, then run the command again.',
         );
       }
       for (const { kind, name } of objects.rows) {

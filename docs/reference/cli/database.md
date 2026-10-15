@@ -28,7 +28,7 @@ Show migration status. Displays which migrations are applied or pending locally,
 void db reset [--yes]
 ```
 
-Drop the development database and re-apply all migrations. D1 resets the local database. PostgreSQL drops the tables, views, sequences, and custom types in the `public` schema of the `DATABASE_URL` database from `.env` and keeps installed extensions. If a table, view, or function in another schema uses one of those types or sequences, reset stops before it drops anything and lists those objects. MySQL drops every table and view in that database.
+Drop the development database and re-apply all migrations. D1 resets the local database. PostgreSQL drops the tables, views, sequences, and custom types in the `public` schema of the `DATABASE_URL` database from `.env` and keeps installed extensions. If a table, view, or function in another schema uses one of those views, sequences, or types, reset stops before it drops anything and lists those objects. MySQL drops every table and view in that database.
 
 When that `DATABASE_URL` points to a host other than `localhost`, Void names the database and asks before dropping its tables. Pass `--yes` to skip the prompt in scripts and CI; without a terminal, the command stops unless `--yes` is set. If `.env` uses the same URL as your deployment (for example after `void db connect`), reset drops the deployed tables.
 
