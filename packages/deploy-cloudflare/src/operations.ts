@@ -40,6 +40,11 @@ export type CloudflareOperation =
       assetsDirectory?: string;
       previewAlias?: string;
       noBundle?: boolean;
+      /**
+       * Attach the Cloudflare CLI to this terminal so that it can ask the
+       * operator. The result then has only the exit status.
+       */
+      interactive?: boolean;
     } & WorkerTarget)
   | ({ type: 'triggers.deploy'; assets?: boolean } & WorkerTarget)
   | ({ type: 'triggers.clear-crons' | 'triggers.clear-domains' } & WorkerTarget)

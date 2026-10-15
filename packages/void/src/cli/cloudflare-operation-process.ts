@@ -105,6 +105,7 @@ function runCf(
   command: Array<string>,
   cwd = process.cwd(),
   bounds?: { timeoutMs: number; maxOutputBytes: number },
+  interactive = false,
 ): Result {
   const env = cfEnvironment();
   env.CF_QUIET = '1';
@@ -116,7 +117,8 @@ function runCf(
     windowsHide: true,
     maxBuffer: bounds?.maxOutputBytes ?? 32 * 1024 * 1024,
     ...(bounds ? { timeout: bounds.timeoutMs } : {}),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // An interactive command shares this process's terminal, so cf can ask there.
+    stdio: interactive ? 'inherit' : ['ignore', 'pipe', 'pipe'],
   });
   const stderr = [
     child.stderr || '',
@@ -1060,9 +1062,12 @@ async function workerChanges(): Promise<Result> {
           ...(request.secretsFilePath ? ['--secrets-file', request.secretsFilePath] : []),
         ],
         directory,
+        undefined,
+        request.interactive === true,
       ),
     );
-    if (called.status !== 0) {
+    // cf wrote an interactive upload to the terminal, so only its exit status is known.
+    if (called.status !== 0 || request.interactive === true) {
       return called;
     }
     // cf renders uploads for the terminal; decode once at the process boundary.
@@ -1272,9 +1277,15 @@ async function main(): Promise<Result> {
   return resources();
 }
 
+// Login, tail and an interactive upload write to the terminal, not a result envelope.
+const terminalOperation =
+  operation?.type === 'auth.login' ||
+  operation?.type === 'tail' ||
+  ((operation?.type === 'versions.upload' || operation?.type === 'worker.deploy') &&
+    operation.interactive === true);
 try {
   const output = await main();
-  if (operation.type !== 'auth.login' && operation.type !== 'tail') {
+  if (!terminalOperation) {
     let data = output.data;
     let humanOutput = '';
     if (data === undefined && output.stdout.trim()) {
@@ -1303,7 +1314,7 @@ try {
   process.exitCode = output.status;
 } catch (error) {
   const message = error instanceof Error ? error.message : 'Cloudflare operation failed.';
-  if (operation?.type !== 'auth.login' && operation?.type !== 'tail') {
+  if (!terminalOperation) {
     process.stdout.write(JSON.stringify({ operationResult: 1, errors: [{ message }] }) + '\n');
   }
   process.stderr.write(message);
