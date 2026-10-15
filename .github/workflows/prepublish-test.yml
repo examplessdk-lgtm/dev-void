@@ -76,6 +76,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: true
+      # The npm bundled with Node can lag behind fixes that fresh installs need.
+      - run: npm i -g npm && npm --version
+        if: ${{ matrix.pm == 'npm' }}
       - run: vp exec playwright install --with-deps chromium
         if: ${{ needs.scope.outputs.suite == 'full' && runner.os == 'Linux' }}
       - run: vp exec playwright install chromium
