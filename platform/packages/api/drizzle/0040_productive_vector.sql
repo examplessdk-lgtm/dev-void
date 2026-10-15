@@ -1,1 +1,0 @@
-ALTER TABLE "email_domains" ADD COLUMN "attempt_id" text;

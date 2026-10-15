@@ -1,2 +1,0 @@
-ALTER TABLE "invitations" ADD COLUMN "email_delivery_status" text;--> statement-breakpoint
-ALTER TABLE "invitations" ADD CONSTRAINT "invitations_email_delivery_status_check" CHECK ("invitations"."email_delivery_status" IS NULL OR "invitations"."email_delivery_status" IN ('sent', 'failed', 'unavailable'));

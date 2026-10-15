@@ -1,1 +1,0 @@
-ALTER TABLE "deployments" ADD COLUMN "bundle_stored" boolean DEFAULT false NOT NULL;

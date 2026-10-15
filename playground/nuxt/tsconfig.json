@@ -1,8 +1,0 @@
-{
-  "extends": ["./.nuxt/tsconfig.json", "./.void/tsconfig.json"],
-  "compilerOptions": {
-    "noUnusedLocals": true,
-    "types": ["void/env"],
-    "allowImportingTsExtensions": true
-  }
-}

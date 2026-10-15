@@ -1,2 +1,0 @@
-ALTER TABLE "project_access_events" DROP CONSTRAINT "project_access_events_action_check";--> statement-breakpoint
-ALTER TABLE "project_access_events" ADD CONSTRAINT "project_access_events_action_check" CHECK ("project_access_events"."action" IN ('invited', 'invitation_resent', 'member_added', 'accepted', 'declined', 'invitation_revoked', 'role_changed', 'member_removed', 'left'));

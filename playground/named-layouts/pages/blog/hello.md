@@ -1,5 +1,0 @@
----
-layout: landing
----
-
-# Hello Blog

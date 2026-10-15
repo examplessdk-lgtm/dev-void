@@ -1,1 +1,0 @@
-ALTER TABLE "github_connections" ADD COLUMN "workflow_path" text DEFAULT '.github/workflows/void-deploy.yml' NOT NULL;
