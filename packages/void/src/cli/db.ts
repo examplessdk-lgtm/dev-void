@@ -586,8 +586,9 @@ const PG_RESET_OBJECTS = `SELECT kind, name FROM (
  * Objects in other schemas that `CASCADE` would also drop with the types ($1) and sequences ($2)
  * that reset drops in `public`: a column of that type or its array type, a view, a function, a
  * column default and so on, also through a type or function in `public` that goes with them.
- * Reset leaves other schemas alone, so it stops when there are any. A view in another schema that
- * also reads a `public` table is listed too, although the table drop would remove it anyway.
+ * Reset must not remove these, so it stops when there are any. The table drops still remove what
+ * depends on a `public` table in another schema (a view, a foreign key, an inheriting table); a
+ * view that also uses one of these types is listed here too.
  */
 const PG_RESET_OUTSIDE_DEPENDENTS = `WITH RECURSIVE dropped(classid, objid) AS (
   SELECT 'pg_type'::regclass::oid, typ.oid FROM pg_type typ
