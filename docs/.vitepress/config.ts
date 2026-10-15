@@ -2,6 +2,7 @@ import type { IconOption } from '@voidzero-dev/vitepress-theme';
 import { extendConfig } from '@voidzero-dev/vitepress-theme/config';
 import { defineConfig } from 'vitepress';
 import { groupIconMdPlugin, groupIconVitePlugin } from 'vitepress-plugin-group-icons';
+import { handleGeminiChat } from './server/gemini';
 
 const referenceItems = [
   {
@@ -183,7 +184,22 @@ export default extendConfig(
     },
 
     vite: {
-      plugins: [groupIconVitePlugin()],
+      plugins: [
+        groupIconVitePlugin(),
+        {
+          name: 'void-gemini-api-plugin',
+          configureServer(server) {
+            server.middlewares.use('/api/gemini/chat', (req, res) => {
+              handleGeminiChat(req, res);
+            });
+          },
+          configurePreviewServer(server) {
+            server.middlewares.use('/api/gemini/chat', (req, res) => {
+              handleGeminiChat(req, res);
+            });
+          },
+        },
+      ],
     },
 
     themeConfig: {
@@ -203,6 +219,11 @@ export default extendConfig(
           link: '/guide/self-hosted-platform',
           activeMatch:
             '^/guide/(platform/|self-hosted-platform|platform-administration|platform-development)',
+        },
+        {
+          text: 'AI Assistant',
+          link: '/ai-assistant',
+          activeMatch: '^/ai-assistant',
         },
         referenceLinks,
         integrationLinks,

@@ -54,12 +54,14 @@ function AsideCredit() {
   );
 }
 
+import GeminiChatbot from './GeminiChatbot.vue';
+
 export default {
   extends: BaseTheme,
   Layout() {
     return h(BaseTheme.Layout, null, {
       'aside-ads-before': () => h(AsideCredit),
-      'layout-bottom': () => [h(DocFooter), h(CodeGroupSync)],
+      'layout-bottom': () => [h(DocFooter), h(CodeGroupSync), h(GeminiChatbot)],
     });
   },
   enhanceApp({ app }) {
@@ -67,6 +69,7 @@ export default {
     app.component('PagesFileTree', PagesFileTree);
     app.component('RoutesFileTree', RoutesFileTree);
     app.component('VoidAppFileTree', VoidAppFileTree);
+    app.component('GeminiChatbot', GeminiChatbot);
     app.provide(themeContextKey, {
       logoDark,
       logoLight,
