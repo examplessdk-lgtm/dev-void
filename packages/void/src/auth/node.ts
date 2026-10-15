@@ -33,7 +33,14 @@ export async function runLocalVoidAuthMigrations(
     userConfig: authConfig,
   };
   const localEnv = loadLocalEnv(root);
-  const env = { ...localEnv, ...process.env } as unknown as VoidAuthEnv;
+  const connectionString =
+    databaseUrl ?? (process.env.DATABASE_URL || localEnv.DATABASE_URL || undefined);
+  // The auth config sees the DATABASE_URL that the migration uses.
+  const env = {
+    ...localEnv,
+    ...process.env,
+    ...(connectionString !== undefined ? { DATABASE_URL: connectionString } : {}),
+  } as unknown as VoidAuthEnv;
   const migrationSchema = resolveVoidAuthMigrationSchema(runtime, env);
 
   if (dialect === 'sqlite') {
@@ -60,8 +67,6 @@ export async function runLocalVoidAuthMigrations(
     return;
   }
 
-  const connectionString =
-    databaseUrl ?? (process.env.DATABASE_URL || localEnv.DATABASE_URL || undefined);
   if (!connectionString) {
     return;
   }

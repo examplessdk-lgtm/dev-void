@@ -604,4 +604,30 @@ describe('runLocalVoidAuthMigrations', () => {
       'verification',
     ]);
   });
+
+  it('gives a function-form config the DATABASE_URL that the migration uses', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'void-auth-migrations-'));
+    writeFileSync(join(root, '.env'), 'DATABASE_URL=postgres://localhost/app\n');
+    const configPath = join(root, 'auth.mjs');
+    writeFileSync(
+      configPath,
+      'export default ({ defaults, env }) => { globalThis.authConfigDatabaseUrl = env.DATABASE_URL; return defaults; };',
+    );
+    vi.stubEnv('DATABASE_URL', '');
+    const recorded = globalThis as { authConfigDatabaseUrl?: unknown };
+    try {
+      await runLocalVoidAuthMigrations(
+        root,
+        'postgresql',
+        join(root, '.void'),
+        'local',
+        configPath,
+      );
+      expect(recorded.authConfigDatabaseUrl).toBe('postgres://localhost/app');
+    } finally {
+      delete recorded.authConfigDatabaseUrl;
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
