@@ -1,0 +1,19 @@
+docs/index.md
+  s_1cbb8f9d8ae59c::t_9d79d020d3e07f 47-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f3cd2c72fb538de2a233fae6da919e60d83e83aa",
+  "prompts": {},
+  "sessions": {
+    "s_1cbb8f9d8ae59c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1377d-23d1-7ba3-a10f-199c8e386545",
+        "model": "unknown"
+      },
+      "human_author": "Christoph Nakazawa <cnakazawa@cloudflare.com>"
+    }
+  }
+}
